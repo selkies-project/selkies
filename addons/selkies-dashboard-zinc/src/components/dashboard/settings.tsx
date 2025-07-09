@@ -2,6 +2,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -15,18 +16,44 @@ import React, { useState, useEffect } from "react";
 // Constants
 const audioBitrateOptions = [32000, 64000, 96000, 128000, 192000, 256000, 320000, 512000];
 const DEFAULT_AUDIO_BITRATE = 320000;
+
+// DPI Scaling options for UI scaling
+const dpiScalingOptions = [
+  { label: "100%", value: 96 },
+  { label: "125%", value: 120 },
+  { label: "150%", value: 144 },
+  { label: "175%", value: 168 },
+  { label: "200%", value: 192 },
+  { label: "225%", value: 216 },
+  { label: "250%", value: 240 },
+  { label: "275%", value: 264 },
+  { label: "300%", value: 288 },
+];
+const DEFAULT_SCALING_DPI = 96;
+
 const commonResolutionValues = [
-    "", "1920x1080", "1280x720", "1366x768", "1920x1200", "2560x1440",
-    "3840x2160", "1024x768", "800x600", "640x480", "320x240"
+  "",
+  "1920x1080",
+  "1280x720",
+  "1366x768",
+  "1920x1200",
+  "2560x1440",
+  "3840x2160",
+  "1024x768",
+  "800x600",
+  "640x480",
+  "320x240",
 ];
-const encoderOptions = ['x264enc', 'nvh264enc', 'vah264enc', 'openh264enc'];
+
+const encoderOptions = [
+  "x264enc",
+  "x264enc-striped",
+  "jpeg",
+];
+
 const framerateOptions = [8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144];
-const videoBufferOptions = Array.from({ length: 16 }, (_, i) => i);
-const videoBitrateOptions = [
-    1000, 2000, 4000, 8000, 10000, 12000, 14000, 16000, 18000, 20000,
-    25000, 30000, 35000, 40000, 45000, 50000,
-    60000, 70000, 80000, 90000, 100000
-];
+
+const videoCRFOptions = [50, 45, 40, 35, 30, 25, 20, 10, 1];
 
 const roundDownToEven = (num: number) => {
     const n = parseInt(num.toString(), 10);
@@ -38,7 +65,7 @@ interface SettingsProps {
     scale?: number;
 }
 
-export function Settings({ scale = 1 }: SettingsProps) {
+export function Settings() {
     // Screen Settings State
     const [manualWidth, setManualWidth] = useState('');
     const [manualHeight, setManualHeight] = useState('');
@@ -48,12 +75,29 @@ export function Settings({ scale = 1 }: SettingsProps) {
         return saved !== null ? saved === 'true' : true;
     });
 
+    // HiDPI and UI Scaling State
+    const [hidpiEnabled, setHidpiEnabled] = useState(() => {
+        const saved = localStorage.getItem('hidpiEnabled');
+        return saved !== null ? saved === 'true' : true;
+    });
+    const [selectedDpi, setSelectedDpi] = useState(() => {
+        return parseInt(localStorage.getItem('scalingDPI'), 10) || DEFAULT_SCALING_DPI;
+    });
+
     // Video and Audio Settings State
     const [videoBitRate, setVideoBitRate] = useState(4000);
     const [audioBitRate, setAudioBitRate] = useState(parseInt(localStorage.getItem('audioBitRate'), 10) || DEFAULT_AUDIO_BITRATE);
     const [videoBufferSize, setVideoBufferSize] = useState(0);
     const [encoder, setEncoder] = useState("x264enc");
     const [framerate, setFramerate] = useState(60);
+    const [videoCRF, setVideoCRF] = useState(() => {
+        const saved = localStorage.getItem('videoCRF');
+        return saved !== null ? parseInt(saved, 10) : 25;
+    });
+    const [h264FullColor, setH264FullColor] = useState(() => {
+        const saved = localStorage.getItem('h264_fullcolor');
+        return saved !== null ? saved === 'true' : false;
+    });
     const [audioInputDevices, setAudioInputDevices] = useState([]);
     const [audioOutputDevices, setAudioOutputDevices] = useState([]);
     const [selectedInputDeviceId, setSelectedInputDeviceId] = useState('default');
@@ -126,6 +170,27 @@ export function Settings({ scale = 1 }: SettingsProps) {
         window.postMessage({ type: 'setScaleLocally', value: newState }, window.location.origin);
     };
 
+    // HiDPI and UI Scaling Handlers
+    const handleHidpiToggle = () => {
+        const newHidpiState = !hidpiEnabled;
+        setHidpiEnabled(newHidpiState);
+        localStorage.setItem('hidpiEnabled', newHidpiState.toString());
+        window.postMessage(
+            { type: 'setUseCssScaling', value: !newHidpiState },
+            window.location.origin
+        );
+    };
+
+    const handleDpiScalingChange = (value: string) => {
+        const newDpi = parseInt(value, 10);
+        setSelectedDpi(newDpi);
+        localStorage.setItem('scalingDPI', newDpi.toString());
+        window.postMessage(
+            { type: 'settings', settings: { SCALING_DPI: newDpi } },
+            window.location.origin
+        );
+    };
+
     const handleSetManualResolution = () => {
         const widthVal = manualWidth.trim();
         const heightVal = manualHeight.trim();
@@ -153,15 +218,49 @@ export function Settings({ scale = 1 }: SettingsProps) {
 
     return (
         <Card className="w-[300px] p-0 pb-4 bg-background/95 backdrop-blur-sm border shadow-sm">
-            <Tabs defaultValue="resolution" className="w-full">
+            <Tabs defaultValue="video" className="w-full">
                 <TabsList className="grid w-full grid-cols-3 bg-muted/50">
-                    <TabsTrigger value="resolution">Resolution</TabsTrigger>
                     <TabsTrigger value="video">Video</TabsTrigger>
                     <TabsTrigger value="audio">Audio</TabsTrigger>
+                    <TabsTrigger value="resolution">Resolution</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="resolution">
                     <CardContent className="space-y-4">
+                        {/* HiDPI Toggle */}
+                        <div className="flex items-center justify-between">
+                            <div className="space-y-0.5">
+                                <label className="text-sm font-medium">HiDPI (Pixel Perfect)</label>
+                            </div>
+                            <Switch
+                                checked={hidpiEnabled}
+                                onCheckedChange={handleHidpiToggle}
+                            />
+                        </div>
+
+                        {/* UI Scaling */}
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium">UI Scaling</label>
+                            <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                    <Button variant="outline" className="w-full justify-between">
+                                        {dpiScalingOptions.find(option => option.value === selectedDpi)?.label || "100%"}
+                                        <ChevronUp className="h-4 w-4 rotate-180" />
+                                    </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent className="w-full">
+                                    {dpiScalingOptions.map((option) => (
+                                        <DropdownMenuItem
+                                            key={option.value}
+                                            onClick={() => handleDpiScalingChange(option.value.toString())}
+                                        >
+                                            {option.label}
+                                        </DropdownMenuItem>
+                                    ))}
+                                </DropdownMenuContent>
+                            </DropdownMenu>
+                        </div>
+
                         <div className="space-y-2">
                             <label className="text-sm font-medium">Resolution Preset</label>
                             <DropdownMenu>
@@ -259,13 +358,13 @@ export function Settings({ scale = 1 }: SettingsProps) {
                     <CardContent className="space-y-4">
                         <div className="space-y-2">
                             <label className="text-sm font-medium">Encoder</label>
-		<DropdownMenu>
-			<DropdownMenuTrigger asChild>
+                            <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
                                     <Button variant="outline" className="w-full justify-between">
                                         {encoder}
                                         <ChevronUp className="h-4 w-4 rotate-180" />
-				</Button>
-			</DropdownMenuTrigger>
+                                    </Button>
+                            </DropdownMenuTrigger>
                                 <DropdownMenuContent className="w-full">
                                     {encoderOptions.map(enc => (
                                         <DropdownMenuItem
@@ -305,46 +404,44 @@ export function Settings({ scale = 1 }: SettingsProps) {
                             </div>
                         </div>
 
-                        <div className="space-y-2">
-                            <label className="text-sm font-medium">Video Bitrate ({videoBitRate / 1000} Mbps)</label>
-                            <div className="flex items-center gap-2">
-                                <Slider
-                                    min={0}
-                                    max={videoBitrateOptions.length - 1}
-                                    step={1}
-                                    value={[videoBitrateOptions.indexOf(videoBitRate)]}
-                                    onValueChange={(value) => {
-                                        const index = value[0];
-                                        const selectedBitrate = videoBitrateOptions[index];
-                                        if (selectedBitrate !== undefined) {
-                                            setVideoBitRate(selectedBitrate);
-                                            localStorage.setItem('videoBitRate', selectedBitrate.toString());
-                                            window.postMessage({ type: 'settings', settings: { videoBitRate: selectedBitrate } }, window.location.origin);
-                                        }
-                                    }}
-                                    className="flex-1"
-                                />
-                            </div>
-                        </div>
 
-                        <div className="space-y-2">
-                            <label className="text-sm font-medium">Video Buffer Size ({videoBufferSize === 0 ? "Immediate" : `${videoBufferSize} frames`})</label>
-                            <div className="flex items-center gap-2">
-                                <Slider
-                                    min={0}
-                                    max={videoBufferOptions.length - 1}
-                                    step={1}
-                                    value={[videoBufferSize]}
-                                    onValueChange={(value) => {
-                                        const newValue = value[0];
-                                        setVideoBufferSize(newValue);
-                                        localStorage.setItem('videoBufferSize', newValue.toString());
-                                        window.postMessage({ type: 'settings', settings: { videoBufferSize: newValue } }, window.location.origin);
-                                    }}
-                                    className="flex-1"
-                                />
-                            </div>
-                        </div>
+                        {(encoder === 'x264enc' || encoder === 'x264enc-striped') && (
+                            <>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium">Video CRF ({videoCRF})</label>
+                                    <div className="flex items-center gap-2">
+                                        <Slider
+                                            min={0}
+                                            max={videoCRFOptions.length - 1}
+                                            step={1}
+                                            value={[videoCRFOptions.indexOf(videoCRF)]}
+                                            onValueChange={(value) => {
+                                                const index = value[0];
+                                                const newCRF = videoCRFOptions[index];
+                                                setVideoCRF(newCRF);
+                                                localStorage.setItem('videoCRF', newCRF.toString());
+                                                window.postMessage({ type: 'settings', settings: { videoCRF: newCRF } }, window.location.origin);
+                                            }}
+                                            className="flex-1"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center justify-between">
+                                    <div className="space-y-0.5">
+                                        <label className="text-sm font-medium">Full Color (4:4:4)</label>
+                                    </div>
+                                    <Switch
+                                        checked={h264FullColor}
+                                        onCheckedChange={(checked) => {
+                                            setH264FullColor(checked);
+                                            localStorage.setItem('h264_fullcolor', checked.toString());
+                                            window.postMessage({ type: 'settings', settings: { h264_fullcolor: checked } }, window.location.origin);
+                                        }}
+                                    />
+                                </div>
+                            </>
+                        )}
                     </CardContent>
                 </TabsContent>
 

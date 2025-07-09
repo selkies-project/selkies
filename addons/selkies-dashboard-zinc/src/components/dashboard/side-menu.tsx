@@ -99,6 +99,11 @@ export function MenuComponent({ isGamepadEnabled, onGamepadToggle }) {
 				}
 			}
 
+			if (event.ctrlKey && event.shiftKey && event.key === "X") {
+				event.preventDefault();
+				setShowStats((prev) => !prev);
+			}
+
 			let escapeTimer: NodeJS.Timeout;
 			if (event.key === "Escape") {
 				escapeTimer = setTimeout(() => {
