@@ -385,6 +385,28 @@ def generate_xrandr_gtf_modeline(res_wh_str):
         )
     return match.group(1).strip(), match.group(2)
 
+def parse_dri_node_to_index(node_path: str) -> int:
+    """
+    Parses a DRI node path like '/dev/dri/renderD128' into an index (e.g., 0).
+    Returns -1 if the path is invalid, malformed, or empty, which
+    disables VA-API usage in the capture module.
+    """
+    if not node_path or not node_path.startswith('/dev/dri/renderD'):
+        if node_path:
+             logger.warning(f"Invalid DRI node format: '{node_path}'. Expected '/dev/dri/renderD...'. VA-API will be disabled.")
+        return -1
+    try:
+        num_str = node_path.split('renderD')[-1]
+        render_num = int(num_str)
+        index = render_num - 128
+        if index < 0:
+            logger.warning(f"Parsed DRI node number {render_num} from '{node_path}' is less than 128. Invalid.")
+            return -1
+        logger.info(f"Parsed DRI node '{node_path}' to index {index}.")
+        return index
+    except (ValueError, IndexError) as e:
+        logger.warning(f"Could not parse DRI node path '{node_path}': {e}. VA-API will be disabled.")
+        return -1
 
 def _run_xrdb(dpi_value, logger):
     """Helper function to apply DPI via xrdb."""
@@ -812,6 +834,58 @@ class DataStreamingServer:
         data_logger.info("pcmflux audio pipeline stopped.")
         return True
 
+    async def shutdown_pipelines(self):
+        """
+        A unified, deadlock-proof method to stop all capture pipelines.
+        This should be the ONLY way pipelines are programmatically stopped.
+        """
+        logger.info("Initiating unified pipeline shutdown...")
+        self.is_jpeg_capturing = False
+        self.is_x264_striped_capturing = False
+        self.is_pcmflux_capturing = False
+        await asyncio.sleep(0.01)
+        stop_tasks = []
+        loop = asyncio.get_running_loop()
+        if self.jpeg_capture_module:
+            logger.info("Queueing JPEG capture stop.")
+            stop_tasks.append(
+                loop.run_in_executor(None, self.jpeg_capture_module.stop_capture)
+            )
+        
+        if self.x264_striped_capture_module:
+            logger.info("Queueing x264-striped capture stop.")
+            stop_tasks.append(
+                loop.run_in_executor(None, self.x264_striped_capture_module.stop_capture)
+            )
+
+        if self.pcmflux_module:
+            logger.info("Queueing pcmflux audio capture stop.")
+            stop_tasks.append(
+                loop.run_in_executor(None, self.pcmflux_module.stop_capture)
+            )
+        if stop_tasks:
+            logger.info(f"Waiting for {len(stop_tasks)} capture module(s) to stop...")
+            await asyncio.gather(*stop_tasks, return_exceptions=True)
+            logger.info("All C++ capture modules have stopped.")
+        if self.jpeg_capture_module:
+            del self.jpeg_capture_module
+            self.jpeg_capture_module = None
+        if self.x264_striped_capture_module:
+            del self.x264_striped_capture_module
+            self.x264_striped_capture_module = None
+        if self.pcmflux_module:
+            del self.pcmflux_module
+            self.pcmflux_module = None
+        await self._ensure_backpressure_task_is_stopped()
+        if self.pcmflux_send_task and not self.pcmflux_send_task.done():
+            self.pcmflux_send_task.cancel()
+            try:
+                await self.pcmflux_send_task
+            except asyncio.CancelledError:
+                pass
+        
+        logger.info("Unified pipeline shutdown complete.")
+
     async def _ensure_backpressure_task_is_stopped(self):
         """
         Safely cancels and cleans up the _frame_backpressure_task.
@@ -1045,7 +1119,7 @@ class DataStreamingServer:
                 "Cannot broadcast stream resolution: SelkiesStreamingApp instance or its display dimensions not available."
             )
 
-    def _x264_striped_stripe_callback(self, result_ptr, user_data):
+    def _x264_striped_stripe_callback(self, result_obj, user_data):
         current_async_loop = (
             self.jpeg_capture_loop
         )  # This is the loop for DataStreamingServer
@@ -1053,42 +1127,29 @@ class DataStreamingServer:
             not self.is_x264_striped_capturing
             or not current_async_loop
             or not self.clients  # Check self.clients instead of self.data_ws for broadcast
-            or not result_ptr
+            or not result_obj or not result_obj.data
         ):
             return
-        result = result_ptr.contents
-        if result.data and result.size > 0:
-            try:
-                payload_from_cpp = bytes(
-                    ctypes.cast(
-                        result.data, ctypes.POINTER(ctypes.c_ubyte * result.size)
-                    ).contents
+        try:
+            payload_from_cpp = result_obj.data
+            clients_ref = self.clients
+            data_to_send_ref = payload_from_cpp
+            frame_id_ref = result_obj.frame_id
+
+            async def _broadcast_x264_data_and_update_frame_id():
+                self.update_last_sent_frame_id(
+                    frame_id_ref
+                )  # Update server's knowledge of sent frame ID
+                if not self._backpressure_send_frames_enabled:
+                    return
+                if clients_ref:
+                    websockets.broadcast(clients_ref, data_to_send_ref)
+            if current_async_loop and current_async_loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    _broadcast_x264_data_and_update_frame_id(), current_async_loop
                 )
-
-                clients_ref = self.clients
-                data_to_send_ref = payload_from_cpp
-                frame_id_ref = result.frame_id
-
-                async def _broadcast_x264_data_and_update_frame_id():
-                    # self here refers to DataStreamingServer instance
-                    self.update_last_sent_frame_id(
-                        frame_id_ref
-                    )  # Update server's knowledge of sent frame ID
-
-                    if not self._backpressure_send_frames_enabled:
-                        # data_logger.debug("Backpressure active, discarding x264-striped frame.") # Can be too noisy
-                        return
-
-                    if clients_ref:
-                        websockets.broadcast(clients_ref, data_to_send_ref)
-
-                if current_async_loop and current_async_loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        _broadcast_x264_data_and_update_frame_id(), current_async_loop
-                    )
-            except Exception as e:
-                data_logger.error(f"X264-Striped callback error: {e}", exc_info=True)
-
+        except Exception as e:
+            data_logger.error(f"X264-Striped callback error: {e}", exc_info=True)
     async def _start_x264_striped_pipeline(self):
         if not X11_CAPTURE_AVAILABLE:
             data_logger.error("Cannot start x264-striped/x264enc: pixelflux library not available.")
@@ -1135,7 +1196,11 @@ class DataStreamingServer:
             cs.h264_fullcolor = self.h264_fullcolor
             cs.h264_fullframe = enable_fullframe
             cs.capture_cursor = self.capture_cursor
-            
+            if self.cli_args.dri_node:
+                cs.vaapi_render_node_index = parse_dri_node_to_index(self.cli_args.dri_node)
+            else:
+                cs.vaapi_render_node_index = -1
+ 
             cs.capture_x = 0
             cs.capture_y = 0
 
@@ -1196,7 +1261,7 @@ class DataStreamingServer:
             await self._ensure_backpressure_task_is_stopped()
         return True
 
-    def _jpeg_stripe_callback(self, result_ptr, user_data):
+    def _jpeg_stripe_callback(self, result_obj, user_data):
         current_async_loop = (
             self.jpeg_capture_loop
         )  # This is the loop for DataStreamingServer
@@ -1204,40 +1269,29 @@ class DataStreamingServer:
             not self.is_jpeg_capturing
             or not current_async_loop
             or not self.clients  # Check self.clients for broadcast
-            or not result_ptr
+            or not result_obj or not result_obj.data
         ):
             return
-        result = result_ptr.contents
-        if result.data and result.size > 0:
-            try:
-                jpeg_buffer = bytes(
-                    ctypes.cast(
-                        result.data, ctypes.POINTER(ctypes.c_ubyte * result.size)
-                    ).contents
+        try:
+            jpeg_buffer = result_obj.data
+            clients_ref = self.clients
+            prefixed_jpeg_data = b"\x03\x00" + jpeg_buffer
+            frame_id_ref = result_obj.frame_id
+            async def _broadcast_jpeg_data_and_update_frame_id():
+                # self here refers to DataStreamingServer instance
+                self.update_last_sent_frame_id(
+                    frame_id_ref
+                )  # Update server's knowledge of sent frame ID
+                if not self._backpressure_send_frames_enabled:
+                    return
+                if clients_ref:
+                    websockets.broadcast(clients_ref, prefixed_jpeg_data)
+            if current_async_loop and current_async_loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    _broadcast_jpeg_data_and_update_frame_id(), current_async_loop
                 )
-
-                clients_ref = self.clients
-                prefixed_jpeg_data = b"\x03\x00" + jpeg_buffer
-                frame_id_ref = result.frame_id
-
-                async def _broadcast_jpeg_data_and_update_frame_id():
-                    # self here refers to DataStreamingServer instance
-                    self.update_last_sent_frame_id(
-                        frame_id_ref
-                    )  # Update server's knowledge of sent frame ID
-
-                    if not self._backpressure_send_frames_enabled:
-                        return
-
-                    if clients_ref:
-                        websockets.broadcast(clients_ref, prefixed_jpeg_data)
-
-                if current_async_loop and current_async_loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        _broadcast_jpeg_data_and_update_frame_id(), current_async_loop
-                    )
-            except Exception as e:
-                data_logger.error(f"JPEG callback error: {e}", exc_info=True)
+        except Exception as e:
+            data_logger.error(f"JPEG callback error: {e}", exc_info=True)
 
     async def _start_jpeg_pipeline(self):
         if not X11_CAPTURE_AVAILABLE:
@@ -2471,15 +2525,7 @@ class DataStreamingServer:
             # 5. Stop global pipelines if the flag is set
             if stop_pipelines_flag:
                 data_logger.info(f"Stopping global pipelines due to last client disconnect ({raddr}).")
-                current_encoder_on_cleanup = str(self.app.encoder if self.app else "Unknown")
-
-                if self.is_jpeg_capturing and current_encoder_on_cleanup == "jpeg":
-                    await self._stop_jpeg_pipeline()
-                if self.is_x264_striped_capturing and (current_encoder_on_cleanup in PIXELFLUX_VIDEO_ENCODERS and current_encoder_on_cleanup != "jpeg"):
-                    await self._stop_x264_striped_pipeline()
-                
-                if self.is_pcmflux_capturing:
-                    await self._stop_pcmflux_pipeline()
+                await self.shutdown_pipelines()
 
             data_logger.info(f"Data WS handler for {raddr} finished all cleanup.")
 
@@ -2557,12 +2603,7 @@ class DataStreamingServer:
             except Exception as e_close:
                 data_logger.error(f"Error on server.wait_closed(): {e_close}")
         self.server = None
-        if self.is_jpeg_capturing:
-            await self._stop_jpeg_pipeline()
-        if self.is_x264_striped_capturing:
-            await self._stop_x264_striped_pipeline()
-        if self.is_pcmflux_capturing:
-            await self._stop_pcmflux_pipeline()
+        await self.shutdown_pipelines()
         data_logger.info(f"Data WS on port {self.port} stop procedure complete.")
 
 
@@ -2753,6 +2794,12 @@ async def main():
         default=os.environ.get("SELKIES_VIDEO_BITRATE", "16000"),
         type=int,
         help="Target video bitrate in kbps",
+    )
+    parser.add_argument(
+        "--dri_node",
+        default=os.environ.get("DRI_NODE", ""),
+        type=str,
+        help="Path to the DRI render node (e.g., /dev/dri/renderD128) for VA-API.",
     )
     parser.add_argument(
         "--audio_device_name",
