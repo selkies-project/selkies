@@ -1119,22 +1119,25 @@ class DataStreamingServer:
                 "Cannot broadcast stream resolution: SelkiesStreamingApp instance or its display dimensions not available."
             )
 
-    def _x264_striped_stripe_callback(self, result_obj, user_data):
+    def _x264_striped_stripe_callback(self, result_ptr, user_data):
         current_async_loop = (
             self.jpeg_capture_loop
         )  # This is the loop for DataStreamingServer
         if (
             not self.is_x264_striped_capturing
             or not current_async_loop
-            or not self.clients  # Check self.clients instead of self.data_ws for broadcast
-            or not result_obj or not result_obj.data
+            or not self.clients 
+            or not result_ptr
         ):
             return
         try:
-            payload_from_cpp = result_obj.data
+            result = result_ptr.contents
+            if result.size <= 0:
+                return
+            payload_from_cpp = bytes(result.data[:result.size])
             clients_ref = self.clients
             data_to_send_ref = payload_from_cpp
-            frame_id_ref = result_obj.frame_id
+            frame_id_ref = result.frame_id
 
             async def _broadcast_x264_data_and_update_frame_id():
                 self.update_last_sent_frame_id(
@@ -1222,15 +1225,13 @@ class DataStreamingServer:
                               f"dmg_thresh={cs.damage_block_threshold}, dmg_dur={cs.damage_block_duration}, "
                               f"fullframe={cs.h264_fullframe}, fullcolor={cs.h264_fullcolor}")
 
-            cb = StripeCallback(self._x264_striped_stripe_callback)
-            
             # Ensure module is fresh if it existed
             if self.x264_striped_capture_module:
                 del self.x264_striped_capture_module
             self.x264_striped_capture_module = ScreenCapture()
             
             await self.jpeg_capture_loop.run_in_executor(
-                None, self.x264_striped_capture_module.start_capture, cs, cb
+               None, self.x264_striped_capture_module.start_capture, cs, self._x264_striped_stripe_callback
             )
             self.is_x264_striped_capturing = True
             await self._start_backpressure_task_if_needed()
@@ -1261,22 +1262,25 @@ class DataStreamingServer:
             await self._ensure_backpressure_task_is_stopped()
         return True
 
-    def _jpeg_stripe_callback(self, result_obj, user_data):
+    def _jpeg_stripe_callback(self, result_ptr, user_data):
         current_async_loop = (
             self.jpeg_capture_loop
         )  # This is the loop for DataStreamingServer
         if (
             not self.is_jpeg_capturing
             or not current_async_loop
-            or not self.clients  # Check self.clients for broadcast
-            or not result_obj or not result_obj.data
+            or not self.clients
+            or not result_ptr
         ):
             return
         try:
-            jpeg_buffer = result_obj.data
+            result = result_ptr.contents
+            if result.size <= 0:
+                return
+            jpeg_buffer = bytes(result.data[:result.size])
             clients_ref = self.clients
             prefixed_jpeg_data = b"\x03\x00" + jpeg_buffer
-            frame_id_ref = result_obj.frame_id
+            frame_id_ref = result.frame_id
             async def _broadcast_jpeg_data_and_update_frame_id():
                 # self here refers to DataStreamingServer instance
                 self.update_last_sent_frame_id(
@@ -1338,14 +1342,12 @@ class DataStreamingServer:
             elif watermark_path_str:
                 data_logger.warning(f"Watermark path specified for JPEG but file not found: {watermark_path_str}")
 
-            cb = StripeCallback(self._jpeg_stripe_callback)
-
             if self.jpeg_capture_module:
                 del self.jpeg_capture_module
             self.jpeg_capture_module = ScreenCapture()
 
             await self.jpeg_capture_loop.run_in_executor(
-                None, self.jpeg_capture_module.start_capture, cs, cb
+                None, self.jpeg_capture_module.start_capture, cs, self._jpeg_stripe_callback
             )
             self.is_jpeg_capturing = True
             data_logger.info("X11 JPEG capture started with detailed settings.")
