@@ -2868,7 +2868,7 @@ async def main():
     )
     parser.add_argument(
         "--h264_streaming_mode",
-        default=os.environ.get("SELKIES_H264_STREAMING_MODE", "False").lower() == "false",
+        default=os.environ.get("SELKIES_H264_STREAMING_MODE", "False").lower() == "true",
         type=lambda x: (str(x).lower() == 'true'),
         help="Enable H.264 streaming mode for pixelflux encoders (default: False).",
     )
