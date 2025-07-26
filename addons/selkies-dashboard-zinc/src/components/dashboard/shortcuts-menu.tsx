@@ -39,6 +39,7 @@ const ShortcutsMenu = () => {
 						</ul>
 					</AlertDescription>
 				</Alert>
+				{/* 
 				<small className="text-foreground">
 					<ul className="list-disc pl-5 text-foreground">
 						<li>
@@ -53,6 +54,7 @@ const ShortcutsMenu = () => {
 						</li>
 					</ul>
 				</small>
+				*/}
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);
