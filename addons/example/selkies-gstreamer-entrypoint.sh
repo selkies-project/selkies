@@ -4,7 +4,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-set -e
+set -ex
 
 # Wait for XDG_RUNTIME_DIR
 until [ -d "${XDG_RUNTIME_DIR}" ]; do sleep 0.5; done
@@ -54,11 +54,11 @@ echo "# selkies NGINX Configuration
 server {
     access_log /dev/stdout;
     error_log /dev/stderr;
-    listen ${NGINX_PORT:-8080} $(if [ \"$(echo ${SELKIES_ENABLE_HTTPS} | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "ssl"; fi);
-    listen [::]:${NGINX_PORT:-8080} $(if [ \"$(echo ${SELKIES_ENABLE_HTTPS} | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "ssl"; fi);
+    listen ${NGINX_PORT:-8080} $(if [ \"$(echo \"${SELKIES_ENABLE_HTTPS}\" | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "ssl"; fi);
+    listen [::]:${NGINX_PORT:-8080} $(if [ \"$(echo \"${SELKIES_ENABLE_HTTPS}\" | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "ssl"; fi);
     ssl_certificate ${SELKIES_HTTPS_CERT-/etc/ssl/certs/ssl-cert-snakeoil.pem};
     ssl_certificate_key ${SELKIES_HTTPS_KEY-/etc/ssl/private/ssl-cert-snakeoil.key};
-    $(if [ \"$(echo ${SELKIES_ENABLE_BASIC_AUTH} | tr '[:upper:]' '[:lower:]')\" != \"false\" ]; then echo "auth_basic \"Selkies\";"; echo -n "    auth_basic_user_file ${XDG_RUNTIME_DIR}/.htpasswd;"; fi)
+    $(if [ \"$(echo \"${SELKIES_ENABLE_BASIC_AUTH}\" | tr '[:upper:]' '[:lower:]')\" != \"false\" ]; then echo "auth_basic \"Selkies\";"; echo -n "    auth_basic_user_file ${XDG_RUNTIME_DIR}/.htpasswd;"; fi)
 
     location / {
         root /opt/gst-web/;
@@ -74,7 +74,7 @@ server {
 
         client_max_body_size    10M;
 
-        proxy_pass http$(if [ \"$(echo ${SELKIES_ENABLE_HTTPS} | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${SELKIES_PORT:-8081};
+        proxy_pass http$(if [ \"$(echo \"${SELKIES_ENABLE_HTTPS}\" | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${SELKIES_PORT:-8081};
     }
 
     location /turn {
@@ -86,7 +86,19 @@ server {
 
         client_max_body_size    10M;
 
-        proxy_pass http$(if [ \"$(echo ${SELKIES_ENABLE_HTTPS} | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${SELKIES_PORT:-8081};
+        proxy_pass http$(if [ \"$(echo \"${SELKIES_ENABLE_HTTPS}\" | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${SELKIES_PORT:-8081};
+    }
+
+    location /mode {
+        proxy_http_version      1.1;
+        proxy_read_timeout      3600s;
+        proxy_send_timeout      3600s;
+        proxy_connect_timeout   3600s;
+        proxy_buffering         off;
+
+        client_max_body_size    10M;
+
+        proxy_pass http$(if [ \"$(echo \"${SELKIES_ENABLE_HTTPS}\" | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:$(if [ \"${SELKIES_MODE}\" = 'webrtc' ]; then echo ${SELKIES_PORT:-8081}; else echo ${DATA_WEBSOCKET_PORT:-8082}; fi);
     }
 
     location /ws {
@@ -106,7 +118,7 @@ server {
 
         client_max_body_size    10M;
 
-        proxy_pass http$(if [ \"$(echo ${SELKIES_ENABLE_HTTPS} | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${SELKIES_PORT:-8081};
+        proxy_pass http$(if [ \"$(echo \"${SELKIES_ENABLE_HTTPS}\" | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${SELKIES_PORT:-8081};
     }
 
     location /webrtc/signaling {
@@ -126,7 +138,30 @@ server {
 
         client_max_body_size    10M;
 
-        proxy_pass http$(if [ \"$(echo ${SELKIES_ENABLE_HTTPS} | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${SELKIES_PORT:-8081};
+        proxy_pass http$(if [ \"$(echo \"${SELKIES_ENABLE_HTTPS}\" | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${SELKIES_PORT:-8081};
+    }
+
+    location /websocket {
+        proxy_set_header        Upgrade \$http_upgrade;
+        proxy_set_header        Connection \"upgrade\";
+        proxy_set_header        Host \$host;
+        proxy_set_header        X-Real-IP \$remote_addr;
+        proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header        X-Forwarded-Proto \$scheme;
+        proxy_http_version      1.1;
+        proxy_read_timeout      3600s;
+        proxy_send_timeout      3600s;
+        proxy_connect_timeout   3600s;
+        proxy_buffering         off;
+        client_max_body_size    10M;
+        proxy_pass http$(if [ \"$(echo \"${SELKIES_ENABLE_HTTPS}\" | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${DATA_WEBSOCKET_PORT:-8082};
+    }
+
+    location /files {
+        fancyindex on;
+        fancyindex_footer /nginx/footer.html;
+        fancyindex_header /nginx/header.html;
+        alias /opt/gst-web/nginx;
     }
 
     location /metrics {
@@ -138,7 +173,7 @@ server {
 
         client_max_body_size    10M;
 
-        proxy_pass http$(if [ \"$(echo ${SELKIES_ENABLE_HTTPS} | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${SELKIES_METRICS_HTTP_PORT:-9081};
+        proxy_pass http$(if [ \"$(echo \"${SELKIES_ENABLE_HTTPS}\" | tr '[:upper:]' '[:lower:]')\" = \"true\" ]; then echo -n "s"; fi)://localhost:${SELKIES_METRICS_HTTP_PORT:-9081};
     }
 
     error_page 500 502 503 504 /50x.html;
@@ -150,11 +185,106 @@ server {
 # Clear the cache registry
 rm -rf "${HOME}/.cache/gstreamer-1.0"
 
-# Start the selkies WebRTC HTML5 remote desktop application
-selkies \
+rm -rf /opt/gst-web/*
+# TODO: manifest needs to be provided along with gst-web img
+touch /opt/gst-web/manifest.json && echo "{
+  \"name\": \"Selkies\",
+  \"short_name\": \"Selkies\",
+  \"manifest_version\": 2,
+  \"version\": \"1.0.0\",
+  \"display\": \"fullscreen\",
+  \"background_color\": \"#000000\",
+  \"theme_color\": \"#000000\",
+  \"icons\": [
+    {
+      \"src\": \"icon.png\",
+      \"type\": \"image/png\",
+      \"sizes\": \"180x180\"
+    }
+  ],
+  \"start_url\": \"/\"
+}" | tee /opt/gst-web/manifest.json > /dev/null
+
+port=$(if [ "${SELKIES_MODE:-}" = 'websockets' ]; then echo "8082"; else echo "8081"; fi)
+# Start the Selkies-GStreamer WebRTC HTML5 remote desktop application
+# selkies-gstreamer \
+#     --mode=${SELKIES_MODE} \
+#     --addr="localhost" \
+#     --port=$port \
+#     --enable_basic_auth="false" \
+#     --enable_metrics_http="true" \
+#     --metrics_http_port="${SELKIES_METRICS_HTTP_PORT:-9081}" \
+#     $@
+
+# Setup dev mode if defined
+if [ ! -z "${DEV_MODE+x}" ]; then
+  # Frontend setup
+  if [[ "${DEV_MODE}" == "core" ]]; then
+    # Core just runs from directory
+    cd $HOME/selkies/addons/gst-web-core
+    npm install
+    npm run serve &
+  else
+    # Build core
+    mkdir -p /opt/gst-web/src /opt/gst-web/nginx
+    cd $HOME/selkies/addons/gst-web-core
+    npm install
+    npm run build
+    cp dist/selkies-core.js ../${DEV_MODE}/src/
+    sudo nodemon --watch selkies-core.js \
+                 --watch selkies-wr-core.js \
+                 --watch selkies-ws-core.js --exec "npm run build && cp dist/selkies-core.js ../${DEV_MODE}/src/" &
+
+    # Copy touch gamepad
+    cp ../universal-touch-gamepad/universalTouchGamepad.js /opt/gst-web/src/
+    sudo nodemon --watch ../universal-touch-gamepad/universalTouchGamepad.js --exec "cp ../universal-touch-gamepad/universalTouchGamepad.js /opt/gst-web/src/" &
+
+    # Copy themes
+    cp -a nginx ../${DEV_MODE}/
+
+    cd $HOME/selkies/addons/${DEV_MODE}
+    npm install
+    npm run build
+    cp -r dist/* /opt/gst-web/
+    sudo nodemon --watch ../${DEV_MODE}/src --exec "npm run build && cp -r ../${DEV_MODE}/dist/* /opt/gst-web/" &
+  fi
+
+  # Run backend
+  cd $HOME/selkies/src/
+  nodemon -V --ext py --exec \
+    "python3" -m selkies \
+      --addr="localhost" \
+      --port=$port \
+      --enable_basic_auth="false" \
+      --mode=${SELKIES_MODE}
+else
+  # Build frontend with selkies-dashboard
+  cd $HOME/selkies/addons/gst-web-core
+  npm install
+  npm run build
+  cd ../selkies-dashboard
+  cp ../gst-web-core/dist/selkies-core.js src/
+  cp ../universal-touch-gamepad/universalTouchGamepad.js src/
+  npm install
+  npm run build
+  rm -rf /opt/gst-web/*
+  cd $HOME/selkies/addons && mkdir -p /opt/gst-web/src /opt/gst-web/nginx
+  # Copy built files to the web server directory
+  cp gst-web-core/nginx/* /opt/gst-web/nginx/
+  cp -r selkies-dashboard/dist/* /opt/gst-web/
+
+  # This is a hack to configure the streaming mode on UI end
+  sed -i "s|window.streamingMode=null;|window.streamingMode=\"${SELKIES_MODE:-websockets}\";|" /opt/gst-web/assets/index-*.js
+
+  # Start Selkies
+  exec selkies \
     --addr="localhost" \
-    --port="${SELKIES_PORT:-8081}" \
+    --port=$port \
     --enable_basic_auth="false" \
     --enable_metrics_http="true" \
     --metrics_http_port="${SELKIES_METRICS_HTTP_PORT:-9081}" \
-    $@
+    --mode=${SELKIES_MODE:-websockets}
+fi
+
+read
+

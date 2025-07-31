@@ -179,7 +179,7 @@ class WebRTCSignalling:
                 if len(toks) > 1:
                     meta = json.loads(base64.b64decode(toks[1]))
                 logger.info("started session with peer: %s, meta: %s", self.peer_id, json.dumps(meta))
-                self.on_session(self.peer_id, (meta))
+                await self.on_session(self.peer_id, (meta))
             elif message.startswith('ERROR'):
                 if message == "ERROR peer '%s' not found" % self.peer_id:
                     await self.on_error(WebRTCSignallingErrorNoPeer("'%s' not found" % self.peer_id))
@@ -199,12 +199,11 @@ class WebRTCSignalling:
                 if data.get("sdp", None):
                     logger.info("received SDP")
                     logger.debug("SDP:\n%s" % data["sdp"])
-                    self.on_sdp(data['sdp'].get('type'),
+                    await self.on_sdp(data['sdp'].get('type'),
                                 data['sdp'].get('sdp'))
                 elif data.get("ice", None):
                     logger.info("received ICE")
                     logger.debug("ICE:\n%s" % data.get("ice"))
-                    self.on_ice(data['ice'].get('sdpMLineIndex'),
-                                data['ice'].get('candidate'))
+                    await self.on_ice(data['ice'])
                 else:
                     await self.on_error(WebRTCSignallingError("unhandled JSON message: %s", json.dumps(data)))

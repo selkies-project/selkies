@@ -8,7 +8,7 @@ import struct
 import socket
 import time
 from queue import Queue
-from input_event_codes import *
+from .input_event_codes import *
 from signal import (
     signal,
     SIGINT,
