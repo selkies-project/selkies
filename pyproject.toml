@@ -57,8 +57,8 @@ Homepage = "https://github.com/selkies-project/selkies"
 
 [project.scripts]
 selkies = "selkies.__main__:main"
-# FIXME
-# selkies-resize = "selkies.resize:entrypoint"
+# FIXME; temporary fix until webrtc if fully integrated
+selkies-resize = "selkies.legacy.resize:entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]

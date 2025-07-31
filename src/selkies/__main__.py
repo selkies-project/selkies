@@ -12,6 +12,14 @@ if __name__ == "__main__" and __package__ is None:
         sys.path.insert(0, package_container_dir)
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', default=os.environ.get("SELKIES_MODE", "webrtc"),
+                        help="Specify the mode: 'webrtc' or 'websockets'; defaults to webrtc")
+    args, _ = parser.parse_known_args()
+    if args.mode == 'webrtc':
+      from .legacy.webrtc import wr_entrypoint
+      wr_entrypoint()
+    else:
       from .selkies import ws_entrypoint
       ws_entrypoint()
 

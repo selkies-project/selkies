@@ -1463,6 +1463,7 @@ export class Input {
         const down = (event.type === 'mousedown' ? 1 : 0);
         var mtype = "m";
         let canvas = document.getElementById('videoCanvas');
+        let videoEle = document.getElementById("stream");
         if (event.type === 'mousedown' || event.type === 'mouseup') {
             if (event.button === 3) {
                 event.preventDefault();
@@ -1477,7 +1478,7 @@ export class Input {
             return;
         }
 
-        if (document.pointerLockElement === this.element || document.pointerLockElement === canvas) {
+        if ((this.element != null && document.pointerLockElement === this.element) || (canvas !== null && document.pointerLockElement === canvas)) {
             mtype = "m2";
             let movementX_logical = event.movementX || 0;
             let movementY_logical = event.movementY || 0;
@@ -1487,7 +1488,7 @@ export class Input {
             this.y = Math.round(movementY_logical * dpr_for_input_coords);
 
         } else if (event.type === 'mousemove') {
-             if (window.isManualResolutionMode && canvas) {
+            if (window.isManualResolutionMode && canvas) {
                 const canvasRect = canvas.getBoundingClientRect(); // CSS logical size
                 if (canvasRect.width > 0 && canvasRect.height > 0 && canvas.width > 0 && canvas.height > 0) {
                     const mouseX_on_canvas_logical_css = event.clientX - canvasRect.left;
@@ -1502,6 +1503,21 @@ export class Input {
                     this.y = Math.max(0, Math.min(canvas.height, Math.round(coordY)));
                 } else {
                     this.x = 0; this.y = 0;
+                }
+            } else if (window.isManualResolutionMode && videoEle) {
+                // TODO: the below code is redundant, can be made genric to canvas and video element
+                const vidoeRect = videoEle.getBoundingClientRect();
+                if (vidoeRect.width > 0 && vidoeRect.height > 0 && videoEle.width > 0 && videoEle.height > 0) {
+                    const mouseX_on_video = event.clientX - vidoeRect.left;
+                    const mouseY_on_video = event.clientY - vidoeRect.top;
+                    const scaleX = videoEle.width / vidoeRect.width;
+                    const scaleY = videoEle.height / vidoeRect.height;
+                    let serverX = mouseX_on_video * scaleX;
+                    let serverY = mouseY_on_video * scaleY;
+                    this.x = Math.max(0, Math.min(videoEle.width, Math.round(serverX))); // Assign scaled absolute to this.x
+                    this.y = Math.max(0, Math.min(videoEle.height, Math.round(serverY))); // Assign scaled absolute to this.y
+                } else {
+                    this.x = 0; this.y = 0; // Fallback
                 }
             } else { // Auto resolution mode (non-manual)
                 if (!this.m) {
@@ -2229,9 +2245,15 @@ export class Input {
         this._exitPointerLock();
     }
 
+    /**
+     * Sends WebRTC app command to hide the remote pointer when exiting pointer lock.
+     */
     _exitPointerLock() {
         if (document.pointerLockElement === this.element) {
             document.exitPointerLock();
+            // hide the pointer.
+            this.send("p,0");
+            console.log("remote pointer visibility to: False");
         }
     }
 

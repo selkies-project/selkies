@@ -119,6 +119,7 @@ class WebRTCSimpleServer(object):
         self.https_key = options.https_key
         self.health_path = options.health
         self.web_root = options.web_root
+        self.mode = options.mode
 
         # Certificate mtime, used to detect when to restart the server
         self.cert_mtime = -1
@@ -208,7 +209,7 @@ class WebRTCSimpleServer(object):
                 response_headers['WWW-Authenticate'] = 'Basic realm="restricted, charset="UTF-8"'
                 return self.http_response(http.HTTPStatus.UNAUTHORIZED, response_headers, b'Authorization required')
 
-        if path == "/ws/" or path == "/ws" or path.endswith("/signalling/") or path.endswith("/signalling"):
+        if path == "/ws/" or path == "/ws" or path.endswith("/signaling/") or path.endswith("/signaling"):
             return None
 
         if path == self.health_path + "/" or path == self.health_path:
@@ -235,6 +236,11 @@ class WebRTCSimpleServer(object):
             else:
                 web_logger.warning("HTTP GET {} 404 NOT FOUND - Missing RTC config".format(path))
                 return self.http_response(http.HTTPStatus.NOT_FOUND, response_headers, b'404 NOT FOUND')
+
+        if path == "/mode" or path == "/mode/":
+            data = json.dumps({"mode" : self.mode})
+            response_headers['Content-Type'] = 'application/json'
+            return self.http_response(http.HTTPStatus.OK, response_headers, data)
 
         path = path.split("?")[0]
         if path == '/':

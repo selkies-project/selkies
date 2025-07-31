@@ -33,7 +33,12 @@ import subprocess
 import socket
 import time
 from PIL import Image
-from gamepad import SelkiesGamepad
+from .gamepad import SelkiesGamepad
+import distro
+
+import gi
+gi.require_version('GLib', "2.0")
+from gi.repository import GLib
 
 import logging
 logger = logging.getLogger("webrtc_input")
@@ -80,7 +85,8 @@ class WebRTCInputError(Exception):
 
 
 class WebRTCInput:
-    def __init__(self, uinput_mouse_socket_path="", js_socket_path="", enable_clipboard="", enable_cursors=True, cursor_size=16, cursor_scale=1.0, cursor_debug=False):
+    def __init__(self, uinput_mouse_socket_path="", js_socket_path="", enable_clipboard="", enable_cursors=True, cursor_size=16, cursor_scale=1.0, cursor_debug=False,
+                 upload_dir=None):
         """Initializes WebRTC input instance
         """
 
@@ -111,6 +117,11 @@ class WebRTCInput:
 
         self.ping_start = None
 
+        self.upload_dir = upload_dir
+        self.upload_dir_path = None
+        self.active_uploads_by_path_conn = {}
+        self.active_upload_target_path_conn = None
+
         self.on_video_encoder_bit_rate = lambda bitrate: logger.warning(
             'unhandled on_video_encoder_bit_rate')
         self.on_audio_encoder_bit_rate = lambda bitrate: logger.warning(
@@ -137,6 +148,9 @@ class WebRTCInput:
             'unhandled on_cursor_change')
         self.on_client_webrtc_stats = lambda webrtc_stat_type, webrtc_stats: logger.warning(
             'unhandled on_client_webrtc_stats')
+        
+        # upload directory to save the uploaded content
+        self.initialize_upload_dir()
 
     def __keyboard_connect(self):
         self.keyboard = pynput.keyboard.Controller()
@@ -555,6 +569,78 @@ class WebRTCInput:
     async def stop_js_server(self):
         await self.__js_disconnect()
 
+    async def on_msg_data(self, data):
+        # Data being received on auxiliary channel would be of type Bytes
+        if len(data) <= 0:
+            return
+        data_type, payload = data[0], data[1:]
+        if data_type == 0x01:  # inidicates file data
+            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
+                try:
+                    self.active_uploads_by_path_conn[self.active_upload_target_path_conn].write(payload)
+                except Exception as e_write:
+                    logger.error(f"File write error for {self.active_upload_target_path_conn}: {e_write}")
+                    try:
+                        self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
+                        os.remove(self.active_upload_target_path_conn)
+                    except Exception:
+                        pass
+                    del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+                    self.active_upload_target_path_conn = None
+            else:
+                logger.warning("received data after upload path is closed")
+       
+    def handle_upload_dir(self, filename, filesize):
+        try:
+            rel_path_from_client, size_str = filename, filesize
+            file_size = int(size_str)
+
+            sane_rel_path = rel_path_from_client.strip('/\\')
+            sane_rel_path = os.path.normpath(sane_rel_path)
+            path_components = [comp for comp in sane_rel_path.split(os.sep) if comp and comp != '.']
+
+            if not path_components or sane_rel_path.startswith(os.sep) or sane_rel_path.startswith('/') or \
+                sane_rel_path.startswith('\\') or ".." in path_components:
+                logger.error(f"Invalid or malicious relative path from client: '{rel_path_from_client}'. Discarding.")
+
+            sane_rel_path = os.path.join(*path_components)
+            final_server_path = os.path.join(self.upload_dir_path, sane_rel_path)
+            real_upload_dir = os.path.realpath(self.upload_dir_path)
+            intended_parent_dir_abs = os.path.abspath(os.path.dirname(final_server_path))
+            real_upload_dir_abs = os.path.abspath(real_upload_dir)
+
+            if not intended_parent_dir_abs.startswith(real_upload_dir_abs):
+                logger.error(f"Path escape attempt detected: '{final_server_path}' (from client: '{rel_path_from_client}') is outside of '{real_upload_dir_abs}'. Discarding.")
+                return
+
+            target_dir = os.path.dirname(final_server_path)
+            
+            if target_dir and target_dir != real_upload_dir_abs and not os.path.exists(target_dir):
+                if not os.path.abspath(target_dir).startswith(real_upload_dir_abs):
+                    logger.error(f"Directory creation escape attempt: '{target_dir}' is outside of '{real_upload_dir_abs}'. Discarding.")
+                    return
+                try:
+                    os.makedirs(target_dir, exist_ok=True)
+                    logger.info(f"Created directory for upload: {target_dir}")
+                except OSError as e_mkdir:
+                    logger.error(f"Could not create directory {target_dir} for upload: {e_mkdir}")
+                    return
+            
+            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
+                try:
+                    self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
+                except Exception as e_close_old:
+                    logger.warning(f"Error closing previous upload stream {self.active_upload_target_path_conn}: {e_close_old}")
+                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+
+            self.active_uploads_by_path_conn[final_server_path] = open(final_server_path, "wb")
+            self.active_upload_target_path_conn = final_server_path
+            logger.info(f"Upload started: {final_server_path} (client rel_path: '{rel_path_from_client}', size: {file_size})")
+        except ValueError:
+            logger.error(f"Invalid FILE_UPLOAD_START format: {filename}")
+        except Exception as e_fup_start:
+            logger.error(f"FILE_UPLOAD_START processing error: {e_fup_start}", exc_info=True)
+
     async def on_message(self, msg):
         """Handles incoming input messages
 
@@ -732,5 +818,80 @@ class WebRTCInput:
                 await self.on_client_webrtc_stats(toks[0], ",".join(toks[1:]))
             except:
                 logger.error("failed to parse WebRTC Statistics JSON object")
+        elif toks[0] == "cmd":
+            if len(toks) > 1:
+                command_to_run = ",".join(toks[1:]) # Reconstruct command string if it contained commas
+                # stterm is unavailable directly for ubuntu, so use xterm as alternative
+                # TODO: need a genric terminal to support all distro, or need to handle each individually
+                if distro.name() == "Ubuntu":
+                    command_to_run = command_to_run.replace("st ", "xterm -geometry +300+100 -hold -e ")
+                logger.info(f"Attempting to execute command: '{command_to_run}'")
+                home_directory = os.path.expanduser("~")
+                try:
+                    # Use subprocess.Popen for fire-and-forget execution
+                    # stdout and stderr are redirected to DEVNULL to ignore output.
+                    # start_new_session=True detaches the process from the current one.
+                    subprocess.Popen(
+                        command_to_run, 
+                        shell=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        cwd=home_directory,
+                        start_new_session=True 
+                    )
+                    logger.info(f"Successfully launched command: '{command_to_run}'")
+                except Exception as e:
+                    logger.error(f"Failed to launch command '{command_to_run}': {e}")
+            else:
+                logger.warning("Received 'cmd' message without a command string.")
+        elif toks[0].startswith("FILE_UPLOAD_START:"):
+            if self.upload_dir_path is None:
+                logger.warning("Upload directory doesn't exits, skipping the file upload")
+                return
+            _, file, size = toks[0].split(":", 2)
+            # create dir/file instance to wirte data to
+            logger.info(f"FILE_UPLOAD_START recieved for {file}")
+            self.handle_upload_dir(file, size)
+
+        elif toks[0].startswith("FILE_UPLOAD_END:"):
+            toks = toks[0].split(":", 2)
+            logger.info("Received FILE UPLOAD END: " + " ".join(toks[1:]))
+            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
+                self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
+                logger.info(f"Upload finished: {self.active_upload_target_path_conn}")
+                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+                self.active_upload_target_path_conn = None
+        elif toks[0].startswith("FILE_UPLOAD_ERROR:"):
+            logger.error(f"Client reported upload error: {toks[0]}")
+            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
+                self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
+                try:
+                    os.remove(self.active_upload_target_path_conn)
+                except OSError:
+                    pass
+                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+            self.active_upload_target_path_conn = None
+            logger.info(f"Purged the file: {toks[0].split(':', 2)[1]}")
         else:
             logger.info('unknown data channel message: %s' % msg)
+
+    def initialize_upload_dir(self):
+        if self.upload_dir in ["/sys", "/proc", "/dev"]:
+            logger.info("Can not initialize upload directory at /sys /proc /dev locations")
+            return
+        if not self.upload_dir:
+            logger.info("Upload dir is empty")
+            return
+
+        if self.upload_dir == "~/Desktop":
+            # expand the user dir path
+            self.upload_dir_path = os.path.expanduser(self.upload_dir)
+        else:
+            self.upload_dir_path = self.upload_dir
+
+        try:
+            os.makedirs(self.upload_dir_path, exist_ok=True)
+            logger.info(f"Upload directory ensured: {self.upload_dir_path}")
+        except OSError as e:
+            logger.error(f"Could not create upload directory {self.upload_dir_path}: {e}")
+            self.upload_dir_path = None

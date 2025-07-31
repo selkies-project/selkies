@@ -37,14 +37,15 @@ logger.setLevel(logging.INFO)
 
 from watchdog.observers import Observer
 from watchdog.events import FileClosedEvent, FileSystemEventHandler
-from webrtc_input import WebRTCInput
-from webrtc_signalling import WebRTCSignalling, WebRTCSignallingErrorNoPeer
-from gstwebrtc_app import GSTWebRTCApp
-from gpu_monitor import GPUMonitor
-from system_monitor import SystemMonitor
-from metrics import Metrics
-from resize import resize_display, get_new_res, set_dpi, set_cursor_size
-from signalling_web import WebRTCSimpleServer, generate_rtc_config
+from .webrtc_input import WebRTCInput
+from .webrtc_signalling import WebRTCSignalling, WebRTCSignallingErrorNoPeer
+from .media_pipeline import MediaPipeline
+from .rtc import RTCApp
+from .gpu_monitor import GPUMonitor
+from .system_monitor import SystemMonitor
+from .metrics import Metrics
+from .resize import resize_display, get_new_res, set_dpi, set_cursor_size
+from .signalling_web import WebRTCSimpleServer, generate_rtc_config
 
 DEFAULT_RTC_CONFIG = """{
   "lifetimeDuration": "86400s",
@@ -308,22 +309,28 @@ def set_json_app_argument(config_path, key, value):
         key {string} -- the name of the argument to set
         value {any} -- the value of the argument to set
     """
+    try: 
+        if not os.path.exists(config_path):
+            # Create new file with empty data
+            with open(config_path, 'w') as f:
+                json.dump({}, f)
 
-    if not os.path.exists(config_path):
-        # Create new file
+        # Read current config JSON
+        with open(config_path, 'r') as f:
+            try:
+                json_data = json.load(f)
+            except json.JSONDecodeError:
+                json_data = {}
+
+        # Set the new value for the argument
+        json_data[key] = value
+
+        # Save the json file
         with open(config_path, 'w') as f:
-            json.dump({}, f)
-
-    # Read current config JSON
-    with open(config_path, 'w') as f:
-        json_data = json.load(f)
-
-    # Set the new value for the argument
-    json_data[key] = value
-
-    # Save the json file
-    with open(config_path, 'w') as f:
-        json.dump(json_data, f)
+            json.dump(json_data, f)
+    except Exception as e:
+        logger.info(f"error writing arguments to json config file: {e}")
+        return False
 
     return True
 
@@ -512,6 +519,11 @@ async def main():
                         help='Port to start the Prometheus metrics server on')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug logging')
+    parser.add_argument('--mode', default=os.environ.get("SELKIES_MODE", "webrtc"),
+                        help="Specify the mode: 'webrtc' or 'websockets'; defaults to webrtc")
+    parser.add_argument('--upload_dir', default=os.environ.get('SELKIES_UPLOAD_DIR', '~/Desktop'),
+                        help="Directory to save the uploaded content, in absolute path format. Default to '~/Desktop' directory")
+
     args, unknown = parser.parse_known_args()
     if os.path.exists(args.json_config):
         # Read and overlay arguments from json file
@@ -565,13 +577,6 @@ async def main():
         basic_auth_user=args.basic_auth_user,
         basic_auth_password=args.basic_auth_password)
 
-    # Initialize signalling client for audio connection
-    audio_signalling = WebRTCSignalling('%s//127.0.0.1:%s/ws' % (ws_protocol, args.port), my_audio_id, audio_peer_id,
-        enable_https=using_https,
-        enable_basic_auth=using_basic_auth,
-        basic_auth_user=args.basic_auth_user,
-        basic_auth_password=args.basic_auth_password)
-
     # Handle errors from the signalling server
     async def on_signalling_error(e):
         if isinstance(e, WebRTCSignallingErrorNoPeer):
@@ -581,23 +586,13 @@ async def main():
         else:
             logger.error("signalling error: %s", str(e))
             await app.stop_pipeline()
-    async def on_audio_signalling_error(e):
-        if isinstance(e, WebRTCSignallingErrorNoPeer):
-            # Waiting for peer to connect, retry in 1 second.
-            await asyncio.sleep(1.0)
-            await audio_signalling.setup_call()
-        else:
-            logger.error("signalling error: %s", str(e))
-            await audio_app.stop_pipeline()
+    
     signalling.on_error = on_signalling_error
-    audio_signalling.on_error = on_audio_signalling_error
 
     signalling.on_disconnect = lambda: app.stop_pipeline()
-    audio_signalling.on_disconnect = lambda: audio_app.stop_pipeline()
 
     # After connecting, attempt to setup call to peer
     signalling.on_connect = signalling.setup_call
-    audio_signalling.on_connect = audio_signalling.setup_call
 
     # [START main_setup]
     # Fetch the TURN server and credentials
@@ -669,29 +664,29 @@ async def main():
     # Create instance of app
     # Only use asynchronous event loops directly when synchronous functions are absolutely necessary (such as GStreamer signals)
     event_loop = asyncio.get_running_loop()
-    app = GSTWebRTCApp(event_loop, stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
-    audio_app = GSTWebRTCApp(event_loop, stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
+    media = MediaPipeline(event_loop, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, 
+                          keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
+    app = RTCApp(event_loop, stun_servers, turn_servers, args.turn_username, args.turn_password)
 
+    app.request_idr_frame = media.dynamic_idr_frame
+    media.stream_available = app.receive_data
+    media.send_data_channel_message = app.send_media_data_over_channel
     # [END main_setup]
 
     # Send the local sdp to signalling when offer is generated.
     app.on_sdp = signalling.send_sdp
-    audio_app.on_sdp = audio_signalling.send_sdp
 
     # Send ICE candidates to the signalling server
     app.on_ice = signalling.send_ice
-    audio_app.on_ice = audio_signalling.send_ice
 
     # Set the remote SDP when received from signalling server
     signalling.on_sdp = app.set_sdp
-    audio_signalling.on_sdp = audio_app.set_sdp
 
     # Set ICE candidates received from signalling server
     signalling.on_ice = app.set_ice
-    audio_signalling.on_ice = audio_app.set_ice
 
     # Start the pipeline once the session is established.
-    def on_session_handler(session_peer_id, meta=None):
+    async def on_session_handler(session_peer_id, meta=None):
         logger.info("starting session for peer id {} with meta: {}".format(session_peer_id, meta))
         if str(session_peer_id) == str(peer_id):
             if meta:
@@ -703,16 +698,13 @@ async def main():
                 else:
                     logger.info("setting cursor to default size")
                     set_cursor_size(16)
-            logger.info("starting video pipeline")
-            app.start_pipeline()
-        elif str(session_peer_id) == str(audio_peer_id):
-            logger.info("starting audio pipeline")
-            audio_app.start_pipeline(audio_only=True)
+            logger.info("starting pipeline")
+            await media.start_media_pipeline()
+            await app.start_rtc_pipeline()
         else:
             logger.error("failed to start pipeline for peer_id: %s" % peer_id)
 
     signalling.on_session = on_session_handler
-    audio_signalling.on_session = on_session_handler
 
     # Initialize the X11 input instance
     cursor_scale = 1.0
@@ -723,7 +715,8 @@ async def main():
         enable_cursors,
         cursor_size,
         cursor_scale,
-        cursor_debug)
+        cursor_debug,
+        args.upload_dir)
 
     # Handle changed cursors
     webrtc_input.on_cursor_change = lambda data: app.send_cursor_data(data)
@@ -733,11 +726,11 @@ async def main():
         logger.info(
             "opened peer data channel for user input to X11")
 
-        app.send_framerate(app.framerate)
-        app.send_video_bitrate(app.video_bitrate)
-        app.send_audio_bitrate(audio_app.audio_bitrate)
+        app.send_framerate(media.framerate)
+        app.send_video_bitrate(media.video_bitrate)
+        app.send_audio_bitrate(media.audio_bitrate)
         app.send_resize_enabled(enable_resize)
-        app.send_encoder(app.encoder)
+        app.send_encoder(media.encoder)
         app.send_cursor_data(app.last_cursor_sent)
 
     app.on_data_open = lambda: data_channel_ready()
@@ -746,22 +739,28 @@ async def main():
     app.on_data_message = webrtc_input.on_message
 
     # Send video bitrate messages to app
-    webrtc_input.on_video_encoder_bit_rate = lambda bitrate: set_json_app_argument(args.json_config, "video_bitrate", bitrate) and (app.set_video_bitrate(int(bitrate)))
+    webrtc_input.on_video_encoder_bit_rate = lambda bitrate: set_json_app_argument(args.json_config, "video_bitrate", bitrate) and (media.set_video_bitrate(int(bitrate)))
 
     # Send audio bitrate messages to app
-    webrtc_input.on_audio_encoder_bit_rate = lambda bitrate: set_json_app_argument(args.json_config, "audio_bitrate", bitrate) and audio_app.set_audio_bitrate(int(bitrate))
+    webrtc_input.on_audio_encoder_bit_rate = lambda bitrate: set_json_app_argument(args.json_config, "audio_bitrate", bitrate) and media.set_audio_bitrate(int(bitrate))
 
     # Send pointer visibility setting to app
-    webrtc_input.on_mouse_pointer_visible = lambda visible: app.set_pointer_visible(
-        visible)
+    webrtc_input.on_mouse_pointer_visible = lambda visible: media.set_pointer_visible(visible)
 
     # Send clipboard contents when requested
     webrtc_input.on_clipboard_read = lambda data: app.send_clipboard_data(data)
 
+    app.on_data_close = lambda : logger.info("Data channel closed")
+
+    app.on_data_error = lambda error: logger.info("Unexpected error, data channel: " + str(error))
+
+    # TODO: create an aux data channel for data messages (file upload/download)
+    app.on_data_msg_bytes = webrtc_input.on_msg_data
+
     # Write framerate argument to local configuration and then tell client to reload.
     def set_fps_handler(fps):
         set_json_app_argument(args.json_config, "framerate", fps)
-        app.set_framerate(fps)
+        media.set_framerate(fps)
     webrtc_input.on_set_fps = lambda fps: set_fps_handler(fps)
 
     # Handler for resize events.
@@ -883,51 +882,53 @@ async def main():
     options.turn_auth_header_name = args.turn_rest_username_auth_header
     options.stun_host = args.stun_host
     options.stun_port = args.stun_port
+    options.mode = args.mode
     server = WebRTCSimpleServer(options)
 
-    # Callback method to update TURN servers of a running pipeline.
-    def mon_rtc_config(stun_servers, turn_servers, rtc_config):
-        if app.webrtcbin:
-            logger.info("updating STUN server")
-            app.webrtcbin.set_property("stun-server", stun_servers[0])
-            for i, turn_server in enumerate(turn_servers):
-                logger.info("updating TURN server")
-                if i == 0:
-                    app.webrtcbin.set_property("turn-server", turn_server)
-                else:
-                    app.webrtcbin.emit("add-turn-server", turn_server)
-        server.set_rtc_config(rtc_config)
+    # TODO: Handle updating aiortc peer connection ice config dynamically
+    # # Callback method to update TURN servers of a running pipeline.
+    # def mon_rtc_config(stun_servers, turn_servers, rtc_config):
+    #     if app.webrtcbin:
+    #         logger.info("updating STUN server")
+    #         app.webrtcbin.set_property("stun-server", stun_servers[0])
+    #         for i, turn_server in enumerate(turn_servers):
+    #             logger.info("updating TURN server")
+    #             if i == 0:
+    #                 app.webrtcbin.set_property("turn-server", turn_server)
+    #             else:
+    #                 app.webrtcbin.emit("add-turn-server", turn_server)
+    #     server.set_rtc_config(rtc_config)
 
-    # Initialize periodic monitor to refresh TURN RTC config when using shared secret.
-    hmac_turn_mon = HMACRTCMonitor(
-        args.turn_host,
-        args.turn_port,
-        args.turn_shared_secret,
-        turn_rest_username,
-        turn_protocol=turn_protocol,
-        turn_tls=using_turn_tls,
-        stun_host=args.stun_host,
-        stun_port=args.stun_port,
-        period=60, enabled=using_hmac_turn)
-    hmac_turn_mon.on_rtc_config = mon_rtc_config
+    # # Initialize periodic monitor to refresh TURN RTC config when using shared secret.
+    # hmac_turn_mon = HMACRTCMonitor(
+    #     args.turn_host,
+    #     args.turn_port,
+    #     args.turn_shared_secret,
+    #     turn_rest_username,
+    #     turn_protocol=turn_protocol,
+    #     turn_tls=using_turn_tls,
+    #     stun_host=args.stun_host,
+    #     stun_port=args.stun_port,
+    #     period=60, enabled=using_hmac_turn)
+    # hmac_turn_mon.on_rtc_config = mon_rtc_config
 
-    # Initialize REST API RTC config monitor to periodically refresh the REST API RTC config.
-    turn_rest_mon = RESTRTCMonitor(
-        args.turn_rest_uri,
-        turn_rest_username,
-        args.turn_rest_username_auth_header,
-        turn_protocol=turn_protocol,
-        turn_rest_protocol_header=args.turn_rest_protocol_header,
-        turn_tls=using_turn_tls,
-        turn_rest_tls_header=args.turn_rest_tls_header,
-        period=60, enabled=using_turn_rest)
-    turn_rest_mon.on_rtc_config = mon_rtc_config
+    # # Initialize REST API RTC config monitor to periodically refresh the REST API RTC config.
+    # turn_rest_mon = RESTRTCMonitor(
+    #     args.turn_rest_uri,
+    #     turn_rest_username,
+    #     args.turn_rest_username_auth_header,
+    #     turn_protocol=turn_protocol,
+    #     turn_rest_protocol_header=args.turn_rest_protocol_header,
+    #     turn_tls=using_turn_tls,
+    #     turn_rest_tls_header=args.turn_rest_tls_header,
+    #     period=60, enabled=using_turn_rest)
+    # turn_rest_mon.on_rtc_config = mon_rtc_config
 
-    # Initialize file watcher for RTC config JSON file.
-    rtc_file_mon = RTCConfigFileMonitor(
-        rtc_file=args.rtc_config_json,
-        enabled=using_rtc_config_json)
-    rtc_file_mon.on_rtc_config = mon_rtc_config
+    # # Initialize file watcher for RTC config JSON file.
+    # rtc_file_mon = RTCConfigFileMonitor(
+    #     rtc_file=args.rtc_config_json,
+    #     enabled=using_rtc_config_json)
+    # rtc_file_mon.on_rtc_config = mon_rtc_config
 
     try:
         asyncio.create_task(server.run())
@@ -937,37 +938,34 @@ async def main():
         asyncio.create_task(webrtc_input.start_clipboard())
         asyncio.create_task(webrtc_input.start_cursor_monitor())
         asyncio.create_task(gpu_mon.start(gpu_id))
-        asyncio.create_task(hmac_turn_mon.start())
-        asyncio.create_task(turn_rest_mon.start())
-        asyncio.create_task(rtc_file_mon.start())
+        # asyncio.create_task(hmac_turn_mon.start())
+        # asyncio.create_task(turn_rest_mon.start())
+        # asyncio.create_task(rtc_file_mon.start())
         asyncio.create_task(system_mon.start())
         while True:
             if using_webrtc_csv:
                 metrics.initialize_webrtc_csv_file(args.webrtc_statistics_dir)
-            asyncio.create_task(app.handle_bus_calls())
-            asyncio.create_task(audio_app.handle_bus_calls())
+            asyncio.create_task(media.handle_bus_calls())
             await signalling.connect()
-            await audio_signalling.connect()
-            asyncio.create_task(audio_signalling.start())
             await signalling.start()
+            await media.stop_pipeline()
             await app.stop_pipeline()
-            await audio_app.stop_pipeline()
             await webrtc_input.stop_js_server()
     except Exception as e:
         logger.error("Caught exception: %s" % e)
         traceback.print_exc()
         sys.exit(1)
     finally:
+        await media.stop_pipeline()
         await app.stop_pipeline()
-        await audio_app.stop_pipeline()
         webrtc_input.stop_clipboard()
         webrtc_input.stop_cursor_monitor()
         await webrtc_input.stop_js_server()
         await webrtc_input.disconnect()
         gpu_mon.stop()
-        await hmac_turn_mon.stop()
-        await turn_rest_mon.stop()
-        await rtc_file_mon.stop()
+        # await hmac_turn_mon.stop()
+        # await turn_rest_mon.stop()
+        # await rtc_file_mon.stop()
         system_mon.stop()
         await server.stop()
         sys.exit(0)
