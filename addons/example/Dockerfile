@@ -4,10 +4,10 @@
 
 # Supported base images: Ubuntu 24.04, 22.04, 20.04
 ARG DISTRIB_IMAGE=ubuntu
-ARG DISTRIB_RELEASE=24.04
+ARG DISTRIB_RELEASE=22.04
 ARG GSTREAMER_BASE_IMAGE=ghcr.io/selkies-project/selkies-gstreamer/gstreamer
 ARG GSTREAMER_BASE_IMAGE_RELEASE=main
-ARG PY_BUILD_IMAGE=ghcr.io/selkies-project/selkies/py-build:main
+ARG PY_BUILD_IMAGE=py-build:latest
 ARG WEB_IMAGE=ghcr.io/selkies-project/selkies-gstreamer/gst-web:main
 ARG JS_BASE_IMAGE=ghcr.io/selkies-project/selkies-gstreamer/js-interposer
 ARG JS_BASE_IMAGE_RELEASE=main
@@ -253,18 +253,49 @@ COPY --chown=1000:1000 --from=selkies-js-interposer /opt/*.deb /opt/selkies-js-i
 RUN apt-get update && apt-get install --no-install-recommends -y /opt/selkies-js-interposer.deb && rm -f /opt/selkies-js-interposer.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
+# Dependencies for pipeflux
+RUN apt-get update && apt-get install -y \
+  cmake \
+  g++ \
+  gcc \
+  libjpeg-turbo8-dev \
+  libx11-dev \
+  libxext-dev \
+  libx264-dev \
+  make \
+  pkg-config \
+  stterm \
+  xclip \
+  gir1.2-gst-plugins-bad-1.0 \
+  libnginx-mod-http-fancyindex
+
 # Install Selkies Python application
 ARG PYPI_PACKAGE=selkies
 ARG PACKAGE_VERSION=0.0.0.dev0
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
+# Install pixelflux driver for websocket streaming mode
+RUN pip3 install pixelflux
 COPY --chown=1000:1000 --from=selkies-build /opt/pypi/dist/${PYPI_PACKAGE}-${PACKAGE_VERSION}-py3-none-any.whl .
 RUN pip3 install --no-cache-dir --force-reinstall --ignore-installed /opt/${PYPI_PACKAGE}-${PACKAGE_VERSION}-py3-none-any.whl
+RUN pip3 install aiohttp aiofiles
+
+# Install proot-apps
+RUN mkdir -pm 755 /tmp/proot-apps && PAPPS_RELEASE=$(curl -sX GET "https://api.github.com/repos/linuxserver/proot-apps/releases/latest" \
+    | awk '/tag_name/{print $4;exit}' FS='[""]') && \
+    curl -L https://github.com/linuxserver/proot-apps/releases/download/${PAPPS_RELEASE}/proot-apps-x86_64.tar.gz \
+    | tar -xzf - -C /tmp/proot-apps/ && \
+    echo "${PAPPS_RELEASE}" > /tmp/proot-apps/pversion
+
+# Temporary installation of Node.js for development purposes
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g nodemon
 
 # Copy scripts and configurations used to start the container
 COPY --chown=1000:1000 entrypoint.sh /etc/entrypoint.sh
 RUN chmod -f 755 /etc/entrypoint.sh
-COPY --chown=1000:1000 selkies-gstreamer-entrypoint.sh /etc/selkies-gstreamer-entrypoint.sh
-RUN chmod -f 755 /etc/selkies-gstreamer-entrypoint.sh
+COPY --chown=1000:1000 selkies-gstreamer-entrypoint.sh /etc/selkies-entrypoint.sh
+RUN chmod -f 755 /etc/selkies-entrypoint.sh
 COPY --chown=1000:1000 supervisord.conf /etc/supervisord.conf
 RUN chmod -f 755 /etc/supervisord.conf
 

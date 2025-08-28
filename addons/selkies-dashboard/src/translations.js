@@ -16,6 +16,7 @@ const en = {
     fullscreenTitle: "Enter Fullscreen",
     gamingModeTitle: "Gaming Mode",
     trackpadModeTitle: "Trackpad Mode",
+    streamingModeTitle: "Streaming Mode",
     buttons: {
         videoStreamEnableTitle: "Enable Video Stream",
         videoStreamDisableTitle: "Disable Video Stream",

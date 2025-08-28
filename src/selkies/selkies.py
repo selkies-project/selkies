@@ -61,7 +61,7 @@ from collections import OrderedDict, deque
 from datetime import datetime
 from shutil import which
 from signal import SIGINT, signal
-from .settings import settings, SETTING_DEFINITIONS
+from .settings import settings_ws as settings, FINAL_SETTING_DEFINITIONS_WEBSOCKETS as SETTING_DEFINITIONS
 
 try:
     from pcmflux import AudioCapture, AudioCaptureSettings, AudioChunkCallback
@@ -3262,7 +3262,7 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
     except Exception as e:
         logger_gst_app_resize.error(f"Error during resize handling for '{res_str}': {e}", exc_info=True)
 
-async def main():
+async def ws_entrypoint():
     is_secure_mode = bool(settings.master_token)
     if is_secure_mode:
         logger.info("Secure Mode ENABLED (SELKIES_MASTER_TOKEN is set).")
@@ -3525,9 +3525,9 @@ async def main():
             await data_server.stop()
         logger.info("Cleanup complete. Exiting.")
 
-def ws_entrypoint():
+if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(ws_entrypoint())
     except KeyboardInterrupt:
         logger.info("Application stopped by KeyboardInterrupt.")
     except SystemExit as e:

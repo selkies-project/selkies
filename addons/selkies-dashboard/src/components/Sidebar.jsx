@@ -52,7 +52,6 @@ const DEFAULT_SCALING_DPI = 96;
 const STATS_READ_INTERVAL_MS = 500;
 const MAX_AUDIO_BUFFER = 10;
 const DEFAULT_FRAMERATE = 60;
-const DEFAULT_VIDEO_BITRATE = 8000;
 const DEFAULT_JPEG_QUALITY = 60;
 const DEFAULT_PAINT_OVER_JPEG_QUALITY = 90;
 const DEFAULT_USE_CPU = false;
@@ -74,6 +73,14 @@ const NOTIFICATION_TIMEOUT_ERROR = 8000;
 const NOTIFICATION_FADE_DURATION = 500;
 
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
+
+const STREAM_MODE_WEBRTC = "webrtc";
+const STREAM_MODE_WEBSOCKETS = "websockets";
+const STREAMING_MODES= [STREAM_MODE_WEBRTC, STREAM_MODE_WEBSOCKETS]
+const DEFAULT_STREAM_MODE = STREAM_MODE_WEBSOCKETS;
+const DEFAULT_WEBRTC_ENCODER = "x264enc";
+const DEFAULT_AUDIO_BITRATE = 96000;  // in bps
+const DEFAULT_VIDEO_BITRATE = 8000;   // in kbps
 
 // --- Helper Functions ---
 function formatBytes(bytes, decimals = 2, rawDict) {
@@ -607,6 +614,8 @@ function Sidebar() {
     newRenderable.uiScaling = isRenderable('scaling_dpi');
     newRenderable.binaryClipboard = isRenderable('enable_binary_clipboard');
     newRenderable.use_browser_cursors = isRenderable('use_browser_cursors');
+    newRenderable.video_bitrate = isRenderable('video_bitrate');
+    newRenderable.audio_bitrate = isRenderable('audio_bitrate');
     
     const hypotheticalHidpi = s.hidpi_enabled || { value: true, locked: false };
     newRenderable.hidpi = hypotheticalHidpi.locked !== true;
@@ -788,6 +797,14 @@ function Sidebar() {
       setDynamicEncoderOptions(s_encoder.allowed);
       localStorage.setItem(getPrefixedKey("encoder"), final);
     }
+    const s_encoder_rtc = serverSettings.encoder_rtc;
+    if (s_encoder_rtc) {
+      const stored = localStorage.getItem(getPrefixedKey("encoder_rtc"));
+      const final = s_encoder_rtc.allowed.includes(stored) ? stored : s_encoder_rtc.value;
+      setEncoderRTC(final);
+      setDynamicEncoderOptions(s_encoder_rtc.allowed);
+      localStorage.setItem(getPrefixedKey("encoder_rtc"), final);
+    }
     const s_framerate = serverSettings.framerate;
     if (s_framerate) {
       const stored = getStoredInt("framerate");
@@ -796,6 +813,22 @@ function Sidebar() {
         : s_framerate.default;
       setFramerate(final);
       localStorage.setItem(getPrefixedKey("framerate"), final);
+    }
+    const s_video_bitrate = serverSettings.video_bitrate;
+    if (s_video_bitrate) {
+      const stored = getStoredInt("video_bitrate");
+      const final = !isNaN(stored)
+        ? Math.max(s_video_bitrate.min, Math.min(s_video_bitrate.max, stored))
+        : s_video_bitrate.default;
+      setVideoBitrate(final);
+      localStorage.setItem(getPrefixedKey("video_bitrate"), final);
+    }
+    const s_audio_bitrate = serverSettings.audio_bitrate;
+    if (s_audio_bitrate) {
+      const stored = getStoredInt("audio_bitrate");
+      const final = s_audio_bitrate.allowed.includes(stored) ? stored : s_audio_bitrate.value;
+      setAudioBitrate(final);
+      localStorage.setItem(getPrefixedKey("audio_bitrate"), final);
     }
     const s_h264_crf = serverSettings.h264_crf;
     if (s_h264_crf) {
@@ -937,12 +970,24 @@ function Sidebar() {
   const toggleKeyboardButtonVisibility = () => {
     setIsKeyboardButtonVisible(prev => !prev);
   };
+
+  const [streamMode, setStreamMode] = useState(
+    localStorage.getItem(getPrefixedKey("stream_mode")) || DEFAULT_STREAM_MODE
+  );
+  const [encoderRTC, setEncoderRTC] = useState(
+    localStorage.getItem(getPrefixedKey("encoder_rtc")) || DEFAULT_WEBRTC_ENCODER
+  );
+  const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState();
+  const [audioBitrate, setAudioBitrate] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("audio_bitrate")), 10) || DEFAULT_AUDIO_BITRATE
+  );
+  const [videoBitrate, setVideoBitrate] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10) || DEFAULT_VIDEO_BITRATE
+  );
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
   const [encoder, setEncoder] = useState(
     localStorage.getItem(getPrefixedKey("encoder")) || DEFAULT_ENCODER
   );
-  const [dynamicEncoderOptions, setDynamicEncoderOptions] =
-    useState(encoderOptions);
   const [framerate, setFramerate] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("framerate")), 10) ||
       DEFAULT_FRAMERATE
@@ -1316,7 +1361,11 @@ function Sidebar() {
   };
   const handleEncoderChange = (event) => {
     const selectedEncoder = event.target.value;
-    setEncoder(selectedEncoder);
+    if (streamMode === STREAM_MODE_WEBRTC) {
+      setEncoderRTC(selectedEncoder);
+    } else {
+      setEncoder(selectedEncoder);
+      }
     debouncedPostSetting({ encoder: selectedEncoder });
   };
   const handleFramerateChange = (event) => {
@@ -1324,6 +1373,16 @@ function Sidebar() {
     setFramerate(selectedFramerate);
     debouncedPostSetting({ framerate: selectedFramerate });
   };
+  const handleVideoBitrateChange = (event) => {
+    const selectedVideoBitrate = parseInt(event.target.value, 10);
+    setVideoBitrate(selectedVideoBitrate)
+    debouncedPostSetting({ video_bitrate: selectedVideoBitrate})
+  };
+  const handleAudioBitrateChange = (event) => {
+    const selectedAudioBitrate = parseInt(event.target.value, 10);
+    setAudioBitrate(selectedAudioBitrate)
+    debouncedPostSetting({ audio_bitrate: selectedAudioBitrate})
+  }
   const handleJpegQualityChange = (event) => {
     const selectedQuality = parseInt(event.target.value, 10);
     setJpegQuality(selectedQuality);
@@ -1545,6 +1604,31 @@ function Sidebar() {
     const newTheme = theme === "dark" ? "light" : "dark";
     setTheme(newTheme);
   };
+  const handleStreamModeChange = async (event) => {
+    const newMode = event.target.value;
+    console.log("Change of stream mode requested:", newMode);
+    try {
+      const response = await fetch("/switch", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ mode: newMode }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+      }
+      const data = await response.json();
+      setStreamMode(newMode);
+      window.postMessage(
+        { type: "mode", mode: newMode },
+        window.location.origin
+      );
+    } catch (error) {
+        console.error("Error switching stream mode:", error);
+    }
+  }
   const handleMouseEnter = (e, itemKey) => {
     setHoveredItem(itemKey);
     setTooltipPosition({ x: e.clientX + 10, y: e.clientY + 10 });
@@ -1682,9 +1766,6 @@ function Sidebar() {
     window.dispatchEvent(new CustomEvent("requestFileUpload"));
 
   useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
     const readStats = () => {
       const cs = window.system_stats,
         su = cs?.mem_used ?? null,
@@ -1785,8 +1866,8 @@ function Sidebar() {
           const id = fileName;
           setNotifications((prev) => {
             const exIdx = prev.findIndex((n) => n.id === id);
-            if (status === "start") {
-              if (prev.length < MAX_NOTIFICATIONS && exIdx === -1)
+            if (exIdx === -1) {
+              if (prev.length < MAX_NOTIFICATIONS && status === "start")
                 return [
                   ...prev,
                   {
@@ -1800,7 +1881,20 @@ function Sidebar() {
                     fadingOut: false,
                   },
                 ];
-              else return prev;
+              if (prev.length < MAX_NOTIFICATIONS && status === "warning") {
+                scheduleNotificationRemoval(id, NOTIFICATION_TIMEOUT_SUCCESS);
+                return [
+                  ...prev,
+                  {
+                    id,
+                    fileName: "Warning",
+                    status: "warn",
+                    message: errMsg,
+                    timestamp: Date.now(),
+                    fadingOut: false,
+                  }
+                ];
+              } else return prev;
             } else if (exIdx !== -1) {
               const un = [...prev],
                 cn = un[exIdx];
@@ -1840,6 +1934,16 @@ function Sidebar() {
                   fadingOut: false,
                 };
                 scheduleNotificationRemoval(id, NOTIFICATION_TIMEOUT_ERROR);
+              } else if (status === "warning") {
+                  un[exIdx] = {
+                    ...cn,
+                    fileName: "Warning",
+                    status: "warn",
+                    message: errMsg,
+                    timestamp: Date.now(),
+                    fadingOut: false,
+                  };
+                  scheduleNotificationRemoval(id, NOTIFICATION_TIMEOUT_ERROR);
               }
               return un;
             } else return prev;
@@ -1972,6 +2076,7 @@ function Sidebar() {
     if (link.id === 'player4') return renderableSettings.enablePlayer4 ?? true;
     return false;
   });
+  const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
 
   return (
     <>
@@ -2233,7 +2338,26 @@ function Sidebar() {
               </span>
             </div>
             {sectionsOpen.settings && (
-              <div className="sidebar-section-content" id="settings-content">
+                // TODO: Change of Stream mode is configurable from server side?
+                <div className="sidebar-section-content" id="settings-content">
+                  <div className="dev-setting-item">
+                  {" "}
+                  <label htmlFor="streamModeSelect">
+                    {t("streamingModeTitle", "Streaming Mode")}
+                  </label>{" "}
+                  <select 
+                    id="streamModeSelect"
+                    value={streamMode}
+                    onChange={handleStreamModeChange}
+                  >
+                    {" "}
+                    {STREAMING_MODES.map((mode) => (
+                      <option key={mode} value={mode}>
+                        {mode}
+                      </option>
+                    ))}{" "}
+                  </select>{" "}
+                </div>
                 {(renderableSettings.encoder ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="encoderSelect">
@@ -2241,11 +2365,11 @@ function Sidebar() {
                     </label>
                     <select
                       id="encoderSelect"
-                      value={encoder}
+                      value={isWebrtc? encoderRTC: encoder}
                       onChange={handleEncoderChange}
                       disabled={!serverSettings || serverSettings.encoder?.allowed?.length <= 1}
                     >
-                      {(serverSettings?.encoder?.allowed || encoderOptions).map((enc) => (
+                      {(serverSettings?.encoder?.allowed || dynamicEncoderOptions).map((enc) => (
                         <option key={enc} value={enc}>
                           {enc}
                         </option>
@@ -2272,7 +2396,26 @@ function Sidebar() {
                     />
                   </div>
                 )}
-                {showJpegOptions && (
+                {isWebrtc && (renderableSettings.video_bitrate ?? true) && (
+                  <div className="dev-setting-item">
+                    <label htmlFor="videoBitrateSlider">
+                      {t("sections.video.bitrateLabel", {
+                        bitrate: videoBitrate,
+                      })}
+                    </label>
+                    <input
+                      type="range"
+                      id="videoBitrateSlider"
+                      min={serverSettings?.video_bitrate?.min || 1}
+                      max={serverSettings?.video_bitrate?.max || 100}
+                      step="1"
+                      value={videoBitrate}
+                      onChange={handleVideoBitrateChange}
+                      disabled={!serverSettings || serverSettings.video_bitrate?.min === serverSettings.video_bitrate?.max}
+                    />
+                  </div>  
+                )}
+                {!isWebrtc && showJpegOptions && (
                   <>
                     {(renderableSettings.jpeg_quality ?? true) && (
                       <div className="dev-setting-item">
@@ -2314,7 +2457,7 @@ function Sidebar() {
                     )}
                   </>
                 )}
-                {showCRF && (renderableSettings.h264_crf ?? true) && (
+                {!isWebrtc && showCRF && (renderableSettings.h264_crf ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="videoCRFSlider">
                       {t("sections.video.crfLabel", { crf: h264_crf })}
@@ -2332,7 +2475,7 @@ function Sidebar() {
                     />
                   </div>
                 )}
-                {showCRF && (renderableSettings.h264PaintoverCRF ?? true) && (
+                {!isWebrtc && showCRF && (renderableSettings.h264PaintoverCRF ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="h264PaintoverCRFSlider">
                       {t("sections.video.paintoverCrfLabel", { crf: h264PaintoverCRF })}
@@ -2350,7 +2493,7 @@ function Sidebar() {
                     />
                   </div>
                 )}
-                {showPaintOverQualityToggle && (renderableSettings.usePaintOverQuality ?? true) && (
+                {!isWebrtc && showPaintOverQualityToggle && (renderableSettings.usePaintOverQuality ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="usePaintOverQualityToggle">
                       {t("sections.video.usePaintOverQualityLabel", "Use Paint-Over Quality")}
@@ -2367,7 +2510,7 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {showH264Options && (renderableSettings.h264StreamingMode ?? true) && (
+                {!isWebrtc && showH264Options && (renderableSettings.h264StreamingMode ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label 
                       htmlFor="h264StreamingModeToggle"
@@ -2387,7 +2530,7 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {showH264Options && (renderableSettings.h264FullColor ?? true) && (
+                {!isWebrtc && showH264Options && (renderableSettings.h264FullColor ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="h264FullColorToggle">
                       {t("sections.video.fullColorLabel")}
@@ -2404,7 +2547,7 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {showH264Options && (renderableSettings.use_cpu ?? true) && (
+                {!isWebrtc && showH264Options && (renderableSettings.use_cpu ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="useCpuToggle">
                       {t("sections.video.useCpuLabel", "CPU Encoding")}
@@ -2699,6 +2842,25 @@ function Sidebar() {
                             </option>
                           ))}
                         </select>
+                      </div>
+                    )}
+                    {isWebrtc && isOutputSelectionSupported && renderableSettings.audio_bitrate && (
+                      <div className="dev-setting-item">
+                        <label htmlFor="audioBitrateSlider">
+                          {t("sections.audio.bitrateLabel", {
+                            bitrate: audioBitrate/ 1000,
+                          })}
+                        </label>
+                        <input
+                          type="range"
+                          id="audioBitrateSlider"
+                          min={serverSettings?.audio_bitrate?.allowed?.[0] || 64000}
+                          max={serverSettings?.audio_bitrate?.allowed?.[serverSettings.audio_bitrate.allowed.length - 1] || 320000}
+                          step="64000"
+                          value={audioBitrate}
+                          onChange={handleAudioBitrateChange}
+                          disabled={!serverSettings || serverSettings.audio_bitrate?.allowed?.length <= 1}
+                        />
                       </div>
                     )}
                     {!isOutputSelectionSupported &&
@@ -3509,6 +3671,14 @@ function Sidebar() {
                   {n.message && (
                     <p className="notification-error-message">{n.message}</p>
                   )}
+                </>
+              )}
+              {n.status === "warn" && (
+                <>
+                  {" "}
+                  <span className="notification-status-text warn-text">
+                    {n.message ? n.message : t("notifications.warningPrefix")}
+                  </span>{" "}
                 </>
               )}
             </div>

@@ -38,6 +38,7 @@ from Xlib import X
 from Xlib import XK
 from Xlib.ext import xfixes, xtest
 import msgpack
+import distro
 
 logger_webrtc_input = logging.getLogger("webrtc_input")
 logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
@@ -775,6 +776,7 @@ class WebRTCInput:
         cursor_debug=False,
         max_cursor_size=32,
         data_server_instance=None,
+        upload_dir=None
     ):
         self.active_shortcut_modifiers = set()
         self.SHORTCUT_MODIFIER_XKEY_NAMES = {
@@ -819,6 +821,12 @@ class WebRTCInput:
         self.last_x = -1
         self.last_y = -1
         self.ping_start = None
+
+        self.upload_dir = upload_dir
+        self.upload_dir_path = None
+        self.active_uploads_by_path_conn = {}
+        self.active_upload_target_path_conn = None
+        
         self.on_video_encoder_bit_rate = lambda bitrate: logger_webrtc_input.warning("unhandled on_video_encoder_bit_rate")
         self.on_audio_encoder_bit_rate = lambda bitrate: logger_webrtc_input.warning("unhandled on_audio_encoder_bit_rate")
         self.on_mouse_pointer_visible = lambda visible: logger_webrtc_input.warning("unhandled on_mouse_pointer_visible")
@@ -838,6 +846,7 @@ class WebRTCInput:
         self.multipart_clipboard_total_size = 0
         self.multipart_clipboard_in_progress = False
         self.data_server_instance = data_server_instance
+        self.on_update_settings = lambda settings_json: logger_webrtc_input.warning("unhandled update_settings")
 
     async def _on_clipboard_read(self, data, mime_type="text/plain"):
         await self.send_clipboard_data(data, mime_type)
@@ -1548,8 +1557,8 @@ class WebRTCInput:
             try: await self.send_x11_mouse(x, y, button_mask, scroll_magnitude, relative, display_id=display_id)
             except Exception as e: logger_webrtc_input.warning(f"Failed to set mouse cursor: {e}")
         elif msg_type == "p": self.on_mouse_pointer_visible(bool(int(toks[1])))
-        elif msg_type == "vb": self.on_video_encoder_bit_rate(int(toks[1]))
-        elif msg_type == "ab": self.on_audio_encoder_bit_rate(int(toks[1]))
+        elif msg_type == "vb": await self.on_video_encoder_bit_rate(int(toks[1]))
+        elif msg_type == "ab": await self.on_audio_encoder_bit_rate(int(toks[1]))
         elif msg_type == "js": 
             cmd = toks[1]
             gamepad_idx = int(toks[2])
@@ -1659,11 +1668,40 @@ class WebRTCInput:
                 logger_webrtc_input.warning("Rejecting binary clipboard write: inbound binary clipboard disabled.")
         elif msg_type == "cw": 
             if self.enable_clipboard in ["true", "in"]:
-                try: data = base64.b64decode(toks[1]).decode("utf-8", 'ignore')
+                try: data = base64.b64decode(toks[1]).decode('utf-8', 'ignore')
                 except Exception as e: logger_webrtc_input.error(f"Clipboard decode error: {e}"); return
                 if await self.write_clipboard(data):
                     logger_webrtc_input.info(f"Set clipboard content, length: {len(data)}")
             else: logger_webrtc_input.warning("Rejecting clipboard write: inbound clipboard disabled.")
+        elif msg_type == "r": 
+            res = toks[1]
+            if re.fullmatch(r"^\d+x\d+$", res):
+                w, h = [int(i) + int(i)%2 for i in res.split("x")] 
+                await self.on_resize(f"{w}x{h}")
+            else: logger_webrtc_input.warning(f"Rejecting resolution change, invalid: {res}")
+        elif msg_type == "s": 
+            scale = toks[1]
+            if re.fullmatch(r"^\d+(\.\d+)?$", scale): await self.on_scaling_ratio(float(scale))
+            else: logger_webrtc_input.warning(f"Rejecting scaling change, invalid: {scale}")
+        elif msg_type == "cmd":
+            if len(toks) > 1:
+                command_to_run = ",".join(toks[1:])
+                logger_webrtc_input.info(f"Attempting to execute command: '{command_to_run}'")
+                home_directory = os.path.expanduser("~")
+                try:
+                    # Use asyncio subprocess for fire-and-forget execution
+                    # stdout and stderr are redirected to DEVNULL to ignore output.
+                    process = await subprocess.create_subprocess_shell(
+                        command_to_run,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        cwd=home_directory
+                    )
+                    logger_webrtc_input.info(f"Successfully launched command: '{command_to_run}'")
+                except Exception as e:
+                    logger_webrtc_input.error(f"Failed to launch command '{command_to_run}': {e}")
+            else:
+                logger_webrtc_input.warning("Received 'cmd' message without a command string.")
         elif msg_type == "_arg_fps": self.on_set_fps(int(toks[1]))
         elif msg_type == "_arg_resize":
             if len(toks) == 3:
@@ -1693,9 +1731,137 @@ class WebRTCInput:
                 )
                 await asyncio.wait_for(process.communicate(), timeout=0.5)
             except Exception as e: logger_webrtc_input.warning(f"Error with xdotool type: {e}")
+        elif toks[0].startswith("FILE_UPLOAD_START:"):
+            if self.upload_dir_path is None:
+                logger_webrtc_input.warning("Upload directory doesn't exits, skipping the file upload")
+                return
+            _, file, size = toks[0].split(":", 2)
+            # create dir/file instance to wirte data to
+            self.handle_upload_dir(file, size)
+
+        elif toks[0].startswith("FILE_UPLOAD_END:"):
+            toks = toks[0].split(":", 2)
+            logger_webrtc_input.info("Received FILE UPLOAD END: " + " ".join(toks[1:]))
+            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
+                self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
+                logger_webrtc_input.info(f"Upload finished: {self.active_upload_target_path_conn}")
+                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+                self.active_upload_target_path_conn = None
+
+        elif toks[0].startswith("FILE_UPLOAD_ERROR:"):
+            logger_webrtc_input.error(f"Client reported upload error: {toks[0]}")
+            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
+                self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
+                try:
+                    os.remove(self.active_upload_target_path_conn)
+                except OSError:
+                    pass
+                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+            self.active_upload_target_path_conn = None
+            logger_webrtc_input.info(f"Purged the file {toks[0].split(':', 2)[1]}")
+        elif toks[0].startswith("SETTINGS"):
+            settings_data = ','.join(toks[1:]) if len(toks) > 1 else ""
+            logger_webrtc_input.info(f"Received SETTINGS message: {settings_data}")
+            try:
+                settings_json = json.loads(settings_data)
+                self.on_update_settings(settings_json)
+            except Exception as e:
+                logger_webrtc_input.error(f"Failed to parse SETTINGS data: {e}")
         else:
             logger_webrtc_input.info(f"Unknown data channel message: {msg[:100]}") 
 
+    def initialize_upload_dir(self):
+        if self.upload_dir in ["/sys", "/proc", "/dev"]:
+            logger_webrtc_input.info("Can not initialize upload directory at /sys /proc /dev locations")
+            return
+        if not self.upload_dir:
+            logger_webrtc_input.info("Upload dir is empty")
+            return
+
+        if self.upload_dir == "~/Desktop":
+            # expand the user dir path
+            self.upload_dir_path = os.path.expanduser(self.upload_dir)
+        else:
+            self.upload_dir_path = self.upload_dir
+
+        try:
+            os.makedirs(self.upload_dir_path, exist_ok=True)
+            logger_webrtc_input.info(f"Upload directory ensured: {self.upload_dir_path}")
+        except OSError as e:
+            logger_webrtc_input.error(f"Could not create upload directory {self.upload_dir_path}: {e}")
+            self.upload_dir_path = None
+
+    def handle_upload_dir(self, filename, filesize):
+        try:
+            rel_path_from_client, size_str = filename, filesize
+            file_size = int(size_str)
+
+            sane_rel_path = rel_path_from_client.strip('/\\')
+            sane_rel_path = os.path.normpath(sane_rel_path)
+            path_components = [comp for comp in sane_rel_path.split(os.sep) if comp and comp != '.']
+
+            if not path_components or sane_rel_path.startswith(os.sep) or sane_rel_path.startswith('/') or \
+                sane_rel_path.startswith('\\') or ".." in path_components:
+                logger_webrtc_input.error(f"Invalid or malicious relative path from client: '{rel_path_from_client}'. Discarding.")
+
+            sane_rel_path = os.path.join(*path_components)
+            final_server_path = os.path.join(self.upload_dir_path, sane_rel_path)
+            real_upload_dir = os.path.realpath(self.upload_dir_path)
+            intended_parent_dir_abs = os.path.abspath(os.path.dirname(final_server_path))
+            real_upload_dir_abs = os.path.abspath(real_upload_dir)
+
+            if not intended_parent_dir_abs.startswith(real_upload_dir_abs):
+                logger_webrtc_input.error(f"Path escape attempt detected: '{final_server_path}' (from client: '{rel_path_from_client}') is outside of '{real_upload_dir_abs}'. Discarding.")
+                return
+
+            target_dir = os.path.dirname(final_server_path)
+
+            if target_dir and target_dir != real_upload_dir_abs and not os.path.exists(target_dir):
+                if not os.path.abspath(target_dir).startswith(real_upload_dir_abs):
+                    logger_webrtc_input.error(f"Directory creation escape attempt: '{target_dir}' is outside of '{real_upload_dir_abs}'. Discarding.")
+                    return
+                try:
+                    os.makedirs(target_dir, exist_ok=True)
+                    logger_webrtc_input.info(f"Created directory for upload: {target_dir}")
+                except OSError as e_mkdir:
+                    logger_webrtc_input.error(f"Could not create directory {target_dir} for upload: {e_mkdir}")
+                    return
+
+            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
+                try:
+                    self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
+                except Exception as e_close_old:
+                    logger_webrtc_input.warning(f"Error closing previous upload stream {self.active_upload_target_path_conn}: {e_close_old}")
+                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+
+            self.active_uploads_by_path_conn[final_server_path] = open(final_server_path, "wb")
+            self.active_upload_target_path_conn = final_server_path
+            logger_webrtc_input.info(f"Upload started: {final_server_path} (client rel_path: '{rel_path_from_client}', size: {file_size})")
+        except ValueError:
+            logger_webrtc_input.error(f"Invalid FILE_UPLOAD_START format: {filename}")
+        except Exception as e_fup_start:
+            logger_webrtc_input.error(f"FILE_UPLOAD_START processing error: {e_fup_start}", exc_info=True)
+
+    async def on_msg_data(self, data):
+        # Data being received on auxiliary channel would be of type Bytes
+        if len(data) <= 0:
+            return
+        data_type, payload = data[0], data[1:]
+        if data_type == 0x01:  # inidicates file data
+            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
+                try:
+                    self.active_uploads_by_path_conn[self.active_upload_target_path_conn].write(payload)
+                except Exception as e_write:
+                    logger_webrtc_input.error(f"File write error for {self.active_upload_target_path_conn}: {e_write}")
+                    try:
+                        self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
+                        os.remove(self.active_upload_target_path_conn)
+                    except Exception:
+                        pass
+                    del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+                    self.active_upload_target_path_conn = None
+            else:
+                logger_webrtc_input.warning("received file data after upload path is closed")
 
 # MOUSE_POSITION
 MOUSE_POSITION = 10

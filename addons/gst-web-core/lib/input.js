@@ -1642,6 +1642,7 @@ export class Input {
         const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
         var mtype = "m";
         let canvas = document.getElementById('videoCanvas');
+        let videoEle = document.getElementById("stream");
         if (event.type === 'mousedown' || event.type === 'mouseup' || event.type === 'pointerdown' || event.type === 'pointerup' || event.type === 'pointercancel') {
             if (event.button === 3) {
                 event.preventDefault();
@@ -1652,10 +1653,11 @@ export class Input {
         if (down && event.button === 0 && event.ctrlKey && event.shiftKey) {
             const targetElement = event.target.requestPointerLock ? event.target : this.element;
             targetElement.requestPointerLock().catch(err => console.error("Pointer lock failed:", err));
+            this.cursorDiv.style.visibility = 'hidden';
             event.preventDefault();
             return;
         }
-        if (document.pointerLockElement === this.element || document.pointerLockElement === canvas) {
+        if ((this.element != null && document.pointerLockElement === this.element) || (canvas !== null && document.pointerLockElement === canvas)) {
             mtype = "m2";
             let movementX_logical = event.movementX || 0;
             let movementY_logical = event.movementY || 0;
@@ -1676,6 +1678,21 @@ export class Input {
                     this.y = Math.max(0, Math.min(canvas.height, Math.round(coordY)));
                 } else {
                     this.x = 0; this.y = 0;
+                }
+            } else if (window.isManualResolutionMode && videoEle) {
+                // TODO: the below code is redundant, can be made genric to canvas and video element
+                const vidoeRect = videoEle.getBoundingClientRect();
+                if (vidoeRect.width > 0 && vidoeRect.height > 0 && videoEle.width > 0 && videoEle.height > 0) {
+                    const mouseX_on_video = event.clientX - vidoeRect.left;
+                    const mouseY_on_video = event.clientY - vidoeRect.top;
+                    const scaleX = videoEle.width / vidoeRect.width;
+                    const scaleY = videoEle.height / vidoeRect.height;
+                    let serverX = mouseX_on_video * scaleX;
+                    let serverY = mouseY_on_video * scaleY;
+                    this.x = Math.max(0, Math.min(videoEle.width, Math.round(serverX))); // Assign scaled absolute to this.x
+                    this.y = Math.max(0, Math.min(videoEle.height, Math.round(serverY))); // Assign scaled absolute to this.y
+                } else {
+                    this.x = 0; this.y = 0; // Fallback
                 }
             } else { // Auto resolution mode (non-manual)
                 if (!this.m) {
@@ -2312,6 +2329,7 @@ export class Input {
             this.send("p,0");
             this.send("SET_NATIVE_CURSOR_RENDERING,0");
             this.resetKeyboard();
+            this.cursorDiv.style.visibility = 'visible'
         }
     }
 
@@ -2395,7 +2413,7 @@ export class Input {
             this.requestKeyboardLock();
         } else {
             if (document.pointerLockElement === this.element) {
-                 document.exitPointerLock();
+                document.exitPointerLock();
             }
             this.send("kr");
             this.resetKeyboard();
@@ -2528,9 +2546,15 @@ export class Input {
         this._exitPointerLock();
     }
 
+    /**
+     * Sends WebRTC app command to hide the remote pointer when exiting pointer lock.
+     */
     _exitPointerLock() {
         if (document.pointerLockElement === this.element) {
             document.exitPointerLock();
+            // hide the pointer.
+            this.send("p,0");
+            console.log("remote pointer visibility to: False");
         }
     }
 
@@ -2544,7 +2568,7 @@ export class Input {
     }
 
     requestKeyboardLock() {
-        if (document.fullscreenElement && 'keyboard' in navigator && 'lock' in navigator.keyboard) {
+        if (document.fullscreenElement && 'keyboard' in navigator && (navigator.keyboard && 'lock' in navigator.keyboard)) {
             const keys = [ "AltLeft", "AltRight", "Tab", "Escape", "MetaLeft", "MetaRight", "ContextMenu" ];
             navigator.keyboard.lock(keys).then(() => {
                 // console.log('Keyboard lock active.');
