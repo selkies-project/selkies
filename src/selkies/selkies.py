@@ -3197,7 +3197,7 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
         if current_app_instance:
             current_app_instance.last_resize_success = False
 
-async def main():
+async def ws_entrypoint():
     if "DEV_MODE" in os.environ:
         try:
             dev_version_file = pathlib.Path(
@@ -3269,7 +3269,7 @@ async def main():
     )
     parser.add_argument(
         "--port",
-        default=os.environ.get("CUSTOM_WS_PORT", "8082"),
+        default=os.environ.get("CUSTOM_WS_PORT", "8081"),
         type=int,
         help="The port for the data websocket server. Overrides the CUSTOM_WS_PORT environment variable.",
     )
@@ -3430,9 +3430,9 @@ async def main():
         logger.info("Cleanup complete. Exiting.")
 
 
-def ws_entrypoint():
+if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(ws_entrypoint())
     except KeyboardInterrupt:
         logger.info("Application stopped by KeyboardInterrupt.")
     except SystemExit as e:

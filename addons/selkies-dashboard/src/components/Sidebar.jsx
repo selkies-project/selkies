@@ -11,6 +11,18 @@ const encoderOptions = [
   "jpeg",
 ];
 
+const encoderWebrtcOptions = [
+  "x264enc",
+  "nvh264enc",
+  "openh264enc",
+  "x265enc",
+  "vp8enc",
+  "vp9enc",
+  "svtav1enc",
+  "av1enc",
+  "rav1enc"
+];
+
 const framerateOptions = [
   8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144,
 ];
@@ -18,6 +30,10 @@ const framerateOptions = [
 const videoBitrateOptions = [
   1000, 2000, 4000, 8000, 10000, 12000, 14000, 16000, 18000, 20000, 25000,
   30000, 35000, 40000, 45000, 50000, 60000, 70000, 80000, 90000, 100000,
+];
+
+const audioBitrateOptions = [
+  24000, 32000, 48000, 64000, 96000, 128000, 192000, 256000, 320000, 510000,
 ];
 
 const videoBufferOptions = Array.from({ length: 16 }, (_, i) => i);
@@ -78,6 +94,13 @@ const NOTIFICATION_TIMEOUT_ERROR = 8000;
 const NOTIFICATION_FADE_DURATION = 500;
 
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
+
+const STREAM_MODE_WEBRTC = "webrtc";
+const STREAM_MODE_WEBSOCKETS = "websockets";
+const STREAMING_MODES= [STREAM_MODE_WEBRTC, STREAM_MODE_WEBSOCKETS]
+const DEFAULT_STREAM_MODE = STREAM_MODE_WEBSOCKETS;
+const DEFAULT_WEBRTC_ENCODER = encoderWebrtcOptions[0];
+const DEFAULT_AUDIO_BITRATE = audioBitrateOptions[3];
 
 // --- Helper Functions ---
 function formatBytes(bytes, decimals = 2, rawDict) {
@@ -661,12 +684,21 @@ function Sidebar({ isOpen }) {
   const toggleKeyboardButtonVisibility = () => {
     setIsKeyboardButtonVisible(prev => !prev);
   };
+
+  const [streamMode, setStreamMode] = useState(
+    localStorage.getItem(getPrefixedKey("streamMode")) || DEFAULT_STREAM_MODE
+  );
+  const [encoderRTC, setEncoderRTC] = useState(
+    localStorage.getItem(getPrefixedKey("encoderRTC")) || DEFAULT_WEBRTC_ENCODER
+  );
+  const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState();
+  const [audioBitRate, setAudioBitRate] = useState(
+    parseInt(localStorage.getItem("audioBitRate"), 10) || DEFAULT_AUDIO_BITRATE
+  );
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
   const [encoder, setEncoder] = useState(
     localStorage.getItem(getPrefixedKey("encoder")) || DEFAULT_ENCODER
   );
-  const [dynamicEncoderOptions, setDynamicEncoderOptions] =
-    useState(encoderOptions);
   const [framerate, setFramerate] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("videoFramerate")), 10) ||
       DEFAULT_FRAMERATE
@@ -806,6 +838,15 @@ function Sidebar({ isOpen }) {
     }, DEBOUNCE_DELAY),
     []
   );
+
+  const debouncedUpdateAudioBitrateSettings = useCallback(
+    debounce((newAudioBitrate) => {
+      window.postMessage(
+        { type: "settings", settings: { audioBitRate: newAudioBitrate} },
+      );
+    }, DEBOUNCE_DELAY),
+    []
+  )
 
   const debouncedUpdateVideoBufferSizeSettings = useCallback(
     debounce((newSize) => {
@@ -1160,7 +1201,12 @@ function Sidebar({ isOpen }) {
   };
   const handleEncoderChange = (event) => {
     const selectedEncoder = event.target.value;
-    setEncoder(selectedEncoder);
+
+    if (streamMode === STREAM_MODE_WEBRTC) {
+      setEncoderRTC(selectedEncoder);
+    } else {
+      setEncoder(selectedEncoder);
+      }
     window.postMessage(
       { type: "settings", settings: { encoder: selectedEncoder } },
       window.location.origin
@@ -1198,6 +1244,15 @@ function Sidebar({ isOpen }) {
       debouncedUpdateVideoBitrateSettings(selectedBitrate);
     }
   };
+  const handleAudioBitrateChange = (event) => {
+    console.log("audio bitrate trigger: ", event.target.value);
+    const index = parseInt(event.target.value, 10);
+    const selectedAudioBitrate = audioBitrateOptions[index];
+    if (selectedAudioBitrate !== undefined) {
+      setAudioBitRate(selectedAudioBitrate);
+      debouncedUpdateAudioBitrateSettings(selectedAudioBitrate);
+    }
+  }
   const handleVideoBufferSizeChange = (event) => {
     const index = parseInt(event.target.value, 10);
     const selectedSize = videoBufferOptions[index];
@@ -1410,6 +1465,31 @@ function Sidebar({ isOpen }) {
     const newTheme = theme === "dark" ? "light" : "dark";
     setTheme(newTheme);
   };
+  const handleStreamModeChange = async (event) => {
+    const newMode = event.target.value;
+    console.log("Change of stream mode requested:", newMode);
+    try {
+      const response = await fetch("/switch", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ mode: newMode }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+      }
+      const data = await response.json();
+      setStreamMode(newMode);
+      window.postMessage(
+        { type: "mode", mode: newMode },
+        window.location.origin
+      );
+      }  catch (error) {
+      console.error("Error switching stream mode:", error);
+    }
+  }
   const handleMouseEnter = (e, itemKey) => {
     setHoveredItem(itemKey);
     setTooltipPosition({ x: e.clientX + 10, y: e.clientY + 10 });
@@ -1547,9 +1627,11 @@ function Sidebar({ isOpen }) {
     window.dispatchEvent(new CustomEvent("requestFileUpload"));
 
   useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
+    (streamMode === STREAM_MODE_WEBRTC ? setDynamicEncoderOptions(encoderWebrtcOptions): 
+      setDynamicEncoderOptions(encoderOptions));
+  }, [streamMode]);
+
+  useEffect(() => {
     const readStats = () => {
       const cs = window.system_stats,
         su = cs?.mem_used ?? null,
@@ -1648,8 +1730,8 @@ function Sidebar({ isOpen }) {
           const id = fileName;
           setNotifications((prev) => {
             const exIdx = prev.findIndex((n) => n.id === id);
-            if (status === "start") {
-              if (prev.length < MAX_NOTIFICATIONS && exIdx === -1)
+            if (exIdx === -1) {
+              if (prev.length < MAX_NOTIFICATIONS && status === "start")
                 return [
                   ...prev,
                   {
@@ -1663,7 +1745,20 @@ function Sidebar({ isOpen }) {
                     fadingOut: false,
                   },
                 ];
-              else return prev;
+              if (prev.length < MAX_NOTIFICATIONS && status === "warning") {
+                scheduleNotificationRemoval(id, NOTIFICATION_TIMEOUT_SUCCESS);
+                return [
+                  ...prev,
+                  {
+                    id,
+                    fileName: "Warning",
+                    status: "warn",
+                    message: errMsg,
+                    timestamp: Date.now(),
+                    fadingOut: false,
+                  }
+                ];
+              } else return prev;
             } else if (exIdx !== -1) {
               const un = [...prev],
                 cn = un[exIdx];
@@ -1703,6 +1798,16 @@ function Sidebar({ isOpen }) {
                   fadingOut: false,
                 };
                 scheduleNotificationRemoval(id, NOTIFICATION_TIMEOUT_ERROR);
+              } else if (status === "warning") {
+                  un[exIdx] = {
+                    ...cn,
+                    fileName: "Warning",
+                    status: "warn",
+                    message: errMsg,
+                    timestamp: Date.now(),
+                    fadingOut: false,
+                  };
+                  scheduleNotificationRemoval(id, NOTIFICATION_TIMEOUT_ERROR);
               }
               return un;
             } else return prev;
@@ -1821,6 +1926,7 @@ function Sidebar({ isOpen }) {
   const showH264Options = ["x264enc-striped", "x264enc"].includes(encoder);
   const showJpegOptions = encoder === 'jpeg';
   const showPaintOverQualityToggle = showH264Options || showJpegOptions;
+  const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
 
   return (
     <>
@@ -2009,12 +2115,30 @@ function Sidebar({ isOpen }) {
             <div className="sidebar-section-content" id="settings-content">
               <div className="dev-setting-item">
                 {" "}
+                <label htmlFor="streamModeSelect">
+                  {t("streamingModeTitle", "Streaming Mode")}
+                </label>{" "}
+                <select 
+                  id="streamModeSelect"
+                  value={streamMode}
+                  onChange={handleStreamModeChange}
+                >
+                  {" "}
+                  {STREAMING_MODES.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {mode}
+                    </option>
+                  ))}{" "}
+                </select>{" "}
+              </div>
+              <div className="dev-setting-item">
+                {" "}
                 <label htmlFor="encoderSelect">
                   {t("sections.video.encoderLabel")}
                 </label>{" "}
                 <select
                   id="encoderSelect"
-                  value={encoder}
+                  value={isWebrtc? encoderRTC: encoder}
                   onChange={handleEncoderChange}
                 >
                   {" "}
@@ -2025,7 +2149,7 @@ function Sidebar({ isOpen }) {
                   ))}{" "}
                 </select>{" "}
               </div>
-              {showFPS && (
+              {(showFPS || isWebrtc) && (
                 <div className="dev-setting-item">
                   {" "}
                   <label htmlFor="framerateSlider">
@@ -2044,7 +2168,7 @@ function Sidebar({ isOpen }) {
                   />{" "}
                 </div>
               )}
-              {showJpegOptions && (
+              {(!isWebrtc && showJpegOptions) && (
                 <>
                   <div className="dev-setting-item">
                     <label htmlFor="jpegQualitySlider">
@@ -2080,7 +2204,7 @@ function Sidebar({ isOpen }) {
                   </div>
                 </>
               )}
-              {showBitrate && (
+              {(showBitrate || isWebrtc) && (
                 <div className="dev-setting-item">
                   {" "}
                   <label htmlFor="videoBitrateSlider">
@@ -2099,7 +2223,7 @@ function Sidebar({ isOpen }) {
                   />{" "}
                 </div>
               )}
-              {showBufferSize && (
+              {!isWebrtc && showBufferSize && (
                 <div className="dev-setting-item">
                   {" "}
                   <label htmlFor="videoBufferSizeSlider">
@@ -2120,7 +2244,7 @@ function Sidebar({ isOpen }) {
                   />{" "}
                 </div>
               )}
-              {showCRF && (
+              {(!isWebrtc && showCRF) && (
                 <div className="dev-setting-item">
                   {" "}
                   <label htmlFor="videoCRFSlider">
@@ -2137,7 +2261,7 @@ function Sidebar({ isOpen }) {
                   />{" "}
                 </div>
               )}
-              {showCRF && (
+              {(!isWebrtc && showCRF) && (
                 <div className="dev-setting-item">
                   {" "}
                   <label htmlFor="h264PaintoverCRFSlider">
@@ -2154,7 +2278,7 @@ function Sidebar({ isOpen }) {
                   />{" "}
                 </div>
               )}
-              {showPaintOverQualityToggle && (
+              {(!isWebrtc && showPaintOverQualityToggle) && (
                 <div className="dev-setting-item toggle-item">
                   <label htmlFor="usePaintOverQualityToggle">
                     {t("sections.video.usePaintOverQualityLabel", "Use Paint-Over Quality")}
@@ -2171,7 +2295,7 @@ function Sidebar({ isOpen }) {
                   </button>
                 </div>
               )}
-              {showH264Options && (
+              {!isWebrtc && showH264Options && (
                 <div className="dev-setting-item toggle-item">
                   <label 
                     htmlFor="h264StreamingModeToggle"
@@ -2191,7 +2315,7 @@ function Sidebar({ isOpen }) {
                   </button>
                 </div>
               )}
-              {showH264Options && (
+              {(!isWebrtc && showH264Options) && (
                 <div className="dev-setting-item toggle-item">
                   <label htmlFor="h264FullColorToggle">
                     {t("sections.video.fullColorLabel")}
@@ -2208,7 +2332,7 @@ function Sidebar({ isOpen }) {
                   </button>
                 </div>
               )}
-              {showH264Options && (
+              {(!isWebrtc && showH264Options) && (
                 <div className="dev-setting-item toggle-item">
                   <label htmlFor="useCpuToggle">
                     {t("sections.video.useCpuLabel", "CPU Encoding")}
@@ -2301,6 +2425,25 @@ function Sidebar({ isOpen }) {
                       </option>
                     ))}{" "}
                   </select>{" "}
+                </div>
+              )}
+              {isWebrtc && isOutputSelectionSupported && (
+                <div className="dev-setting-item">
+                  {" "}
+                  <label htmlFor="audioBitrateSlider">
+                    {t("sections.audio.bitrateLabel", {
+                      bitrate: audioBitRate / 1000,
+                    })}
+                  </label>{" "}
+                  <input
+                    type="range"
+                    id="audioBitrateSlider"
+                    min="0"
+                    max={audioBitrateOptions.length - 1}
+                    step="1"
+                    value={audioBitrateOptions.indexOf(audioBitRate)}
+                    onChange={handleAudioBitrateChange}
+                  />{" "}
                 </div>
               )}
               {!isOutputSelectionSupported &&
@@ -3280,6 +3423,14 @@ function Sidebar({ isOpen }) {
                   {n.message && (
                     <p className="notification-error-message">{n.message}</p>
                   )}{" "}
+                </>
+              )}
+              {n.status === "warn" && (
+                <>
+                  {" "}
+                  <span className="notification-status-text warn-text">
+                    {n.message ? n.message : t("notifications.warningPrefix")}
+                  </span>{" "}
                 </>
               )}
             </div>
