@@ -38,5 +38,20 @@ selkies-resize 1920x1080
 # Start Xfce4 Desktop session
 [ "${START_XFCE4:-true}" = "true" ] && rm -rf ~/.config/xfce4 && vglrun -d "${VGL_DISPLAY:-egl}" /usr/bin/dbus-launch --exit-with-session /usr/bin/xfce4-session &
 
+# Add proot-apps
+if [ ! -f "${HOME}/.local/bin/proot-apps" ]; then
+  mkdir -p ${HOME}/.local/bin/
+  cp /tmp/proot-apps/* ${HOME}/.local/bin/
+  echo 'export PATH="$HOME/.local/bin:$PATH"' >> $HOME/.bashrc
+  chown ${USER}:${USER} \
+    ${HOME}/.bashrc \
+    ${HOME}/.local/ \
+    ${HOME}/.local/bin \
+    ${HOME}/.local/bin/{ncat,proot-apps,proot,jq,pversion}
+elif ! diff -q /tmp/proot-apps/pversion ${HOME}/.local/bin/pversion > /dev/null; then
+  cp /tmp/proot-apps/* ${HOME}/.local/bin/
+  chown ${USER}:${USER} ${HOME}/.local/bin/{ncat,proot-apps,proot,jq,pversion}
+fi
+
 echo "Session Running. Press [Return] to exit."
 read

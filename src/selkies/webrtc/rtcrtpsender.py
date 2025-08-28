@@ -78,6 +78,7 @@ from .stats import (
     RTCStatsReport,
 )
 from .utils import random16, random32, uint16_add, uint32_add
+from pyee.asyncio import AsyncIOEventEmitter
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ class RTCEncodedFrame:
         self.audio_level = audio_level
 
 
-class RTCRtpSender:
+class RTCRtpSender(AsyncIOEventEmitter):
     """
     The :class:`RTCRtpSender` interface provides the ability to control and
     obtain details about how a particular :class:`MediaStreamTrack` is encoded
@@ -118,6 +119,7 @@ class RTCRtpSender:
     def __init__(
         self, trackOrKind: Union[MediaStreamTrack, str], transport: RTCDtlsTransport
     ) -> None:
+        super().__init__()
         if transport.state == "closed":
             raise InvalidStateError
 
@@ -308,6 +310,7 @@ class RTCRtpSender:
                 await self._retransmit(seq)
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_PLI:
             self._send_keyframe()
+            self._emit_pli_event()
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_APP:
             try:
                 bitrate, ssrcs = unpack_remb_fci(packet.fci)
@@ -319,6 +322,13 @@ class RTCRtpSender:
                         self.__encoder.target_bitrate = bitrate
             except ValueError:
                 pass
+
+    def _emit_pli_event(self):
+        """
+        Emit a "pli" event to notify the application layer, which is
+        responsible for instructing the encoder to generate that keyframe
+        """
+        self.emit("pli")
 
     async def _next_encoded_frame(
         self, codec: RTCRtpCodecParameters
