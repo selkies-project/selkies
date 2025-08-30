@@ -42,8 +42,10 @@ let preferredInputDeviceId = null;
 let preferredOutputDeviceId = null;
 let metricsIntervalId = null;
 let backpressureIntervalId = null;
+let heartbeatIntervalId = null;
 const METRICS_INTERVAL_MS = 500;
 const BACKPRESSURE_INTERVAL_MS = 50;
+const HEARTBEAT_INTERVAL_MS = 90000; // 90 seconds - less than Cloudflare's 100s timeout
 const UPLOAD_CHUNK_SIZE = (1024 * 1024) - 1;
 const FILE_UPLOAD_THROTTLE_MS = 200;
 let fileUploadProgressLastSent = {};
@@ -2567,6 +2569,17 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
     }
   };
 
+  const sendHeartbeat = () => {
+    if (websocket && websocket.readyState === WebSocket.OPEN) {
+      try {
+        websocket.send('PING');
+        console.log('[Heartbeat] Sent PING to keep WebSocket connection alive');
+      } catch (error) {
+        console.error('[Heartbeat] Error sending PING:', error);
+      }
+    }
+  };
+
   const sendClientMetrics = () => {
     if (isSharedMode) return; // Shared mode does not have client-side FPS display in this context
 
@@ -2752,6 +2765,11 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
           backpressureIntervalId = setInterval(sendBackpressureAck, BACKPRESSURE_INTERVAL_MS);
           console.log(`[websockets] Started sending backpressure ACKs every ${BACKPRESSURE_INTERVAL_MS}ms.`);
         }
+    }
+
+    if (heartbeatIntervalId === null) {
+      heartbeatIntervalId = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+      console.log(`[websockets] Started heartbeat every ${HEARTBEAT_INTERVAL_MS}ms to prevent connection timeouts.`);
     }
   };
 
@@ -3263,6 +3281,8 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
           console.log("Client: Received VIDEO_STOPPED. Updating isVideoPipelineActive=false. Expecting PIPELINE_RESETTING from server for full state reset.");
           isVideoPipelineActive = false;
           window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
+        } else if (event.data === 'PONG') {
+          console.log('[Heartbeat] Received PONG from server');
         }
         else if (event.data.startsWith('PIPELINE_RESETTING ')) {
           const parts = event.data.split(' ');
@@ -3312,6 +3332,10 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
       clearInterval(backpressureIntervalId);
       backpressureIntervalId = null;
     }
+    if (heartbeatIntervalId) {
+      clearInterval(heartbeatIntervalId);
+      heartbeatIntervalId = null;
+    }
     releaseWakeLock();
     if (isSharedMode) {
         console.error("Shared mode: WebSocket error. Resetting shared state to 'error'.");
@@ -3333,6 +3357,10 @@ function handleDecodedFrame(frame) { // frame.codedWidth/Height are physical pix
     if (backpressureIntervalId) {
       clearInterval(backpressureIntervalId);
       backpressureIntervalId = null;
+    }
+    if (heartbeatIntervalId) {
+      clearInterval(heartbeatIntervalId);
+      heartbeatIntervalId = null;
     }
     releaseWakeLock();
     cleanupVideoBuffer();
@@ -3667,6 +3695,10 @@ function cleanup() {
   if (backpressureIntervalId) {
     clearInterval(backpressureIntervalId);
     backpressureIntervalId = null;
+  }
+  if (heartbeatIntervalId) {
+    clearInterval(heartbeatIntervalId);
+    heartbeatIntervalId = null;
   }
   releaseWakeLock();
   if (window.isCleaningUp) return;

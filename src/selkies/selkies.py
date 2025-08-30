@@ -2345,6 +2345,13 @@ class DataStreamingServer:
                             ]
                         active_upload_target_path_conn = None
 
+                    elif message == "PING":
+                        try:
+                            await websocket.send("PONG")
+                            data_logger.debug(f"Responded to heartbeat PING from {raddr}")
+                        except Exception as e:
+                            data_logger.warning(f"Failed to send PONG response to {raddr}: {e}")
+
                     elif message == "START_VIDEO":
                         async with self._pipeline_lock:
                             current_encoder = getattr(self.app, "encoder", None)
