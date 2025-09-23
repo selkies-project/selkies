@@ -3515,7 +3515,7 @@ async def main():
         app=app,
         uinput_mouse_socket=UINPUT_MOUSE_SOCKET,
         js_socket_path=JS_SOCKET_PATH,
-        enable_clipboard=ENABLE_CLIPBOARD,
+        enable_clipboard=False,
         enable_cursors=ENABLE_CURSORS,
         cursor_size=CURSOR_SIZE,
         cursor_scale=1.0,
