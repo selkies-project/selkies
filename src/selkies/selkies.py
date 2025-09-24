@@ -3203,7 +3203,7 @@ async def _send_stats_periodically_ws(websocket, shared_data, interval_seconds=5
     except Exception as e:
         data_logger.error(f"Stats sender (WS) error: {e}", exc_info=True)
 
-async def on_resize_handler(res_str, current_app_instance, data_server_instance=None, display_id='primary'):
+async def on_resize_handler(res_str, current_app_instance, data_server_instance=None, display_id='primary', ro_data_server_instance=None):
     """
     Handles client resize request. Updates the state for a specific display and triggers a full reconfiguration.
     """
@@ -3314,6 +3314,12 @@ async def main():
         type=int,
         help="The port for the data websocket server. Overrides the CUSTOM_WS_PORT environment variable.",
     )
+    parser.add_argument(
+        "--view_only_port",
+        default=os.environ.get("CUSTOM_RO_WS_PORT", "8083"),
+        type=int,
+        help="The port for the view-only data websocket server. Overrides the CUSTOM_RO_WS_PORT environment variable.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args, unknown = parser.parse_known_args()
     global TARGET_FRAMERATE
@@ -3360,6 +3366,19 @@ async def main():
         audio_device_name=args.audio_device_name,
         cli_args=args,
     )
+    ro_data_server = DataStreamingServer(
+        port=args.view_only_port,
+        app=app,
+        uinput_mouse_socket=UINPUT_MOUSE_SOCKET,
+        js_socket_path=JS_SOCKET_PATH,
+        enable_clipboard=False,
+        enable_cursors=ENABLE_CURSORS,
+        cursor_size=CURSOR_SIZE,
+        cursor_scale=1.0,
+        cursor_debug=DEBUG_CURSORS,
+        audio_device_name=args.audio_device_name,
+        cli_args=args,
+    )
     app.data_streaming_server = data_server
 
     input_handler = InputHandler(
@@ -3394,7 +3413,9 @@ async def main():
 
     tasks_to_run = []
     data_server_task = asyncio.create_task(data_server.run_server(), name="DataServer")
+    ro_data_server_task = asyncio.create_task(ro_data_server.run_server(), name="RODataServer")
     tasks_to_run.append(data_server_task)
+    tasks_to_run.append(ro_data_server_task)
 
     if hasattr(input_handler, "connect"):  # This refers to the global input_handler
         tasks_to_run.append(
