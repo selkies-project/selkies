@@ -31,7 +31,10 @@ import {
   LayoutPanelLeft,
   Keyboard,
   Touchpad,
-  ScreenShare
+  ScreenShare,
+  ChevronLeft,
+  ChevronDown,
+  ChevronUp
 } from "lucide-react";
 
 import { Clipboard } from "@/components/dashboard/clipboard";
@@ -74,11 +77,17 @@ export function TopMenu({
   const [activePanel, setActivePanel] = React.useState<string | null>(null);
   const [showAppsModal, setShowAppsModal] = React.useState(false);
   const [showDropdown, setShowDropdown] = React.useState(false);
+  const [showSystemMonitoring, setShowSystemMonitoring] = React.useState(false);
   const [isDragging, setIsDragging] = React.useState(false);
+  const [isSystemMonitoringDragging, setIsSystemMonitoringDragging] = React.useState(false);
   const [position, setPosition] = React.useState(() => {
     // Start with a rough center estimate, will be adjusted after mount
     const x = window.innerWidth / 2 - 200; // Reduced from 300 to better estimate actual menu width
     return { x, y: 0 };
+  });
+  const [systemMonitoringPosition, setSystemMonitoringPosition] = React.useState(() => {
+    // Start with top-left position
+    return { x: 16, y: 64 }; // 16px from left, 64px from top (below menu bar)
   });
 
   // --- Server Settings & UI Customization ---
@@ -110,8 +119,10 @@ export function TopMenu({
   const ellipsisRef = React.useRef<HTMLDivElement>(null);
   const dropdownRef = React.useRef<HTMLDivElement>(null);
   const panelRef = React.useRef<HTMLDivElement>(null);
+  const systemMonitoringRef = React.useRef<HTMLDivElement>(null);
 
   const startPosRef = React.useRef({ x: 0, y: 0 });
+  const systemMonitoringStartPosRef = React.useRef({ x: 0, y: 0 });
 
   // --- Server Settings Message Listener ---
   React.useEffect(() => {
@@ -224,6 +235,51 @@ export function TopMenu({
     };
   }, [isDragging]);
 
+  // System monitoring dragging functionality
+  const handleSystemMonitoringMouseDown = (e: React.MouseEvent) => {
+    setIsSystemMonitoringDragging(true);
+    systemMonitoringStartPosRef.current = {
+      x: e.clientX - systemMonitoringPosition.x,
+      y: e.clientY - systemMonitoringPosition.y,
+    };
+  };
+
+  React.useEffect(() => {
+    const handleSystemMonitoringMouseMove = (e: MouseEvent) => {
+      if (!isSystemMonitoringDragging) return;
+
+      const newX = e.clientX - systemMonitoringStartPosRef.current.x;
+      const newY = e.clientY - systemMonitoringStartPosRef.current.y;
+
+      // Get the actual dimensions of the system monitoring element
+      const systemMonitoringElement = systemMonitoringRef.current;
+      const panelWidth = systemMonitoringElement ? systemMonitoringElement.offsetWidth : 300; // fallback to 300
+      const panelHeight = systemMonitoringElement ? systemMonitoringElement.offsetHeight : 200; // fallback to 200
+
+      const maxX = window.innerWidth - panelWidth;
+      const maxY = window.innerHeight - panelHeight;
+
+      setSystemMonitoringPosition({
+        x: Math.max(0, Math.min(newX, maxX)),
+        y: Math.max(0, Math.min(newY, maxY)),
+      });
+    };
+
+    const handleSystemMonitoringMouseUp = () => {
+      setIsSystemMonitoringDragging(false);
+    };
+
+    if (isSystemMonitoringDragging) {
+      document.addEventListener('mousemove', handleSystemMonitoringMouseMove);
+      document.addEventListener('mouseup', handleSystemMonitoringMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleSystemMonitoringMouseMove);
+      document.removeEventListener('mouseup', handleSystemMonitoringMouseUp);
+    };
+  }, [isSystemMonitoringDragging]);
+
   // Click outside to close panels and dropdown
   React.useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -239,7 +295,7 @@ export function TopMenu({
         }
       }
 
-      // Close panels if clicking outside panel and main menu
+      // Close panels if clicking outside panel and main menu (excluding system monitoring)
       if (activePanel) {
         const isOutsideMainMenu = dragRef.current && !dragRef.current.contains(target);
         const isOutsidePanel = panelRef.current && !panelRef.current.contains(target);
@@ -273,6 +329,11 @@ export function TopMenu({
 
     if (panelName === 'apps') {
       setShowAppsModal(true);
+      return;
+    }
+
+    if (panelName === 'monitoring') {
+      setShowSystemMonitoring(prev => !prev);
       return;
     }
 
@@ -711,7 +772,7 @@ export function TopMenu({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  variant={activePanel === 'monitoring' ? "default" : "secondary"}
+                  variant={showSystemMonitoring ? "default" : "secondary"}
                   size="icon"
                   className="h-6 w-6"
                   onClick={() => handlePanelToggle('monitoring')}
@@ -761,6 +822,28 @@ export function TopMenu({
 
 
 
+      {/* System Monitoring Panel - Draggable */}
+      <AnimatePresence>
+        {showSystemMonitoring && (
+          <motion.div
+            ref={systemMonitoringRef}
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            style={{
+              position: 'fixed',
+              left: systemMonitoringPosition.x,
+              top: systemMonitoringPosition.y,
+              zIndex: 30,
+              cursor: isSystemMonitoringDragging ? 'grabbing' : 'grab'
+            }}
+            onMouseDown={handleSystemMonitoringMouseDown}
+          >
+            <SystemMonitoring />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Active Panel */}
       <AnimatePresence>
         {activePanel && (
@@ -783,7 +866,7 @@ export function TopMenu({
       {/* Mobile Key Buttons */}
       {(isMobile || hasDetectedTouch) && (
         <motion.div
-          className="fixed bottom-4 left-4 z-40 flex flex-wrap gap-2 p-2 rounded-lg border bg-background/95 backdrop-blur-sm shadow-lg"
+          className="fixed bottom-4 left-4 z-40 flex flex-wrap gap-2 p-2 rounded-lg border bg-card/95 backdrop-blur-sm shadow-lg"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
         >
