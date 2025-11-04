@@ -92,6 +92,8 @@ SETTING_DEFINITIONS = [
 
     # Server Startup & Operational Settings
     {'name': 'port', 'type': 'int', 'default': 8082, 'env_var': 'CUSTOM_WS_PORT', 'help': 'Port for the data websocket server.'},
+    {'name': 'control_port', 'type': 'int', 'default': 8083, 'help': 'Port for the internal control plane API.'},
+    {'name': 'master_token', 'type': 'str', 'default': '', 'help': 'Master token to enable secure mode and protect the control plane API.'},
     {'name': 'dri_node', 'type': 'str', 'default': '', 'env_var': 'DRI_NODE', 'help': 'Path to the DRI render node for VA-API.'},
     {'name': 'audio_device_name', 'type': 'str', 'default': 'output.monitor', 'help': 'Audio device name for pcmflux capture.'},
     {'name': 'watermark_path', 'type': 'str', 'default': '', 'env_var': 'WATERMARK_PNG', 'help': 'Absolute path to the watermark PNG file.'},

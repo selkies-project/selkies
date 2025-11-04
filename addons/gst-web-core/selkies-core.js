@@ -18,6 +18,9 @@ let canvas = null;
 let canvasContext = null;
 let websocket;
 let clientMode = null;
+let clientRole = null;
+let clientSlot = null;
+let isTokenAuthMode = false;
 let audioContext;
 let audioWorkletNode;
 let audioWorkletProcessorPort;
@@ -101,26 +104,34 @@ const CLIPBOARD_CHUNK_SIZE = 750 * 1024;
 let detectedSharedModeType = null;
 let playerInputTargetIndex = 0; // Default for primary player
 
-const hash = window.location.hash;
-if (hash === '#shared') {
-    detectedSharedModeType = 'shared';
-    playerInputTargetIndex = undefined;
-} else if (hash === '#player2') {
-    detectedSharedModeType = 'player2';
-    playerInputTargetIndex = 1;
-} else if (hash === '#player3') {
-    detectedSharedModeType = 'player3';
-    playerInputTargetIndex = 2;
-} else if (hash === '#player4') {
-    detectedSharedModeType = 'player4';
-    playerInputTargetIndex = 3;
-} else if (hash.startsWith('#display2')) {
-    displayId = 'display2';
-    const parts = hash.split('-');
-    if (parts.length > 1) {
-        const position = parts[1];
-        if (['left', 'right', 'up', 'down'].includes(position)) {
-            displayPosition = position;
+const urlParams = new URLSearchParams(window.location.search);
+const authToken = urlParams.get('token');
+
+if (authToken) {
+    isTokenAuthMode = true;
+    console.log("Client is running in Token Authentication mode.");
+} else {
+    const hash = window.location.hash;
+    if (hash === '#shared') {
+        detectedSharedModeType = 'shared';
+        playerInputTargetIndex = undefined;
+    } else if (hash === '#player2') {
+        detectedSharedModeType = 'player2';
+        playerInputTargetIndex = 1;
+    } else if (hash === '#player3') {
+        detectedSharedModeType = 'player3';
+        playerInputTargetIndex = 2;
+    } else if (hash === '#player4') {
+        detectedSharedModeType = 'player4';
+        playerInputTargetIndex = 3;
+    } else if (hash.startsWith('#display2')) {
+        displayId = 'display2';
+        const parts = hash.split('-');
+        if (parts.length > 1) {
+            const position = parts[1];
+            if (['left', 'right', 'up', 'down'].includes(position)) {
+                displayPosition = position;
+            }
         }
     }
 }
@@ -130,7 +141,7 @@ const SHARED_PROBING_TIMEOUT_MS = 7000; // Timeout for waiting for the first vid
 let sharedProbingTimeoutId = null;
 let sharedProbingAttempts = 0;
 const MAX_SHARED_PROBING_ATTEMPTS = 3; // e.g., initial + 2 retries
-const isSharedMode = detectedSharedModeType !== null;
+let isSharedMode = detectedSharedModeType !== null;
 let sharedClientHasReceivedKeyframe = false;
 
 if (isSharedMode) {
@@ -1154,9 +1165,9 @@ const initializeInput = () => {
     console.log("Input already initialized. Skipping.");
     return;
   }
-  if (detectedSharedModeType === 'shared') {
+  if (clientRole === 'viewer' && clientSlot === null) {
     inputInitialized = true;
-    console.log("Generic #shared mode: Input system instance creation skipped.");
+    console.log("Role is 'viewer' with no slot. Input system will not be initialized.");
     return;
   }
   inputInitialized = true;
@@ -1220,6 +1231,10 @@ const initializeInput = () => {
   };
 
   inputInstance.attach();
+  if (clientRole === 'viewer' && clientSlot !== null) {
+      console.log(`Role is 'viewer' with slot ${clientSlot}. Detaching context to disable mouse/keyboard/touch.`);
+      inputInstance.detach_context();
+  }
   window.webrtcInput = inputInstance;
   applyEffectiveCursorSetting();
 
@@ -2543,7 +2558,12 @@ function handleDecodedFrame(frame) {
   }
 
   const ws_protocol = location.protocol === 'http:' ? 'ws://' : 'wss://';
-  const websocketEndpointURL = new URL(`${ws_protocol}${window.location.host}${pathname}websockets`);
+  let websocketEndpointURL = new URL(`${ws_protocol}${window.location.host}${pathname}`);
+  if (isTokenAuthMode) {
+      websocketEndpointURL.search = `?token=${authToken}`;
+  }
+  websocketEndpointURL.pathname += 'websockets';
+
   websocket = new WebSocket(websocketEndpointURL.href);
   websocket.binaryType = 'arraybuffer';
 
@@ -3039,34 +3059,62 @@ function handleDecodedFrame(frame) {
       if (event.data.startsWith('KILL ')) {
         const reason = event.data.substring(5);
         console.error(`Received KILL message from server: ${reason}`);
-        if (reconnectIntervalId) {
-            clearInterval(reconnectIntervalId);
-            reconnectIntervalId = null;
-        }
-        if (metricsIntervalId) {
-            clearInterval(metricsIntervalId);
-            metricsIntervalId = null;
-        }
-        if (backpressureIntervalId) {
-            clearInterval(backpressureIntervalId);
-            backpressureIntervalId = null;
-        }
+        if (reconnectIntervalId) clearInterval(reconnectIntervalId);
         if (websocket) {
-            websocket.onclose = () => {
-                console.log("Connection closed by server kill command. Reconnection disabled.");
-            };
+            websocket.onclose = () => {};
             websocket.close();
         }
         if (statusDisplayElement) {
             statusDisplayElement.textContent = `Connection Terminated: ${reason}`;
             statusDisplayElement.classList.remove('hidden');
-            statusDisplayElement.style.backgroundColor = 'rgba(200, 0, 0, 0.8)';
-            statusDisplayElement.style.color = 'white';
-        }
-        if (playButtonElement) {
-            playButtonElement.classList.add('hidden');
         }
         return;
+      }
+      if (event.data.startsWith('AUTH_SUCCESS,')) {
+        const payloadStr = event.data.substring(13);
+        const permissions = JSON.parse(payloadStr);
+        clientRole = permissions.role;
+        clientSlot = permissions.slot;
+        console.log(`Authentication successful. Received Role: ${clientRole}, Slot: ${clientSlot}`);
+
+        if (clientRole === 'viewer') {
+            console.log("Token-based client is a 'viewer'. Applying shared mode compatibility settings.");
+            isSharedMode = true;
+            detectedSharedModeType = 'shared';
+            if (clientSlot !== null && clientSlot > 0) {
+                playerInputTargetIndex = clientSlot - 1;
+            } else {
+                playerInputTargetIndex = undefined;
+            }
+            if (!manual_width || manual_width <= 0 || !manual_height || manual_height <= 0) {
+                manual_width = 1280; manual_height = 720;
+            }
+            applyManualCanvasStyle(manual_width, manual_height, true);
+            window.addEventListener('resize', () => {
+                if (isSharedMode && manual_width && manual_height && manual_width > 0 && manual_height > 0) {
+                    applyManualCanvasStyle(manual_width, manual_height, true);
+                }
+            });
+            updateUIForSharedMode();
+
+            if (initializationComplete) {
+                console.log("Post-init sync: Forcing shared mode state because 'MODE websockets' was handled before auth.");
+                sharedClientState = 'awaiting_identification';
+                sharedProbingAttempts = 0;
+                identifiedEncoderModeForShared = null;
+
+                if (websocket && websocket.readyState === WebSocket.OPEN) {
+                     websocket.send('STOP_VIDEO');
+                     setTimeout(() => {
+                        if (websocket && websocket.readyState === WebSocket.OPEN) {
+                            websocket.send('START_VIDEO');
+                            console.log("Shared mode: Sent START_VIDEO after initial STOP_VIDEO.");
+                        }
+                    }, 250);
+                }
+                startSharedModeProbingTimeout();
+            }
+        }
       }
       if (event.data === 'MODE websockets') {
         clientMode = 'websockets';
@@ -3074,6 +3122,20 @@ function handleDecodedFrame(frame) {
         status = 'initializing';
         loadingText = 'Initializing WebSocket mode...';
         updateStatusDisplay();
+
+        if (!isTokenAuthMode) {
+            const hash = window.location.hash;
+            if (hash === '#shared') {
+                clientRole = 'viewer'; clientSlot = null;
+            } else if (hash.startsWith('#player')) {
+                clientRole = 'viewer'; clientSlot = parseInt(hash.substring(7), 10) || null;
+            } else {
+                clientRole = 'controller'; clientSlot = null;
+            }
+            console.log(`Legacy mode detected. Role from hash: ${clientRole}, Slot: ${clientSlot}`);
+            initializeInput();
+        }
+
 
         if (decoder && decoder.state !== "closed") {
             try { decoder.close(); } catch(e){}
@@ -3086,6 +3148,9 @@ function handleDecodedFrame(frame) {
 
         if (!isSharedMode) {
             stopMicrophoneCapture();
+            if (!isTokenAuthMode) {
+                initializeInput();
+            }
             if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'x264enc' && currentEncoderMode !== 'x264enc-striped') {
               initializeDecoder();
             }
@@ -3095,7 +3160,9 @@ function handleDecodedFrame(frame) {
           initializeDecoderAudio();
         });
 
-        initializeInput();
+        if (isTokenAuthMode) {
+            initializeInput();
+        }
 
         if (window.webrtcInput && typeof window.webrtcInput.setTrackpadMode === 'function') {
           window.webrtcInput.setTrackpadMode(trackpadMode);
@@ -3225,42 +3292,42 @@ function handleDecodedFrame(frame) {
            if (isSharedMode) {
              const dpr_for_conversion = useCssScaling ? 1 : (window.devicePixelRatio || 1);
              if (sharedClientState === 'error' || sharedClientState === 'idle') {
-                 console.log(`Shared mode: Received stream_resolution while in state '${sharedClientState}'. Ignoring.`);
+               console.log(`Shared mode: Received stream_resolution while in state '${sharedClientState}'. Ignoring.`);
              } else {
-                 const physicalNewWidth = parseInt(obj.width, 10);
-                 const physicalNewHeight = parseInt(obj.height, 10);
+               const physicalNewWidth = parseInt(obj.width, 10);
+               const physicalNewHeight = parseInt(obj.height, 10);
 
-                 if (physicalNewWidth > 0 && physicalNewHeight > 0) {
-                     const evenPhysicalNewWidth = roundDownToEven(physicalNewWidth);
-                     const evenPhysicalNewHeight = roundDownToEven(physicalNewHeight);
+               if (physicalNewWidth > 0 && physicalNewHeight > 0) {
+                 const evenPhysicalNewWidth = roundDownToEven(physicalNewWidth);
+                 const evenPhysicalNewHeight = roundDownToEven(physicalNewHeight);
 
-                     const logicalNewWidth = evenPhysicalNewWidth / dpr_for_conversion;
-                     const logicalNewHeight = evenPhysicalNewHeight / dpr_for_conversion;
-                     let dimensionsChanged = (manual_width !== logicalNewWidth || manual_height !== logicalNewHeight);
+                 const logicalNewWidth = evenPhysicalNewWidth / dpr_for_conversion;
+                 const logicalNewHeight = evenPhysicalNewHeight / dpr_for_conversion;
+                 let dimensionsChanged = (manual_width !== logicalNewWidth || manual_height !== logicalNewHeight);
 
-                     if (dimensionsChanged) {
-                         console.log(`Shared mode: Received new stream resolution ${logicalNewWidth.toFixed(2)}x${logicalNewHeight.toFixed(2)} (logical).`);
-                         manual_width = logicalNewWidth;
-                         manual_height = logicalNewHeight;
-                         applyManualCanvasStyle(manual_width, manual_height, true);
-                     }
-                     
-                     if (sharedClientState === 'ready' && dimensionsChanged && identifiedEncoderModeForShared === 'h264_full_frame') {
-                         console.log(`Shared mode: Triggering main decoder re-init for new resolution.`);
-                         triggerInitializeDecoder();
-                     } else if (sharedClientState === 'ready' && dimensionsChanged) {
-                         console.log(`Shared mode: Clearing canvas due to resolution change.`);
-                         if (canvasContext && canvas.width > 0 && canvas.height > 0) {
-                             canvasContext.setTransform(1, 0, 0, 1, 0, 0);
-                             canvasContext.clearRect(0, 0, canvas.width, canvas.height);
-                         }
-                     }
-                 } else {
-                     console.warn(`Shared mode: Received invalid stream_resolution dimensions: ${obj.width}x${obj.height}`);
+                 if (dimensionsChanged) {
+                   console.log(`Shared mode: Received new stream resolution ${logicalNewWidth.toFixed(2)}x${logicalNewHeight.toFixed(2)} (logical).`);
+                   manual_width = logicalNewWidth;
+                   manual_height = logicalNewHeight;
+                   applyManualCanvasStyle(manual_width, manual_height, true);
                  }
+
+                 if (sharedClientState === 'ready' && dimensionsChanged && identifiedEncoderModeForShared === 'h264_full_frame') {
+                   console.log(`Shared mode: Triggering main decoder re-init for new resolution.`);
+                   triggerInitializeDecoder();
+                 } else if (sharedClientState === 'ready' && dimensionsChanged) {
+                   console.log(`Shared mode: Clearing canvas due to resolution change.`);
+                   if (canvasContext && canvas.width > 0 && canvas.height > 0) {
+                     canvasContext.setTransform(1, 0, 0, 1, 0, 0);
+                     canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+                   }
+                 }
+               } else {
+                 console.warn(`Shared mode: Received invalid stream_resolution dimensions: ${obj.width}x${obj.height}`);
+               }
              }
            }
-          } else {
+         } else {
             console.warn(`Unexpected JSON message type:`, obj.type, obj);
           }
         } else if (event.data.startsWith('cursor,')) {
@@ -3473,6 +3540,16 @@ function handleDecodedFrame(frame) {
 
   websocket.onclose = (event) => {
     console.log('[websockets] Connection closed', event);
+    if (event.code === 4001) {
+        console.error("Server rejected connection: Invalid token. Disabling reconnect.");
+        if (reconnectIntervalId) clearInterval(reconnectIntervalId);
+        reconnectIntervalId = null;
+        loadingText = 'Connection Failed: Invalid Token';
+        updateStatusDisplay();
+        return;
+    } else if (event.code === 4002) {
+        console.log("Server closed connection due to permission change. Reconnecting...");
+    }
     status = 'disconnected';
     loadingText = 'WebSocket disconnected. Attempting to reconnect...';
     updateStatusDisplay();
@@ -3512,15 +3589,17 @@ function handleDecodedFrame(frame) {
         sharedProbingAttempts = 0;
         identifiedEncoderModeForShared = null;
     }
-  };
-
-  reconnectIntervalId = setInterval(() => {
-    if (clientMode === 'websockets' && websocket && websocket.readyState === WebSocket.OPEN) {
-    } else if (reconnectIntervalId !== null) {
-      console.log("WebSocket not open or not in WebSocket mode, reloading page to reconnect.");
-      location.reload();
+    if (!reconnectIntervalId) {
+      reconnectIntervalId = setInterval(() => {
+        if (websocket && (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING)) {
+          // Pass
+        } else {
+          console.log("WebSocket disconnected, reloading page to reconnect.");
+          location.reload();
+        }
+      }, 5000);
     }
-  }, 3000);
+  };
 });
 
 function cleanupVideoBuffer() {

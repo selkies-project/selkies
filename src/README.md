@@ -52,6 +52,49 @@ This server provides the backend infrastructure for establishing and managing in
         *   GPU performance (if applicable).
         *   WebRTC and streaming connection statistics.
 
+9.  **Token-Based Authentication & Authorization:**
+    *   Features an optional secure mode, enabled by setting a `master_token`.
+    *   When enabled, it exposes a control plane API on a separate port (`control_port`) to manage temporary user access tokens.
+    *   Clients must connect with a valid token (`?token=...`) to establish a WebSocket connection.
+    *   Assigns roles (e.g., `controller`, `viewer`) and properties (e.g., gamepad `slot`) to clients based on their token.
+    *   Enforces permissions on the server-side, restricting actions that viewers can perform.
+    *   Automatically disconnects clients if their token is revoked or their permissions change.
+
+### Control Plane API for Token Management
+
+When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server runs a control plane API on the `control_port` (default: 8083). This API is used to dynamically set and update the access tokens that clients can use to connect.
+
+**Endpoint:** `POST /tokens`
+
+**Authentication:** The request must include an `Authorization` header with the master token: `Authorization: Bearer <your-master-token>`
+
+**Request Body:** A JSON object where each key is a unique access token string you create, and the value is a permissions object defining that token's capabilities.
+
+**Permissions Object Fields:**
+*   `"role"`: (String, required) Can be one of the following:
+    *   `"controller"`: Full access. Can send keyboard, mouse, and all other input events.
+    *   `"viewer"`: Restricted access. Primarily for viewing the stream. Can be granted specific input rights via the `slot` property.
+*   `"slot"`: (Integer or `null`, required) Assigns an input slot, primarily for gamepads.
+    *   `null`: No specific input slot. A viewer with a `null` slot has no input capabilities.
+    *   `1`: Grants the `viewer` control over the **Player 1** gamepad *only*.
+    *   `2`: Grants the `viewer` control over the **Player 2** gamepad *only*.
+    *   `3`: Grants the `viewer` control over the **Player 3** gamepad *only*.
+    *   `4`: Grants the `viewer` control over the **Player 4** gamepad *only*.
+
+**Behavior:** When a valid request is received, the server replaces its entire set of active tokens with the new set provided in the payload. It then runs a reconciliation process: any connected client whose token is now invalid or has changed permissions will be disconnected.
+
+**Example `curl` Command:**
+```bash
+curl -X POST http://localhost:8083/tokens \
+-H "Authorization: Bearer my-secret-master-token" \
+-H "Content-Type: application/json" \
+-d '{
+  "user-token-1": {"role": "controller", "slot": null},
+  "user-token-2": {"role": "viewer", "slot": 1},
+  "user-token-3": {"role": "viewer", "slot": null}
+}'
+```
+
 ## Technical Foundation
 
 *   **Primary Language/Runtime:** Python, leveraging `asyncio` for efficient asynchronous operations and I/O handling.
@@ -175,6 +218,8 @@ The table below lists all available server settings.
 | `SELKIES_USE_BROWSER_CURSORS` | `--use-browser-cursors` | `False` | Use browser CSS cursors instead of rendering to canvas. |
 | `SELKIES_USE_CSS_SCALING` | `--use-css-scaling` | `False` | HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched. |
 | `SELKIES_PORT` (or `CUSTOM_WS_PORT`) | `--port` | `8082` | Port for the data websocket server. |
+| `SELKIES_CONTROL_PORT` | `--control-port` | `8083` | Port for the internal control plane API, used for managing access tokens when in secure mode. |
+| `SELKIES_MASTER_TOKEN` | `--master-token` | `''` | Master token to enable secure mode. If set, clients must authenticate using tokens provided via the control plane API. |
 | `SELKIES_DRI_NODE` (or `DRI_NODE`) | `--dri-node` | `''` | Path to the DRI render node for VA-API. |
 | `SELKIES_AUDIO_DEVICE_NAME` | `--audio-device-name` | `'output.monitor'` | Audio device name for pcmflux capture. |
 | `SELKIES_WATERMARK_PATH` (or `WATERMARK_PNG`) | `--watermark-path` | `''` | Absolute path to the watermark PNG file. |

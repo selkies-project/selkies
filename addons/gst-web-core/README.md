@@ -2,6 +2,22 @@
 
 This document outlines the API for an external dashboard to interact with the client-side Selkies Core application. Interaction primarily occurs via the standard `window.postMessage` mechanism and by observing specific global variables for statistics.
 
+
+## Connection & Authentication Modes
+
+Before interacting with the client via `postMessage`, it must first connect to the server. The client supports two primary modes for establishing its role and permissions, determined by the URL used to access the page.
+
+### 1. Token Authentication Mode
+
+This is the primary mode when connecting to a server running in its secure configuration. The client's role and capabilities are determined by a temporary token provided as a URL query parameter.
+
+*   **URL Format:** `https://<server>/?token=<ACCESS_TOKEN>`
+*   **Behavior:** The token is sent to the server during the WebSocket handshake. If valid, the server responds with the client's assigned role (e.g., `controller`, `viewer`) and properties (e.g., a gamepad `slot`). This mode takes precedence over the legacy hash mode.
+
+### 2. Legacy Hash Mode
+*   **URL Format:** `https://<server>/#<mode>` (e.g., `/#shared`, `/#player2`)
+*   **Behavior:** This mode is used only if no `?token=` parameter is present in the URL. The fragment (`#...`) determines the client's role. This is intended for simpler, unsecured deployments.
+
 ## 1. Window Messaging API (Dashboard -> Client)
 
 The client listens for messages sent via `window.postMessage`. To ensure security, the client **only accepts messages from the same origin** (`event.origin === window.location.origin`).

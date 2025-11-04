@@ -51,10 +51,12 @@ import pathlib
 import re
 import struct
 from asyncio import subprocess
+import urllib.parse
 import sys
 import time
 import websockets
 import websockets.asyncio.server as ws_async
+from aiohttp import web
 from collections import OrderedDict, deque
 from datetime import datetime
 from shutil import which
@@ -105,6 +107,9 @@ except OSError as e:
     logger.error(f"Could not create upload directory {upload_dir_path}: {e}")
     upload_dir_path = None
 
+config_gate = asyncio.Event()
+user_tokens = {}
+client_permissions = {}
 
 class SelkiesAppError(Exception):
     pass
@@ -816,6 +821,7 @@ class DataStreamingServer:
         cursor_debug,
         audio_device_name,
         cli_args,
+        is_secure_mode,
     ):
         self.port = port
         self.mode = "websockets"
@@ -827,6 +833,7 @@ class DataStreamingServer:
         self.clients = set()
         self.app = app
         self.cli_args = cli_args
+        self.is_secure_mode = is_secure_mode
         self.RECONNECT_DEBOUNCE_MS = 500
         self.MAX_RECENT_CLIENTS = 1000
         self.last_connection_times = OrderedDict()
@@ -895,6 +902,7 @@ class DataStreamingServer:
         self._bytes_sent_in_interval = 0
         self._last_bandwidth_calc_time = time.monotonic()
         # Frame-based backpressure settings
+        self.last_start_video_request_times = {}
         self.allowed_desync_ms = BACKPRESSURE_ALLOWED_DESYNC_MS
         self.latency_threshold_for_adjustment_ms = BACKPRESSURE_LATENCY_THRESHOLD_MS
         self.backpressure_check_interval_s = BACKPRESSURE_CHECK_INTERVAL_S
@@ -1309,8 +1317,13 @@ class DataStreamingServer:
         return parsed
 
     async def _apply_client_settings(
-        self, websocket_obj, settings: dict, is_initial_settings: bool
+        self, websocket_obj, settings: dict, is_initial_settings: bool, client_role: str = "controller"
     ):
+
+        if client_role == "viewer":
+            data_logger.info(f"Ignoring SETTINGS payload from viewer {websocket_obj.remote_address}.")
+            return
+
         display_id = settings.get("displayId", "primary")
         if display_id not in self.display_clients:
             data_logger.error(f"Cannot apply settings for unknown display_id '{display_id}'")
@@ -1475,6 +1488,48 @@ class DataStreamingServer:
             self.client_settings_received.set()
 
     async def ws_handler(self, websocket):
+        if self.is_secure_mode:
+            await config_gate.wait()
+
+            query_params = urllib.parse.parse_qs(urllib.parse.urlparse(websocket.request.path).query)
+            token = query_params.get('token', [None])[0]
+
+            if not token or token not in user_tokens:
+                data_logger.warning(f"Rejecting connection from {websocket.remote_address}: Missing or invalid token.")
+                await websocket.close(code=4001, reason="Invalid authentication token")
+                return
+
+            permissions = user_tokens[token]
+            client_permissions[websocket] = {
+                "token": token,
+                "role": permissions.get("role"),
+                "slot": permissions.get("slot"),
+            }
+            data_logger.info(f"Client {websocket.remote_address} authenticated with token. Role: {permissions.get('role')}, Slot: {permissions.get('slot')}")
+            auth_success_payload = json.dumps({
+                "role": permissions.get("role"),
+                "slot": permissions.get("slot"),
+            })
+            await websocket.send(f"AUTH_SUCCESS,{auth_success_payload}")
+        else:
+            path_hash = urllib.parse.urlparse(websocket.request.path).fragment
+            role = "controller"
+            slot = None
+            if path_hash == "shared":
+                role = "viewer"
+            elif path_hash == "collab":
+                role = "controller"
+            elif path_hash.startswith("player"):
+                try:
+                    slot_num = int(path_hash[6:])
+                    if 2 <= slot_num <= 4:
+                        role = "viewer"
+                        slot = slot_num
+                except (ValueError, IndexError):
+                    pass
+            client_permissions[websocket] = {"token": None, "role": role, "slot": slot}
+            data_logger.info(f"Legacy client {websocket.remote_address} connected. Role: {role}, Slot: {slot}")
+
         global TARGET_FRAMERATE
         current_time = time.monotonic()
         ip_address, _ = websocket.remote_address
@@ -1840,6 +1895,32 @@ class DataStreamingServer:
                             audio_buffer.clear()
 
                 elif isinstance(message, str):
+                    perms = client_permissions.get(websocket)
+                    if perms and perms.get("role") == "viewer":
+                        allowed_viewer_prefixes = [
+                            "SETTINGS,",
+                            "START_VIDEO",
+                            "js,"
+                        ]
+                        if not any(message.startswith(prefix) for prefix in allowed_viewer_prefixes):
+                            data_logger.warning(f"DENIED unauthorized message from viewer {websocket.remote_address}: {message[:100]}...")
+                            continue
+
+                    if message.startswith("SETTINGS,"):
+                        client_perms = client_permissions.get(websocket)
+                        client_role = client_perms.get("role") if client_perms else "controller"
+
+                    perms = client_permissions.get(websocket)
+                    if perms and perms.get("role") == "viewer":
+                        allowed_viewer_prefixes = [
+                            "SETTINGS,",
+                            "START_VIDEO",
+                            "js,",
+                        ]
+                        if not any(message.startswith(prefix) for prefix in allowed_viewer_prefixes):
+                            data_logger.warning(f"DENIED unauthorized message from viewer {websocket.remote_address}: {message[:100]}...")
+                            continue
+
                     if message.startswith("FILE_UPLOAD_START:"):
                         if 'upload' not in settings.file_transfers:
                             data_logger.warning("Client tried to upload a file, but uploads are disabled by server settings.")
@@ -1956,6 +2037,21 @@ class DataStreamingServer:
                             parsed_settings = self._parse_settings_payload(payload_str)
                             display_id = parsed_settings.get("displayId", "primary")
 
+                            client_perms = client_permissions.get(websocket)
+                            client_role = client_perms.get("role") if client_perms else "controller"
+
+                            if client_role == 'viewer':
+                                data_logger.info(f"Viewer client {websocket.remote_address} sent initial SETTINGS. Syncing with current stream state.")
+                                if not initial_settings_processed:
+                                    initial_settings_processed = True
+                                
+                                await self.broadcast_stream_resolution()
+
+                                data_logger.info(f"Broadcasting PIPELINE_RESETTING to sync new viewer.")
+                                websockets.broadcast(self.clients, "PIPELINE_RESETTING primary")
+
+                                continue
+
                             if display_id != 'primary':
                                 second_screen_enabled, _ = self.cli_args.second_screen
                                 if not second_screen_enabled:
@@ -2051,6 +2147,7 @@ class DataStreamingServer:
                                 websocket,
                                 parsed_settings,
                                 not initial_settings_processed,
+                                client_role
                             )
                             if not initial_settings_processed:
                                 initial_settings_processed = True
@@ -2140,6 +2237,15 @@ class DataStreamingServer:
                         active_upload_target_path_conn = None
 
                     elif message == "START_VIDEO":
+                        perms = client_permissions.get(websocket)
+                        if perms and perms.get("role") == "viewer":
+                            now = time.time()
+                            last_req_time = self.last_start_video_request_times.get(websocket, 0)
+                            if now - last_req_time < 30.0:
+                                data_logger.warning(f"Throttled START_VIDEO request from viewer {websocket.remote_address}. Ignoring.")
+                                continue
+                            self.last_start_video_request_times[websocket] = now
+
                         if client_display_id and client_display_id in self.display_clients:
                             data_logger.info(f"Received START_VIDEO for '{client_display_id}'. Starting its stream.")
                             display_state = self.display_clients[client_display_id]
@@ -2299,6 +2405,21 @@ class DataStreamingServer:
                             data_logger.warning("Received 'cmd' message without a command string.")
 
                     else:
+                        perms = client_permissions.get(websocket)
+                        allowed = False
+                        if perms:
+                            role = perms.get("role")
+                            slot = perms.get("slot")
+
+                            if role == "controller":
+                                allowed = True
+                            elif role == "viewer" and slot is not None:
+                                if message.startswith("js,"):
+                                    allowed = True
+                        if not allowed:
+                            if perms:
+                                data_logger.debug(f"Dropping unauthorized message from {websocket.remote_address} with role={perms.get('role')}, slot={perms.get('slot')}. Msg: {message[:50]}")
+                            continue
                         if self.input_handler and hasattr(
                             self.input_handler, "on_message"
                         ):
@@ -2313,6 +2434,8 @@ class DataStreamingServer:
                 f"Error in Data WS handler for {raddr}: {e_main_loop}", exc_info=True
             )
         finally:
+            self.last_start_video_request_times.pop(websocket, None)
+            client_permissions.pop(websocket, None)
             data_logger.info(f"Cleaning up Data WS handler for {raddr} (Display ID: {client_display_id})...")
 
             self.clients.discard(websocket)
@@ -3131,6 +3254,56 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
         logger_gst_app_resize.error(f"Error during resize handling for '{res_str}': {e}", exc_info=True)
 
 async def main():
+    is_secure_mode = bool(settings.master_token)
+    if is_secure_mode:
+        logger.info("Secure Mode ENABLED (SELKIES_MASTER_TOKEN is set).")
+    else:
+        logger.info("Legacy Mode ENABLED (SELKIES_MASTER_TOKEN is not set).")
+        config_gate.set()
+
+    async def reconcile_clients():
+        """Iterate through connected clients and disconnect those with invalid/changed permissions."""
+        global user_tokens, client_permissions
+        connected_websockets = list(client_permissions.keys())
+        current_tokens = user_tokens.copy()
+        for ws in connected_websockets:
+            if ws.state != websockets.protocol.State.OPEN:
+                continue
+            perms = client_permissions.get(ws)
+            if not perms or perms.get("token") is None:
+                continue
+            token = perms["token"]
+            new_perms = current_tokens.get(token)
+            should_disconnect = False
+            if not new_perms:
+                should_disconnect, reason = True, "Token revoked"
+            elif new_perms.get("role") != perms.get("role") or new_perms.get("slot") != perms.get("slot"):
+                should_disconnect, reason = True, "Permissions changed"
+            if should_disconnect:
+                data_logger.info(f"Disconnecting client {ws.remote_address} due to: {reason}")
+                try:
+                    await ws.close(code=4002, reason=reason)
+                except websockets.ConnectionClosed:
+                    pass
+
+    async def handle_tokens_post(request):
+        global user_tokens, config_gate
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer ") or auth_header.split(" ", 1)[1] != settings.master_token:
+            return web.Response(status=401, text="Unauthorized")
+        try:
+            new_token_data = await request.json()
+            if not isinstance(new_token_data, dict): raise ValueError("Payload must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            return web.Response(status=400, text=f"Bad Request: {e}")
+        user_tokens = new_token_data
+        logger.info(f"Updated user tokens. Now tracking {len(user_tokens)} tokens.")
+        if not config_gate.is_set():
+            config_gate.set()
+            logger.info("Configuration gate is now open. WebSocket server will accept connections.")
+        asyncio.create_task(reconcile_clients())
+        return web.Response(status=200, text="OK")
+
     if "DEV_MODE" in os.environ:
         try:
             dev_version_file = pathlib.Path(
@@ -3186,6 +3359,7 @@ async def main():
         cursor_debug=DEBUG_CURSORS,
         audio_device_name=settings.audio_device_name,
         cli_args=settings,
+        is_secure_mode=is_secure_mode,
     )
     app.data_streaming_server = data_server
 
@@ -3222,6 +3396,16 @@ async def main():
     data_server_task = asyncio.create_task(data_server.run_server(), name="DataServer")
     tasks_to_run.append(data_server_task)
 
+    control_plane_runner = None
+    if is_secure_mode:
+        api_app = web.Application()
+        api_app.router.add_post('/tokens', handle_tokens_post)
+        control_plane_runner = web.AppRunner(api_app)
+        await control_plane_runner.setup()
+        site = web.TCPSite(control_plane_runner, '0.0.0.0', settings.control_port)
+        await site.start()
+        logger.info(f"Control Plane API listening on port {settings.control_port}")
+
     if hasattr(input_handler, "connect"):
         tasks_to_run.append(
             asyncio.create_task(input_handler.connect(), name="InputConnect")
@@ -3253,6 +3437,9 @@ async def main():
     except Exception as e_main:
         logger.critical(f"Critical error in main execution: {e_main}", exc_info=True)
     finally:
+        if control_plane_runner:
+            await control_plane_runner.cleanup()
+            logger.info("Control Plane API shut down.")
         logger.info("Main loop ending or interrupted. Performing cleanup...")
 
         all_tasks_for_cleanup = [
