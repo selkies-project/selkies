@@ -896,7 +896,7 @@ class DataStreamingServer:
         self.cursor_debug = cursor_debug
         self.input_handler = None
         self._last_adjustment_timestamp = 0.0
-        self.client_settings_received = None
+        self.client_settings_received = asyncio.Event()
         self._reconfigure_lock = asyncio.Lock()
         self._is_reconfiguring = False
         self._bytes_sent_in_interval = 0
@@ -1552,7 +1552,6 @@ class DataStreamingServer:
             websocket 
         )
         self.capture_loop = self.capture_loop or asyncio.get_running_loop()
-        self.client_settings_received = asyncio.Event()
         initial_settings_processed = False
         self._sent_frame_timestamps.clear()
         self._rtt_samples.clear()
@@ -2405,21 +2404,28 @@ class DataStreamingServer:
                             data_logger.warning("Received 'cmd' message without a command string.")
 
                     else:
-                        perms = client_permissions.get(websocket)
-                        allowed = False
-                        if perms:
-                            role = perms.get("role")
-                            slot = perms.get("slot")
+                        if message.startswith("js,") and self.is_secure_mode:
+                            perms = client_permissions.get(websocket)
+                            if not perms or not perms.get("token"):
+                                data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {websocket.remote_address} dropped. Client has no token/perms.")
+                                continue
+                            
+                            token = perms.get("token")
+                            current_perms = user_tokens.get(token)
+                            server_slot = current_perms.get("slot") if current_perms else None
 
-                            if role == "controller":
-                                allowed = True
-                            elif role == "viewer" and slot is not None:
-                                if message.startswith("js,"):
-                                    allowed = True
-                        if not allowed:
-                            if perms:
-                                data_logger.debug(f"Dropping unauthorized message from {websocket.remote_address} with role={perms.get('role')}, slot={perms.get('slot')}. Msg: {message[:50]}")
-                            continue
+                            if server_slot is None:
+                                data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {websocket.remote_address} dropped. Client token has no assigned slot.")
+                                continue
+                            try:
+                                client_index = int(message.split(',')[2])
+                                if (int(server_slot) - 1) != client_index:
+                                    data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {websocket.remote_address} dropped. Client sent for index {client_index}, but is assigned slot {server_slot}.")
+                                    continue
+                            except (IndexError, ValueError):
+                                data_logger.warning(f"BLOCK (Secure Mode): Malformed gamepad message from {websocket.remote_address}: {message}")
+                                continue
+                        
                         if self.input_handler and hasattr(
                             self.input_handler, "on_message"
                         ):
@@ -3275,10 +3281,27 @@ async def main():
             token = perms["token"]
             new_perms = current_tokens.get(token)
             should_disconnect = False
+            reason = ""
             if not new_perms:
                 should_disconnect, reason = True, "Token revoked"
-            elif new_perms.get("role") != perms.get("role") or new_perms.get("slot") != perms.get("slot"):
-                should_disconnect, reason = True, "Permissions changed"
+            else:
+                old_role, old_slot = perms.get("role"), perms.get("slot")
+                new_role = new_perms.get("role")
+                new_slot = new_perms.get("slot")
+
+                if old_role != new_role:
+                    should_disconnect, reason = True, "Permissions changed significantly"
+                
+                elif old_slot != new_slot:
+                    data_logger.info(f"Updating client {ws.remote_address} for slot change: {old_slot} -> {new_slot}")                    
+                    update_payload = json.dumps({"role": new_role, "slot": new_slot})
+                    update_message = f"ROLE_UPDATE,{update_payload}"
+                    try:
+                        await ws.send(update_message)
+                        client_permissions[ws]['role'] = new_role
+                        client_permissions[ws]['slot'] = new_slot
+                    except websockets.ConnectionClosed:
+                        data_logger.warning(f"Could not send role update to {ws.remote_address}, connection closed.")
             if should_disconnect:
                 data_logger.info(f"Disconnecting client {ws.remote_address} due to: {reason}")
                 try:

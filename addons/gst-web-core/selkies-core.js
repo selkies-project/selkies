@@ -453,9 +453,9 @@ const updateCanvasImageRendering = () => {
     return;
   }
   const dpr = window.devicePixelRatio || 1;
-  if (window.is_manual_resolution_mode || (useCssScaling && dpr > 1)) {
+  if (isSharedMode || window.is_manual_resolution_mode || (useCssScaling && dpr > 1)) {
     if (canvas.style.imageRendering !== 'auto') {
-      console.log("Smoothing enabled for manual resolution or high-DPR scaling.");
+      console.log("Smoothing enabled for manual resolution, high-DPR scaling, or shared mode.");
       canvas.style.imageRendering = 'auto';
     }
   } else {
@@ -1165,10 +1165,9 @@ const initializeInput = () => {
     console.log("Input already initialized. Skipping.");
     return;
   }
-  if (clientRole === 'viewer' && clientSlot === null) {
-    inputInitialized = true;
-    console.log("Role is 'viewer' with no slot. Input system will not be initialized.");
-    return;
+  if (clientSlot !== null && clientSlot > 0) {
+    playerInputTargetIndex = clientSlot - 1;
+    console.log(`Input Initialization: Applying server-provided slot ${clientSlot}. Gamepad will target index ${playerInputTargetIndex}.`);
   }
   inputInitialized = true;
   console.log("Initializing Input system...");
@@ -1190,7 +1189,8 @@ const initializeInput = () => {
     return;
   }
 
-  inputInstance = new Input(overlayInput, sendInputFunction, isSharedMode, playerInputTargetIndex, useCssScaling);
+  const initialSlot = clientSlot;
+  inputInstance = new Input(overlayInput, sendInputFunction, isSharedMode, playerInputTargetIndex, useCssScaling, initialSlot);
 
   inputInstance.getWindowResolution = () => {
     const videoContainer = document.querySelector('.video-container');
@@ -1231,8 +1231,9 @@ const initializeInput = () => {
   };
 
   inputInstance.attach();
-  if (clientRole === 'viewer' && clientSlot !== null) {
-      console.log(`Role is 'viewer' with slot ${clientSlot}. Detaching context to disable mouse/keyboard/touch.`);
+  if (clientRole === 'viewer') {
+      const reason = clientSlot !== null ? `(gamepad-only slot ${clientSlot})` : "(no slot)";
+      console.log(`Role is 'viewer' ${reason}. Detaching context to disable mouse/keyboard/touch.`);
       inputInstance.detach_context();
   }
   window.webrtcInput = inputInstance;
@@ -3076,6 +3077,7 @@ function handleDecodedFrame(frame) {
         clientRole = permissions.role;
         clientSlot = permissions.slot;
         console.log(`Authentication successful. Received Role: ${clientRole}, Slot: ${clientSlot}`);
+        window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 
         if (clientRole === 'viewer') {
             console.log("Token-based client is a 'viewer'. Applying shared mode compatibility settings.");
@@ -3116,6 +3118,91 @@ function handleDecodedFrame(frame) {
             }
         }
       }
+      if (event.data.startsWith('AUTH_SUCCESS,')) {
+        const payloadStr = event.data.substring(13);
+        const permissions = JSON.parse(payloadStr);
+        clientRole = permissions.role;
+        clientSlot = permissions.slot;
+        console.log(`Authentication successful. Received Role: ${clientRole}, Slot: ${clientSlot}`);
+        window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
+
+        if (window.webrtcInput && typeof window.webrtcInput.updateControllerSlot === 'function') {
+            window.webrtcInput.updateControllerSlot(clientSlot);
+        }
+
+        if (clientRole === 'viewer') {
+            console.log("Token-based client is a 'viewer'. Applying shared mode compatibility settings.");
+            isSharedMode = true;
+            detectedSharedModeType = 'shared';
+
+            if (clientSlot !== null && clientSlot > 0) {
+                playerInputTargetIndex = clientSlot - 1;
+            } else {
+                playerInputTargetIndex = undefined;
+            }
+
+            if (!manual_width || manual_width <= 0 || !manual_height || manual_height <= 0) {
+                manual_width = 1280; manual_height = 720;
+            }
+            applyManualCanvasStyle(manual_width, manual_height, true);
+            window.addEventListener('resize', () => {
+                if (isSharedMode && manual_width && manual_height && manual_width > 0 && manual_height > 0) {
+                    applyManualCanvasStyle(manual_width, manual_height, true);
+                }
+            });
+            updateUIForSharedMode();
+
+            if (initializationComplete) {
+                console.log("Post-init sync: Forcing shared mode state because 'MODE websockets' was handled before auth.");
+                sharedClientState = 'awaiting_identification';
+                sharedProbingAttempts = 0;
+                identifiedEncoderModeForShared = null;
+
+                if (websocket && websocket.readyState === WebSocket.OPEN) {
+                     websocket.send('STOP_VIDEO');
+                     setTimeout(() => {
+                        if (websocket && websocket.readyState === WebSocket.OPEN) {
+                            websocket.send('START_VIDEO');
+                            console.log("Shared mode: Sent START_VIDEO after initial STOP_VIDEO to sync stream.");
+                        }
+                    }, 250);
+                }
+                startSharedModeProbingTimeout();
+            }
+         }
+      }
+      if (event.data.startsWith('ROLE_UPDATE,')) {
+        let newPermissions;
+        try {
+          const payloadStr = event.data.substring(12);
+          newPermissions = JSON.parse(payloadStr);
+        } catch (e) {
+          console.error("Failed to parse ROLE_UPDATE message:", e);
+          return;
+        }
+        console.log(`Received role update. New role: ${newPermissions.role}, New slot: ${newPermissions.slot}`);
+        const oldSlot = clientSlot;
+        clientRole = newPermissions.role;
+        clientSlot = newPermissions.slot;
+
+        if (window.webrtcInput && typeof window.webrtcInput.updateControllerSlot === 'function') {
+            window.webrtcInput.updateControllerSlot(clientSlot);
+        }
+
+        if (oldSlot !== null && clientSlot === null) {
+            if (window.webrtcInput && window.webrtcInput.gamepadManager) {
+                console.log("Controller slot revoked, disabling gamepad polling.");
+                window.webrtcInput.gamepadManager.disable();
+            }
+        } else if (oldSlot === null && clientSlot !== null) {
+            if (window.webrtcInput && window.webrtcInput.gamepadManager && isGamepadEnabled) {
+                console.log("Controller slot granted and global gamepad toggle is ON. Enabling gamepad polling.");
+                window.webrtcInput.gamepadManager.enable();
+            } else if (window.webrtcInput && window.webrtcInput.gamepadManager) {
+                console.log("Controller slot granted, but global gamepad toggle is OFF. Polling remains disabled.");
+            }
+        }
+      }
       if (event.data === 'MODE websockets') {
         clientMode = 'websockets';
         console.log('[websockets] Switched to websockets mode.');
@@ -3127,10 +3214,14 @@ function handleDecodedFrame(frame) {
             const hash = window.location.hash;
             if (hash === '#shared') {
                 clientRole = 'viewer'; clientSlot = null;
+                if (clientSlot !== null) playerInputTargetIndex = clientSlot - 1;
             } else if (hash.startsWith('#player')) {
                 clientRole = 'viewer'; clientSlot = parseInt(hash.substring(7), 10) || null;
             } else {
-                clientRole = 'controller'; clientSlot = null;
+                clientRole = 'controller'; clientSlot = 1;
+                clientRole = 'controller';
+                clientSlot = 1;
+                playerInputTargetIndex = 0;
             }
             console.log(`Legacy mode detected. Role from hash: ${clientRole}, Slot: ${clientSlot}`);
             initializeInput();

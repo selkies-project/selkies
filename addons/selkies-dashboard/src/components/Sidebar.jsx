@@ -519,6 +519,7 @@ const getPrefixedKey = (key) => {
 
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
+  const [isToggleVisible, setIsToggleVisible] = useState(true);
   const toggleSidebar = () => {
     setIsOpen(!isOpen);
   };
@@ -1729,6 +1730,8 @@ function Sidebar() {
           if (message.audio !== undefined) setIsAudioActive(message.audio);
           if (message.microphone !== undefined)
             setIsMicrophoneActive(message.microphone);
+        } else if (message.type === 'clientRoleUpdate' && message.role === 'viewer') {
+          setIsToggleVisible(false);
         } else if (message.type === "gamepadControl") {
           if (message.enabled !== undefined)
             setIsGamepadEnabled(message.enabled);
@@ -1972,13 +1975,15 @@ function Sidebar() {
 
   return (
     <>
-      <div
-        className='toggle-handle'
-        onClick={toggleSidebar}
-        title={`${isOpen ? 'Close' : 'Open'} Dashboard`}
-      >
-        <div className="toggle-indicator"></div>
-      </div>
+      {isToggleVisible && (
+        <div
+          className='toggle-handle'
+          onClick={toggleSidebar}
+          title={`${isOpen ? 'Close' : 'Open'} Dashboard`}
+        >
+          <div className="toggle-indicator"></div>
+        </div>
+      )}
       {availablePlacements && (() => {
         const arrowBaseStyle = {
           position: 'absolute',
