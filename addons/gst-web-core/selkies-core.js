@@ -560,6 +560,9 @@ body {
   border-radius: 3px;
   backdrop-filter: blur(5px);
 }
+.video-container.shared-user-mode #overlayInput {
+  cursor: default !important;
+}
   `;
   document.head.appendChild(style);
 };
@@ -805,6 +808,12 @@ function disableAutoResize() {
 
 function updateUIForSharedMode() {
     if (!isSharedMode) return;
+
+    const videoContainer = document.querySelector('.video-container');
+    if (videoContainer) {
+        videoContainer.classList.add('shared-user-mode');
+        console.log("Shared mode: Added 'shared-user-mode' class to video container.");
+    }
 
     const globalFileInput = document.getElementById('globalFileInput');
     if (globalFileInput) {
