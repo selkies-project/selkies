@@ -102,6 +102,8 @@ docker run --name selkies -it -d --rm -p 8080:8080 -p 3478:3478 ghcr.io/selkies-
 docker exec -it selkies bash
 ```
 
+Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs.
+
 **2. From inside the test container, call the `generate_rtc_config` method.**
 
 ```bash
