@@ -845,6 +845,7 @@ const initializeUI = () => {
   overlayInput = document.createElement('input');
   overlayInput.type = 'text';
   overlayInput.readOnly = false;
+  overlayInput.autocomplete = 'off';
   overlayInput.id = 'overlayInput';
   videoContainer.appendChild(overlayInput);
 
