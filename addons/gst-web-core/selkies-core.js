@@ -23,6 +23,8 @@ let clientSlot = null;
 let isTokenAuthMode = false;
 let audioContext;
 let audioWorkletNode;
+let audioGainNode;
+let currentVolume = 1.0;
 let audioWorkletProcessorPort;
 window.currentAudioBufferSize = 0;
 let videoFrameBuffer = [];
@@ -1423,6 +1425,21 @@ function receiveMessage(event) {
     return;
   }
   switch (message.type) {
+    case 'setVolume':
+      if (typeof message.value === 'number' && audioGainNode) {
+        currentVolume = Math.max(0, Math.min(1, message.value));
+        audioGainNode.gain.setValueAtTime(currentVolume, audioContext.currentTime);
+      }
+      break;
+    case 'setMute':
+      if (typeof message.value === 'boolean' && audioGainNode) {
+        if (message.value === true) {
+          audioGainNode.gain.setValueAtTime(0, audioContext.currentTime);
+        } else {
+          audioGainNode.gain.setValueAtTime(currentVolume, audioContext.currentTime);
+        }
+      }
+      break;
     case 'sidebarVisibilityChanged':
       isSidebarOpen = !!message.isOpen;
       break;
@@ -2481,8 +2498,12 @@ function handleDecodedFrame(frame) {
             window.currentAudioBufferDuration = event.data.durationMs;
         }
       };
-      audioWorkletNode.connect(audioContext.destination);
-      console.log('Playback AudioWorkletProcessor initialized and connected.');
+      audioGainNode = audioContext.createGain();
+      audioGainNode.gain.value = currentVolume;
+      audioWorkletNode.connect(audioGainNode);
+      audioGainNode.connect(audioContext.destination);
+      console.log('Playback AudioWorkletProcessor initialized and connected through a GainNode for volume control.');
+      await applyOutputDevice();
       await applyOutputDevice();
 
       if (audioDecoderWorker) {
