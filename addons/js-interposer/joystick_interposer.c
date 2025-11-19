@@ -28,6 +28,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <sys/ioctl.h>
 #include <linux/ioctl.h>
 #include <sys/epoll.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
@@ -138,6 +140,9 @@ static int (*real_close)(int fd) = NULL;
 static ssize_t (*real_read)(int fd, void *buf, size_t count) = NULL;
 static ssize_t (*real_write)(int fd, const void *buf, size_t count) = NULL;
 static int (*real_access)(const char *pathname, int mode) = NULL;
+static int (*real_fstat)(int fd, struct stat *buf) = NULL;
+static int (*real_stat)(const char *pathname, struct stat *buf) = NULL;
+static int (*real_lstat)(const char *pathname, struct stat *buf) = NULL;
 
 /**
  * @brief Initializes the logging system.
@@ -407,6 +412,9 @@ __attribute__((constructor)) void init_interposer() {
     if (load_real_func((void *)&real_read, "read") < 0) sji_log_error("CRITICAL: Failed to load real 'read'.");
     if (load_real_func((void *)&real_write, "write") < 0) sji_log_error("CRITICAL: Failed to load real 'write'.");
     if (load_real_func((void *)&real_access, "access") < 0) sji_log_error("CRITICAL: Failed to load real 'access'.");
+    if (load_real_func((void *)&real_fstat, "fstat") < 0) sji_log_error("CRITICAL: Failed to load real 'fstat'.");
+    if (load_real_func((void *)&real_stat, "stat") < 0) sji_log_error("CRITICAL: Failed to load real 'stat'.");
+    if (load_real_func((void *)&real_lstat, "lstat") < 0) sji_log_error("CRITICAL: Failed to load real 'lstat'.");
     load_real_func((void *)&real_open64, "open64");
     sji_log_info("Selkies Joystick Interposer initialized. Logging is %s.", g_sji_log_enabled ? "ENABLED" : "DISABLED");
 }
@@ -491,6 +499,110 @@ int access(const char *pathname, int mode) {
     } else {
         return real_access(pathname, mode);
     }
+}
+
+/**
+ * @brief Helper to populate a stat structure with fake device IDs.
+ *
+ * SDL uses the st_rdev field (device ID) to check for duplicates.
+ * Since our sockets are just unix sockets, they usually return 0 or a generic ID.
+ * We must forge unique IDs (Major 13 for Input) matching the virtual path indices.
+ */
+static void fill_fake_stat(const char* path, struct stat *buf) {
+    buf->st_mode = S_IFCHR | 0666;
+    
+    int dev_num = -1;
+    
+    if (sscanf(path, "/dev/input/event%d", &dev_num) == 1) {
+        buf->st_rdev = makedev(13, dev_num);
+    } else if (sscanf(path, "/dev/input/js%d", &dev_num) == 1) {
+        buf->st_rdev = makedev(13, dev_num);
+    } else {
+        buf->st_rdev = makedev(13, 9999); 
+    }
+    
+    buf->st_uid = 0;
+    buf->st_gid = 0;
+    buf->st_size = 0;
+    buf->st_blksize = 4096;
+    buf->st_blocks = 0;
+    buf->st_nlink = 1;
+}
+
+/**
+ * @brief Intercepted `fstat()` system call.
+ */
+int fstat(int fd, struct stat *buf) {
+    if (!real_fstat) {
+         if (load_real_func((void *)&real_fstat, "fstat") < 0) {
+             errno = EFAULT;
+             return -1;
+         }
+    }
+
+    for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
+        if (interposers[i].sockfd != -1 && interposers[i].sockfd == fd) {
+            memset(buf, 0, sizeof(struct stat));
+            fill_fake_stat(interposers[i].open_dev_name, buf);
+            
+            sji_log_debug("Intercepted fstat for fd %d (%s), returning fake rdev %d:%d", 
+                fd, interposers[i].open_dev_name, major(buf->st_rdev), minor(buf->st_rdev));
+            return 0;
+        }
+    }
+    return real_fstat(fd, buf);
+}
+
+/**
+ * @brief Intercepted `stat()` system call.
+ */
+int stat(const char *pathname, struct stat *buf) {
+    if (!real_stat) {
+        if (load_real_func((void *)&real_stat, "stat") < 0) {
+            errno = EFAULT;
+            return -1;
+        }
+    }
+
+    if (pathname) {
+        for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
+            if (strcmp(pathname, interposers[i].open_dev_name) == 0) {
+                memset(buf, 0, sizeof(struct stat));
+                fill_fake_stat(pathname, buf);
+                
+                sji_log_debug("Intercepted stat for %s, returning fake rdev %d:%d", 
+                    pathname, major(buf->st_rdev), minor(buf->st_rdev));
+                return 0;
+            }
+        }
+    }
+    return real_stat(pathname, buf);
+}
+
+/**
+ * @brief Intercepted `lstat()` system call.
+ */
+int lstat(const char *pathname, struct stat *buf) {
+    if (!real_lstat) {
+        if (load_real_func((void *)&real_lstat, "lstat") < 0) {
+            errno = EFAULT;
+            return -1;
+        }
+    }
+
+    if (pathname) {
+        for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
+            if (strcmp(pathname, interposers[i].open_dev_name) == 0) {
+                memset(buf, 0, sizeof(struct stat));
+                fill_fake_stat(pathname, buf);
+                
+                sji_log_debug("Intercepted lstat for %s, returning fake rdev %d:%d", 
+                    pathname, major(buf->st_rdev), minor(buf->st_rdev));
+                return 0;
+            }
+        }
+    }
+    return real_lstat(pathname, buf);
 }
 
 /**
