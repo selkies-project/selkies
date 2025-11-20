@@ -72,16 +72,18 @@ When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server runs a c
 
 **Permissions Object Fields:**
 *   `"role"`: (String, required) Can be one of the following:
-    *   `"controller"`: Full access. Can send keyboard, mouse, and all other input events.
-    *   `"viewer"`: Restricted access. Primarily for viewing the stream. Can be granted specific input rights via the `slot` property.
+    *   `"controller"`: Full access. Can send keyboard, mouse, and all other input events (unless overridden by `mk_control`).
+    *   `"viewer"`: Restricted access. Primarily for viewing the stream. Can be granted specific input rights via the `slot` or `mk_control` properties.
 *   `"slot"`: (Integer or `null`, required) Assigns an input slot, primarily for gamepads.
-    *   `null`: No specific input slot. A viewer with a `null` slot has no input capabilities.
-    *   `1`: Grants the `viewer` control over the **Player 1** gamepad *only*.
-    *   `2`: Grants the `viewer` control over the **Player 2** gamepad *only*.
-    *   `3`: Grants the `viewer` control over the **Player 3** gamepad *only*.
-    *   `4`: Grants the `viewer` control over the **Player 4** gamepad *only*.
+    *   `null`: No specific input slot.
+    *   `1` - `4`: Grants the user control over the specific virtual gamepad slot (Player 1 through Player 4).
+*   `"mk_control"`: (Boolean, optional) Exclusive override for Mouse & Keyboard input.
+    *   If `true` on **any** active token in the set, only that specific client processes mouse and keyboard events.
+    *   If `false` or omitted on **all** active tokens, mouse and keyboard access defaults to clients with the `"controller"` role.
 
-**Behavior:** When a valid request is received, the server replaces its entire set of active tokens with the new set provided in the payload. It then runs a reconciliation process: any connected client whose token is now invalid or has changed permissions will be disconnected.
+**Behavior:** When a valid request is received, the server replaces its entire set of active tokens with the new set provided in the payload. It then runs a reconciliation process:
+1.  Clients with tokens not present in the new set are disconnected.
+2.  Clients with tokens that remain valid but have changed permissions (`role`, `slot`, or `mk_control`) receive an immediate state update without disconnection.
 
 **Example `curl` Command:**
 ```bash
@@ -89,9 +91,8 @@ curl -X POST http://localhost:8083/tokens \
 -H "Authorization: Bearer my-secret-master-token" \
 -H "Content-Type: application/json" \
 -d '{
-  "user-token-1": {"role": "controller", "slot": null},
-  "user-token-2": {"role": "viewer", "slot": 1},
-  "user-token-3": {"role": "viewer", "slot": null}
+  "token-1": {"role": "controller", "slot": null, "mk_control": false},
+  "token-2": {"role": "viewer", "slot": 1, "mk_control": true}
 }'
 ```
 

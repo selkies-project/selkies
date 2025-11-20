@@ -1184,6 +1184,11 @@ export class Input {
         this._trackpadTapTimeout = null;
         this._trackpadLastScrollCentroid = null;
         this._touchScrollLastCentroid = null;
+        this.inputAttached = false;
+    }
+
+    setSharedMode(enabled) {
+        this.isSharedMode = !!enabled;
     }
 
     updateControllerSlot(newSlot) {
@@ -1234,11 +1239,11 @@ export class Input {
 
     _updateBrowserCursor() {
         if (!this._cursorBase64Data) {
-            this.element.style.cursor = 'none';
+            this.element.style.setProperty('cursor', 'none', 'important');
             return;
         }
         const cursorDataUrl = `data:image/png;base64,${this._cursorBase64Data}`;
-        this.element.style.cursor = `url("${cursorDataUrl}") ${this._rawHotspotX} ${this._rawHotspotY}, default`;
+        this.element.style.setProperty('cursor', `url("${cursorDataUrl}") ${this._rawHotspotX} ${this._rawHotspotY}, default`, 'important');
     }
 
     async updateServerCursor(cursorData) {
@@ -1250,20 +1255,25 @@ export class Input {
             this._cursorBase64Data = null;
             this.cursorDiv.style.display = 'none';
             if (this.use_browser_cursors) {
-                this.element.style.cursor = 'none';
+                this.element.style.setProperty('cursor', 'none', 'important');
             }
             return;
         }
         this._rawHotspotX = parseInt(cursorData.hotx) || 0;
         this._rawHotspotY = parseInt(cursorData.hoty) || 0;
         this._cursorBase64Data = cursorData.curdata;
+        if (!this.inputAttached) {
+            this.cursorDiv.style.display = 'none';
+            this.element.style.cursor = 'auto';
+            return;
+        }
         if (this.use_browser_cursors) {
             this.cursorDiv.style.display = 'none';
             this._updateBrowserCursor();
         } else {
             const blob = await (await fetch(`data:image/png;base64,${this._cursorBase64Data}`)).blob();
             this._cursorImageBitmap = await createImageBitmap(blob);
-            this.element.style.cursor = 'none';
+            this.element.style.setProperty('cursor', 'none', 'important');
             this.cursorDiv.style.display = 'block';
             this._drawAndScaleCursor();
         }
@@ -1581,9 +1591,9 @@ export class Input {
         if (this.buttonMask === 0 && event.target !== this.element) {
             return;
         }
-        if (!this.use_browser_cursors) {
+        if (this.inputAttached && !this.use_browser_cursors) {
             this.cursorDiv.style.display = 'block';
-            this.element.style.cursor = 'none';
+            this.element.style.setProperty('cursor', 'none', 'important');
         }
         let visualClientX = event.clientX;
         let visualClientY = event.clientY;
@@ -1595,7 +1605,7 @@ export class Input {
                 visualClientY = lastPredictedEvent.clientY;
             }
         }
-        if (!this.use_browser_cursors) {
+        if (this.inputAttached && !this.use_browser_cursors) {
             this._updateCursorPosition(visualClientX, visualClientY);
         }
         this._latestMouseX = visualClientX;
@@ -1627,7 +1637,7 @@ export class Input {
             this.y = Math.round(movementY_logical * dpr_for_input_coords);
 
         } else if (event.type === 'mousemove' || event.type === 'pointermove') {
-             if (window.is_manual_resolution_mode && canvas) {
+             if ((window.is_manual_resolution_mode || this.isSharedMode) && canvas) {
                 const canvasRect = canvas.getBoundingClientRect(); // CSS logical size
                 if (canvasRect.width > 0 && canvasRect.height > 0 && canvas.width > 0 && canvas.height > 0) {
                     const mouseX_on_canvas_logical_css = event.clientX - canvasRect.left;
@@ -1835,7 +1845,7 @@ export class Input {
         const dpr_for_input_coords = this.useCssScaling ? 1 : client_dpr;
         let canvas = document.getElementById('videoCanvas');
 
-        if (window.is_manual_resolution_mode && canvas) {
+        if ((window.is_manual_resolution_mode || this.isSharedMode) && canvas) {
             const canvasRect = canvas.getBoundingClientRect(); // CSS logical size
             if (canvasRect.width > 0 && canvasRect.height > 0 && canvas.width > 0 && canvas.height > 0) {
                 const touchX_on_canvas_logical_css = touchPoint.clientX - canvasRect.left;
@@ -1898,10 +1908,10 @@ export class Input {
         }
 
         if (this._trackpadMode || this.use_browser_cursors) {
-            this.cursorDiv.style.display = 'none';
+            this.element.style.setProperty('cursor', 'none', 'important');
             this.element.style.cursor = 'default';
         } else {
-            this.element.style.cursor = 'none';
+            this.element.style.setProperty('cursor', 'none', 'important');
             this.cursorDiv.style.display = 'none';
         }
     }
@@ -1915,12 +1925,12 @@ export class Input {
         this.use_browser_cursors = newMode;
         if (this._trackpadMode) {
             this.cursorDiv.style.display = 'none';
-            this.element.style.cursor = 'none';
+            this.element.style.setProperty('cursor', 'none', 'important');
         } else if (this.use_browser_cursors) {
             this.cursorDiv.style.display = 'none';
             this._updateBrowserCursor();
         } else {
-            this.element.style.cursor = 'none';
+            this.element.style.setProperty('cursor', 'none', 'important');
             if (this._cursorBase64Data && !this._cursorImageBitmap) {
                 const blob = await (await fetch(`data:image/png;base64,${this._cursorBase64Data}`)).blob();
                 this._cursorImageBitmap = await createImageBitmap(blob);
@@ -2384,6 +2394,10 @@ export class Input {
         return [ Math.max(1, parseInt(offsetRatioWidth - offsetRatioWidth % 2)), Math.max(1, parseInt(offsetRatioHeight - offsetRatioHeight % 2)) ];
     }
 
+    isInputAttached() {
+        return this.inputAttached;
+    }
+
     attach() {
         this.listeners.push(addListener(this.element, 'resize', this._windowMath, this));
         this.listeners.push(addListener(document, 'pointerlockchange', this._pointerLock, this));
@@ -2405,6 +2419,17 @@ export class Input {
     }
 
     attach_context() {
+        if (this.inputAttached) return;
+        this._windowMath();
+        this.element.style.setProperty('cursor', 'none', 'important');
+        if (this._cursorImageBitmap || this._cursorBase64Data) {
+            if (this.use_browser_cursors) {
+                this._updateBrowserCursor();
+            } else {
+                this.cursorDiv.style.display = 'block';
+                this._drawAndScaleCursor();
+            }
+        }
         this.listeners_context.push(addListener(window, 'keydown', this._handleKeyDown, this, true));
         this.listeners_context.push(addListener(window, 'keyup', this._handleKeyUp, this, true));
         this.listeners_context.push(addListener(window, 'blur', this.resetKeyboard, this));
@@ -2443,6 +2468,7 @@ export class Input {
              this._pointerLock();
         }
         this._windowMath();
+        this.inputAttached = true;
     }
 
     detach() {
@@ -2458,6 +2484,8 @@ export class Input {
     detach_context() {
         removeListeners(this.listeners_context);
         this.listeners_context = [];
+        this.element.style.cursor = 'auto';
+        this.cursorDiv.style.display = 'none';
         this.send("kr");
         this.resetKeyboard();
         this._activeTouches.clear();
@@ -2467,6 +2495,7 @@ export class Input {
              this.buttonMask &= ~1;
              this._sendMouseState();
         }
+        this.inputAttached = false;
         this._exitPointerLock();
     }
 

@@ -1894,17 +1894,6 @@ class DataStreamingServer:
                             audio_buffer.clear()
 
                 elif isinstance(message, str):
-                    perms = client_permissions.get(websocket)
-                    if perms and perms.get("role") == "viewer":
-                        allowed_viewer_prefixes = [
-                            "SETTINGS,",
-                            "START_VIDEO",
-                            "js,"
-                        ]
-                        if not any(message.startswith(prefix) for prefix in allowed_viewer_prefixes):
-                            data_logger.warning(f"DENIED unauthorized message from viewer {websocket.remote_address}: {message[:100]}...")
-                            continue
-
                     if message.startswith("SETTINGS,"):
                         client_perms = client_permissions.get(websocket)
                         client_role = client_perms.get("role") if client_perms else "controller"
@@ -1916,6 +1905,8 @@ class DataStreamingServer:
                             "START_VIDEO",
                             "js,",
                         ]
+                        if active_mk_token and perms.get("token") == active_mk_token:
+                            allowed_viewer_prefixes.extend(["kd", "ku", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr"])
                         if not any(message.startswith(prefix) for prefix in allowed_viewer_prefixes):
                             data_logger.warning(f"DENIED unauthorized message from viewer {websocket.remote_address}: {message[:100]}...")
                             continue
@@ -2425,7 +2416,19 @@ class DataStreamingServer:
                             except (IndexError, ValueError):
                                 data_logger.warning(f"BLOCK (Secure Mode): Malformed gamepad message from {websocket.remote_address}: {message}")
                                 continue
-                        
+
+                        if self.is_secure_mode and message.split(',')[0] in ["kd", "ku", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr"]:
+                            perms = client_permissions.get(websocket)
+                            token = perms.get("token") if perms else None
+                            
+                            if active_mk_token is not None:
+                                if token != active_mk_token:
+                                    continue
+                            else:
+                                role = perms.get("role") if perms else "viewer"
+                                if role != "controller":
+                                    continue
+ 
                         if self.input_handler and hasattr(
                             self.input_handler, "on_message"
                         ):
@@ -3308,9 +3311,21 @@ async def main():
                     await ws.close(code=4002, reason=reason)
                 except websockets.ConnectionClosed:
                     pass
+            has_mk_access = False
+            if active_mk_token is not None:
+                if token == active_mk_token:
+                    has_mk_access = True
+            elif new_perms.get("role") == "controller":
+                has_mk_access = True
+            
+            mk_msg = "MK_ACCESS,1" if has_mk_access else "MK_ACCESS,0"
+            try:
+                await ws.send(mk_msg)
+            except websockets.ConnectionClosed:
+                pass
 
     async def handle_tokens_post(request):
-        global user_tokens, config_gate
+        global user_tokens, config_gate, active_mk_token
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer ") or auth_header.split(" ", 1)[1] != settings.master_token:
             return web.Response(status=401, text="Unauthorized")
@@ -3320,6 +3335,12 @@ async def main():
         except (json.JSONDecodeError, ValueError) as e:
             return web.Response(status=400, text=f"Bad Request: {e}")
         user_tokens = new_token_data
+        new_mk_owner = None
+        for tkn, perms in user_tokens.items():
+            if perms.get("mk_control", False):
+                new_mk_owner = tkn
+                break
+        active_mk_token = new_mk_owner
         logger.info(f"Updated user tokens. Now tracking {len(user_tokens)} tokens.")
         if not config_gate.is_set():
             config_gate.set()

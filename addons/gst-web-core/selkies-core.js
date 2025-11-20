@@ -3113,6 +3113,9 @@ function handleDecodedFrame(frame) {
         if (clientRole === 'viewer') {
             console.log("Token-based client is a 'viewer'. Applying shared mode compatibility settings.");
             isSharedMode = true;
+            if (window.webrtcInput) {
+                window.webrtcInput.setSharedMode(true);
+            }
             detectedSharedModeType = 'shared';
             if (clientSlot !== null && clientSlot > 0) {
                 playerInputTargetIndex = clientSlot - 1;
@@ -3201,6 +3204,23 @@ function handleDecodedFrame(frame) {
                 startSharedModeProbingTimeout();
             }
          }
+      }
+      if (event.data.startsWith('MK_ACCESS,')) {
+        const accessLevel = parseInt(event.data.split(',')[1]);
+        const hasAccess = (accessLevel === 1);
+        console.log(`Received MK_ACCESS update: ${hasAccess}`);
+        
+        if (window.webrtcInput) {
+            if (hasAccess) {
+                if (!window.webrtcInput.isInputAttached()) {
+                    console.log("MK Access Granted: Attaching input context.");
+                    window.webrtcInput.attach_context();
+                }
+            } else {
+                console.log("MK Access Revoked: Detaching input context.");
+                window.webrtcInput.detach_context();
+            }
+        }
       }
       if (event.data.startsWith('ROLE_UPDATE,')) {
         let newPermissions;
