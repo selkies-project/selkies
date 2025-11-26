@@ -5,11 +5,11 @@
 # Supported base images: Ubuntu 24.04, 22.04, 20.04
 ARG DISTRIB_IMAGE=ubuntu
 ARG DISTRIB_RELEASE=24.04
-ARG GSTREAMER_BASE_IMAGE=ghcr.io/selkies-project/selkies/gstreamer
+ARG GSTREAMER_BASE_IMAGE=ghcr.io/selkies-project/selkies-gstreamer/gstreamer
 ARG GSTREAMER_BASE_IMAGE_RELEASE=main
 ARG PY_BUILD_IMAGE=ghcr.io/selkies-project/selkies/py-build:main
-ARG WEB_IMAGE=ghcr.io/selkies-project/selkies/gst-web:main
-ARG JS_BASE_IMAGE=ghcr.io/selkies-project/selkies/js-interposer
+ARG WEB_IMAGE=ghcr.io/selkies-project/selkies-gstreamer/gst-web:main
+ARG JS_BASE_IMAGE=ghcr.io/selkies-project/selkies-gstreamer/js-interposer
 ARG JS_BASE_IMAGE_RELEASE=main
 FROM ${GSTREAMER_BASE_IMAGE}:${GSTREAMER_BASE_IMAGE_RELEASE}-${DISTRIB_IMAGE}${DISTRIB_RELEASE} AS selkies
 FROM ${PY_BUILD_IMAGE} AS selkies-build
@@ -258,13 +258,13 @@ ARG PYPI_PACKAGE=selkies
 ARG PACKAGE_VERSION=0.0.0.dev0
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
 COPY --chown=1000:1000 --from=selkies-build /opt/pypi/dist/${PYPI_PACKAGE}-${PACKAGE_VERSION}-py3-none-any.whl .
-RUN pip3 install --no-cache-dir --force-reinstall /opt/${PYPI_PACKAGE}-${PACKAGE_VERSION}-py3-none-any.whl
+RUN pip3 install --no-cache-dir --force-reinstall --ignore-installed /opt/${PYPI_PACKAGE}-${PACKAGE_VERSION}-py3-none-any.whl
 
 # Copy scripts and configurations used to start the container
 COPY --chown=1000:1000 entrypoint.sh /etc/entrypoint.sh
 RUN chmod -f 755 /etc/entrypoint.sh
-COPY --chown=1000:1000 selkies-entrypoint.sh /etc/selkies-entrypoint.sh
-RUN chmod -f 755 /etc/selkies-entrypoint.sh
+COPY --chown=1000:1000 selkies-gstreamer-entrypoint.sh /etc/selkies-gstreamer-entrypoint.sh
+RUN chmod -f 755 /etc/selkies-gstreamer-entrypoint.sh
 COPY --chown=1000:1000 supervisord.conf /etc/supervisord.conf
 RUN chmod -f 755 /etc/supervisord.conf
 
