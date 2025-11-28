@@ -939,6 +939,7 @@ const browser = {
     isMac: function() { return /Mac|iPod|iPhone|iPad/.test(navigator.platform); },
     isIOS: function() { return /iPod|iPhone|iPad/.test(navigator.platform); },
     isWindows: function() { return /Win/.test(navigator.platform); },
+    isLinux: function() { return /Linux/.test(navigator.platform); },
     isChrome: function() { return !!window.chrome && (!!window.chrome.webstore || !!window.chrome.runtime); },
     isSafari: function() { return /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent); },
 };
@@ -1554,9 +1555,28 @@ export class Input {
     _compositionEnd(event) {
         if (!this._guac_markEvent(event)) return;
         if (!this.isComposing) return;
+        if (browser.isLinux()) {
+            this.isComposing = false;
+            this.compositionString = "";
+            return;
+        }
         this._updateCompositionText(event.data);
         this.isComposing = false;
         this.compositionString = "";
+    }
+
+    _handleTextInput(event) {
+        if (!event.data) return;
+
+        const text = event.data;
+        for (let i = 0; i < text.length; i++) {
+            const codepoint = text.charCodeAt(i);
+            const keysym = Keysyms.lookup(codepoint);
+            if (keysym) {
+                this._sendKeyEvent(keysym, 'Unidentified', true);
+                this._sendKeyEvent(keysym, 'Unidentified', false);
+            }
+        }
     }
 
     _handleMobileInput(event) {
@@ -2444,6 +2464,9 @@ export class Input {
         this.listeners_context.push(addListener(compositionTarget, 'compositionstart', this._compositionStart, this));
         this.listeners_context.push(addListener(compositionTarget, 'compositionupdate', this._compositionUpdate, this));
         this.listeners_context.push(addListener(compositionTarget, 'compositionend', this._compositionEnd, this));
+        if (browser.isLinux()) {
+            this.listeners_context.push(addListener(this.element, 'textInput', this._handleTextInput, this));
+        }
         this.listeners_context.push(addListener(this.element, 'pointerdown', this._handlePointerDown, this));
         this.listeners_context.push(addListener(this.element, 'pointermove', this._handlePointerMove, this));
         this.listeners_context.push(addListener(this.element, 'pointerup', this._handlePointerUp, this));
