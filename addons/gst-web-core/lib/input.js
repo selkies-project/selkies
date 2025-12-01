@@ -1333,6 +1333,11 @@ export class Input {
     _handleKeyDown(event) {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
+        const keycode = KeyboardUtil.getKeyCode(event);
+        if (keycode in this._keyDownList) {
+            _stopEvent(event);
+            return;
+        }
         if (this.isComposing || event.isComposing || event.keyCode === 229) {
             _stopEvent(event);
             return;

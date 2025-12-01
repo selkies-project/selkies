@@ -1520,7 +1520,7 @@ class WebRTCInput:
                 unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
                 try:
                     char_to_type = chr(unicode_codepoint)
-                    if not char_to_type.isalpha():
+                    if not char_to_type.isalpha() and char_to_type != ' ':
                         logger_webrtc_input.debug(f"Handling non-alpha '{char_to_type}' with atomic 'type' to prevent stuck modifiers.")
                         await self.on_message(f"co,end,{char_to_type}")
                         self.atomically_typed_keys.add(keysym)
