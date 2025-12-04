@@ -675,7 +675,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     return;
   }
 
-  const dpr = (window.is_manual_resolution_mode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+  const dpr = (isSharedMode || window.is_manual_resolution_mode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
   const internalBufferWidth = roundDownToEven(targetWidth * dpr);
   const internalBufferHeight = roundDownToEven(targetHeight * dpr);
 
@@ -2264,7 +2264,7 @@ function handleDecodedFrame(frame) {
       return;
     }
 
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = (isSharedMode) ? 1 : (window.devicePixelRatio || 1);
     const dpr_for_conversion = useCssScaling ? 1 : dpr;
 
     if (isSharedMode) {
@@ -2288,6 +2288,10 @@ function handleDecodedFrame(frame) {
               const physicalStripeCodedWidth = firstStripeFrame.codedWidth;
               const logicalStripeCodedWidth = physicalStripeCodedWidth / dpr_for_conversion;
               if (manual_width !== logicalStripeCodedWidth && logicalStripeCodedWidth > 0) {
+                  if (manual_width > 0 && manual_height > 0) {
+                      const ratio = logicalStripeCodedWidth / manual_width;
+                      manual_height = roundDownToEven(manual_height * ratio);
+                  }
                   manual_width = logicalStripeCodedWidth;
                   console.log(`Shared mode (VNC stripe paint): Updated manual (logical) Width from VNC stripe to ${manual_width.toFixed(2)} (Stripe Coded: ${physicalStripeCodedWidth}, DPR for conversion: ${dpr_for_conversion})`);
                   if (manual_height && manual_width > 0 && manual_height > 0) {
@@ -2316,6 +2320,10 @@ function handleDecodedFrame(frame) {
                 const physicalImageCodedWidth = firstStripeImage.codedWidth;
                 const logicalImageCodedWidth = physicalImageCodedWidth / dpr_for_conversion;
                 if (manual_width !== logicalImageCodedWidth && logicalImageCodedWidth > 0) {
+                    if (manual_width > 0 && manual_height > 0) {
+                        const ratio = logicalImageCodedWidth / manual_width;
+                        manual_height = roundDownToEven(manual_height * ratio);
+                    }
                     manual_width = logicalImageCodedWidth;
                     console.log(`Shared mode (JPEG stripe paint): Updated manual (logical) Width from JPEG stripe to ${manual_width.toFixed(2)} (Image Coded: ${physicalImageCodedWidth}, DPR for conversion: ${dpr_for_conversion})`);
                     if (manual_height && manual_width > 0 && manual_height > 0) {
@@ -4380,7 +4388,16 @@ function initiateFallback(error, context) {
         }
     } else {
         console.log("Primary client fallback: Forcing client settings to safe defaults.");
-        setStringParam('encoder', 'x264enc');
+        const crashKey = `${storageAppName}_crash_count`;
+        let crashCount = parseInt(window.localStorage.getItem(crashKey) || '0');
+        crashCount++;
+        window.localStorage.setItem(crashKey, crashCount.toString());
+        if (crashCount >= 3) {
+            setStringParam('encoder', 'jpeg');
+            window.localStorage.setItem(crashKey, '0');
+        } else {
+            setStringParam('encoder', 'x264enc');
+        }
         setBoolParam('h264_fullcolor', false);
         setIntParam('framerate', 60);
         setIntParam('h264_crf', 25);
