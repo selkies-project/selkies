@@ -1561,6 +1561,7 @@ export class Input {
         if (!this._guac_markEvent(event)) return;
         if (!this.isComposing) return;
         if (browser.isLinux()) {
+            this._updateCompositionText("");
             this.isComposing = false;
             this.compositionString = "";
             return;
