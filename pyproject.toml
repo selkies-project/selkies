@@ -36,6 +36,7 @@ dependencies = [
     "python-xlib @ https://github.com/selkies-project/python-xlib/archive/master.zip",
     "pixelflux",
     "pcmflux",
+    "xkbcommon",
     # PulseAudio Microphone
     "pulsectl",
     "pasimple",
