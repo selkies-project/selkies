@@ -79,6 +79,7 @@ class HeaderExtensions:
     rtp_stream_id: Any = None
     transmission_offset: Optional[int] = None
     transport_sequence_number: Optional[int] = None
+    playout_delay: Any = None
 
 
 class HeaderExtensionsMap:
@@ -106,6 +107,8 @@ class HeaderExtensionsMap:
                 == "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
             ):
                 self.__ids.transport_sequence_number = ext.id
+            elif ext.uri == "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay":
+                self.__ids.playout_delay = ext.id
 
     def get(self, extension_profile: int, extension_value: bytes) -> HeaderExtensions:
         values = HeaderExtensions()
@@ -127,6 +130,11 @@ class HeaderExtensionsMap:
                 values.audio_level = (vad_level & 0x80 == 0x80, vad_level & 0x7F)
             elif x_id == self.__ids.transport_sequence_number:
                 values.transport_sequence_number = unpack("!H", x_value)[0]
+            elif x_id == self.__ids.playout_delay:
+                byte1, byte2, byte3 = struct.unpack('!BBB', x_value)
+                min_value = (byte1 << 4 | byte2 >> 4)
+                max_value = ((byte2 & 0x0F) << 8 | byte3)
+                values.playout_delay = (min_value, max_value)
         return values
 
     def set(self, values: HeaderExtensions) -> tuple[int, bytes]:
@@ -177,6 +185,18 @@ class HeaderExtensionsMap:
                 (
                     self.__ids.transport_sequence_number,
                     pack("!H", values.transport_sequence_number),
+                )
+            )
+        if values.playout_delay is not None and self.__ids.playout_delay:
+            extensions.append(
+                (
+                    self.__ids.playout_delay,
+                    pack(
+                        "!BBB", 
+                        values.playout_delay[0] >> 4,
+                        (((values.playout_delay[0] & 0x0F) << 4) | values.playout_delay[1] >> 8),
+                        values.playout_delay[1] & 0xFF
+                    ),
                 )
             )
         return pack_header_extensions(extensions)

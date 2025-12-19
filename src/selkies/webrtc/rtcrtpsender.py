@@ -430,7 +430,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     packet.extensions.mid = self.__mid
                     if enc_frame.audio_level is not None:
                         packet.extensions.audio_level = (False, -enc_frame.audio_level)
-
+                    # https://webrtc.googlesource.com/src/+/main/docs/native-code/rtp-hdrext/playout-delay/README.md
+                    # set min and max to 0 to hint the receiver to render frames as soon as possible
+                    packet.extensions.playout_delay = (0, 0) 
                     # send packet
                     self.__log_debug("> %s", packet)
                     self.__rtp_history[packet.sequence_number % RTP_HISTORY_SIZE] = (
