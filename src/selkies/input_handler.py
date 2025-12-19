@@ -27,16 +27,32 @@ import socket
 import os
 import base64
 import io
-import re 
+import re
 import json
+from PIL import Image 
 
-import pynput
-from PIL import Image
-import Xlib
-from Xlib import display
-from Xlib import X
-from Xlib import XK
-from Xlib.ext import xfixes, xtest
+try:
+    from xkbcommon import xkb
+except ImportError:
+    xkb = None
+
+try:
+    import pynput
+    import Xlib
+    from Xlib import display
+    from Xlib import X
+    from Xlib import XK
+    from Xlib.ext import xfixes, xtest
+    X11_LIBS_AVAILABLE = True
+except ImportError:
+    X11_LIBS_AVAILABLE = False
+    pynput = None
+    Xlib = None
+    display = None
+    X = None
+    XK = None
+    xfixes = None
+    xtest = None
 import msgpack
 import distro
 
@@ -777,6 +793,7 @@ class WebRTCInput:
         max_cursor_size=32,
         data_server_instance=None,
         upload_dir=None
+        is_wayland=False,
     ):
         self.active_shortcut_modifiers = set()
         self.SHORTCUT_MODIFIER_XKEY_NAMES = {
@@ -847,6 +864,51 @@ class WebRTCInput:
         self.multipart_clipboard_in_progress = False
         self.data_server_instance = data_server_instance
         self.on_update_settings = lambda settings_json: logger_webrtc_input.warning("unhandled update_settings")
+        self.is_wayland = is_wayland
+        self.wayland_input = None
+        self.wayland_scancode_map = {}
+        if self.is_wayland:
+            try:
+                from pixelflux import ScreenCapture
+                self.wayland_input = ScreenCapture()
+                logger_webrtc_input.info("Wayland input injection initialized.")
+                
+                if xkb:
+                    try:
+                        self.xkb_ctx = xkb.Context()
+                        self.xkb_keymap = self.xkb_ctx.keymap_new_from_names()
+                        self._build_wayland_keymap()
+                        logger_webrtc_input.info(f"Built Wayland scancode map with {len(self.wayland_scancode_map)} keys.")
+                    except Exception as e:
+                        logger_webrtc_input.error(f"Failed to build xkb keymap: {e}")
+                else:
+                    logger_webrtc_input.warning("xkbcommon not found. Keyboard input on Wayland may fail.")
+
+            except Exception as e:
+                logger_webrtc_input.error(f"Failed to initialize Wayland input: {e}")
+
+    def _build_wayland_keymap(self):
+        """Builds a reverse mapping from Keysyms to Scancodes using xkbcommon."""
+        if not self.xkb_keymap:
+            return
+        
+        try:
+            self.xkb_keymap = self.xkb_ctx.keymap_new_from_names(
+                rules="evdev", model="pc105", layout="us", variant="", options=""
+            )
+        except Exception as e:
+            logger_webrtc_input.warning(f"Could not force 'us' layout, using default: {e}")
+
+        min_kc = self.xkb_keymap.min_keycode()
+        max_kc = self.xkb_keymap.max_keycode()
+        
+        for kc in range(min_kc, max_kc + 1):
+            for level in range(4):
+                syms = self.xkb_keymap.key_get_syms_by_level(kc, 0, level)
+                if syms:
+                    for sym in syms:
+                        if sym not in self.wayland_scancode_map:
+                            self.wayland_scancode_map[sym] = kc
 
     async def _on_clipboard_read(self, data, mime_type="text/plain"):
         await self.send_clipboard_data(data, mime_type)
@@ -891,7 +953,8 @@ class WebRTCInput:
         if self.uinput_mouse_socket_path:
             logger_webrtc_input.info(f"Connecting to uinput mouse socket: {self.uinput_mouse_socket_path}")
             self.uinput_mouse_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        self.mouse = pynput.mouse.Controller()
+        if not self.is_wayland and pynput:
+            self.mouse = pynput.mouse.Controller()
     def __mouse_disconnect(self):
         if self.mouse: del self.mouse; self.mouse = None
     def __mouse_emit(self, *args, **kwargs):
@@ -958,8 +1021,9 @@ class WebRTCInput:
             gamepad.send_event(client_axis_num, client_axis_val, is_button_event=False)
             
     async def connect(self):
-        try: self.xdisplay = display.Display()
-        except Exception as e: logger_webrtc_input.error(f"Failed to connect to X display: {e}"); self.xdisplay = None
+        if not self.is_wayland and X11_LIBS_AVAILABLE:
+            try: self.xdisplay = display.Display()
+            except Exception as e: logger_webrtc_input.error(f"Failed to connect to X display: {e}"); self.xdisplay = None
         if self.xdisplay:
             try:
                 screen = self.xdisplay.screen()
@@ -977,7 +1041,8 @@ class WebRTCInput:
                 )
             except Exception as e:
                 logger_webrtc_input.warning(f"Could not determine system DPI, using default 96. Error: {e}")
-        self.__keyboard_connect()
+        if not self.is_wayland and X11_LIBS_AVAILABLE:
+            self.__keyboard_connect()
         if self.xdisplay: await self.reset_keyboard()
         self.__mouse_connect()
         
@@ -1028,6 +1093,17 @@ class WebRTCInput:
         if self.xdisplay: self.xdisplay = None
 
     async def reset_keyboard(self):
+        if self.is_wayland:
+            if self.wayland_input:
+                # Release common modifiers
+                modifiers = [65507, 65505, 65513, 65508, 65506, 65027, 65511, 65512] # Ctrl, Shift, Alt, Meta
+                for k in modifiers:
+                    scancode = self.wayland_scancode_map.get(k)
+                    if scancode:
+                        try: self.wayland_input.inject_key(scancode, 0)
+                        except: pass
+            return
+
         if not self.keyboard or not self.xdisplay : 
             logger_webrtc_input.warning("Cannot reset keyboard, X display or keyboard controller not available.")
             return
@@ -1070,6 +1146,23 @@ class WebRTCInput:
                 elif self.mouse: self.mouse.release(btn_uinput_or_pynput)
 
     async def send_x11_keypress(self, keysym, down=True):
+        if self.is_wayland and self.wayland_input:
+            scancode = self.wayland_scancode_map.get(keysym)
+            if scancode is None and (0x20 <= keysym <= 0xFF):
+                try:
+                    lower_sym = ord(chr(keysym).lower())
+                    scancode = self.wayland_scancode_map.get(lower_sym)
+                except: pass
+
+            if scancode:
+                try:
+                    self.wayland_input.inject_key(scancode, 1 if down else 0)
+                except Exception as e:
+                    logger_webrtc_input.warning(f"Failed to inject Wayland key: {e}")
+            else:
+                await self._xdotool_fallback(keysym, down)
+            return
+
         is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
         action = "keydown" if down else "keyup"
         command = None
@@ -1171,8 +1264,25 @@ class WebRTCInput:
                 if not char_for_type_cmd_fallback:
                     try: char_for_type_cmd_fallback = chr(0xA3)
                     except ValueError: pass
-        
+
         if xdotool_key_arg is None:
+            return
+
+        if self.is_wayland:
+            char_to_type = char_for_type_cmd_fallback
+            if not char_to_type and 'keysym_name_from_xlib' in locals() and keysym_name_from_xlib and len(keysym_name_from_xlib) == 1:
+                char_to_type = keysym_name_from_xlib
+            if down and char_to_type:
+                try:
+                    command_wtype = ["wtype", char_to_type]
+                    process_wtype = await subprocess.create_subprocess_exec(
+                        *command_wtype,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    await asyncio.wait_for(process_wtype.communicate(), timeout=1.0)
+                except Exception as e:
+                    logger_webrtc_input.warning(f"wtype fallback failed: {e}")
             return
 
         action = "keydown" if down else "keyup"
@@ -1210,20 +1320,65 @@ class WebRTCInput:
             pass
 
     async def send_x11_mouse(self, x, y, button_mask, scroll_magnitude, relative=False, display_id='primary'):
-        offset_x = 0
-        offset_y = 0
-        if not relative and self.data_server_instance and hasattr(self.data_server_instance, 'display_layouts'):
-            layout = self.data_server_instance.display_layouts.get(display_id)
-            if layout:
-                offset_x = layout.get('x', 0)
-                offset_y = layout.get('y', 0)
-        final_x = x + offset_x
-        final_y = y + offset_y
-        position_changed = (final_x != self.last_x or final_y != self.last_y)
+        if relative:
+            final_x = self.last_x + x
+            final_y = self.last_y + y
+        else:
+            offset_x = 0
+            offset_y = 0
+            if self.data_server_instance and hasattr(self.data_server_instance, 'display_layouts'):
+                layout = self.data_server_instance.display_layouts.get(display_id) 
+                if layout:
+                    offset_x = layout.get('x', 0) 
+                    offset_y = layout.get('y', 0)
+            final_x = x + offset_x
+            final_y = y + offset_y
+
+        self.last_x = final_x
+        self.last_y = final_y
+
+        if self.wayland_input:
+            is_static_relative = relative and (x == 0 and y == 0)
+            
+            if not is_static_relative:
+                self.wayland_input.inject_mouse_move(float(final_x), float(final_y))
+
+            if button_mask != self.button_mask:
+                for bit_index in range(8):
+                    current_button_bit_value = (1 << bit_index)
+                    button_state_changed = ((self.button_mask & current_button_bit_value) != \
+                                            (button_mask & current_button_bit_value))
+
+                    if button_state_changed:
+                        is_pressed_now = (button_mask & current_button_bit_value) != 0
+                        state = 1 if is_pressed_now else 0
+                        mag = float(max(1, scroll_magnitude))
+
+                        if bit_index == 0:
+                            self.wayland_input.inject_mouse_button(272, state)
+                        elif bit_index == 1:
+                            self.wayland_input.inject_mouse_button(274, state)
+                        elif bit_index == 2:
+                            self.wayland_input.inject_mouse_button(273, state)
+                        elif bit_index == 3:
+                            if scroll_magnitude > 0 and is_pressed_now:
+                                self.wayland_input.inject_mouse_scroll(0.0, -10.0 * mag)
+                        elif bit_index == 4:
+                            if scroll_magnitude > 0 and is_pressed_now:
+                                self.wayland_input.inject_mouse_scroll(0.0, 10.0 * mag)
+                        elif bit_index == 6:
+                            if scroll_magnitude > 0 and is_pressed_now:
+                                self.wayland_input.inject_mouse_scroll(-10.0 * mag, 0.0)
+                        elif bit_index == 7:
+                            if scroll_magnitude > 0 and is_pressed_now:
+                                self.wayland_input.inject_mouse_scroll(10.0 * mag, 0.0)
+
+            self.button_mask = button_mask
+            return
 
         if relative:
             self.send_mouse(MOUSE_MOVE, (x, y))
-        elif position_changed:
+        else:
             self.send_mouse(MOUSE_POSITION, (final_x, final_y))
         self.last_x = final_x
         self.last_y = final_y
@@ -1319,8 +1474,55 @@ class WebRTCInput:
             except asyncio.CancelledError:
                 pass
             self.clipboard_monitor_task = asyncio.create_task(self.start_clipboard())
+    def _get_wl_env(self):
+        env = os.environ.copy()
+        env["WAYLAND_DISPLAY"] = "wayland-0"
+        return env
+
     async def read_clipboard(self, use_binary=False):
-        """Reads clipboard, prioritizing image formats if use_binary, otherwise only text."""
+        """Reads clipboard. Supports Wayland (wl-paste) and X11 (xclip)."""
+        if self.is_wayland:
+            try:
+                proc_types = await subprocess.create_subprocess_exec(
+                    "wl-paste", "--list-types",
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=self._get_wl_env()
+                )
+                stdout_types, _ = await asyncio.wait_for(proc_types.communicate(), timeout=1.0)
+                
+                if proc_types.returncode != 0:
+                    return None, None
+
+                available_types = stdout_types.decode().strip().split('\n')
+
+                if use_binary:
+                    image_mimes = ['image/png', 'image/jpeg', 'image/bmp', 'image/webp']
+                    target_mime = next((m for m in image_mimes if m in available_types), None)
+                    if target_mime:
+                        proc_data = await subprocess.create_subprocess_exec(
+                            "wl-paste", "--type", target_mime,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=self._get_wl_env()
+                        )
+                        stdout_data, _ = await asyncio.wait_for(proc_data.communicate(), timeout=2.0)
+                        if proc_data.returncode == 0 and stdout_data:
+                            return stdout_data, target_mime
+                text_mimes = ['text/plain', 'text/plain;charset=utf-8', 'UTF8_STRING', 'STRING']
+                if any(t in available_types for t in text_mimes):
+                    proc_text = await subprocess.create_subprocess_exec(
+                        "wl-paste", "--no-newline", # Ensure exact content
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        env=self._get_wl_env()
+                    )
+                    stdout_text, _ = await asyncio.wait_for(proc_text.communicate(), timeout=1.0)
+                    if proc_text.returncode == 0:
+                        return stdout_text.decode('utf-8', errors='replace'), 'text/plain'
+
+                return None, None
+
+            except Exception as e:
+                logger_webrtc_input.warning(f"Error reading Wayland clipboard: {e}")
+                return None, None
         try:
             proc_targets = await subprocess.create_subprocess_exec(
                 "xclip", "-selection", "clipboard", "-o", "-t", "TARGETS",
@@ -1353,11 +1555,32 @@ class WebRTCInput:
             logger_webrtc_input.warning(f"Error reading clipboard with xclip: {e}")
             return None, None
     async def write_clipboard(self, data, mime_type="text/plain"):
-        """Writes data to the clipboard with a specified MIME type."""
         if not data:
             return True
+        input_bytes = data if isinstance(data, bytes) else data.encode()
+        if self.is_wayland:
+            try:
+                cmd = ["wl-copy", "--type", mime_type]
+                process = await subprocess.create_subprocess_exec(
+                    *cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    env=self._get_wl_env()
+                )
+                if process.stdin:
+                    process.stdin.write(input_bytes)
+                    await process.stdin.drain()
+                    process.stdin.close()
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=2.0)
+                if process.returncode == 0:
+                    return True
+                else:
+                    logger_webrtc_input.warning(f"wl-copy failed code: {process.returncode}, err: {stderr.decode()}")
+                    return False
+            except Exception as e:
+                return False
         try:
-            input_bytes = data if isinstance(data, bytes) else data.encode()
             process = await subprocess.create_subprocess_exec(
                 "xclip", "-selection", "clipboard", "-i", "-t", mime_type,
                 stdin=subprocess.PIPE,
@@ -1414,6 +1637,9 @@ class WebRTCInput:
     def stop_clipboard(self): self.clipboard_running = False; logger_webrtc_input.info("Stopping clipboard monitor")
     
     async def start_cursor_monitor(self):
+        if self.is_wayland:
+            logger_webrtc_input.info("Wayland mode: Cursor monitor disabled (handled by compositor callback).")
+            return
         if not self.xdisplay.has_extension("XFIXES"):
             if self.xdisplay.query_extension("XFIXES") is None:
                 logger_webrtc_input.error(
@@ -1527,17 +1753,16 @@ class WebRTCInput:
                 self.active_modifiers.add(keysym)
             if is_printable and not self.active_modifiers:
                 unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
-                try:
+                try:            
                     char_to_type = chr(unicode_codepoint)
-                    if not char_to_type.isalpha() and char_to_type != ' ':
-                        logger_webrtc_input.debug(f"Handling non-alpha '{char_to_type}' with atomic 'type' to prevent stuck modifiers.")
+                    if not self.is_wayland and (not char_to_type.isalpha() and char_to_type != ' '):
                         await self.on_message(f"co,end,{char_to_type}")
                         self.atomically_typed_keys.add(keysym)
                     else:
                         await self.send_x11_keypress(keysym, down=True)
                 except (ValueError, TypeError):
                     await self.send_x11_keypress(keysym, down=True)
-            else:
+            else:   
                 await self.send_x11_keypress(keysym, down=True)
         elif msg_type == "ku":
             keysym = int(toks[1])
@@ -1724,8 +1949,9 @@ class WebRTCInput:
         elif msg_type == "co" and toks[1] == "end": 
             try:
                 text_to_type = msg[7:]
+                cmd = ["wtype", "--", text_to_type] if self.is_wayland else ["xdotool", "type", text_to_type]
                 process = await subprocess.create_subprocess_exec(
-                    "xdotool", "type", text_to_type,
+                    *cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE
                 )
@@ -1885,8 +2111,17 @@ UINPUT_REL_X = (EV_REL, 0x00) # REL_X
 UINPUT_REL_Y = (EV_REL, 0x01) # REL_Y
 UINPUT_REL_WHEEL = (EV_REL, 0x08) # REL_WHEEL
 
+pynput_left = None
+pynput_middle = None
+pynput_right = None
+
+if pynput is not None:
+    pynput_left = pynput.mouse.Button.left
+    pynput_middle = pynput.mouse.Button.middle
+    pynput_right = pynput.mouse.Button.right
+
 MOUSE_BUTTON_MAP = {
-    MOUSE_BUTTON_LEFT_ID: {"uinput": UINPUT_BTN_LEFT, "pynput": pynput.mouse.Button.left},
-    MOUSE_BUTTON_MIDDLE_ID: {"uinput": UINPUT_BTN_MIDDLE, "pynput": pynput.mouse.Button.middle},
-    MOUSE_BUTTON_RIGHT_ID: {"uinput": UINPUT_BTN_RIGHT, "pynput": pynput.mouse.Button.right},
+    MOUSE_BUTTON_LEFT_ID: {"uinput": UINPUT_BTN_LEFT, "pynput": pynput_left},
+    MOUSE_BUTTON_MIDDLE_ID: {"uinput": UINPUT_BTN_MIDDLE, "pynput": pynput_middle},
+    MOUSE_BUTTON_RIGHT_ID: {"uinput": UINPUT_BTN_RIGHT, "pynput": pynput_right},
 }

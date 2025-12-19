@@ -1,6 +1,7 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
+import os
 
 # Constants
 BACKPRESSURE_ALLOWED_DESYNC_MS = 2000
@@ -27,6 +28,7 @@ AUDIO_CHANNELS_DEFAULT = 2
 AUDIO_BITRATE_DEFAULT = 320000
 GPU_ID_DEFAULT = 0
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "x264enc", "x264enc-striped"]
+IS_WAYLAND = os.environ.get("PIXELFLUX_WAYLAND", "false").lower() == "true"
 
 import logging
 LOGLEVEL = logging.INFO
@@ -46,7 +48,6 @@ import argparse
 import base64
 import ctypes
 import json
-import os
 import pathlib
 import re
 import struct
@@ -54,6 +55,8 @@ from asyncio import subprocess
 import urllib.parse
 import sys
 import time
+import io
+from PIL import Image, ImageDraw
 import websockets
 import websockets.asyncio.server as ws_async
 from aiohttp import web
@@ -232,6 +235,8 @@ def fit_res(w, h, max_w, max_h):
 
 
 async def get_new_res(res_str):
+    if IS_WAYLAND:
+        return res_str, res_str, [res_str], res_str, "Wayland-0"
     screen_name = None
     resolutions = []
     screen_pat = re.compile(r"(\S+) connected")
@@ -286,6 +291,8 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
     Adds a new mode via cvt/gtf if the requested mode doesn't exist,
     using res_str (e.g., "2560x1280") as the mode name for xrandr.
     """
+    if IS_WAYLAND:
+        return True
     _, _, available_resolutions, _, screen_name = await get_new_res(res_str)
 
     if not screen_name:
@@ -694,6 +701,8 @@ async def set_dpi(dpi_setting):
     Sets the display DPI using DE-specific methods based on a defined detection order.
     The dpi_setting is expected to be an integer or a string representing an integer.
     """
+    if IS_WAYLAND:
+        return True
     try:
         dpi_value = int(str(dpi_setting))
         if dpi_value <= 0:
@@ -1155,6 +1164,10 @@ class DataStreamingServer:
 
     async def _start_backpressure_task_if_needed(self, display_id: str):
         """Starts the backpressure task for a specific display if not already running."""
+        # --- Disable for wayland mode ---
+        if IS_WAYLAND:
+            return
+
         display_state = self.display_clients.get(display_id)
         if not display_state:
             data_logger.error(f"Cannot start backpressure task: display '{display_id}' not found.")
@@ -1438,7 +1451,7 @@ class DataStreamingServer:
             if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
                 data_logger.info(f"DPI changed from {old_settings.get('scaling_dpi')} to {new_dpi}. Applying system-level change.")
                 await set_dpi(new_dpi)
-                if CURSOR_SIZE > 0:
+                if CURSOR_SIZE > 0 and not IS_WAYLAND:
                     new_cursor_size = max(1, int(round(int(new_dpi) / 96.0 * CURSOR_SIZE)))
                     await set_cursor_size(new_cursor_size)
             display_state["scaling_dpi"] = new_dpi
@@ -2121,6 +2134,7 @@ class DataStreamingServer:
                                     'h264_paintover_crf': self._initial_h264_paintover_crf,
                                     'h264_paintover_burst_frames': self._initial_h264_paintover_burst_frames,
                                     'use_paint_over_quality': self._initial_use_paint_over_quality,
+                                    'scale': 1.0,
                                 }
                             else:
                                 data_logger.info(f"Client is taking over existing display '{display_id}'. Updating state for new connection.")
@@ -2345,12 +2359,29 @@ class DataStreamingServer:
                         try:
                             dpi_value_str = message.split(",")[1]
                             dpi_value = int(dpi_value_str)
-                            data_logger.info(f"Received DPI setting from client: {dpi_value}")
+                            
+                            # Calculate and store scale for Wayland stack
+                            scale_val = float(dpi_value) / 96.0
+                            if client_display_id and client_display_id in self.display_clients:
+                                self.display_clients[client_display_id]['scale'] = scale_val
+
+                            data_logger.info(f"Received DPI setting from client: {dpi_value} (Scale: {scale_val})")
 
                             if await set_dpi(dpi_value):
                                 data_logger.info(f"Successfully set DPI to {dpi_value}")
                             else:
                                 data_logger.error(f"Failed to set DPI to {dpi_value}")
+
+                            if IS_WAYLAND and client_display_id:
+                                data_logger.info(f"Wayland: Scaling changed to {scale_val}, restarting stream for {client_display_id}...")
+                                await self._stop_capture_for_display(client_display_id)
+                                c_info = self.display_clients[client_display_id]
+                                await self._start_capture_for_display(
+                                    client_display_id, 
+                                    c_info.get('width', 1024), 
+                                    c_info.get('height', 768), 
+                                    0, 0
+                                )
 
                             if CURSOR_SIZE > 0:
                                 calculated_cursor_size = int(round(dpi_value / 96.0 * CURSOR_SIZE))
@@ -2759,12 +2790,12 @@ class DataStreamingServer:
             data_logger.info("Starting display reconfiguration...")
             try:
                 current_display_count = len(self.display_clients)
-                if self._wm_swap_is_supported is None:
+                if not IS_WAYLAND and self._wm_swap_is_supported is None:
                     if which("xfce4-session") or which("startplasma-x11"):
                         self._wm_swap_is_supported = True
                     else:
                         self._wm_swap_is_supported = False
-                if (current_display_count > 1 and self._wm_swap_is_supported and not self._is_wm_swapped):
+                if (not IS_WAYLAND and current_display_count > 1 and self._wm_swap_is_supported and not self._is_wm_swapped):
                     data_logger.info("Multi-monitor setup: switching to Openbox with a minimal config.")
                     config_path = "/tmp/openbox_selkies_config.xml"
                     config_content = "<openbox_config></openbox_config>\n"
@@ -2852,35 +2883,36 @@ class DataStreamingServer:
                     total_width = aligned_total_width
                 self.display_layouts = layouts
                 data_logger.info(f"Layout calculated: Total Size={total_width}x{total_height}. Layouts: {layouts}")
-                _, _, available_resolutions, _, screen_name = await get_new_res("1x1")
-                if not screen_name:
-                    data_logger.error("CRITICAL: Could not determine screen name from xrandr. Aborting.")
-                    return
-                current_monitors = await self._get_current_monitors()
-                for monitor_name in current_monitors:
-                    await self._run_command(["xrandr", "--delmonitor", monitor_name], f"delete old monitor {monitor_name}")
-                total_mode_str = f"{total_width}x{total_height}"
-                if total_mode_str not in available_resolutions:
-                    data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
-                    try:
-                        _, modeline_params = await generate_xrandr_gtf_modeline(total_mode_str)
-                        await self._run_command(["xrandr", "--newmode", total_mode_str] + modeline_params.split(), "create new mode")
-                        await self._run_command(["xrandr", "--addmode", screen_name, total_mode_str], "add new mode")
-                    except Exception as e:
-                        data_logger.error(f"FATAL: Could not create extended mode {total_mode_str}: {e}. Aborting.")
+                if not IS_WAYLAND:
+                    _, _, available_resolutions, _, screen_name = await get_new_res("1x1")
+                    if not screen_name:
+                        data_logger.error("CRITICAL: Could not determine screen name from xrandr. Aborting.")
                         return
-                await self._run_command(["xrandr", "--fb", total_mode_str, "--output", screen_name, "--mode", total_mode_str], "set framebuffer")
-                data_logger.info("Defining logical monitors for the window manager...")
-                for display_id, layout in layouts.items():
-                    geometry = f"{layout['w']}/0x{layout['h']}/0+{layout['x']}+{layout['y']}"
-                    monitor_name = f"selkies-{display_id}"
-                    cmd = ["xrandr", "--setmonitor", monitor_name, geometry, screen_name]
-                    await self._run_command(cmd, f"set logical monitor {monitor_name}")
-                if 'primary' in layouts:
-                    await self._run_command(
-                        ["xrandr", "--output", screen_name, "--primary"],
-                        "set primary output"
-                    )
+                    current_monitors = await self._get_current_monitors()
+                    for monitor_name in current_monitors:
+                        await self._run_command(["xrandr", "--delmonitor", monitor_name], f"delete old monitor {monitor_name}")
+                    total_mode_str = f"{total_width}x{total_height}"
+                    if total_mode_str not in available_resolutions:
+                        data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
+                        try:
+                            _, modeline_params = await generate_xrandr_gtf_modeline(total_mode_str)
+                            await self._run_command(["xrandr", "--newmode", total_mode_str] + modeline_params.split(), "create new mode")
+                            await self._run_command(["xrandr", "--addmode", screen_name, total_mode_str], "add new mode")
+                        except Exception as e:
+                            data_logger.error(f"FATAL: Could not create extended mode {total_mode_str}: {e}. Aborting.")
+                            return
+                    await self._run_command(["xrandr", "--fb", total_mode_str, "--output", screen_name, "--mode", total_mode_str], "set framebuffer")
+                    data_logger.info("Defining logical monitors for the window manager...")
+                    for display_id, layout in layouts.items():
+                        geometry = f"{layout['w']}/0x{layout['h']}/0+{layout['x']}+{layout['y']}"
+                        monitor_name = f"selkies-{display_id}"
+                        cmd = ["xrandr", "--setmonitor", monitor_name, geometry, screen_name]
+                        await self._run_command(cmd, f"set logical monitor {monitor_name}")
+                    if 'primary' in layouts:
+                        await self._run_command(
+                            ["xrandr", "--output", screen_name, "--primary"],
+                            "set primary output"
+                        )
                 data_logger.info("Starting separate capture instances for each ACTIVE display region...")
                 for display_id, layout in layouts.items():
                     client_data = self.display_clients.get(display_id)
@@ -2995,7 +3027,7 @@ class DataStreamingServer:
             encoder_for_this_capture = display_state.get('encoder', self.app.encoder)
 
             def queue_data_for_display(result_ptr, user_data):
-                """Callback from C++ capture library. Adds necessary header for JPEG."""
+                # ... [Existing video callback implementation] ...
                 if not result_ptr:
                     return
                 try:
@@ -3022,11 +3054,62 @@ class DataStreamingServer:
                 except Exception as e:
                     data_logger.error(f"Error in capture callback for {display_id}: {e}", exc_info=False)
 
+            def make_default_cursor_b64(size):
+                im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(im)
+                draw.ellipse((0, 0, size - 1, size - 1), fill=(255, 255, 255, 255))
+                inset = 2
+                draw.ellipse((inset, inset, size - 1 - inset, size - 1 - inset), fill=(0, 0, 0, 255))
+                with io.BytesIO() as f:
+                    im.save(f, "PNG")
+                    png_bytes = f.getvalue()
+                return base64.b64encode(png_bytes).decode('ascii')
+
+            default_cursor_b64 = make_default_cursor_b64(16)
+
+            def wayland_cursor_handler(msg_type, data_bytes, hot_x, hot_y):
+                try:
+                    if msg_type == "hide":
+                        self.app.send_ws_cursor_data({
+                            "curdata": "",
+                            "width": 0, "height": 0,
+                            "hotx": 0, "hoty": 0,
+                            "handle": 0
+                        })
+                    elif msg_type == "png" and data_bytes:
+                        b64_data = base64.b64encode(data_bytes).decode('ascii')
+                        self.app.send_ws_cursor_data({
+                            "curdata": b64_data,
+                            "width": self.cursor_size, 
+                            "height": self.cursor_size,
+                            "hotx": hot_x,
+                            "hoty": hot_y,
+                            "handle": int(time.time() * 1000)
+                        })
+                    elif msg_type == "surface" or (msg_type == "png" and not data_bytes):
+                        center = 16 // 2
+                        self.app.send_ws_cursor_data({
+                            "curdata": default_cursor_b64,
+                            "width": 16,
+                            "height": 16,
+                            "hotx": center,
+                            "hoty": center,
+                            "handle": int(time.time() * 1000)
+                        })
+                except Exception as e:
+                    data_logger.error(f"Error handling wayland cursor: {e}")
+
             queue_size = getattr(self, 'BACKPRESSURE_QUEUE_SIZE', 120)
             self.video_chunk_queues[display_id] = asyncio.Queue(maxsize=queue_size)
             sender_task = asyncio.create_task(self._video_chunk_sender(display_id))
             
             capture_module = ScreenCapture()
+
+            if IS_WAYLAND:
+                if hasattr(capture_module, 'set_cursor_callback'):
+                    capture_module.set_cursor_callback(wayland_cursor_handler)
+                    data_logger.info(f"Registered Wayland cursor callback for '{display_id}'")
+                    wayland_cursor_handler("surface", b"", 0, 0)
 
             await self.capture_loop.run_in_executor(
                 None,
@@ -3059,6 +3142,8 @@ class DataStreamingServer:
         cs.capture_height = height
         cs.capture_x = x
         cs.capture_y = y
+        if IS_WAYLAND:
+            cs.scale = display_state.get('scale', 1.0)
         cs.target_fps = float(display_state.get('framerate', self.app.framerate))
         cs.capture_cursor = self.capture_cursor
         cs.debug_logging = self.cli_args.debug[0]
@@ -3252,11 +3337,15 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
                 current_app_instance.display_width = target_w
                 current_app_instance.display_height = target_h
 
-            logger_gst_app_resize.info(f"Display client '{display_id}' dimensions updated to {target_w}x{target_h}. Triggering reconfiguration.")
-            await data_server_instance.reconfigure_displays()
+            if IS_WAYLAND:
+                logger_gst_app_resize.info(f"Wayland Resize: Updating {display_id} to {target_w}x{target_h} and restarting pipeline.")
+                await data_server_instance._stop_capture_for_display(display_id)
+                await data_server_instance._start_capture_for_display(display_id, target_w, target_h, 0, 0)
+            else:
+                logger_gst_app_resize.info(f"Display client '{display_id}' dimensions updated to {target_w}x{target_h}. Triggering reconfiguration.")
+                await data_server_instance.reconfigure_displays()
         else:
             logger_gst_app_resize.error(f"Cannot resize: display_id '{display_id}' not found in connected clients.")
-
     except ValueError:
         logger_gst_app_resize.error(f"Invalid resolution format in resize request: {res_str}")
     except Exception as e:
@@ -3418,6 +3507,7 @@ async def ws_entrypoint():
         1.0,
         DEBUG_CURSORS,
         data_server_instance=data_server,
+        is_wayland=IS_WAYLAND,
     )
     data_server.input_handler = (
         input_handler
