@@ -1863,13 +1863,16 @@ class WebRTCInput:
                 else:
                     logger_webrtc_input.info(f"Finished multi-part clipboard receive. Total size: {received_size}")
                     data = self.multipart_clipboard_buffer.getvalue()
-                    if self.multipart_clipboard_mime_type == "text/plain":
-                        text_data = data.decode("utf-8", "ignore")
-                        if await self.write_clipboard(text_data):
-                            logger_webrtc_input.info(f"Set multi-part clipboard content, length: {len(text_data)}")
-                    else:
-                        if await self.write_clipboard(data, mime_type=self.multipart_clipboard_mime_type):
-                            logger_webrtc_input.info(f"Set multi-part binary clipboard content ({self.multipart_clipboard_mime_type}), size: {len(data)} bytes")
+                    mime_type = self.multipart_clipboard_mime_type
+                    async def _write_multipart():
+                        if mime_type == "text/plain":
+                            text_data = data.decode("utf-8", "ignore")
+                            if await self.write_clipboard(text_data):
+                                logger_webrtc_input.info(f"Set multi-part clipboard content, length: {len(text_data)}")
+                        else:
+                            if await self.write_clipboard(data, mime_type=mime_type):
+                                logger_webrtc_input.info(f"Set multi-part binary clipboard content ({mime_type}), size: {len(data)} bytes")
+                    asyncio.create_task(_write_multipart())
                 self.multipart_clipboard_buffer = None
                 self.multipart_clipboard_in_progress = False
         elif msg_type == "cr": 
@@ -1884,19 +1887,27 @@ class WebRTCInput:
                 try:
                     _, mime_type, b64_data = toks
                     data_bytes = base64.b64decode(b64_data)
-                    if await self.write_clipboard(data_bytes, mime_type=mime_type):
-                        logger_webrtc_input.info(f"Set binary clipboard content ({mime_type}), size: {len(data_bytes)} bytes")
+                    async def _write_cb():
+                        if await self.write_clipboard(data_bytes, mime_type=mime_type):
+                            logger_webrtc_input.info(f"Set binary clipboard content ({mime_type}), size: {len(data_bytes)} bytes")
+                    asyncio.create_task(_write_cb())
                 except Exception as e:
                     logger_webrtc_input.error(f"Binary clipboard write error: {e}")
             else:
                 logger_webrtc_input.warning("Rejecting binary clipboard write: inbound binary clipboard disabled.")
         elif msg_type == "cw": 
             if self.enable_clipboard in ["true", "in"]:
-                try: data = base64.b64decode(toks[1]).decode("utf-8", 'ignore')
-                except Exception as e: logger_webrtc_input.error(f"Clipboard decode error: {e}"); return
-                if await self.write_clipboard(data):
-                    logger_webrtc_input.info(f"Set clipboard content, length: {len(data)}")
-            else: logger_webrtc_input.warning("Rejecting clipboard write: inbound clipboard disabled.")
+                try: 
+                    data = base64.b64decode(toks[1]).decode("utf-8", 'ignore')
+                    async def _write_cw():
+                        if await self.write_clipboard(data):
+                            logger_webrtc_input.info(f"Set clipboard content, length: {len(data)}")
+                    asyncio.create_task(_write_cw())
+                except Exception as e: 
+                    logger_webrtc_input.error(f"Clipboard decode error: {e}")
+                    return
+            else: 
+                logger_webrtc_input.warning("Rejecting clipboard write: inbound clipboard disabled.")
         elif msg_type == "_arg_fps": self.on_set_fps(int(toks[1]))
         elif msg_type == "_arg_resize":
             if len(toks) == 3:
