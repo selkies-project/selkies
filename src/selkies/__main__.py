@@ -75,6 +75,10 @@ async def create_api_server(manager: StreamSupervisor, host: str, port: int):
 
 	async def handle_switch(request):
 		"""Handles the /switch endpoint."""
+		# Check if dual mode is enabled
+		if not settings.enable_dual_mode[0]:
+			return web.json_response({"error": "Can't switch to the requested mode. Mode switching is disabled."}, status=403)
+
 		data = await request.json()
 		app_name = data.get("mode")
 		logger.info(f"Received request to switch to '{app_name}'.")

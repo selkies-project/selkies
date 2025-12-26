@@ -625,6 +625,7 @@ function Sidebar() {
     newRenderable.enablePlayer2 = s.enable_player2?.value ?? true;
     newRenderable.enablePlayer3 = s.enable_player3?.value ?? true;
     newRenderable.enablePlayer4 = s.enable_player4?.value ?? true;
+    newRenderable.enableDualMode = s.enable_dual_mode?.value ?? false;
 
     newRenderable.videoToggle = isRenderable('video_enabled');
     newRenderable.audioToggle = isRenderable('audio_enabled');
@@ -2340,24 +2341,26 @@ function Sidebar() {
             {sectionsOpen.settings && (
                 // TODO: Change of Stream mode is configurable from server side?
                 <div className="sidebar-section-content" id="settings-content">
-                  <div className="dev-setting-item">
-                  {" "}
-                  <label htmlFor="streamModeSelect">
-                    {t("streamingModeTitle", "Streaming Mode")}
-                  </label>{" "}
-                  <select 
-                    id="streamModeSelect"
-                    value={streamMode}
-                    onChange={handleStreamModeChange}
-                  >
-                    {" "}
-                    {STREAMING_MODES.map((mode) => (
-                      <option key={mode} value={mode}>
-                        {mode}
-                      </option>
-                    ))}{" "}
-                  </select>{" "}
-                </div>
+                  {(renderableSettings.enableDualMode ?? false) && (
+                    <div className="dev-setting-item">
+                      {" "}
+                      <label htmlFor="streamModeSelect">
+                        {t("streamingModeTitle", "Streaming Mode")}
+                      </label>{" "}
+                      <select
+                        id="streamModeSelect"
+                        value={streamMode}
+                        onChange={handleStreamModeChange}
+                      >
+                        {" "}
+                        {STREAMING_MODES.map((mode) => (
+                          <option key={mode} value={mode}>
+                            {mode}
+                          </option>
+                        ))}{" "}
+                      </select>{" "}
+                    </div>
+                  )}
                 {(renderableSettings.encoder ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="encoderSelect">

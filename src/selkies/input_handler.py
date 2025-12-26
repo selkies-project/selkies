@@ -792,7 +792,7 @@ class WebRTCInput:
         cursor_debug=False,
         max_cursor_size=32,
         data_server_instance=None,
-        upload_dir=None
+        upload_dir=None,
         is_wayland=False,
     ):
         self.active_shortcut_modifiers = set()
