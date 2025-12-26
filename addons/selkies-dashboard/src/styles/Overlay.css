@@ -42,6 +42,7 @@
     --notification-progress-fill: var(--sidebar-header-color);
     --notification-success-color: #2ecc71;
     --notification-error-color: #e74c3c;
+    --notification-warn-color: #fae102;
     --notification-shadow: rgba(0, 0, 0, 0.3);
     --notification-close-hover-bg: rgba(255, 255, 255, 0.1);
 }
@@ -78,6 +79,7 @@
     --notification-progress-fill: var(--sidebar-header-color);
     --notification-success-color: #27ae60;
     --notification-error-color: #c0392b;
+    --notification-warn-color: #9b9e00;
     --notification-shadow: rgba(0, 0, 0, 0.15);
     --notification-close-hover-bg: rgba(0, 0, 0, 0.08);
 }
@@ -385,6 +387,7 @@
 
 /* Style for select elements like #encoderSelect.
    Custom arrow SVG for dark theme. */
+.dev-setting-item #streamModeSelect,
 .dev-setting-item #encoderSelect,
 .dev-setting-item #resolutionPresetSelect,
 .dev-setting-item #uiScalingSelect,
@@ -1043,6 +1046,11 @@ body {
 /* Error status text styling. */
 .notification-item.error .notification-status-text.error-text {
     color: var(--notification-error-color);
+    font-weight: bold;
+}
+
+.notification-item.warn .notification-status-text.warn-text {
+    color: var(--notification-warn-color);
     font-weight: bold;
 }
 

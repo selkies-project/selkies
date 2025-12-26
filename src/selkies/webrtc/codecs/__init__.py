@@ -91,6 +91,9 @@ HEADER_EXTENSIONS: dict[str, list[RTCRtpHeaderExtensionParameters]] = {
         RTCRtpHeaderExtensionParameters(
             id=3, uri="http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
         ),
+        RTCRtpHeaderExtensionParameters(
+            id=4, uri="http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"
+        )
     ],
 }
 

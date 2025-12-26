@@ -37,6 +37,7 @@ dependencies = [
     "pixelflux",
     "pcmflux",
     "xkbcommon",
+    "distro",
     # PulseAudio Microphone
     "pulsectl",
     "pasimple",
@@ -50,6 +51,7 @@ dependencies = [
     "pylibsrtp>=0.10.0",
     "pyopenssl>=25.0.0",
     "aiohttp>=3.7.0",
+    "aiofiles>=25.1.0",
 ]
 
 [project.urls]
@@ -58,8 +60,8 @@ Homepage = "https://github.com/selkies-project/selkies"
 
 [project.scripts]
 selkies = "selkies.__main__:main"
-# FIXME
-# selkies-resize = "selkies.resize:entrypoint"
+# FIXME; temporary fix until webrtc if fully integrated
+selkies-resize = "selkies.legacy.resize:entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]
