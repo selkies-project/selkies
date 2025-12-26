@@ -10,12 +10,18 @@ import logging
 from aiohttp import web
 from typing import Dict, Optional, Tuple
 
-from .webrtc_mode import wr_entrypoint
-from .selkies import ws_entrypoint
 from settings import settings_webrtc as settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+async def start_websockets_mode():
+    from .selkies import ws_entrypoint
+    await ws_entrypoint()
+
+async def start_webrtc_mode():
+    from .webrtc_mode import wr_entrypoint
+    await wr_entrypoint()
 
 if __name__ == "__main__" and __package__ is None:
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -120,18 +126,22 @@ async def run():
         return
 
     managed_stream_modes = {
-      "websockets": ws_entrypoint,
-      "webrtc": wr_entrypoint,
+      "websockets": start_websockets_mode,
+      "webrtc": start_webrtc_mode,
     }
 
     manager = StreamSupervisor(managed_stream_modes)
-    api_task = asyncio.create_task(create_api_server(manager, host='localhost', port=8082))
+    api_task = None
+    if settings.enable_dual_mode[0]:
+        api_task = asyncio.create_task(create_api_server(manager, host='localhost', port=8082))
+        logger.info("Dual mode enabled: Supervisor API server started on port 8082")
     await manager.switch_to_mode(mode)
-
     logger.info(f"Starting Selkies in '{mode}' mode.")
-
     try:
-        await api_task
+        if api_task:
+            await api_task
+        elif manager.current_task:
+            await manager.current_task
     except asyncio.CancelledError:
         logger.error("run interrupted, exiting the process")
     except Exception as e:
