@@ -2176,6 +2176,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     } else {
       console.log('Tab is visible, requesting video pipeline start if it was inactive.');
+      if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'x264enc' && currentEncoderMode !== 'x264enc-striped') {
+          console.log('Tab visible: Re-initializing VideoDecoder to recover from background reclamation.');
+          triggerInitializeDecoder(); 
+      }
       if (websocket && websocket.readyState === WebSocket.OPEN) {
         if (!isVideoPipelineActive) {
           websocket.send('START_VIDEO');
@@ -2403,6 +2407,8 @@ function handleDecodedFrame(frame) {
       audioContext = new(window.AudioContext || window.webkitAudioContext)(contextOptions);
       console.log('Playback AudioContext initialized. Actual sampleRate:', audioContext.sampleRate, 'Initial state:', audioContext.state);
       audioContext.onstatechange = () => {
+        if (!audioContext) return; 
+        
         console.log(`Playback AudioContext state changed to: ${audioContext.state}`);
         if (audioContext.state === 'running') {
           applyOutputDevice();
