@@ -1341,8 +1341,14 @@ class WebRTCInput:
             is_static_relative = relative and (x == 0 and y == 0)
             
             if not is_static_relative:
-                self.wayland_input.inject_mouse_move(float(final_x), float(final_y))
-
+                if relative:
+                    if hasattr(self.wayland_input, 'inject_relative_mouse_move'):
+                        self.wayland_input.inject_relative_mouse_move(float(x), float(y))
+                    else:
+                        self.wayland_input.inject_mouse_move(float(final_x), float(final_y))
+                else:
+                    self.wayland_input.inject_mouse_move(float(final_x), float(final_y))
+            
             if button_mask != self.button_mask:
                 for bit_index in range(8):
                     current_button_bit_value = (1 << bit_index)
@@ -1354,18 +1360,35 @@ class WebRTCInput:
                         state = 1 if is_pressed_now else 0
                         mag = float(max(1, scroll_magnitude))
 
-                        if bit_index == 0:
+                        if bit_index == 0: # Left
                             self.wayland_input.inject_mouse_button(272, state)
-                        elif bit_index == 1:
+                        elif bit_index == 1: # Middle
                             self.wayland_input.inject_mouse_button(274, state)
-                        elif bit_index == 2:
+                        elif bit_index == 2: # Right
                             self.wayland_input.inject_mouse_button(273, state)
+                        
                         elif bit_index == 3:
-                            if scroll_magnitude > 0 and is_pressed_now:
-                                self.wayland_input.inject_mouse_scroll(0.0, -10.0 * mag)
+                            if scroll_magnitude > 0: 
+                                if is_pressed_now:
+                                    self.wayland_input.inject_mouse_scroll(0.0, 10.0 * mag)
+                            else:
+                                if is_pressed_now:
+                                    await self.send_x11_keypress(KEYSYM_ALT_L, down=True)
+                                    await self.send_x11_keypress(KEYSYM_LEFT_ARROW, down=True)
+                                    await self.send_x11_keypress(KEYSYM_LEFT_ARROW, down=False)
+                                    await self.send_x11_keypress(KEYSYM_ALT_L, down=False)
+
                         elif bit_index == 4:
-                            if scroll_magnitude > 0 and is_pressed_now:
-                                self.wayland_input.inject_mouse_scroll(0.0, 10.0 * mag)
+                            if scroll_magnitude > 0:
+                                if is_pressed_now:
+                                    self.wayland_input.inject_mouse_scroll(0.0, -10.0 * mag)
+                            else:
+                                if is_pressed_now:
+                                    await self.send_x11_keypress(KEYSYM_ALT_L, down=True)
+                                    await self.send_x11_keypress(KEYSYM_RIGHT_ARROW, down=True)
+                                    await self.send_x11_keypress(KEYSYM_RIGHT_ARROW, down=False)
+                                    await self.send_x11_keypress(KEYSYM_ALT_L, down=False)
+
                         elif bit_index == 6:
                             if scroll_magnitude > 0 and is_pressed_now:
                                 self.wayland_input.inject_mouse_scroll(-10.0 * mag, 0.0)
@@ -1375,16 +1398,14 @@ class WebRTCInput:
 
             self.button_mask = button_mask
             return
-
         if relative:
             self.send_mouse(MOUSE_MOVE, (x, y))
         else:
             self.send_mouse(MOUSE_POSITION, (final_x, final_y))
         self.last_x = final_x
         self.last_y = final_y
-
         if button_mask != self.button_mask:
-            for bit_index in range(8): # Check bits 0 through 7
+            for bit_index in range(8):
                 current_button_bit_value = (1 << bit_index)
                 button_state_changed = ((self.button_mask & current_button_bit_value) != \
                                         (button_mask & current_button_bit_value))
@@ -1395,25 +1416,25 @@ class WebRTCInput:
                     action_to_send = None
                     data_to_send = None
                     is_scroll_action = False
-                    performed_keyboard_combo = False # Flag to skip mouse event sending
+                    performed_keyboard_combo = False 
 
-                    if bit_index == 0: # Left button
+                    if bit_index == 0:
                         action_to_send = MOUSE_BUTTON
                         data_to_send = (MOUSE_BUTTON_PRESS if is_pressed_now else MOUSE_BUTTON_RELEASE, MOUSE_BUTTON_LEFT_ID)
-                    elif bit_index == 1: # Middle button
+                    elif bit_index == 1:
                         action_to_send = MOUSE_BUTTON
                         data_to_send = (MOUSE_BUTTON_PRESS if is_pressed_now else MOUSE_BUTTON_RELEASE, MOUSE_BUTTON_MIDDLE_ID)
-                    elif bit_index == 2: # Right button
+                    elif bit_index == 2:
                         action_to_send = MOUSE_BUTTON
                         data_to_send = (MOUSE_BUTTON_PRESS if is_pressed_now else MOUSE_BUTTON_RELEASE, MOUSE_BUTTON_RIGHT_ID)
                     
-                    elif bit_index == 3: # Client's Back button (mask 8) OR Scroll Up
-                        if scroll_magnitude > 0: # It's an actual scroll down event
+                    elif bit_index == 3:
+                        if scroll_magnitude > 0:
                             if is_pressed_now:
                                 action_to_send = MOUSE_SCROLL_UP
                                 is_scroll_action = True
-                        else: # scroll_magnitude is 0, so it's a "Back" action via Alt+Left
-                            if is_pressed_now: # Trigger on press
+                        else:
+                            if is_pressed_now:
                                 if self.keyboard:
                                     logger_webrtc_input.debug("Sending Alt+Left Arrow for Back")
                                     await self.send_x11_keypress(KEYSYM_ALT_L, down=True)
@@ -1423,13 +1444,13 @@ class WebRTCInput:
                                     performed_keyboard_combo = True
                                 else:
                                     logger_webrtc_input.warning("Keyboard not available for Alt+Left.")
-                    elif bit_index == 4: # Client's Forward button (mask 16) OR Scroll Down
-                        if scroll_magnitude > 0: # It's an actual scroll up event
+                    elif bit_index == 4:
+                        if scroll_magnitude > 0:
                             if is_pressed_now:
                                 action_to_send = MOUSE_SCROLL_DOWN
                                 is_scroll_action = True
-                        else: # scroll_magnitude is 0, so it's a "Forward" action via Alt+Right
-                            if is_pressed_now: # Trigger on press
+                        else:
+                            if is_pressed_now:
                                 if self.keyboard:
                                     logger_webrtc_input.debug("Sending Alt+Right Arrow for Forward")
                                     await self.send_x11_keypress(KEYSYM_ALT_L, down=True)
@@ -1447,12 +1468,11 @@ class WebRTCInput:
                         if scroll_magnitude > 0 and is_pressed_now:
                             action_to_send = MOUSE_SCROLL_RIGHT
                             is_scroll_action = True
-                    # Send the determined MOUSE action (if any and no keyboard combo was done)
                     if not performed_keyboard_combo and action_to_send is not None:
                         if is_scroll_action:
                             for _ in range(max(1, scroll_magnitude)):
                                 self.send_mouse(action_to_send, None)
-                        else: # Regular button action
+                        else:
                             self.send_mouse(action_to_send, data_to_send)
                 
             self.button_mask = button_mask

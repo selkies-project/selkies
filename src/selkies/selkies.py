@@ -3027,7 +3027,6 @@ class DataStreamingServer:
             encoder_for_this_capture = display_state.get('encoder', self.app.encoder)
 
             def queue_data_for_display(result_ptr, user_data):
-                # ... [Existing video callback implementation] ...
                 if not result_ptr:
                     return
                 try:
@@ -3054,22 +3053,9 @@ class DataStreamingServer:
                 except Exception as e:
                     data_logger.error(f"Error in capture callback for {display_id}: {e}", exc_info=False)
 
-            def make_default_cursor_b64(size):
-                im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-                draw = ImageDraw.Draw(im)
-                draw.ellipse((0, 0, size - 1, size - 1), fill=(255, 255, 255, 255))
-                inset = 2
-                draw.ellipse((inset, inset, size - 1 - inset, size - 1 - inset), fill=(0, 0, 0, 255))
-                with io.BytesIO() as f:
-                    im.save(f, "PNG")
-                    png_bytes = f.getvalue()
-                return base64.b64encode(png_bytes).decode('ascii')
-
-            default_cursor_b64 = make_default_cursor_b64(16)
-
             def wayland_cursor_handler(msg_type, data_bytes, hot_x, hot_y):
                 try:
-                    if msg_type == "hide":
+                    if msg_type == "hide" or not data_bytes:
                         self.app.send_ws_cursor_data({
                             "curdata": "",
                             "width": 0, "height": 0,
@@ -3084,16 +3070,6 @@ class DataStreamingServer:
                             "height": self.cursor_size,
                             "hotx": hot_x,
                             "hoty": hot_y,
-                            "handle": int(time.time() * 1000)
-                        })
-                    elif msg_type == "surface" or (msg_type == "png" and not data_bytes):
-                        center = 16 // 2
-                        self.app.send_ws_cursor_data({
-                            "curdata": default_cursor_b64,
-                            "width": 16,
-                            "height": 16,
-                            "hotx": center,
-                            "hoty": center,
                             "handle": int(time.time() * 1000)
                         })
                 except Exception as e:

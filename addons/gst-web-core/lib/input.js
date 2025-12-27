@@ -1644,6 +1644,9 @@ export class Input {
         let canvas = document.getElementById('videoCanvas');
         let videoEle = document.getElementById("stream");
         if (event.type === 'mousedown' || event.type === 'mouseup' || event.type === 'pointerdown' || event.type === 'pointerup' || event.type === 'pointercancel') {
+            if (event.button === 1) { 
+                event.preventDefault(); 
+            } 
             if (event.button === 3) {
                 event.preventDefault();
             } else if (event.button === 4) {
