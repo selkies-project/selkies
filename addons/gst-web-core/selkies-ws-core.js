@@ -4377,6 +4377,10 @@ function performServerInitiatedVideoReset(reason = "unknown") {
 }
 
 function initiateFallback(error, context) {
+    if (error.name === 'QuotaExceededError' || (error.message && error.message.includes('reclaimed'))) {
+        console.warn(`[initiateFallback] Ignoring soft error (Context: ${context}): Codec reclaimed by browser. Waiting for tab focus to re-initialize.`);
+        return; 
+    }
     console.error(`FATAL DECODER ERROR (Context: ${context}).`, error);
     if (window.isFallingBack) return;
     window.isFallingBack = true;
