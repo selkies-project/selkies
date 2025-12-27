@@ -1441,7 +1441,11 @@ class DataStreamingServer:
             display_state["use_paint_over_quality"] = sanitize_value("use_paint_over_quality", settings.get("use_paint_over_quality"))
             display_state["h264_paintover_crf"] = sanitize_value("h264_paintover_crf", settings.get("h264_paintover_crf"))
             display_state["h264_paintover_burst_frames"] = sanitize_value("h264_paintover_burst_frames", settings.get("h264_paintover_burst_frames"))
-            display_state["use_cpu"] = sanitize_value("use_cpu", settings.get("use_cpu"))
+            if display_state["encoder"] in ["jpeg", "x264enc-striped"]:
+                display_state["use_cpu"] = True
+                data_logger.info(f"Forcing use_cpu=True because encoder is '{display_state['encoder']}'")
+            else:
+                display_state["use_cpu"] = sanitize_value("use_cpu", settings.get("use_cpu"))
             self.app.audio_bitrate = sanitize_value("audio_bitrate", settings.get("audio_bitrate"))
             display_state["audio_bitrate"] = self.app.audio_bitrate
             if self.input_handler:
