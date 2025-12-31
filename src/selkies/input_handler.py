@@ -1220,6 +1220,51 @@ class WebRTCInput:
                 await self._xdotool_fallback(keysym, down)
 
     async def _xdotool_fallback(self, keysym_number, down=True):
+        if self.is_wayland:
+            if not down:
+                return
+            char_to_type = None
+            if (keysym_number & 0xFF000000) == 0x01000000:
+                unicode_codepoint = keysym_number & 0x00FFFFFF
+                if 0 <= unicode_codepoint <= 0x10FFFF:
+                    try:
+                        char_to_type = chr(unicode_codepoint)
+                    except ValueError:
+                        pass
+            else:
+                keysym_name = None
+                if XK is not None:
+                    try:
+                        keysym_name = XK.keysym_to_string(keysym_number)
+                    except Exception:
+                        pass
+                
+                if keysym_name is None:
+                    if 0x20 <= keysym_number <= 0x7E or keysym_number >= 0xA0:
+                        try:
+                            char_to_type = chr(keysym_number)
+                        except ValueError:
+                            pass
+                else:
+                    if len(keysym_name) == 1:
+                        char_to_type = keysym_name
+                    elif keysym_number == 0x00a3:
+                        char_to_type = "£"
+            if char_to_type:
+                try:
+                    command_wtype = ["wtype", char_to_type]
+                    process_wtype = await subprocess.create_subprocess_exec(
+                        *command_wtype,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        env=self._get_wl_env()
+                    )
+                    await asyncio.wait_for(process_wtype.communicate(), timeout=1.0)
+                except Exception as e:
+                    logger_webrtc_input.warning(f"wtype fallback failed: {e}")
+            
+            return
+
         if not self.xdisplay:
             return
 
@@ -1237,7 +1282,6 @@ class WebRTCInput:
             else:
                 return
         else:
-            # Assuming XK is available (e.g., from Xlib.XK)
             keysym_name_from_xlib = XK.keysym_to_string(keysym_number)
 
             if keysym_name_from_xlib is None:
@@ -1266,23 +1310,6 @@ class WebRTCInput:
                     except ValueError: pass
 
         if xdotool_key_arg is None:
-            return
-
-        if self.is_wayland:
-            char_to_type = char_for_type_cmd_fallback
-            if not char_to_type and 'keysym_name_from_xlib' in locals() and keysym_name_from_xlib and len(keysym_name_from_xlib) == 1:
-                char_to_type = keysym_name_from_xlib
-            if down and char_to_type:
-                try:
-                    command_wtype = ["wtype", char_to_type]
-                    process_wtype = await subprocess.create_subprocess_exec(
-                        *command_wtype,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                    await asyncio.wait_for(process_wtype.communicate(), timeout=1.0)
-                except Exception as e:
-                    logger_webrtc_input.warning(f"wtype fallback failed: {e}")
             return
 
         action = "keydown" if down else "keyup"
