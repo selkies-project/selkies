@@ -1361,6 +1361,7 @@ class WebRTCInput:
             final_x = x + offset_x
             final_y = y + offset_y
 
+        position_changed = (final_x != self.last_x or final_y != self.last_y)
         self.last_x = final_x
         self.last_y = final_y
 
@@ -1427,7 +1428,7 @@ class WebRTCInput:
             return
         if relative:
             self.send_mouse(MOUSE_MOVE, (x, y))
-        else:
+        elif position_changed:
             self.send_mouse(MOUSE_POSITION, (final_x, final_y))
         self.last_x = final_x
         self.last_y = final_y
