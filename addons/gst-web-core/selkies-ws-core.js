@@ -1956,6 +1956,10 @@ function handleSettingsMessage(settings) {
     scalingDPI = parseInt(settings.scaling_dpi, 10);
     setIntParam('scaling_dpi', scalingDPI);
     settingsChanged = true;
+    if (websocket && websocket.readyState === WebSocket.OPEN) {
+        console.log(`[websockets] Sending explicit DPI command: s,${scalingDPI}`);
+        websocket.send(`s,${scalingDPI}`);
+    }
   }
   if (settings.enable_binary_clipboard !== undefined) {
     enable_binary_clipboard = !!settings.enable_binary_clipboard;
