@@ -236,7 +236,8 @@ def fit_res(w, h, max_w, max_h):
 
 async def get_new_res(res_str):
     if IS_WAYLAND:
-        return res_str, res_str, [res_str], res_str, "Wayland-0"
+        wl_idx = getattr(settings, 'wayland_socket_index', 0)
+        return res_str, res_str, [res_str], res_str, f"Wayland-{wl_idx}"
     screen_name = None
     resolutions = []
     screen_pat = re.compile(r"(\S+) connected")
@@ -1452,12 +1453,30 @@ class DataStreamingServer:
                 self.enable_binary_clipboard = sanitize_value("enable_binary_clipboard", settings.get("enable_binary_clipboard"))
                 await self.input_handler.update_binary_clipboard_setting(self.enable_binary_clipboard)
             new_dpi = sanitize_value("scaling_dpi", settings.get("scaling_dpi"))
+            new_dpi = sanitize_value("scaling_dpi", settings.get("scaling_dpi"))
             if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
                 data_logger.info(f"DPI changed from {old_settings.get('scaling_dpi')} to {new_dpi}. Applying system-level change.")
                 await set_dpi(new_dpi)
                 if CURSOR_SIZE > 0 and not IS_WAYLAND:
                     new_cursor_size = max(1, int(round(int(new_dpi) / 96.0 * CURSOR_SIZE)))
                     await set_cursor_size(new_cursor_size)
+               
+                if IS_WAYLAND and which("wlr-randr") and display_id == 'primary':
+                    scale_val = float(new_dpi) / 96.0
+                    cmd = ["wlr-randr", "--output", "WL-1", "--scale", str(scale_val)]
+                    env = os.environ.copy()
+                    wl_idx = getattr(self.cli_args, 'wayland_socket_index', 0)
+                    env["WAYLAND_DISPLAY"] = f"wayland-{wl_idx}"
+                    data_logger.info(f"Wayland Settings: Executing '{' '.join(cmd)}' on wayland-{wl_idx}")
+                    try: 
+                        proc = await asyncio.create_subprocess_exec(
+                            *cmd, env=env,
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                        )
+                        await proc.communicate()
+                    except Exception as e:
+                        data_logger.error(f"Failed to execute wlr-randr in settings apply: {e}")
+
             display_state["scaling_dpi"] = new_dpi
             dimensional_change = resolution_actually_changed or position_actually_changed
             video_params_changed = any(
@@ -2377,15 +2396,29 @@ class DataStreamingServer:
                                 data_logger.error(f"Failed to set DPI to {dpi_value}")
 
                             if IS_WAYLAND and client_display_id:
-                                data_logger.info(f"Wayland: Scaling changed to {scale_val}, restarting stream for {client_display_id}...")
-                                await self._stop_capture_for_display(client_display_id)
-                                c_info = self.display_clients[client_display_id]
-                                await self._start_capture_for_display(
-                                    client_display_id, 
-                                    c_info.get('width', 1024), 
-                                    c_info.get('height', 768), 
-                                    0, 0
-                                )
+                                if which("wlr-randr"):
+                                    output_name = "WL-1"
+                                    cmd = ["wlr-randr", "--output", output_name, "--scale", str(scale_val)]
+                                    env = os.environ.copy()
+                                    wl_idx = getattr(self.cli_args, 'wayland_socket_index', 0)
+                                    env["WAYLAND_DISPLAY"] = f"wayland-{wl_idx}"
+                                    data_logger.info(f"Wayland: Executing '{' '.join(cmd)}' on wayland-{wl_idx}.")
+                                    try:
+                                        proc = await asyncio.create_subprocess_exec(
+                                            *cmd,
+                                            env=env,
+                                            stdout=asyncio.subprocess.PIPE,
+                                            stderr=asyncio.subprocess.PIPE
+                                        )
+                                        stdout, stderr = await proc.communicate()
+                                        if proc.returncode != 0:
+                                            data_logger.error(f"wlr-randr failed: {stderr.decode().strip()}")
+                                        else:
+                                            data_logger.info(f"wlr-randr success: {stdout.decode().strip()}")
+                                    except Exception as e:
+                                        data_logger.error(f"Failed to execute wlr-randr: {e}")
+                                else:
+                                    data_logger.warning("Wayland scaling requested but 'wlr-randr' binary not found.")
 
                             if CURSOR_SIZE > 0:
                                 calculated_cursor_size = int(round(dpi_value / 96.0 * CURSOR_SIZE))
@@ -3488,6 +3521,7 @@ async def ws_entrypoint():
         DEBUG_CURSORS,
         data_server_instance=data_server,
         is_wayland=IS_WAYLAND,
+        wayland_socket_index=settings.wayland_socket_index,
     )
     data_server.input_handler = (
         input_handler

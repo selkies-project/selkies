@@ -794,7 +794,9 @@ class WebRTCInput:
         data_server_instance=None,
         upload_dir=None,
         is_wayland=False,
+        wayland_socket_index=0,
     ):
+        self.wayland_socket_index = wayland_socket_index
         self.active_shortcut_modifiers = set()
         self.SHORTCUT_MODIFIER_XKEY_NAMES = {
             'Control_L', 'Control_R', 
@@ -1524,7 +1526,7 @@ class WebRTCInput:
             self.clipboard_monitor_task = asyncio.create_task(self.start_clipboard())
     def _get_wl_env(self):
         env = os.environ.copy()
-        env["WAYLAND_DISPLAY"] = "wayland-0"
+        env["WAYLAND_DISPLAY"] = f"wayland-{self.wayland_socket_index}"
         return env
 
     async def read_clipboard(self, use_binary=False):

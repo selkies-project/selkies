@@ -113,6 +113,7 @@ SETTING_DEFINITIONS_WEBSOCKETS = [
     {'name': 'audio_device_name', 'type': 'str', 'default': 'output.monitor', 'help': 'Audio device name for pcmflux capture.'},
     {'name': 'watermark_path', 'type': 'str', 'default': '', 'env_var': 'WATERMARK_PNG', 'help': 'Absolute path to the watermark PNG file.'},
     {'name': 'watermark_location', 'type': 'int', 'default': -1, 'env_var': 'WATERMARK_LOCATION', 'help': 'Watermark location enum (0-6).'},
+    {'name': 'wayland_socket_index', 'type': 'int', 'default': 0, 'help': 'Index for the Wayland command socket (e.g. 0 for wayland-0).'},
 ]
 
 SETTING_DEFINITIONS_WEBRTC = [

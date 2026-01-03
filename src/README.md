@@ -226,6 +226,7 @@ The table below lists all available server settings.
 | `SELKIES_WATERMARK_PATH` (or `WATERMARK_PNG`) | `--watermark-path` | `''` | Absolute path to the watermark PNG file. |
 | `SELKIES_WATERMARK_LOCATION` (or `WATERMARK_LOCATION`) | `--watermark-location` | `-1` | Watermark location enum (0-6). |
 | `SELKIES_DEBUG` | `--debug` | `False` | Enable debug logging. |
+| `SELKIES_WAYLAND_SOCKET_INDEX` | `--wayland-socket-index` | `0` | Index for the Wayland command socket (e.g. 0 for wayland-0). |
 | `SELKIES_ENABLE_SHARING` | `--enable-sharing` | `True` | Master toggle for all sharing features. |
 | `SELKIES_ENABLE_COLLAB` | `--enable-collab` | `True` | Enable collaborative (read-write) sharing link. |
 | `SELKIES_ENABLE_SHARED` | `--enable-shared` | `True` | Enable view-only sharing links. |
