@@ -604,8 +604,8 @@ function getCurrentSettingsPayload() {
     settingsToSend['enable_binary_clipboard'] = getBoolParam('enable_binary_clipboard', false);
     if (window.is_manual_resolution_mode && manual_width != null && manual_height != null) {
         settingsToSend['is_manual_resolution_mode'] = true;
-        settingsToSend['manual_width'] = roundDownToEven(manual_width * dpr);
-        settingsToSend['manual_height'] = roundDownToEven(manual_height * dpr);
+        settingsToSend['manual_width'] = roundDownToEven(manual_width);
+        settingsToSend['manual_height'] = roundDownToEven(manual_height);
     } else {
         const videoContainer = document.querySelector('.video-container');
         const rect = videoContainer ? videoContainer.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
@@ -2733,8 +2733,8 @@ function handleDecodedFrame(frame) {
 
       if (is_manual_resolution_mode && manual_width != null && manual_height != null) {
         settingsToSend['is_manual_resolution_mode'] = true;
-        settingsToSend['manual_width'] = roundDownToEven(manual_width * dpr);
-        settingsToSend['manual_height'] = roundDownToEven(manual_height * dpr);
+        settingsToSend['manual_width'] = roundDownToEven(manual_width);
+        settingsToSend['manual_height'] = roundDownToEven(manual_height);
       } else {
         const videoContainer = document.querySelector('.video-container');
         const rect = videoContainer ? videoContainer.getBoundingClientRect() : {
@@ -2745,7 +2745,7 @@ function handleDecodedFrame(frame) {
         settingsToSend['initialClientWidth'] = roundDownToEven(rect.width * dpr);
         settingsToSend['initialClientHeight'] = roundDownToEven(rect.height * dpr);
       }
-      
+ 
       settingsToSend['useCssScaling'] = useCssScaling;
       settingsToSend['displayId'] = displayId;
       if (displayId === 'display2') {
@@ -3400,18 +3400,26 @@ function handleDecodedFrame(frame) {
                   console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
                   handleSettingsMessage(changes);
               }
-              if (obj.settings && obj.settings.is_manual_resolution_mode && obj.settings.is_manual_resolution_mode.value === true) {
-                  console.log("Server settings payload confirms manual mode. Switching to manual resize handlers.");
-                  const serverWidth = obj.settings.manual_width ? parseInt(obj.settings.manual_width.value, 10) : 0;
-                  const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value, 10) : 0;
-                  if (serverWidth > 0 && serverHeight > 0) {
-                      console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
-                      window.is_manual_resolution_mode = true;
-                      manual_width = serverWidth;
-                      manual_height = serverHeight;
-                      applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
+              const serverForcesManual = obj.settings && obj.settings.is_manual_resolution_mode && obj.settings.is_manual_resolution_mode.value === true;
+
+              if (serverForcesManual || window.is_manual_resolution_mode) {
+                  console.log(`Manual resolution mode active (Server forced: ${serverForcesManual}, Client pref: ${window.is_manual_resolution_mode}). Switching to manual resize handlers.`);
+                  if (serverForcesManual) {
+                      const serverWidth = obj.settings.manual_width ? parseInt(obj.settings.manual_width.value, 10) : 0;
+                      const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value, 10) : 0;
+                      if (serverWidth > 0 && serverHeight > 0) {
+                          console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
+                          window.is_manual_resolution_mode = true;
+                          manual_width = serverWidth;
+                          manual_height = serverHeight;
+                          applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
+                      } else {
+                          console.warn("Server dictated manual mode but did not provide valid dimensions.");
+                      }
                   } else {
-                      console.warn("Server dictated manual mode but did not provide valid dimensions.");
+                      if (manual_width && manual_height) {
+                          applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
+                      }
                   }
                   disableAutoResize();
               } else {

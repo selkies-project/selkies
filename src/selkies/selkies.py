@@ -3352,6 +3352,11 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
 
             if IS_WAYLAND:
                 logger_gst_app_resize.info(f"Wayland Resize: Updating {display_id} to {target_w}x{target_h} and restarting pipeline.")
+                if data_server_instance and hasattr(data_server_instance, 'display_layouts'):
+                    if display_id in data_server_instance.display_layouts:
+                        data_server_instance.display_layouts[display_id]['w'] = target_w
+                        data_server_instance.display_layouts[display_id]['h'] = target_h
+
                 await data_server_instance._stop_capture_for_display(display_id)
                 await data_server_instance._start_capture_for_display(display_id, target_w, target_h, 0, 0)
             else:
