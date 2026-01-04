@@ -377,7 +377,14 @@ is_manual_resolution_mode = getBoolParam('is_manual_resolution_mode', false);
 isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
 useCssScaling = getBoolParam('useCssScaling', false);
 trackpadMode = getBoolParam('trackpadMode', false);
-scalingDPI = getIntParam('scaling_dpi', 96);
+if (getStringParam('scaling_dpi', null) === null) {
+  const dpr = window.devicePixelRatio || 1;
+  const target = Math.round(dpr * 4) * 24;
+  const presets = [120, 144, 168, 192, 216, 240, 288];
+  scalingDPI = (dpr > 1 && presets.includes(target)) ? target : 96;
+} else {
+  scalingDPI = getIntParam('scaling_dpi', 96);
+}
 antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 use_browser_cursors = getBoolParam('use_browser_cursors', false);
 if (displayId === 'display2') {
