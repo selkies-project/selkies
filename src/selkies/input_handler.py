@@ -869,7 +869,14 @@ class WebRTCInput:
         self.is_wayland = is_wayland
         self.wayland_input = None
         self.wayland_scancode_map = {}
+        self.use_hex_fallback = False
+
         if self.is_wayland:
+            import shutil
+            if shutil.which("kwin_wayland"):
+                self.use_hex_fallback = True
+                logger_webrtc_input.info("kwin_wayland detected: enabling Hex-Input fallback for Unicode.")
+
             try:
                 from pixelflux import ScreenCapture
                 self.wayland_input = ScreenCapture()
@@ -1253,6 +1260,14 @@ class WebRTCInput:
                     elif keysym_number == 0x00a3:
                         char_to_type = "£"
             if char_to_type:
+                if self.use_hex_fallback:
+                    try:
+                        hex_str = f"{ord(char_to_type):x}"
+                        await self._inject_unicode_via_hex(hex_str)
+                    except Exception as e:
+                        logger_webrtc_input.warning(f"Hex fallback failed: {e}")
+                    return
+
                 try:
                     command_wtype = ["wtype", char_to_type]
                     process_wtype = await subprocess.create_subprocess_exec(
@@ -1347,6 +1362,27 @@ class WebRTCInput:
                         pass
         except (FileNotFoundError, asyncio.TimeoutError, Exception):
             pass
+
+    async def _inject_unicode_via_hex(self, hex_str):
+        KEY_CTRL_L  = 0xFFE3
+        KEY_SHIFT_L = 0xFFE1
+        KEY_U       = 0x0075
+        KEY_ENTER   = 0xFF0D
+
+        await self.send_x11_keypress(KEY_CTRL_L, down=True)
+        await self.send_x11_keypress(KEY_SHIFT_L, down=True)
+        await self.send_x11_keypress(KEY_U, down=True)
+        await self.send_x11_keypress(KEY_U, down=False)
+        await self.send_x11_keypress(KEY_SHIFT_L, down=False)
+        await self.send_x11_keypress(KEY_CTRL_L, down=False)
+
+        for char in hex_str:
+            keysym = ord(char)
+            await self.send_x11_keypress(keysym, down=True)
+            await self.send_x11_keypress(keysym, down=False)
+
+        await self.send_x11_keypress(KEY_ENTER, down=True)
+        await self.send_x11_keypress(KEY_ENTER, down=False)
 
     async def send_x11_mouse(self, x, y, button_mask, scroll_magnitude, relative=False, display_id='primary'):
         if relative:
