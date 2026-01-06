@@ -1453,7 +1453,6 @@ class DataStreamingServer:
                 self.enable_binary_clipboard = sanitize_value("enable_binary_clipboard", settings.get("enable_binary_clipboard"))
                 await self.input_handler.update_binary_clipboard_setting(self.enable_binary_clipboard)
             new_dpi = sanitize_value("scaling_dpi", settings.get("scaling_dpi"))
-            new_dpi = sanitize_value("scaling_dpi", settings.get("scaling_dpi"))
             if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
                 data_logger.info(f"DPI changed from {old_settings.get('scaling_dpi')} to {new_dpi}. Applying system-level change.")
                 await set_dpi(new_dpi)
@@ -1461,31 +1460,39 @@ class DataStreamingServer:
                     new_cursor_size = max(1, int(round(int(new_dpi) / 96.0 * CURSOR_SIZE)))
                     await set_cursor_size(new_cursor_size)
                
-                if IS_WAYLAND and which("wlr-randr") and display_id == 'primary':
+                if IS_WAYLAND:
                     scale_val = float(new_dpi) / 96.0
-                    cmd = ["wlr-randr", "--output", "WL-1", "--scale", str(scale_val)]
-                    env = os.environ.copy()
-                    wl_idx = getattr(self.cli_args, 'wayland_socket_index', 0)
-                    env["WAYLAND_DISPLAY"] = f"wayland-{wl_idx}"
-                    data_logger.info(f"Wayland Settings: Executing '{' '.join(cmd)}' on wayland-{wl_idx}")
-                    try: 
-                        proc = await asyncio.create_subprocess_exec(
-                            *cmd, env=env,
-                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                        )
-                        await proc.communicate()
-                    except Exception as e:
-                        data_logger.error(f"Failed to execute wlr-randr in settings apply: {e}")
+                    if which("kwin_wayland"):
+                        display_state['scale'] = scale_val
+                    elif which("wlr-randr") and display_id == 'primary':
+                        cmd = ["wlr-randr", "--output", "WL-1", "--scale", str(scale_val)]
+                        env = os.environ.copy()
+                        wl_idx = getattr(self.cli_args, 'wayland_socket_index', 0)
+                        env["WAYLAND_DISPLAY"] = f"wayland-{wl_idx}"
+                        data_logger.info(f"Wayland Settings: Executing '{' '.join(cmd)}' on wayland-{wl_idx}")
+                        try: 
+                            proc = await asyncio.create_subprocess_exec(
+                                *cmd, env=env,
+                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                            )
+                            await proc.communicate()
+                        except Exception as e:
+                            data_logger.error(f"Failed to execute wlr-randr in settings apply: {e}")
 
             display_state["scaling_dpi"] = new_dpi
             dimensional_change = resolution_actually_changed or position_actually_changed
+
+            video_params_list = [
+                'encoder', 'framerate', 'h264_crf', 'h264_fullcolor', 'h264_streaming_mode',
+                'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'h264_paintover_crf',
+                'h264_paintover_burst_frames', 'use_paint_over_quality'
+            ]
+            if IS_WAYLAND and which("kwin_wayland"):
+                video_params_list.append('scaling_dpi')
+
             video_params_changed = any(
                 display_state.get(key) != old_settings.get(key)
-                for key in [
-                    'encoder', 'framerate', 'h264_crf', 'h264_fullcolor', 'h264_streaming_mode',
-                    'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'h264_paintover_crf',
-                    'h264_paintover_burst_frames', 'use_paint_over_quality'
-                ]
+                for key in video_params_list
             )
             audio_bitrate_changed = self.app.audio_bitrate != old_settings.get('audio_bitrate')
             if audio_bitrate_changed and self.is_pcmflux_capturing:
@@ -2383,10 +2390,7 @@ class DataStreamingServer:
                             dpi_value_str = message.split(",")[1]
                             dpi_value = int(dpi_value_str)
                             
-                            # Calculate and store scale for Wayland stack
                             scale_val = float(dpi_value) / 96.0
-                            if client_display_id and client_display_id in self.display_clients:
-                                self.display_clients[client_display_id]['scale'] = scale_val
 
                             data_logger.info(f"Received DPI setting from client: {dpi_value} (Scale: {scale_val})")
 
@@ -2396,7 +2400,20 @@ class DataStreamingServer:
                                 data_logger.error(f"Failed to set DPI to {dpi_value}")
 
                             if IS_WAYLAND and client_display_id:
-                                if which("wlr-randr"):
+                                if which("kwin_wayland"):
+                                    if client_display_id in self.display_clients:
+                                        self.display_clients[client_display_id]['scale'] = scale_val
+                                    data_logger.info(f"KDE Wayland detected. Restarting stream with scale {scale_val} for {client_display_id}")
+                                    await self._stop_capture_for_display(client_display_id)
+                                    if hasattr(self, 'display_layouts') and client_display_id in self.display_layouts:
+                                        layout = self.display_layouts[client_display_id]
+                                        await self._start_capture_for_display(
+                                            display_id=client_display_id,
+                                            width=layout['w'], height=layout['h'],
+                                            x_offset=layout['x'], y_offset=layout['y']
+                                        )
+                                        await self._start_backpressure_task_if_needed(client_display_id)
+                                elif which("wlr-randr"):
                                     output_name = "WL-1"
                                     cmd = ["wlr-randr", "--output", output_name, "--scale", str(scale_val)]
                                     env = os.environ.copy()
