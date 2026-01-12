@@ -2441,6 +2441,10 @@ export class Input {
         return [ Math.max(1, parseInt(offsetRatioWidth - offsetRatioWidth % 2)), Math.max(1, parseInt(offsetRatioHeight - offsetRatioHeight % 2)) ];
     }
 
+    resize() {
+        this._windowMath();
+    }
+
     isInputAttached() {
         return this.inputAttached;
     }

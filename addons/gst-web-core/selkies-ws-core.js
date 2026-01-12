@@ -106,7 +106,7 @@ const CLIPBOARD_CHUNK_SIZE = 750 * 1024;
 
 
 let detectedSharedModeType = null;
-let playerInputTargetIndex = 0; // Default for primary player
+let playerInputTargetIndex = 0;
 
 const urlParams = new URLSearchParams(window.location.search);
 const authToken = urlParams.get('token');
@@ -617,8 +617,14 @@ function getCurrentSettingsPayload() {
         const videoContainer = document.querySelector('.video-container');
         const rect = videoContainer ? videoContainer.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
         settingsToSend['is_manual_resolution_mode'] = false;
-        settingsToSend['initialClientWidth'] = roundDownToEven(rect.width * dpr);
-        settingsToSend['initialClientHeight'] = roundDownToEven(rect.height * dpr);
+        
+        let initW = roundDownToEven(rect.width * dpr);
+        let initH = roundDownToEven(rect.height * dpr);
+        if (initW > 4080) initW = 4080;
+        if (initH > 4080) initH = 4080;
+
+        settingsToSend['initialClientWidth'] = initW;
+        settingsToSend['initialClientHeight'] = initH;
     }
     settingsToSend['useCssScaling'] = useCssScaling;
     settingsToSend['displayId'] = displayId;
@@ -664,6 +670,9 @@ function sendResolutionToServer(width, height) {
     realHeight = roundDownToEven(height * dprUsed);
   }
 
+  if (realWidth > 4080) realWidth = 4080;
+  if (realHeight > 4080) realHeight = 4080;
+
   const resString = `${realWidth}x${realHeight}`;
   console.log(`Sending resolution to server: ${resString}, DisplayID: ${displayId}, Manual Mode: ${window.is_manual_resolution_mode}, Pixel Ratio Used: ${dprUsed}, useCssScaling: ${useCssScaling}`);
 
@@ -697,7 +706,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
   const containerWidth = container.clientWidth;
   const containerHeight = container.clientHeight;
   if (scaleToFit) {
-    const logicalAspectRatio = targetWidth / targetHeight; // Use logical dimensions for aspect ratio calculation
+    const logicalAspectRatio = targetWidth / targetHeight;
     const containerAspectRatio = containerWidth / containerHeight;
     let cssWidth, cssHeight;
     if (logicalAspectRatio > containerAspectRatio) {
@@ -714,12 +723,12 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     canvas.style.height = `${cssHeight}px`;
     canvas.style.top = `${topOffset}px`;
     canvas.style.left = `${leftOffset}px`;
-    canvas.style.objectFit = 'contain'; // Should be 'fill' if CSS handles aspect ratio
+    canvas.style.objectFit = 'contain';
     console.log(`Applied manual style (Scaled): CSS ${cssWidth.toFixed(2)}x${cssHeight.toFixed(2)}, Buffer ${internalBufferWidth}x${internalBufferHeight}, Pos ${leftOffset.toFixed(2)},${topOffset.toFixed(2)}`);
   } else {
     canvas.style.position = 'absolute';
-    canvas.style.width = `${targetWidth}px`; // CSS size is logical
-    canvas.style.height = `${targetHeight}px`; // CSS size is logical
+    canvas.style.width = `${targetWidth}px`;
+    canvas.style.height = `${targetHeight}px`;
     canvas.style.top = '0px';
     canvas.style.left = '0px';
     canvas.style.objectFit = 'fill';
@@ -740,16 +749,24 @@ function resetCanvasStyle(streamWidth, streamHeight) {
   const internalBufferWidth = roundDownToEven(streamWidth * dpr);
   const internalBufferHeight = roundDownToEven(streamHeight * dpr);
 
-  // Set canvas buffer size (internal resolution)
   if (canvas.width !== internalBufferWidth || canvas.height !== internalBufferHeight) {
     canvas.width = internalBufferWidth;
     canvas.height = internalBufferHeight;
     console.log(`Canvas internal buffer reset to: ${internalBufferWidth}x${internalBufferHeight}`);
   }
 
-  // Set canvas CSS display size to explicitly match the logical stream size
-  canvas.style.width = `${streamWidth}px`;
-  canvas.style.height = `${streamHeight}px`;
+  const cssWidth = `${streamWidth}px`;
+  const cssHeight = `${streamHeight}px`;
+
+  canvas.style.width = cssWidth;
+  canvas.style.height = cssHeight;
+
+  const overlayInput = document.getElementById('overlayInput');
+  if (overlayInput) {
+      overlayInput.style.width = cssWidth;
+      overlayInput.style.height = cssHeight;
+      overlayInput.style.position = 'absolute';
+  }
 
   const container = canvas.parentElement;
   if (container) {
@@ -759,20 +776,34 @@ function resetCanvasStyle(streamWidth, streamHeight) {
     const leftOffset = Math.floor((containerWidth - streamWidth) / 2);
     const topOffset = Math.floor((containerHeight - streamHeight) / 2);
 
-    canvas.style.position = 'absolute'; // Ensure position is absolute for top/left to work
+    canvas.style.position = 'absolute';
     canvas.style.top = `${topOffset}px`;
     canvas.style.left = `${leftOffset}px`;
+    
+    if (overlayInput) {
+        overlayInput.style.top = `${topOffset}px`;
+        overlayInput.style.left = `${leftOffset}px`;
+    }
+
     console.log(`Reset canvas CSS to ${streamWidth}px x ${streamHeight}px, Pos ${leftOffset},${topOffset}, object-fit: fill. Buffer: ${internalBufferWidth}x${internalBufferHeight}`);
   } else {
     canvas.style.position = 'absolute';
     canvas.style.top = '0px';
     canvas.style.left = '0px';
+    if (overlayInput) {
+        overlayInput.style.top = '0px';
+        overlayInput.style.left = '0px';
+    }
     console.log(`Reset canvas CSS to ${streamWidth}px x ${streamHeight}px, Pos 0,0 (no parent metrics), object-fit: fill. Buffer: ${internalBufferWidth}x${internalBufferHeight}`);
   }
 
   canvas.style.objectFit = 'fill';
-  canvas.style.display = 'block'; // Ensure canvas is displayed
+  canvas.style.display = 'block';
   updateCanvasImageRendering();
+
+  if (window.webrtcInput && typeof window.webrtcInput.resize === 'function') {
+      window.webrtcInput.resize();
+  }
 }
 
 function enableAutoResize() {
@@ -782,7 +813,7 @@ function enableAutoResize() {
   }
   if (originalWindowResizeHandler) {
     console.log("Switching to Auto Mode: Adding original (auto) debounced resize listener.");
-    window.removeEventListener('resize', originalWindowResizeHandler); // Ensure no duplicates
+    window.removeEventListener('resize', originalWindowResizeHandler);
     window.addEventListener('resize', originalWindowResizeHandler);
     if (typeof handleResizeUI_globalRef === 'function') {
       console.log("Triggering immediate auto-resize calculation for auto mode.");
@@ -796,20 +827,18 @@ function enableAutoResize() {
 }
 
 const directManualLocalScalingHandler = () => {
-  // This handler is for non-shared manual mode.
   if (window.is_manual_resolution_mode && !isSharedMode && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
     applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
   }
 };
 
 function disableAutoResize() {
-  // This is primarily for non-shared manual mode.
   if (originalWindowResizeHandler) {
     console.log("Switching to Manual Mode Local Scaling: Removing original (auto) resize listener.");
     window.removeEventListener('resize', originalWindowResizeHandler);
   }
   console.log("Switching to Manual Mode Local Scaling: Adding direct manual scaling listener.");
-  window.removeEventListener('resize', directManualLocalScalingHandler); // Defensive removal
+  window.removeEventListener('resize', directManualLocalScalingHandler);
   window.addEventListener('resize', directManualLocalScalingHandler);
   if (window.is_manual_resolution_mode && !isSharedMode && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
     console.log("Applying current manual canvas style after enabling direct manual resize handler.");
@@ -867,10 +896,10 @@ const initializeUI = () => {
 
   if (isSharedMode) {
       if (!manual_width || manual_width <= 0 || !manual_height || manual_height <= 0) {
-          manual_width = 1280; manual_height = 720; // Fallback defaults for safety
+          manual_width = 1280; manual_height = 720;
       }
       applyManualCanvasStyle(manual_width, manual_height, true);
-      window.addEventListener('resize', () => { // Simple resize for CSS scaling
+      window.addEventListener('resize', () => {
           if (isSharedMode && manual_width && manual_height && manual_width > 0 && manual_height > 0) {
               applyManualCanvasStyle(manual_width, manual_height, true);
           }
@@ -878,7 +907,7 @@ const initializeUI = () => {
       console.log(`Initialized UI in Shared Mode: Canvas buffer target ${manual_width}x${manual_height} (logical), will scale to fit viewport.`);
   } else if (is_manual_resolution_mode && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
     applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
-    disableAutoResize(); // Sets up directManualLocalScalingHandler for non-shared manual
+    disableAutoResize();
     console.log(`Initialized UI in Manual Resolution Mode: ${manual_width}x${manual_height} (logical), ScaleLocally: ${scaleLocallyManual}`);
   } else {
     const initialStreamWidth = 1024;
@@ -933,7 +962,7 @@ const initializeUI = () => {
   playButtonElement.addEventListener('click', playStream);
 
   if (isSharedMode) {
-      updateUIForSharedMode(); // Call after main UI elements are in DOM
+      updateUIForSharedMode();
   }
 };
 
@@ -1081,7 +1110,7 @@ function handleRequestFileUpload() {
 async function handleFileInputChange(event) {
   if (isSharedMode) {
     console.log("Shared mode: File upload via fileInputChange blocked.");
-    event.target.value = null; // Clear the input
+    event.target.value = null;
     return;
   }
   const files = event.target.files;
@@ -1289,8 +1318,20 @@ const initializeInput = () => {
 
     console.log("handleResizeUI: Auto-resize triggered (e.g., by window resize event).");
     const windowResolution = inputInstance.getWindowResolution();
-    const evenWidth = roundDownToEven(windowResolution[0]);
-    const evenHeight = roundDownToEven(windowResolution[1]);
+    let evenWidth = roundDownToEven(windowResolution[0]);
+    let evenHeight = roundDownToEven(windowResolution[1]);
+
+    const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+    const MAX_DIM = 4080;
+    
+    if (evenWidth * dpr > MAX_DIM) {
+        evenWidth = Math.floor(MAX_DIM / dpr);
+        evenWidth = roundDownToEven(evenWidth);
+    }
+    if (evenHeight * dpr > MAX_DIM) {
+        evenHeight = Math.floor(MAX_DIM / dpr);
+        evenHeight = roundDownToEven(evenHeight);
+    }
 
     if (evenWidth <= 0 || evenHeight <= 0) {
       console.warn(`handleResizeUI: Calculated invalid dimensions (${evenWidth}x${evenHeight}). Skipping resize send.`);
@@ -1600,7 +1641,7 @@ function receiveMessage(event) {
       setIntParam('manual_width', null);
       setIntParam('manual_height', null);
       setBoolParam('is_manual_resolution_mode', false);
-      const currentWindowRes = window.webrtcInput ? window.webrtcInput.getWindowResolution() : [window.innerWidth, window.innerHeight]; // Logical
+      const currentWindowRes = window.webrtcInput ? window.webrtcInput.getWindowResolution() : [window.innerWidth, window.innerHeight];
       const autoWidth = roundDownToEven(currentWindowRes[0]);
       const autoHeight = roundDownToEven(currentWindowRes[1]);
       resetCanvasStyle(autoWidth, autoHeight);
@@ -2657,7 +2698,7 @@ function handleDecodedFrame(frame) {
       const now = performance.now();
       const elapsedStriped = now - lastStripedFpsUpdateTime;
       const elapsedFullFrame = now - lastFpsUpdateTime;
-      const fpsUpdateInterval = 1000; // ms
+      const fpsUpdateInterval = 1000;
 
       if (uniqueStripedFrameIdsThisPeriod.size > 0) {
         if (elapsedStriped >= fpsUpdateInterval) {
@@ -3580,7 +3621,6 @@ function handleDecodedFrame(frame) {
                         console.error('Error assembling final clipboard content:', e);
                     }
                 }
-                // Reset state
                 multipartClipboard.inProgress = false;
                 multipartClipboard.data = [];
             }
@@ -3867,11 +3907,6 @@ const audioDecoderWorkerCode = `
         if(frame && typeof frame.close === 'function') { try { frame.close(); } catch(e) { /* ignore */ } }
         return;
     }
-    // In shared mode, pipelineActive is effectively always true from worker's perspective for processing
-    // if (!pipelineActive) {
-    //   try { frame.close(); } catch(e) { /* ignore */ }
-    //   return;
-    // }
     let pcmDataArrayBuffer;
     try {
       const requiredByteLength = frame.allocationSize({ planeIndex: 0, format: 'f32' });
@@ -3900,11 +3935,10 @@ const audioDecoderWorkerCode = `
         await initializeDecoderInWorker();
         break;
       case 'decode':
-        // if (!pipelineActive) return; // Allow decode even if main thread says inactive, for shared mode to always process
         if (decoderAudio && decoderAudio.state === 'configured') {
           const chunk = new EncodedAudioChunk({ type: 'key', timestamp: data.timestamp || (performance.now() * 1000), data: data.opusBuffer });
           try {
-            if (currentDecodeQueueSize < 20) { // Limit queue to prevent OOM with bad data
+            if (currentDecodeQueueSize < 20) {
                  decoderAudio.decode(chunk); currentDecodeQueueSize++;
             } else {
                 // console.warn('[AudioWorker] Decode queue full, dropping audio chunk.');
@@ -3914,7 +3948,7 @@ const audioDecoderWorkerCode = `
               if (decoderAudio.state === 'closed' || decoderAudio.state === 'unconfigured') await initializeDecoderInWorker();
           }
         } else if (!decoderAudio || (decoderAudio && decoderAudio.state !== 'configuring')) {
-          await initializeDecoderInWorker(); // Try to reinit if not configured
+          await initializeDecoderInWorker();
         }
         break;
       case 'reinitialize': await initializeDecoderInWorker(); break;
