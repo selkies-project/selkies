@@ -1923,6 +1923,12 @@ function handleSettingsMessage(settings) {
     h264_fullcolor = !!settings.h264_fullcolor;
     setBoolParam('h264_fullcolor', h264_fullcolor);
     settingsChanged = true;
+    if (decoder && decoder.state !== 'closed') {
+      console.log('h264_fullcolor setting changed, closing main video decoder.');
+      decoder.close();
+      decoder = null;
+    }
+    clearAllVncStripeDecoders();
   }
   if (settings.h264_streaming_mode !== undefined) {
     h264_streaming_mode = !!settings.h264_streaming_mode;
@@ -1943,6 +1949,12 @@ function handleSettingsMessage(settings) {
     use_cpu = !!settings.use_cpu;
     setBoolParam('use_cpu', use_cpu);
     settingsChanged = true;
+    if (decoder && decoder.state !== 'closed') {
+      console.log('use_cpu setting changed, closing main video decoder.');
+      decoder.close();
+      decoder = null;
+    }
+    clearAllVncStripeDecoders();
   }
   if (settings.h264_paintover_crf !== undefined) {
     h264_paintover_crf = parseInt(settings.h264_paintover_crf, 10);
