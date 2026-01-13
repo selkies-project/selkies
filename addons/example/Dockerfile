@@ -102,6 +102,7 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
         libwayland-egl1 \
         wmctrl \
         xsel \
+        xclip \
         xdotool \
         x11-utils \
         x11-xkb-utils \
@@ -114,6 +115,7 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
         libxv1 \
         libxtst6 \
         libxext6 \
+        libxkbcommon-dev \
         # Graphics driver dependencies
         mesa-va-drivers \
         libva2 \
@@ -233,6 +235,7 @@ Pin-Priority: -1" > /etc/apt/preferences.d/firefox-nosnap && \
         coturn \
         # NGINX web server
         nginx \
+        libnginx-mod-http-fancyindex \
         apache2-utils \
         netcat-openbsd && \
     # Sanitize NGINX path
@@ -253,18 +256,45 @@ COPY --chown=1000:1000 --from=selkies-js-interposer /opt/*.deb /opt/selkies-js-i
 RUN apt-get update && apt-get install --no-install-recommends -y /opt/selkies-js-interposer.deb && rm -f /opt/selkies-js-interposer.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
+RUN echo "**** libva hack ****" && \
+  mkdir /tmp/libva && \
+  curl -o \
+    /tmp/libva/libva.deb -L \
+    "https://launchpad.net/ubuntu/+source/libva/2.22.0-3ubuntu2/+build/30591127/+files/libva2_2.22.0-3ubuntu2_amd64.deb" && \
+  cd /tmp/libva && \
+  ar x libva.deb && \
+  tar xf data.tar.zst && \
+  rm -f \
+    /usr/lib/x86_64-linux-gnu/libva.so.2* && \
+  cp -a \
+    usr/lib/x86_64-linux-gnu/libva.so.2* \
+    /usr/lib/x86_64-linux-gnu
+
 # Install Selkies Python application
 ARG PYPI_PACKAGE=selkies
 ARG PACKAGE_VERSION=0.0.0.dev0
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
 COPY --chown=1000:1000 --from=selkies-build /opt/pypi/dist/${PYPI_PACKAGE}-${PACKAGE_VERSION}-py3-none-any.whl .
 RUN pip3 install --no-cache-dir --force-reinstall --ignore-installed /opt/${PYPI_PACKAGE}-${PACKAGE_VERSION}-py3-none-any.whl
+RUN pip3 install aiohttp aiofiles
+
+# Install proot-apps
+RUN mkdir -pm 755 /tmp/proot-apps && PAPPS_RELEASE=$(curl -sX GET "https://api.github.com/repos/linuxserver/proot-apps/releases/latest" \
+    | awk '/tag_name/{print $4;exit}' FS='[""]') && \
+    curl -L https://github.com/linuxserver/proot-apps/releases/download/${PAPPS_RELEASE}/proot-apps-x86_64.tar.gz \
+    | tar -xzf - -C /tmp/proot-apps/ && \
+    echo "${PAPPS_RELEASE}" > /tmp/proot-apps/pversion
+
+# Temporary installation of Node.js for development purposes
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g nodemon
 
 # Copy scripts and configurations used to start the container
 COPY --chown=1000:1000 entrypoint.sh /etc/entrypoint.sh
 RUN chmod -f 755 /etc/entrypoint.sh
-COPY --chown=1000:1000 selkies-gstreamer-entrypoint.sh /etc/selkies-gstreamer-entrypoint.sh
-RUN chmod -f 755 /etc/selkies-gstreamer-entrypoint.sh
+COPY --chown=1000:1000 selkies-gstreamer-entrypoint.sh /etc/selkies-entrypoint.sh
+RUN chmod -f 755 /etc/selkies-entrypoint.sh
 COPY --chown=1000:1000 supervisord.conf /etc/supervisord.conf
 RUN chmod -f 755 /etc/supervisord.conf
 
