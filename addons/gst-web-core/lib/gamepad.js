@@ -67,7 +67,7 @@ export class GamepadManager {
                 } else {
                     console.warn(`Failed to load mapping for ${gamepadId} (HTTP Status: ${response.status})`);
                 }
-                state.remapProfile = {};
+                state.remapProfile = null;
                 return;
             }
 
@@ -93,7 +93,7 @@ export class GamepadManager {
 
         } catch (error) {
             console.error(`Error fetching or parsing mapping file for ${gamepadId}:`, error);
-            state.remapProfile = {};
+            state.remapProfile = null;
         }
     }
 
@@ -139,11 +139,16 @@ export class GamepadManager {
                     if (currentGp.buttons[x] === undefined) continue;
                     const value = currentGp.buttons[x].value;
                     const pressed = currentGp.buttons[x].pressed;
+                    let buttonIndex = x;
+
+                    if (navigator.userAgent.includes("Firefox")) {
+                        if (x === 2) buttonIndex = 3;
+                        else if (x === 3) buttonIndex = 2;
+                    }
 
                     if (gpState.buttons[x] !== value) {
-                        let buttonIndex = x;
                         if (gpState.remapProfile) {
-                            const standardIndex = gpState.remapProfile.buttons[x];
+                            const standardIndex = gpState.remapProfile.buttons[buttonIndex];
                             if (standardIndex !== undefined) {
                                 buttonIndex = standardIndex;
                             } else {

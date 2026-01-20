@@ -2376,6 +2376,10 @@ export class Input {
         if (!this.gamepadManager) {
             this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this));
         }
+        let axisCount = event.gamepad.axes.length;
+        if (navigator.userAgent.toLowerCase().includes('firefox')) {
+            axisCount = Math.max(axisCount, 6);
+        }
         const connectMsg = "js,c," + server_gp_index + "," + btoa(event.gamepad.id) + "," + event.gamepad.axes.length + "," + event.gamepad.buttons.length;
         this.send(connectMsg);
         if (this.ongamepadconnected !== null) { this.ongamepadconnected(event.gamepad.id); }
@@ -2391,7 +2395,6 @@ export class Input {
     _gamepadButton(gp_num, btn_num, val) {
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
         if (server_gp_index === undefined || server_gp_index < 0) return;
-
         this.send("js,b," + server_gp_index + "," + btn_num + "," + val);
         if (this._isSidebarOpen) {
             window.postMessage({ type: 'gamepadButtonUpdate', gamepadIndex: server_gp_index, buttonIndex: btn_num, value: val }, window.location.origin);
@@ -2401,7 +2404,18 @@ export class Input {
     _gamepadAxis(gp_num, axis_num, val) {
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
         if (server_gp_index === undefined || server_gp_index < 0) return;
-
+        if (navigator.userAgent.toLowerCase().includes('firefox')) {
+            if (axis_num === 4) {
+                const buttonVal = (val + 1.0) / 2.0;
+                this.send("js,b," + server_gp_index + ",6," + buttonVal);
+                return;
+            }
+            if (axis_num === 5) {
+                const buttonVal = (val + 1.0) / 2.0;
+                this.send("js,b," + server_gp_index + ",7," + buttonVal);
+                return;
+            }
+        }
         this.send("js,a," + server_gp_index + "," + axis_num + "," + val);
         if (this._isSidebarOpen) {
             window.postMessage({ type: 'gamepadAxisUpdate', gamepadIndex: server_gp_index, axisIndex: axis_num, value: val }, window.location.origin);
