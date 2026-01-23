@@ -585,6 +585,12 @@
   align-items: center;
   justify-content: center;
 }
+/* Wider for iOS to escape gesture zone */
+@supports (-webkit-touch-callout: none) {
+  .toggle-handle {
+    width: 35px;
+  }
+}
 
 /* Visual indicator for the toggle handle. */
 .toggle-indicator {
