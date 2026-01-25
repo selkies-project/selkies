@@ -2472,6 +2472,12 @@ export class Input {
         this.listeners.push(addListener(window, 'gamepaddisconnected', this._gamepadDisconnect, this));
         this.listeners.push(addListener(window, 'message', this._handleVisibilityMessage, this));
 
+
+        this.listeners.push(addListener(window, 'orientationchange', () => {
+            setTimeout(() => this._windowMath(), 200);
+            setTimeout(() => this._windowMath(), 500);
+        }, this));
+
         if (!this.isSharedMode) {
             this.attach_context();
         } else {
