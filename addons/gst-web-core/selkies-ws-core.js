@@ -2464,6 +2464,23 @@ function handleDecodedFrame(frame) {
         console.log("Secondary display: Audio pipeline initialization skipped.");
         return;
     }
+
+    if (window.isAudioInitializing) return;
+    window.isAudioInitializing = true;
+
+    try {
+      if (audioDecoderWorker) {
+      console.warn("Terminating existing audio worker during init.");
+      audioDecoderWorker.terminate();
+      audioDecoderWorker = null;
+    }
+    if (audioContext) {
+      console.warn("Closing existing AudioContext during init.");
+      try { await audioContext.close(); } catch (e) { console.error(e); }
+      audioContext = null;
+      audioWorkletNode = null;
+      audioWorkletProcessorPort = null;
+    }
     if (!audioContext) {
       const contextOptions = {
         sampleRate: 48000
@@ -2651,6 +2668,9 @@ function handleDecodedFrame(frame) {
       audioContext = null;
       audioWorkletNode = null;
       audioWorkletProcessorPort = null;
+    }
+    } finally {
+      window.isAudioInitializing = false;
     }
   }
 
@@ -4139,9 +4159,8 @@ function cleanup() {
     audioWorkletProcessorPort = null;
     window.currentAudioBufferSize = 0;
     if (audioDecoderWorker) {
-      audioDecoderWorker.postMessage({
-        type: 'close'
-      });
+      audioDecoderWorker.postMessage({ type: 'close' });
+      audioDecoderWorker.terminate(); 
       audioDecoderWorker = null;
     }
   }
