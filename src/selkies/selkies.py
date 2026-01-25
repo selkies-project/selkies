@@ -2318,20 +2318,22 @@ class DataStreamingServer:
                                 pass
 
                     elif message == "START_AUDIO":
-                        async with self._reconfigure_lock:
+                        async def _handle_start_audio_request():
                             await self.client_settings_received.wait()
-                            data_logger.info(
-                                "Received START_AUDIO command from client for server-to-client audio."
-                            )
-                            if PCMFLUX_AVAILABLE:
-                                if not self.is_pcmflux_capturing:
-                                    data_logger.info("START_AUDIO: Starting pcmflux audio pipeline.")
-                                    await self._start_pcmflux_pipeline()
+                            async with self._reconfigure_lock:
+                                data_logger.info(
+                                    "Received START_AUDIO command from client for server-to-client audio."
+                                )
+                                if PCMFLUX_AVAILABLE:
+                                    if not self.is_pcmflux_capturing:
+                                        data_logger.info("START_AUDIO: Starting pcmflux audio pipeline.")
+                                        await self._start_pcmflux_pipeline()
+                                    else:
+                                        data_logger.info("START_AUDIO: pcmflux audio pipeline already active.")
                                 else:
-                                    data_logger.info("START_AUDIO: pcmflux audio pipeline already active.")
-                            else:
-                                data_logger.warning("START_AUDIO: Cannot start server-to-client audio (pcmflux not available).")
-                            websockets.broadcast(self.clients, "AUDIO_STARTED")
+                                    data_logger.warning("START_AUDIO: Cannot start server-to-client audio (pcmflux not available).")
+                                websockets.broadcast(self.clients, "AUDIO_STARTED")
+                        asyncio.create_task(_handle_start_audio_request())
 
                     elif message == "STOP_AUDIO":
                         async with self._reconfigure_lock:
