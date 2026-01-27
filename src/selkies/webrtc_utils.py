@@ -67,7 +67,7 @@ class HMACRTCMonitor:
         self.turn_tls = turn_tls
         self.stun_host = stun_host
         self.stun_port = stun_port
-        self.period = min(int(period), 60)
+        self.period = period
         self.enabled = enabled
         self.stop_event = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
@@ -99,9 +99,10 @@ class HMACRTCMonitor:
                 except Exception as e:
                     logger_rtcice.warning(f"could not fetch TURN HMAC config in periodic monitor: {e}")
 
-                _, pending = await asyncio.wait([self.stop_event.wait()], timeout=self.period)
-                for task in pending:
-                    task.cancel()
+                try:
+                    await asyncio.wait_for(self.stop_event.wait(), timeout=self.period)
+                except asyncio.TimeoutError:
+                    pass
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -140,11 +141,12 @@ class RESTRTCMonitor:
         self.turn_rest_tls_header = turn_rest_tls_header
         self.on_rtc_config = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
 
-    async def start(self):
+    def start(self):
         if not self.enabled:
             return
         self.stop_event.clear()
         self._task = asyncio.create_task(self._monitor_loop())
+        logger_rtcice.info("TURN REST RTC monitor started")
 
     async def _monitor_loop(self):
         try:
@@ -163,9 +165,10 @@ class RESTRTCMonitor:
                 except Exception as e:
                     logger_rtcice.warning(f"could not fetch TURN REST config in periodic monitor: {e}")
 
-                _, pending = await asyncio.wait([self.stop_event.wait()], timeout=self.period)
-                for task in pending:
-                    task.cancel()
+                try:
+                    await asyncio.wait_for(self.stop_event.wait(), timeout=self.period)
+                except asyncio.TimeoutError:
+                    pass
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -431,7 +434,7 @@ def try_hmac_turn(args: Any, username: str, protocol: str, use_tls: bool) -> Opt
     )
     return parse_rtc_config(hmac_data)
 
-async def get_rtc_configuration(args: Any) -> Tuple[List, List, Dict]:
+async def get_rtc_configuration(args: Any) -> Tuple[List, List, bytes, Dict[str, bool]]:
     """
     Determines and fetches the RTC configuration based on a prioritized sequence of methods.
 
@@ -448,25 +451,34 @@ async def get_rtc_configuration(args: Any) -> Tuple[List, List, Dict]:
     turn_protocol = 'tcp' if args.turn_protocol.lower() == 'tcp' else 'udp'
     using_turn_tls = args.turn_tls
 
+    monitoring_utilities_used = {
+        "using_hmac_turn": False,
+        "using_rtc_config_json": False,
+        "using_rest_api": False
+    }
+
     # Try each method in order of priority, returning on the first success
     if config := await try_cloudflare(args):
-        return config
+        return *config, monitoring_utilities_used
 
     if config := await try_json_file(args):
-        return config
+        monitoring_utilities_used["using_rtc_config_json"] = True
+        return *config, monitoring_utilities_used
 
     if config := await try_rest_api(args, turn_rest_username, turn_protocol, using_turn_tls):
-        return config
+        monitoring_utilities_used["using_rest_api"] = True
+        return *config, monitoring_utilities_used
 
     if config := try_legacy_turn(args, turn_protocol, using_turn_tls):
-        return config
+        return *config, monitoring_utilities_used
 
     if config := try_hmac_turn(args, turn_rest_username, turn_protocol, using_turn_tls):
-        return config
+        monitoring_utilities_used["using_hmac_turn"] = True
+        return *config, monitoring_utilities_used
 
     # Fallback to default if all other methods fail
     logger_rtcice.warning("No valid TURN server information found, using default RTC config.")
-    return parse_rtc_config(DEFAULT_RTC_CONFIG)
+    return *parse_rtc_config(DEFAULT_RTC_CONFIG), monitoring_utilities_used
 
 
 # ---------------- Metrics utilities ----------------
@@ -730,20 +742,22 @@ class SystemMonitor:
                 if self.on_timer:
                     await self.on_timer(time.time())
 
-                _, pending = await asyncio.wait([self.stop_event.wait()], timeout=self.period)
-                for task in pending:
-                    task.cancel()
+                try:
+                    await asyncio.wait_for(self.stop_event.wait(), timeout=self.period)
+                except asyncio.TimeoutError:
+                    pass
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger_system.error(f"System monitor error: {e}")
+            logger_system.error(f"System monitor error: {e}", exc_info=True)
         finally:
-            logger_system.info("System monitor stopped")
+            logger_system.debug("System monitor loop exited")
 
     async def stop(self):
         self.stop_event.set()
         if self.task:
             await self.task
+        logger_system.info("System monitor stopped")
 
 class GPUMonitor:
     def __init__(self, gpu_id: int = 0, period: int = 1, enabled: bool = True):
@@ -783,17 +797,19 @@ class GPUMonitor:
                 elif self.on_stats:
                     load, mem_total, mem_used = stats
                     await self.on_stats(load, mem_total, mem_used)
-                _, pending = await asyncio.wait([self.stop_event.wait()], timeout=self.period)
-                for task in pending:
-                    task.cancel()
+                try:
+                    await asyncio.wait_for(self.stop_event.wait(), timeout=self.period)
+                except asyncio.TimeoutError:
+                    pass
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger_gpu.error(f"GPU monitor error: {e}")
+            logger_gpu.error(f"GPU monitor error: {e}", exc_info=True)
         finally:
-            logger_gpu.info("GPU monitor stopped")
+            logger_gpu.debug("GPU monitor loop exited")
 
     async def stop(self):
         self.stop_event.set()
         if self.task:
             await self.task
+        logger_gpu.info("GPU monitor stopped")

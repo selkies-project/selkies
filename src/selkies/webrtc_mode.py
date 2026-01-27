@@ -29,14 +29,14 @@ import signal
 import sys
 import aiofiles
 import aiofiles.os
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 import uuid
 
 logger = logging.getLogger("main")
 logger.setLevel(logging.INFO)
 
 from .rtc import RTCApp
-from .media_pipeline import MediaPipeline
+from .media_pipeline import MediaPipeline, MediaPipelineGst, MediaPipelinePixel
 from .webrtc_signaling import WebRTCSignaling
 from .signaling_server import WebRTCSimpleServer
 from .input_handler import WebRTCInput
@@ -44,6 +44,7 @@ from .display_utils import resize_display, set_dpi, set_cursor_size
 from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
 from .settings import settings_webrtc as settings, AppSettings, FINAL_SETTING_DEFINITIONS_WEBRTC as SETTING_DEFINITIONS
 from types import SimpleNamespace
+from .webrtc_utils import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor
 
 CURSOR_SIZE = 32
 
@@ -74,7 +75,7 @@ class WebRTCApp:
     def __init__(self):
         self.settings: Optional[AppSettings] = settings
         self.tasks: List[asyncio.Task] = []
-        self.shutdown_event = asyncio.Event() # Could also be used by StreamMonitor to handle the shutdown more appropriately
+        self.shutdown_event = asyncio.Event()
         self.signaling_client: Optional[WebRTCSignaling] = None
         self.media_pipeline: Optional[MediaPipeline] = None
         self.rtc_app: Optional[RTCApp] = None
@@ -87,6 +88,10 @@ class WebRTCApp:
         self.peer_id = 1
         self.args: Optional[SimpleNamespace] = None
         self._init_default_settings()
+        self.monitoring_utils_used: Dict[str, bool] = {}
+        self.mon_hmac_turn: Optional[HMACRTCMonitor] = None
+        self.mon_rest_api: Optional[RESTRTCMonitor] = None
+        self.mon_rtc_config_file: Optional[RTCConfigFileMonitor] = None
 
         # signal handlers
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -111,6 +116,10 @@ class WebRTCApp:
         except Exception as e:
             logger.error(f"Error initializing default settings: {e}", exc_info=True)
 
+        # TODO: Starting webrtc mode with some default resolution which will
+        # be reconfigured upon client connection. Remove this later.
+        asyncio.run_coroutine_threadsafe(resize_display("1920x1080"), asyncio.get_running_loop())
+
     def handle_signal(self, signum, event) -> None:
         logger.info(f"Received signal {signum}, initiating shutdown")
         self.shutdown_event.set()
@@ -125,24 +134,36 @@ class WebRTCApp:
         # Init signaling client
         self.signaling_client = self.create_signaling_client()
 
-        self.media_pipeline = MediaPipeline(
-            async_event_loop=asyncio.get_running_loop(),
-            encoder=self.args.encoder,
-            audio_channels=int(self.args.audio_channels),
-            framerate=int(self.args.framerate),
-            gpu_id=int(self.args.gpu_id),
-            video_bitrate=int(self.args.video_bitrate) * 1000,  # Convert to kbps
-            audio_bitrate=int(self.args.audio_bitrate),
-            keyframe_distance=float(self.args.keyframe_distance),
-            video_packetloss_percent=float(self.args.video_packetloss_percent),
-            audio_packetloss_percent=float(self.args.audio_packetloss_percent)
-        )
+        if self.args.media_pipeline == 'gstreamer':
+            self.media_pipeline = MediaPipelineGst(
+                async_event_loop=asyncio.get_running_loop(),
+                encoder=self.args.encoder_rtc,
+                audio_channels=int(self.args.audio_channels),
+                framerate=int(self.args.framerate),
+                gpu_id=int(self.args.gpu_id),
+                video_bitrate=int(self.args.video_bitrate) * 1000,  # Convert to kbps
+                audio_bitrate=int(self.args.audio_bitrate),
+                keyframe_distance=float(self.args.keyframe_distance),
+                video_packetloss_percent=float(self.args.video_packetloss_percent),
+                audio_packetloss_percent=float(self.args.audio_packetloss_percent)
+            )
+        else:
+            self.media_pipeline = MediaPipelinePixel(
+                async_event_loop=asyncio.get_running_loop(),
+                encoder=self.args.encoder_rtc,
+                framerate=int(self.args.framerate),
+                video_bitrate=int(self.args.video_bitrate) * 1000,  # Convert to kbps
+                audio_bitrate=int(self.args.audio_bitrate),
+                audio_channels=int(self.args.audio_channels),
+                audio_enabled = self.args.audio_enabled,
+                audio_device_name=self.args.audio_device_name
+            )
 
         # Fetch rtc configuration
-        stun_servers, turn_servers, rtc_config = await get_rtc_configuration(self.args)
+        stun_servers, turn_servers, rtc_config, self.monitoring_utils_used = await get_rtc_configuration(self.args)
         self.rtc_app = RTCApp(
             async_event_loop=asyncio.get_running_loop(),
-            encoder=self.args.encoder,
+            encoder=self.args.encoder_rtc,
             stun_servers=stun_servers,
             turn_servers=turn_servers,
         )
@@ -163,10 +184,10 @@ class WebRTCApp:
 
         # Initialize monitoring instances
         self.system_monitor = SystemMonitor()
-        self.gpu_monitor = GPUMonitor(enabled=self.args.encoder.startswith("nv"))
+        self.gpu_monitor = GPUMonitor(enabled=self.args.encoder_rtc.startswith("nv"))
 
         # Signaling server
-        self.signaling_server = self.create_signaling_server(rtc_config)
+        self.signaling_server = self.create_signaling_server(rtc_config, self.monitoring_utils_used)
 
     def create_signaling_client(self) -> WebRTCSignaling:
         """Create and configure signaling client."""
@@ -193,8 +214,11 @@ class WebRTCApp:
 
     async def handle_signaling_disconnect(self) -> None:
         logger.info("signaling disconnected, stopping pipelines")
-        await self.media_pipeline.stop_pipeline()
-        await self.rtc_app.stop_rtc_connection()
+        try:
+            await self.media_pipeline.stop_media_pipeline()
+            await self.rtc_app.stop_rtc_connection()
+        except Exception as e:
+            logger.error(f"Error stopping pipelines on signaling disconnect: {e}", exc_info=True)
 
     async def handle_session_start(self, session_peer_id: int) -> None:
         logger.info(f"starting session for peer id {session_peer_id}")
@@ -211,8 +235,9 @@ class WebRTCApp:
         except Exception as e:
             raise
 
-    def create_signaling_server(self, rtc_config: Any) -> WebRTCSimpleServer:
+    def create_signaling_server(self, rtc_config: Any, mon_utils_used: Dict[str, bool]) -> WebRTCSimpleServer:
         """Create signaling server instance."""
+        using_hmac_turn = mon_utils_used.get('using_hmac_turn', False)
         options = argparse.Namespace()
         options.addr = self.args.addr
         options.port = self.args.port
@@ -228,9 +253,9 @@ class WebRTCApp:
         options.cert_restart = False # using_https
         options.rtc_config_file = self.args.rtc_config_json
         options.rtc_config = rtc_config
-        options.turn_shared_secret = self.args.turn_shared_secret
-        options.turn_host = self.args.turn_host
-        options.turn_port = self.args.turn_port
+        options.turn_shared_secret = self.args.turn_shared_secret if using_hmac_turn else ''
+        options.turn_host = self.args.turn_host if using_hmac_turn else ''
+        options.turn_port = self.args.turn_port if using_hmac_turn else ''
         options.turn_protocol = self.args.turn_protocol
         options.turn_tls = self.args.turn_tls
         options.turn_auth_header_name = self.args.turn_rest_username_auth_header
@@ -253,7 +278,10 @@ class WebRTCApp:
         self.signaling_client.on_ice = self.rtc_app.set_ice
 
         # Media pipeline callbacks
-        self.media_pipeline.produce_data = self.rtc_app.consume_data
+        if self.args.media_pipeline == 'gstreamer':
+            self.media_pipeline.produce_data = self.rtc_app.consume_data_gst
+        else:
+            self.media_pipeline.produce_data = self.rtc_app.consume_data_pixel
         self.media_pipeline.send_data_channel_message = self.rtc_app.send_media_data_over_channel
 
         # RTCApp callbacks
@@ -283,15 +311,12 @@ class WebRTCApp:
             self.input_handler.on_resize = self.on_resize_handler
             self.input_handler.on_scaling_ratio = self.handle_scaling
         else:
-            self.input_handler.on_resize = lambda res: logger.warning("remote resizing disabled, kipping resize to {res}")
-            self.input_handler.on_scaling_ratio = lambda scale: logger.warning(f"remote resize is disabled, skipping DPI scale change to {str(scale)}")
+            self.input_handler.on_resize = lambda res: logger.warning(f"remote resizing disabled, skipping resize to {res}")
+            self.input_handler.on_scaling_ratio = lambda scale: logger.warning(f"remote scaling is disabled, skipping DPI scale change to {str(scale)}")
 
         # Monitoring callbacks
-        self.gpu_monitor.on_stats = lambda load, memory_total, memory_used: (
-            self.rtc_app.send_gpu_stats(load, memory_total, memory_used) if self.rtc_app else None,
-            self.metrics.set_gpu_utilization(load * 100) if self.metrics else None
-        )
-        self.system_monitor.on_timer = self.handle_system_monitor_timer
+        self.gpu_monitor.on_stats = self.handle_gpu_stats
+        self.system_monitor.on_timer = self.handle_system_monitor
 
     def handle_data_channel_open(self) -> None:
         logger.info("opened peer data channel for user input to X11")
@@ -304,20 +329,19 @@ class WebRTCApp:
         """Handle video bitrate change request."""
         updated = await self.set_json_app_argument("video_bitrate", bitrate)
         if updated and self.media_pipeline:
-            self.media_pipeline.set_video_bitrate(bitrate)
+            await self.media_pipeline.set_video_bitrate(bitrate)
 
     async def handle_audio_bitrate_change(self, bitrate: int) -> None:
         """Handle audio bitrate change request."""
         updated = await self.set_json_app_argument("audio_bitrate", bitrate)
         if updated and self.media_pipeline:
-            self.media_pipeline.set_audio_bitrate(bitrate)
+            await self.media_pipeline.set_audio_bitrate(bitrate)
 
-    def handle_fps_change(self, fps: int) -> None:
+    async def handle_fps_change(self, fps: int) -> None:
         """Handle FPS change request."""
-        # TODO: update fps_change in ws mode to async and refactor this func
-        asyncio.run_coroutine_threadsafe(self.set_json_app_argument("framerate", fps), asyncio.get_event_loop())
-        if self.media_pipeline:
-            self.media_pipeline.set_framerate(fps)
+        updated = await self.set_json_app_argument("framerate", fps)
+        if updated and self.media_pipeline:
+            await self.media_pipeline.set_framerate(fps)
         else:
             logger.error("Media pipeline not initialized, cannot set framerate")
 
@@ -388,6 +412,8 @@ class WebRTCApp:
             success = await resize_display(f"{target_w}x{target_h}")
             if success:
                 logger.info(f"resize_display('{target_w}x{target_h}') reported success")
+                self.media_pipeline.width = target_w
+                self.media_pipeline.height = target_h
             else:
                 logger.error( f"resize_display('{target_w}x{target_h}') reported failure")
                 self.media_pipeline.last_resize_success = False
@@ -415,7 +441,7 @@ class WebRTCApp:
         else:
             logger.error(f"Failed to set cursor size to {new_cursor_size}")
 
-    async def handle_system_monitor_timer(self, t: float) -> None:
+    async def handle_system_monitor(self, t: float) -> None:
         """Handle system monitoring timer."""
         if self.input_handler and self.rtc_app and self.system_monitor:
             self.input_handler.ping_start = t
@@ -426,7 +452,14 @@ class WebRTCApp:
             )
             self.rtc_app.send_ping(t)
 
-    def handle_update_settings(self, settings_json: dict) -> None:
+    async def handle_gpu_stats(self, load: float, memory_total: int, memory_used: int) -> None:
+        """Handle GPU stats monitoring timer."""
+        if self.rtc_app:
+            self.rtc_app.send_gpu_stats(load, memory_total, memory_used)
+        if self.metrics:
+            self.metrics.set_gpu_utilization(load * 100)
+
+    async def handle_update_settings(self, settings_json: dict) -> None:
         # TODO: Gradually expand the list of settings that can be updated via this method
         settings_allowed_to_update = [
             'video_bitrate',
@@ -484,18 +517,26 @@ class WebRTCApp:
                 sanitized_value = sanitize_value(key, value)
                 if sanitized_value and sanitized_value != current_value:
                     if key == 'video_bitrate' and self.media_pipeline:
-                        self.media_pipeline.set_video_bitrate(sanitized_value)
+                        await self.media_pipeline.set_video_bitrate(sanitized_value)
                     elif key == 'audio_bitrate' and self.media_pipeline:
-                        self.media_pipeline.set_audio_bitrate(sanitized_value)
+                        await self.media_pipeline.set_audio_bitrate(int(sanitized_value))
                     elif key == 'framerate' and self.media_pipeline:
-                        self.media_pipeline.set_framerate(sanitized_value)
+                        await self.media_pipeline.set_framerate(sanitized_value)
                     logger.debug(f"Updated setting '{key}' from {current_value} to {sanitized_value} based on client settings")
                     setattr(self.args, key, sanitized_value)
             else:
                 logger.warning(f"Received unknown setting '{key}' from client")
 
+    def mon_rtc_config(self, stun_servers, turn_servers, rtc_config):
+        if self.signaling_server:
+            logger.debug("updating signaling server RTC config")
+            self.signaling_server.set_rtc_config(rtc_config)
+        if self.rtc_app:
+            logger.debug("updating STUN/TURN servers in RTC app")
+            self.rtc_app.update_rtc_config(stun_servers, turn_servers)
+
     async def start_components(self) -> None:
-        """Start all asynchronous tasks."""
+        """Start all asynchronous tasks"""
         # Start signaling server
         self.tasks.append(asyncio.create_task(self.signaling_server.run()))
 
@@ -514,6 +555,43 @@ class WebRTCApp:
             self.system_monitor.start()
         if self.signaling_client:
             self.signaling_client.start()
+
+        if self.monitoring_utils_used:
+            turn_rest_username = self.args.turn_rest_username.replace(":", "-")
+            if self.monitoring_utils_used.get('using_hmac_turn', False):
+                self.mon_hmac_turn = HMACRTCMonitor(
+                    turn_host=self.args.turn_host,
+                    turn_port=self.args.turn_port,
+                    turn_shared_secret=self.args.turn_shared_secret,
+                    turn_username=turn_rest_username,
+                    turn_protocol=self.args.turn_protocol,
+                    turn_tls=self.args.turn_tls,
+                    stun_host=self.args.stun_host,
+                    stun_port=self.args.stun_port,
+                    period=60, enabled=True
+                )
+                self.mon_hmac_turn.on_rtc_config = self.mon_rtc_config
+                self.mon_hmac_turn.start()
+            if self.monitoring_utils_used.get('using_rest_api', False):
+                self.mon_rest_api = RESTRTCMonitor(
+                    turn_rest_uri=self.args.turn_rest_uri,
+                    turn_rest_username=turn_rest_username,
+                    turn_rest_username_auth_header=self.args.turn_rest_username_auth_header,
+                    turn_protocol=self.args.turn_protocol,
+                    turn_rest_protocol_header=self.args.turn_rest_protocol_header,
+                    turn_tls=self.args.turn_tls,
+                    turn_rest_tls_header=self.args.turn_rest_tls_header,
+                    period=60, enabled=True            
+                )
+                self.mon_rest_api.on_rtc_config = self.mon_rtc_config
+                self.mon_rest_api.start()
+            if self.monitoring_utils_used.get('using_rtc_config_file', False):
+                self.mon_rtc_config_file = RTCConfigFileMonitor(
+                    rtc_file=self.args.rtc_config_json,
+                    enabled=True
+                )
+                self.mon_rtc_config_file.on_rtc_config = self.mon_rtc_config
+                self.mon_rtc_config_file.start()
 
     async def shutdown(self) -> None:
         """Gracefully shutdown all components."""
@@ -553,7 +631,7 @@ class WebRTCApp:
         if self.signaling_server:
             stop_coros.append((_await_with_timeout(self.signaling_server.stop(), "signaling_server", 3.0)))
         if self.media_pipeline:
-            stop_coros.append((_await_with_timeout(self.media_pipeline.stop_pipeline(), "media_pipeline", 3.0)))
+            stop_coros.append((_await_with_timeout(self.media_pipeline.stop_media_pipeline(), "media_pipeline", 3.0)))
         if self.rtc_app:
             stop_coros.append((_await_with_timeout(self.rtc_app.stop_rtc_connection(), "rtc_app", 3.0)))
         if self.input_handler:
@@ -574,6 +652,14 @@ class WebRTCApp:
         if self.metrics:
             stop_coros.append((_await_with_timeout(self.metrics.stop_http(), "metrics", 2.0)))
 
+        if self.mon_hmac_turn:
+            stop_coros.append((_await_with_timeout(self.mon_hmac_turn.stop(), "HMAC RTC Monitor", 2.0)))
+        if self.mon_rest_api:
+            stop_coros.append((_await_with_timeout(self.mon_rest_api.stop(), "REST RTC Monitor", 2.0))) 
+        if self.mon_rtc_config_file:
+            stop_coros.append((_await_with_timeout(self.mon_rtc_config_file.stop(), "RTC Config File Monitor", 2.0))) 
+
+         # Await all stop coroutines with a global timeout
         if stop_coros:
             try:
                 await asyncio.wait_for(asyncio.gather(*stop_coros, return_exceptions=True), timeout=5)
@@ -582,7 +668,6 @@ class WebRTCApp:
             except Exception:
                 logger.exception("Unexpected error during concurrent component shutdown")
 
-        # clear tasks list and final logging
         self.tasks.clear()
         logger.info("Shutdown complete")
 

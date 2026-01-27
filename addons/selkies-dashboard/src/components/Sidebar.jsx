@@ -22,6 +22,12 @@ const encoderOptions = [
   "jpeg",
 ];
 
+const encoderOptionsWR = [
+  "x264enc",
+  "nvh264enc",
+  "vp8enc",
+]
+
 const commonResolutionValues = [
   "",
   "1920x1080",
@@ -79,8 +85,8 @@ const STREAM_MODE_WEBSOCKETS = "websockets";
 const STREAMING_MODES= [STREAM_MODE_WEBRTC, STREAM_MODE_WEBSOCKETS]
 const DEFAULT_STREAM_MODE = STREAM_MODE_WEBSOCKETS;
 const DEFAULT_WEBRTC_ENCODER = "x264enc";
-const DEFAULT_AUDIO_BITRATE = 96000;  // in bps
-const DEFAULT_VIDEO_BITRATE = 8000;   // in kbps
+const DEFAULT_AUDIO_BITRATE = 128000;  // in bps
+const DEFAULT_VIDEO_BITRATE = 8;   // in mbps
 
 // --- Helper Functions ---
 function formatBytes(bytes, decimals = 2, rawDict) {
@@ -602,6 +608,7 @@ function Sidebar() {
     newRenderable.coreButtons = s.ui_show_core_buttons?.value ?? true;
 
     newRenderable.encoder = isRenderable('encoder');
+    newRenderable.encoder_rtc = isRenderable('encoder_rtc');
     newRenderable.framerate = isRenderable('framerate');
     newRenderable.jpeg_quality = isRenderable('jpeg_quality');
     newRenderable.paint_over_jpeg_quality = isRenderable('paint_over_jpeg_quality');
@@ -801,7 +808,9 @@ function Sidebar() {
     const s_encoder_rtc = serverSettings.encoder_rtc;
     if (s_encoder_rtc) {
       const stored = localStorage.getItem(getPrefixedKey("encoder_rtc"));
-      const final = s_encoder_rtc.allowed.includes(stored) ? stored : s_encoder_rtc.value;
+      // FIXME: overriding with server sent value for now, as server doesn't support
+      // change of encoder on the fly, yet.
+      const final = s_encoder_rtc.value;
       setEncoderRTC(final);
       setDynamicEncoderOptions(s_encoder_rtc.allowed);
       localStorage.setItem(getPrefixedKey("encoder_rtc"), final);
@@ -1108,7 +1117,12 @@ function Sidebar() {
     initialBottom: 0,
     initialRight: 0,
   });
+  const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
 
+  useEffect(() => {
+    // Default encoder options; might be replaced with server sent options later
+    setDynamicEncoderOptions(isWebrtc ? encoderOptionsWR: encoderOptions);
+  }, [])
 
   // --- Debounce Settings ---
   const DEBOUNCE_DELAY = 500;
@@ -1950,12 +1964,13 @@ function Sidebar() {
             } else return prev;
           });
         } else if (message.type === "serverSettings") {
-          if (message.encoders && Array.isArray(message.encoders)) {
-            const newEncoderOptions =
-              Array.isArray(message.encoders) && message.encoders.length > 0
-                ? message.encoders
-                : encoderOptions;
-            setDynamicEncoderOptions(newEncoderOptions);
+            const encoders = message.payload?.encoder?.allowed || message.payload?.encoder_rtc?.allowed
+            if (encoders && Array.isArray(encoders)) {
+              const newEncoderOptions =
+                Array.isArray(encoders) && encoders.length > 0
+                  ? encoders
+                  : (isWebrtc? encoderOptionsWR: encoderOptions);
+              setDynamicEncoderOptions(newEncoderOptions);
           }
           if (typeof message.enableBinaryClipboard === 'boolean') {
             setEnableBinaryClipboard(message.enableBinaryClipboard);
@@ -2077,7 +2092,6 @@ function Sidebar() {
     if (link.id === 'player4') return renderableSettings.enablePlayer4 ?? true;
     return false;
   });
-  const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
 
   return (
     <>
@@ -2339,7 +2353,6 @@ function Sidebar() {
               </span>
             </div>
             {sectionsOpen.settings && (
-                // TODO: Change of Stream mode is configurable from server side?
                 <div className="sidebar-section-content" id="settings-content">
                   {(renderableSettings.enableDualMode ?? false) && (
                     <div className="dev-setting-item">
@@ -2361,14 +2374,14 @@ function Sidebar() {
                       </select>{" "}
                     </div>
                   )}
-                {(renderableSettings.encoder ?? true) && (
+                {!isWebrtc && (renderableSettings.encoder ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="encoderSelect">
                       {t("sections.video.encoderLabel")}
                     </label>
                     <select
                       id="encoderSelect"
-                      value={isWebrtc? encoderRTC: encoder}
+                      value={encoder}
                       onChange={handleEncoderChange}
                       disabled={!serverSettings || serverSettings.encoder?.allowed?.length <= 1}
                     >
@@ -2380,7 +2393,26 @@ function Sidebar() {
                     </select>
                   </div>
                 )}
-                {showFPS && (renderableSettings.framerate ?? true) && (
+                {isWebrtc && (renderableSettings.encoder_rtc ?? true) && (
+                  <div className="dev-setting-item">
+                    <label htmlFor="encoderRTCSelect">
+                      {t("sections.video.encoderLabel")}
+                    </label>
+                    <select
+                      id="encoderRTCSelect"
+                      value={encoderRTC}
+                      onChange={handleEncoderChange}
+                      disabled={!serverSettings || serverSettings.encoder_rtc?.allowed?.length <= 1}
+                    >
+                      {(serverSettings?.encoder_rtc?.allowed || dynamicEncoderOptions).map((enc) => (
+                        <option key={enc} value={enc}>
+                          {enc}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {(isWebrtc || showFPS) && (renderableSettings.framerate ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="framerateSlider">
                       {t("sections.video.framerateLabel", {

@@ -238,7 +238,7 @@ export class WebRTCDemoSignaling {
 
         if (event.data.startsWith("ERROR")) {
             if (event.data === "ERROR peer '0' not found") {
-                this._setDebug("Peer not found. Retrying...");
+                this._setError("Peer not found. Retrying...");
                 setTimeout(() => {
                     this._setupCall();
                 }, 1000);
