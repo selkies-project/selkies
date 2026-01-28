@@ -2012,6 +2012,11 @@ function handleSettingsMessage(settings) {
     setBoolParam('use_paint_over_quality', use_paint_over_quality);
     settingsChanged = true;
   }
+  if (settings.is_manual_resolution_mode === true) {
+    scalingDPI = 96;
+    setIntParam('scaling_dpi', scalingDPI);
+    settingsChanged = true;
+  }
   if (settings.scaling_dpi !== undefined) {
     scalingDPI = parseInt(settings.scaling_dpi, 10);
     setIntParam('scaling_dpi', scalingDPI);
