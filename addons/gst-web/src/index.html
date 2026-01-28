@@ -286,6 +286,34 @@
                   persistent-hint>
                 </v-select>
               </p>
+              <v-divider></v-divider>
+              <h3>Microphone</h3>
+              <p>
+                <v-switch v-model="microphoneEnabled" 
+                         :disabled="!microphoneSupported"
+                         label="Enable microphone"
+                         hint="Send your microphone audio to the remote host">
+                </v-switch>
+              </p>
+              <p v-if="microphoneEnabled">
+                <v-btn @click="microphoneMuted ? unmuteMicrophone() : muteMicrophone()" 
+                       :color="microphoneMuted ? 'red' : 'green'" 
+                       small>
+                  <v-icon small>{{ microphoneMuted ? 'mic_off' : 'mic' }}</v-icon>
+                  {{ microphoneMuted ? 'Unmute' : 'Mute' }}
+                </v-btn>
+              </p>
+              <p v-if="microphoneDevices.length > 1">
+                <v-select :items="microphoneDevices" 
+                         label="Microphone device" 
+                         menu-props="left" 
+                         v-model="selectedMicrophoneDevice"
+                         item-text="label"
+                         item-value="deviceId"
+                         hint="Select microphone input device"
+                         persistent-hint>
+                </v-select>
+              </p>
               <p>
               <ul>
                 <li>Peer connection state: <b>{{ status }}</b></li>
@@ -435,6 +463,7 @@ navigator.serviceWorker.addEventListener('message', event => {
 <script src="util.js?ts=1"></script>
 <script src="signaling.js?ts=1"></script>
 <script src="webrtc.js?ts=1"></script>
+<script src="microphone.js?ts=1"></script>
 <script src="app.js?ts=1"></script>
 
 </html>

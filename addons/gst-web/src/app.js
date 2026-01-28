@@ -155,6 +155,13 @@ var app = new Vue({
             scaleLocal: false,
             debug: false,
             turnSwitch: false,
+            // Microphone settings
+            microphoneEnabled: false,
+            microphoneSupported: false,
+            microphoneTransmitting: false,
+            microphoneMuted: false,
+            microphoneDevices: [],
+            selectedMicrophoneDevice: null,
             publishingAllowed: false,
             publishingIdle: false,
             publishingError: "",
@@ -265,6 +272,45 @@ var app = new Vue({
                         this.publishingError = response.status;
                     }
                 });
+        },
+        async initializeMicrophone() {
+            if (!MicrophoneManager.isSupported()) {
+                this.microphoneSupported = false;
+                return;
+            }
+            
+            this.microphoneSupported = true;
+            this.microphoneDevices = await MicrophoneManager.getAudioInputDevices();
+            
+            if (typeof microphoneManager === 'undefined') {
+                window.microphoneManager = new MicrophoneManager(webrtc);
+                microphoneManager.onstatuschange = (message) => {
+                    app.logEntries.push(applyTimestamp(message));
+                };
+                microphoneManager.onerror = (message) => {
+                    app.logEntries.push(applyTimestamp(message));
+                };
+                microphoneManager.ondebug = (message) => {
+                    if (app.debug) {
+                        app.debugEntries.push(applyTimestamp(message));
+                    }
+                };
+            }
+        },
+        toggleMicrophone() {
+            this.microphoneEnabled = !this.microphoneEnabled;
+        },
+        muteMicrophone() {
+            if (typeof microphoneManager !== 'undefined') {
+                microphoneManager.mute();
+                this.microphoneMuted = true;
+            }
+        },
+        unmuteMicrophone() {
+            if (typeof microphoneManager !== 'undefined') {
+                microphoneManager.unmute();
+                this.microphoneMuted = false;
+            }
         }
     },
 
@@ -336,6 +382,15 @@ var app = new Vue({
                 webrtc.input.attach_context();
             }
         },
+        microphoneEnabled(newValue) {
+            if (newValue === null) return;
+            this.setBoolParam("microphoneEnabled", newValue);
+            if (newValue && typeof microphoneManager !== 'undefined') {
+                microphoneManager.enable();
+            } else if (typeof microphoneManager !== 'undefined') {
+                microphoneManager.disable();
+            }
+        },
     },
 
     updated: () => {
@@ -352,6 +407,9 @@ app.turnSwitch = app.getBoolParam("turnSwitch", false);
 
 // Fetch scale local settings
 app.scaleLocal = app.getBoolParam("scaleLocal", !app.resizeRemote);
+
+// Fetch microphone settings
+app.microphoneEnabled = app.getBoolParam("microphoneEnabled", false);
 
 var videoElement = document.getElementById("stream");
 if (videoElement === null) {
@@ -850,4 +908,7 @@ fetch("./turn")
         audio_webrtc.rtcPeerConfig = config;
         webrtc.connect();
         audio_webrtc.connect();
+        
+        // Initialize microphone support
+        app.initializeMicrophone().catch(err => console.error('Failed to initialize microphone:', err));
     });
