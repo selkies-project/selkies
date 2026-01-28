@@ -1867,9 +1867,23 @@ class WebRTCInput:
             except: x,y,button_mask,scroll_magnitude = 0,0,self.button_mask,0; relative=False
             try: await self.send_x11_mouse(x, y, button_mask, scroll_magnitude, relative, display_id=display_id)
             except Exception as e: logger_webrtc_input.warning(f"Failed to set mouse cursor: {e}")
-        elif msg_type == "p": self.on_mouse_pointer_visible(bool(int(toks[1])))
-        elif msg_type == "vb": await self.on_video_encoder_bit_rate(int(toks[1]))
-        elif msg_type == "ab": await self.on_audio_encoder_bit_rate(int(toks[1]))
+        elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
+        elif msg_type == "vb":
+            try:
+                bitrate = int(toks[1])
+                if bitrate <= 0:
+                    return
+                await self.on_video_encoder_bit_rate(bitrate)
+            except Exception as e:
+                logger_webrtc_input.error(f"Error video bitrate change: {e}")
+        elif msg_type == "ab":
+            try:
+                bitrate = int(toks[1])
+                if bitrate <= 0:
+                    return
+                await self.on_audio_encoder_bit_rate(bitrate)
+            except Exception as e:
+                logger_webrtc_input.error(f"Error audio bitrate change: {e}")
         elif msg_type == "js": 
             cmd = toks[1]
             gamepad_idx = int(toks[2])
@@ -2024,7 +2038,14 @@ class WebRTCInput:
                     logger_webrtc_input.error(f"Failed to launch command '{command_to_run}': {e}")
             else:
                 logger_webrtc_input.warning("Received 'cmd' message without a command string.")
-        elif msg_type == "_arg_fps": self.on_set_fps(int(toks[1]))
+        elif msg_type == "_arg_fps":
+            try:
+                fps = int(toks[1])
+                if fps <= 0:
+                    return
+                await self.on_set_fps(fps)
+            except Exception as e:
+                logger_webrtc_input.error(f"Error fps change: {e}")
         elif msg_type == "_arg_resize":
             if len(toks) == 3:
                 enabled, res_str = toks[1].lower() == "true", toks[2]
@@ -2087,7 +2108,7 @@ class WebRTCInput:
             logger_webrtc_input.info(f"Received SETTINGS message: {settings_data}")
             try:
                 settings_json = json.loads(settings_data)
-                self.on_update_settings(settings_json)
+                asyncio.create_task(self.on_update_settings(settings_json))
             except Exception as e:
                 logger_webrtc_input.error(f"Failed to parse SETTINGS data: {e}")
         else:

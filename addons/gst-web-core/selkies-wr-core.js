@@ -135,9 +135,9 @@ function InitUI() {
 
 export default function webrtc() {
 	let appName;
-	let videoBitRate = 8000;
+	let videoBitRate = 8;      // in mbps
 	let videoFramerate = 60;
-	let audioBitRate = 96000;
+	let audioBitRate = 128000; // in kbps
 	let showStart = false;
 	let showDrawer = false;
 	// TODO: how do we want to handle the log and debug entries
@@ -951,8 +951,11 @@ export default function webrtc() {
 				connectionStat.connectionLatency =  Math.max(connectionStat.connectionVideoLatency, connectionStat.connectionAudioLatency);
 
 				statsStart = now;
-				window.fps = connectionStat.connectionFrameRate
-
+				window.fps = connectionStat.connectionFrameRate;
+				window.network_stats = {
+					"bandwidth_mbps": (parseInt(stats.general.availableReceiveBandwidth) / 1e+6),
+					"latency_ms": connectionStat.connectionLatency,
+				};
 				webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
 			});
 		// Stats refresh interval (1000 ms)
@@ -1164,7 +1167,7 @@ export default function webrtc() {
 				webrtc.ondebug = (message) => { debugEntries.push(applyTimestamp("[webrtc] " + message)) };
 			}
 
-			webrtc.ongpustats = async (stats) => {
+			webrtc.ongpustats = (stats) => {
 				// Gpu stats for the Dashboard to render
 				window.gpu_stats = stats;
 			}
@@ -1268,7 +1271,7 @@ export default function webrtc() {
 				serverLatency = latency_ms * 2.0;
 			}
 
-			webrtc.onsystemstats = async (stats) => {
+			webrtc.onsystemstats = (stats) => {
 				// Dashboard takes care of data validation
 				window.system_stats = stats;
 			}

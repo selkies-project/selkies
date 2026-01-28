@@ -186,13 +186,13 @@ class RTCApp:
         self.__send_data_channel_message(
             "cursor", data)
 
-    def send_gpu_stats(self, load: Any, memory_total: Any, memory_used: Any):
+    def send_gpu_stats(self, load: float, memory_total: int, memory_used: int):
         """Sends GPU stats to the data channel"""
 
         self.__send_data_channel_message("gpu_stats", {
-            "load": load,
-            "memory_total": memory_total,
-            "memory_used": memory_used,
+            "gpu_percent": load * 100,
+            "mem_total": memory_total * 1024 * 1024,
+            "mem_used": memory_used * 1024 * 1024,
         })
 
     def send_reload_window(self):
@@ -259,7 +259,7 @@ class RTCApp:
 
     def is_data_channel_ready(self):
         """Checks to see if the data channel is open"""
-        return self.data_channel and self.peer_connection.connectionState == "connected"
+        return self.peer_connection.connectionState == "connected" and self.data_channel and self.data_channel.readyState == "open"
 
     def __send_data_channel_message(self, msg_type: str, data: Any):
         """Sends message to the peer through the data channel.
@@ -301,7 +301,7 @@ class RTCApp:
 
         return sdp_text
 
-    async def consume_data(self, sample, kind):
+    async def consume_data_gst(self, sample, kind):
         if sample:
             buf = sample.get_buffer()
             caps = sample.get_caps()
@@ -353,6 +353,42 @@ class RTCApp:
             buf.unmap(map_info)
         else:
             logger.warning("sample received is empty")
+    
+    async def consume_data_pixel(self, buf, pts, kind):
+        if kind == "video":
+            if buf:
+                try:
+                    packet = av.Packet(bytes(buf))
+                    RTP_VIDEO_CLOCK_RATE = 90000
+                    packet.time_base = Fraction(1, RTP_VIDEO_CLOCK_RATE)
+                    if pts is not None:
+                        packet.pts = pts
+                        packet.dts = packet.pts
+                    if self.video_pipeline_bridge != None:
+                        await self.video_pipeline_bridge.set_data(packet)
+                except Exception as e:
+                    logger.error(f"error processing video sample: {e}")
+        elif kind == "audio":
+            if buf:
+                try:
+                    packet = av.Packet(bytes(buf))
+                    packet.time_base = Fraction(1, 48000)
+                    if pts is not None:
+                        packet.pts = pts
+                    if self.audio_pipeline_bridge != None:
+                        await self.audio_pipeline_bridge.set_data(packet)
+                except Exception as e:
+                    logger.error(f"error processing audio sample: {e}")
+
+    def update_rtc_config(self, stun_servers: List[str], turn_servers: List[str]):
+        """Updates the RTC configuration with new STUN and TURN servers."""
+
+        # TODO: Changing ICE servers on an existing peer connection is not supported by aiortc.
+        # A new peer connection would need to be created for the changes to take effect, or
+        # renegotiation logic would need to be implemented in aiortc.
+        self.stun_servers = stun_servers
+        self.turn_servers = turn_servers
+        logger.warning("aiortc doesn't support ICE servers updation yet")
 
     def format_turn_servers(self, turn_servers: List[str]):
         """
@@ -529,6 +565,7 @@ class RTCApp:
         # TODO: aiortc only supports a limited set of codecs for now
         encoder_mime_map = {
             "x264enc"  : "video/H264",
+            "nvh264enc": "video/H264",
             "vp8enc"   : "video/VP8",
             # "av1enc"   : "video/AV1"
         }

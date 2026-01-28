@@ -45,7 +45,7 @@ COMMON_SETTING_DEFINITIONS = [
     {'name': 'framerate', 'type': 'range', 'default': '8-120', 'meta': {'default_value': 60}, 'help': 'Allowed framerate range (e.g., "8-165") or a fixed value (e.g., "60").'},
 
     # Audio Settings
-    {'name': 'audio_bitrate', 'type': 'enum', 'default': '320000', 'meta': {'allowed': ['64000', '128000', '265000', '320000']}, 'help': 'The default audio bitrate.'},
+    {'name': 'audio_bitrate', 'type': 'enum', 'default': '320000', 'meta': {'allowed': ['64000', '128000', '192000', '256000', '320000']}, 'help': 'The default audio bitrate.'},
 
     # Display & Resolution Settings
     {'name': 'is_manual_resolution_mode', 'type': 'bool', 'default': False, 'help': 'Lock the resolution to the manual width/height values.'},
@@ -89,6 +89,7 @@ COMMON_SETTING_DEFINITIONS = [
     {'name': 'debug', 'type': 'bool', 'default': False, 'help': 'Enable debug logging.'},
     {'name': 'mode', 'type': 'str', 'default': 'websockets', 'help': "Specify the mode: 'webrtc' or 'websockets'; defaults to websockets"},
     {'name': 'enable_dual_mode', 'type': 'bool', 'default': False, 'help': 'Enable switching Streaming modes from UI'},
+    {'name': 'audio_device_name', 'type': 'str', 'default': 'output.monitor', 'help': 'Audio device name for pcmflux capture.'},
 ]
 
 SETTING_DEFINITIONS_WEBSOCKETS = [
@@ -110,7 +111,6 @@ SETTING_DEFINITIONS_WEBSOCKETS = [
     {'name': 'control_port', 'type': 'int', 'default': 8083, 'help': 'Port for the internal control plane API.'},
     {'name': 'master_token', 'type': 'str', 'default': '', 'help': 'Master token to enable secure mode and protect the control plane API.'},
     {'name': 'dri_node', 'type': 'str', 'default': '', 'env_var': 'DRI_NODE', 'help': 'Path to the DRI render node for VA-API.'},
-    {'name': 'audio_device_name', 'type': 'str', 'default': 'output.monitor', 'help': 'Audio device name for pcmflux capture.'},
     {'name': 'watermark_path', 'type': 'str', 'default': '', 'env_var': 'WATERMARK_PNG', 'help': 'Absolute path to the watermark PNG file.'},
     {'name': 'watermark_location', 'type': 'int', 'default': -1, 'env_var': 'WATERMARK_LOCATION', 'help': 'Watermark location enum (0-6).'},
     {'name': 'wayland_socket_index', 'type': 'int', 'default': 0, 'help': 'Index for the Wayland command socket (e.g. 0 for wayland-0).'},
@@ -148,7 +148,7 @@ SETTING_DEFINITIONS_WEBRTC = [
     {'name': 'cloudflare_turn_token_id', 'type': 'str', 'default': '', 'help': 'The Cloudflare TURN App token ID.'},
     {'name': 'cloudflare_turn_api_token', 'type': 'str', 'default': '', 'help': 'The Cloudflare TURN API token.'},
 
-    {'name': 'encoder', 'type': 'enum', 'default': 'x264enc', 'meta': {'allowed': ['av1enc', 'x264enc', 'nvh264enc', 'vp8enc']}, 'help': 'GStreamer video encoder to use'},
+    {'name': 'encoder_rtc', 'type': 'enum', 'default': 'x264enc', 'meta': {'allowed': ['av1enc', 'x264enc', 'nvh264enc', 'vp8enc']}, 'help': 'GStreamer video encoder to use'},
     {'name': 'video_bitrate', 'type': 'range', 'default': '1-100', 'meta': {"default_value": 8}, 'help': 'Default video bitrate in Megabits per second (Mbps), allowed range (e.g., "1-100") or a fixed value (e.g., "8" for 8 Mbps)'},
     {'name': 'app_wait_ready', 'type': 'bool', 'default': False, 'help': 'Waits for --app_ready_file to exist before starting stream if set to "true"'},
     {'name': 'app_ready_file', 'type': 'str', 'default': '/tmp/selkies-appready', 'help': 'File set by sidecar used to indicate that app is initialized and ready'},
@@ -169,7 +169,8 @@ SETTING_DEFINITIONS_WEBRTC = [
     {'name': 'webrtc_statistics_dir', 'type': 'str', 'default': '/tmp', 'help': 'Directory to save WebRTC Statistics CSV from client with filenames selkies-stats-video-[timestamp].csv and selkies-stats-audio-[timestamp].csv'},
     {'name': 'enable_metrics_http', 'type': 'bool', 'default': False, 'help': 'Enable the Prometheus HTTP metrics port'},
     {'name': 'metrics_http_port', 'type': 'int', 'default': 8000, 'help': 'Port to start the Prometheus metrics server on'},
-    {'name': 'upload_dir', 'type': 'str', 'default': '~/Desktop', 'help': "Directory to save the uploaded content, in absolute path format. Default to '~/Desktop' directory"}
+    {'name': 'upload_dir', 'type': 'str', 'default': '~/Desktop', 'help': "Directory to save the uploaded content, in absolute path format. Default to '~/Desktop' directory"},
+    {'name': 'media_pipeline', 'type': 'enum', 'default': 'pixelflux', 'meta': {'allowed': ['gstreamer', 'pixelflux']}, 'help': 'Media pipeline to use; responsible for video and audio capturing and encoding of data. Defaults to pixelflux media pipeline'}
 ]
 
 class AppSettings:
