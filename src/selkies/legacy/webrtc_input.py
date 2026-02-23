@@ -95,8 +95,35 @@ def _init_cursor_name():
         logger.warning("cursor name support unavailable: %s", e)
         return False
 
-def _get_cursor_name():
-    """Return the current X11 cursor name (e.g. 'left_ptr', 'hand2'), or None."""
+_X11_TO_CSS = {
+    "left_ptr": "default",
+    "arrow": "default",
+    "hand2": "pointer",
+    "hand1": "pointer",
+    "xterm": "text",
+    "fleur": "move",
+    "crosshair": "crosshair",
+    "watch": "wait",
+    "left_ptr_watch": "progress",
+    "question_arrow": "help",
+    "X_cursor": "not-allowed",
+    "pirate": "not-allowed",
+    "top_side": "n-resize",
+    "bottom_side": "s-resize",
+    "left_side": "w-resize",
+    "right_side": "e-resize",
+    "top_left_corner": "nw-resize",
+    "top_right_corner": "ne-resize",
+    "bottom_left_corner": "sw-resize",
+    "bottom_right_corner": "se-resize",
+    "sb_h_double_arrow": "ew-resize",
+    "sb_v_double_arrow": "ns-resize",
+    "grabbing": "grabbing",
+    "grab": "grab",
+}
+
+def _get_css_cursor():
+    """Return the current cursor as a CSS cursor value, or None."""
     if not _init_cursor_name():
         return None
     try:
@@ -105,9 +132,11 @@ def _get_cursor_name():
         if not result:
             return None
         name = result.contents.name
-        cursor_name = name.decode("utf-8", errors="replace") if name else None
+        x11_name = name.decode("utf-8", errors="replace") if name else None
         x11.XFree(result)
-        return cursor_name
+        if x11_name:
+            return _X11_TO_CSS.get(x11_name)
+        return None
     except Exception:
         return None
 
@@ -600,9 +629,9 @@ class WebRTCInput:
                 "y": yhot_scaled,
             },
         }
-        cursor_name = _get_cursor_name()
-        if cursor_name:
-            msg["cursor_name"] = cursor_name
+        css_cursor = _get_css_cursor()
+        if css_cursor:
+            msg["css_cursor"] = css_cursor
         return msg
 
     def cursor_to_png(self, cursor, resize_width, resize_height):
