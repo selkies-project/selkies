@@ -845,10 +845,16 @@ class WebRTCInput:
         self.upload_dir_path = None
         self.active_uploads_by_path_conn = {}
         self.active_upload_target_path_conn = None
-        
-        self.on_video_encoder_bit_rate = lambda bitrate: logger_webrtc_input.warning("unhandled on_video_encoder_bit_rate")
-        self.on_audio_encoder_bit_rate = lambda bitrate: logger_webrtc_input.warning("unhandled on_audio_encoder_bit_rate")
-        self.on_mouse_pointer_visible = lambda visible: logger_webrtc_input.warning("unhandled on_mouse_pointer_visible")
+
+        async def _unhandled_video_bitrate(bitrate):
+            logger_webrtc_input.warning(f"unhandled on_video_encoder_bit_rate: {bitrate}")
+        self.on_video_encoder_bit_rate = _unhandled_video_bitrate
+        async def _unhandled_audio_bitrate(bitrate):
+            logger_webrtc_input.warning(f"unhandled on_audio_encoder_bit_rate: {bitrate}")
+        self.on_audio_encoder_bit_rate = _unhandled_audio_bitrate
+        async def _unhandled_mouse_pointer(visible):
+            logger_webrtc_input.warning(f"unhandled on_mouse_pointer_visible: {visible}")
+        self.on_mouse_pointer_visible = _unhandled_mouse_pointer 
         self.on_clipboard_read = self._on_clipboard_read
         self.on_set_fps = lambda fps: logger_webrtc_input.warning("unhandled on_set_fps")
         self.on_set_enable_resize = lambda enable_resize, res: logger_webrtc_input.warning("unhandled on_set_enable_resize")
