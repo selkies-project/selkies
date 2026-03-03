@@ -20,15 +20,12 @@
 #   limitations under the License.
 
 import logging
-import sys
 import asyncio
 import re
 import json
-import sys
 import base64
 
 from .webrtc import (
-    MediaStreamTrack,
     RTCPeerConnection,
     RTCIceCandidate,
     RTCRtpSender,
@@ -47,12 +44,47 @@ from .webrtc.rtcicetransport import (
 import av
 from fractions import Fraction
 from typing import List, Any, Dict, Optional
+from .webrtc.contrib.media import MediaRelay
+from enum import Enum
+
 import gi
 gi.require_version('Gst', "1.0")
 from gi.repository import Gst
 
 logger = logging.getLogger("rtc")
 logger.setLevel(logging.INFO)
+
+class ConditionalExtraFormatter(logging.Formatter):
+    def __init__(self, fmt=None, datefmt=None, style='%', extra_fields=None):
+        super().__init__(fmt, datefmt, style)
+        self.extra_fields = extra_fields or ['client_peer_id', 'client_type']
+
+    def format(self, record):
+        result = super().format(record)
+        # Add extra fields only if they exist
+        extra_parts = []
+        for field in self.extra_fields:
+            value = getattr(record, field, None)
+            if value is not None:
+                extra_parts.append(f"{field}={value}")
+        if extra_parts:
+            result = f"{result} | {' '.join(extra_parts)}"
+        return result
+
+handler = logging.StreamHandler()
+formatter = ConditionalExtraFormatter(
+    fmt='%(levelname)s:%(name)s:%(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    extra_fields=['client_peer_id', 'client_type']
+)
+logger.handlers.clear()
+logger.propagate = False
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+class ClientType(str, Enum):
+    CONTROLLER = "controller"
+    VIEWER = "viewer"
 
 class RTCAppError(Exception):
     pass
@@ -103,8 +135,7 @@ class RTCApp:
         stun_servers: List[str] = None,
         turn_servers: List[str] = None
     ):
-        self.peer_connection = None
-        self.data_channel = None
+        self.peer_connections = {}
         self.aux_data_channel = None
         self.async_event_loop = async_event_loop
         self.stun_servers = stun_servers
@@ -114,6 +145,7 @@ class RTCApp:
 
         self.audio_pipeline_bridge = None
         self.video_pipeline_bridge = None
+        self.media_relay = None
 
         # Data channel events
         self.on_data_open = lambda: logger.warning('unhandled on_data_open')
@@ -128,23 +160,50 @@ class RTCApp:
 
         self.request_idr_frame = lambda: logger.warning('unhandled request_idr_frame')
 
-    async def set_sdp(self, sdp_type: str, sdp: str):
+    async def set_sdp(self, sdp_type: str, sdp: str, client_peer_id: str):
         """Sets remote SDP received by peer"""
-
         if sdp_type != 'answer':
-            raise RTCAppError('ERROR: sdp type was not "answer"')
+            raise RTCAppError('ERROR: sdp type is not "answer"')
         if sdp is None:
             raise RTCAppError("ERROR: sdp can't be None")
+        if not client_peer_id:
+            raise RTCAppError("ERROR: client_peer_id is required to set sdp")
+
+        peer_obj = self.peer_connections.get(client_peer_id, None)
+        if peer_obj is None:
+            raise RTCAppError(f"ERROR: peer connection for client_peer_id: {client_peer_id} not found")
+
+        peer_conn = peer_obj["peer_conn"]
+        if peer_conn.connectionState in ["closed", "failed"]:
+            logger.warning(
+                f"Ignoring remote SDP: peer connection in {peer_conn.connectionState} state",
+                extra={'client_peer_id': client_peer_id, 'client_type': peer_obj.get('client_type')}
+            )
+            return
 
         sdp = RTCSessionDescription(sdp=sdp, type=sdp_type)
-
         if isinstance(sdp, RTCSessionDescription):
-            await self.peer_connection.setRemoteDescription(sdp)
+            await peer_conn.setRemoteDescription(sdp)
 
-    async def set_ice(self, ice: Dict):
-        """Adds ice candidate received from signalling server"""
+    async def set_ice(self, ice: Dict, client_peer_id: str):
+        """Adds ice candidate received from signaling server"""
+        if not client_peer_id:
+            raise RTCAppError("ERROR: client_peer_id is required to set sdp")
+
+        peer_obj = self.peer_connections.get(client_peer_id, None)
+        if peer_obj is None:
+            raise RTCAppError(f"ERROR: peer connection for client_peer_id: {client_peer_id} not found")
+
+        peer_conn = peer_obj["peer_conn"]
+        if peer_conn.connectionState in ["closed", "failed"]:
+            logger.warning(
+                f"Ignoring adding ICE candidate: peer connection in {peer_conn.connectionState} state",
+                extra={'client_peer_id': client_peer_id, 'client_type': peer_obj.get('client_type')}
+            )
+            return
+
         if ice.get('candidate') == "":
-            await self.peer_connection.addIceCandidate(None)
+            await peer_conn.addIceCandidate(None)
             return
 
         # Generate RTCIceCandidate from ice
@@ -158,7 +217,7 @@ class RTCApp:
             icecandidate.sdpMLineIndex = ice.get('sdpMLineIndex')
 
         if isinstance(icecandidate, RTCIceCandidate):
-            await self.peer_connection.addIceCandidate(icecandidate)
+            await peer_conn.addIceCandidate(icecandidate)
         else:
             raise RTCAppError("ERROR: ice candidate is not an instance of RTCIceCandidate")
 
@@ -167,7 +226,7 @@ class RTCApp:
         CLIPBOARD_CHUNK_SIZE = 65400
         if not data:
             return
-        
+
         # TODO: add support for binary clipboard data
         clipboard_message = base64.b64encode(data.encode()).decode("utf-8")
         read = 0
@@ -205,7 +264,7 @@ class RTCApp:
         """Sends the current framerate to the data channel."""
         logger.info("sending framerate")
         self.__send_data_channel_message(
-            "system", {"action": "videoFramerate,"+str(framerate)})
+            "system", {"action": "videoFramerate," + str(framerate)})
 
     def send_video_bitrate(self, bitrate: int):
         """Sends the current video bitrate to the data channel"""
@@ -230,7 +289,7 @@ class RTCApp:
         """
         logger.info("sending resize enabled state")
         self.__send_data_channel_message(
-            "system", {"action": "resize,"+str(resize_enabled)})
+            "system", {"action": "resize," + str(resize_enabled)})
 
     def send_remote_resolution(self, res: str):
         """sends the current remote resolution to the client"""
@@ -257,26 +316,38 @@ class RTCApp:
                 "mem_used": mem_used,
             })
 
-    def is_data_channel_ready(self):
+    def get_data_channel(self):
         """Checks to see if the data channel is open"""
-        return self.peer_connection.connectionState == "connected" and self.data_channel and self.data_channel.readyState == "open"
+        state = False
+        peer_obj = self.get_controller_instance()
+        if not peer_obj:
+            return state, None
+
+        conn_state = peer_obj.get("peer_conn").connectionState
+        data_channel_state = peer_obj.get("data_channel").readyState
+        return conn_state == "connected" and data_channel_state == "open", peer_obj.get("data_channel")
 
     def __send_data_channel_message(self, msg_type: str, data: Any):
         """Sends message to the peer through the data channel.
         Message is dropped if the channel is not open.
         """
-        if not self.peer_connection:
+        if not self.peer_connections:
             return
 
-        if not self.is_data_channel_ready():
-            logger.debug("skipping message because data channel is not ready: %s" % msg_type)
+        state, data_channel = self.get_data_channel()
+        if not state:
+            logger.info("skipping message because data channel is not ready: %s" % msg_type)
             return
 
         msg = {"type": msg_type, "data": data}
-        self.data_channel.send(json.dumps(msg))
+        data_channel.send(json.dumps(msg))
 
     def send_media_data_over_channel(self, msg_type, data):
         self.__send_data_channel_message(msg_type, data)
+
+    def get_controller_instance(self):
+        """Returns the peer connection object for the controller client, if it exists."""
+        return next((obj for obj in self.peer_connections.values() if obj.get("client_type") == ClientType.CONTROLLER), None)
 
     def munge_sdp(self, sdp: str):
         sdp_text = sdp
@@ -353,7 +424,7 @@ class RTCApp:
             buf.unmap(map_info)
         else:
             logger.warning("sample received is empty")
-    
+
     async def consume_data_pixel(self, buf, pts, kind):
         if kind == "video":
             if buf:
@@ -473,91 +544,106 @@ class RTCApp:
         logger.debug(f"Forcing codec preferences to: {[*chosen_codec, rtx_codec]}")
         transceiver.setCodecPreferences([*chosen_codec, rtx_codec])
 
-    def on_datachannel(self, channel: RTCDataChannel):
-        """Handles incoming auxiliary data channel"""
-        logger.info("Auxiliary data channel opened: %s", channel.label)
+    def on_datachannel(self, channel: RTCDataChannel, client_peer_id: str = None):
+        """Handles incoming auxiliary data channel.
+
+        Arguments:
+            channel        -- the RTCDataChannel object provided by the event
+            client_peer_id -- optional id of the client peer associated with this channel
+        """
+        logger.info(f"Auxiliary data channel opened: {channel.label}", extra={'client_peer_id': client_peer_id})
         self.aux_data_channel = channel
         self.aux_data_channel.on("close", lambda: logger.info("Auxiliary data channel closed"))
         self.aux_data_channel.on("error", lambda e: logger.error("Auxiliary data channel error: %s", e))
         self.aux_data_channel.on("message", lambda data: asyncio.run_coroutine_threadsafe(self.on_data_msg_bytes(data), loop=self.async_event_loop))
 
-    async def on_connectionstatechange(self):
-        if self.peer_connection:
-            state = self.peer_connection.connectionState
-            logger.info("Peer Connection state is %s", state)
-            if state == "failed":
-                await self.peer_connection.close()
-            elif state == "disconnected":
-                logger.warning("Peer connection disconnected.")
-            elif state == "connected":
-                logger.info("Peer connection established.")
-            elif state == "closed":
-                logger.info("Peer connection closed.")
-            elif state == "connecting":
-                logger.info("Peer connection is connecting.")
-            else:
-                logger.debug(f"Unhandled peer connection state: {state}")
+    async def on_connectionstatechange(self, client_peer_id: str):
+        """Handle connection state changes for a peer connection.
+        """
+        peer_conn = None
+        if client_peer_id:
+            peer_obj = self.peer_connections.get(client_peer_id, None)
+            if peer_obj:
+                peer_conn = peer_obj.get("peer_conn")
 
-    def on_pli(self):
-        logger.info("PLI occurred, triggering IDR frame request")
+        if peer_conn is None:
+            logger.debug("No peer connection found for connectionstatechange")
+            return
+
+        state = peer_conn.connectionState
+        client_type = peer_obj.get('client_type') if peer_obj else ''
+        if state == "failed":
+            await peer_conn.close()
+        elif state == "disconnected":
+            logger.warning("Peer connection disconnected", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+        elif state == "connected":
+            logger.info("Peer connection established", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+        elif state == "closed":
+            logger.info("Peer connection closed", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+        elif state == "connecting":
+            logger.info("Peer connection is connecting", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+        else:
+            logger.debug(f"Unhandled peer connection state: {state}", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+
+    def on_pli(self, client_peer_id: str, client_type: str):
+        logger.info("PLI occurred, triggering IDR frame request", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         asyncio.run_coroutine_threadsafe(self.request_idr_frame(), self.async_event_loop)
 
-    async def start_rtc_connection(self):
-        # TODO: The logic for hanlding multi user session could be handled by this func
-        try:
-            logger.info("Starting rtc pipeline")
-            await self._start_rtc_pipeline()
-        except Exception as e:
-            logger.error(f"Error starting rtc pipeline: {e}", exc_info=True)
-        else:
-            logger.info("Pipeline started successfully")
+    async def _start_rtc_pipeline(self, client_peer_id: str, c_type: str):
+        """Starts the WebRTC pipeline and creates the peer connection."""
+        # Normalize client_type to ClientType enum
+        client_type = ClientType(c_type)
 
-    async def stop_rtc_connection(self):
-        try:
-            logger.info("Stopping rtc pipeline")
-            await self._stop_rtc_pipeline()
-        except Exception as e:
-            logger.error(f"Error stopping rtc pipeline: {e}", exc_info=True)
-        else:
-            logger.info("Pipeline stopped successfully")
+        # Create media relay if client is a controller type
+        if client_type is ClientType.CONTROLLER:
+            self.media_relay = MediaRelay()
 
-    async def _start_rtc_pipeline(self):
-        self.peer_connection =  RTCPeerConnection(self.get_rtc_config())
+            # create data bridge instances for video and audio
+            self.video_pipeline_bridge = PipelineBridge()
+            self.video_media = VideoMedia(self.video_pipeline_bridge)
 
-        # create data bridge instances for video and audio
-        self.video_pipeline_bridge = PipelineBridge()
-        video_media = VideoMedia(self.video_pipeline_bridge)
+            self.audio_pipeline_bridge = PipelineBridge()
+            self.audio_media = AudioMedia(self.audio_pipeline_bridge)
+            logger.info("Media relay and pipeline bridges created for controller client")
 
-        self.audio_pipeline_bridge = PipelineBridge()
-        audio_media = AudioMedia(self.audio_pipeline_bridge)
+        peer_connection =  RTCPeerConnection(self.get_rtc_config())
+
+        if self.media_relay is None:
+            raise RTCAppError("Cannot create peer connection: no media relay available. Controller may be disconnected.")
 
         # add audio and video encoded streams
-        rtp_video_sender = self.peer_connection.addTrack(video_media)
-        rtp_video_sender.on("pli", self.on_pli)
-        self.peer_connection.addTrack(audio_media)
+        rtp_video_sender = peer_connection.addTrack(self.media_relay.subscribe(self.video_media))
+        rtp_video_sender.on("pli", lambda cid=client_peer_id, ct=client_type: self.on_pli(cid, ct))
+        peer_connection.addTrack(self.media_relay.subscribe(self.audio_media))
 
         # Primary data channel
-        self.data_channel = self.peer_connection.createDataChannel("input", ordered=True, maxRetransmits=0)
+        data_channel = peer_connection.createDataChannel("input", ordered=True, maxRetransmits=0)
 
         # Assign event handlers for the input data channel
-        self.data_channel.on("open", self.on_data_open)
-        self.data_channel.on("message", lambda msg: asyncio.run_coroutine_threadsafe(self.on_data_message(msg), loop=self.async_event_loop))
+        data_channel.on("open", self.on_data_open)
+        data_channel.on("message", lambda msg: asyncio.run_coroutine_threadsafe(self.on_data_message(msg), loop=self.async_event_loop))
 
         # A dynamic secondary data channel intended for file data transmission
-        self.peer_connection.on("datachannel", self.on_datachannel)
-        self.peer_connection.on("connectionstatechange", self.on_connectionstatechange)
+        peer_connection.on("datachannel", lambda ch, cid=client_peer_id: self.on_datachannel(ch, cid))
+        peer_connection.on("connectionstatechange", lambda cid=client_peer_id: asyncio.run_coroutine_threadsafe(self.on_connectionstatechange(cid), loop=self.async_event_loop))
 
         preferred_codec = self.get_mime_by_encoder(self.encoder)
         if preferred_codec is None:
             raise RTCAppError(f"Encoder {self.encoder} is not supported")
-        self.force_codec(self.peer_connection, rtp_video_sender, preferred_codec)
+        self.force_codec(peer_connection, rtp_video_sender, preferred_codec)
 
-        await self.peer_connection.setLocalDescription(await self.peer_connection.createOffer())
-        offer = self.peer_connection.localDescription
+        await peer_connection.setLocalDescription(await peer_connection.createOffer())
+        offer = peer_connection.localDescription
 
         sdp = offer.sdp
         sdp = self.munge_sdp(sdp)
-        await self.on_sdp('offer', sdp)
+        await self.on_sdp('offer', sdp, client_peer_id)
+
+        self.peer_connections[client_peer_id] = {
+            "peer_conn": peer_connection,
+            "data_channel": data_channel,
+            "client_type": client_type
+        }
 
     def get_mime_by_encoder(self, encoder: str) -> Optional[str]:
         """Returns respective mime type by encoder name"""
@@ -571,16 +657,61 @@ class RTCApp:
         }
         return encoder_mime_map.get(encoder)
 
-    async def _stop_rtc_pipeline(self):
+    async def _stop_rtc_pipeline(self, client_peer_id: str):
         """Stops the WebRTC pipeline and closes the peer connection."""
         try:
-            # FIXME: maybe checking for None is not appropriate
-            if self.peer_connection is not None:
-                await self.peer_connection.close()
-            self.peer_connection = None
-            self.data_channel = None
+            if not self.peer_connections:
+                return
+
+            peer_obj = self.peer_connections.get(client_peer_id, None)
+            if not peer_obj:
+                logger.warning(f"Peer object not found for client peer_id: {client_peer_id}")
+                return
+
+            peer_conn = peer_obj.get("peer_conn")
+            if peer_conn is not None:
+                await peer_conn.close()
+            del self.peer_connections[client_peer_id]
+
+            if peer_obj.get('client_type') == ClientType.CONTROLLER:
+                logger.info("Controller peer disconnected, cleaning up media relay and bridges")
+                self.media_relay = None
+                self.aux_data_channel = None
+                self.video_pipeline_bridge = None
+                self.audio_pipeline_bridge = None
+        except Exception as e:
+            raise RTCAppError(f"Error stopping pipeline: {e}")
+
+    async def start_rtc_connection(self, client_peer_id: str, client_type: str):
+        try:
+            logger.info("Starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+            await self._start_rtc_pipeline(client_peer_id, client_type)
+        except Exception as e:
+            logger.error("Error starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
+        else:
+            logger.info("RTC pipeline started successfully", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+
+    async def stop_rtc_connection(self, client_peer_id: str, client_type: str):
+        """Stop a specific peer connection by ID."""
+        try:
+            logger.info("Stopping RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+            await self._stop_rtc_pipeline(client_peer_id)
+        except Exception as e:
+            logger.error("Error stopping RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
+        else:
+            logger.info("RTC pipeline stopped successfully", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+
+    async def stop_all_rtc_connections(self):
+        """Stop all active peer connections and cleanup media resources."""
+        try:
+            logger.info("Stopping all RTC connections")
+            for client_peer_id in list(self.peer_connections.keys()):
+                await self._stop_rtc_pipeline(client_peer_id)
+
+            self.media_relay = None
             self.aux_data_channel = None
             self.video_pipeline_bridge = None
             self.audio_pipeline_bridge = None
+            logger.info("All RTC connections stopped, cleaned up media relay and bridges")
         except Exception as e:
-            raise RTCAppError(f"Error stopping pipeline: {e}")
+            raise RTCAppError(f"Error stopping all RTC connections: {e}")

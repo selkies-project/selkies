@@ -1060,6 +1060,7 @@ function Sidebar() {
     const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
     return saved !== null ? saved === 'true' : DEFAULT_ENABLE_BINARY_CLIPBOARD;
   });
+  const [videoBitrateMbps, setVideoBitrateMbps] = useState(0);
   const [presetValue, setPresetValue] = useState("");
   const [clientFps, setClientFps] = useState(0);
   const [audioBuffer, setAudioBuffer] = useState(0);
@@ -1731,6 +1732,8 @@ function Sidebar() {
           return t("sections.stats.tooltipBandwidth", { value: bandwidthMbps.toFixed(2) }, `Bandwidth: ${bandwidthMbps.toFixed(2)} Mbps`);
         case "latency":
           return t("sections.stats.tooltipLatency", { value: latencyMs.toFixed(1) }, `Latency: ${latencyMs.toFixed(1)} ms`);
+        case "videobitrate":
+          return t("sections.stats.tooltipVideoBitrate", { value: videoBitrateMbps }, `Video Bitrate: ${videoBitrateMbps} Mbps`);
         default:
           return "";
       }
@@ -1746,6 +1749,7 @@ function Sidebar() {
       gpuMemTotal,
       clientFps,
       audioBuffer,
+      videoBitrateMbps,
     ]
   );
 
@@ -1811,6 +1815,8 @@ function Sidebar() {
       const netStats = window.network_stats;
       setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
       setLatencyMs(netStats?.latency_ms ?? 0);
+      const vb = window.video_bitrate;
+      setVideoBitrateMbps(vb || 0);
     };
     const intervalId = setInterval(readStats, STATS_READ_INTERVAL_MS);
     return () => clearInterval(intervalId);
@@ -2055,6 +2061,12 @@ function Sidebar() {
   const latencyPercent = Math.min(100, (latencyMs / MAX_LATENCY_MS) * 100);
   const latencyOffset = calculateGaugeOffset(
     latencyPercent,
+    gaugeRadius,
+    gaugeCircumference
+  );
+  const videoBitrateGaugePercent = Math.min(100, (videoBitrateMbps / videoBitrate) * 100);
+  const videoBitrateOffset = calculateGaugeOffset(
+    videoBitrateGaugePercent,
     gaugeRadius,
     gaugeCircumference
   );
@@ -3177,6 +3189,55 @@ function Sidebar() {
                           {t("sections.stats.fpsLabel")}
                         </div>
                       </div>
+                      {isWebrtc && (<div
+                        className="gauge-container"
+                        onMouseEnter={(e) => handleMouseEnter(e, "videobitrate")}
+                        onMouseLeave={handleMouseLeave}
+                      >
+                        <svg
+                          width={gaugeSize}
+                          height={gaugeSize}
+                          viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
+                        >
+                          <circle
+                            stroke="var(--item-border)"
+                            fill="transparent"
+                            strokeWidth={gaugeStrokeWidth}
+                            r={gaugeRadius}
+                            cx={gaugeCenter}
+                            cy={gaugeCenter}
+                          />
+                          <circle
+                            stroke="var(--sidebar-header-color)"
+                            fill="transparent"
+                            strokeWidth={gaugeStrokeWidth}
+                            r={gaugeRadius}
+                            cx={gaugeCenter}
+                            cy={gaugeCenter}
+                            transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
+                            style={{
+                              strokeDasharray: gaugeCircumference,
+                              strokeDashoffset: videoBitrateOffset,
+                              transition: "stroke-dashoffset 0.3s ease-in-out",
+                              strokeLinecap: "round",
+                            }}
+                          />
+                          <text
+                            x={gaugeCenter}
+                            y={gaugeCenter}
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            fontSize={`${gaugeSize / 5}px`}
+                            fill="var(--sidebar-text)"
+                            fontWeight="bold"
+                          >
+                            {videoBitrateMbps}
+                          </text>
+                        </svg>
+                        <div className="gauge-label">
+                          {t("sections.stats.videoBitrateLabel", "Video Bitrate")}
+                        </div>
+                      </div>)}
                       <div
                         className="gauge-container"
                         onMouseEnter={(e) => handleMouseEnter(e, "audio")}
