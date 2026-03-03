@@ -115,6 +115,8 @@ const en = {
             tooltipBandwidth: "Bandwidth: {value}mbps",
             latencyLabel: "Latency",
             tooltipLatency: "Round Trip Latency: {value}ms",
+            videoBitrateLabel: "Video Bitrate",
+            tooltipVideoBitrate: "Video Bitrate: {value}mbps",
         },
         clipboard: {
             title: "Clipboard",
