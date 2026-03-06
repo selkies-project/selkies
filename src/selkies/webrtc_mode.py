@@ -87,11 +87,12 @@ class WebRTCApp:
         self._json_config_lock = asyncio.Lock()
         self.peer_id = 1
         self.args: Optional[SimpleNamespace] = None
-        self._init_default_settings()
         self.monitoring_utils_used: Dict[str, bool] = {}
         self.mon_hmac_turn: Optional[HMACRTCMonitor] = None
         self.mon_rest_api: Optional[RESTRTCMonitor] = None
         self.mon_rtc_config_file: Optional[RTCConfigFileMonitor] = None
+
+        self._init_default_settings()
 
         # signal handlers
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -197,8 +198,6 @@ class WebRTCApp:
 
         client = WebRTCSignaling(
             f'{ws_protocol}//127.0.0.1:{self.args.port}/ws',
-            0,  # server_peer_id
-            1,  # client_peer_id
             enable_https=using_https,
             enable_basic_auth=using_basic_auth,
             basic_auth_user=self.args.basic_auth_user,
@@ -206,34 +205,51 @@ class WebRTCApp:
         )
         return client
 
-    # TODO: Handle the error scenario
     async def handle_signaling_error(self, error: Exception) -> None:
         """Handle signaling errors."""
         logger.error(f"Signaling client error: {error}. Closing the pipelines")
         await self.handle_signaling_disconnect()
 
     async def handle_signaling_disconnect(self) -> None:
-        logger.info("signaling disconnected, stopping pipelines")
+        logger.info("Signaling disconnected, cleaning up all resources")
         try:
+            await self.rtc_app.stop_all_rtc_connections()
             await self.media_pipeline.stop_media_pipeline()
-            await self.rtc_app.stop_rtc_connection()
         except Exception as e:
-            logger.error(f"Error stopping pipelines on signaling disconnect: {e}", exc_info=True)
+            logger.error(f"Error during signaling disconnect cleanup: {e}", exc_info=True)
 
-    async def handle_session_start(self, session_peer_id: int) -> None:
-        logger.info(f"starting session for peer id {session_peer_id}")
+    async def handle_session_start(self, session_peer_id: str, client_type: str) -> None:
+        logger.info(f"starting session for client peer id: {session_peer_id} of type: {client_type}")
         try:
-            if str(session_peer_id) == str(self.peer_id):
+            if client_type == 'controller':
+                if self.media_pipeline.is_media_pipeline_running():
+                    logger.warning("Media pipeline already running, stopping before restart")
+                    await self.media_pipeline.stop_media_pipeline()
                 await self.media_pipeline.start_media_pipeline()
-                await self.rtc_app.start_rtc_connection()
-                # Initialize stats location directory
-                if self.args.enable_webrtc_statistics:
-                    self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
-                logger.info(f"started session for peer id {session_peer_id}")
-            else:
-                logger.error(f"failed to start pipeline for peer_id: {session_peer_id}")
+            await self.rtc_app.start_rtc_connection(session_peer_id, client_type)
+
+            # Initialize stats location directory
+            if self.args.enable_webrtc_statistics:
+                self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
+            logger.info(f"started session for client peer id {session_peer_id}")
         except Exception as e:
-            raise
+            logger.error(f"Error starting session for client peer id {session_peer_id}: {e}", exc_info=True)
+            if client_type == 'controller':
+                await self.media_pipeline.stop_media_pipeline()
+            await self.rtc_app.stop_rtc_connection(session_peer_id, client_type)
+
+    async def handle_session_end(self, session_peer_id: str, client_type: str) -> None:
+        """Handle end of a session initiated by a client.
+        Stops the RTC connection and media pipeline for the given session peer id.
+        """
+        try:
+            if self.media_pipeline and client_type == 'controller':
+                await self.media_pipeline.stop_media_pipeline()
+            if self.rtc_app:
+                await self.rtc_app.stop_rtc_connection(session_peer_id, client_type)
+            logger.info(f"session ended for client peer id {session_peer_id} of type {client_type}")
+        except Exception as e:
+            logger.error(f"Error handling session end for {session_peer_id}: {e}", exc_info=True)
 
     def create_signaling_server(self, rtc_config: Any, mon_utils_used: Dict[str, bool]) -> WebRTCSimpleServer:
         """Create signaling server instance."""
@@ -262,6 +278,11 @@ class WebRTCApp:
         options.stun_host = self.args.stun_host
         options.stun_port = self.args.stun_port
         options.mode = self.args.mode
+        options.enable_sharing = self.args.enable_sharing
+        options.enable_shared = self.args.enable_shared
+        options.enable_player2 = self.args.enable_player2
+        options.enable_player3 = self.args.enable_player3
+        options.enable_player4 = self.args.enable_player4
 
         return WebRTCSimpleServer(options)
 
@@ -273,7 +294,8 @@ class WebRTCApp:
         # Signaling client callbacks
         self.signaling_client.on_error = self.handle_signaling_error
         self.signaling_client.on_disconnect = self.handle_signaling_disconnect
-        self.signaling_client.on_session = self.handle_session_start
+        self.signaling_client.on_session_start = self.handle_session_start
+        self.signaling_client.on_session_end = self.handle_session_end
         self.signaling_client.on_sdp = self.rtc_app.set_sdp
         self.signaling_client.on_ice = self.rtc_app.set_ice
 
@@ -581,7 +603,7 @@ class WebRTCApp:
                     turn_rest_protocol_header=self.args.turn_rest_protocol_header,
                     turn_tls=self.args.turn_tls,
                     turn_rest_tls_header=self.args.turn_rest_tls_header,
-                    period=60, enabled=True            
+                    period=60, enabled=True
                 )
                 self.mon_rest_api.on_rtc_config = self.mon_rtc_config
                 self.mon_rest_api.start()
@@ -624,7 +646,7 @@ class WebRTCApp:
         except Exception:
             logger.exception("Unexpected error while awaiting background tasks")
 
-        # Stop signaling client / media pipeline / rtc app / input_handler concurrently
+        # Stop each component concurrently
         stop_coros = []
         if self.signaling_client:
             stop_coros.append((_await_with_timeout(self.signaling_client.stop(), "signaling_client", 3.0)))
@@ -633,7 +655,7 @@ class WebRTCApp:
         if self.media_pipeline:
             stop_coros.append((_await_with_timeout(self.media_pipeline.stop_media_pipeline(), "media_pipeline", 3.0)))
         if self.rtc_app:
-            stop_coros.append((_await_with_timeout(self.rtc_app.stop_rtc_connection(), "rtc_app", 3.0)))
+            stop_coros.append((_await_with_timeout(self.rtc_app.stop_all_rtc_connections(), "rtc_app", 3.0)))
         if self.input_handler:
             try:
                 self.input_handler.stop_clipboard()
@@ -655,9 +677,9 @@ class WebRTCApp:
         if self.mon_hmac_turn:
             stop_coros.append((_await_with_timeout(self.mon_hmac_turn.stop(), "HMAC RTC Monitor", 2.0)))
         if self.mon_rest_api:
-            stop_coros.append((_await_with_timeout(self.mon_rest_api.stop(), "REST RTC Monitor", 2.0))) 
+            stop_coros.append((_await_with_timeout(self.mon_rest_api.stop(), "REST RTC Monitor", 2.0)))
         if self.mon_rtc_config_file:
-            stop_coros.append((_await_with_timeout(self.mon_rtc_config_file.stop(), "RTC Config File Monitor", 2.0))) 
+            stop_coros.append((_await_with_timeout(self.mon_rtc_config_file.stop(), "RTC Config File Monitor", 2.0)))
 
          # Await all stop coroutines with a global timeout
         if stop_coros:

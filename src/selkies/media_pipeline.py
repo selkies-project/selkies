@@ -98,6 +98,10 @@ class MediaPipeline(metaclass=ABCMeta):
         pass
 
     @abstractmethod
+    def is_media_pipeline_running(self) -> bool:
+        pass
+
+    @abstractmethod
     async def set_pointer_visible(self, visible: bool):
         pass
 
@@ -111,6 +115,10 @@ class MediaPipeline(metaclass=ABCMeta):
 
     @abstractmethod
     async def set_audio_bitrate(self, bitrate: int):
+        pass
+    
+    @abstractmethod
+    async def dynamic_idr_frame(self):
         pass
 
 class MediaPipelineGst(MediaPipeline):
@@ -1291,6 +1299,9 @@ class MediaPipelineGst(MediaPipeline):
         elif t == _Gst.MessageType.LATENCY:
             await asyncio.to_thread(self.pipeline.set_latency, 0)
         return True
+    
+    def is_media_pipeline_running(self):
+        return self._running and self.pipeline is not None
 
 class MediaPipelinePixel(MediaPipeline):
     def __init__(
@@ -1429,7 +1440,7 @@ class MediaPipelinePixel(MediaPipeline):
             cs.h264_crf = 23
             cs.h264_cbr_mode = True
             cs.h264_bitrate_kbps = self.video_bitrate
-            cs.vaapi_render_node_index = -1   #
+            cs.vaapi_render_node_index = -1
             if self.encoder == "x264enc":
                 cs.use_cpu = True
 
@@ -1583,3 +1594,5 @@ class MediaPipelinePixel(MediaPipeline):
             except Exception as e:
                 logger.error(f"Error stopping media pipelines: {e}", exc_info=True)
 
+    def is_media_pipeline_running(self):
+        return self._running

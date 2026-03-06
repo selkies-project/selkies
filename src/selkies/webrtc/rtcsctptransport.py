@@ -558,43 +558,60 @@ class InboundStream:
     def pop_messages(self) -> Iterator[tuple[int, int, bytes]]:
         pos = 0
         start_pos = None
+        expected_tsn = None
+        ordered = True
+        consumed_tsns = set()
+
         while pos < len(self.reassembly):
             chunk = self.reassembly[pos]
+            if chunk.tsn in consumed_tsns:
+                pos += 1
+                continue
             if start_pos is None:
                 ordered = not (chunk.flags & SCTP_DATA_UNORDERED)
+                # Prevent HoL blocking wedge. Skip middle/last fragments
+                # of broken messages to allow unordered messages to process.
                 if not (chunk.flags & SCTP_DATA_FIRST_FRAG):
-                    if ordered:
-                        break
-                    else:
-                        pos += 1
-                        continue
+                    pos += 1
+                    continue
                 if ordered and uint16_gt(chunk.stream_seq, self.sequence_number):
-                    break
+                    pos += 1
+                    continue
                 expected_tsn = chunk.tsn
                 start_pos = pos
-            elif chunk.tsn != expected_tsn:
-                if ordered:
-                    break
-                else:
+            else:
+                # Edge case: if we encounter a first fragment in the middle of reassembly
+                if chunk.flags & SCTP_DATA_FIRST_FRAG:
+                    # Abandon the previous broken reassembly and start fresh
+                    start_pos = pos
+                    expected_tsn = chunk.tsn
+                    ordered = not (chunk.flags & SCTP_DATA_UNORDERED)
+                    if ordered and uint16_gt(chunk.stream_seq, self.sequence_number):
+                        start_pos = None
+                        pos += 1
+                        continue
+                elif chunk.tsn != expected_tsn:
+                    # Gap detected in the middle of reassembly
                     start_pos = None
-                    pos += 1
                     continue
 
             if chunk.flags & SCTP_DATA_LAST_FRAG:
-                user_data = b"".join(
-                    [c.user_data for c in self.reassembly[start_pos : pos + 1]]
-                )
-                self.reassembly = (
-                    self.reassembly[:start_pos] + self.reassembly[pos + 1 :]
-                )
+                message_chunks =[]
+                for i in range(start_pos, pos + 1):
+                    c = self.reassembly[i]
+                    message_chunks.append(c.user_data)
+                    consumed_tsns.add(c.tsn)
+                user_data = b"".join(message_chunks)
                 if ordered and chunk.stream_seq == self.sequence_number:
                     self.sequence_number = uint16_add(self.sequence_number, 1)
-                pos = start_pos
                 yield (chunk.stream_id, chunk.protocol, user_data)
-            else:
-                pos += 1
+                start_pos = None
+            pos += 1
+            if start_pos is not None:
+                expected_tsn = tsn_plus_one(expected_tsn)
 
-            expected_tsn = tsn_plus_one(expected_tsn)
+        if consumed_tsns:
+            self.reassembly =[c for c in self.reassembly if c.tsn not in consumed_tsns]
 
     def prune_chunks(self, tsn: int) -> int:
         """
@@ -1148,7 +1165,7 @@ class RTCSctpTransport(AsyncIOEventEmitter):
                 self._last_received_tsn = tsn
             else:
                 break
-
+        logger.info(f"updated cumulaticve tsn : {self._last_received_tsn}")
         # filter out obsolete entries
         self._sack_duplicates = list(filter(is_obsolete, self._sack_duplicates))
         self._sack_misordered = set(filter(is_obsolete, self._sack_misordered))
@@ -1863,3 +1880,6 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         SHUTDOWN_SENT = 6
         SHUTDOWN_RECEIVED = 7
         SHUTDOWN_ACK_SENT = 8
+
+
+## 1. not sending heartBeat chunck if we are data sender

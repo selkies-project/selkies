@@ -44,7 +44,7 @@ export class WebRTCDemoSignaling {
      *    Signaling implementation is here:
      *      https://github.com/GStreamer/gstreamer/tree/main/subprojects/gst-examples/webrtc/signaling
      */
-    constructor(server) {
+    constructor(server, client_type, client_slot, client_strict_viewer) {
         /**
          * @private
          * @type {URL}
@@ -108,7 +108,41 @@ export class WebRTCDemoSignaling {
          */
         this.retry_count = 0;
 
+        /**
+         * @type {Array<number>}
+         */
         this.currRes = null;
+
+        /**
+         * @type {string}
+         */
+        this.peer_type = "client";
+
+        /**
+         * @type {string}
+         * possile values: 'viewer', 'controller'
+         */
+        this.client_type = client_type;
+
+        /**
+         * @type {string}
+         */
+        this.server_peer_id = null;
+
+        /**
+         * @type {number}
+         */
+        this.client_slot = client_slot;
+
+        /**
+         * @type {boolean}
+         */
+        this.client_strict_viewer = client_strict_viewer;
+
+        /**
+         * @type {function}
+         */
+        this.onshowalert = null;
     }
 
     /**
@@ -180,8 +214,13 @@ export class WebRTCDemoSignaling {
     _onServerOpen() {
         // Send local device resolution and scaling with HELLO message.
         this.state = 'connected';
-        this._ws_conn.send(`HELLO ${this.peer_id}`);
-        this._setStatus("Registering with server, peer ID: " + this.peer_id);
+        var meta = {
+            'client_type': this.client_type,
+            'client_slot': this.client_slot,
+            'client_strict_viewer': this.client_strict_viewer,
+        }
+        this._ws_conn.send(`HELLO ${this.peer_type} ${JSON.stringify(meta)}`);
+        this._setStatus("Registering with server, peer type: " + this.peer_type + ", client type: " + this.client_type);
         this.retry_count = 0;
     }
 
@@ -207,8 +246,8 @@ export class WebRTCDemoSignaling {
     }
 
     _setupCall() {
-        this._setStatus("Initiating session with peer.");
-        this._ws_conn.send(`SESSION 0`);
+        this._setStatus("Initiating session with server.");
+        this._ws_conn.send(`SESSION server`);
     }
     /**
      * Fired whenever a message is received from the signaling server.
@@ -231,14 +270,15 @@ export class WebRTCDemoSignaling {
             return;
         }
 
-        if (event.data === "SESSION_OK") { 
-            this._setStatus("Session established with peer.");
+        if (event.data.startsWith("SESSION_OK")) { 
+            this._setStatus("Session established with server.");
+            this.server_peer_id = event.data.split(" ")[1];
             return;
         }
 
         if (event.data.startsWith("ERROR")) {
-            if (event.data === "ERROR peer '0' not found") {
-                this._setError("Peer not found. Retrying...");
+            if (event.data === "ERROR peer server not found") {
+                this._setError("Server not found. Retrying...");
                 setTimeout(() => {
                     this._setupCall();
                 }, 1000);
@@ -249,7 +289,9 @@ export class WebRTCDemoSignaling {
         // Attempt to parse JSON SDP or ICE message
         var msg;
         try {
-            msg = JSON.parse(event.data);
+            // strip off prefix
+            msg = event.data.substring(event.data.indexOf(' ') + 1);
+            msg = JSON.parse(msg);
         } catch (e) {
             if (e instanceof SyntaxError) {
                 this._setError("error parsing message as JSON: " + event.data);
@@ -283,7 +325,10 @@ export class WebRTCDemoSignaling {
             if (this.ondisconnect !== null) {
                 if (event.code === 1000 || event.code === 1001) {
                     this.ondisconnect(false);
-                } else {
+                } else if (event.code === 4000) {
+                    if (this.onshowalert !== null) this.onshowalert(event.reason);
+                } 
+                else {
                     // abnormal closure, try to reconnect
                     console.log("Reconnecting due to abnormal connection closure.");
                     this.ondisconnect(true);
@@ -325,7 +370,7 @@ export class WebRTCDemoSignaling {
      */
     sendICE(ice) {
         this._setDebug("sending ice candidate: " + JSON.stringify(ice));
-        this._ws_conn.send(JSON.stringify({ 'ice': ice }));
+        this._ws_conn.send(`${this.server_peer_id} ${JSON.stringify({ 'ice': ice })}`);
     }
 
     /**
@@ -335,6 +380,6 @@ export class WebRTCDemoSignaling {
      */
     sendSDP(sdp) {
         this._setDebug("sending local sdp: " + JSON.stringify(sdp));
-        this._ws_conn.send(JSON.stringify({ 'sdp': sdp }));
+        this._ws_conn.send(`${this.server_peer_id} ${JSON.stringify({ 'sdp': sdp })}`);
     }
 }
