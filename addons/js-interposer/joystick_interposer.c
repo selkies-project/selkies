@@ -371,8 +371,6 @@ typedef struct {
  */
 #define ABS_AXIS_MIN_DEFAULT -32767
 #define ABS_AXIS_MAX_DEFAULT 32767
-#define ABS_TRIGGER_MIN_DEFAULT 0
-#define ABS_TRIGGER_MAX_DEFAULT 255
 #define ABS_HAT_MIN_DEFAULT -1
 #define ABS_HAT_MAX_DEFAULT 1
 
@@ -1231,21 +1229,13 @@ int intercept_ev_ioctl(js_interposer_t *interposer, int fd, ioctl_request_t requ
             absinfo_ptr->flat = 128;
             absinfo_ptr->resolution = 1;
 
-            if (abs_code == ABS_X || abs_code == ABS_Y || abs_code == ABS_RX || abs_code == ABS_RY) {
+            if (abs_code == ABS_X || abs_code == ABS_Y || abs_code == ABS_RX || abs_code == ABS_RY || abs_code == ABS_Z || abs_code == ABS_RZ) {
                 absinfo_ptr->minimum = ABS_AXIS_MIN_DEFAULT; 
                 absinfo_ptr->maximum = ABS_AXIS_MAX_DEFAULT; 
                 absinfo_ptr->fuzz = 16;     
                 absinfo_ptr->flat = 128;    
                 absinfo_ptr->resolution = 1;
                 sji_log_debug("IOCTL_EV(%s): EVIOCGABS(0x%02x) - Main analog stick. min=%d, max=%d, res=%d",
-                             interposer->open_dev_name, abs_code, absinfo_ptr->minimum, absinfo_ptr->maximum, absinfo_ptr->resolution);
-            } else if (abs_code == ABS_Z || abs_code == ABS_RZ) {
-                absinfo_ptr->minimum = ABS_TRIGGER_MIN_DEFAULT;
-                absinfo_ptr->maximum = ABS_TRIGGER_MAX_DEFAULT;
-                absinfo_ptr->fuzz = 0;
-                absinfo_ptr->flat = 0;
-                absinfo_ptr->resolution = 1;
-                sji_log_debug("IOCTL_EV(%s): EVIOCGABS(0x%02x) - Trigger. min=%d, max=%d, res=%d",
                              interposer->open_dev_name, abs_code, absinfo_ptr->minimum, absinfo_ptr->maximum, absinfo_ptr->resolution);
             } else if (abs_code == ABS_HAT0X || abs_code == ABS_HAT0Y) {
                 absinfo_ptr->minimum = ABS_HAT_MIN_DEFAULT;
