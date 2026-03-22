@@ -917,13 +917,24 @@ class WebRTCInput:
         min_kc = self.xkb_keymap.min_keycode()
         max_kc = self.xkb_keymap.max_keycode()
         
+        self.wayland_shift_required_keys = set()
+        level_0_keys = set()
+        
         for kc in range(min_kc, max_kc + 1):
-            for level in range(4):
-                syms = self.xkb_keymap.key_get_syms_by_level(kc, 0, level)
-                if syms:
-                    for sym in syms:
-                        if sym not in self.wayland_scancode_map:
-                            self.wayland_scancode_map[sym] = kc
+            syms_0 = self.xkb_keymap.key_get_syms_by_level(kc, 0, 0)
+            if syms_0:
+                for sym in syms_0:
+                    level_0_keys.add(sym)
+                    if sym not in self.wayland_scancode_map:
+                        self.wayland_scancode_map[sym] = kc
+
+            syms_1 = self.xkb_keymap.key_get_syms_by_level(kc, 0, 1)
+            if syms_1:
+                for sym in syms_1:
+                    if sym not in self.wayland_scancode_map:
+                        self.wayland_scancode_map[sym] = kc
+                        if sym not in level_0_keys:
+                            self.wayland_shift_required_keys.add(sym)
 
     async def _on_clipboard_read(self, data, mime_type="text/plain"):
         await self.send_clipboard_data(data, mime_type)
@@ -1162,12 +1173,21 @@ class WebRTCInput:
 
     async def send_x11_keypress(self, keysym, down=True):
         if self.is_wayland and self.wayland_input:
+            if (0xA0 <= keysym <= 0xFF) or keysym == 0x20AC or ((keysym & 0xFF000000) == 0x01000000):
+                await self._xdotool_fallback(keysym, down)
+                return
+
             scancode = self.wayland_scancode_map.get(keysym)
+            
             if scancode is None and (0x20 <= keysym <= 0xFF):
                 try:
                     lower_sym = ord(chr(keysym).lower())
                     scancode = self.wayland_scancode_map.get(lower_sym)
                 except: pass
+
+            if scancode is not None and hasattr(self, 'wayland_shift_required_keys') and keysym in self.wayland_shift_required_keys:
+                if 65505 not in self.active_modifiers and 65506 not in self.active_modifiers:
+                    scancode = None
 
             if scancode:
                 try:
@@ -1246,25 +1266,21 @@ class WebRTCInput:
                         char_to_type = chr(unicode_codepoint)
                     except ValueError:
                         pass
+            elif 0x20 <= keysym_number <= 0xFF:
+                try:
+                    char_to_type = chr(keysym_number)
+                except ValueError:
+                    pass
+            elif keysym_number == 0x20AC:
+                char_to_type = '€'
             else:
-                keysym_name = None
                 if XK is not None:
                     try:
                         keysym_name = XK.keysym_to_string(keysym_number)
+                        if keysym_name and len(keysym_name) == 1:
+                            char_to_type = keysym_name
                     except Exception:
                         pass
-                
-                if keysym_name is None:
-                    if 0x20 <= keysym_number <= 0x7E or keysym_number >= 0xA0:
-                        try:
-                            char_to_type = chr(keysym_number)
-                        except ValueError:
-                            pass
-                else:
-                    if len(keysym_name) == 1:
-                        char_to_type = keysym_name
-                    elif keysym_number == 0x00a3:
-                        char_to_type = "£"
             if char_to_type:
                 if self.use_hex_fallback:
                     try:
