@@ -600,7 +600,7 @@ class WebRTCInput:
                 relative = True
             try:
                 x, y, button_mask, scroll_magnitude = [int(i) for i in toks[1:]]
-            except:
+            except Exception:
                 x, y, button_mask, scroll_magnitude = 0, 0, self.button_mask, 0
                 relative = False
             try:
@@ -716,21 +716,21 @@ class WebRTCInput:
             try:
                 fps = int(toks[1])
                 self.on_client_fps(fps)
-            except:
+            except Exception:
                 logger.error("failed to parse fps from client: " + str(toks))
         elif toks[0] == "_l":
             # Reported latency from client.
             try:
                 latency_ms = int(toks[1])
                 self.on_client_latency(latency_ms)
-            except:
+            except Exception:
                 logger.error(
                     "failed to parse latency report from client" + str(toks))
         elif toks[0] == "_stats_video" or toks[0] == "_stats_audio":
             # WebRTC Statistics API data from client
             try:
                 await self.on_client_webrtc_stats(toks[0], ",".join(toks[1:]))
-            except:
+            except Exception:
                 logger.error("failed to parse WebRTC Statistics JSON object")
         else:
             logger.info('unknown data channel message: %s' % msg)
