@@ -328,7 +328,7 @@ class SelkiesGamepad:
             self.server.close()
             try:
                 os.unlink(self.socket_path)
-            except:
+            except Exception:
                 pass
         
         logger.info("Stopped gamepad socket server for %s" % self.socket_path)
@@ -338,7 +338,7 @@ class SelkiesGamepad:
         self.server.close()
         try:
             os.unlink(self.socket_path)
-        except:
+        except Exception:
             pass
 
 class GamepadMapper:
