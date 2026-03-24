@@ -7,7 +7,7 @@
 # This file incorporates work covered by the following copyright and
 # permission notice:
 #
-#   Example 1-1 call signalling server
+#   Example 1-1 call signaling server
 #
 #   Copyright (C) 2017 Centricular Ltd.
 #
@@ -30,6 +30,8 @@ import pathlib
 import hashlib
 import hmac
 import base64
+import uuid
+from dataclasses import dataclass
 
 import websockets
 import websockets.asyncio.server
@@ -89,15 +91,25 @@ def generate_rtc_config(turn_host, turn_port, shared_secret, user, protocol='udp
 
     return json.dumps(rtc_config, indent=2)
 
+@dataclass
+class Peer:
+    uid: str
+    ws: websockets.WebSocketServerProtocol
+    raddr: str
+    peer_type: str
+    client_type: str
+    client_slot: int
+    client_strict_viewer: bool
+    peer_status: str = None
+
 class WebRTCSimpleServer(object):
     def __init__(self, options):
         ############### Global data ###############
 
-        # Format: {uid, remote_address, <'session'|room_id|None>)}
+        # Format: {uid: Peer_object}
         self.peers = dict()
-        # Format: {caller_uid: callee_uid,
-        #          callee_uid: caller_uid}
-        # Bidirectional mapping between the two peers
+        # Format: {caller_uid: callee_uid}
+        # Unidirectional mapping
         self.sessions = dict()
         # Format: {room_id: {peer1_id, peer2_id, peer3_id, ...}}
         # Room dict with a set of peers in each room
@@ -143,6 +155,14 @@ class WebRTCSimpleServer(object):
         self.enable_basic_auth = options.enable_basic_auth
         self.basic_auth_user = options.basic_auth_user
         self.basic_auth_password = options.basic_auth_password
+
+        # Sharing mode options
+        self.enable_sharing = options.enable_sharing
+        self.enable_shared = options.enable_shared
+        self.enable_player2 = options.enable_player2
+        self.enable_player3 = options.enable_player3
+        self.enable_player4 = options.enable_player4
+        self.lock = asyncio.Lock()
 
         self.rtc_config = options.rtc_config
         if os.path.exists(options.rtc_config_file):
@@ -285,17 +305,26 @@ class WebRTCSimpleServer(object):
         if uid in self.sessions:
             other_id = self.sessions[uid]
             del self.sessions[uid]
-            logger.info("Cleaned up {} session".format(uid))
-            if other_id in self.sessions:
-                del self.sessions[other_id]
-                logger.info("Also cleaned up {} session".format(other_id))
-                # If there was a session with this peer, also
-                # close the connection to reset its state.
+            logger.info("Cleaned up {} session, client type {!r}".format(uid, self.peers[uid].client_type))
+
+            peer = self.peers[uid]
+            # if controller closes the connection also close server side connection
+            if peer.client_type == 'controller':
                 if other_id in self.peers:
-                    logger.info("Closing connection to {}".format(other_id))
-                    wso, oaddr, _= self.peers[other_id]
-                    del self.peers[other_id]
-                    await wso.close()
+                    logger.info("Closing connection to {}, client type {!r}".format(other_id, self.peers[other_id].client_type))
+                    other_peer = self.peers.get(other_id, None)
+                    if other_peer:
+                        wso = other_peer.ws
+                        await wso.close()
+            elif peer.client_type == 'viewer':
+                # if viewer closes the connection notify the server
+                if other_id in self.peers:
+                    other_peer = self.peers.get(other_id, None)
+                    if other_peer:
+                        wso = other_peer.ws
+                        msg = 'SESSION_END {} {}'.format(uid, peer.client_type)
+                        logger.info("{} -> {}: {}".format(uid, other_id, msg))
+                        await wso.send(msg)
 
     async def cleanup_room(self, uid, room_id):
         room_peers = self.rooms[room_id]
@@ -303,42 +332,64 @@ class WebRTCSimpleServer(object):
             return
         room_peers.remove(uid)
         for pid in room_peers:
-            wsp, paddr, _= self.peers[pid]
+            peer = self.peers[pid]
+            wsp = peer.ws
+
             msg = 'ROOM_PEER_LEFT {}'.format(uid)
             logger.info('room {}: {} -> {}: {}'.format(room_id, uid, pid, msg))
             await wsp.send(msg)
 
     async def remove_peer(self, uid):
-        await self.cleanup_session(uid)
-        if uid in self.peers:
-            ws, raddr, status = self.peers[uid]
-            if status and status != 'session':
-                await self.cleanup_room(uid, status)
-            del self.peers[uid]
-            await ws.close()
-            logger.info("Disconnected from peer {!r} at {!r}".format(uid, raddr))
+        async with self.lock:
+            await self.cleanup_session(uid)
+
+            if uid in self.peers:
+                peer = self.peers[uid]
+                ws = peer.ws
+                raddr = peer.raddr
+                peer_status = peer.peer_status
+                peer_type = peer.peer_type
+                client_type = peer.client_type
+                if peer_status and peer_status != 'session':
+                    await self.cleanup_room(uid, peer_status)
+                # special case for server peer disconnection, close all client connections
+                if peer_type == 'server':
+                    del self.peers[uid]
+                    for p in list(self.peers.values()):
+                        if p.peer_type == 'client':
+                            ws = p.ws
+                            await ws.close(code=4000, reason="Server disconnected, closing connection.")
+                else:
+                    del self.peers[uid]
+                    await ws.close()
+                    logger.info("Disconnected from peer {!r} at {!r} of client_type {!r}".format(uid, raddr, client_type))
 
     ############### Handler functions ###############
 
-    async def connection_handler(self, ws, uid):
+    async def connection_handler(self, ws, uid, peer_type, client_type=None, client_slot=None, client_strict_viewer=None):
         raddr = ws.remote_address
         peer_status = None
-        self.peers[uid] = [ws, raddr, peer_status]
-        logger.info("Registered peer {!r} at {!r}".format(uid, raddr))
+        self.peers[uid] = Peer(uid=uid, ws=ws, raddr=raddr, peer_type=peer_type, client_type=client_type, client_slot=client_slot, client_strict_viewer=client_strict_viewer)
+        logger.info("Registered peer {!r} at {!r} with peer_type {!r} and client_type {!r}".format(uid, raddr, peer_type, client_type))
         while True:
             # Receive command, wait forever if necessary
             msg = await self.recv_msg_ping(ws, raddr)
             # Update current status
-            peer_status = self.peers[uid][2]
+            peer = self.peers[uid]
+            peer_status = peer.peer_status
             # We are in a session or a room, messages must be relayed
             if peer_status is not None:
                 # We're in a session, route message to connected peer
                 if peer_status == 'session':
-                    other_id = self.sessions[uid]
-                    wso, oaddr, status  = self.peers[other_id]
+                    # Session message are prefixed with sender peer_id, eg: client-<UUID> <message>
+                    other_id, msg_string = msg.split(maxsplit=1)
+                    other_peer = self.peers[other_id]
+                    wso = other_peer.ws
+                    status = other_peer.peer_status
                     assert(status == 'session')
                     logger.info("{} -> {}: {}".format(uid, other_id, msg))
-                    await wso.send(msg)
+                    msg_string = '{} {}'.format(uid, msg_string)
+                    await wso.send(msg_string)
                 # We're in a room, accept room-specific commands
                 elif peer_status:
                     # ROOM_PEER_MSG peer_id MSG
@@ -348,7 +399,10 @@ class WebRTCSimpleServer(object):
                             await ws.send('ERROR peer {!r} not found'
                                           ''.format(other_id))
                             continue
-                        wso, oaddr, status = self.peers[other_id]
+                        other_peer = self.peers[other_id]
+                        wso = other_peer.ws
+                        status = other_peer.peer_status
+                        room_id = peer_status
                         if status != room_id:
                             await ws.send('ERROR peer {!r} is not in the room'
                                           ''.format(other_id))
@@ -356,12 +410,6 @@ class WebRTCSimpleServer(object):
                         msg = 'ROOM_PEER_MSG {} {}'.format(uid, msg)
                         logger.info('room {}: {} -> {}: {}'.format(room_id, uid, other_id, msg))
                         await wso.send(msg)
-                    # elif msg == 'ROOM_PEER_LIST':
-                    #     room_id = self.peers[peer_id][2]
-                    #     room_peers = ' '.join([pid for pid in self.rooms[room_id] if pid != peer_id])
-                    #     msg = 'ROOM_PEER_LIST {}'.format(room_peers)
-                    #     logger.info('room {}: -> {}: {}'.format(room_id, uid, msg))
-                    #     await ws.send(msg)
                     else:
                         await ws.send('ERROR invalid msg, already in room')
                         continue
@@ -371,23 +419,27 @@ class WebRTCSimpleServer(object):
             elif msg.startswith('SESSION'):
                 logger.info("{!r} command {!r}".format(uid, msg))
                 _, callee_id = msg.split(maxsplit=1)
+                if callee_id == 'server':
+                    callee_id = next((uid for uid, pdata in self.peers.items() if hasattr(pdata, 'peer_type') and pdata.peer_type == 'server'), callee_id)
                 if callee_id not in self.peers:
-                    await ws.send('ERROR peer {!r} not found'.format(callee_id))
+                    await ws.send('ERROR peer server not found')
                     continue
                 if peer_status is not None:
                     await ws.send('ERROR peer {!r} busy'.format(callee_id))
                     continue
-                await ws.send('SESSION_OK')
-                wsc = self.peers[callee_id][0]
+                await ws.send('SESSION_OK ' + str(callee_id))
+                wsc = self.peers[callee_id].ws
                 logger.info('Session from {!r} ({!r}) to {!r} ({!r})'
                       ''.format(uid, raddr, callee_id, wsc.remote_address))
-                # Notify callee
-                await wsc.send('SESSION {}'.format(uid))
+                # Notify callee. callee is always server
+                await wsc.send('SESSION_START {} {}'.format(uid, client_type))
                 # Register session
-                self.peers[uid][2] = peer_status = 'session'
+                self.peers[uid].peer_status = peer_status = 'session'
+                self.peers[callee_id].peer_status = 'session'
+                # We only store session between caller and callee, where caller is
+                # always of peer_type 'client' and callee is 'server', so we can handle
+                # termination of sessions clearly if client disconnects.
                 self.sessions[uid] = callee_id
-                self.peers[callee_id][2] = 'session'
-                self.sessions[callee_id] = uid
             # Requested joining or creation of a room
             elif msg.startswith('ROOM'):
                 logger.info('{!r} command {!r}'.format(uid, msg))
@@ -406,17 +458,21 @@ class WebRTCSimpleServer(object):
                 room_peers = ' '.join([pid for pid in self.rooms[room_id]])
                 await ws.send('ROOM_OK {}'.format(room_peers))
                 # Enter room
-                self.peers[uid][2] = peer_status = room_id
+                self.peers[uid].peer_status = peer_status = room_id
                 self.rooms[room_id].add(uid)
                 for pid in self.rooms[room_id]:
                     if pid == uid:
                         continue
-                    wsp, paddr, _ = self.peers[pid]
+                    peer = self.peers[pid]
+                    wsp = peer.ws
                     msg = 'ROOM_PEER_JOINED {}'.format(uid)
                     logger.info('room {}: {} -> {}: {}'.format(room_id, uid, pid, msg))
                     await wsp.send(msg)
             else:
                 logger.info('Ignoring unknown message {!r} from {!r}'.format(msg, uid))
+
+    def allowed_client_slots(self):
+        return [1] + [i for i in range(2, 5) if getattr(self, f'enable_player{i}')]
 
     async def hello_peer(self, ws):
         '''
@@ -425,20 +481,70 @@ class WebRTCSimpleServer(object):
         raddr = ws.remote_address
         hello = await ws.recv()
         toks = hello.split(maxsplit=2)
-        metab64str = None
-        if len(toks) > 2:
-            hello, uid, metab64str = toks
-        else:
-            hello, uid = toks
-        if hello != 'HELLO':
-            await ws.close(code=1002, reason='invalid protocol')
-            raise Exception("Invalid hello from {!r}".format(raddr))
-        if not uid or uid in self.peers or uid.split() != [uid]: # no whitespace
-            await ws.close(code=1002, reason='invalid peer uid')
-            raise Exception("Invalid uid {!r} from {!r}".format(uid, raddr))
-        # Send back a HELLO
-        await ws.send('HELLO')
-        return uid
+        client_type = None
+        client_slot = None
+        client_strict_viewer = None
+        async with self.lock:
+            if len(toks) > 2:
+                # peer_type is either 'server' or 'client'
+                # client_type is either 'viewer' or 'controller'
+                hello, peer_type, json_metadata_str = toks
+                try:
+                    json_metadata = json.loads(json_metadata_str)
+                    client_type = json_metadata.get('client_type')
+                    client_slot = json_metadata.get('client_slot')
+                    client_strict_viewer = json_metadata.get('client_strict_viewer')
+                except json.JSONDecodeError:
+                    await ws.close(code=1002, reason='invalid protocol')
+                    raise Exception("Invalid JSON metadata from {!r}".format(raddr))
+            else:
+                hello, peer_type = toks
+
+            if hello != 'HELLO':
+                await ws.close(code=1002, reason='invalid protocol')
+                raise Exception("Invalid hello from {!r}".format(raddr))
+            if peer_type not in ('server', 'client'):
+                await ws.close(code=1002, reason='invalid protocol')
+                raise Exception("Invalid peer type from {!r}".format(raddr))
+            if peer_type == 'client' and client_type not in ('viewer', 'controller'):
+                await ws.close(code=1002, reason='invalid protocol')
+                raise Exception("Invalid client type from {!r}".format(raddr))
+
+            if peer_type == 'client':
+                if not self.enable_sharing:
+                    client_exists = next((peer for peer in self.peers.values() if hasattr(peer, 'peer_type') and peer.peer_type == "client"), None)
+                    if client_exists:
+                        logger.info("peer: {}".format(self.peers))
+                        await ws.close(code=4000, reason="Multiple connections not allowed in non-sharing mode.")
+                        raise Exception("Multiple connections not allowed in non-sharing mode; connection from {!r}".format(raddr))
+                else:
+                    allowed_slots = self.allowed_client_slots()
+                    logger.info("Allowed slots are: " + str(allowed_slots) + " provided is: " +str(client_slot))
+                    if client_slot != -1 and (client_slot not in allowed_slots):
+                        await ws.close(code=4000, reason="Invalid player id provided, check URL.")
+                        raise Exception("Invalid client slot provided {!r}".format(client_slot))
+
+                # clients with hash #shared
+                if not self.enable_shared and client_strict_viewer:
+                    await ws.close(code=4000, reason="Strict shared clients are not enabled.")
+                    raise Exception("Strict shared clients are disabled; connection from {!r}".format(raddr))
+
+                peer_controller = next((peer for peer in self.peers.values() if hasattr(peer, 'client_type') and peer.client_type == 'controller'), None)
+                if client_type == 'controller':
+                    if peer_controller:
+                        await ws.close(code=4000, reason="Duplicate controller. A client of type 'controller' already exists.")
+                        raise Exception("Duplicate controllers not allowed; connection from {!r}".format(raddr))
+                if client_type == 'viewer':
+                    if not peer_controller:
+                        await ws.close(code=4000, reason="No controller detected. Viewer clients require an existing controller client.")
+                        raise Exception("No controller detected for client of type 'viewer'; connection from {!r}".format(raddr))
+
+            # Generate unique peer ID
+            uid = str(uuid.uuid4())
+            puid = "-".join([peer_type, uid])
+            # Send back a HELLO
+            await ws.send('HELLO')
+            return puid, peer_type, client_type, client_slot, client_strict_viewer
 
     def get_https_certs(self):
         cert_pem = os.path.abspath(self.https_cert) if os.path.isfile(self.https_cert) else None
@@ -458,7 +564,7 @@ class WebRTCSimpleServer(object):
         try:
             sslctx.load_cert_chain(cert_pem, keyfile=key_pem)
         except Exception:
-            logger.error('Certificate or private key file not found or incorrect. To use a self-signed certificate, install the package \'ssl-cert\' and add the group \'ssl-cert\' to your user in Debian-based distributions or generate a new certificate with root using \'openssl req -x509 -newkey rsa:4096 -keyout /etc/ssl/private/ssl-cert-snakeoil.key -out /etc/ssl/certs/ssl-cert-snakeoil.pem -days 3650 -nodes -subj \"/CN=localhost\"\'')
+            logger.error('Certificate or private key file not found or incorrect. To use a self-signed certificate, install the package \'ssl-cert\' and add the group \'ssl-cert\' to your user in Debian-based distributions or generate a new certificate with root using \'openssl req -x509 -newkey rsa:4096 -keyout /etc/ssl/private/ssl-cert-snakeoil.key -out /etc/ssl/certs/ssl-cert-snakeoil.pem -days 3650 -nodes -subj "/CN=localhost"\'')
             sys.exit(1)
         return sslctx
 
@@ -469,9 +575,14 @@ class WebRTCSimpleServer(object):
             '''
             raddr = ws.remote_address
             logger.info("Connected to {!r}".format(raddr))
-            peer_id = await self.hello_peer(ws)
             try:
-                await self.connection_handler(ws, peer_id)
+                # peer_id is either 'server-<UUID>' or 'client-<UUID>'
+                peer_id, peer_type, client_type, client_slot, client_strict_viewer = await self.hello_peer(ws)
+            except Exception as e:
+                logger.error("Error during handshake with peer {!r}: {}".format(raddr, e))
+                return
+            try:
+                await self.connection_handler(ws, peer_id, peer_type, client_type, client_slot, client_strict_viewer)
             except websockets.exceptions.ConnectionClosed:
                 logger.info("Connection to peer {!r} closed, exiting handler".format(raddr))
             except Exception as e:

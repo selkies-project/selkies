@@ -373,8 +373,8 @@ export class WebRTCDemo {
 			if (this.ondatachannelclose !== null)
 				this.ondatachannelclose();
 		};
-		this._send_channel.onerror = () => {
-			this._setError("Unexpected error, data channel closed")
+		this._send_channel.onerror = (event) => {
+			this._setError(`Unexpected error, data channel closed, ${event.error || 'unknown error'}`);
 		}
 	}
 

@@ -145,7 +145,7 @@ export default function webrtc() {
 	let debugEntries = [];
 	let status = 'connecting';
 	let clipboardStatus = 'disabled';
-	let windowResolution = "";
+	let windowResolution = [];
 	let encoderLabel = "";
 	let encoder = ""
 	let gamepad = {
@@ -187,7 +187,7 @@ export default function webrtc() {
 	let manualWidth, manualHeight = 0;
 	window.isManualResolutionMode = false;
 	window.fps = 0;
-	let isGamepadEnabled = false;
+	let enableWebrtcStatics = false;
 
 	var videoConnected = "";
 	var audioConnected = "";
@@ -195,8 +195,45 @@ export default function webrtc() {
 	var webrtc = null;
 	var input = null;
 	let useCssScaling = false;
+	// Webrtc mode has video and audio active by default,
+	// and no microphone support yet.
+	let isVideoPipelineActive = true;
+	let isAudioPipelineActive = true;
+	let isMicrophoneActive = false;
+	let isGamepadEnabled = true;
 
-	const UPLOAD_CHUNK_SIZE = 64 * 1024  - 1; // 64KiB, excluding a byte for prefix
+	// 64KiB, excluding a byte for prefix
+	const UPLOAD_CHUNK_SIZE = 64 * 1024  - 1;
+	const CLIENT_CONTROLLER = "controller";
+	const CLIENT_VIEWER = "viewer";
+
+	let detectedSharedModeType = null;
+	let playerInputTargetIndex = 0;
+	let clientRole = null;
+	let clientSlot = null;
+
+	const hash = window.location.hash;
+	if (hash === '#shared') {
+        clientRole = CLIENT_VIEWER;
+        clientSlot = -1;
+        detectedSharedModeType = 'shared';
+        playerInputTargetIndex = undefined;
+    } else if (hash.startsWith('#player')) {
+        clientRole = CLIENT_VIEWER;
+        const playerNum = parseInt(hash.substring(7), 10);
+        clientSlot = playerNum || null;
+        if (playerNum >= 2 && playerNum <= 4) {
+            detectedSharedModeType = `player${playerNum}`;
+            playerInputTargetIndex = playerNum - 1;
+        }
+    } else {
+        clientRole = CLIENT_CONTROLLER;
+        clientSlot = 1;
+        playerInputTargetIndex = 0;
+    }
+
+	const isSharedMode = detectedSharedModeType !== null;
+	const isStrictViewer = detectedSharedModeType === "shared";
 
 	// Set storage key based on URL
 	const urlForKey = window.location.href.split('#')[0];
@@ -370,6 +407,10 @@ export default function webrtc() {
 	}
 
 	function sendClientPersistedSettings() {
+		if (isSharedMode) {
+			console.log("Skipping sending client persisted settings in shared mode.");
+			return;
+		}
 		const settingsPrefix = `${storageAppName}_`;
 		const settingsToSend = {};
 		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
@@ -412,7 +453,6 @@ export default function webrtc() {
 		try {
 			const settingsJson = JSON.stringify(settingsToSend);
 			webrtc.sendDataChannelMessage(`SETTINGS,${settingsJson}`);
-		
 			console.log('Sent initial settings to server:', settingsToSend);
 		} catch (e) {
 			console.error('Error constructing or sending initial settings:', e);
@@ -492,6 +532,10 @@ export default function webrtc() {
 	}
 
 	function sendResolutionToServer(width, height) {
+		if (isSharedMode) {
+			console.log("Skipping sending resolution in shared mode.");
+			return;
+		}
 		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
 		const realWidth = roundDownToEven(width * dpr);
 		const realHeight = roundDownToEven(height * dpr);
@@ -528,6 +572,10 @@ export default function webrtc() {
 	}
 
 	function loadLastSessionSettings() {
+		if (isSharedMode) {
+			console.log("Skipping loading last session settings in shared mode.");
+			return;
+		}
 		// Preset the video element to last session resolution
 		if (window.isManualResolutionMode && manualWidth && manualHeight) {
 			console.log(`Applying manual resolution: ${manualWidth}x${manualHeight}`);
@@ -542,8 +590,46 @@ export default function webrtc() {
 		}
 	}
 
+	function postSidebarButtonUpdate() {
+		const updatePayload = {
+			type: 'sidebarButtonStatusUpdate',
+			video: isVideoPipelineActive,
+			audio: isAudioPipelineActive,
+			microphone: isMicrophoneActive,
+			gamepad: isGamepadEnabled
+		};
+		console.log('Posting sidebarButtonStatusUpdate:', updatePayload);
+		window.postMessage(updatePayload, window.location.origin);
+	}
+
+	function toggleGamepadConnection() {
+		if (input && input.gamepadManager) {
+			if (isSharedMode) {
+				input.gamepadManager.enable();
+				console.log("Shared mode: Gamepad control message received, ensuring its GamepadManager remains active for polling.");
+				return true;
+			} else {
+				if (isGamepadEnabled) {
+					input.gamepadManager.enable();
+					console.log("Primary mode: Gamepad toggle ON. Enabling GamepadManager polling.");
+					return true;
+				} else {
+					input.gamepadManager.disable();
+					console.log("Primary mode: Gamepad toggle OFF. Disabling GamepadManager polling.");
+				}
+			}
+		} else {
+			console.warn("Client: input.gamepadManager not found in 'gamepadControl' message handler");
+		}
+		return false;
+	}
+
 	// callback invoked when "message" event is triggerd
 	function handleMessage(event) {
+		if (event.origin !== window.location.origin) {
+			console.warn("Received message from unexpected origin");
+			return;
+		}
 		let message = event.data;
 		switch(message.type) {
 			case "setScaleLocally":
@@ -625,6 +711,16 @@ export default function webrtc() {
 					webrtc.sendDataChannelMessage(`cmd,${commandString}`);
 				} else {
 					console.warn(`Received invalid command from dashboard: ${message.value}`)
+				}
+				break;
+			case 'gamepadControl':
+				console.log(`Received gamepad control message: enabled=${message.enabled}`);
+				const newGamepadState = message.enabled;
+				if (isGamepadEnabled !== newGamepadState) {
+					isGamepadEnabled = newGamepadState;
+					setBoolParam('isGamepadEnabled', isGamepadEnabled);
+					postSidebarButtonUpdate();
+					toggleGamepadConnection()
 				}
 				break;
 		}
@@ -901,6 +997,10 @@ export default function webrtc() {
 
 	// TODO: How do we want to render rudimentary metrics?
 	function enableStatWatch() {
+		if (isSharedMode) {
+			console.log("Shared mode detected, skipping stats watch setup.");
+			return;
+		}
 		// Start watching stats
 		var videoBytesReceivedStart = 0;
 		var audioBytesReceivedStart = 0;
@@ -956,7 +1056,8 @@ export default function webrtc() {
 					"bandwidth_mbps": (parseInt(stats.general.availableReceiveBandwidth) / 1e+6),
 					"latency_ms": connectionStat.connectionLatency,
 				};
-				webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
+				window.video_bitrate = connectionStat.connectionVideoBitrate;
+				if (enableWebrtcStatics) webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
 			});
 		// Stats refresh interval (1000 ms)
 		}, 1000);
@@ -984,6 +1085,10 @@ export default function webrtc() {
 	}
 
 	function setupKeyBoardAssisstant() {
+		if (isSharedMode) {
+			console.log("Shared mode detected, skipping keyboard assistant setup.");
+			return;
+		}
 		const keyboardInputAssist = document.getElementById('keyboard-input-assist');
 		if (keyboardInputAssist && input) {
 			keyboardInputAssist.addEventListener('input', (event) => {
@@ -1009,8 +1114,13 @@ export default function webrtc() {
 		});
 		console.log("Added 'input' and 'keydown' listeners to #keyboard-input-assist.");
 		} else {
-		console.error(" Could not add listeners to keyboard assist: Element or Input handler instance not found.");
+			console.error(" Could not add listeners to keyboard assist: Element or Input handler instance not found.");
 		}
+	}
+
+	function gamepadsConnected() {
+		let connected = [...navigator.getGamepads()].filter(Boolean);
+		return connected.length > 0;
 	}
 
 	return {
@@ -1098,8 +1208,8 @@ export default function webrtc() {
 			setIntParam('audio_bitrate', audioBitRate);
 			window.isManualResolutionMode = getBoolParam('is_manual_resolution_mode', false);
 			setBoolParam('is_manual_resolution_mode', window.isManualResolutionMode);
-			isGamepadEnabled = getBoolParam('gamepad_enabled', true);
-			setBoolParam('gamepad_enabled', isGamepadEnabled);
+			isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
+			setBoolParam('isGamepadEnabled', isGamepadEnabled);
 			manualWidth = getIntParam('manual_width', null);
 			setIntParam('manual_width', manualWidth);
 			manualHeight = getIntParam('manual_height', null);
@@ -1109,24 +1219,28 @@ export default function webrtc() {
 			useCssScaling = getBoolParam('useCssScaling', true);  // TODO: need to handle hiDPI
 			setBoolParam('useCssScaling', useCssScaling);
 
-			// listen for dashboard messages (Dashboard -> core client)
-			window.addEventListener("message", handleMessage);
-			// listen for file upload event
-			window.addEventListener('requestFileUpload', handleRequestFileUpload);
-			// handlers to handle the drop in files/directories for upload
-			overlayInput.addEventListener('dragover', handleDragOver);
-			overlayInput.addEventListener('drop', handleDrop);
+			if (!isSharedMode) {
+				// listen for dashboard messages (Dashboard -> core client)
+				window.addEventListener("message", handleMessage);
+				// listen for file upload event
+				window.addEventListener('requestFileUpload', handleRequestFileUpload);
+				// handlers to handle the drop in files/directories for upload
+				overlayInput.addEventListener('dragover', handleDragOver);
+				overlayInput.addEventListener('drop', handleDrop);
+			}
 
 			// WebRTC entrypoint, connect to the signaling server
 			var pathname = window.location.pathname;
 			pathname = pathname.slice(0, pathname.lastIndexOf("/") + 1);
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
-			var signaling = new WebRTCDemoSignaling(new URL(protocol + window.location.host + pathname + appName + "/signaling/"));
-			webrtc = new WebRTCDemo(signaling, videoElement, 1);
+			var url = new URL(protocol + window.location.host + pathname + appName + "/signaling/");
+			var signaling = new WebRTCDemoSignaling(url, clientRole, clientSlot, isStrictViewer);
+			webrtc = new WebRTCDemo(signaling, videoElement, 1, isSharedMode);
 			const send = (data) => {
+				if (isSharedMode && isStrictViewer) return;
 				webrtc.sendDataChannelMessage(data);
 			}
-			input = new Input(overlayInput, send, false, useCssScaling=useCssScaling);
+			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
 
 			setupKeyBoardAssisstant();
 
@@ -1151,6 +1265,10 @@ export default function webrtc() {
 				}
 				updateStatusDisplay();
 			};
+
+			signaling.onshowalert = (msg) => {
+				alert("Disconnected: " + msg + " Please try again.");
+			}
 
 			// Send webrtc status and error messages to logs.
 			webrtc.onstatus = (message) => {
@@ -1196,27 +1314,43 @@ export default function webrtc() {
 
 			webrtc.ondatachannelopen = () => {
 				console.log("Data channel opened");
-				// Bind gamepad connected handler.
-				input.ongamepadconnected = (gamepad_id) => {
-					webrtc._setStatus('Gamepad connected: ' + gamepad_id);
-					gamepad = {gamepadState: "connected", gamepadName: gamepad_id};
+				if (!isStrictViewer) {
+					input.ongamepadconnected = (gamepad_id) => {
+					let connected = toggleGamepadConnection();
+					if (connected) {
+						gamepad.gamepadState = "connected";
+						gamepad.gamepadName = gamepad_id;
+						webrtc._setStatus('Gamepad connected: ' + gamepad_id);
+					}
+					}
+					input.ongamepaddisconnected = () => {
+						if (input.gamepadManager !== null) {
+							input.gamepadManager.disable();
+							gamepad.gamepadState = "disconnected";
+							gamepad.gamepadName = "none";
+							webrtc._setStatus('Gamepad disconnected');
+						}
+					}
 				}
 
-				// Bind gamepad disconnect handler.
-				input.ongamepaddisconnected = () => {
-					webrtc._setStatus('Gamepad disconnected: ' + gamepad_id);
-					gamepad = {gamepadState: "disconnected", gamepadName: "none"};
-				}
-
-				// Bind input handlers.
+				// Bind input handlers. For shared mode, the listeners are limited
 				input.attach();
+				if (isSharedMode) {
+					console.log('Shared mode: skipping loading of last session settings and sending persisted settings to server');
+					return;
+				}
+
 				loadLastSessionSettings();
 				sendClientPersistedSettings();
 
 				// Send client-side metrics over data channel every 5 seconds
 				setInterval(async () => {
-					if (connectionStat.connectionFrameRate === parseInt(connectionStat.connectionFrameRate, 10))webrtc.sendDataChannelMessage(`_f,${connectionStat.connectionFrameRate}`);
-					if (connectionStat.connectionLatency === parseInt(connectionStat.connectionLatency, 10)) webrtc.sendDataChannelMessage(`_l,${connectionStat.connectionLatency}`);
+					if (connectionStat.connectionFrameRate === parseInt(connectionStat.connectionFrameRate, 10)) {
+						webrtc.sendDataChannelMessage(`_f,${connectionStat.connectionFrameRate}`);
+					}
+					if (connectionStat.connectionLatency === parseInt(connectionStat.connectionLatency, 10)) {
+						webrtc.sendDataChannelMessage(`_l,${connectionStat.connectionLatency}`);
+					}
 				}, 5000)
 			}
 
@@ -1232,9 +1366,11 @@ export default function webrtc() {
 				showStart = true;
 			}
 
-			// Actions to take whenever window changes focus
-			window.addEventListener('focus', handleWindowFocus);
-			window.addEventListener('blur', handleWindowBlur);
+			if (!isSharedMode) {
+				// Actions to take whenever window changes focus
+				window.addEventListener('focus', handleWindowFocus);
+				window.addEventListener('blur', handleWindowBlur);
+			}
 
 			webrtc.onclipboardcontent = (content) => {
 				if (clipboardStatus === 'enabled') {
@@ -1277,31 +1413,43 @@ export default function webrtc() {
 			}
 
 			webrtc.onserversettings = (obj) => {
+				if (obj.settings === undefined || obj.settings === null) {
+					console.warn("Received invalid server settings paylod");
+					return;
+				}
 				console.log("Received server settings payload:", obj.settings);
 				const changes = sanitizeAndStoreSettings(obj.settings);
 				window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
 				if (Object.keys(changes).length > 0) {
-						// TODO: server-side handling of settings updates
-						// console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
-						handleSettingsMessage(changes);
+					// TODO: server-side handling of settings updates
+					// console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
+					handleSettingsMessage(changes);
 				}
-				if (obj.settings && obj.settings.is_manual_resolution_mode && obj.settings.is_manual_resolution_mode.value === true) {
+				if (obj.settings.is_manual_resolution_mode && obj.settings.is_manual_resolution_mode.value === true) {
 					console.log("Server settings payload confirms manual mode. Switching to manual resize handlers.");
 					const serverWidth = obj.settings.manual_width ? parseInt(obj.settings.manual_width.value, 10) : 0;
 					const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value, 10) : 0;
 					if (serverWidth > 0 && serverHeight > 0) {
-							console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
-							window.is_manual_resolution_mode = true;
-							manualWidth = serverWidth;
-							manualHeight = serverHeight;
-							applyManualStyle(manualWidth, manualHeight, scaleLocallyManual);
+						console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
+						window.is_manual_resolution_mode = true;
+						manualWidth = serverWidth;
+						manualHeight = serverHeight;
+						applyManualStyle(manualWidth, manualHeight, scaleLocallyManual);
 					} else {
-							console.warn("Server dictated manual mode but did not provide valid dimensions.");
+						console.warn("Server dictated manual mode but did not provide valid dimensions.");
 					}
 					disableAutoResize();
 				} else {
-						console.log("Server settings payload confirms auto mode. Switching to auto resize handlers.");
-						enableAutoResize();
+					if (isSharedMode) {
+						console.log("Shared mode detected, skipping auto resize enablement.");
+						return;
+					}
+					console.log("Server settings payload confirms auto mode. Switching to auto resize handlers.");
+					enableAutoResize();
+				}
+
+				if (obj.settings.enable_webrtc_statistics && obj.settings.enable_webrtc_statistics.value === true) {
+					enableWebrtcStatics = true;
 				}
 			}
 
@@ -1374,7 +1522,7 @@ export default function webrtc() {
 			debugEntries = [];
 			status = 'connecting';
 			clipboardStatus = 'disabled';
-			windowResolution = "";
+			windowResolution = [];
 			encoderLabel = "";
 			encoder = ""
 			gamepad = {
@@ -1410,13 +1558,16 @@ export default function webrtc() {
 			rdelta = 500;
 			rtimeout = false;
 			manualWidth, manualHeight = 0;
-			isGamepadEnabled = false;
+			isGamepadEnabled = true;
 			videoConnected = "";
 			audioConnected = "";
 			statWatchEnabled = false;
 			webrtc = null;
 			input = null;
 			useCssScaling = false;
+			detectedSharedModeType = null;
+			playerInputTargetIndex = 0;
+			enableWebrtcStatics = false;
 		}
 	}
 }

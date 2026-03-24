@@ -98,6 +98,10 @@ class MediaPipeline(metaclass=ABCMeta):
         pass
 
     @abstractmethod
+    def is_media_pipeline_running(self) -> bool:
+        pass
+
+    @abstractmethod
     async def set_pointer_visible(self, visible: bool):
         pass
 
@@ -111,6 +115,10 @@ class MediaPipeline(metaclass=ABCMeta):
 
     @abstractmethod
     async def set_audio_bitrate(self, bitrate: int):
+        pass
+
+    @abstractmethod
+    async def dynamic_idr_frame(self):
         pass
 
 class MediaPipelineGst(MediaPipeline):
@@ -1292,6 +1300,9 @@ class MediaPipelineGst(MediaPipeline):
             await asyncio.to_thread(self.pipeline.set_latency, 0)
         return True
 
+    def is_media_pipeline_running(self):
+        return self._running and self.pipeline is not None
+
 class MediaPipelinePixel(MediaPipeline):
     def __init__(
         self,
@@ -1330,14 +1341,14 @@ class MediaPipelinePixel(MediaPipeline):
 
     async def set_pointer_visible(self, visible: bool):
         """To enable capturing the cursor from pixeflux.
-        
+
         :visible: set True to enable
         """
         if not self._is_screen_capturing or self.capture_module is None:
             return
 
         if self.capture_cursor == visible:
-            return 
+            return
 
         self.capture_cursor = visible
         await self.restart_screen_capture()
@@ -1429,7 +1440,7 @@ class MediaPipelinePixel(MediaPipeline):
             cs.h264_crf = 23
             cs.h264_cbr_mode = True
             cs.h264_bitrate_kbps = self.video_bitrate
-            cs.vaapi_render_node_index = -1   #
+            cs.vaapi_render_node_index = -1
             if self.encoder == "x264enc":
                 cs.use_cpu = True
 
@@ -1560,6 +1571,9 @@ class MediaPipelinePixel(MediaPipeline):
 
     async def start_media_pipeline(self):
         async with self.async_lock:
+            if self._running:
+                return
+
             logger.info("Starting media pipeline...")
             try:
                 await self.start_screen_capture()
@@ -1573,6 +1587,9 @@ class MediaPipelinePixel(MediaPipeline):
 
     async def stop_media_pipeline(self):
         async with self.async_lock:
+            if not self._running:
+                return
+
             logger.info("Stopping media pipeline...")
             try:
                 await self.stop_screen_capture()
@@ -1583,3 +1600,5 @@ class MediaPipelinePixel(MediaPipeline):
             except Exception as e:
                 logger.error(f"Error stopping media pipelines: {e}", exc_info=True)
 
+    def is_media_pipeline_running(self):
+        return self._running
