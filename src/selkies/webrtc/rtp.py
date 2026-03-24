@@ -43,7 +43,7 @@ from av import AudioFrame
 from .rtcrtpparameters import RTCRtpParameters
 
 # used for NACK and retransmission
-RTP_HISTORY_SIZE = 128
+RTP_HISTORY_SIZE = 512
 
 # reserved to avoid confusion with RTCP
 FORBIDDEN_PAYLOAD_TYPES = range(72, 77)

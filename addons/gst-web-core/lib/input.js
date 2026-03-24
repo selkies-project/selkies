@@ -1142,7 +1142,7 @@ export class Input {
         this.onmenuhotkey = null;
         this.onfullscreenhotkey = this.enterFullscreen;
         this.ongamepadconnected = null;
-        this.ongamepaddisconneceted = null;
+        this.ongamepaddisconnected = null;
         this.listeners = [];
         this.listeners_context = [];
         this._queue = new Queue();
@@ -2394,7 +2394,7 @@ export class Input {
     }
 
     _gamepadDisconnect(event) {
-         if (this.ongamepaddisconneceted !== null) { this.ongamepaddisconneceted(); }
+         if (this.ongamepaddisconnected !== null) { this.ongamepaddisconnected(); }
          const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
          if (server_gp_index === undefined || server_gp_index === null) return;
          this.send("js,d," + server_gp_index);
