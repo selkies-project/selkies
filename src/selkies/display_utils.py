@@ -468,7 +468,7 @@ async def main():
         print("USAGE: %s WxH" % sys.argv[0])
         sys.exit(1)
     res = sys.argv[1]
-    print(await asyncio.to_thread(resize_display, res))
+    print(await resize_display(res))
 
 def entrypoint():
     asyncio.run(main())
