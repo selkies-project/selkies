@@ -43,7 +43,7 @@ dependencies = [
     "pasimple",
     # WebRTC
     "aioice>=0.10.1,<1.0.0",
-    "av>=14.0.0,<15.0.0",
+    "av",
     "cffi>=1.0.0",
     "cryptography>=44.0.0",
     "google-crc32c>=1.1",
@@ -60,8 +60,7 @@ Homepage = "https://github.com/selkies-project/selkies"
 
 [project.scripts]
 selkies = "selkies.__main__:main"
-# FIXME; temporary fix until webrtc if fully integrated
-selkies-resize = "selkies.legacy.resize:entrypoint"
+selkies-resize = "selkies.display_utils:entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]

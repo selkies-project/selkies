@@ -27,13 +27,6 @@ export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR:-/tmp}/pulse}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR:-/tmp}/pulse}/native}"
 
-# Export environment variables required for Selkies
-export GST_DEBUG="${GST_DEBUG:-*:2}"
-export GSTREAMER_PATH=/opt/gstreamer
-
-# Source environment for GStreamer
-. /opt/gstreamer/gst-env
-
 export SELKIES_ENCODER="${SELKIES_ENCODER:-x264enc}"
 export SELKIES_ENABLE_RESIZE="${SELKIES_ENABLE_RESIZE:-false}"
 if [ -z "${SELKIES_TURN_REST_URI}" ] && { { [ -z "${SELKIES_TURN_USERNAME}" ] || [ -z "${SELKIES_TURN_PASSWORD}" ]; } && [ -z "${SELKIES_TURN_SHARED_SECRET}" ] || [ -z "${SELKIES_TURN_HOST}" ] || [ -z "${SELKIES_TURN_PORT}" ]; }; then
@@ -51,10 +44,10 @@ fi
 
 # Extract NVRTC dependency, https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/LICENSE.txt
 if command -v nvidia-smi &> /dev/null && nvidia-smi >/dev/null 2>&1; then
-  NVRTC_DEST_PREFIX="${NVRTC_DEST_PREFIX-/opt/gstreamer}"
+  NVRTC_DEST_PREFIX="${NVRTC_DEST_PREFIX-/usr}"
   CUDA_DRIVER_SYSTEM="$(nvidia-smi --version | grep 'CUDA Version' | cut -d: -f2 | tr -d ' ')"
   NVRTC_ARCH="${NVRTC_ARCH-$(dpkg --print-architecture | sed -e 's/arm64/sbsa/' -e 's/ppc64el/ppc64le/' -e 's/i.*86/x86/' -e 's/amd64/x86_64/' -e 's/unknown/x86_64/')}"
-  # TEMPORARY: Cap CUDA version to 12.9 if the detected version is 13.0 or higher for NVRTC compatibility, https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/4655
+  # TEMPORARY: Cap CUDA version to 12.9 if the detected version is 13.0 or higher for NVRTC compatibility
   if [ -n "${CUDA_DRIVER_SYSTEM}" ]; then
     CUDA_MAJOR_VERSION=$(echo "${CUDA_DRIVER_SYSTEM}" | cut -d. -f1)
     if [ "${CUDA_MAJOR_VERSION}" -ge 13 ]; then
@@ -111,7 +104,7 @@ server {
     $(if [ \"$(echo \"${SELKIES_ENABLE_BASIC_AUTH}\" | tr '[:upper:]' '[:lower:]')\" != \"false\" ]; then echo "auth_basic \"Selkies\";"; echo -n "    auth_basic_user_file ${XDG_RUNTIME_DIR}/.htpasswd;"; fi)
 
     location / {
-        root /opt/gst-web/;
+        root /opt/selkies-web/;
         index  index.html index.htm;
     }
 
@@ -226,15 +219,13 @@ server {
 
     error_page 500 502 503 504 /50x.html;
     location = /50x.html {
-        root /opt/gst-web/;
+        root /opt/selkies-web/;
     }
 }" | tee /etc/nginx/sites-available/default > /dev/null
 
-# Clear the cache registry
-rm -rf "${HOME}/.cache/gstreamer-1.0"
 
-# TODO: manifest needs to be provided along with gst-web img
-touch /opt/gst-web/manifest.json && echo "{
+# TODO: manifest needs to be provided along with selkies-web img
+touch /opt/selkies-web/manifest.json && echo "{
   \"name\": \"Selkies\",
   \"short_name\": \"Selkies\",
   \"manifest_version\": 2,
@@ -250,13 +241,13 @@ touch /opt/gst-web/manifest.json && echo "{
     }
   ],
   \"start_url\": \"/\"
-}" | tee /opt/gst-web/manifest.json > /dev/null
+}" | tee /opt/selkies-web/manifest.json > /dev/null
 
 # Download Selkies web app icon
-mkdir -p /opt/gst-web/ && \
-curl -o /opt/gst-web/icon.png \
+mkdir -p /opt/selkies-web/ && \
+curl -o /opt/selkies-web/icon.png \
   https://raw.githubusercontent.com/linuxserver/docker-templates/master/linuxserver.io/img/selkies-logo.png && \
-curl -o /opt/gst-web/favicon.ico \
+curl -o /opt/selkies-web/favicon.ico \
   https://raw.githubusercontent.com/linuxserver/docker-templates/refs/heads/master/linuxserver.io/img/selkies-icon.ico
 
 port="${SELKIES_PORT:-8081}"
@@ -266,13 +257,13 @@ if [ ! -z "${DEV_MODE+x}" ]; then
   # Frontend setup
   if [[ "${DEV_MODE}" == "core" ]]; then
     # Core just runs from directory
-    cd $HOME/selkies/addons/gst-web-core
+    cd $HOME/selkies/addons/selkies-web-core
     npm install
     npm run serve &
   else
     # Build core
-    mkdir -p /opt/gst-web/src /opt/gst-web/nginx
-    cd $HOME/selkies/addons/gst-web-core
+    mkdir -p /opt/selkies-web/src /opt/selkies-web/nginx
+    cd $HOME/selkies/addons/selkies-web-core
     npm install
     npm run build
     cp dist/selkies-core.js ../${DEV_MODE}/src/
@@ -281,8 +272,8 @@ if [ ! -z "${DEV_MODE+x}" ]; then
                  --watch selkies-ws-core.js --exec "npm run build && cp dist/selkies-core.js ../${DEV_MODE}/src/" &
 
     # Copy touch gamepad
-    cp ../universal-touch-gamepad/universalTouchGamepad.js /opt/gst-web/src/
-    sudo nodemon --watch ../universal-touch-gamepad/universalTouchGamepad.js --exec "cp ../universal-touch-gamepad/universalTouchGamepad.js /opt/gst-web/src/" &
+    cp ../universal-touch-gamepad/universalTouchGamepad.js /opt/selkies-web/src/
+    sudo nodemon --watch ../universal-touch-gamepad/universalTouchGamepad.js --exec "cp ../universal-touch-gamepad/universalTouchGamepad.js /opt/selkies-web/src/" &
 
     # Copy themes
     cp -a nginx ../${DEV_MODE}/
@@ -290,10 +281,10 @@ if [ ! -z "${DEV_MODE+x}" ]; then
     cd $HOME/selkies/addons/${DEV_MODE}
     npm install
     npm run build
-    cp -r dist/* /opt/gst-web/
-    cp -r nginx/* /opt/gst-web/nginx/
-    sed -i "s|REPLACE_DOWNLOADS_PATH|${HOME}/${SELKIES_UPLOAD_DIR:-Desktop/}|g" /opt/gst-web/nginx/footer.html
-    sudo nodemon --watch ../${DEV_MODE}/src --exec "npm run build && cp -r ../${DEV_MODE}/dist/* /opt/gst-web/" &
+    cp -r dist/* /opt/selkies-web/
+    cp -r nginx/* /opt/selkies-web/nginx/
+    sed -i "s|REPLACE_DOWNLOADS_PATH|${HOME}/${SELKIES_UPLOAD_DIR:-Desktop/}|g" /opt/selkies-web/nginx/footer.html
+    sudo nodemon --watch ../${DEV_MODE}/src --exec "npm run build && cp -r ../${DEV_MODE}/dist/* /opt/selkies-web/" &
   fi
 
   # Run backend
