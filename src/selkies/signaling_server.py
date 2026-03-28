@@ -646,7 +646,7 @@ class WebRTCSimpleServer(object):
                 return
 
 def entrypoint():
-    default_web_root = os.path.join(os.getcwd(), "../../addons/selkies-web/src")
+    default_web_root = os.path.join(os.getcwd(), "../../addons/selkies-web-core/src")
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--addr', default='', help='Address to listen on (default: all interfaces, both ipv4 and ipv6)')

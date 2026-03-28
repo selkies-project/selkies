@@ -13,9 +13,9 @@ services:
         PYPI_PACKAGE: selkies
         PACKAGE_VERSION: 0.0.0.dev0
   web:
-    image: selkies-web
+    image: selkies-web-core
     build:
-      context: ./addons/selkies-web
+      context: ./addons/selkies-web-core
       dockerfile: Dockerfile
   test:
     ###
@@ -32,7 +32,7 @@ services:
         DISTRIB_RELEASE: ${DISTRIB_RELEASE:-24.04}
 
         PY_BUILD_IMAGE: selkies-py-build:latest
-        WEB_IMAGE: selkies-web:latest
+        WEB_IMAGE: selkies-web-core:latest
         PYPI_PACKAGE: selkies
         PACKAGE_VERSION: 0.0.0.dev0
     environment:
