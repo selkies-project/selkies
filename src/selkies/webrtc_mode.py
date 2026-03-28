@@ -141,7 +141,7 @@ class WebRTCApp:
             video_bitrate=int(self.args.video_bitrate) * 1000,  # Convert to kbps
             audio_bitrate=int(self.args.audio_bitrate),
             audio_channels=int(self.args.audio_channels),
-            audio_enabled = self.args.audio_enabled,
+            audio_enabled=self.args.audio_enabled,
             audio_device_name=self.args.audio_device_name
         )
 
