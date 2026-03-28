@@ -3,7 +3,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 ARG PY_BUILD_IMAGE=ghcr.io/selkies-project/selkies/py-build:main
-ARG WEB_IMAGE=ghcr.io/selkies-project/selkies/gst-web:main
+ARG WEB_IMAGE=ghcr.io/selkies-project/selkies/selkies-web:main
 FROM ${PY_BUILD_IMAGE} AS selkies-build
 FROM ${WEB_IMAGE} AS selkies-web
 FROM quay.io/condaforge/miniforge3:latest
@@ -24,7 +24,7 @@ ADD build ${SELKIES_BUILD}
 # Obtain Python application and web interface
 ARG SELKIES_SOURCE=/opt/selkies-source
 COPY --from=selkies-build /opt/pypi/dist/${PYPI_PACKAGE}-${PACKAGE_VERSION}-py3-none-any.whl ${SELKIES_SOURCE}/
-COPY --from=selkies-web /usr/share/nginx/html ${SELKIES_SOURCE}/gst-web
+COPY --from=selkies-web /usr/share/nginx/html ${SELKIES_SOURCE}/selkies-web
 
 WORKDIR /opt
 RUN . /opt/conda/bin/activate && \

@@ -1,12 +1,13 @@
 import re
 import os
 from asyncio import subprocess
+import asyncio
 from shutil import which
 
 import logging
-LOGLEVEL = logging.INFO
-logging.basicConfig(level=LOGLEVEL)
-logger_gst_app_resize = logging.getLogger("resize")
+
+logger_app_resize = logging.getLogger("resize")
+logger_app_resize.setLevel(logging.INFO)
 
 def fit_res(w, h, max_w, max_h):
     if w <= max_w and h <= max_h:
@@ -37,7 +38,7 @@ async def get_new_res(res_str):
         stdout, _ = await process.communicate()
         xrandr_output = stdout.decode('utf-8')
     except (FileNotFoundError, Exception) as e:
-        logger_gst_app_resize.error(f"xrandr command failed: {e}")
+        logger_app_resize.error(f"xrandr command failed: {e}")
         return curr_res, new_res, resolutions, max_res_str, screen_name
     current_screen_modes_started = False
     for line in xrandr_output.splitlines():
@@ -54,7 +55,7 @@ async def get_new_res(res_str):
             if res_match:
                 resolutions.append(res_match.group(1))
     if not screen_name:
-        logger_gst_app_resize.warning(
+        logger_app_resize.warning(
             "Could not determine connected screen from xrandr."
         )
         return curr_res, new_res, resolutions, max_res_str, screen_name
@@ -65,7 +66,7 @@ async def get_new_res(res_str):
         new_w, new_h = fit_res(w, h, max_w_limit, max_h_limit)
         new_res = f"{new_w}x{new_h}"
     except ValueError:
-        logger_gst_app_resize.error(f"Invalid resolution format for fitting: {res_str}")
+        logger_app_resize.error(f"Invalid resolution format for fitting: {res_str}")
     resolutions = sorted(list(set(resolutions)))
     return curr_res, new_res, resolutions, max_res_str, screen_name
 
@@ -79,7 +80,7 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
     _, _, available_resolutions, _, screen_name = await get_new_res(res_str)
 
     if not screen_name:
-        logger_gst_app_resize.error(
+        logger_app_resize.error(
             "Cannot resize display via xrandr, no screen identified."
         )
         return False
@@ -87,7 +88,7 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
     target_mode_to_set = res_str
 
     if res_str not in available_resolutions:
-        logger_gst_app_resize.info(
+        logger_app_resize.info(
             f"Mode {res_str} not found in xrandr list. Attempting to add for screen '{screen_name}'."
         )
         try:
@@ -96,7 +97,7 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
                 modeline_params,
             ) = await generate_xrandr_gtf_modeline(res_str)
         except Exception as e:
-            logger_gst_app_resize.error(
+            logger_app_resize.error(
                 f"Failed to generate modeline for {res_str}: {e}"
             )
             return False
@@ -109,11 +110,11 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
         )
         stdout_new, stderr_new = await new_mode_proc.communicate()
         if new_mode_proc.returncode != 0:
-            logger_gst_app_resize.error(
+            logger_app_resize.error(
                 f"Failed to create new xrandr mode with '{' '.join(cmd_new)}': {stderr_new.decode()}"
             )
             return False
-        logger_gst_app_resize.info(f"Successfully ran: {' '.join(cmd_new)}")
+        logger_app_resize.info(f"Successfully ran: {' '.join(cmd_new)}")
 
         # Use res_str (e.g., "2560x1280") as the mode name for --addmode
         cmd_add = ["xrandr", "--addmode", screen_name, res_str]
@@ -124,7 +125,7 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
         )
         stdout_add, stderr_add = await add_mode_proc.communicate()
         if add_mode_proc.returncode != 0:
-            logger_gst_app_resize.error(
+            logger_app_resize.error(
                 f"Failed to add mode '{res_str}' to screen '{screen_name}': {stderr_add.decode()}"
             )
             # Cleanup commands
@@ -142,9 +143,9 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
             )
             await rmmode_proc.communicate()
             return False
-        logger_gst_app_resize.info(f"Successfully ran: {' '.join(cmd_add)}")
+        logger_app_resize.info(f"Successfully ran: {' '.join(cmd_add)}")
 
-    logger_gst_app_resize.info(
+    logger_app_resize.info(
         f"Applying xrandr mode '{target_mode_to_set}' for screen '{screen_name}'."
     )
     cmd_output = ["xrandr", "--output", screen_name, "--mode", target_mode_to_set]
@@ -155,12 +156,12 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
     )
     stdout_set, stderr_set = await set_mode_proc.communicate()
     if set_mode_proc.returncode != 0:
-        logger_gst_app_resize.error(
+        logger_app_resize.error(
             f"Failed to set mode '{target_mode_to_set}' on screen '{screen_name}': {stderr_set.decode()}"
         )
         return False
 
-    logger_gst_app_resize.info(
+    logger_app_resize.info(
         f"Successfully applied xrandr mode '{target_mode_to_set}'."
     )
     return True
@@ -183,7 +184,7 @@ async def generate_xrandr_gtf_modeline(res_wh_str):
                 raise Exception(f"cvt failed: {stderr.decode()}")
             modeline_output = stdout.decode('utf-8')
         except (FileNotFoundError, Exception):
-            logger_gst_app_resize.warning(
+            logger_app_resize.warning(
                 "cvt command failed or not found, trying gtf."
             )
             cmd = ["gtf", w_str, h_str, "60"]
@@ -352,10 +353,10 @@ async def set_dpi(dpi_setting):
     try:
         dpi_value = int(str(dpi_setting))
         if dpi_value <= 0:
-            logger_gst_app_resize.error(f"Invalid DPI value: {dpi_value}. Must be a positive integer.")
+            logger_app_resize.error(f"Invalid DPI value: {dpi_value}. Must be a positive integer.")
             return False
     except ValueError:
-        logger_gst_app_resize.error(f"Invalid DPI format: '{dpi_setting}'. Must be convertible to a positive integer.")
+        logger_app_resize.error(f"Invalid DPI format: '{dpi_setting}'. Must be convertible to a positive integer.")
         return False
 
     any_method_succeeded = False
@@ -364,52 +365,52 @@ async def set_dpi(dpi_setting):
     # DE Detection and Action Order: KDE -> XFCE -> MATE -> i3 -> Openbox
     if which("startplasma-x11"):
         de_name_for_log = "KDE"
-        logger_gst_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_gst_app_resize):
+        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
+        if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
     
     elif which("xfce4-session"):
         de_name_for_log = "XFCE"
-        logger_gst_app_resize.info(f"{de_name_for_log} detected. Applying xfconf-query for DPI {dpi_value}.")
-        if await _run_xfconf(dpi_value, logger_gst_app_resize):
+        logger_app_resize.info(f"{de_name_for_log} detected. Applying xfconf-query for DPI {dpi_value}.")
+        if await _run_xfconf(dpi_value, logger_app_resize):
             any_method_succeeded = True
         # For XFCE, only xfconf-query is used to avoid potential double scaling.
 
     elif which("mate-session"):
         de_name_for_log = "MATE"
-        logger_gst_app_resize.info(f"{de_name_for_log} detected. Applying MATE gsettings and xrdb for DPI {dpi_value}.")
-        mate_gsettings_success = await _run_mate_gsettings(dpi_value, logger_gst_app_resize)
+        logger_app_resize.info(f"{de_name_for_log} detected. Applying MATE gsettings and xrdb for DPI {dpi_value}.")
+        mate_gsettings_success = await _run_mate_gsettings(dpi_value, logger_app_resize)
         # Also apply xrdb for MATE for wider application compatibility / fallback
-        xrdb_for_mate_success = await _run_xrdb(dpi_value, logger_gst_app_resize)
+        xrdb_for_mate_success = await _run_xrdb(dpi_value, logger_app_resize)
         if mate_gsettings_success or xrdb_for_mate_success:
             any_method_succeeded = True
 
     elif which("i3"):
         de_name_for_log = "i3"
-        logger_gst_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_gst_app_resize):
+        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
+        if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
             
     elif which("openbox-session") or which("openbox"): # Check for openbox binary as well
         de_name_for_log = "Openbox"
-        logger_gst_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_gst_app_resize):
+        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
+        if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
             
     else:
         de_name_for_log = "Generic/Unknown DE"
-        logger_gst_app_resize.info(f"No specific DE session binary found (KDE, XFCE, MATE, i3, Openbox). Attempting generic xrdb as a fallback for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_gst_app_resize):
+        logger_app_resize.info(f"No specific DE session binary found (KDE, XFCE, MATE, i3, Openbox). Attempting generic xrdb as a fallback for DPI {dpi_value}.")
+        if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
 
     if not any_method_succeeded:
-        logger_gst_app_resize.warning(f"No DPI setting method succeeded for DPI {dpi_value} (Attempted for: {de_name_for_log}).")
+        logger_app_resize.warning(f"No DPI setting method succeeded for DPI {dpi_value} (Attempted for: {de_name_for_log}).")
 
     return any_method_succeeded
 
 async def set_cursor_size(size):
     if not isinstance(size, int) or size <= 0:
-        logger_gst_app_resize.error(f"Invalid cursor size: {size}")
+        logger_app_resize.error(f"Invalid cursor size: {size}")
         return False
     if which("xfconf-query"):
         cmd = [
@@ -432,7 +433,7 @@ async def set_cursor_size(size):
         await process.communicate()
         if process.returncode == 0:
             return True
-        logger_gst_app_resize.warning("Failed to set XFCE cursor size.")
+        logger_app_resize.warning("Failed to set XFCE cursor size.")
     if which("gsettings"):
         try:
             cmd_set = [
@@ -449,12 +450,28 @@ async def set_cursor_size(size):
             )
             await process_set.communicate()
             if process_set.returncode == 0:
-                logger_gst_app_resize.info(f"Set GNOME cursor-size to {size}")
+                logger_app_resize.info(f"Set GNOME cursor-size to {size}")
                 return True
-            logger_gst_app_resize.warning("Failed to set GNOME cursor-size.")
+            logger_app_resize.warning("Failed to set GNOME cursor-size.")
         except Exception as e:
-            logger_gst_app_resize.warning(
+            logger_app_resize.warning(
                 f"Error trying to set GNOME cursor size via gsettings: {e}"
             )
-    logger_gst_app_resize.warning("No supported tool found/worked to set cursor size.")
+    logger_app_resize.warning("No supported tool found/worked to set cursor size.")
     return False
+
+async def main():
+    import sys
+    logging.basicConfig(level=logging.INFO)
+
+    if len(sys.argv) < 2:
+        print("USAGE: %s WxH" % sys.argv[0])
+        sys.exit(1)
+    res = sys.argv[1]
+    print(await asyncio.to_thread(resize_display, res))
+
+def entrypoint():
+    asyncio.run(main())
+
+if __name__ == "__main__":
+    entrypoint()

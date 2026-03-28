@@ -519,7 +519,6 @@ class WebRTCSimpleServer(object):
                         raise Exception("Multiple connections not allowed in non-sharing mode; connection from {!r}".format(raddr))
                 else:
                     allowed_slots = self.allowed_client_slots()
-                    logger.info("Allowed slots are: " + str(allowed_slots) + " provided is: " +str(client_slot))
                     if client_slot != -1 and (client_slot not in allowed_slots):
                         await ws.close(code=4000, reason="Invalid player id provided, check URL.")
                         raise Exception("Invalid client slot provided {!r}".format(client_slot))
@@ -647,7 +646,7 @@ class WebRTCSimpleServer(object):
                 return
 
 def entrypoint():
-    default_web_root = os.path.join(os.getcwd(), "../../addons/gst-web/src")
+    default_web_root = os.path.join(os.getcwd(), "../../addons/selkies-web/src")
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--addr', default='', help='Address to listen on (default: all interfaces, both ipv4 and ipv6)')

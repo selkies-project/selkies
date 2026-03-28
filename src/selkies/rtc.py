@@ -48,10 +48,6 @@ from .webrtc.contrib.media import MediaRelay
 from enum import Enum
 from .media_pipeline import MediaPipeline
 
-import gi
-gi.require_version('Gst', "1.0")
-from gi.repository import Gst
-
 logger = logging.getLogger("rtc")
 logger.setLevel(logging.INFO)
 
@@ -374,60 +370,7 @@ class RTCApp:
 
         return sdp_text
 
-    async def consume_data_gst(self, sample, kind):
-        if sample:
-            buf = sample.get_buffer()
-            caps = sample.get_caps()
-            if not buf or not caps:
-                logger.warning("consume_data: buffer or caps is None")
-                return Gst.FlowReturn.OK
-
-            # map the buffer to get a memoryview
-            result, map_info = buf.map(Gst.MapFlags.READ)
-            if not result:
-                return Gst.FlowReturn.ERROR
-
-            if kind == "video":
-                try:
-                    packet = av.Packet(bytes(map_info.data))
-
-                    RTP_VIDEO_CLOCK_RATE = 90000
-                    packet.time_base = Fraction(1, RTP_VIDEO_CLOCK_RATE)
-                     # Convert GStreamer's nanosecond timestamps to the 90kHz video clock rate
-                    if buf.pts is not None and buf.pts != Gst.CLOCK_TIME_NONE:
-                        packet.pts = (buf.pts * RTP_VIDEO_CLOCK_RATE) // 1000000000
-                        packet.dts = packet.pts  # Since there are no B-frames, PTS and DTS are the same
-                        delta = buf.has_flags(Gst.BufferFlags.DELTA_UNIT)
-                        packet.is_keyframe = not delta
-                    if self.video_pipeline_bridge != None:
-                        await self.video_pipeline_bridge.set_data(packet)
-                except Exception as e:
-                    logger.error(f"error processing video sample: {e}")
-            else:
-                try:
-                    packet = av.Packet(bytes(map_info.data))
-
-                    # For audio, dynamically get the clock rate from the GStreamer caps
-                    audio_info = caps.get_structure(0)
-                    _, clock_rate = audio_info.get_int("rate")
-                    if not clock_rate:
-                        logger.warning("Could not get clock-rate from caps, falling back to 48000")
-                        clock_rate = 48000
-                    packet.time_base = Fraction(1, clock_rate)
-
-                    if buf.pts is not None and buf.pts != Gst.CLOCK_TIME_NONE:
-                        packet.pts = (buf.pts * clock_rate) // 1000000000
-
-                    if self.audio_pipeline_bridge != None:
-                        await self.audio_pipeline_bridge.set_data(packet)
-                except Exception as e:
-                        logger.error(f"error processing audio sample: {e}")
-
-            buf.unmap(map_info)
-        else:
-            logger.warning("sample received is empty")
-
-    async def consume_data_pixel(self, buf, pts, kind):
+    async def consume_data(self, buf, pts, kind):
         if kind == "video":
             if buf:
                 try:
@@ -688,7 +631,10 @@ class RTCApp:
             peer_conn = peer_obj.get("peer_conn")
             if peer_conn is not None:
                 await peer_conn.close()
-            del self.peer_connections[client_peer_id]
+            try:
+                del self.peer_connections[client_peer_id]
+            except KeyError:
+                pass
 
             if peer_obj.get('client_type') == ClientType.CONTROLLER:
                 logger.info("Controller peer disconnected, cleaning up media relay and bridges")

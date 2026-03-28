@@ -22,7 +22,6 @@
 import argparse
 import asyncio
 import json
-from json import encoder
 import logging
 import os
 import signal
@@ -36,7 +35,7 @@ logger = logging.getLogger("main")
 logger.setLevel(logging.INFO)
 
 from .rtc import RTCApp
-from .media_pipeline import MediaPipeline, MediaPipelineGst, MediaPipelinePixel
+from .media_pipeline import MediaPipeline, MediaPipelinePixel
 from .webrtc_signaling import WebRTCSignaling
 from .signaling_server import WebRTCSimpleServer
 from .input_handler import WebRTCInput
@@ -135,30 +134,16 @@ class WebRTCApp:
         # Init signaling client
         self.signaling_client = self.create_signaling_client()
 
-        if self.args.media_pipeline == 'gstreamer':
-            self.media_pipeline = MediaPipelineGst(
-                async_event_loop=asyncio.get_running_loop(),
-                encoder=self.args.encoder_rtc,
-                audio_channels=int(self.args.audio_channels),
-                framerate=int(self.args.framerate),
-                gpu_id=int(self.args.gpu_id),
-                video_bitrate=int(self.args.video_bitrate) * 1000,  # Convert to kbps
-                audio_bitrate=int(self.args.audio_bitrate),
-                keyframe_distance=float(self.args.keyframe_distance),
-                video_packetloss_percent=float(self.args.video_packetloss_percent),
-                audio_packetloss_percent=float(self.args.audio_packetloss_percent)
-            )
-        else:
-            self.media_pipeline = MediaPipelinePixel(
-                async_event_loop=asyncio.get_running_loop(),
-                encoder=self.args.encoder_rtc,
-                framerate=int(self.args.framerate),
-                video_bitrate=int(self.args.video_bitrate) * 1000,  # Convert to kbps
-                audio_bitrate=int(self.args.audio_bitrate),
-                audio_channels=int(self.args.audio_channels),
-                audio_enabled = self.args.audio_enabled,
-                audio_device_name=self.args.audio_device_name
-            )
+        self.media_pipeline = MediaPipelinePixel(
+            async_event_loop=asyncio.get_running_loop(),
+            encoder=self.args.encoder_rtc,
+            framerate=int(self.args.framerate),
+            video_bitrate=int(self.args.video_bitrate) * 1000,  # Convert to kbps
+            audio_bitrate=int(self.args.audio_bitrate),
+            audio_channels=int(self.args.audio_channels),
+            audio_enabled = self.args.audio_enabled,
+            audio_device_name=self.args.audio_device_name
+        )
 
         # Fetch rtc configuration
         stun_servers, turn_servers, rtc_config, self.monitoring_utils_used = await get_rtc_configuration(self.args)
@@ -289,11 +274,7 @@ class WebRTCApp:
         self.signaling_client.on_sdp = self.rtc_app.set_sdp
         self.signaling_client.on_ice = self.rtc_app.set_ice
 
-        # Media pipeline callbacks
-        if self.args.media_pipeline == 'gstreamer':
-            self.media_pipeline.produce_data = self.rtc_app.consume_data_gst
-        else:
-            self.media_pipeline.produce_data = self.rtc_app.consume_data_pixel
+        self.media_pipeline.produce_data = self.rtc_app.consume_data
         self.media_pipeline.send_data_channel_message = self.rtc_app.send_media_data_over_channel
 
         # RTCApp callbacks

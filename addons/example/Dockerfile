@@ -5,15 +5,12 @@
 # Supported base images: Ubuntu 24.04, 22.04, 20.04
 ARG DISTRIB_IMAGE=ubuntu
 ARG DISTRIB_RELEASE=24.04
-ARG GSTREAMER_BASE_IMAGE=ghcr.io/selkies-project/selkies/gstreamer
-ARG GSTREAMER_BASE_IMAGE_RELEASE=main
 ARG PY_BUILD_IMAGE=ghcr.io/selkies-project/selkies/py-build:main
-ARG WEB_IMAGE=ghcr.io/selkies-project/selkies/gst-web:main
+ARG WEB_IMAGE=ghcr.io/selkies-project/selkies/selkies-web:main
 ARG JS_BASE_IMAGE=ghcr.io/selkies-project/selkies/js-interposer
 ARG JS_BASE_IMAGE_RELEASE=main
 ARG LIBUDEV_IMAGE=ghcr.io/selkies-project/selkies/fake-udev
 ARG LIBUDEV_IMAGE_RELEASE=main
-FROM ${GSTREAMER_BASE_IMAGE}:${GSTREAMER_BASE_IMAGE_RELEASE}-${DISTRIB_IMAGE}${DISTRIB_RELEASE} AS selkies
 FROM ${PY_BUILD_IMAGE} AS selkies-build
 FROM ${WEB_IMAGE} AS selkies-web
 FROM ${JS_BASE_IMAGE}:${JS_BASE_IMAGE_RELEASE}-${DISTRIB_IMAGE}${DISTRIB_RELEASE} AS selkies-js-interposer
@@ -73,17 +70,11 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
         gnupg \
         software-properties-common \
         jq \
-        # GStreamer dependencies
         python3-pip \
         python3-dev \
-        python3-gi \
         python3-setuptools \
         python3-wheel \
         libgcrypt20 \
-        libgirepository-1.0-1 \
-        glib-networking \
-        libglib2.0-0 \
-        libgudev-1.0-0 \
         alsa-utils \
         jackd2 \
         libjack-jackd2-0 \
@@ -248,11 +239,8 @@ Pin-Priority: -1" > /etc/apt/preferences.d/firefox-nosnap && \
     # Prevent dialogs at Xfce4 desktop environment start
     cp -rf /etc/xdg/xfce4/panel/default.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
 
-# Install GStreamer distribution
-COPY --chown=1000:1000 --from=selkies /opt/gstreamer ./gstreamer
-
 # Install web application
-COPY --chown=1000:1000 --from=selkies-web /usr/share/nginx/html ./gst-web
+COPY --chown=1000:1000 --from=selkies-web /usr/share/nginx/html ./selkies-web
 
 # Install Joystick Interposer
 COPY --chown=1000:1000 --from=selkies-js-interposer /opt/*.deb /opt/selkies-js-interposer.deb
