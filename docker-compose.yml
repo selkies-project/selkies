@@ -13,9 +13,9 @@ services:
         PYPI_PACKAGE: selkies
         PACKAGE_VERSION: 0.0.0.dev0
   web:
-    image: gst-web
+    image: selkies-web-core
     build:
-      context: ./addons/gst-web
+      context: ./addons/selkies-web-core
       dockerfile: Dockerfile
   test:
     ###
@@ -31,15 +31,8 @@ services:
         DISTRIB_IMAGE: ${DISTRIB_IMAGE:-ubuntu}
         DISTRIB_RELEASE: ${DISTRIB_RELEASE:-24.04}
 
-        # Testing with gstreamer build in-repo:
-        # 1. (cd addons/gstreamer && docker build --build-arg DISTRIB_IMAGE=${DISTRIB_IMAGE?} --build-arg DISTRIB_RELEASE=${DISTRIB_RELEASE?} -t gstreamer:latest-${DISTRIB_IMAGE?}${DISTRIB_RELEASE?} .)
-        # 2. export GSTREAMER_BASE_IMAGE=gstreamer
-        # 3. docker-compose build test
-        GSTREAMER_BASE_IMAGE: ${GSTREAMER_BASE_IMAGE:-ghcr.io/selkies-project/selkies/gstreamer}
-        GSTREAMER_BASE_IMAGE_RELEASE: ${GSTREAMER_BASE_IMAGE_RELEASE:-main}
-
         PY_BUILD_IMAGE: selkies-py-build:latest
-        WEB_IMAGE: gst-web:latest
+        WEB_IMAGE: selkies-web-core:latest
         PYPI_PACKAGE: selkies
         PACKAGE_VERSION: 0.0.0.dev0
     environment:

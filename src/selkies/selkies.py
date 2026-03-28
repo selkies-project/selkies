@@ -3478,7 +3478,7 @@ async def ws_entrypoint():
     if "DEV_MODE" in os.environ:
         try:
             dev_version_file = pathlib.Path(
-                "../../addons/gst-web-core/selkies-version.txt"
+                "../../addons/selkies-web-core/selkies-version.txt"
             )
             if dev_version_file.parent.exists():
                 dev_version_file.touch(exist_ok=True)

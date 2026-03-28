@@ -122,7 +122,7 @@ SETTING_DEFINITIONS_WEBRTC = [
     {'name': 'json_config', 'type': 'str', 'default': '/tmp/selkies_config.json', 'help': 'Path to the JSON file containing argument key-value pairs that are overlaid with CLI arguments or environment variables, this path must be writable'},
     {'name': 'addr', 'type': 'str', 'default': '0.0.0.0', 'help': 'Host to listen to for the signaling and web server, default: "0.0.0.0"'},
     {'name': 'port', 'type': 'int', 'default': 8081, 'help': 'Port to listen to for the signaling and web server, default: "8081"'},
-    {'name': 'web_root', 'type': 'str', 'default': '/opt/gst-web', 'help': 'Path to directory containing web application files, default: "/opt/gst-web"'},
+    {'name': 'web_root', 'type': 'str', 'default': '/opt/selkies-web', 'help': 'Path to directory containing web application files, default: "/opt/selkies-web"'},
     {'name': 'enable_https', 'type': 'bool', 'default': False, 'help': 'Enable or disable HTTPS for the web application, specifying a valid server certificate is recommended'},
     {'name': 'https_cert', 'type': 'str', 'default': '/etc/ssl/certs/ssl-cert-snakeoil.pem', 'help': 'Path to the TLS server certificate file when HTTPS is enabled'},
     {'name': 'https_key', 'type': 'str', 'default': '/etc/ssl/private/ssl-cert-snakeoil.key', 'help': 'Path to the TLS server private key file when HTTPS is enabled, set to an empty value if the private key is included in the certificate'},
@@ -150,13 +150,13 @@ SETTING_DEFINITIONS_WEBRTC = [
     {'name': 'cloudflare_turn_token_id', 'type': 'str', 'default': '', 'help': 'The Cloudflare TURN App token ID.'},
     {'name': 'cloudflare_turn_api_token', 'type': 'str', 'default': '', 'help': 'The Cloudflare TURN API token.'},
 
-    {'name': 'encoder_rtc', 'type': 'enum', 'default': 'x264enc', 'meta': {'allowed': ['av1enc', 'x264enc', 'nvh264enc', 'vp8enc']}, 'help': 'GStreamer video encoder to use'},
+    {'name': 'encoder_rtc', 'type': 'enum', 'default': 'x264enc', 'meta': {'allowed': ['av1enc', 'x264enc', 'nvh264enc', 'vp8enc']}, 'help': 'Video encoder to encode video media'},
     {'name': 'video_bitrate', 'type': 'range', 'default': '1-100', 'meta': {"default_value": 8}, 'help': 'Default video bitrate in Megabits per second (Mbps), allowed range (e.g., "1-100") or a fixed value (e.g., "8" for 8 Mbps)'},
     {'name': 'app_wait_ready', 'type': 'bool', 'default': False, 'help': 'Waits for --app_ready_file to exist before starting stream if set to "true"'},
     {'name': 'app_ready_file', 'type': 'str', 'default': '/tmp/selkies-appready', 'help': 'File set by sidecar used to indicate that app is initialized and ready'},
     {'name': 'uinput_mouse_socket', 'type': 'str', 'default': '', 'help': 'Path to the uinput mouse socket, if not provided uinput is used directly'},
     {'name': 'js_socket_path', 'type': 'str', 'default': '/tmp', 'help': 'Directory to write the Selkies Joystick Interposer communication sockets to, default: /tmp, results in socket files: /tmp/selkies_js{0-3}.sock'},
-    {'name': 'gpu_id', 'type': 'str', 'default': '0', 'help': 'GPU ID for GStreamer hardware video encoders, will use enumerated GPU ID (0, 1, ..., n) for NVIDIA and /dev/dri/renderD{128 + n} for VA-API'},
+    {'name': 'gpu_id', 'type': 'str', 'default': '0', 'help': 'GPU ID for hardware video encoders, will use enumerated GPU ID (0, 1, ..., n) for NVIDIA and /dev/dri/renderD{128 + n} for VA-API'},
     {'name': 'keyframe_distance', 'type': 'int', 'default': -1, 'help': 'Distance between video keyframes/GOP-frames in seconds, defaults to "-1" for infinite keyframe distance (ideal for low latency and preventing periodic blurs)'},
     {'name': 'congestion_control', 'type': 'bool', 'default': False, 'help': 'Enable Google Congestion Control (GCC), suggested if network conditions fluctuate and when bandwidth is >= 2 mbps but may lead to lower quality and microstutter due to adaptive bitrate in some encoders'},
     {'name': 'video_packetloss_percent', 'type': 'int', 'default': 0, 'help': 'Expected packet loss percentage (percent) for ULP/RED Forward Error Correction (FEC) in video, use "0" to disable FEC, less effective because of other mechanisms including NACK/PLI, enabling not recommended if Google Congestion Control is enabled'},
@@ -172,7 +172,6 @@ SETTING_DEFINITIONS_WEBRTC = [
     {'name': 'enable_metrics_http', 'type': 'bool', 'default': False, 'help': 'Enable the Prometheus HTTP metrics port'},
     {'name': 'metrics_http_port', 'type': 'int', 'default': 8000, 'help': 'Port to start the Prometheus metrics server on'},
     {'name': 'upload_dir', 'type': 'str', 'default': '~/Desktop', 'help': "Directory to save the uploaded content, in absolute path format. Default to '~/Desktop' directory"},
-    {'name': 'media_pipeline', 'type': 'enum', 'default': 'pixelflux', 'meta': {'allowed': ['gstreamer', 'pixelflux']}, 'help': 'Media pipeline to use; responsible for video and audio capturing and encoding of data. Defaults to pixelflux media pipeline'}
 ]
 
 class AppSettings:
