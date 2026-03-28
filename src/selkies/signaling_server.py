@@ -66,12 +66,34 @@ def generate_rtc_config(turn_host, turn_port, shared_secret, user, protocol='udp
     hashed = hmac.new(bytes(shared_secret, "utf-8"), bytes(username, "utf-8"), hashlib.sha1).digest()
     password = base64.b64encode(hashed).decode()
 
+    def format_ice_host(host):
+        if host and ":" in host and not (host.startswith("[") and host.endswith("]")):
+            return f"[{host}]"
+        return host
+
+    def append_stun_url(stun_urls, seen_stun, host, port):
+        if not host:
+            return
+        try:
+            port_num = int(port)
+        except (TypeError, ValueError):
+            port_num = 3478
+
+        key = (host.lower(), port_num)
+        if key in seen_stun:
+            return
+
+        seen_stun.add(key)
+        stun_urls.append(f"stun:{format_ice_host(host)}:{port_num}")
+
     # Configure STUN servers
-    stun_list = ["stun:{}:{}".format(turn_host, turn_port)]
-    if stun_host is not None and stun_port is not None and (stun_host != turn_host or str(stun_port) != str(turn_port)):
-        stun_list.insert(0, "stun:{}:{}".format(stun_host, stun_port))
-    if stun_host != "stun.l.google.com" or (str(stun_port) != "19302"):
-        stun_list.append("stun:stun.l.google.com:19302")
+    stun_list = []
+    seen_stun = set()
+    if stun_host is not None and stun_port is not None:
+        append_stun_url(stun_list, seen_stun, str(stun_host), stun_port)
+    append_stun_url(stun_list, seen_stun, str(turn_host), turn_port)
+    append_stun_url(stun_list, seen_stun, "stun.l.google.com", 19302)
+    append_stun_url(stun_list, seen_stun, "stun.cloudflare.com", 3478)
 
     rtc_config = {}
     rtc_config["lifetimeDuration"] = "{}s".format(expiry_hour * 3600)
@@ -83,7 +105,7 @@ def generate_rtc_config(turn_host, turn_port, shared_secret, user, protocol='udp
     })
     rtc_config["iceServers"].append({
         "urls": [
-            "{}:{}:{}?transport={}".format('turns' if turn_tls else 'turn', turn_host, turn_port, protocol)
+            "{}:{}:{}?transport={}".format('turns' if turn_tls else 'turn', format_ice_host(str(turn_host)), turn_port, protocol)
         ],
         "username": username,
         "credential": password

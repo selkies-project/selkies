@@ -24,6 +24,7 @@ import asyncio
 import re
 import json
 import base64
+import urllib.parse
 
 from .webrtc import (
     RTCPeerConnection,
@@ -411,24 +412,39 @@ class RTCApp:
         Restructure each TURN server string to the expected format
         and return a list of formatted TURN server URLs.
         """
-        formatted_servers = []
+        formatted_servers: List[Dict[str, Optional[str]]] = []
         for server in turn_servers or []:
-            # Expecting format: username:password@host:port
-            if '@' in server:
-                parts = server.split('@')
-                if len(parts) == 2:
-                    credentials, host = parts
-                    if ':' in credentials:
-                        scheme, username, password = credentials.split(':', 2)
-                        username = username.strip("/")
-                    else:
-                        scheme, username, password = 'turn:', '', ''
-                    host = scheme + ':' + host
-                    formatted_servers.append({
-                        'urls': host,
-                        'username': username,
-                        'credential': password
-                    })
+            if not isinstance(server, str):
+                continue
+
+            lower_server = server.lower()
+            if not (lower_server.startswith("turn://") or lower_server.startswith("turns://")):
+                continue
+
+            parsed = urllib.parse.urlparse(server)
+            if not parsed.hostname:
+                continue
+
+            scheme = 'turns' if parsed.scheme.lower() == 'turns' else 'turn'
+            try:
+                port = parsed.port or (443 if scheme == 'turns' else 3478)
+            except ValueError:
+                port = 443 if scheme == 'turns' else 3478
+
+            host = parsed.hostname
+            if host and ":" in host and not (host.startswith("[") and host.endswith("]")):
+                host = f"[{host}]"
+
+            query = f"?{parsed.query}" if parsed.query else ""
+            turn_entry: Dict[str, Optional[str]] = {
+                'urls': f'{scheme}:{host}:{port}{query}'
+            }
+
+            if parsed.username is not None and parsed.password is not None:
+                turn_entry['username'] = urllib.parse.unquote(parsed.username)
+                turn_entry['credential'] = urllib.parse.unquote(parsed.password)
+
+            formatted_servers.append(turn_entry)
         return formatted_servers
 
     def format_stun_servers(self, stun_servers: List[str]) -> List[str]:
@@ -450,11 +466,14 @@ class RTCApp:
         if self.stun_servers:
             ice_servers.append(RTCIceServer(urls=formatted_stun_servers))
         for turn in formatted_turn_servers:
-            ice_servers.append(RTCIceServer(
-                urls=turn.get('urls', []),
-                username=turn.get('username', ''),
-                credential=turn.get('credential', '')
-            ))
+            turn_kwargs: Dict[str, Any] = {
+                'urls': turn.get('urls', [])
+            }
+            if turn.get('username') is not None:
+                turn_kwargs['username'] = turn.get('username')
+            if turn.get('credential') is not None:
+                turn_kwargs['credential'] = turn.get('credential')
+            ice_servers.append(RTCIceServer(**turn_kwargs))
         config = RTCConfiguration(iceServers=ice_servers, bundlePolicy=RTCBundlePolicy.MAX_BUNDLE)
         return config
 
