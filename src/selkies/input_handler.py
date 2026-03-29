@@ -875,13 +875,17 @@ class WebRTCInput:
         self.is_wayland = is_wayland
         self.wayland_input = None
         self.wayland_scancode_map = {}
-        self.use_hex_fallback = False
+        self.use_clipboard_fallback = False
+        self.clipboard_paused = False
+        self.clipboard_injection_lock = asyncio.Lock()
+        self.keyboard_queue = asyncio.Queue()
+        self.keyboard_worker_task = None
 
         if self.is_wayland:
             import shutil
             if shutil.which("kwin_wayland"):
-                self.use_hex_fallback = True
-                logger_webrtc_input.info("kwin_wayland detected: enabling Hex-Input fallback for Unicode.")
+                self.use_clipboard_fallback = True
+                logger_webrtc_input.info("kwin_wayland detected: enabling Clipboard-Input fallback for Unicode.")
 
             try:
                 from pixelflux import ScreenCapture
@@ -1075,6 +1079,9 @@ class WebRTCInput:
         # Initialize persistent gamepad instances
         await self._initialize_persistent_gamepads()
 
+        if getattr(self, 'use_clipboard_fallback', False):
+            self.keyboard_worker_task = asyncio.create_task(self._keyboard_worker())        
+
     async def _initialize_persistent_gamepads(self):
         logger_webrtc_input.info(f"Initializing {self.num_gamepads} persistent gamepad instances...")
         if not os.path.exists(self.js_socket_path_prefix):
@@ -1117,6 +1124,10 @@ class WebRTCInput:
                 await gamepad.close()
         self.__mouse_disconnect()
         if self.xdisplay: self.xdisplay = None
+        
+        if self.keyboard_worker_task:
+            self.keyboard_worker_task.cancel()
+            self.keyboard_worker_task = None
 
     async def reset_keyboard(self):
         if self.is_wayland:
@@ -1281,15 +1292,11 @@ class WebRTCInput:
                             char_to_type = keysym_name
                     except Exception:
                         pass
-            if char_to_type:
-                if self.use_hex_fallback:
-                    try:
-                        hex_str = f"{ord(char_to_type):x}"
-                        await self._inject_unicode_via_hex(hex_str)
-                    except Exception as e:
-                        logger_webrtc_input.warning(f"Hex fallback failed: {e}")
-                    return
 
+            if char_to_type:
+                if getattr(self, 'use_clipboard_fallback', False):
+                    await self._inject_unicode_via_clipboard(char_to_type)
+                    return
                 try:
                     command_wtype = ["wtype", char_to_type]
                     process_wtype = await subprocess.create_subprocess_exec(
@@ -1385,26 +1392,49 @@ class WebRTCInput:
         except (FileNotFoundError, asyncio.TimeoutError, Exception):
             pass
 
-    async def _inject_unicode_via_hex(self, hex_str):
-        KEY_CTRL_L  = 0xFFE3
-        KEY_SHIFT_L = 0xFFE1
-        KEY_U       = 0x0075
-        KEY_ENTER   = 0xFF0D
+    async def _inject_unicode_via_clipboard(self, text_to_type):
+        async with self.clipboard_injection_lock:
+            self.clipboard_paused = True
+            KEY_CTRL_L = 0xFFE3
+            KEY_V      = 0x0076
 
-        await self.send_x11_keypress(KEY_CTRL_L, down=True)
-        await self.send_x11_keypress(KEY_SHIFT_L, down=True)
-        await self.send_x11_keypress(KEY_U, down=True)
-        await self.send_x11_keypress(KEY_U, down=False)
-        await self.send_x11_keypress(KEY_SHIFT_L, down=False)
-        await self.send_x11_keypress(KEY_CTRL_L, down=False)
+            currently_active_mods = list(self.active_modifiers)
 
-        for char in hex_str:
-            keysym = ord(char)
-            await self.send_x11_keypress(keysym, down=True)
-            await self.send_x11_keypress(keysym, down=False)
+            try:
+                for mod_keysym in currently_active_mods:
+                    await self.send_x11_keypress(mod_keysym, down=False)
 
-        await self.send_x11_keypress(KEY_ENTER, down=True)
-        await self.send_x11_keypress(KEY_ENTER, down=False)
+                old_data, old_mime = await self.read_clipboard(use_binary=True)
+                await self.write_clipboard(text_to_type, mime_type="text/plain")
+                await asyncio.sleep(0.01)
+                
+                await self.send_x11_keypress(KEY_CTRL_L, down=True)
+                await self.send_x11_keypress(KEY_V, down=True)
+                await self.send_x11_keypress(KEY_V, down=False)
+                await self.send_x11_keypress(KEY_CTRL_L, down=False)
+                await asyncio.sleep(0.01)
+                
+                if old_data is not None:
+                    await self.write_clipboard(old_data, mime_type=old_mime or "text/plain")
+                elif self.is_wayland:
+                    try:
+                        proc = await subprocess.create_subprocess_exec(
+                            "wl-copy", "--clear",
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            env=self._get_wl_env()
+                        )
+                        await asyncio.wait_for(proc.communicate(), timeout=1.0)
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                logger_webrtc_input.error(f"Error during clipboard injection: {e}", exc_info=True)
+            finally:
+                for mod_keysym in currently_active_mods:
+                    if mod_keysym in self.active_modifiers:
+                        await self.send_x11_keypress(mod_keysym, down=True)
+
+                self.clipboard_paused = False
 
     async def send_x11_mouse(self, x, y, button_mask, scroll_magnitude, relative=False, display_id='primary'):
         if relative:
@@ -1673,20 +1703,22 @@ class WebRTCInput:
                     *cmd,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, # FIX: Prevent daemon from keeping pipe open
                     env=self._get_wl_env()
                 )
                 if process.stdin:
                     process.stdin.write(input_bytes)
                     await process.stdin.drain()
                     process.stdin.close()
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=2.0)
+                # Should now return instantly instead of hitting the 2.0s timeout
+                await asyncio.wait_for(process.communicate(), timeout=2.0)
                 if process.returncode == 0:
                     return True
                 else:
-                    logger_webrtc_input.warning(f"wl-copy failed code: {process.returncode}, err: {stderr.decode()}")
+                    logger_webrtc_input.warning(f"wl-copy failed code: {process.returncode}")
                     return False
             except Exception as e:
+                logger_webrtc_input.warning(f"wl-copy exception: {e}")
                 return False
         try:
             process = await subprocess.create_subprocess_exec(
@@ -1720,6 +1752,10 @@ class WebRTCInput:
         last_data_bytes = b""
         while self.clipboard_running:
             try:
+                if getattr(self, 'clipboard_paused', False):
+                    await asyncio.sleep(0.1)
+                    continue
+
                 use_binary = self.enable_binary_clipboard in ["true", "out"]
                 curr_data, curr_mime = await self.read_clipboard(use_binary=use_binary)
                 if curr_data is None:
@@ -1847,6 +1883,48 @@ class WebRTCInput:
         logger_webrtc_input.info("Stopping all gamepad instances.")
         await self.__gamepad_disconnect()
 
+    async def _keyboard_worker(self):
+        while True:
+            try:
+                msg_type, data = await self.keyboard_queue.get()
+                
+                if msg_type == "kd":
+                    keysym = data
+                    is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
+                    if keysym in self.MODIFIER_KEYSYMS:
+                        self.active_modifiers.add(keysym)
+                    if is_printable and not self.active_modifiers:
+                        unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
+                        try:            
+                            char_to_type = chr(unicode_codepoint)
+                            await self.send_x11_keypress(keysym, down=True)
+                        except (ValueError, TypeError):
+                            await self.send_x11_keypress(keysym, down=True)
+                    else:   
+                        await self.send_x11_keypress(keysym, down=True)
+
+                elif msg_type == "ku":
+                    keysym = data
+                    if keysym in self.MODIFIER_KEYSYMS:
+                        self.active_modifiers.discard(keysym)
+                    if keysym in self.atomically_typed_keys:
+                        self.atomically_typed_keys.discard(keysym)
+                    else:
+                        await self.send_x11_keypress(keysym, down=False)
+
+                elif msg_type == "kr":
+                    await self.reset_keyboard()
+
+                elif msg_type == "co_end":
+                    text_to_type = data
+                    await self._inject_unicode_via_clipboard(text_to_type)
+
+                self.keyboard_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger_webrtc_input.error(f"Error in keyboard worker: {e}", exc_info=True)
+
     async def on_message(self, msg, display_id='primary'):
         toks = msg.split(",")
         msg_type = toks[0]
@@ -1856,33 +1934,42 @@ class WebRTCInput:
             self.on_ping_response(float("%.3f" % ((time.time() - self.ping_start) / 2 * 1000)))
         elif msg_type == "kd":
             keysym = int(toks[1])
-            is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
-            if keysym in self.MODIFIER_KEYSYMS:
-                self.active_modifiers.add(keysym)
-            if is_printable and not self.active_modifiers:
-                unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
-                try:            
-                    char_to_type = chr(unicode_codepoint)
-                    if not self.is_wayland and (not char_to_type.isalpha() and char_to_type != ' '):
-                        await self.on_message(f"co,end,{char_to_type}")
-                        self.atomically_typed_keys.add(keysym)
-                    else:
+            if getattr(self, 'use_clipboard_fallback', False):
+                self.keyboard_queue.put_nowait(("kd", keysym))
+            else:
+                is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
+                if keysym in self.MODIFIER_KEYSYMS:
+                    self.active_modifiers.add(keysym)
+                if is_printable and not self.active_modifiers:
+                    unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
+                    try:            
+                        char_to_type = chr(unicode_codepoint)
+                        if not self.is_wayland and (not char_to_type.isalpha() and char_to_type != ' '):
+                            await self.on_message(f"co,end,{char_to_type}")
+                            self.atomically_typed_keys.add(keysym)
+                        else:
+                            await self.send_x11_keypress(keysym, down=True)
+                    except (ValueError, TypeError):
                         await self.send_x11_keypress(keysym, down=True)
-                except (ValueError, TypeError):
+                else:   
                     await self.send_x11_keypress(keysym, down=True)
-            else:   
-                await self.send_x11_keypress(keysym, down=True)
         elif msg_type == "ku":
             keysym = int(toks[1])
-            
-            if keysym in self.MODIFIER_KEYSYMS:
-                self.active_modifiers.discard(keysym)
-            if keysym in self.atomically_typed_keys:
-                self.atomically_typed_keys.discard(keysym)
-                pass
+            if getattr(self, 'use_clipboard_fallback', False):
+                self.keyboard_queue.put_nowait(("ku", keysym))
             else:
-                await self.send_x11_keypress(keysym, down=False)
-        elif msg_type == "kr": await self.reset_keyboard()
+                if keysym in self.MODIFIER_KEYSYMS:
+                    self.active_modifiers.discard(keysym)
+                if keysym in self.atomically_typed_keys:
+                    self.atomically_typed_keys.discard(keysym)
+                    pass
+                else:
+                    await self.send_x11_keypress(keysym, down=False)
+        elif msg_type == "kr": 
+            if getattr(self, 'use_clipboard_fallback', False):
+                self.keyboard_queue.put_nowait(("kr", None))
+            else:
+                await self.reset_keyboard()
         elif msg_type in ["m", "m2"]:
             relative = msg_type == "m2"
             try: x, y, button_mask, scroll_magnitude = [int(i) for i in toks[1:]]
@@ -2089,20 +2176,22 @@ class WebRTCInput:
         elif msg_type == "co" and toks[1] == "end": 
             try:
                 text_to_type = msg[7:]
-                cmd = ["wtype", "--", text_to_type] if self.is_wayland else ["xdotool", "type", text_to_type]
-                process = await subprocess.create_subprocess_exec(
-                    *cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                await asyncio.wait_for(process.communicate(), timeout=0.5)
-            except Exception as e: logger_webrtc_input.warning(f"Error with xdotool type: {e}")
+                if getattr(self, 'use_clipboard_fallback', False):
+                    self.keyboard_queue.put_nowait(("co_end", text_to_type))
+                else:
+                    cmd = ["wtype", "--", text_to_type] if self.is_wayland else ["xdotool", "type", text_to_type]
+                    process = await subprocess.create_subprocess_exec(
+                        *cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    await asyncio.wait_for(process.communicate(), timeout=0.5)
+            except Exception as e: logger_webrtc_input.warning(f"Error with co,end type: {e}")
         elif toks[0].startswith("FILE_UPLOAD_START:"):
             if self.upload_dir_path is None:
                 logger_webrtc_input.warning("Upload directory doesn't exits, skipping the file upload")
                 return
             _, file, size = toks[0].split(":", 2)
-            # create dir/file instance to wirte data to
             self.handle_upload_dir(file, size)
 
         elif toks[0].startswith("FILE_UPLOAD_END:"):
