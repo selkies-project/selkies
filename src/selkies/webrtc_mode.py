@@ -574,17 +574,18 @@ class WebRTCApp:
                     turn_rest_protocol_header=self.args.turn_rest_protocol_header,
                     turn_tls=self.args.turn_tls,
                     turn_rest_tls_header=self.args.turn_rest_tls_header,
+                    turn_api_key=self.args.turn_rest_api_key,
                     period=60, enabled=True
                 )
                 self.mon_rest_api.on_rtc_config = self.mon_rtc_config
                 self.mon_rest_api.start()
-            if self.monitoring_utils_used.get('using_rtc_config_file', False):
+            if self.monitoring_utils_used.get('using_rtc_config_json', False):
                 self.mon_rtc_config_file = RTCConfigFileMonitor(
                     rtc_file=self.args.rtc_config_json,
                     enabled=True
                 )
                 self.mon_rtc_config_file.on_rtc_config = self.mon_rtc_config
-                self.mon_rtc_config_file.start()
+                await self.mon_rtc_config_file.start()
 
     async def shutdown(self) -> None:
         """Gracefully shutdown all components."""

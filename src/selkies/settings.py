@@ -133,6 +133,7 @@ SETTING_DEFINITIONS_WEBRTC = [
 
     # TURN/STUN
     {'name': 'turn_rest_uri', 'type': 'str', 'default': '', 'help': 'URI for TURN REST API service, example: http://localhost:8008'},
+    {'name': 'turn_rest_api_key', 'type': 'str', 'default': '', 'help': 'API key to pass to the TURN REST API service'},
     {'name': 'turn_rest_username', 'type': 'str', 'default': 'selkies-hostname', 'help': 'URI for TURN REST API service, default set to system hostname'},
     {'name': 'turn_rest_username_auth_header', 'type': 'str', 'default': 'x-auth-user', 'help': 'Header to pass user to TURN REST API service'},
     {'name': 'turn_rest_protocol_header', 'type': 'str', 'default': 'x-turn-protocol', 'help': 'Header to pass desired TURN protocol to TURN REST API service'},

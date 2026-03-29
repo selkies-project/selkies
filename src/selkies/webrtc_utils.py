@@ -10,7 +10,7 @@ import logging
 import urllib.parse
 from watchdog.observers import Observer
 from .signaling_server import generate_rtc_config
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Tuple, List, Dict, Any, Optional, Union
 from watchdog.events import FileClosedEvent, FileSystemEventHandler
 
 import os
@@ -44,6 +44,64 @@ DEFAULT_RTC_CONFIG = """{
   "blockStatus": "NOT_BLOCKED",
   "iceTransportPolicy": "all"
 }"""
+
+DEFAULT_STUN_SERVERS = [
+    ("stun.l.google.com", 19302),
+    ("stun.cloudflare.com", 3478)
+]
+
+
+def _format_ice_host(host: str) -> str:
+    if host and ":" in host and not (host.startswith("[") and host.endswith("]")):
+        return f"[{host}]"
+    return host
+
+
+def _extract_host_port(url: str, scheme: str, default_port: int) -> Tuple[Optional[str], int]:
+    parsed = urllib.parse.urlparse("//" + url[len(scheme) + 1:])
+    host = parsed.hostname
+    if not host:
+        return None, default_port
+    try:
+        port = parsed.port or default_port
+    except ValueError:
+        port = default_port
+    return host, port
+
+
+def _append_stun_url(stun_list: List[str], seen_stun: set, host: Optional[str], port: Any) -> None:
+    if not host:
+        return
+    try:
+        port_num = int(port)
+    except (TypeError, ValueError):
+        port_num = 3478
+
+    key = (host.lower(), port_num)
+    if key in seen_stun:
+        return
+
+    seen_stun.add(key)
+    stun_list.append(f"stun:{_format_ice_host(host)}:{port_num}")
+
+
+async def _dispatch_rtc_callback(callback, stun_servers: List[str], turn_servers: List[str], rtc_config: bytes) -> None:
+    if asyncio.iscoroutinefunction(callback):
+        await callback(stun_servers, turn_servers, rtc_config)
+        return
+    await asyncio.to_thread(callback, stun_servers, turn_servers, rtc_config)
+
+
+def _log_asyncio_task_error(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except Exception as e:
+        logger_rtcice.warning(f"Error in on_rtc_config callback task: {e}")
+
+
+def _schedule_rtc_callback(loop: asyncio.AbstractEventLoop, callback, stun_servers: List[str], turn_servers: List[str], rtc_config: bytes) -> None:
+    task = loop.create_task(_dispatch_rtc_callback(callback, stun_servers, turn_servers, rtc_config))
+    task.add_done_callback(_log_asyncio_task_error)
 
 class HMACRTCMonitor:
     def __init__(
@@ -95,7 +153,7 @@ class HMACRTCMonitor:
                         self.stun_host,
                         self.stun_port)
                     stun_servers, turn_servers, rtc_config = await asyncio.to_thread(parse_rtc_config, hmac_data)
-                    await asyncio.to_thread(self.on_rtc_config, stun_servers, turn_servers, rtc_config)
+                    await _dispatch_rtc_callback(self.on_rtc_config, stun_servers, turn_servers, rtc_config)
                 except Exception as e:
                     logger_rtcice.warning(f"could not fetch TURN HMAC config in periodic monitor: {e}")
 
@@ -125,6 +183,7 @@ class RESTRTCMonitor:
         turn_rest_protocol_header: str = 'x-turn-protocol',
         turn_tls: bool = False,
         turn_rest_tls_header: str = 'x-turn-tls',
+        turn_api_key: Optional[str] = None,
         period: int = 60,
         enabled: bool = True
     ):
@@ -139,6 +198,7 @@ class RESTRTCMonitor:
         self.turn_rest_protocol_header = turn_rest_protocol_header
         self.turn_tls = turn_tls
         self.turn_rest_tls_header = turn_rest_tls_header
+        self.turn_api_key = turn_api_key if turn_api_key else None
         self.on_rtc_config = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
 
     def start(self):
@@ -159,9 +219,10 @@ class RESTRTCMonitor:
                         self.turn_protocol,
                         self.turn_rest_protocol_header,
                         self.turn_tls,
-                        self.turn_rest_tls_header
+                        self.turn_rest_tls_header,
+                        self.turn_api_key
                     )
-                    await asyncio.to_thread(self.on_rtc_config, stun_servers, turn_servers, rtc_config)
+                    await _dispatch_rtc_callback(self.on_rtc_config, stun_servers, turn_servers, rtc_config)
                 except Exception as e:
                     logger_rtcice.warning(f"could not fetch TURN REST config in periodic monitor: {e}")
 
@@ -184,19 +245,18 @@ class RESTRTCMonitor:
 class RTCConfigFileMonitor(FileSystemEventHandler):
     def __init__(self, rtc_file: str, enabled: bool = True):
         self.enabled = enabled
-        self.rtc_file = rtc_file
+        self.rtc_file = os.path.abspath(rtc_file)
+        self.watch_dir = os.path.dirname(self.rtc_file) or "."
         self._loop = asyncio.get_running_loop()
         self.on_rtc_config = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
 
         self.observer = Observer()
-        self.observer.schedule(self, self.rtc_file, recursive=False)
+        self.observer.schedule(self, self.watch_dir, recursive=False)
 
     async def start(self):
         if not self.enabled:
             return
 
-        # Schedule this class itself to handle events for the specified file
-        self.observer.schedule(self, self.rtc_file, recursive=False)
         await asyncio.to_thread(self.observer.start)
         logger_rtcice.info(f"RTC config file monitor started for: {self.rtc_file}")
 
@@ -220,15 +280,21 @@ class RTCConfigFileMonitor(FileSystemEventHandler):
         """
         if not isinstance(event, FileClosedEvent):
             return
+        if os.path.abspath(event.src_path) != self.rtc_file:
+            return
         try:
             logger_rtcice.info(f"Detected RTC JSON file change: {event.src_path}")
             with open(self.rtc_file, 'rb') as f:
                 data = f.read()
 
             stun_servers, turn_servers, rtc_config = parse_rtc_config(data)
-            asyncio.run_coroutine_threadsafe(
-                self.on_rtc_config(stun_servers, turn_servers, rtc_config),
-                self._loop
+            self._loop.call_soon_threadsafe(
+                _schedule_rtc_callback,
+                self._loop,
+                self.on_rtc_config,
+                stun_servers,
+                turn_servers,
+                rtc_config
             )
         except Exception as e:
             logger_rtcice.warning(f"Could not read or parse RTC JSON file: {self.rtc_file}: {e}")
@@ -244,11 +310,13 @@ def make_turn_rtc_config_json_legacy(
     stun_port: int = None
 ) -> str:
     """COnverts given rtc details to json format for legacy components"""
-    stun_list = ["stun:{}:{}".format(turn_host, turn_port)]
-    if stun_host is not None and stun_port is not None and (stun_host != turn_host or str(stun_port) != str(turn_port)):
-        stun_list.insert(0, "stun:{}:{}".format(stun_host, stun_port))
-    if stun_host != "stun.l.google.com" or (str(stun_port) != "19302"):
-        stun_list.append("stun:stun.l.google.com:19302")
+    stun_list: List[str] = []
+    seen_stun: set = set()
+    if stun_host is not None and stun_port is not None:
+        _append_stun_url(stun_list, seen_stun, str(stun_host), stun_port)
+    _append_stun_url(stun_list, seen_stun, str(turn_host), turn_port)
+    for default_host, default_port in DEFAULT_STUN_SERVERS:
+        _append_stun_url(stun_list, seen_stun, default_host, default_port)
 
     rtc_config = {}
     rtc_config["lifetimeDuration"] = "86400s"
@@ -260,51 +328,189 @@ def make_turn_rtc_config_json_legacy(
     })
     rtc_config["iceServers"].append({
         "urls": [
-            "{}:{}:{}?transport={}".format('turns' if turn_tls else 'turn', turn_host, turn_port, protocol)
+            "{}:{}:{}?transport={}".format('turns' if turn_tls else 'turn', _format_ice_host(str(turn_host)), turn_port, protocol)
         ],
         "username": username,
         "credential": password
     })
     return json.dumps(rtc_config, indent=2)
 
-def parse_rtc_config(data: bytes) -> Tuple[List[str], List[str], bytes]:
-    ice_servers = json.loads(data)['iceServers']
+def parse_rtc_config(data: Union[str, bytes]) -> Tuple[List[str], List[str], bytes]:
+    rtc_config = json.loads(data)
+    if not isinstance(rtc_config, dict):
+        raise TypeError(f"Invalid RTC config root type: {type(rtc_config)}")
+
+    normalized_config = False
+    ice_servers = rtc_config.get('iceServers')
+    if ice_servers is None:
+        ice_servers = rtc_config.get('iceservers')
+        if ice_servers is not None:
+            rtc_config['iceServers'] = ice_servers
+            rtc_config.pop('iceservers', None)
+            normalized_config = True
+
+    if ice_servers is None and 'uris' in rtc_config:
+        uris = rtc_config.get('uris')
+        if uris is None:
+            uris = []
+        if isinstance(uris, str):
+            uris = [uris]
+        elif not isinstance(uris, list):
+            logger_rtcice.warning("Invalid 'uris' type: %s", type(uris))
+            uris = []
+
+        turn_urls = [uri for uri in uris if isinstance(uri, str) and (uri.lower().startswith('turn:') or uri.lower().startswith('turns:'))]
+        stun_urls = [uri for uri in uris if isinstance(uri, str) and uri.lower().startswith('stun:')]
+
+        normalized_stun_urls: List[str] = []
+        seen_stun: set = set()
+
+        for stun_url in stun_urls:
+            host, port = _extract_host_port(stun_url, 'stun', 3478)
+            _append_stun_url(normalized_stun_urls, seen_stun, host, port)
+
+        for turn_url in turn_urls:
+            lower_turn = turn_url.lower()
+            scheme = 'turns' if lower_turn.startswith('turns:') else 'turn'
+            host, port = _extract_host_port(turn_url, scheme, 443 if scheme == 'turns' else 3478)
+            _append_stun_url(normalized_stun_urls, seen_stun, host, port)
+
+        for default_host, default_port in DEFAULT_STUN_SERVERS:
+            _append_stun_url(normalized_stun_urls, seen_stun, default_host, default_port)
+
+        ice_servers = []
+        if normalized_stun_urls:
+            ice_servers.append({
+                "urls": normalized_stun_urls
+            })
+        if turn_urls:
+            turn_entry: Dict[str, Any] = {
+                "urls": turn_urls
+            }
+            turn_username = rtc_config.get('username')
+            turn_password = rtc_config.get('password')
+            if turn_username not in (None, '') and turn_password not in (None, ''):
+                turn_entry["username"] = str(turn_username)
+                turn_entry["credential"] = str(turn_password)
+            ice_servers.append(turn_entry)
+
+        ttl = rtc_config.get('ttl', 86400)
+        try:
+            ttl = int(ttl)
+            if ttl <= 0:
+                ttl = 86400
+        except (ValueError, TypeError):
+            ttl = 86400
+
+        rtc_config = {
+            "lifetimeDuration": "{}s".format(ttl),
+            "iceServers": ice_servers,
+            "blockStatus": "NOT_BLOCKED",
+            "iceTransportPolicy": "all"
+        }
+        normalized_config = True
+
+    if ice_servers is None:
+        raise KeyError('missing "iceServers"/"iceservers" or TURN REST "uris" keys in RTC config')
+
+    if not isinstance(ice_servers, list):
+        raise TypeError(f"Invalid 'iceServers' type: {type(ice_servers)}")
+
     stun_uris = []
     turn_uris = []
+    seen_stun_uris = set()
+    seen_turn_uris = set()
     for ice_server in ice_servers:
-        for url in ice_server.get("urls", []):
-            if url.startswith("stun:"):
-                stun_host = url.split(":")[1]
-                stun_port = url.split(":")[2].split("?")[0]
+        if not isinstance(ice_server, dict):
+            logger_rtcice.warning("Invalid ice server entry type: %s", type(ice_server))
+            normalized_config = True
+            continue
+
+        # Convert 'uris' to 'urls' for compatibility with RTCPeerConnection spec
+        if "uris" in ice_server and "urls" not in ice_server:
+            ice_server["urls"] = ice_server.pop("uris")
+            normalized_config = True
+
+        # Convert TURN REST-style password field to RTCPeerConnection-style credential field
+        if "password" in ice_server and "credential" not in ice_server:
+            ice_server["credential"] = ice_server.pop("password")
+            normalized_config = True
+        
+        urls = ice_server.get("urls", [])
+        if isinstance(urls, str):
+            urls = [urls]
+            normalized_config = True
+        if not isinstance(urls, list):
+            logger_rtcice.warning("Invalid 'urls' type: %s", type(urls))
+            normalized_config = True
+            continue
+
+        filtered_urls = [url for url in urls if isinstance(url, str)]
+        if len(filtered_urls) != len(urls):
+            normalized_config = True
+            urls = filtered_urls
+
+        if ice_server.get("urls") != urls:
+            ice_server["urls"] = urls
+            normalized_config = True
+        
+        for url in urls:
+            lower_url = url.lower()
+            if lower_url.startswith("stun:"):
+                stun_host, stun_port = _extract_host_port(url, "stun", 3478)
+                if not stun_host:
+                    continue
                 stun_uri = "stun://%s:%s" % (
-                    stun_host,
+                    _format_ice_host(stun_host),
                     stun_port
                 )
-                stun_uris.append(stun_uri)
-            elif url.startswith("turn:"):
-                turn_host = url.split(':')[1]
-                turn_port = url.split(':')[2].split('?')[0]
-                turn_user = ice_server['username']
-                turn_password = ice_server['credential']
-                turn_uri = "turn://%s:%s@%s:%s" % (
-                    urllib.parse.quote(turn_user, safe=""),
-                    urllib.parse.quote(turn_password, safe=""),
-                    turn_host,
-                    turn_port
-                )
-                turn_uris.append(turn_uri)
-            elif url.startswith("turns:"):
-                turn_host = url.split(':')[1]
-                turn_port = url.split(':')[2].split('?')[0]
-                turn_user = ice_server['username']
-                turn_password = ice_server['credential']
-                turn_uri = "turns://%s:%s@%s:%s" % (
-                    urllib.parse.quote(turn_user, safe=""),
-                    urllib.parse.quote(turn_password, safe=""),
-                    turn_host,
-                    turn_port
-                )
-                turn_uris.append(turn_uri)
+                if stun_uri not in seen_stun_uris:
+                    stun_uris.append(stun_uri)
+                    seen_stun_uris.add(stun_uri)
+            elif lower_url.startswith("turn:") or lower_url.startswith("turns:"):
+                protocol = "turn" if lower_url.startswith("turn:") else "turns"
+                parsed_turn = urllib.parse.urlparse("//" + url[len(protocol) + 1:])
+                turn_host = parsed_turn.hostname
+                if not turn_host:
+                    continue
+                try:
+                    turn_port = parsed_turn.port or (443 if protocol == "turns" else 3478)
+                except ValueError:
+                    turn_port = 443 if protocol == "turns" else 3478
+
+                query = f"?{parsed_turn.query}" if parsed_turn.query else ""
+                turn_user = ice_server.get('username')
+                turn_password = ice_server.get('credential')
+
+                if turn_user in (None, '') and parsed_turn.username is not None:
+                    turn_user = urllib.parse.unquote(parsed_turn.username)
+                if turn_password in (None, '') and parsed_turn.password is not None:
+                    turn_password = urllib.parse.unquote(parsed_turn.password)
+
+                has_credentials = turn_user not in (None, '') and turn_password not in (None, '')
+                if has_credentials:
+                    turn_uri = "%s://%s:%s@%s:%s%s" % (
+                        protocol,
+                        urllib.parse.quote(str(turn_user), safe=""),
+                        urllib.parse.quote(str(turn_password), safe=""),
+                        _format_ice_host(turn_host),
+                        turn_port,
+                        query
+                    )
+                else:
+                    turn_uri = "%s://%s:%s%s" % (
+                        protocol,
+                        _format_ice_host(turn_host),
+                        turn_port,
+                        query
+                    )
+                if turn_uri not in seen_turn_uris:
+                    turn_uris.append(turn_uri)
+                    seen_turn_uris.add(turn_uri)
+    if normalized_config:
+        data = json.dumps(rtc_config).encode("utf-8")
+    elif isinstance(data, str):
+        data = data.encode("utf-8")
     return stun_uris, turn_uris, data
 
 async def fetch_turn_rest(
@@ -314,30 +520,39 @@ async def fetch_turn_rest(
     protocol: str = 'udp',
     header_protocol: str = 'x-turn-protocol',
     turn_tls: bool = False,
-    header_tls: str = 'x-turn-tls'
-) -> Tuple[List, List, Dict]:
+    header_tls: str = 'x-turn-tls',
+    turn_api_key: Optional[str] = None
+) -> Tuple[List[str], List[str], bytes]:
     """
     Asynchronously fetches TURN config from a REST API
+    Returns a tuple containing STUN URIs, TURN URIs, and the raw/normalized RTC config JSON bytes.
     """
-    auth_headers = {
-        auth_header_username: user,
-        header_protocol: protocol,
-        header_tls: 'true' if turn_tls else 'false'
+    auth_headers: Dict[str, str] = {}
+    if auth_header_username:
+        auth_headers[auth_header_username] = user
+    if header_protocol:
+        auth_headers[header_protocol] = protocol
+    if header_tls:
+        auth_headers[header_tls] = 'true' if turn_tls else 'false'
+
+    params = {
+        'service': 'turn',
+        'username': user
     }
+    if turn_api_key:
+        params['key'] = turn_api_key
+        params['api'] = turn_api_key
 
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(uri, headers=auth_headers) as response:
-                # Raise an exception for 4xx or 5xx status codes
-                response.raise_for_status()
-
+            async with session.get(uri, headers=auth_headers, params=params) as response:
                 content = await response.read()
+                if response.status >= 400:
+                    body = content.decode('utf-8', errors='replace')
+                    raise Exception(f"Error fetching REST API config: {response.status} {response.reason}. Body: {body}")
                 if not content:
                     raise Exception("Data from REST API service was empty")
                 return parse_rtc_config(content)
-        except aiohttp.ClientResponseError as e:
-            body = await e.response.text() if hasattr(e, 'response') else ''
-            raise Exception(f"Error fetching REST API config: {e.status} {e.message}. Body: {body}") from e
         except aiohttp.ClientError as e:
             raise Exception(f"Network error while fetching REST API config: {e}") from e
 
@@ -362,7 +577,7 @@ async def fetch_cloudflare_turn(turn_token_id: str, api_token: str, ttl: int = 8
         except aiohttp.ClientError as e:
             raise Exception(f"Network error while fetching Cloudflare credentials: {e}") from e
 
-async def try_cloudflare(args: Any) -> Optional[Tuple[List, List, Dict]]:
+async def try_cloudflare(args: Any) -> Optional[Tuple[List[str], List[str], bytes]]:
     """Attempts to configure RTC using Cloudflare TURN."""
     if not args.enable_cloudflare_turn:
         return None
@@ -380,7 +595,7 @@ async def try_cloudflare(args: Any) -> Optional[Tuple[List, List, Dict]]:
         logger_rtcice.warning(f"Failed to fetch TURN config from Cloudflare: {e}")
         return None
 
-async def try_json_file(args: Any) -> Optional[Tuple[List, List, Dict]]:
+async def try_json_file(args: Any) -> Optional[Tuple[List[str], List[str], bytes]]:
     """Attempts to configure RTC from a local JSON file."""
     if not os.path.exists(args.rtc_config_json):
         return None
@@ -394,15 +609,16 @@ async def try_json_file(args: Any) -> Optional[Tuple[List, List, Dict]]:
         logger_rtcice.error(f"Failed to read or parse RTC config file '{args.rtc_config_json}': {e}")
         return None
 
-async def try_rest_api(args: Any, username: str, protocol: str, use_tls: bool) -> Optional[Tuple[List, List, Dict]]:
+async def try_rest_api(args: Any, username: str, protocol: str, use_tls: bool) -> Optional[Tuple[List[str], List[str], bytes]]:
     """Attempts to configure RTC from a custom TURN REST API."""
     if not args.turn_rest_uri:
         return None
 
     try:
+        api_key = getattr(args, 'turn_rest_api_key', None)
         config = await fetch_turn_rest(
             args.turn_rest_uri, username, args.turn_rest_username_auth_header,
-            protocol, args.turn_rest_protocol_header, use_tls, args.turn_rest_tls_header
+            protocol, args.turn_rest_protocol_header, use_tls, args.turn_rest_tls_header, api_key
         )
         logger_rtcice.info("Using TURN REST API for RTC configuration.")
         return config
@@ -410,7 +626,7 @@ async def try_rest_api(args: Any, username: str, protocol: str, use_tls: bool) -
         logger_rtcice.warning(f"Error fetching from TURN REST API, falling back to other methods: {e}")
         return None
 
-def try_legacy_turn(args: Any, protocol: str, use_tls: bool) -> Optional[Tuple[List, List, Dict]]:
+def try_legacy_turn(args: Any, protocol: str, use_tls: bool) -> Optional[Tuple[List[str], List[str], bytes]]:
     """Attempts to configure RTC using long-term TURN credentials."""
     if not (args.turn_username and args.turn_password and args.turn_host and args.turn_port):
         return None
@@ -422,7 +638,7 @@ def try_legacy_turn(args: Any, protocol: str, use_tls: bool) -> Optional[Tuple[L
     )
     return parse_rtc_config(config_json)
 
-def try_hmac_turn(args: Any, username: str, protocol: str, use_tls: bool) -> Optional[Tuple[List, List, Dict]]:
+def try_hmac_turn(args: Any, username: str, protocol: str, use_tls: bool) -> Optional[Tuple[List[str], List[str], bytes]]:
     """Attempts to configure RTC using short-term HMAC credentials."""
     if not (args.turn_shared_secret and args.turn_host and args.turn_port):
         return None
@@ -434,7 +650,7 @@ def try_hmac_turn(args: Any, username: str, protocol: str, use_tls: bool) -> Opt
     )
     return parse_rtc_config(hmac_data)
 
-async def get_rtc_configuration(args: Any) -> Tuple[List, List, bytes, Dict[str, bool]]:
+async def get_rtc_configuration(args: Any) -> Tuple[List[str], List[str], bytes, Dict[str, bool]]:
     """
     Determines and fetches the RTC configuration based on a prioritized sequence of methods.
 
