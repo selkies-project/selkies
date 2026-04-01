@@ -1230,8 +1230,13 @@ int intercept_ev_ioctl(js_interposer_t *interposer, int fd, ioctl_request_t requ
             absinfo_ptr->resolution = 1;
 
             if (abs_code == ABS_X || abs_code == ABS_Y || abs_code == ABS_RX || abs_code == ABS_RY || abs_code == ABS_Z || abs_code == ABS_RZ) {
-                absinfo_ptr->minimum = ABS_AXIS_MIN_DEFAULT; 
-                absinfo_ptr->maximum = ABS_AXIS_MAX_DEFAULT; 
+                if (abs_code == ABS_Y || abs_code == ABS_RY) {
+                    absinfo_ptr->minimum = ABS_AXIS_MAX_DEFAULT; 
+                    absinfo_ptr->maximum = ABS_AXIS_MIN_DEFAULT; 
+                } else {
+                    absinfo_ptr->minimum = ABS_AXIS_MIN_DEFAULT; 
+                    absinfo_ptr->maximum = ABS_AXIS_MAX_DEFAULT; 
+                }
                 absinfo_ptr->fuzz = 16;     
                 absinfo_ptr->flat = 128;    
                 absinfo_ptr->resolution = 1;
