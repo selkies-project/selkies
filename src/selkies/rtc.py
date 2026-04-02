@@ -44,10 +44,13 @@ from .webrtc.rtcicetransport import (
 )
 import av
 from fractions import Fraction
-from typing import List, Any, Dict, Optional
+from typing import List, Any, Dict, Optional, Union
 from .webrtc.contrib.media import MediaRelay
 from enum import Enum
 from .media_pipeline import MediaPipeline
+
+# leave some room for metadata in the data channel message
+CLIPBOARD_CHUNK_SIZE = 65535 - 150
 
 logger = logging.getLogger("rtc")
 logger.setLevel(logging.INFO)
@@ -79,6 +82,15 @@ logger.handlers.clear()
 logger.propagate = False
 handler.setFormatter(formatter)
 logger.addHandler(handler)
+
+
+def get_adjusted_chunk_size() -> int:
+    """Returns adjusted chunk size.
+
+    Base64 encoded data is higher in size compared to its input
+    as it uses 4 chars per 3 bytes.
+    """
+    return (CLIPBOARD_CHUNK_SIZE * 3) // 4
 
 class ClientType(str, Enum):
     CONTROLLER = "controller"
@@ -133,7 +145,7 @@ class RTCApp:
         stun_servers: List[str] = None,
         turn_servers: List[str] = None
     ):
-        self.peer_connections = {}
+        self.peer_connections: Dict[str, Any] = {}
         self.aux_data_channel = None
         self.async_event_loop = async_event_loop
         self.stun_servers = stun_servers
@@ -220,24 +232,46 @@ class RTCApp:
         else:
             raise RTCAppError("ERROR: ice candidate is not an instance of RTCIceCandidate")
 
-    async def send_clipboard_data(self, data: str, mime_type: str = "text/plain"):
+    async def send_clipboard_data(self, data: Union[str, bytes], mime_type: str = "text/plain"):
         """Sends clipboard data over the data channel in chunks"""
-        CLIPBOARD_CHUNK_SIZE = 65400
         if not data:
             return
 
-        # TODO: add support for binary clipboard data
-        clipboard_message = base64.b64encode(data.encode()).decode("utf-8")
-        read = 0
-        while read < len(clipboard_message):
-            if read + CLIPBOARD_CHUNK_SIZE < len(clipboard_message):
-                chunk = clipboard_message[read:read + CLIPBOARD_CHUNK_SIZE]
-                self.__send_data_channel_message("clipboard-msg", {"content": chunk})
-            else:
-                chunk = clipboard_message[read:]
-                self.__send_data_channel_message("clipboard-msg-end", {"content": chunk})
-            read += len(chunk)
-        logger.debug(f"Sent clipboard data of length {len(data)} with mime type {mime_type}")
+        is_text = mime_type == "text/plain"
+        data_bytes: bytes = data.encode() if is_text and isinstance(data, str) else data
+        clipboard_chunk_size = get_adjusted_chunk_size()
+        if len(data_bytes) <= clipboard_chunk_size:
+            b64data = base64.b64encode(data_bytes).decode('utf-8')
+            self.__send_data_channel_message(
+                "clipboard-msg",
+                {
+                    "content": b64data,
+                    "mime_type": mime_type,
+                    "is_binary_data": not is_text,
+                    "total_size": len(data_bytes)
+                }
+            )
+        else:
+            read = 0
+            self.__send_data_channel_message(
+                "clipboard-msg-start",
+                {
+                    "mime_type": mime_type,
+                    "is_binary_data": not is_text,
+                    "total_size": len(data_bytes),
+                }
+            )
+            while read < len(data_bytes):
+                chunk = data_bytes[read:read + clipboard_chunk_size]
+                b64_encoded_chunk = base64.b64encode(chunk).decode("utf-8")
+                self.__send_data_channel_message(
+                    "clipboard-msg-data", {"content": b64_encoded_chunk}
+                )
+                read += len(chunk)
+                await asyncio.sleep(0)
+            self.__send_data_channel_message("clipboard-msg-end", {})
+
+        logger.info(f"Sent clipboard data of length {len(data_bytes)} with mime type {mime_type}")
 
     def send_cursor_data(self, data: Any):
         self.last_cursor_sent = data
@@ -573,7 +607,7 @@ class RTCApp:
         # Normalize client_type to ClientType enum
         client_type = ClientType(c_type)
 
-        # Create media relay if client is a controller type
+        # Create media relay if client is of Controller type
         if client_type is ClientType.CONTROLLER:
             self.media_relay = MediaRelay()
 

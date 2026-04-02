@@ -25,7 +25,6 @@
 /*eslint no-unused-vars: ["error", { "vars": "local" }]*/
 
 import { Input } from "./input";
-import { base64ToString, Queue } from "./util";
 /**
  * @typedef {Object} WebRTCDemo
  * @property {function} ondebug - Callback fired when new debug message is set.
@@ -406,18 +405,8 @@ export class WebRTCDemo {
 					this.ongpustats(msg.data);
 			}
 		} else if (msg.type.startsWith('clipboard-msg')) {
-			// clipboard-msg-end indicates the end of chucks of a clipboard msg
-			if (msg.type === "clipboard-msg-end") {
-				if (msg.data !== null) this.clipboardcontent.push(msg.data.content);
-				var text = base64ToString(this.clipboardcontent.join(''));
-				this._setDebug("received clipboard contents, length: " + text.length);
-				if (this.onclipboardcontent !== null) {
-					this.onclipboardcontent(text);
-				}
-				// Clear the clipboard content after processing the full message
-				this.clipboardcontent.length = 0;
-			} else {
-				if (msg.data !== null) this.clipboardcontent.push(msg.data.content);
+			if (typeof this.onclipboardcontent === 'function') {
+				this.onclipboardcontent(msg);
 			}
 		} else if (msg.type === 'cursor') {
 			if (this.oncursorchange !== null && msg.data !== null) {

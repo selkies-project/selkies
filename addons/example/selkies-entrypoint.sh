@@ -267,9 +267,11 @@ if [ ! -z "${DEV_MODE+x}" ]; then
     npm install
     npm run build
     cp dist/selkies-core.js ../${DEV_MODE}/src/
+    mkdir -p ../${DEV_MODE}/dist/assets/
     sudo nodemon --watch selkies-core.js \
                  --watch selkies-wr-core.js \
-                 --watch selkies-ws-core.js --exec "npm run build && cp dist/selkies-core.js ../${DEV_MODE}/src/" &
+                 --watch selkies-ws-core.js --exec "npm run build && cp dist/selkies-core.js ../${DEV_MODE}/src/ && \
+                 cp dist/clipboard-worker* ../${DEV_MODE}/dist/assets/" &
 
     # Copy touch gamepad
     cp ../universal-touch-gamepad/universalTouchGamepad.js /opt/selkies-web/src/
@@ -281,6 +283,7 @@ if [ ! -z "${DEV_MODE+x}" ]; then
     cd $HOME/selkies/addons/${DEV_MODE}
     npm install
     npm run build
+    cp ../selkies-web-core/dist/clipboard-worker* dist/assets/
     cp -r dist/* /opt/selkies-web/
     cp -r nginx/* /opt/selkies-web/nginx/
     sed -i "s|REPLACE_DOWNLOADS_PATH|${HOME}/${SELKIES_UPLOAD_DIR:-Desktop/}|g" /opt/selkies-web/nginx/footer.html
