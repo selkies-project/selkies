@@ -794,8 +794,10 @@ class WebRTCInput:
         data_server_instance=None,
         upload_dir=None,
         is_wayland=False,
+        is_xwayland=False,
         wayland_socket_index=0,
     ):
+        self.is_xwayland = is_xwayland
         self.wayland_socket_index = wayland_socket_index
         self.active_shortcut_modifiers = set()
         self.SHORTCUT_MODIFIER_XKEY_NAMES = {
@@ -883,9 +885,9 @@ class WebRTCInput:
 
         if self.is_wayland:
             import shutil
-            if shutil.which("kwin_wayland"):
+            if shutil.which("kwin_wayland") or self.is_xwayland:
                 self.use_clipboard_fallback = True
-                logger_webrtc_input.info("kwin_wayland detected: enabling Clipboard-Input fallback for Unicode.")
+                logger_webrtc_input.info("kwin_wayland or Xwayland detected: enabling Clipboard-Input fallback for Unicode.")
 
             try:
                 from pixelflux import ScreenCapture
@@ -1049,12 +1051,12 @@ class WebRTCInput:
         gamepad = self.gamepad_instances.get(gamepad_idx)
         if gamepad:
             gamepad.send_event(client_axis_num, client_axis_val, is_button_event=False)
-            
+
     async def connect(self):
-        if not self.is_wayland and X11_LIBS_AVAILABLE:
+        if (not self.is_wayland or self.is_xwayland) and X11_LIBS_AVAILABLE:
             try: self.xdisplay = display.Display()
             except Exception as e: logger_webrtc_input.error(f"Failed to connect to X display: {e}"); self.xdisplay = None
-        if self.xdisplay:
+        if self.xdisplay: 
             try:
                 screen = self.xdisplay.screen()
                 width_mm = screen.width_in_mms
@@ -1071,7 +1073,7 @@ class WebRTCInput:
                 )
             except Exception as e:
                 logger_webrtc_input.warning(f"Could not determine system DPI, using default 96. Error: {e}")
-        if not self.is_wayland and X11_LIBS_AVAILABLE:
+        if (not self.is_wayland or self.is_xwayland) and X11_LIBS_AVAILABLE:
             self.__keyboard_connect()
         if self.xdisplay: await self.reset_keyboard()
         self.__mouse_connect()
@@ -1266,37 +1268,40 @@ class WebRTCInput:
                 await self._xdotool_fallback(keysym, down)
 
     async def _xdotool_fallback(self, keysym_number, down=True):
-        if self.is_wayland:
-            if not down:
-                return
-            char_to_type = None
-            if (keysym_number & 0xFF000000) == 0x01000000:
-                unicode_codepoint = keysym_number & 0x00FFFFFF
-                if 0 <= unicode_codepoint <= 0x10FFFF:
-                    try:
-                        char_to_type = chr(unicode_codepoint)
-                    except ValueError:
-                        pass
-            elif 0x20 <= keysym_number <= 0xFF:
+        char_to_type = None
+        if (keysym_number & 0xFF000000) == 0x01000000:
+            unicode_codepoint = keysym_number & 0x00FFFFFF
+            if 0 <= unicode_codepoint <= 0x10FFFF:
                 try:
-                    char_to_type = chr(keysym_number)
+                    char_to_type = chr(unicode_codepoint)
                 except ValueError:
                     pass
-            elif keysym_number == 0x20AC:
-                char_to_type = '€'
-            else:
-                if XK is not None:
-                    try:
-                        keysym_name = XK.keysym_to_string(keysym_number)
-                        if keysym_name and len(keysym_name) == 1:
-                            char_to_type = keysym_name
-                    except Exception:
-                        pass
+        elif 0x20 <= keysym_number <= 0xFF:
+            try:
+                char_to_type = chr(keysym_number)
+            except ValueError:
+                pass
+        elif keysym_number == 0x20AC:
+            char_to_type = '€'
+        else:
+            if XK is not None:
+                try:
+                    keysym_name = XK.keysym_to_string(keysym_number)
+                    if keysym_name and len(keysym_name) == 1:
+                        char_to_type = keysym_name
+                except Exception:
+                    pass
 
+        if char_to_type and getattr(self, 'use_clipboard_fallback', False):
+            if not down:
+                return
+            await self._inject_unicode_via_clipboard(char_to_type)
+            return
+
+        if self.is_wayland and not self.is_xwayland:
+            if not down:
+                return
             if char_to_type:
-                if getattr(self, 'use_clipboard_fallback', False):
-                    await self._inject_unicode_via_clipboard(char_to_type)
-                    return
                 try:
                     command_wtype = ["wtype", char_to_type]
                     process_wtype = await subprocess.create_subprocess_exec(
@@ -1308,7 +1313,6 @@ class WebRTCInput:
                     await asyncio.wait_for(process_wtype.communicate(), timeout=1.0)
                 except Exception as e:
                     logger_webrtc_input.warning(f"wtype fallback failed: {e}")
-            
             return
 
         if not self.xdisplay:
@@ -1395,8 +1399,8 @@ class WebRTCInput:
     async def _inject_unicode_via_clipboard(self, text_to_type):
         async with self.clipboard_injection_lock:
             self.clipboard_paused = True
-            KEY_CTRL_L = 0xFFE3
-            KEY_V      = 0x0076
+            KEY_SHIFT_L = 0xFFE1
+            KEY_INSERT  = 0xFF63
 
             currently_active_mods = list(self.active_modifiers)
 
@@ -1405,21 +1409,23 @@ class WebRTCInput:
                     await self.send_x11_keypress(mod_keysym, down=False)
 
                 old_data, old_mime = await self.read_clipboard(use_binary=True)
-                await self.write_clipboard(text_to_type, mime_type="text/plain")
+                
+                mime_to_use = "UTF8_STRING" if self.is_xwayland or not self.is_wayland else "text/plain"
+                await self.write_clipboard(text_to_type, mime_type=mime_to_use)
                 await asyncio.sleep(0.01)
                 
-                await self.send_x11_keypress(KEY_CTRL_L, down=True)
-                await self.send_x11_keypress(KEY_V, down=True)
-                await self.send_x11_keypress(KEY_V, down=False)
-                await self.send_x11_keypress(KEY_CTRL_L, down=False)
+                await self.send_x11_keypress(KEY_SHIFT_L, down=True)
+                await self.send_x11_keypress(KEY_INSERT, down=True)
+                await self.send_x11_keypress(KEY_INSERT, down=False)
+                await self.send_x11_keypress(KEY_SHIFT_L, down=False)
                 await asyncio.sleep(0.01)
-                
+
                 if old_data is not None:
                     await self.write_clipboard(old_data, mime_type=old_mime or "text/plain")
-                elif self.is_wayland:
+                elif self.is_wayland and not self.is_xwayland:
                     try:
                         proc = await subprocess.create_subprocess_exec(
-                            "wl-copy", "--clear",
+                            "wl-copy", "--clear", 
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             env=self._get_wl_env()
                         )
@@ -1619,7 +1625,7 @@ class WebRTCInput:
 
     async def read_clipboard(self, use_binary=False):
         """Reads clipboard. Supports Wayland (wl-paste) and X11 (xclip)."""
-        if self.is_wayland:
+        if self.is_wayland and not self.is_xwayland:
             try:
                 proc_types = await subprocess.create_subprocess_exec(
                     "wl-paste", "--list-types",
@@ -1696,7 +1702,7 @@ class WebRTCInput:
         if not data:
             return True
         input_bytes = data if isinstance(data, bytes) else data.encode()
-        if self.is_wayland:
+        if self.is_wayland and not self.is_xwayland:
             try:
                 cmd = ["wl-copy", "--type", mime_type]
                 process = await subprocess.create_subprocess_exec(
@@ -1779,7 +1785,7 @@ class WebRTCInput:
         logger_webrtc_input.info("Clipboard monitor stopped")
 
     def stop_clipboard(self): self.clipboard_running = False; logger_webrtc_input.info("Stopping clipboard monitor")
-    
+
     async def start_cursor_monitor(self):
         if self.is_wayland:
             logger_webrtc_input.info("Wayland mode: Cursor monitor disabled (handled by compositor callback).")
@@ -2179,7 +2185,7 @@ class WebRTCInput:
                 if getattr(self, 'use_clipboard_fallback', False):
                     self.keyboard_queue.put_nowait(("co_end", text_to_type))
                 else:
-                    cmd = ["wtype", "--", text_to_type] if self.is_wayland else ["xdotool", "type", text_to_type]
+                    cmd = ["wtype", "--", text_to_type] if (self.is_wayland and not self.is_xwayland) else ["xdotool", "type", text_to_type]
                     process = await subprocess.create_subprocess_exec(
                         *cmd,
                         stdout=subprocess.PIPE,

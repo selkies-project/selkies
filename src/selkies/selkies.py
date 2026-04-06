@@ -29,6 +29,7 @@ AUDIO_BITRATE_DEFAULT = 320000
 GPU_ID_DEFAULT = 0
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "x264enc", "x264enc-striped"]
 IS_WAYLAND = os.environ.get("PIXELFLUX_WAYLAND", "false").lower() == "true"
+IS_XWAYLAND = os.environ.get("PIXELFLUX_XWAYLAND", "false").lower() == "true"
 
 import logging
 LOGLEVEL = logging.INFO
@@ -235,7 +236,7 @@ def fit_res(w, h, max_w, max_h):
 
 
 async def get_new_res(res_str):
-    if IS_WAYLAND:
+    if IS_WAYLAND and not IS_XWAYLAND:
         wl_idx = getattr(settings, 'wayland_socket_index', 0)
         return res_str, res_str, [res_str], res_str, f"Wayland-{wl_idx}"
     screen_name = None
@@ -292,7 +293,7 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
     Adds a new mode via cvt/gtf if the requested mode doesn't exist,
     using res_str (e.g., "2560x1280") as the mode name for xrandr.
     """
-    if IS_WAYLAND:
+    if IS_WAYLAND and not IS_XWAYLAND:
         return True
     _, _, available_resolutions, _, screen_name = await get_new_res(res_str)
 
@@ -702,7 +703,7 @@ async def set_dpi(dpi_setting):
     Sets the display DPI using DE-specific methods based on a defined detection order.
     The dpi_setting is expected to be an integer or a string representing an integer.
     """
-    if IS_WAYLAND:
+    if IS_WAYLAND and not IS_XWAYLAND:
         return True
     try:
         dpi_value = int(str(dpi_setting))
@@ -1457,11 +1458,11 @@ class DataStreamingServer:
             if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
                 data_logger.info(f"DPI changed from {old_settings.get('scaling_dpi')} to {new_dpi}. Applying system-level change.")
                 await set_dpi(new_dpi)
-                if CURSOR_SIZE > 0 and not IS_WAYLAND:
+                if CURSOR_SIZE > 0 and (not IS_WAYLAND or IS_XWAYLAND):
                     new_cursor_size = max(1, int(round(int(new_dpi) / 96.0 * CURSOR_SIZE)))
                     await set_cursor_size(new_cursor_size)
                
-                if IS_WAYLAND:
+                if IS_WAYLAND and not IS_XWAYLAND:
                     scale_val = float(new_dpi) / 96.0
                     if which("kwin_wayland"):
                         display_state['scale'] = scale_val
@@ -1488,7 +1489,7 @@ class DataStreamingServer:
                 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'h264_paintover_crf',
                 'h264_paintover_burst_frames', 'use_paint_over_quality'
             ]
-            if IS_WAYLAND and which("kwin_wayland"):
+            if IS_WAYLAND and not IS_XWAYLAND and which("kwin_wayland"):
                 video_params_list.append('scaling_dpi')
 
             video_params_changed = any(
@@ -2402,7 +2403,7 @@ class DataStreamingServer:
                             else:
                                 data_logger.error(f"Failed to set DPI to {dpi_value}")
 
-                            if IS_WAYLAND and client_display_id:
+                            if IS_WAYLAND and not IS_XWAYLAND and client_display_id:
                                 if which("kwin_wayland"):
                                     if client_display_id in self.display_clients:
                                         self.display_clients[client_display_id]['scale'] = scale_val
@@ -2847,12 +2848,12 @@ class DataStreamingServer:
             data_logger.info("Starting display reconfiguration...")
             try:
                 current_display_count = len(self.display_clients)
-                if not IS_WAYLAND and self._wm_swap_is_supported is None:
+                if (not IS_WAYLAND or IS_XWAYLAND) and self._wm_swap_is_supported is None:
                     if which("xfce4-session") or which("startplasma-x11"):
                         self._wm_swap_is_supported = True
                     else:
                         self._wm_swap_is_supported = False
-                if (not IS_WAYLAND and current_display_count > 1 and self._wm_swap_is_supported and not self._is_wm_swapped):
+                if ((not IS_WAYLAND or IS_XWAYLAND) and current_display_count > 1 and self._wm_swap_is_supported and not self._is_wm_swapped):
                     data_logger.info("Multi-monitor setup: switching to Openbox with a minimal config.")
                     config_path = "/tmp/openbox_selkies_config.xml"
                     config_content = "<openbox_config></openbox_config>\n"
@@ -2940,7 +2941,7 @@ class DataStreamingServer:
                     total_width = aligned_total_width
                 self.display_layouts = layouts
                 data_logger.info(f"Layout calculated: Total Size={total_width}x{total_height}. Layouts: {layouts}")
-                if not IS_WAYLAND:
+                if not IS_WAYLAND or IS_XWAYLAND:
                     _, _, available_resolutions, _, screen_name = await get_new_res("1x1")
                     if not screen_name:
                         data_logger.error("CRITICAL: Could not determine screen name from xrandr. Aborting.")
@@ -3135,7 +3136,7 @@ class DataStreamingServer:
             queue_size = getattr(self, 'BACKPRESSURE_QUEUE_SIZE', 120)
             self.video_chunk_queues[display_id] = asyncio.Queue(maxsize=queue_size)
             sender_task = asyncio.create_task(self._video_chunk_sender(display_id))
-            
+
             capture_module = ScreenCapture()
 
             if IS_WAYLAND:
@@ -3144,7 +3145,7 @@ class DataStreamingServer:
                     data_logger.info(f"Registered Wayland cursor callback for '{display_id}'")
                     wayland_cursor_handler("surface", b"", 0, 0)
 
-            await self.capture_loop.run_in_executor(
+            await self.capture_loop.run_in_executor( 
                 None,
                 capture_module.start_capture,
                 settings,
@@ -3370,7 +3371,7 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
                 current_app_instance.display_width = target_w
                 current_app_instance.display_height = target_h
 
-            if IS_WAYLAND:
+            if IS_WAYLAND and not IS_XWAYLAND:
                 logger_gst_app_resize.info(f"Wayland Resize: Updating {display_id} to {target_w}x{target_h} and restarting pipeline.")
                 if data_server_instance and hasattr(data_server_instance, 'display_layouts'):
                     if display_id in data_server_instance.display_layouts:
@@ -3553,6 +3554,7 @@ async def ws_entrypoint():
         DEBUG_CURSORS,
         data_server_instance=data_server,
         is_wayland=IS_WAYLAND,
+        is_xwayland=IS_XWAYLAND,
         wayland_socket_index=settings.wayland_socket_index,
     )
     data_server.input_handler = (
