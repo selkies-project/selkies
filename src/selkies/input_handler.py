@@ -30,6 +30,8 @@ import io
 import re
 import json
 from PIL import Image 
+import urllib.parse
+import urllib.request
 
 try:
     from xkbcommon import xkb
@@ -55,6 +57,7 @@ except ImportError:
     xtest = None
 import msgpack
 import distro
+import aiofiles
 
 logger_webrtc_input = logging.getLogger("webrtc_input")
 logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
@@ -1617,6 +1620,29 @@ class WebRTCInput:
         env["WAYLAND_DISPLAY"] = f"wayland-{self.wayland_socket_index}"
         return env
 
+    async def _get_file(self, file_path, target_mime):
+        max_clipboard_file_size = 10 * 1024 * 1024
+        try:
+            file_size = await asyncio.to_thread(os.path.getsize, file_path)
+            if file_size > max_clipboard_file_size:
+                logger_webrtc_input.warning(
+                    "Skipping clipboard file %s: %d bytes exceeds 10MB limit", 
+                    file_path, file_size
+                )
+                return None, None
+            async with aiofiles.open(file_path, 'rb') as f:
+                file_data = await f.read(max_clipboard_file_size + 1)
+                if len(file_data) > max_clipboard_file_size:
+                    logger_webrtc_input.warning(
+                        "Skipping clipboard file %s: file grew beyond 10MB limit during read (%d bytes)",
+                        file_path, len(file_data)
+                    )
+                    return None, None
+                return file_data, target_mime
+        except OSError as e:
+            logger_webrtc_input.warning("Failed to access clipboard file %s: %s", file_path, e)
+            return None, None
+
     async def read_clipboard(self, use_binary=False):
         """Reads clipboard. Supports Wayland (wl-paste) and X11 (xclip)."""
         if self.is_wayland:
@@ -1671,15 +1697,43 @@ class WebRTCInput:
                 return None, None
             targets = stdout_targets.decode().strip().split('\n')
             if use_binary:
-                for mime_type in ['image/png', 'image/jpeg', 'image/bmp', 'image/svg', 'image/webp']:
+                for mime_type in ['image/png', 'image/jpeg', 'image/bmp', 'image/svg', 'image/webp', 'image/svg+xml']:
                     if mime_type in targets:
                         proc_data = await subprocess.create_subprocess_exec(
                             "xclip", "-selection", "clipboard", "-o", "-t", mime_type,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE
                         )
-                        stdout_data, _ = await asyncio.wait_for(proc_data.communicate(), timeout=1)
+                        stdout_data, _ = await asyncio.wait_for(proc_data.communicate(), timeout=3)
                         if proc_data.returncode == 0 and stdout_data:
                             return stdout_data, mime_type
+
+                # Allow copying of images from file managers
+                if 'text/uri-list' in targets:
+                    proc_data = await subprocess.create_subprocess_exec(
+                        "xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list",
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                    )
+                    stdout_data, _ = await asyncio.wait_for(proc_data.communicate(), timeout=1)
+                    if proc_data.returncode == 0 and stdout_data:
+                        lines = stdout_data.decode("utf-8", errors="replace").splitlines()
+                        for line in lines:
+                            line = line.strip()
+                            if not line or line.startswith("#"):
+                                continue
+                            parsed_uri = urllib.parse.urlparse(line)
+                            if parsed_uri.scheme == 'file':
+                                file_path = urllib.request.url2pathname(parsed_uri.path)
+                                if os.path.isfile(file_path):
+                                    ext = os.path.splitext(file_path)[1].lower()
+                                    mime_map = {
+                                        '.png': 'image/png', '.jpg': 'image/jpeg',
+                                        '.jpeg': 'image/jpeg', '.bmp': 'image/bmp',
+                                        '.webp': 'image/webp', '.svg': 'image/svg+xml'
+                                    }
+                                    if ext in mime_map:
+                                        target_mime = mime_map[ext]
+                                        return await self._get_file(file_path, target_mime)
+                                
             if 'UTF8_STRING' in targets:
                 proc_text = await subprocess.create_subprocess_exec(
                     "xclip", "-selection", "clipboard", "-o", "-t", "UTF8_STRING",
@@ -1690,12 +1744,20 @@ class WebRTCInput:
                     return stdout_text.decode(), 'text/plain'
             return None, None
         except Exception as e:
-            logger_webrtc_input.warning(f"Error reading clipboard with xclip: {e}")
+            logger_webrtc_input.warning(f"Error reading clipboard with xclip: {e}", exc_info=True)
             return None, None
+
     async def write_clipboard(self, data, mime_type="text/plain"):
         if not data:
             return True
-        input_bytes = data if isinstance(data, bytes) else data.encode()
+        input_bytes = data if isinstance(data, bytes) else data.encode('utf-8')
+
+        # Ensure LANG is set to a UTF-8 locale
+        # Helpful when running as portable application too, where LANG may be unset
+        env = self._get_wl_env() if self.is_wayland else os.environ.copy()
+        if 'LANG' not in env or env['LANG'] == 'C':
+            env['LANG'] = 'C.UTF-8'
+
         if self.is_wayland:
             try:
                 cmd = ["wl-copy", "--type", mime_type]
@@ -1704,7 +1766,7 @@ class WebRTCInput:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL, # FIX: Prevent daemon from keeping pipe open
-                    env=self._get_wl_env()
+                    env=env
                 )
                 if process.stdin:
                     process.stdin.write(input_bytes)
@@ -1721,11 +1783,14 @@ class WebRTCInput:
                 logger_webrtc_input.warning(f"wl-copy exception: {e}")
                 return False
         try:
+            is_text = mime_type == "text/plain"
+            target_mime = "UTF8_STRING" if is_text else mime_type
             process = await subprocess.create_subprocess_exec(
-                "xclip", "-selection", "clipboard", "-i", "-t", mime_type,
+                "xclip", "-selection", "clipboard", "-i", "-t", target_mime,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.DEVNULL,
+                env=env
             )
             if process.stdin:
                 process.stdin.write(input_bytes)
@@ -2187,6 +2252,12 @@ class WebRTCInput:
                     )
                     await asyncio.wait_for(process.communicate(), timeout=0.5)
             except Exception as e: logger_webrtc_input.warning(f"Error with co,end type: {e}")
+        elif msg_type == "_ebc":
+            try:
+                enable = toks[1].lower() == "true"
+                asyncio.create_task(self.update_binary_clipboard_setting(enable))
+            except Exception as e:
+                logger_webrtc_input.error(f"Error updating binary clipboard setting: {e}")
         elif toks[0].startswith("FILE_UPLOAD_START:"):
             if self.upload_dir_path is None:
                 logger_webrtc_input.warning("Upload directory doesn't exits, skipping the file upload")

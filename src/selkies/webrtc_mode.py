@@ -161,6 +161,7 @@ class WebRTCApp:
             uinput_mouse_socket_path="",
             js_socket_path_prefix="/tmp",
             enable_clipboard=self.args.enable_clipboard,
+            enable_binary_clipboard="true" if self.args.enable_binary_clipboard else "false",
             enable_cursors=self.args.enable_cursors,
             cursor_size=self.args.cursor_size,
             cursor_scale=1.0,
@@ -458,6 +459,7 @@ class WebRTCApp:
             'video_bitrate',
             'audio_bitrate',
             'framerate',
+            'enable_binary_clipboard',
         ]
 
         def sanitize_value(name: str, client_value: Any) -> Any:
@@ -508,13 +510,15 @@ class WebRTCApp:
             current_value = getattr(self.args, key, None)
             if current_value is not None:
                 sanitized_value = sanitize_value(key, value)
-                if sanitized_value and sanitized_value != current_value:
+                if sanitized_value is not None and sanitized_value != current_value:
                     if key == 'video_bitrate' and self.media_pipeline:
                         await self.media_pipeline.set_video_bitrate(sanitized_value)
                     elif key == 'audio_bitrate' and self.media_pipeline:
                         await self.media_pipeline.set_audio_bitrate(int(sanitized_value))
                     elif key == 'framerate' and self.media_pipeline:
                         await self.media_pipeline.set_framerate(sanitized_value)
+                    elif key == 'enable_binary_clipboard':
+                        await self.input_handler.update_binary_clipboard_setting(sanitized_value)
                     logger.debug(f"Updated setting '{key}' from {current_value} to {sanitized_value} based on client settings")
                     setattr(self.args, key, sanitized_value)
             else:

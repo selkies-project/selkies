@@ -25,4 +25,12 @@ export default defineConfig({
       }
     }
   },
+  worker: {
+    format: 'es',
+    rollupOptions: {
+      output: {
+        entryFileNames: '[name]-[hash].js'
+      }
+    }
+  }
 })

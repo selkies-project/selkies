@@ -26,9 +26,9 @@
  */
 
 import { WebRTCDemo } from "./lib/webrtc";
-import { WebRTCDemoSignaling } from "./lib/signaling"
-import { stringToBase64 } from "./lib/util";
-import { Input } from "./lib/input"
+import { WebRTCDemoSignaling } from "./lib/signaling";
+import { Input } from "./lib/input";
+import ClipboardWorker from './clipboard-worker.js?worker'
 
 function InitUI() {
 	let style = document.createElement('style');
@@ -133,6 +133,93 @@ function InitUI() {
   document.head.appendChild(style);
 }
 
+class ClipboardWorkerBridge {
+    constructor() {
+        this.worker = null;
+        this.callbacks = new Map();
+        this.msgId = 0;
+    }
+
+    /**
+     * Initializes the Web Worker
+     */
+    init() {
+        if (!this.worker) {
+			this.worker = new ClipboardWorker(); 
+            this.worker.onmessage = (e) => {
+                const { id, success, result, error, mimeType, byteLength } = e.data;
+                const resolveReject = this.callbacks.get(id);
+                if (resolveReject) {
+                    this.callbacks.delete(id);
+                    if (success) {
+                        resolveReject.resolve({ result, mimeType, byteLength });
+                    } else {
+                        resolveReject.reject(new Error(error));
+                    }
+                }
+            };
+            console.log("Clipboard Web Worker initialized.");
+        }
+    }
+
+    /**
+     * Kills the background thread and cleans up memory
+     */
+	terminate() {
+		if (!this.worker) return;
+		this.worker.terminate();
+		this.worker = null; 
+		const pendingCallbacks = Array.from(this.callbacks.values());
+		this.callbacks.clear();
+		for (const { reject } of pendingCallbacks) {
+			const err = new Error("Worker Terminated");
+			err.name = "AbortError";
+			reject(err);
+		}
+		console.log("Clipboard Web Worker terminated and pending operations aborted.");
+	}
+
+    /**
+     * Sends text to the worker to be encoded to Base64
+     */
+    async encodeText(text) {
+        this.init();
+        return new Promise((resolve, reject) => {
+            const id = ++this.msgId;
+            this.callbacks.set(id, { resolve, reject });
+            this.worker.postMessage({ id, action: 'ENCODE_TEXT_TO_B64', payload: text });
+        });
+    }
+
+    /**
+     * Sends an ArrayBuffer to the worker to be encoded to Base64.
+     * Uses Zero-Copy Transfer.
+     */
+    async encodeBinary(arrayBuffer) {
+        this.init();
+        return new Promise((resolve, reject) => {
+            const id = ++this.msgId;
+            this.callbacks.set(id, { resolve, reject });
+            this.worker.postMessage(
+                { id, action: 'ENCODE_BINARY_TO_B64', payload: arrayBuffer },
+                [arrayBuffer]
+            );
+        });
+    }
+
+    /**
+     * Sends Base64 string to be decoded back to Text or ArrayBuffer
+     */
+    async decode(base64String, mimeType) {
+        this.init();
+        return new Promise((resolve, reject) => {
+            const id = ++this.msgId;
+            this.callbacks.set(id, { resolve, reject });
+            this.worker.postMessage({ id, action: 'DECODE_FROM_B64', payload: base64String, mimeType });
+        });
+    }
+}
+
 export default function webrtc() {
 	let appName;
 	let videoBitRate = 8;      // in mbps
@@ -206,11 +293,23 @@ export default function webrtc() {
 	const UPLOAD_CHUNK_SIZE = 64 * 1024  - 1;
 	const CLIENT_CONTROLLER = "controller";
 	const CLIENT_VIEWER = "viewer";
+	// leave some room for metadata in the message
+	const CLIPBOARD_CHUNK_SIZE = 64 * 1024 - 100;
 
 	let detectedSharedModeType = null;
 	let playerInputTargetIndex = 0;
 	let clientRole = null;
 	let clientSlot = null;
+
+	let enable_binary_clipboard = false;
+	let multipartClipboard = {
+		chunks: [],
+		mimeType: '',
+		totalSize: 0,
+		inProgress: false
+	};
+	let clipboardWorker = new ClipboardWorkerBridge();
+	let lastClipboardText = "";
 
 	const hash = window.location.hash;
 	if (hash === '#shared') {
@@ -384,12 +483,12 @@ export default function webrtc() {
 				const isLocked = !!setting.locked;
 				if (isLocked) {
 					const clientValue = getBoolParam(key, !serverValue);
-				if (clientValue !== serverValue) {
-					console.log(`Sanitizing '${key}': setting is locked by server. Client value ${clientValue} is being overwritten with ${serverValue}.`);
-					changes[key] = serverValue;
-				}
-				window[key] = serverValue;
-				setBoolParam(key, serverValue);
+					if (clientValue !== serverValue) {
+						console.log(`Sanitizing '${key}': setting is locked by server. Client value ${clientValue} is being overwritten with ${serverValue}.`);
+						changes[key] = serverValue;
+					}
+					window[key] = serverValue;
+					setBoolParam(key, serverValue);
 				} else {
 					const prefixedKey = `${storageAppName}_${key}`;
 					const wasUnset = window.localStorage.getItem(prefixedKey) === null;
@@ -696,10 +795,6 @@ export default function webrtc() {
 				// }
 				console.warn("Skipping cssScaling since hidpi needs to be implemented")
 				break;
-			case "clipboardUpdateFromUI":
-				console.log("Received clipboard from UI, sending it to server");
-				webrtc.sendDataChannelMessage(`cw,${stringToBase64(message.text)}`);
-				break;
 			case "settings":
 				console.log("Received settings msg from dashboard:", message.settings);
 				handleSettingsMessage(message.settings);
@@ -722,6 +817,17 @@ export default function webrtc() {
 					postSidebarButtonUpdate();
 					toggleGamepadConnection()
 				}
+				break;
+			case 'clipboardUpdateFromUI':
+				console.log('Received clipboardUpdateFromUI message.');
+				if (isSharedMode) {
+					console.log("Shared mode: Clipboard write to server blocked.");
+					break;
+				}
+				const newClipboardText = message.text;
+				sendClipboardData(newClipboardText);
+				break;
+			default:
 				break;
 		}
 	}
@@ -751,6 +857,12 @@ export default function webrtc() {
 		if (settings.SCALING_DPI !== undefined) {
 			const dpi = parseInt(settings.SCALING_DPI, 10);
 			webrtc.sendDataChannelMessage(`s,${dpi}`)
+		}
+		if (settings.enable_binary_clipboard !== undefined) {
+			enable_binary_clipboard = !!settings.enable_binary_clipboard;
+			webrtc.sendDataChannelMessage(`_ebc,${enable_binary_clipboard}`);
+			setBoolParam('enable_binary_clipboard', enable_binary_clipboard);
+			console.log(`Binary clipboard support ${enable_binary_clipboard ? 'enabled' : 'disabled'}`);
 		}
 	}
 
@@ -1063,19 +1175,50 @@ export default function webrtc() {
 		}, 1000);
 	}
 
-	function handleWindowFocus() {
-		// reset keyboard to avoid stuck keys.
+	async function handleWindowFocus() {
 		webrtc.sendDataChannelMessage("kr");
-		// clipboard interface is only available in secure context
-		if (window.isSecureContext) {
-			// Send clipboard contents.
-			navigator.clipboard.readText()
-				.then(text => {
-						webrtc.sendDataChannelMessage(`cw,${stringToBase64(text)}`);
-				})
-				.catch(err => {
-						webrtc._setStatus('Failed to read clipboard contents: ' + err);
-				});
+		if (!window.isSecureContext || isSharedMode || clipboardStatus !== "enabled") return;
+
+		try {
+			if (enable_binary_clipboard) {
+				const clipboardItems = await navigator.clipboard.read();
+				if (!clipboardItems || clipboardItems.length === 0) {
+						return;
+				}
+
+				const item = clipboardItems[0];
+				const imageType = item.types.find(t => t.startsWith('image/'));
+				if (imageType) {
+					const blob = await item.getType(imageType);
+					const arrayBuffer = await blob.arrayBuffer();
+					await sendClipboardData(arrayBuffer, imageType);
+					console.log(`Sent binary clipboard on focus via sendClipboardData: ${imageType}, size: ${blob.size} bytes`);
+				} else if (item.types.includes('text/plain')) {
+					const blob = await item.getType('text/plain');
+					const text = await blob.text();
+					if (text && text === lastClipboardText) {
+						return;
+					}
+					await sendClipboardData(text);
+					lastClipboardText = text;
+					console.log("Sent clipboard text (from binary-enabled path) on focus via sendClipboardData");
+				}
+			}
+			else {
+				const text = await navigator.clipboard.readText();
+				if (text && text === lastClipboardText) {
+					return;
+				}
+				if (text) {
+					await sendClipboardData(text);
+					lastClipboardText = text;
+					console.log("Sent clipboard text on focus via sendClipboardData");
+				}
+			}
+		} catch (err) {
+			if (err.name !== 'NotFoundError' && !err.message.includes('not focused')) {
+				console.warn(`Clipboard focus error: ${err.name}`);
+			}
 		}
 	}
 
@@ -1118,9 +1261,174 @@ export default function webrtc() {
 		}
 	}
 
-	function gamepadsConnected() {
-		let connected = [...navigator.getGamepads()].filter(Boolean);
-		return connected.length > 0;
+	async function sendClipboardData(data, mimeType = 'text/plain') {
+		if (clipboardStatus !== "enabled" || data == null) return;
+
+		const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
+		let arrayBuffer;
+		let totalSize;
+
+		if (isBinary) {
+			if (data instanceof Uint8Array && (data.byteOffset > 0 || data.byteLength !== data.buffer.byteLength)) {
+				arrayBuffer = data.slice().buffer;
+			} else {
+				arrayBuffer = data.buffer || data;
+			}
+			totalSize = arrayBuffer.byteLength;
+		} else {
+			const uint8 = new TextEncoder().encode(data);
+			arrayBuffer = uint8.buffer;
+			totalSize = uint8.byteLength;
+			mimeType = 'text/plain';
+		}
+
+		try {
+			const { result: fullBase64 } = await clipboardWorker.encodeBinary(arrayBuffer);
+			const b64Size = fullBase64.length;
+			if (b64Size <= CLIPBOARD_CHUNK_SIZE) {
+				if (mimeType === 'text/plain') {
+					webrtc.sendDataChannelMessage(`cw,${fullBase64}`);
+					console.log('Sent small clipboard text in single message.');
+				} else {
+					webrtc.sendDataChannelMessage(`cb,${mimeType},${fullBase64}`);
+					console.log(`Sent small binary clipboard data in single message: ${mimeType}`);
+				}
+			} else {
+				console.log(`Sending large clipboard data (${totalSize} bytes) in multiple parts.`);
+				if (mimeType === 'text/plain') {
+					webrtc.sendDataChannelMessage(`cws,${totalSize}`);
+				} else {
+					webrtc.sendDataChannelMessage(`cbs,${mimeType},${totalSize}`);
+				}
+				for (let offset = 0; offset < b64Size; offset += CLIPBOARD_CHUNK_SIZE) {
+					const b64Chunk = fullBase64.substring(offset, offset + CLIPBOARD_CHUNK_SIZE);
+					if (mimeType === 'text/plain') {
+						webrtc.sendDataChannelMessage(`cwd,${b64Chunk}`);
+					} else {
+						webrtc.sendDataChannelMessage(`cbd,${b64Chunk}`);
+					}
+					await new Promise(resolve => setTimeout(resolve, 10));
+				}
+				if (mimeType === 'text/plain') {
+					webrtc.sendDataChannelMessage('cwe');
+				} else {
+					webrtc.sendDataChannelMessage('cbe');
+				}
+				console.log('Finished sending multi-part clipboard data.');
+			}
+		} catch (err) {
+			console.error("Error sending clipboard data:", err);
+		}
+	}
+
+	// Most browsers have limitations on the types of images
+	// for clipboard so convert them to widely supported png
+	async function convertImageToPngBlob(blob) {
+		return new Promise((resolve, reject) => {
+			const img = new Image();
+			const url = URL.createObjectURL(blob);
+			img.onload = () => {
+				URL.revokeObjectURL(url);
+				const canvas = document.createElement('canvas');
+				canvas.width = img.width;
+				canvas.height = img.height;
+				const ctx = canvas.getContext('2d');
+				ctx.drawImage(img, 0, 0);
+				canvas.toBlob((pngBlob) => {
+					resolve(pngBlob);
+				}, 'image/png');
+			};
+			img.onerror = (err) => {
+				URL.revokeObjectURL(url);
+				reject(new Error("Failed to load image for PNG conversion"));
+			};
+			img.src = url;
+		});
+	}
+
+	const cleanupMultipartClipboard = () => {
+		multipartClipboard.mimeType = null;
+		multipartClipboard.chunks = [];
+		multipartClipboard.totalSize = 0;
+		multipartClipboard.inProgress = false;
+	};
+
+	async function handleClipboardData(msg) {
+		if (!msg.data) {
+			console.warn("Received clipboard message with null data");
+			return { isMultipart: false, mimeType: null, content: null };
+		}
+	
+		let mimeType = msg.data.mime_type || multipartClipboard.mimeType;
+		let is_text =  mimeType === 'text/plain' ? true : false;
+		let content = null;
+		let isMultipart = false;
+		switch (msg.type) {
+			case "clipboard-msg":
+				let blob;
+				try {
+					const { result } = await clipboardWorker.decode(msg.data.content, mimeType);
+					if (is_text) {
+						return { isMultipart, mimeType, content: result };
+					}
+					blob = new Blob([result], { type: mimeType });
+					if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
+						blob = await convertImageToPngBlob(blob);
+						if (!blob) return { isMultipart, mimeType, content: null };
+						mimeType = 'image/png';
+					}
+				} catch (err) {
+					console.error("Image conversion failed for clipboard message:", err);
+					return { isMultipart, mimeType, content: null };
+				}
+				return { isMultipart, mimeType, content: new ClipboardItem({ [mimeType]: blob }) };
+			case "clipboard-msg-start":
+				multipartClipboard.chunks = [];
+				multipartClipboard.mimeType = mimeType;
+				multipartClipboard.totalSize = msg.data.total_size;
+				multipartClipboard.inProgress = true;
+				console.log(`Starting multi-part download: ${mimeType}, expected raw size: ${msg.data.total_size}`);
+				return { isMultipart: true, mimeType, content: null };
+			case "clipboard-msg-data":
+				if (multipartClipboard.inProgress) {
+					multipartClipboard.chunks.push(msg.data.content);
+				}
+				return { isMultipart: true, mimeType, content: null };
+			case "clipboard-msg-end":
+				if (!multipartClipboard.inProgress) {
+					return { isMultipart: false, mimeType, content: null };
+				}
+				const fullBase64 = multipartClipboard.chunks.join("");
+				mimeType = multipartClipboard.mimeType;
+				try {
+					const { result, byteLength } = await clipboardWorker.decode(fullBase64, mimeType);
+					if (byteLength !== multipartClipboard.totalSize) {
+						console.warn(`Size mismatch! Expected ${multipartClipboard.totalSize}, got ${byteLength}`);
+						cleanupMultipartClipboard();
+						return { isMultipart: false, mimeType, content: null };
+					}
+					if (mimeType === 'text/plain') {
+						content = result;
+					} else {
+						let blob = new Blob([result], { type: mimeType });
+						if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
+							blob = await convertImageToPngBlob(blob);
+							if (!blob) {
+								cleanupMultipartClipboard();
+								return { isMultipart: false, mimeType, content: null };
+							}
+							mimeType = 'image/png';
+						}
+						content = new ClipboardItem({ [mimeType]: blob });
+					}
+				} catch (err) {
+					console.error("Worker decoding failed:", err);
+				}
+				cleanupMultipartClipboard();
+				return { isMultipart: false, mimeType, content };
+			default:
+				console.warn("Unknown clipboard cmd received");
+		}
 	}
 
 	return {
@@ -1218,6 +1526,7 @@ export default function webrtc() {
 			setStringParam('encoder_rtc', encoder)
 			useCssScaling = getBoolParam('useCssScaling', true);  // TODO: need to handle hiDPI
 			setBoolParam('useCssScaling', useCssScaling);
+			enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 
 			if (!isSharedMode) {
 				// listen for dashboard messages (Dashboard -> core client)
@@ -1372,18 +1681,44 @@ export default function webrtc() {
 				window.addEventListener('blur', handleWindowBlur);
 			}
 
-			webrtc.onclipboardcontent = (content) => {
+			webrtc.onclipboardcontent = async (msg) => {
+				if (!window.isSecureContext || isSharedMode) {
+					return;
+				}
 				if (clipboardStatus === 'enabled') {
-					navigator.clipboard.writeText(content)
-						.catch(err => {
-								webrtc._setStatus('Could not copy text to clipboard: ' + err);
-					});
+					const {isMultipart, mimeType, content} = await handleClipboardData(msg);
+					const isText = mimeType === "text/plain";
+					if (isMultipart || content === null) {
+						return;
+					}
 
-					// send the clipboard content to the dashboard interface
-					window.postMessage({
-						type: 'clipboardContentUpdate',
-						text: content
-					}, window.location.origin);
+					if (isText) {
+						navigator.clipboard.writeText(content)
+							.then(() => {
+								window.postMessage({
+									type: 'clipboardContentUpdate',
+									text: content,
+								}, window.location.origin);
+								console.log('Successfully wrote text from server to local clipboard.');
+							})
+							.catch(err => {
+								console.log('Could not copy text to clipboard: ', err);
+							});
+					} else {
+						if (enable_binary_clipboard) {
+							navigator.clipboard.write([content])
+								.then(() => {
+									window.postMessage({
+										type: 'clipboardContentUpdate',
+										text: "received an image from server",
+									}, window.location.origin);
+									console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
+								})
+								.catch(err => {
+									console.error('Failed to write image to clipboard: ', err);
+								});
+						}
+					}
 				}
 			}
 
@@ -1511,6 +1846,14 @@ export default function webrtc() {
 			window.removeEventListener("focus", handleWindowFocus);
 			window.removeEventListener("blur", handleWindowBlur);
 
+			try {
+				clipboardWorker.terminate();
+			} catch (error) {
+				if (error.name === 'AbortError') return;
+				console.error(error);
+			}
+			clipboardWorker = null;
+
 			// temporary workaround to nullify/reset the variables
 			appName = null;
 			videoBitRate = 8000;
@@ -1557,7 +1900,7 @@ export default function webrtc() {
 			rtime = null;
 			rdelta = 500;
 			rtimeout = false;
-			manualWidth, manualHeight = 0;
+			manualWidth = 0, manualHeight = 0;
 			isGamepadEnabled = true;
 			videoConnected = "";
 			audioConnected = "";
@@ -1568,6 +1911,14 @@ export default function webrtc() {
 			detectedSharedModeType = null;
 			playerInputTargetIndex = 0;
 			enableWebrtcStatics = false;
+			enable_binary_clipboard = false;
+			multipartClipboard = {
+				chunks: [],
+				mimeType: '',
+				totalSize: 0,
+				inProgress: false
+			};
+
 		}
 	}
 }
