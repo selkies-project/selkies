@@ -2030,7 +2030,7 @@ class WebRTCInput:
                     pass
                 else:
                     await self.send_x11_keypress(keysym, down=False)
-        elif msg_type == "kr": 
+        elif msg_type == "kr":
             if getattr(self, 'use_clipboard_fallback', False):
                 self.keyboard_queue.put_nowait(("kr", None))
             else:
