@@ -1136,6 +1136,7 @@ class WebRTCInput:
         if self.is_wayland:
             if self.wayland_input:
                 # Release common modifiers
+                logger_webrtc_input.debug("reset_keyboard: Releasing common wayland modifiers")
                 modifiers = [65507, 65505, 65513, 65508, 65506, 65027, 65511, 65512] # Ctrl, Shift, Alt, Meta
                 for k in modifiers:
                     scancode = self.wayland_scancode_map.get(k)
@@ -2030,7 +2031,7 @@ class WebRTCInput:
                     pass
                 else:
                     await self.send_x11_keypress(keysym, down=False)
-        elif msg_type == "kr": 
+        elif msg_type == "kr":
             if getattr(self, 'use_clipboard_fallback', False):
                 self.keyboard_queue.put_nowait(("kr", None))
             else:

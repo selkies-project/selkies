@@ -2662,6 +2662,13 @@ class DataStreamingServer:
                         f"Error cleaning up file upload {_local_active_path} for {raddr}: {e_file_cleanup}"
                     )
 
+            if self.input_handler:
+                try:
+                    await self.input_handler.reset_keyboard()
+                    data_logger.info(f"Keyboard reset completed ({raddr}) disconnect.")
+                except Exception as e_reset:
+                    data_logger.warning(f"Failed to reset keyboard afterclient disconnect: {e_reset}")
+
             if not self.clients:
                  data_logger.info(f"Last client ({raddr}) disconnected. All pipelines should have been stopped by reconfigure_displays.")
                  self.capture_cursor = False
