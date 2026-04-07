@@ -1136,7 +1136,6 @@ class WebRTCInput:
         if self.is_wayland:
             if self.wayland_input:
                 # Release common modifiers
-                logger_webrtc_input.debug("reset_keyboard: Releasing common wayland modifiers")
                 modifiers = [65507, 65505, 65513, 65508, 65506, 65027, 65511, 65512] # Ctrl, Shift, Alt, Meta
                 for k in modifiers:
                     scancode = self.wayland_scancode_map.get(k)
