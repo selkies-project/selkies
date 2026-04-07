@@ -2667,7 +2667,7 @@ class DataStreamingServer:
                     await self.input_handler.reset_keyboard()
                     data_logger.info(f"Keyboard reset completed ({raddr}) disconnect.")
                 except Exception as e_reset:
-                    data_logger.warning(f"Failed to reset keyboard afterclient disconnect: {e_reset}")
+                    data_logger.warning(f"Failed to reset keyboard after client disconnect: {e_reset}")
 
             if not self.clients:
                  data_logger.info(f"Last client ({raddr}) disconnected. All pipelines should have been stopped by reconfigure_displays.")
