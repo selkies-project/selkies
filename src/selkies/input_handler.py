@@ -1398,8 +1398,8 @@ class WebRTCInput:
     async def _inject_unicode_via_clipboard(self, text_to_type):
         async with self.clipboard_injection_lock:
             self.clipboard_paused = True
-            KEY_CTRL_L = 0xFFE3
-            KEY_V      = 0x0076
+            KEY_SHIFT_L = 0xFFE1
+            KEY_INSERT  = 0xFF63
 
             currently_active_mods = list(self.active_modifiers)
 
@@ -1408,15 +1408,17 @@ class WebRTCInput:
                     await self.send_x11_keypress(mod_keysym, down=False)
 
                 old_data, old_mime = await self.read_clipboard(use_binary=True)
-                await self.write_clipboard(text_to_type, mime_type="text/plain")
-                await asyncio.sleep(0.01)
-                
-                await self.send_x11_keypress(KEY_CTRL_L, down=True)
-                await self.send_x11_keypress(KEY_V, down=True)
-                await self.send_x11_keypress(KEY_V, down=False)
-                await self.send_x11_keypress(KEY_CTRL_L, down=False)
-                await asyncio.sleep(0.01)
-                
+
+                mime_to_use = "UTF8_STRING" if not self.is_wayland else "text/plain"
+                await self.write_clipboard(text_to_type, mime_type=mime_to_use)
+                await asyncio.sleep(0.02)
+
+                await self.send_x11_keypress(KEY_SHIFT_L, down=True)
+                await self.send_x11_keypress(KEY_INSERT, down=True)
+                await self.send_x11_keypress(KEY_INSERT, down=False)
+                await self.send_x11_keypress(KEY_SHIFT_L, down=False)
+                await asyncio.sleep(0.02)
+
                 if old_data is not None:
                     await self.write_clipboard(old_data, mime_type=old_mime or "text/plain")
                 elif self.is_wayland:
