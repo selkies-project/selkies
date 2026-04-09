@@ -351,7 +351,7 @@ function AppsModal({ isOpen, onClose, t }) {
     window.postMessage(
       {
         type: "command",
-        value: `st ~/.local/bin/proot-apps install ${appName}`,
+        value: `/selkies-proot install ${appName}`,
       },
       window.location.origin
     );
@@ -364,7 +364,7 @@ function AppsModal({ isOpen, onClose, t }) {
     window.postMessage(
       {
         type: "command",
-        value: `st ~/.local/bin/proot-apps remove ${appName}`,
+        value: `/selkies-proot remove ${appName}`,
       },
       window.location.origin
     );
@@ -375,7 +375,7 @@ function AppsModal({ isOpen, onClose, t }) {
     window.postMessage(
       {
         type: "command",
-        value: `st ~/.local/bin/proot-apps update ${appName}`,
+        value: `/selkies-proot update ${appName}`,
       },
       window.location.origin
     );
