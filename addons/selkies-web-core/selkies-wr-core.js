@@ -222,6 +222,7 @@ class ClipboardWorkerBridge {
 
 export default function webrtc() {
 	let appName;
+	let crf = 23;
 	let videoBitRate = 8;      // in mbps
 	let videoFramerate = 60;
 	let audioBitRate = 128000; // in kbps
@@ -234,7 +235,8 @@ export default function webrtc() {
 	let clipboardStatus = 'disabled';
 	let windowResolution = [];
 	let encoderLabel = "";
-	let encoder = ""
+	let encoder = "";
+	let rateControlMode = "cbr";
 	let gamepad = {
 			gamepadState: 'disconnected',
 			gamepadName: 'none',
@@ -516,13 +518,14 @@ export default function webrtc() {
 
 		const knownSettings = [
 			'framerate', 'encoder_rtc', 'is_manual_resolution_mode',
-			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard'
+			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
+			'rate_control_mode', 'h264_crf'
 		];
 		const booleanSettingKeys = [
 			'is_manual_resolution_mode', 'enable_binary_clipboard'
 		];
 		const integerSettingKeys = [
-			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_bitrate'
+			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_bitrate', 'h264_crf'
 		];
 
 		for (const key in localStorage) {
@@ -864,7 +867,28 @@ export default function webrtc() {
 			setBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 			console.log(`Binary clipboard support ${enable_binary_clipboard ? 'enabled' : 'disabled'}`);
 		}
+		if (settings.rate_control_mode !== undefined) {
+			rateControlMode = settings.rate_control_mode;
+			webrtc.sendDataChannelMessage(`_rc,${rateControlMode}`);
+			sendRespectiveRCvalue(rateControlMode);
+			setStringParam('rate_control_mode', rateControlMode);
+			console.log(`Rate control mode set to ${rateControlMode}`);
+		}
+		if (settings.h264_crf !== undefined) {
+			crf = parseInt(settings.h264_crf, 10);
+			webrtc.sendDataChannelMessage(`_crf,${crf}`);
+			setIntParam('h264_crf', crf);
+			console.log(`H264 CRF set to ${crf}`);
+		}
 	}
+
+	function sendRespectiveRCvalue(newMode) {
+		if (newMode === "cbr") {
+			webrtc.sendDataChannelMessage(`vb,${videoBitRate}`);
+		} else if (newMode === "crf") {
+			webrtc.sendDataChannelMessage(`_crf,${crf}`);
+		}
+	};
 
 	function handleRequestFileUpload() {
 		const hiddenInput = document.getElementById('globalFileInput');
@@ -887,7 +911,7 @@ export default function webrtc() {
 		// doesn't support simultaneous reception of multiple files, yet.
 		if (!webrtc.createAuxDataChannel()) {
 			console.warn("Simultaneous uploading of files with distinct upload operations is not supported yet");
-			const errorMsg = "Please let the ongoing upload complete";
+			const errorMsg = "Please let the ongoing upload complete.";
 			window.postMessage({
 				type: 'fileUpload',
 				payload: {
@@ -1524,9 +1548,12 @@ export default function webrtc() {
 			setIntParam('manual_height', manualHeight);
 			encoder = getStringParam('encoder_rtc', 'x264enc');
 			setStringParam('encoder_rtc', encoder)
+			rateControlMode = getStringParam('rate_control_mode', 'cbr');
+			setStringParam('rate_control_mode', rateControlMode);
 			useCssScaling = getBoolParam('useCssScaling', true);  // TODO: need to handle hiDPI
 			setBoolParam('useCssScaling', useCssScaling);
 			enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
+			crf = getIntParam('h264_crf', crf);
 
 			if (!isSharedMode) {
 				// listen for dashboard messages (Dashboard -> core client)

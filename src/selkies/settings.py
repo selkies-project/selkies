@@ -45,6 +45,10 @@ COMMON_SETTING_DEFINITIONS = [
     {'name': 'command_enabled', 'type': 'bool', 'default': True, 'help': 'Enable parsing of command websocket messages.'},
     {'name': 'file_transfers', 'type': 'list', 'default': 'upload,download', 'meta': {'allowed': ['upload', 'download']}, 'help': 'Allowed file transfer directions (comma-separated: "upload,download"). Set to "" or "none" to disable.'},
     {'name': 'framerate', 'type': 'range', 'default': '8-120', 'meta': {'default_value': 60}, 'help': 'Allowed framerate range (e.g., "8-165") or a fixed value (e.g., "60").'},
+    {'name': 'h264_crf', 'type': 'range', 'default': '5-50', 'meta': {'default_value': 25}, 'help': 'Allowed H.264 CRF range (e.g., "5-50") or a fixed value.'},
+    {'name': 'video_bitrate', 'type': 'range', 'default': '1-100', 'meta': {"default_value": 8}, 'help': 'Default video-bitrate aka CBR, in Megabits per second (Mbps), allowed range (e.g., "1-100") or a fixed value (e.g., "8" for 8 Mbps)'},
+    {'name': 'rate_control_mode', 'type': 'enum', 'default': 'crf', 'meta': {'allowed': ['crf', 'cbr']}, 'help': 'Rate control mode for video encoding (cbr or crf). Only effective when enable_rate_control is true.'},
+    {'name': 'enable_rate_control', 'type': 'bool', 'default': False, 'help': 'Enable rate control for video encoding. Used in association with rate_control_mode.'},
 
     # Audio Settings
     {'name': 'audio_bitrate', 'type': 'enum', 'default': '320000', 'meta': {'allowed': ['64000', '128000', '192000', '256000', '320000']}, 'help': 'The default audio bitrate.'},
@@ -97,7 +101,6 @@ COMMON_SETTING_DEFINITIONS = [
 SETTING_DEFINITIONS_WEBSOCKETS = [
     # Video & Encoder Settings
     {'name': 'encoder', 'type': 'enum', 'default': 'x264enc', 'meta': {'allowed': ['x264enc', 'x264enc-striped', 'jpeg']}, 'help': 'The default video encoder.'},
-    {'name': 'h264_crf', 'type': 'range', 'default': '5-50', 'meta': {'default_value': 25}, 'help': 'Allowed H.264 CRF range (e.g., "5-50") or a fixed value.'},
     {'name': 'jpeg_quality', 'type': 'range', 'default': '1-100', 'meta': {'default_value': 40}, 'help': 'Allowed JPEG quality range (e.g., "1-100") or a fixed value.'},
     {'name': 'h264_fullcolor', 'type': 'bool', 'default': False, 'help': 'Enable H.264 full color range for pixelflux encoders.'},
     {'name': 'h264_streaming_mode', 'type': 'bool', 'default': False, 'help': 'Enable H.264 streaming mode for pixelflux encoders.'},
@@ -152,7 +155,6 @@ SETTING_DEFINITIONS_WEBRTC = [
     {'name': 'cloudflare_turn_api_token', 'type': 'str', 'default': '', 'help': 'The Cloudflare TURN API token.'},
 
     {'name': 'encoder_rtc', 'type': 'enum', 'default': 'x264enc', 'meta': {'allowed': ['av1enc', 'x264enc', 'nvh264enc', 'vp8enc']}, 'help': 'Video encoder to encode video media'},
-    {'name': 'video_bitrate', 'type': 'range', 'default': '1-100', 'meta': {"default_value": 8}, 'help': 'Default video bitrate in Megabits per second (Mbps), allowed range (e.g., "1-100") or a fixed value (e.g., "8" for 8 Mbps)'},
     {'name': 'app_wait_ready', 'type': 'bool', 'default': False, 'help': 'Waits for --app_ready_file to exist before starting stream if set to "true"'},
     {'name': 'app_ready_file', 'type': 'str', 'default': '/tmp/selkies-appready', 'help': 'File set by sidecar used to indicate that app is initialized and ready'},
     {'name': 'uinput_mouse_socket', 'type': 'str', 'default': '', 'help': 'Path to the uinput mouse socket, if not provided uinput is used directly'},

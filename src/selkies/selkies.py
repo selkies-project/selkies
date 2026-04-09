@@ -56,6 +56,7 @@ import urllib.parse
 import sys
 import time
 import io
+from enum import Enum
 from PIL import Image, ImageDraw
 import websockets
 import websockets.asyncio.server as ws_async
@@ -117,6 +118,9 @@ client_permissions = {}
 class SelkiesAppError(Exception):
     pass
 
+class RateControlMode(str, Enum):
+    CBR = "cbr"
+    CRF = "crf"
 
 class SelkiesStreamingApp:
     def __init__(
@@ -832,6 +836,7 @@ class DataStreamingServer:
         audio_device_name,
         cli_args,
         is_secure_mode,
+        rc_mode = RateControlMode.CRF,
     ):
         self.port = port
         self.mode = "websockets"
@@ -858,6 +863,7 @@ class DataStreamingServer:
         self._rtt_samples = deque(maxlen=RTT_SMOOTHING_SAMPLES)
         self._smoothed_rtt_ms = 0.0
         self._sent_frames_log = deque()
+        self.rc_mode = rc_mode
         
         def get_initial_value(setting_name):
             """Helper to get the correct initial integer/bool from a processed setting."""
@@ -891,6 +897,8 @@ class DataStreamingServer:
         self.use_cpu = self._initial_use_cpu
         self._initial_use_paint_over_quality = get_initial_value('use_paint_over_quality')
         self.use_paint_over_quality = self._initial_use_paint_over_quality
+        self._initial_video_bitrate = get_initial_value('video_bitrate')
+        self.video_bitrate = self._initial_video_bitrate
 
         self._system_monitor_task_ws = None
         self._gpu_monitor_task_ws = None
@@ -1328,6 +1336,8 @@ class DataStreamingServer:
         parsed["enable_binary_clipboard"] = get_bool("enable_binary_clipboard")
         parsed["displayId"] = get_str("displayId")
         parsed["displayPosition"] = get_str("displayPosition")
+        parsed["rate_control_mode"] = get_str("rate_control_mode")
+        parsed["video_bitrate"] = get_int("video_bitrate")
         data_logger.debug(f"Parsed client settings: {parsed}")
         return parsed
 
@@ -1450,6 +1460,11 @@ class DataStreamingServer:
                 display_state["use_cpu"] = sanitize_value("use_cpu", settings.get("use_cpu"))
             self.app.audio_bitrate = sanitize_value("audio_bitrate", settings.get("audio_bitrate"))
             display_state["audio_bitrate"] = self.app.audio_bitrate
+            display_state["video_bitrate"] = sanitize_value("video_bitrate", settings.get("video_bitrate"))
+            enable_rate_control, _ = self.cli_args.enable_rate_control
+            if enable_rate_control:
+                display_state["rate_control_mode"] = sanitize_value("rate_control_mode", settings.get("rate_control_mode"))
+            
             if self.input_handler:
                 self.enable_binary_clipboard = sanitize_value("enable_binary_clipboard", settings.get("enable_binary_clipboard"))
                 await self.input_handler.update_binary_clipboard_setting(self.enable_binary_clipboard)
@@ -1486,7 +1501,7 @@ class DataStreamingServer:
             video_params_list = [
                 'encoder', 'framerate', 'h264_crf', 'h264_fullcolor', 'h264_streaming_mode',
                 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'h264_paintover_crf',
-                'h264_paintover_burst_frames', 'use_paint_over_quality'
+                'h264_paintover_burst_frames', 'use_paint_over_quality', 'rate_control_mode', 'video_bitrate'
             ]
             if IS_WAYLAND and which("kwin_wayland"):
                 video_params_list.append('scaling_dpi')
@@ -2165,6 +2180,8 @@ class DataStreamingServer:
                                     'h264_paintover_crf': self._initial_h264_paintover_crf,
                                     'h264_paintover_burst_frames': self._initial_h264_paintover_burst_frames,
                                     'use_paint_over_quality': self._initial_use_paint_over_quality,
+                                    'rate_control_mode': self.rc_mode.value,
+                                    'video_bitrate': self._initial_video_bitrate,
                                     'scale': 1.0,
                                 }
                             else:
@@ -3201,6 +3218,10 @@ class DataStreamingServer:
             cs.h264_fullcolor = display_state.get('h264_fullcolor', self._initial_h264_fullcolor)
             cs.h264_streaming_mode = display_state.get('h264_streaming_mode', self._initial_h264_streaming_mode)
             cs.h264_fullframe = (encoder == "x264enc")
+            rc_mode = display_state.get('rate_control_mode', 'crf')
+            cs.h264_cbr_mode = (rc_mode == 'cbr')
+            video_bitrate = display_state.get('video_bitrate', self._initial_video_bitrate)
+            cs.h264_bitrate_kbps = video_bitrate * 1000  # Convert Mbps to kbps
 
         cs.use_paint_over_quality = display_state.get('use_paint_over_quality', self._initial_use_paint_over_quality)
         cs.paint_over_trigger_frames = 15
@@ -3539,6 +3560,8 @@ async def ws_entrypoint():
         cli_args=settings,
         is_secure_mode=is_secure_mode,
     )
+    if settings.enable_rate_control[0]:
+        data_server.rc_mode = RateControlMode(settings.rate_control_mode)
     app.data_streaming_server = data_server
 
     clipboard_mode = "false"

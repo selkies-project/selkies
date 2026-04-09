@@ -12,8 +12,8 @@ const PER_DISPLAY_SETTINGS = [
     'framerate', 'h264_crf', 'h264_fullcolor',
     'h264_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
     'h264_paintover_crf', 'h264_paintover_burst_frames', 'use_paint_over_quality',
-    'is_manual_resolution_mode', 'manual_width', 'manual_height',
-    'encoder', 'scaleLocallyManual', 'use_browser_cursors'
+    'is_manual_resolution_mode', 'manual_width', 'manual_height', 'encoder',
+    'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode', 'video_bitrate'
 ];
 
 const encoderOptions = [
@@ -27,6 +27,8 @@ const encoderOptionsWR = [
   "nvh264enc",
   "vp8enc",
 ]
+
+const rateControlOptions = ["cbr", "crf"];
 
 const commonResolutionValues = [
   "",
@@ -87,6 +89,8 @@ const DEFAULT_STREAM_MODE = STREAM_MODE_WEBSOCKETS;
 const DEFAULT_WEBRTC_ENCODER = "x264enc";
 const DEFAULT_AUDIO_BITRATE = 128000;  // in bps
 const DEFAULT_VIDEO_BITRATE = 8;   // in mbps
+const RATE_CONTROL_CBR = "cbr";
+const RATE_CONTROL_CRF = "crf";
 
 // --- Helper Functions ---
 function formatBytes(bytes, decimals = 2, rawDict) {
@@ -623,7 +627,7 @@ function Sidebar() {
     newRenderable.use_browser_cursors = isRenderable('use_browser_cursors');
     newRenderable.video_bitrate = isRenderable('video_bitrate');
     newRenderable.audio_bitrate = isRenderable('audio_bitrate');
-    
+
     const hypotheticalHidpi = s.hidpi_enabled || { value: true, locked: false };
     newRenderable.hidpi = hypotheticalHidpi.locked !== true;
 
@@ -639,6 +643,7 @@ function Sidebar() {
     newRenderable.microphoneToggle = isRenderable('microphone_enabled');
     newRenderable.gamepadToggle = isRenderable('gamepad_enabled');
 
+    newRenderable.enableRateControl = s.enable_rate_control?.value ?? false;
     const ftSetting = s.file_transfers;
     newRenderable.fileUpload = ftSetting ? ftSetting.value.includes('upload') : true;
     newRenderable.fileDownload = ftSetting ? ftSetting.value.includes('download') : true;
@@ -919,6 +924,13 @@ function Sidebar() {
       const final = s_use_browser_cursors.locked ? s_use_browser_cursors.value : getStoredBool("use_browser_cursors");
       setUseBrowserCursors(final);
     }
+    const s_rate_control_mode = serverSettings.rate_control_mode;
+    if (s_rate_control_mode) {
+      const stored = localStorage.getItem(getPrefixedKey("rate_control_mode"));
+      const final = s_rate_control_mode.allowed.includes(stored) ? stored : s_rate_control_mode.value;
+      setRateControlMode(final);
+      localStorage.setItem(getPrefixedKey("rate_control_mode"), final);
+    }
     const s_ui_title = serverSettings.ui_title;
     if (s_ui_title) {
         setUiTitle(s_ui_title.value);
@@ -1059,6 +1071,10 @@ function Sidebar() {
   const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
     const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
     return saved !== null ? saved === 'true' : DEFAULT_ENABLE_BINARY_CLIPBOARD;
+  });
+  const [rateControlMode, setRateControlMode] = useState(() => {
+    const saved = localStorage.getItem(getPrefixedKey("rate_control_mode"));
+    return saved !== null ? saved : "";
   });
   const [videoBitrateMbps, setVideoBitrateMbps] = useState(0);
   const [presetValue, setPresetValue] = useState("");
@@ -1438,6 +1454,11 @@ function Sidebar() {
     const newStreamingModeState = !h264StreamingMode;
     setH264StreamingMode(newStreamingModeState);
     debouncedPostSetting({ h264_streaming_mode: newStreamingModeState });
+  };
+  const handleRateControlChange = (event) => {
+    const selectedRateControl = event.target.value;
+    setRateControlMode(selectedRateControl);
+    debouncedPostSetting({ rate_control_mode: selectedRateControl });
   };
   const handleAudioInputChange = (event) => {
     const deviceId = event.target.value;
@@ -2424,6 +2445,25 @@ function Sidebar() {
                     </select>
                   </div>
                 )}
+                {(renderableSettings.enableRateControl ?? true) && (
+                  <div className="dev-setting-item">
+                    <label htmlFor="rateControlSelect">
+                      {t("sections.video.rateControlLabel")}
+                    </label>
+                    <select
+                      id="rateControlSelect"
+                      value={rateControlMode}
+                      onChange={handleRateControlChange}
+                      disabled={!serverSettings || serverSettings.rate_control_mode?.allowed?.length <= 1}
+                    >
+                      {(serverSettings?.rate_control_mode?.allowed || rateControlOptions).map((rc) => (
+                        <option key={rc} value={rc}>
+                          {rc.toUpperCase()}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 {(isWebrtc || showFPS) && (renderableSettings.framerate ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="framerateSlider">
@@ -2443,7 +2483,8 @@ function Sidebar() {
                     />
                   </div>
                 )}
-                {isWebrtc && (renderableSettings.video_bitrate ?? true) && (
+                {((renderableSettings.enableRateControl && rateControlMode === RATE_CONTROL_CBR) ||
+                  (!renderableSettings.enableRateControl && isWebrtc)) && (renderableSettings.video_bitrate ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="videoBitrateSlider">
                       {t("sections.video.bitrateLabel", {
@@ -2504,7 +2545,8 @@ function Sidebar() {
                     )}
                   </>
                 )}
-                {!isWebrtc && showCRF && (renderableSettings.h264_crf ?? true) && (
+                {((renderableSettings.enableRateControl && rateControlMode === RATE_CONTROL_CRF) ||
+                  (!renderableSettings.enableRateControl && !isWebrtc)) && showCRF && (renderableSettings.h264_crf ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="videoCRFSlider">
                       {t("sections.video.crfLabel", { crf: h264_crf })}

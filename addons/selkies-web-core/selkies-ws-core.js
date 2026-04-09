@@ -49,7 +49,8 @@ const PER_DISPLAY_SETTINGS = [
     'h264_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
     'h264_paintover_crf', 'h264_paintover_burst_frames', 'use_paint_over_quality',
     'is_manual_resolution_mode', 'manual_width', 'manual_height',
-    'encoder', 'scaleLocallyManual', 'use_browser_cursors'
+    'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
+    'video_bitrate'
 ];
 // Microphone related resources
 let micStream = null;
@@ -188,6 +189,7 @@ let h264_paintover_crf = 18;
 let h264_paintover_burst_frames = 5;
 let use_paint_over_quality = true;
 let audio_bitrate = 320000;
+let videoBitrate = 8;
 let showStart = true;
 let status = 'connecting';
 let loadingText = '';
@@ -221,6 +223,7 @@ let lastFpsUpdateTime = performance.now();
 let statusDisplayElement;
 let playButtonElement;
 let overlayInput;
+let rateControlMode = 'crf';
 
 const getIntParam = (key, default_value) => {
   const prefixedKey = `${storageAppName}_${key}`;
@@ -379,6 +382,8 @@ is_manual_resolution_mode = getBoolParam('is_manual_resolution_mode', false);
 isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
 useCssScaling = getBoolParam('useCssScaling', false);
 trackpadMode = getBoolParam('trackpadMode', false);
+rateControlMode = getStringParam('rate_control_mode', rateControlMode);
+videoBitrate = getIntParam('video_bitrate', videoBitrate);
 if (getStringParam('scaling_dpi', null) === null) {
   const dpr = window.devicePixelRatio || 1;
   const target = Math.round(dpr * 4) * 24;
@@ -404,6 +409,7 @@ setIntParam('h264_paintover_burst_frames', h264_paintover_burst_frames);
 setIntParam('audio_bitrate', audio_bitrate);
 setStringParam('encoder', currentEncoderMode);
 setIntParam('scaling_dpi', scalingDPI);
+setIntParam('video_bitrate', videoBitrate);
 
 if (isSharedMode) {
     manual_width = 1280;
@@ -613,6 +619,8 @@ function getCurrentSettingsPayload() {
     settingsToSend['use_paint_over_quality'] = getBoolParam('use_paint_over_quality', true);
     settingsToSend['scaling_dpi'] = getIntParam('scaling_dpi', 96);
     settingsToSend['enable_binary_clipboard'] = getBoolParam('enable_binary_clipboard', false);
+    settingsToSend['rate_control_mode'] = getStringParam('rate_control_mode', 'crf');
+    settingsToSend['video_bitrate'] = getIntParam('video_bitrate', 8);
     if (window.is_manual_resolution_mode && manual_width != null && manual_height != null) {
         settingsToSend['is_manual_resolution_mode'] = true;
         settingsToSend['manual_width'] = roundDownToEven(manual_width);
@@ -2088,10 +2096,29 @@ function handleSettingsMessage(settings) {
     setTimeout(() => { window.location.reload(); }, 700);
     return;
   }
+  if (settings.rate_control_mode !== undefined) {
+    rateControlMode = settings.rate_control_mode;
+    setStringParam('rate_control_mode', rateControlMode);
+    fetchLatestRCvalue(rateControlMode);
+    settingsChanged = true;
+  }
+  if (settings.video_bitrate !== undefined) {
+    videoBitrate = parseInt(settings.video_bitrate, 10);
+    setIntParam('video_bitrate', videoBitrate);
+    settingsChanged = true;
+  }
   if (settingsChanged) {
     sendFullSettingsUpdateToServer('handleSettingsMessage');
   }
 }
+
+function fetchLatestRCvalue(newMode) {
+  if (newMode === "cbr") {
+    videoBitrate = getIntParam('video_bitrate', videoBitrate);
+  } else if (newMode === "crf") {
+    h264_crf = getIntParam('h264_crf', h264_crf);
+  }
+};
 
 function sendStatsMessage() {
   const stats = {
@@ -2816,7 +2843,7 @@ function handleDecodedFrame(frame) {
         'audio_bitrate', 'h264_fullcolor', 'h264_streaming_mode',
         'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'h264_paintover_crf',
         'h264_paintover_burst_frames', 'use_paint_over_quality', 'scaling_dpi',
-        'enable_binary_clipboard'
+        'enable_binary_clipboard', 'rate_control_mode', 'video_bitrate'
       ];
       const booleanSettingKeys = [
         'is_manual_resolution_mode', 'h264_fullcolor', 'h264_streaming_mode',
@@ -2825,7 +2852,7 @@ function handleDecodedFrame(frame) {
       const integerSettingKeys = [
         'framerate', 'h264_crf', 'audio_bitrate', 'jpeg_quality',
         'paint_over_jpeg_quality', 'h264_paintover_crf',
-        'h264_paintover_burst_frames', 'scaling_dpi'
+        'h264_paintover_burst_frames', 'scaling_dpi', 'video_bitrate'
       ];
 
       for (const key in localStorage) {
