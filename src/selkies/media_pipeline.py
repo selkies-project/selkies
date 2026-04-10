@@ -22,6 +22,7 @@
 import asyncio
 import logging
 import ctypes
+from enum import Enum
 from abc import ABCMeta, abstractmethod
 
 from pixelflux import CaptureSettings, ScreenCapture, StripeCallback
@@ -29,6 +30,10 @@ from pcmflux import AudioCapture, AudioCaptureSettings, AudioChunkCallback
 
 logger = logging.getLogger("media_pipeline")
 logger.setLevel(logging.INFO)
+
+class RateControlMode(str, Enum):
+    CBR = "cbr"
+    CRF = "crf"
 
 class MediaPipelineError(Exception):
     pass
@@ -66,25 +71,38 @@ class MediaPipeline(metaclass=ABCMeta):
     async def dynamic_idr_frame(self):
         pass
 
+    @abstractmethod
+    async def update_rate_control_mode(self, mode: RateControlMode):
+        pass
+
+    @abstractmethod
+    async def set_crf(self, crf: int):
+        pass
+
 class MediaPipelinePixel(MediaPipeline):
     def __init__(
         self,
         async_event_loop: asyncio.AbstractEventLoop,
-        encoder: str,
+        encoder_rtc: str,
         framerate: int = 30,
-        video_bitrate: int = 2000,
+        video_bitrate: int = 8,
         audio_bitrate: int = 128000,
         width: int = 1920,
         height: int = 1080,
         audio_channels: int = 2,
         audio_enabled: bool = True,
-        audio_device_name = 'output.monitor'
+        audio_device_name = 'output.monitor',
+        crf: int = 23,
+        rc_mode: RateControlMode = RateControlMode.CBR
     ):
         self.async_event_loop = async_event_loop
         self.audio_channels = audio_channels
-        self.encoder = encoder
+        self.encoder_rtc = encoder_rtc
         self.framerate = framerate
         self.video_bitrate = video_bitrate
+        self.rc_mode = rc_mode
+        # FIXME: h264_crf variable name could be encoder agnostic
+        self.h264_crf = crf
         self.audio_bitrate = audio_bitrate
         self.last_resize_success = True
         self.width = width
@@ -117,6 +135,51 @@ class MediaPipelinePixel(MediaPipeline):
         await self.restart_screen_capture()
         logger.info(f"Set pointer visibility to: {visible}")
 
+    async def update_rate_control_mode(self, mode: RateControlMode):
+        """Set rate control mode for video encoder.
+
+        :mode: Rate control mode, either "cbr" or "crf"
+        """
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
+
+        if mode == self.rc_mode:
+            return
+
+        if mode not in [RateControlMode.CBR, RateControlMode.CRF]:
+            logger.error(f"Invalid rate control mode: {mode}")
+            return
+
+        self.rc_mode = mode
+        try:
+            await self.restart_screen_capture()
+            logger.info(f"Updated rate control mode to: {self.rc_mode}")
+        except AttributeError:
+            logger.error("Video capture module does not support rate control mode updation")
+        except Exception as e:
+            logger.info(f"Error updating rate control mode {e}", exc_info=True)
+
+    async def set_crf(self, new_crf: int):
+        """Set video encoder target CRF.
+
+        :new_crf: CRF value
+        """
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
+
+        if self.rc_mode != RateControlMode.CRF or self.h264_crf == new_crf:
+            return
+
+        old_crf = self.h264_crf
+        self.h264_crf = new_crf
+        try:
+            await self.restart_screen_capture()
+            logger.info(f"Updated CRF: {old_crf} -> {new_crf}")
+        except AttributeError:
+            logger.error("Video capture module does not support CRF updation")
+        except Exception as e:
+            logger.info(f"Error updating CRF {e}", exc_info=True)
+
     async def set_video_bitrate(self, new_bitrate: int):
         """Set video encoder target bitrate.
 
@@ -125,13 +188,12 @@ class MediaPipelinePixel(MediaPipeline):
         if not self._is_screen_capturing or self.capture_module is None:
             return
 
-        new_bitrate *= 1000   # convert to kpbs
-        if new_bitrate <= 0 or self.video_bitrate == new_bitrate:
+        if self.rc_mode == RateControlMode.CRF or new_bitrate <= 0 or self.video_bitrate == new_bitrate:
             return
 
         try:
-            await self.async_event_loop.run_in_executor(None, self.capture_module.update_video_bitrate, new_bitrate)
-            logger.info(f"Updated video bitrate: {self.video_bitrate} -> {new_bitrate}")
+            await self.async_event_loop.run_in_executor(None, self.capture_module.update_video_bitrate, new_bitrate * 1000)
+            logger.info(f"Updated video bitrate: {self.video_bitrate}Mbps -> {new_bitrate}Mbps")
             self.video_bitrate = new_bitrate
         except AttributeError:
             logger.error("Video capture module does not support video bitrate updation")
@@ -196,18 +258,18 @@ class MediaPipelinePixel(MediaPipeline):
         cs.target_fps = float(self.framerate)
         cs.capture_cursor = self.capture_cursor
         cs.output_mode = 1
+        cs.auto_adjust_screen_capture_size = True
 
-        if self.encoder in ["nvh264enc", "x264enc"]:
+        if self.encoder_rtc in ["nvh264enc", "x264enc"]:
             cs.h264_streaming_mode = True
             cs.h264_fullframe = True
-            cs.h264_crf = 23
-            cs.h264_cbr_mode = True
-            cs.h264_bitrate_kbps = self.video_bitrate
+            cs.h264_crf = self.h264_crf
+            # Setting h264_cbr_mode to True will make the encoder ignore the crf value
+            cs.h264_cbr_mode = self.rc_mode == RateControlMode.CBR
+            cs.h264_bitrate_kbps = self.video_bitrate * 1000  # Convert Mbps to kbps
             cs.vaapi_render_node_index = -1
-            if self.encoder == "x264enc":
-                cs.use_cpu = True
-
-        cs.auto_adjust_screen_capture_size = True
+            if self.encoder_rtc == "x264enc":
+                cs.use_cpu = True        
         return cs
 
     async def start_screen_capture(self):
@@ -215,7 +277,7 @@ class MediaPipelinePixel(MediaPipeline):
             return
 
         settings = self.generate_capture_settings()
-        def screen_capture_callback(result_ptr, user_data):
+        def screen_capture_callback(result_ptr, _):
             if not result_ptr:
                 return
             try:

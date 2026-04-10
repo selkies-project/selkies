@@ -35,7 +35,7 @@ logger = logging.getLogger("main")
 logger.setLevel(logging.INFO)
 
 from .rtc import RTCApp
-from .media_pipeline import MediaPipeline, MediaPipelinePixel
+from .media_pipeline import MediaPipeline, MediaPipelinePixel, RateControlMode
 from .webrtc_signaling import WebRTCSignaling
 from .signaling_server import WebRTCSimpleServer
 from .input_handler import WebRTCInput
@@ -136,14 +136,17 @@ class WebRTCApp:
 
         self.media_pipeline = MediaPipelinePixel(
             async_event_loop=asyncio.get_running_loop(),
-            encoder=self.args.encoder_rtc,
+            encoder_rtc=self.args.encoder_rtc,
             framerate=int(self.args.framerate),
-            video_bitrate=int(self.args.video_bitrate) * 1000,  # Convert to kbps
+            video_bitrate=int(self.args.video_bitrate),
             audio_bitrate=int(self.args.audio_bitrate),
             audio_channels=int(self.args.audio_channels),
             audio_enabled=self.args.audio_enabled,
-            audio_device_name=self.args.audio_device_name
+            audio_device_name=self.args.audio_device_name,
+            crf=int(self.args.h264_crf),
         )
+        if self.args.enable_rate_control:
+            self.media_pipeline.rc_mode = RateControlMode(self.args.rate_control_mode)
 
         # Fetch rtc configuration
         stun_servers, turn_servers, rtc_config, self.monitoring_utils_used = await get_rtc_configuration(self.args)
@@ -300,6 +303,8 @@ class WebRTCApp:
         self.input_handler.on_ping_response = lambda latency: self.rtc_app.send_latency_time(latency)
         self.input_handler.on_client_webrtc_stats = self.handle_client_werbtc_stats
         self.input_handler.on_update_settings = self.handle_update_settings
+        self.input_handler.on_update_rate_control_mode = self.media_pipeline.update_rate_control_mode
+        self.input_handler.on_update_crf = self.media_pipeline.set_crf
 
         if self.args.enable_resize:
             self.input_handler.on_resize = self.on_resize_handler
@@ -456,6 +461,8 @@ class WebRTCApp:
     async def handle_update_settings(self, settings_json: dict) -> None:
         # TODO: Gradually expand the list of settings that can be updated via this method
         settings_allowed_to_update = [
+            'rate_control_mode',
+            'h264_crf',
             'video_bitrate',
             'audio_bitrate',
             'framerate',
@@ -503,15 +510,22 @@ class WebRTCApp:
                 return def_val_meta if def_val_meta is not None else setting_def.get('default')
             return client_value
 
-        for key, value in settings_json.items():
-            if key not in settings_allowed_to_update:
-                logger.warning(f"Client attempted to update disallowed setting '{key}'. Ignoring.")
+        for key in settings_allowed_to_update:
+            client_value = settings_json.get(key)
+            if client_value is None:
+                continue
+            if key == 'rate_control_mode' and self.args.enable_rate_control is False:
+                logger.debug(f"Server has rate control disabled. Ignoring update for '{key}'.")
                 continue
             current_value = getattr(self.args, key, None)
             if current_value is not None:
-                sanitized_value = sanitize_value(key, value)
+                sanitized_value = sanitize_value(key, client_value)
                 if sanitized_value is not None and sanitized_value != current_value:
-                    if key == 'video_bitrate' and self.media_pipeline:
+                    if key == 'rate_control_mode':
+                        await self.media_pipeline.update_rate_control_mode(RateControlMode(sanitized_value))
+                    elif key == 'h264_crf':
+                        await self.media_pipeline.set_crf(sanitized_value)
+                    elif key == 'video_bitrate' and self.media_pipeline:
                         await self.media_pipeline.set_video_bitrate(sanitized_value)
                     elif key == 'audio_bitrate' and self.media_pipeline:
                         await self.media_pipeline.set_audio_bitrate(int(sanitized_value))

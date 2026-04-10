@@ -55,6 +55,7 @@ const en = {
             paintOverJpegQualityLabel: "Paintover Quality: {paintOverJpegQuality}",
             paintoverCrfLabel: "Paint-Overs CRF ({crf}):",
             usePaintOverQualityLabel: "Use Paint-Overs",
+            rateControlLabel: "Encoder Rate Control Mode",
         },
         audio: {
             title: "Audio Settings",

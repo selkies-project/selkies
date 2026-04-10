@@ -32,7 +32,7 @@ import json
 from PIL import Image 
 import urllib.parse
 import urllib.request
-
+from .media_pipeline import RateControlMode
 try:
     from xkbcommon import xkb
 except ImportError:
@@ -883,6 +883,8 @@ class WebRTCInput:
         self.clipboard_injection_lock = asyncio.Lock()
         self.keyboard_queue = asyncio.Queue()
         self.keyboard_worker_task = None
+        self.on_update_rate_control_mode = lambda mode: logger_webrtc_input.warning("unhandled on_update_rate_control_mode")
+        self.on_update_crf = lambda value: logger_webrtc_input.warning("unhandled on_update_crf")
 
         if self.is_wayland:
             import shutil
@@ -1992,7 +1994,7 @@ class WebRTCInput:
             except Exception as e:
                 logger_webrtc_input.error(f"Error in keyboard worker: {e}", exc_info=True)
 
-    async def on_message(self, msg, display_id='primary'):
+    async def on_message(self, msg: str, display_id='primary'):
         toks = msg.split(",")
         msg_type = toks[0]
 
@@ -2260,6 +2262,22 @@ class WebRTCInput:
                 asyncio.create_task(self.update_binary_clipboard_setting(enable))
             except Exception as e:
                 logger_webrtc_input.error(f"Error updating binary clipboard setting: {e}")
+        elif msg_type == "_rc":
+            try:
+                mode = toks[1].strip().lower()
+                rc_mode = RateControlMode(mode)
+                asyncio.create_task(self.on_update_rate_control_mode(rc_mode))
+            except Exception as e:
+                logger_webrtc_input.error(f"Error updating rate control mode: {e}")
+        elif msg_type == "_crf":
+            try:
+                crf_value = int(toks[1])
+                if not (0 <= crf_value <= 51):
+                    logger_webrtc_input.warning(f"CRF value out of range (0-51): {crf_value}")
+                    return
+                asyncio.create_task(self.on_update_crf(crf_value))
+            except Exception as e:
+                logger_webrtc_input.error(f"Error updating CRF value: {e}")
         elif toks[0].startswith("FILE_UPLOAD_START:"):
             if self.upload_dir_path is None:
                 logger_webrtc_input.warning("Upload directory doesn't exits, skipping the file upload")
