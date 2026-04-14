@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <errno.h>
+#include <sys/eventfd.h>
 #include <fnmatch.h>       // For fnmatch if used (like for "js*")
 #include <sys/types.h>     // For dev_t
 #include <sys/sysmacros.h> // For major() and minor()
@@ -243,6 +244,7 @@ struct udev_monitor {
     struct udev *udev_ctx;
     int n_ref;
     char name[64];
+    int fd;
 };
 
 struct udev *udev_new(void) {
@@ -1123,6 +1125,7 @@ struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev, const char
         return NULL;
     }
     mon->n_ref = 1;
+    mon->fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (name) {
         strncpy(mon->name, name, sizeof(mon->name) - 1);
         mon->name[sizeof(mon->name) - 1] = '\0';
@@ -1143,12 +1146,13 @@ struct udev_monitor *udev_monitor_ref(struct udev_monitor *udev_monitor) {
 
 struct udev_monitor *udev_monitor_unref(struct udev_monitor *udev_monitor) {
     FAKE_UDEV_LOG_DEBUG("Enter for monitor %p", (void*)udev_monitor);
-    if (!udev_monitor) {
-        return NULL;
-    }
+    if (!udev_monitor) return NULL;
     udev_monitor->n_ref--;
     if (udev_monitor->n_ref <= 0) {
         udev_unref(udev_monitor->udev_ctx);
+        if (udev_monitor->fd >= 0) {
+            close(udev_monitor->fd);
+        }
         free(udev_monitor);
         return NULL;
     }
@@ -1162,7 +1166,7 @@ int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
 
 int udev_monitor_get_fd(struct udev_monitor *udev_monitor) {
     if (!udev_monitor) return -1;
-    return STDIN_FILENO;
+    return udev_monitor->fd;
 }
 
 struct udev_device *udev_monitor_receive_device(struct udev_monitor *udev_monitor) {
