@@ -463,6 +463,38 @@ const roundDownToEven = (num) => {
   return Math.floor(num / 2) * 2;
 };
 
+const isChromium = (() => {
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
+  const isCriOS = /CriOS/.test(navigator.userAgent);
+  const hasChromeObj = typeof window.chrome !== 'undefined';
+  return hasChromeObj && !isIOS && !isFirefox && !isCriOS;
+})();
+
+const getDynamicH264Codec = (width, height, is444, fps) => {
+  if (!isChromium) {
+    return 'avc1.42E01E';
+  }
+  const pixelsPerSecond = width * height * fps;
+  const profile = is444 ? 'F400' : '7A00';
+  let level;
+  if (pixelsPerSecond <= 1920 * 1080 * 60) {
+    level = '2A';
+  } else if (pixelsPerSecond <= 3840 * 2160 * 30) {
+    level = '33';
+  } else if (pixelsPerSecond <= 3840 * 2160 * 60) {
+    level = '34';
+  } else if (pixelsPerSecond <= 7680 * 4320 * 30) {
+    level = '3C';
+  } else if (pixelsPerSecond <= 7680 * 4320 * 60) {
+    level = '3D';
+  } else {
+    level = '3E';
+  }
+  return `avc1.${profile}${level}`;
+};
+
 const updateCanvasImageRendering = () => {
   if (!canvas) return;
   if (!antiAliasingEnabled) {
@@ -2215,8 +2247,9 @@ document.addEventListener('DOMContentLoaded', () => {
       output: handleDecodedFrame,
       error: (e) => initiateFallback(e, 'main_decoder'),
     });
+    const dynamicCodec = getDynamicH264Codec(actualCodedWidth, actualCodedHeight, h264_fullcolor);
     const decoderConfig = {
-      codec: 'avc1.42E01E',
+      codec: dynamicCodec,
       codedWidth: actualCodedWidth,
       codedHeight: actualCodedHeight,
       optimizeForLatency: true, 
@@ -3194,11 +3227,13 @@ function handleDecodedFrame(frame) {
                     output: handleDecodedVncStripeFrame.bind(null, vncStripeYStart, vncFrameID),
                     error: (e) => initiateFallback(e, `stripe_decoder_Y=${vncStripeYStart}`)
                 });
+                const dynamicCodec = getDynamicH264Codec(stripeWidth, stripeHeight, h264_fullcolor);
                 const decoderConfig = {
-                    codec: 'avc1.42E01E',
+                    codec: dynamicCodec,
                     codedWidth: stripeWidth,
                     codedHeight: stripeHeight,
-                    optimizeForLatency: true
+                    optimizeForLatency: true,
+                    hardwareAcceleration: "prefer-software"
                 };
                 vncStripeDecoders[vncStripeYStart] = {
                     decoder: newStripeDecoder,
