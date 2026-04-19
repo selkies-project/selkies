@@ -1419,7 +1419,7 @@ class WebRTCInput:
                 await self.send_x11_keypress(KEY_INSERT, down=True)
                 await self.send_x11_keypress(KEY_INSERT, down=False)
                 await self.send_x11_keypress(KEY_SHIFT_L, down=False)
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(0.05)
 
                 if old_data is not None:
                     await self.write_clipboard(old_data, mime_type=old_mime or "text/plain")
@@ -1953,42 +1953,73 @@ class WebRTCInput:
         await self.__gamepad_disconnect()
 
     async def _keyboard_worker(self):
+        unicode_buffer = []
+
+        async def flush_buffer():
+            if unicode_buffer:
+                combined_text = "".join(unicode_buffer)
+                unicode_buffer.clear()
+                await self._inject_unicode_via_clipboard(combined_text)
+
         while True:
             try:
-                msg_type, data = await self.keyboard_queue.get()
-                
-                if msg_type == "kd":
-                    keysym = data
-                    is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
-                    if keysym in self.MODIFIER_KEYSYMS:
-                        self.active_modifiers.add(keysym)
-                    if is_printable and not self.active_modifiers:
-                        unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
-                        try:            
-                            char_to_type = chr(unicode_codepoint)
-                            await self.send_x11_keypress(keysym, down=True)
-                        except (ValueError, TypeError):
-                            await self.send_x11_keypress(keysym, down=True)
-                    else:   
+                if unicode_buffer:
+                    try:
+                        msg_type, data = await asyncio.wait_for(self.keyboard_queue.get(), timeout=0.15)
+                    except asyncio.TimeoutError:
+                        await flush_buffer()
+                        continue
+                else:
+                    msg_type, data = await self.keyboard_queue.get()
+
+                try:
+                    keysym = data if msg_type in ("kd", "ku") else None
+                    is_unicode_fallback = False
+                    if keysym is not None:
+                        is_unicode_fallback = (0xA0 <= keysym <= 0xFF) or keysym == 0x20AC or ((keysym & 0xFF000000) == 0x01000000)
+
+                    if msg_type == "kd":
+                        if is_unicode_fallback and not self.active_modifiers:
+                            unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
+                            try:
+                                char_to_type = chr(unicode_codepoint)
+                                unicode_buffer.append(char_to_type)
+                                continue
+                            except ValueError:
+                                pass
+                        
+                        if keysym == 65288 and unicode_buffer:
+                            unicode_buffer.pop() 
+                            continue
+                            
+                        await flush_buffer()
+                        
+                        if keysym in self.MODIFIER_KEYSYMS:
+                            self.active_modifiers.add(keysym)
+                        
                         await self.send_x11_keypress(keysym, down=True)
 
-                elif msg_type == "ku":
-                    keysym = data
-                    if keysym in self.MODIFIER_KEYSYMS:
-                        self.active_modifiers.discard(keysym)
-                    if keysym in self.atomically_typed_keys:
-                        self.atomically_typed_keys.discard(keysym)
-                    else:
-                        await self.send_x11_keypress(keysym, down=False)
+                    elif msg_type == "ku":
+                        if is_unicode_fallback:
+                            continue
 
-                elif msg_type == "kr":
-                    await self.reset_keyboard()
+                        if keysym in self.MODIFIER_KEYSYMS:
+                            self.active_modifiers.discard(keysym)
+                        if keysym in self.atomically_typed_keys:
+                            self.atomically_typed_keys.discard(keysym)
+                        else:
+                            await self.send_x11_keypress(keysym, down=False)
 
-                elif msg_type == "co_end":
-                    text_to_type = data
-                    await self._inject_unicode_via_clipboard(text_to_type)
+                    elif msg_type == "kr":
+                        await flush_buffer()
+                        await self.reset_keyboard()
 
-                self.keyboard_queue.task_done()
+                    elif msg_type == "co_end":
+                        unicode_buffer.append(data)
+
+                finally:
+                    self.keyboard_queue.task_done()
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
