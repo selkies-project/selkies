@@ -1455,6 +1455,14 @@ export default function webrtc() {
 		}
 	}
 
+	// Returns URL pathname against browser's URL even when running under
+	// iframe context where the pathname could be root directory `/` otherwise.
+	function getRoutePrefix() {
+		const pathname = window.location.pathname;
+		const dirPath = pathname.substring(0, pathname.lastIndexOf('/') + 1);
+		return dirPath.replace(/\/$/, '');
+	}
+
 	return {
 		initialize() {
 			InitUI();
@@ -1523,7 +1531,7 @@ export default function webrtc() {
 				console.log("Dynamically added #keyboard-input-assist element.");
 			}
 			// Fetch locally stored application data
-			appName = window.location.pathname.endsWith("/") && (window.location.pathname.split("/")[1]) || "webrtc";
+			appName = "webrtc"
 			debug = getBoolParam('debug', false);
 			setBoolParam('debug', debug);
 			turnSwitch = getBoolParam('turn_switch', false);
@@ -1566,8 +1574,7 @@ export default function webrtc() {
 			}
 
 			// WebRTC entrypoint, connect to the signaling server
-			var pathname = window.location.pathname;
-			pathname = pathname.slice(0, pathname.lastIndexOf("/") + 1);
+			var pathname = getRoutePrefix() + "/";
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
 			var url = new URL(protocol + window.location.host + pathname + appName + "/signaling/");
 			var signaling = new WebRTCDemoSignaling(url, clientRole, clientSlot, isStrictViewer);
@@ -1835,8 +1842,11 @@ export default function webrtc() {
 			}
 
 			// Fetch RTC configuration containing STUN/TURN servers.
-			fetch("./turn")
+			fetch(getRoutePrefix() + "/turn")
 				.then(function (response) {
+					if (!response.ok) {
+						throw new Error(`Status: ${response.status}`);
+					}
 					return response.json();
 				})
 				.then((config) => {
@@ -1859,7 +1869,12 @@ export default function webrtc() {
 					}
 					webrtc.rtcPeerConfig = config;
 					webrtc.connect();
-				});
+				})
+				.catch((error) => {
+					status = `Failed to fetch TURN server details. Check the server URL. Error: ${error}`
+					console.error(status);
+					updateStatusDisplay();
+				})
 		},
 		cleanup() {
 			// reset the data

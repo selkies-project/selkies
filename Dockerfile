@@ -2,6 +2,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+FROM ghcr.io/selkies-project/selkies/selkies-web:main as selkies-web
 FROM python:3
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
@@ -16,6 +17,8 @@ WORKDIR /opt/pypi
 # Copy source files
 COPY src ./src
 COPY README.md pyproject.toml ./
+# Include the production built web files in the wheel package
+COPY --from=selkies-web /usr/share/nginx/html ./src/selkies/selkies_web
 
 ARG PYPI_PACKAGE=selkies
 ARG PACKAGE_VERSION=0.0.0.dev0

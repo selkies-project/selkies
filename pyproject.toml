@@ -25,7 +25,6 @@ classifiers = [
 ]
 requires-python = ">=3.8"
 dependencies = [
-    "websockets>=13.0",
     "gputil",
     "prometheus_client",
     "msgpack",
@@ -62,5 +61,11 @@ Homepage = "https://github.com/selkies-project/selkies"
 selkies = "selkies.__main__:main"
 selkies-resize = "selkies.display_utils:entrypoint"
 
+# Package Static web files as part of distribution wheel
+[tool.setuptools.package-data]
+"selkies.selkies_web" = ["**/*"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+# Namespaces allow us to include non-python packages
+namespaces = true
