@@ -1201,7 +1201,7 @@ class WebRTCInput:
                     scancode = self.wayland_scancode_map.get(lower_sym)
                 except: pass
 
-            if scancode is not None and hasattr(self, 'wayland_shift_required_keys') and keysym in self.wayland_shift_required_keys:
+            if down and scancode is not None and hasattr(self, 'wayland_shift_required_keys') and keysym in self.wayland_shift_required_keys:
                 if 65505 not in self.active_modifiers and 65506 not in self.active_modifiers:
                     scancode = None
 
