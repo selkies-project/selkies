@@ -133,8 +133,9 @@ async def run():
     manager = StreamSupervisor(managed_stream_modes)
     api_task = None
     if settings.enable_dual_mode[0]:
-        api_task = asyncio.create_task(create_api_server(manager, host='localhost', port=8082))
-        logger.info("Dual mode enabled: Supervisor API server started on port 8082")
+        supervisor_port = settings.supervisor_port
+        api_task = asyncio.create_task(create_api_server(manager, host='localhost', port=supervisor_port))
+        logger.info(f"Dual mode enabled: Supervisor API server started on port {supervisor_port}")
     await manager.switch_to_mode(mode)
     logger.info(f"Starting Selkies in '{mode}' mode.")
     try:
