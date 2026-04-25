@@ -995,7 +995,7 @@ function Sidebar() {
 
   const [streamMode, setStreamMode] = useState(
     localStorage.getItem(getPrefixedKey("stream_mode")) ||
-      (typeof window !== "undefined" && window.__SELKIES_INITIAL_MODE__) ||
+      (typeof window !== "undefined" && window.__SELKIES_STREAMING_MODE__) ||
       DEFAULT_STREAM_MODE
   );
   const [encoderRTC, setEncoderRTC] = useState(

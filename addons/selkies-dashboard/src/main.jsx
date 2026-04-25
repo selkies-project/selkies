@@ -4,21 +4,25 @@ import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
 import PlayerGamepadButton from './components/PlayerGamepadButton.jsx';
 import './index.css';
-import './selkies-core.js';
 
 // Probe the dual-mode supervisor for the currently active streaming mode
-// before mounting React, so the dashboard's initial streamMode matches the
-// server. Falls back silently when no supervisor is running (single-mode setups).
+// before importing selkies-core. selkies-core reads
+// window.__SELKIES_STREAMING_MODE__ at module-evaluation time and starts the
+// transport immediately, so the probe must finish first. Falls back silently
+// (single-mode setups have no /status endpoint).
 async function detectInitialMode() {
   try {
-    const r = await fetch('./status', { credentials: 'same-origin' });
+    const r = await fetch('./status', {
+      credentials: 'same-origin',
+      signal: AbortSignal.timeout(3000),
+    });
     if (!r.ok) return;
     const data = await r.json();
     if (data && data.current_mode) {
-      window.__SELKIES_INITIAL_MODE__ = data.current_mode;
+      window.__SELKIES_STREAMING_MODE__ = data.current_mode;
     }
   } catch {
-    // /status not available (no dual-mode), keep default
+    // /status missing, slow, or returned bad JSON - keep default
   }
 }
 
@@ -28,6 +32,7 @@ const playerClientModes = ['#player2', '#player3', '#player4'];
 
 (async () => {
   await detectInitialMode();
+  await import('./selkies-core.js');
   if (!noDashboardModes.includes(currentHash)) {
     const dashboardRootElement = document.createElement('div');
     dashboardRootElement.id = 'dashboard-root';
