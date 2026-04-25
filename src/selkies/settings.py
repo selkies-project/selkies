@@ -95,6 +95,7 @@ COMMON_SETTING_DEFINITIONS = [
     {'name': 'debug', 'type': 'bool', 'default': False, 'help': 'Enable debug logging.'},
     {'name': 'mode', 'type': 'str', 'default': 'websockets', 'help': "Specify the mode: 'webrtc' or 'websockets'; defaults to websockets"},
     {'name': 'enable_dual_mode', 'type': 'bool', 'default': False, 'help': 'Enable switching Streaming modes from UI'},
+    {'name': 'supervisor_port', 'type': 'int', 'default': 8084, 'help': 'Port for the dual-mode supervisor API (/switch and /status endpoints) when enable_dual_mode is true.'},
     {'name': 'audio_device_name', 'type': 'str', 'default': 'output.monitor', 'help': 'Audio device name for pcmflux capture.'},
 ]
 
@@ -114,7 +115,6 @@ SETTING_DEFINITIONS_WEBSOCKETS = [
     # Server Startup & Operational Settings
     {'name': 'port', 'type': 'int', 'default': 8081, 'env_var': 'CUSTOM_WS_PORT', 'help': 'Port for the data websocket server.'},
     {'name': 'control_port', 'type': 'int', 'default': 8083, 'help': 'Port for the internal control plane API.'},
-    {'name': 'supervisor_port', 'type': 'int', 'default': 8083, 'env_var': 'SELKIES_SUPERVISOR_PORT', 'help': 'Port for the dual-mode supervisor API (handles /switch and /status endpoints when enable_dual_mode is true).'},
     {'name': 'master_token', 'type': 'str', 'default': '', 'help': 'Master token to enable secure mode and protect the control plane API.'},
     {'name': 'dri_node', 'type': 'str', 'default': '', 'env_var': 'DRI_NODE', 'help': 'Path to the DRI render node for VA-API.'},
     {'name': 'watermark_path', 'type': 'str', 'default': '', 'env_var': 'WATERMARK_PNG', 'help': 'Absolute path to the watermark PNG file.'},
