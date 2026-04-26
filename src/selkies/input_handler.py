@@ -1196,7 +1196,7 @@ class WebRTCInput:
                 unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
                 try:
                     char = chr(unicode_codepoint)
-                    if not char.isalpha() and char != ' ':
+                    if not char.isalpha() and char != ' ' and char != '-':
                         is_symbol = True
                 except ValueError:
                     pass
