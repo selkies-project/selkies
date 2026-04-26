@@ -951,7 +951,7 @@ const initializeUI = () => {
   statusDisplayElement.textContent = 'Connecting...';
   videoContainer.appendChild(statusDisplayElement);
   overlayInput = document.createElement('input');
-  overlayInput.type = 'text';
+  overlayInput.type = 'search';
   overlayInput.readOnly = false;
   overlayInput.autocomplete = 'off';
   overlayInput.id = 'overlayInput';
@@ -1008,7 +1008,7 @@ const initializeUI = () => {
 
   if (!document.getElementById('keyboard-input-assist')) {
     const keyboardInputAssist = document.createElement('input');
-    keyboardInputAssist.type = 'text';
+    keyboardInputAssist.type = 'search';
     keyboardInputAssist.id = 'keyboard-input-assist';
     keyboardInputAssist.style.position = 'absolute';
     keyboardInputAssist.style.left = '-9999px';

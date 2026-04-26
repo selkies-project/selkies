@@ -2237,7 +2237,7 @@ function Sidebar() {
                 <FullscreenIcon />
               </button>
             )}
-            {(isMobile || hasDetectedTouch) ? (
+            {((isMobile || hasDetectedTouch) && isKeyboardButtonVisible) ? (
               (renderableSettings.trackpad ?? true) && (
                 <button
                   className={`header-action-button trackpad-mode-button ${isTrackpadModeActive ? "active" : ""}`}
