@@ -1189,7 +1189,19 @@ class WebRTCInput:
 
     async def send_x11_keypress(self, keysym, down=True):
         if self.is_wayland and self.wayland_input:
-            if (0xA0 <= keysym <= 0xFF) or keysym == 0x20AC or ((keysym & 0xFF000000) == 0x01000000):
+            is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
+            is_symbol = False
+            
+            if is_printable:
+                unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
+                try:
+                    char = chr(unicode_codepoint)
+                    if not char.isalpha() and char != ' ':
+                        is_symbol = True
+                except ValueError:
+                    pass
+
+            if is_symbol or keysym == 0x20AC:
                 await self._xdotool_fallback(keysym, down)
                 return
 
