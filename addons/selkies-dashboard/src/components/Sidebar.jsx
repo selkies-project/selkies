@@ -994,7 +994,9 @@ function Sidebar() {
   };
 
   const [streamMode, setStreamMode] = useState(
-    localStorage.getItem(getPrefixedKey("stream_mode")) || DEFAULT_STREAM_MODE
+    localStorage.getItem(getPrefixedKey("stream_mode")) ||
+      (typeof window !== "undefined" && window.__SELKIES_STREAMING_MODE__) ||
+      DEFAULT_STREAM_MODE
   );
   const [encoderRTC, setEncoderRTC] = useState(
     localStorage.getItem(getPrefixedKey("encoder_rtc")) || DEFAULT_WEBRTC_ENCODER
