@@ -38,3 +38,30 @@ RUN \
   cp -r ../selkies-web-core/dist/jsdb dist/ && \
   mkdir -p /usr/share/nginx/html && \
   cp -ar dist/* /usr/share/nginx/html/;
+
+# Create manifest.json
+RUN cat <<EOF > /usr/share/nginx/html/manifest.json
+{
+  "name": "Selkies",
+  "short_name": "Selkies",
+  "manifest_version": 2,
+  "version": "1.0.0",
+  "display": "fullscreen",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    {
+      "src": "icon.png",
+      "type": "image/png",
+      "sizes": "180x180"
+    }
+  ],
+  "start_url": "/"
+}
+EOF
+
+# Download Selkies web app icons
+RUN curl -o /usr/share/nginx/html/icon.png \
+      https://raw.githubusercontent.com/linuxserver/docker-templates/master/linuxserver.io/img/selkies-logo.png && \
+    curl -o /usr/share/nginx/html/favicon.ico \
+      https://raw.githubusercontent.com/linuxserver/docker-templates/refs/heads/master/linuxserver.io/img/selkies-icon.ico

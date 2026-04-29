@@ -415,7 +415,7 @@ class RTCApp:
                     if pts is not None:
                         packet.pts = pts
                         packet.dts = packet.pts
-                    if self.video_pipeline_bridge != None:
+                    if self.video_pipeline_bridge is not None:
                         await self.video_pipeline_bridge.set_data(packet)
                 except Exception as e:
                     logger.error(f"error processing video sample: {e}")
@@ -426,7 +426,7 @@ class RTCApp:
                     packet.time_base = Fraction(1, 48000)
                     if pts is not None:
                         packet.pts = pts
-                    if self.audio_pipeline_bridge != None:
+                    if self.audio_pipeline_bridge is not None:
                         await self.audio_pipeline_bridge.set_data(packet)
                 except Exception as e:
                     logger.error(f"error processing audio sample: {e}")
@@ -703,7 +703,7 @@ class RTCApp:
             logger.info("Starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._start_rtc_pipeline(client_peer_id, client_type)
         except Exception as e:
-            logger.error("Error starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
+            logger.error(f"Error starting RTC pipeline: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
         else:
             logger.info("RTC pipeline started successfully", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
 
@@ -713,7 +713,7 @@ class RTCApp:
             logger.info("Stopping RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._stop_rtc_pipeline(client_peer_id)
         except Exception as e:
-            logger.error("Error stopping RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
+            logger.error(f"Error stopping RTC pipeline: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
         else:
             logger.info("RTC pipeline stopped successfully", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
 

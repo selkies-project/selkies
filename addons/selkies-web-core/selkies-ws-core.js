@@ -2799,6 +2799,18 @@ function handleDecodedFrame(frame) {
   let websocketEndpointURL = new URL(`${ws_protocol}${window.location.host}${pathname}`);
   if (isTokenAuthMode) {
       websocketEndpointURL.search = `?token=${authToken}`;
+  } else if (isSharedMode) {
+      // Pass role/slot as query params so the server can assign permissions
+      // (URL fragments are never transmitted to the server per HTTP spec)
+      const wsParams = new URLSearchParams();
+      wsParams.set('role', 'viewer');
+      if (detectedSharedModeType && detectedSharedModeType.startsWith('player')) {
+          const playerSlot = detectedSharedModeType.replace('player', '');
+          if (playerSlot >= 2 && playerSlot <= 4) {
+              wsParams.set('slot', playerSlot);
+          }
+      }
+      websocketEndpointURL.search = wsParams.toString();
   }
   websocketEndpointURL.pathname += 'websockets';
 

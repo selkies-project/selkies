@@ -44,28 +44,20 @@ X11_CAPTURE_AVAILABLE = False
 PCMFLUX_AVAILABLE = False
 
 import asyncio
-import argparse
 import base64
 import ctypes
 import json
-import pathlib
 import re
-import struct
 from asyncio import subprocess
-import urllib.parse
-import sys
 import time
-import io
 from enum import Enum
-from PIL import Image, ImageDraw
-import websockets
-import websockets.asyncio.server as ws_async
-from aiohttp import web
+from aiohttp import web, WSMsgType
 from collections import OrderedDict, deque
 from datetime import datetime
 from shutil import which
 from signal import SIGINT, signal
-from .settings import settings_ws as settings, FINAL_SETTING_DEFINITIONS_WEBSOCKETS as SETTING_DEFINITIONS
+from .stream_server import BaseStreamingService
+from .settings import settings, SETTING_DEFINITIONS
 
 try:
     from pcmflux import AudioCapture, AudioCaptureSettings, AudioChunkCallback
@@ -111,9 +103,45 @@ except OSError as e:
     logger.error(f"Could not create upload directory {upload_dir_path}: {e}")
     upload_dir_path = None
 
-config_gate = asyncio.Event()
 user_tokens = {}
 client_permissions = {}
+active_mk_token = None
+
+async def _broadcast_to_clients(clients, message):
+    """Broadcast concurrently to all clients - only remove on clear connection errors."""
+    if not clients:
+        return
+
+    client_task_pairs = []
+    closed_clients = set()
+
+    for client in clients:
+        if client.closed:
+            closed_clients.add(client)
+            continue
+        if isinstance(message, bytes):
+            task = client.send_bytes(message)
+        else:
+            task = client.send_str(message)
+        client_task_pairs.append((client, task))
+
+    tasks = [task for _, task in client_task_pairs]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for (client, _), result in zip(client_task_pairs, results):
+        if isinstance(result, Exception):
+            # Only remove on clear connection closure errors
+            if isinstance(result, ConnectionResetError):
+                closed_clients.add(client)
+            # For OSError and RuntimeError, check if they're connection-related
+            elif isinstance(result, (OSError, RuntimeError)):
+                err_msg = str(result).lower()
+                if any(term in err_msg for term in ['broken pipe', 'connection reset', 'closed']):
+                    closed_clients.add(client)
+            else:
+                data_logger.warning(f"Broadcast exception (client not removed): {type(result).__name__}: {result}")
+
+    if closed_clients:
+        clients -= closed_clients
 
 class SelkiesAppError(Exception):
     pass
@@ -168,20 +196,20 @@ class SelkiesStreamingApp:
                     message = f"clipboard_binary,{mime_type},{encoded_data}"
                 else:
                     message = f"clipboard,{encoded_data}"
-                websockets.broadcast(self.data_streaming_server.clients, message)
+                await _broadcast_to_clients(self.data_streaming_server.clients, message)
             else:
                 data_logger.info(f"Sending large clipboard data ({mime_type}, {total_size} bytes) via multipart.")
                 start_message = f"clipboard_start,{mime_type},{total_size}"
-                websockets.broadcast(self.data_streaming_server.clients, start_message)
+                await _broadcast_to_clients(self.data_streaming_server.clients, start_message)
                 offset = 0
                 while offset < total_size:
                     chunk = data_bytes[offset:offset + CLIPBOARD_CHUNK_SIZE]
                     encoded_chunk = base64.b64encode(chunk).decode('ascii')
                     data_message = f"clipboard_data,{encoded_chunk}"
-                    websockets.broadcast(self.data_streaming_server.clients, data_message)
+                    await _broadcast_to_clients(self.data_streaming_server.clients, data_message)
                     offset += len(chunk)
                     await asyncio.sleep(0)
-                websockets.broadcast(self.data_streaming_server.clients, "clipboard_finish")
+                await _broadcast_to_clients(self.data_streaming_server.clients, "clipboard_finish")
                 data_logger.info("Finished sending multi-part clipboard data.")
         except Exception as e:
             data_logger.error(f"Failed to send clipboard data: {e}", exc_info=True)
@@ -201,7 +229,7 @@ class SelkiesStreamingApp:
             clients_ref = self.data_streaming_server.clients
 
             async def _broadcast_cursor_helper():
-                websockets.broadcast(clients_ref, msg_to_broadcast)
+                await _broadcast_to_clients(clients_ref, msg_to_broadcast)
 
             asyncio.run_coroutine_threadsafe(
                 _broadcast_cursor_helper(), self.async_event_loop
@@ -819,36 +847,20 @@ async def set_cursor_size(size):
     return False
 
 
-class DataStreamingServer:
+class DataStreamingServer(BaseStreamingService):
     """Handles the data WebSocket connection for input, stats, and control messages."""
 
-    def __init__(
-        self,
-        port,
-        app,
-        uinput_mouse_socket,
-        js_socket_path,
-        enable_clipboard,
-        enable_cursors,
-        cursor_size,
-        cursor_scale,
-        cursor_debug,
-        audio_device_name,
-        cli_args,
-        is_secure_mode,
-        rc_mode = RateControlMode.CRF,
-    ):
-        self.port = port
-        self.mode = "websockets"
-        self.server = None
-        self.stop_server = None
+    def __init__(self, supervisor = None):
+        super().__init__("websockets")
         self.data_ws = (
             None
         )
         self.clients = set()
-        self.app = app
-        self.cli_args = cli_args
-        self.is_secure_mode = is_secure_mode
+        self.app = None
+        self.cli_args = settings
+        self.is_secure_mode = False
+        self.input_handler = None
+        self._tasks_to_run = []
         self.RECONNECT_DEBOUNCE_MS = 500
         self.MAX_RECENT_CLIENTS = 1000
         self.last_connection_times = OrderedDict()
@@ -863,7 +875,11 @@ class DataStreamingServer:
         self._rtt_samples = deque(maxlen=RTT_SMOOTHING_SAMPLES)
         self._smoothed_rtt_ms = 0.0
         self._sent_frames_log = deque()
-        self.rc_mode = rc_mode
+        self.rc_mode = RateControlMode.CRF
+        self.config_gate = asyncio.Event()
+        self.shutdown_event = asyncio.Event()
+        self._shutdown_called = False
+        self.supervisor = supervisor
         
         def get_initial_value(setting_name):
             """Helper to get the correct initial integer/bool from a processed setting."""
@@ -904,15 +920,14 @@ class DataStreamingServer:
         self._gpu_monitor_task_ws = None
         self._stats_sender_task_ws = None
         self._shared_stats_ws = {}
-        self.uinput_mouse_socket = uinput_mouse_socket
-        self.js_socket_path = js_socket_path
-        self.enable_clipboard = enable_clipboard
+        self.uinput_mouse_socket = UINPUT_MOUSE_SOCKET
+        self.js_socket_path = JS_SOCKET_PATH
+        self.enable_clipboard = self.cli_args.clipboard_enabled
         self.enable_binary_clipboard = self.cli_args.enable_binary_clipboard[0]
-        self.enable_cursors = enable_cursors
-        self.cursor_size = cursor_size
-        self.cursor_scale = cursor_scale
-        self.cursor_debug = cursor_debug
-        self.input_handler = None
+        self.enable_cursors = ENABLE_CURSORS
+        self.cursor_size = CURSOR_SIZE
+        self.cursor_scale = 1.0
+        self.cursor_debug = DEBUG_CURSORS
         self._last_adjustment_timestamp = 0.0
         self.client_settings_received = asyncio.Event()
         self._reconfigure_lock = asyncio.Lock()
@@ -933,7 +948,7 @@ class DataStreamingServer:
         self.capture_instances = {}
 
         # pcmflux audio capture state
-        self.audio_device_name = audio_device_name
+        self.audio_device_name = self.cli_args.audio_device_name
         self.pcmflux_module = None
         self.is_pcmflux_capturing = False
         self.pcmflux_settings = None
@@ -946,6 +961,89 @@ class DataStreamingServer:
         self._last_display_count = 0
         self._is_wm_swapped = False
         self._wm_swap_is_supported = None
+
+    def initialize(self):
+        """
+        Initialize the DataStreamingServer components including SelkiesStreamingApp and InputHandler.
+        This should be called before run().
+        """
+        self.is_secure_mode = bool(self.cli_args.master_token)
+        if self.is_secure_mode:
+            logger.info("Secure Mode ENABLED (SELKIES_MASTER_TOKEN is set).")
+        else:
+            logger.info("Legacy Mode ENABLED (SELKIES_MASTER_TOKEN is not set).")
+            self.config_gate.set()
+
+        global TARGET_FRAMERATE
+        processed_framerate = settings.framerate
+        min_fr, max_fr = processed_framerate
+        if min_fr == max_fr:
+            TARGET_FRAMERATE = min_fr
+        else:
+            fr_def = next((s for s in SETTING_DEFINITIONS if s['name'] == 'framerate'), None)
+            TARGET_FRAMERATE = fr_def['meta']['default_value'] if fr_def else 60
+
+        initial_encoder = settings.encoder
+
+        if not settings.debug[0] and PULSEAUDIO_AVAILABLE:
+            logging.getLogger("pulsectl").setLevel(logging.WARNING)
+
+        logger.info(f"Initializing DataStreamingServer with encoder: {initial_encoder}, Framerate: {TARGET_FRAMERATE}")
+
+        event_loop = asyncio.get_running_loop()
+        # Create SelkiesStreamingApp
+        self.app = SelkiesStreamingApp(
+            event_loop,
+            framerate=TARGET_FRAMERATE,
+            encoder=initial_encoder,
+            mode="websockets",
+        )
+        self.app.server_enable_resize = ENABLE_RESIZE
+        self.app.last_resize_success = True
+        self.app.data_streaming_server = self
+        logger.info(
+            f"SelkiesStreamingApp initialized: encoder={self.app.encoder}, display={self.app.display_width}x{self.app.display_height}"
+        )
+
+        if settings.enable_rate_control[0]:
+            self.rc_mode = RateControlMode(settings.rate_control_mode)
+
+        # Determine clipboard mode
+        clipboard_mode = "false"
+        if settings.clipboard_enabled[0]:
+            c_in, c_out = settings.clipboard_in_enabled[0], settings.clipboard_out_enabled[0]
+            if c_in and c_out: clipboard_mode = "true"
+            elif c_in: clipboard_mode = "in"
+            elif c_out: clipboard_mode = "out"
+
+        self.input_handler = InputHandler(
+            self.app,
+            self.uinput_mouse_socket,
+            self.js_socket_path,
+            clipboard_mode,
+            str(settings.enable_binary_clipboard[0]).lower(),
+            self.enable_cursors,
+            self.cursor_size,
+            1.0,
+            self.cursor_debug,
+            data_server_instance=self,
+            is_wayland=IS_WAYLAND,
+            wayland_socket_index=settings.wayland_socket_index,
+        )
+
+        self.input_handler.on_clipboard_read = self.app.send_ws_clipboard_data
+        self.input_handler.on_set_fps = self.app.set_framerate
+        
+        if ENABLE_RESIZE:
+            self.input_handler.on_resize = lambda res_str, display_id='primary': on_resize_handler(
+                res_str, self.app, self, display_id
+            )
+        else:
+            self.input_handler.on_resize = lambda res_str, display_id='primary': logger.warning("Resize disabled.")
+            self.input_handler.on_scaling_ratio = lambda scale_val: logger.warning(
+                "Scaling disabled."
+            )
+        logger.info("DataStreamingServer initialization complete.")
 
     async def broadcast_display_config(self):
         """Broadcasts the current display configuration to all clients."""
@@ -960,7 +1058,7 @@ class DataStreamingServer:
         message_str = f"DISPLAY_CONFIG_UPDATE,{json.dumps(payload)}"
         
         data_logger.info(f"Broadcasting display config update: {message_str}")
-        websockets.broadcast(self.clients, message_str)
+        await _broadcast_to_clients(self.clients, message_str)
 
     def _pcmflux_audio_callback(self, result_ptr, user_data):
         """
@@ -999,7 +1097,7 @@ class DataStreamingServer:
                 
                 message_to_send = b'\x01\x00' + opus_bytes
                 self._bytes_sent_in_interval += len(message_to_send) * len(primary_viewers)
-                websockets.broadcast(primary_viewers, message_to_send)
+                await _broadcast_to_clients(primary_viewers, message_to_send)
 
                 self.pcmflux_audio_queue.task_done()
         except asyncio.CancelledError:
@@ -1160,13 +1258,13 @@ class DataStreamingServer:
         
         if display_id == 'primary' and self.clients:
             data_logger.info(f"Broadcasting primary pipeline reset to all {len(self.clients)} clients: {message}")
-            websockets.broadcast(self.clients, message)
+            await _broadcast_to_clients(self.clients, message)
         else:
             websocket = display_state.get('ws')
             if websocket:
                 try:
-                    await websocket.send(message)
-                except websockets.ConnectionClosed:
+                    await websocket.send_str(message)
+                except (ConnectionResetError, OSError, RuntimeError):
                     data_logger.warning(f"Could not notify client for '{display_id}' of reset; connection closed.")
         
         display_state['backpressure_enabled'] = True
@@ -1286,7 +1384,7 @@ class DataStreamingServer:
             }
             message_str = json.dumps(message)
             data_logger.info(f"Broadcasting primary stream resolution to all clients: {message_str}")
-            websockets.broadcast(self.clients, message_str)
+            await _broadcast_to_clients(self.clients, message_str)
 
     def _parse_settings_payload(self, payload_str: str) -> dict:
         settings_data = json.loads(payload_str)
@@ -1346,7 +1444,8 @@ class DataStreamingServer:
     ):
 
         if client_role == "viewer":
-            data_logger.info(f"Ignoring SETTINGS payload from viewer {websocket_obj.remote_address}.")
+            _viewer_raddr = client_permissions.get(websocket_obj, {}).get("remote_address", "unknown")
+            data_logger.info(f"Ignoring SETTINGS payload from viewer {_viewer_raddr}.")
             return
 
         display_id = settings.get("displayId", "primary")
@@ -1546,16 +1645,12 @@ class DataStreamingServer:
         if is_initial_settings and self.client_settings_received and not self.client_settings_received.is_set():
             self.client_settings_received.set()
 
-    async def ws_handler(self, websocket):
+    async def ws_handler(self, websocket: web.WebSocketResponse, remote_address, token = "", query_role = "", query_slot = None):
         if self.is_secure_mode:
-            await config_gate.wait()
-
-            query_params = urllib.parse.parse_qs(urllib.parse.urlparse(websocket.request.path).query)
-            token = query_params.get('token', [None])[0]
-
+            await self.config_gate.wait()
             if not token or token not in user_tokens:
-                data_logger.warning(f"Rejecting connection from {websocket.remote_address}: Missing or invalid token.")
-                await websocket.close(code=4001, reason="Invalid authentication token")
+                data_logger.warning(f"Rejecting connection from {remote_address}: Missing or invalid token.")
+                await websocket.close(code=4001, message=b"Invalid authentication token")
                 return
 
             permissions = user_tokens[token]
@@ -1563,35 +1658,34 @@ class DataStreamingServer:
                 "token": token,
                 "role": permissions.get("role"),
                 "slot": permissions.get("slot"),
+                "remote_address": remote_address,
             }
-            data_logger.info(f"Client {websocket.remote_address} authenticated with token. Role: {permissions.get('role')}, Slot: {permissions.get('slot')}")
+            data_logger.info(f"Client {remote_address} authenticated with token. Role: {permissions.get('role')}, Slot: {permissions.get('slot')}")
             auth_success_payload = json.dumps({
                 "role": permissions.get("role"),
                 "slot": permissions.get("slot"),
             })
-            await websocket.send(f"AUTH_SUCCESS,{auth_success_payload}")
+            await websocket.send_str(f"AUTH_SUCCESS,{auth_success_payload}")
         else:
-            path_hash = urllib.parse.urlparse(websocket.request.path).fragment
+            # Legacy mode: role/slot are passed via query params
+            # (URL fragments are never transmitted to the server per HTTP spec)
             role = "controller"
             slot = None
-            if path_hash == "shared":
+            if query_role == "viewer":
                 role = "viewer"
-            elif path_hash == "collab":
-                role = "controller"
-            elif path_hash.startswith("player"):
+            if query_slot is not None:
                 try:
-                    slot_num = int(path_hash[6:])
+                    slot_num = int(query_slot)
                     if 2 <= slot_num <= 4:
-                        role = "viewer"
                         slot = slot_num
-                except (ValueError, IndexError):
+                except (ValueError, TypeError):
                     pass
-            client_permissions[websocket] = {"token": None, "role": role, "slot": slot}
-            data_logger.info(f"Legacy client {websocket.remote_address} connected. Role: {role}, Slot: {slot}")
+            client_permissions[websocket] = {"token": None, "role": role, "slot": slot, "remote_address": remote_address}
+            data_logger.info(f"Legacy client {remote_address} connected. Role: {role}, Slot: {slot}")
 
         global TARGET_FRAMERATE
         current_time = time.monotonic()
-        ip_address, _ = websocket.remote_address
+        ip_address, _ = remote_address
         last_time = self.last_connection_times.get(ip_address)
         if last_time:
             elapsed_ms = (current_time - last_time) * 1000
@@ -1599,12 +1693,12 @@ class DataStreamingServer:
                 data_logger.warning(
                     f"Client {ip_address} reconnecting too quickly ({elapsed_ms:.1f}ms). Rejecting connection."
                 )
-                await websocket.close(code=4029, reason="Rate limited: reconnecting too quickly")
+                await websocket.close(code=4029, message=b"Rate limited: reconnecting too quickly")
                 return
         self.last_connection_times[ip_address] = current_time
         if len(self.last_connection_times) > self.MAX_RECENT_CLIENTS:
             self.last_connection_times.popitem(last=False)
-        raddr = websocket.remote_address
+        raddr = remote_address
         data_logger.info(f"Data WebSocket connected from {raddr}")
         self.clients.add(websocket)
         self.data_ws = (
@@ -1619,8 +1713,8 @@ class DataStreamingServer:
         client_display_id = None
 
         try:
-            await websocket.send(f"MODE {self.mode}")
-        except websockets.exceptions.ConnectionClosed:
+            await websocket.send_str(f"MODE {self.mode}")
+        except (ConnectionResetError, OSError, RuntimeError):
             self.clients.discard(websocket)
             if self.data_ws is websocket:
                 self.data_ws = None
@@ -1630,7 +1724,7 @@ class DataStreamingServer:
             data_logger.info(f"Sending last known cursor to new client {raddr}")
             try:
                 msg_str = json.dumps(self.app.last_cursor_sent)
-                await websocket.send(f"cursor,{msg_str}")
+                await websocket.send_str(f"cursor,{msg_str}")
             except Exception as e:
                 data_logger.warning(f"Failed to send initial cursor to new client {raddr}: {e}")
 
@@ -1655,8 +1749,8 @@ class DataStreamingServer:
                     payload_entry['allowed'] = setting_def['meta']['allowed']
             server_settings_payload["settings"][name] = payload_entry
         try:
-            await websocket.send(json.dumps(server_settings_payload))
-        except websockets.exceptions.ConnectionClosed:
+            await websocket.send_str(json.dumps(server_settings_payload))
+        except (ConnectionResetError, OSError, RuntimeError):
             self.clients.discard(websocket)
             if self.data_ws is websocket:
                 self.data_ws = None
@@ -1724,9 +1818,9 @@ class DataStreamingServer:
                     )
                     pulse = None
 
-            async for message in websocket:
-                if isinstance(message, bytes):
-                    msg_type, payload = message[0], message[1:]
+            async for msg in websocket:
+                if msg.type == WSMsgType.BINARY:
+                    msg_type, payload = msg.data[0], msg.data[1:]
                     if msg_type == 0x01:
                         if (
                             active_upload_target_path_conn
@@ -1952,7 +2046,8 @@ class DataStreamingServer:
                                     pass
                             audio_buffer.clear()
 
-                elif isinstance(message, str):
+                elif msg.type == WSMsgType.TEXT:
+                    message = msg.data
                     if message.startswith("SETTINGS,"):
                         client_perms = client_permissions.get(websocket)
                         client_role = client_perms.get("role") if client_perms else "controller"
@@ -1967,7 +2062,7 @@ class DataStreamingServer:
                         if active_mk_token and perms.get("token") == active_mk_token:
                             allowed_viewer_prefixes.extend(["kd", "ku", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr"])
                         if not any(message.startswith(prefix) for prefix in allowed_viewer_prefixes):
-                            data_logger.warning(f"DENIED unauthorized message from viewer {websocket.remote_address}: {message[:100]}...")
+                            data_logger.warning(f"DENIED unauthorized message from viewer {remote_address}: {message[:100]}...")
                             continue
 
                     if message.startswith("FILE_UPLOAD_START:"):
@@ -2090,14 +2185,14 @@ class DataStreamingServer:
                             client_role = client_perms.get("role") if client_perms else "controller"
 
                             if client_role == 'viewer':
-                                data_logger.info(f"Viewer client {websocket.remote_address} sent initial SETTINGS. Syncing with current stream state.")
+                                data_logger.info(f"Viewer client {remote_address} sent initial SETTINGS. Syncing with current stream state.")
                                 if not initial_settings_processed:
                                     initial_settings_processed = True
                                 
                                 await self.broadcast_stream_resolution()
 
                                 data_logger.info(f"Broadcasting PIPELINE_RESETTING to sync new viewer.")
-                                websockets.broadcast(self.clients, "PIPELINE_RESETTING primary")
+                                await _broadcast_to_clients(self.clients, "PIPELINE_RESETTING primary")
 
                                 continue
 
@@ -2105,13 +2200,13 @@ class DataStreamingServer:
                                 second_screen_enabled, _ = self.cli_args.second_screen
                                 if not second_screen_enabled:
                                     data_logger.warning(
-                                        f"Client from {websocket.remote_address} attempted to connect as secondary display ('{display_id}'), "
+                                        f"Client from {remote_address} attempted to connect as secondary display ('{display_id}'), "
                                         "but second screens are disabled by server settings. Rejecting connection."
                                     )
                                     try:
-                                        await websocket.send("KILL Second screens are disabled on this server.")
-                                        await websocket.close(code=1008, reason="Second screens disabled")
-                                    except websockets.ConnectionClosed:
+                                        await websocket.send_str("KILL Second screens are disabled on this server.")
+                                        await websocket.close(code=1008, message=b"Second screens disabled")
+                                    except (ConnectionResetError, OSError, RuntimeError):
                                         pass
                                     return
  
@@ -2120,15 +2215,16 @@ class DataStreamingServer:
                                 existing_client_info = self.display_clients.get(display_id)
                                 if existing_client_info:
                                     old_ws = existing_client_info.get('ws')
-                                    if old_ws and old_ws is not websocket and old_ws.state == websockets.protocol.State.OPEN:
+                                    if old_ws and old_ws is not websocket and not old_ws.closed:
                                         kill_reason = f"a new {display_id} client connected connection killed"
+                                        old_ws_raddr = client_permissions.get(old_ws, {}).get("remote_address", "unknown")
                                         data_logger.warning(
-                                            f"Killing old client for '{display_id}' at {old_ws.remote_address}. Reason: {kill_reason}"
+                                            f"Killing old client for '{display_id}' at {old_ws_raddr}. Reason: {kill_reason}"
                                         )
                                         try:
-                                            await old_ws.send(f"KILL {kill_reason}")
-                                            await old_ws.close(code=1000, reason="Superseded by new client")
-                                        except websockets.ConnectionClosed:
+                                            await old_ws.send_str(f"KILL {kill_reason}")
+                                            await old_ws.close(code=1000, message=b"Superseded by new client")
+                                        except (ConnectionResetError, OSError, RuntimeError):
                                             data_logger.info(f"Old client for '{display_id}' was already disconnected.")
                                         except Exception as e:
                                             data_logger.error(f"Error while killing old client for '{display_id}': {e}")
@@ -2151,8 +2247,8 @@ class DataStreamingServer:
                                         old_ws = old_secondary_client.get('ws')
                                         if old_ws:
                                             try:
-                                                await old_ws.send("VIDEO_STOPPED")
-                                            except websockets.ConnectionClosed:
+                                                await old_ws.send_str("VIDEO_STOPPED")
+                                            except (ConnectionResetError, OSError, RuntimeError):
                                                 pass
                             if display_id not in self.display_clients:
                                 data_logger.info(f"Registering new client for display: {display_id}")
@@ -2294,7 +2390,7 @@ class DataStreamingServer:
                             now = time.time()
                             last_req_time = self.last_start_video_request_times.get(websocket, 0)
                             if now - last_req_time < 30.0:
-                                data_logger.warning(f"Throttled START_VIDEO request from viewer {websocket.remote_address}. Ignoring.")
+                                data_logger.warning(f"Throttled START_VIDEO request from viewer {remote_address}. Ignoring.")
                                 continue
                             self.last_start_video_request_times[websocket] = now
 
@@ -2312,16 +2408,16 @@ class DataStreamingServer:
                                         x_offset=layout['x'], y_offset=layout['y']
                                     )
                                     await self._start_backpressure_task_if_needed(client_display_id)
-                                    await websocket.send("VIDEO_STARTED")
+                                    await websocket.send_str("VIDEO_STARTED")
                                 except Exception as e:
                                     data_logger.error(f"Failed to restart individual stream for '{client_display_id}': {e}", exc_info=True)
                                     await self.reconfigure_displays()
                             else:
                                 data_logger.warning(f"No layout found for '{client_display_id}' on START_VIDEO. Performing full reconfiguration.")
                                 await self.reconfigure_displays()
-                                await websocket.send("VIDEO_STARTED")
+                                await websocket.send_str("VIDEO_STARTED")
                         else:
-                            data_logger.info(f"Received START_VIDEO from a shared client ({websocket.remote_address}). Triggering reconfiguration.")
+                            data_logger.info(f"Received START_VIDEO from a shared client ({remote_address}). Triggering reconfiguration.")
                             await self.reconfigure_displays()
 
                     elif message == "STOP_VIDEO":
@@ -2331,8 +2427,8 @@ class DataStreamingServer:
                             
                             await self._stop_capture_for_display(client_display_id)
                             try:
-                                await websocket.send("VIDEO_STOPPED")
-                            except websockets.ConnectionClosed:
+                                await websocket.send_str("VIDEO_STOPPED")
+                            except (ConnectionResetError, OSError, RuntimeError):
                                 pass
 
                     elif message == "START_AUDIO":
@@ -2350,7 +2446,7 @@ class DataStreamingServer:
                                         data_logger.info("START_AUDIO: pcmflux audio pipeline already active.")
                                 else:
                                     data_logger.warning("START_AUDIO: Cannot start server-to-client audio (pcmflux not available).")
-                                websockets.broadcast(self.clients, "AUDIO_STARTED")
+                                await _broadcast_to_clients(self.clients, "AUDIO_STARTED")
                         asyncio.create_task(_handle_start_audio_request())
 
                     elif message == "STOP_AUDIO":
@@ -2359,11 +2455,11 @@ class DataStreamingServer:
                             if self.is_pcmflux_capturing:
                                 await self._stop_pcmflux_pipeline()
                             if self.clients:
-                                websockets.broadcast(self.clients, "AUDIO_STOPPED")
+                                await _broadcast_to_clients(self.clients, "AUDIO_STOPPED")
 
                     elif message.startswith("r,"):
                         await self.client_settings_received.wait() 
-                        raddr = websocket.remote_address
+                        raddr = remote_address
                         
                         parts = message.split(',')
                         if len(parts) != 3:
@@ -2503,7 +2599,7 @@ class DataStreamingServer:
                         if message.startswith("js,") and self.is_secure_mode:
                             perms = client_permissions.get(websocket)
                             if not perms or not perms.get("token"):
-                                data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {websocket.remote_address} dropped. Client has no token/perms.")
+                                data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {remote_address} dropped. Client has no token/perms.")
                                 continue
                             
                             token = perms.get("token")
@@ -2511,15 +2607,15 @@ class DataStreamingServer:
                             server_slot = current_perms.get("slot") if current_perms else None
 
                             if server_slot is None:
-                                data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {websocket.remote_address} dropped. Client token has no assigned slot.")
+                                data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {remote_address} dropped. Client token has no assigned slot.")
                                 continue
                             try:
                                 client_index = int(message.split(',')[2])
                                 if (int(server_slot) - 1) != client_index:
-                                    data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {websocket.remote_address} dropped. Client sent for index {client_index}, but is assigned slot {server_slot}.")
+                                    data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {remote_address} dropped. Client sent for index {client_index}, but is assigned slot {server_slot}.")
                                     continue
                             except (IndexError, ValueError):
-                                data_logger.warning(f"BLOCK (Secure Mode): Malformed gamepad message from {websocket.remote_address}: {message}")
+                                data_logger.warning(f"BLOCK (Secure Mode): Malformed gamepad message from {remote_address}: {message}")
                                 continue
 
                         if self.is_secure_mode and message.split(',')[0] in ["kd", "ku", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr"]:
@@ -2539,10 +2635,8 @@ class DataStreamingServer:
                         ):
                             await self.input_handler.on_message(message, client_display_id)
 
-        except websockets.exceptions.ConnectionClosedOK:
-            data_logger.info(f"Data WS disconnected gracefully from {raddr}")
-        except websockets.exceptions.ConnectionClosedError as e:
-            data_logger.warning(f"Data WS closed with error from {raddr}: {e}")
+        except (ConnectionResetError, OSError, RuntimeError) as e:
+            data_logger.info(f"Data WS disconnected from {raddr}: {e}")
         except Exception as e_main_loop:
             data_logger.error(
                 f"Error in Data WS handler for {raddr}: {e_main_loop}", exc_info=True
@@ -2694,86 +2788,10 @@ class DataStreamingServer:
 
             data_logger.info(f"Data WS handler for {raddr} finished all cleanup.")
 
-    async def run_server(self):
-        self.stop_server = asyncio.Future()
-        while not self.stop_server.done():
-            _current_server_instance = None
-            wait_closed_task = None
-            try:
-                async with ws_async.serve(
-                    self.ws_handler,
-                    "0.0.0.0",
-                    self.port,
-                    compression=None,
-                    ping_interval=20,
-                    ping_timeout=20,
-                ) as server_obj:
-                    _current_server_instance = server_obj
-                    self.server = _current_server_instance
-                    data_logger.info(
-                        f"Data WebSocket Server listening on port {self.port}"
-                    )
-                    wait_closed_task = asyncio.create_task(
-                        _current_server_instance.wait_closed()
-                    )
-                    done, pending = await asyncio.wait(
-                        [self.stop_server, wait_closed_task],
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if self.stop_server in done:
-                        if wait_closed_task in pending:
-                            wait_closed_task.cancel()
-                        break
-                    data_logger.warning(
-                        f"Data WS Server on port {self.port} stopped unexpectedly. Restarting."
-                    )
-            except OSError as e:
-                data_logger.error(
-                    f"OSError starting Data WS on port {self.port}: {e}. Retrying in 5s..."
-                )
-                await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                data_logger.info(
-                    f"Data WS run_server task for port {self.port} cancelled."
-                )
-                break
-            except Exception as e:
-                data_logger.error(
-                    f"Exception in Data WS run_server for port {self.port}: {e}. Retrying in 5s...",
-                    exc_info=True,
-                )
-                await asyncio.sleep(5)
-            finally:
-                if self.server is _current_server_instance:
-                    self.server = None
-                if wait_closed_task and not wait_closed_task.done():
-                    try:
-                        await asyncio.wait_for(wait_closed_task, timeout=0.1)
-                    except (asyncio.CancelledError, asyncio.TimeoutError):
-                        pass
-        data_logger.info(f"Data WS run_server loop for port {self.port} has finished.")
-
-    async def stop(self):
-        data_logger.info(f"Stopping Data WebSocket Server on port {self.port}...")
-        if self.stop_server and not self.stop_server.done():
-            self.stop_server.set_result(True)
-        if self.server:
-            self.server.close()
-            try:
-                await asyncio.wait_for(self.server.wait_closed(), timeout=2.0)
-            except asyncio.TimeoutError:
-                data_logger.warning(
-                    f"Timeout closing Data WS listener on port {self.port}."
-                )
-            except Exception as e_close:
-                data_logger.error(f"Error on server.wait_closed(): {e_close}")
-        self.server = None
-        await self.shutdown_pipelines()
-        data_logger.info(f"Data WS on port {self.port} stop procedure complete.")
-
     async def _cleanup_client(self, websocket, display_id):
         """Removes a client and triggers reconfiguration if necessary."""
-        data_logger.info(f"Cleaning up Data WS handler for {websocket.remote_address} (Display ID: {display_id})...")
+        _cleanup_raddr = client_permissions.get(websocket, {}).get("remote_address", "unknown")
+        data_logger.info(f"Cleaning up Data WS handler for {_cleanup_raddr} (Display ID: {display_id})...")
         self.display_clients.pop(display_id, None)
 
         if self._is_reconfiguring:
@@ -3060,7 +3078,7 @@ class DataStreamingServer:
                                         primary_client_info['sent_timestamps'].popitem(last=False)
                                 break
                     try:
-                        websockets.broadcast(primary_viewers, data_chunk)
+                        await _broadcast_to_clients(primary_viewers, data_chunk)
                         self._bytes_sent_in_interval += len(data_chunk) * len(primary_viewers)
                     except Exception as e:
                         data_logger.error(f"Error during primary broadcast: {e}")
@@ -3077,9 +3095,9 @@ class DataStreamingServer:
                     if len(client_info['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
                         client_info['sent_timestamps'].popitem(last=False)
                     try:
-                        await websocket.send(data_chunk)
+                        await websocket.send_bytes(data_chunk)
                         self._bytes_sent_in_interval += len(data_chunk)
-                    except websockets.ConnectionClosed:
+                    except (ConnectionResetError, OSError, RuntimeError):
                         data_logger.warning(f"Client for '{display_id}' connection closed during send.")
                         break
                 queue.task_done()
@@ -3240,6 +3258,148 @@ class DataStreamingServer:
             cs.watermark_location_enum = self.cli_args.watermark_location
         
         return cs
+    
+    async def run(self):
+        """
+        Start the DataStreamingServer and all its components.
+        """
+        self._shutdown_called = False
+        self.initialize()
+
+        logger.info("Starting DataStreamingServer...")
+        
+        self._tasks_to_run = []
+        # Start input handler tasks
+        if hasattr(self.input_handler, "connect"):
+            self._tasks_to_run.append(
+                asyncio.create_task(self.input_handler.connect(), name="InputConnect")
+            )
+        if hasattr(self.input_handler, "start_clipboard"):
+            self.input_handler.clipboard_monitor_task = asyncio.create_task(
+                self.input_handler.start_clipboard(), name="ClipboardMon"
+            )
+            self._tasks_to_run.append(self.input_handler.clipboard_monitor_task)
+        if hasattr(self.input_handler, "start_cursor_monitor"):
+            self._tasks_to_run.append(
+                asyncio.create_task(self.input_handler.start_cursor_monitor(), name="CursorMon")
+            )
+
+        try:
+            await self.shutdown_event.wait()
+        except asyncio.CancelledError:
+            logger.info("Main application task was cancelled.")
+        except Exception as e_main:
+            logger.critical(f"Critical error in main execution: {e_main}", exc_info=True)
+        finally:
+            logger.info("Main loop ending or interrupted. Performing cleanup...")
+            await self.shutdown()
+
+    async def shutdown(self):
+        """
+        Shutdown all DataStreamingServer components and clean up resources.
+        This should be called to properly stop the server.
+        """
+        if self._shutdown_called:
+            logger.info("Shutdown already called, skipping")
+            return
+        self._shutdown_called = True
+        logger.info("DataStreamingServer shutdown initiated...")
+        
+        # Clear websockets connections to avoid redundant calls to
+        # reconfigure_displays.
+        # FIXME: The termination flow could be further improved 
+        self.clients.clear()
+        self.display_clients.clear()
+
+        # Cancel all auxiliary tasks
+        all_tasks_for_cleanup = [
+            t for t in self._tasks_to_run
+            if t and not t.done()
+        ]
+
+        for task in all_tasks_for_cleanup:
+            logger.debug(f"Cancelling task: {task.get_name()}")
+            task.cancel()
+
+        if all_tasks_for_cleanup:
+            await asyncio.gather(*all_tasks_for_cleanup, return_exceptions=True)
+            logger.info("Auxiliary tasks cancellation complete.")
+
+        # Stop input handler components
+        if self.input_handler:
+            logger.info("Stopping InputHandler components...")
+            if hasattr(self.input_handler, "stop_clipboard"):
+                self.input_handler.stop_clipboard()
+            if hasattr(self.input_handler, "stop_cursor_monitor"):
+                self.input_handler.stop_cursor_monitor()
+            if hasattr(self.input_handler, "disconnect") and asyncio.iscoroutinefunction(
+                self.input_handler.disconnect
+            ):
+                await self.input_handler.disconnect()
+
+        self.app = None
+        self.input_handler = None
+        logger.info("DataStreamingServer shutdown complete.")
+
+    async def start(self):
+        self.shutdown_event.clear()
+        await self.run()
+
+    async def stop(self):
+        self.shutdown_event.set()
+
+    def register_routes(self, api_prefix: str, main_router: web.UrlDispatcher):
+        main_router.add_get(f'{api_prefix}/websockets{{slash:/?}}', self.data_ws_handler)
+        main_router.add_post(f'{api_prefix}/tokens', self.handle_tokens)
+
+    async def handle_tokens(self, request: web.Request):
+        if self.supervisor.current_mode != self.mode:
+            return web.json_response({"error": "WebSocket mode inactive"}, status=409)
+
+        if not self.is_secure_mode:
+            return web.json_response({"error": "WebSocket not in secure mode"}, status=404)
+
+        global user_tokens, active_mk_token
+        try:
+            new_token_data = await request.json()
+            if not isinstance(new_token_data, dict): raise ValueError("Payload must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            return web.Response(status=400, text=f"Bad Request: {e}")
+        user_tokens = new_token_data
+        new_mk_owner = None
+        for tkn, perms in user_tokens.items():
+            if perms.get("mk_control", False):
+                new_mk_owner = tkn
+                break
+        active_mk_token = new_mk_owner
+        logger.info(f"Updated user tokens. Now tracking {len(user_tokens)} tokens.")
+        if not self.config_gate.is_set():
+            self.config_gate.set()
+            logger.info("Configuration gate is now open. WebSocket server will accept connections.")
+        asyncio.create_task(reconcile_clients())
+        return web.Response(status=200, text="OK")
+
+    async def data_ws_handler(self, request: web.Request):
+        if self.supervisor.current_mode != self.mode:
+            return web.Response(status=409, text="WebSocket mode is inactive")
+
+        token = ""
+        if self.cli_args.master_token:
+            token = request.query.get('token') 
+            if not token:
+                return web.Response(status=401, text="Token missing in secure mode")
+
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        peername = request.transport.get_extra_info('peername')
+        remote_address = peername[:2] if peername else (request.remote, 0)
+        # Extract legacy role/slot from query params
+        query_role = request.query.get('role', '')
+        query_slot = request.query.get('slot')
+        await self.ws_handler(ws, remote_address, token, query_role=query_role, query_slot=query_slot)
+        return ws
+
 
 async def _collect_system_stats_ws(shared_data, interval_seconds=1):
     data_logger.debug(
@@ -3345,12 +3505,12 @@ async def _send_stats_periodically_ws(websocket, shared_data, interval_seconds=5
                     data_logger.info("Stats sender: WS closed or invalid.")
                     break
                 if system_stats:
-                    await websocket.send(json.dumps(system_stats))
+                    await websocket.send_str(json.dumps(system_stats))
                 if gpu_stats:
-                    await websocket.send(json.dumps(gpu_stats))
+                    await websocket.send_str(json.dumps(gpu_stats))
                 if network_stats:
-                    await websocket.send(json.dumps(network_stats))
-            except websockets.exceptions.ConnectionClosed:
+                    await websocket.send_str(json.dumps(network_stats))
+            except (ConnectionResetError, OSError, RuntimeError):
                 data_logger.info("Stats sender: WS connection closed.")
                 break
             except Exception as e_send:
@@ -3417,288 +3577,57 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
     except Exception as e:
         logger_gst_app_resize.error(f"Error during resize handling for '{res_str}': {e}", exc_info=True)
 
-async def ws_entrypoint():
-    is_secure_mode = bool(settings.master_token)
-    if is_secure_mode:
-        logger.info("Secure Mode ENABLED (SELKIES_MASTER_TOKEN is set).")
-    else:
-        logger.info("Legacy Mode ENABLED (SELKIES_MASTER_TOKEN is not set).")
-        config_gate.set()
-
-    async def reconcile_clients():
-        """Iterate through connected clients and disconnect those with invalid/changed permissions."""
-        global user_tokens, client_permissions
-        connected_websockets = list(client_permissions.keys())
-        current_tokens = user_tokens.copy()
-        for ws in connected_websockets:
-            if ws.state != websockets.protocol.State.OPEN:
-                continue
-            perms = client_permissions.get(ws)
-            if not perms or perms.get("token") is None:
-                continue
-            token = perms["token"]
-            new_perms = current_tokens.get(token)
-            should_disconnect = False
-            reason = ""
-            if not new_perms:
-                should_disconnect, reason = True, "Token revoked"
-            else:
-                old_role, old_slot = perms.get("role"), perms.get("slot")
-                new_role = new_perms.get("role")
-                new_slot = new_perms.get("slot")
-
-                if old_role != new_role:
-                    should_disconnect, reason = True, "Permissions changed significantly"
-                
-                elif old_slot != new_slot:
-                    data_logger.info(f"Updating client {ws.remote_address} for slot change: {old_slot} -> {new_slot}")                    
-                    update_payload = json.dumps({"role": new_role, "slot": new_slot})
-                    update_message = f"ROLE_UPDATE,{update_payload}"
-                    try:
-                        await ws.send(update_message)
-                        client_permissions[ws]['role'] = new_role
-                        client_permissions[ws]['slot'] = new_slot
-                    except websockets.ConnectionClosed:
-                        data_logger.warning(f"Could not send role update to {ws.remote_address}, connection closed.")
-            if should_disconnect:
-                data_logger.info(f"Disconnecting client {ws.remote_address} due to: {reason}")
-                try:
-                    await ws.close(code=4002, reason=reason)
-                except websockets.ConnectionClosed:
-                    pass
-            has_mk_access = False
-            if active_mk_token is not None:
-                if token == active_mk_token:
-                    has_mk_access = True
-            elif new_perms.get("role") == "controller":
-                has_mk_access = True
-            
-            mk_msg = "MK_ACCESS,1" if has_mk_access else "MK_ACCESS,0"
-            try:
-                await ws.send(mk_msg)
-            except websockets.ConnectionClosed:
-                pass
-
-    async def handle_tokens_post(request):
-        global user_tokens, config_gate, active_mk_token
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer ") or auth_header.split(" ", 1)[1] != settings.master_token:
-            return web.Response(status=401, text="Unauthorized")
-        try:
-            new_token_data = await request.json()
-            if not isinstance(new_token_data, dict): raise ValueError("Payload must be a JSON object")
-        except (json.JSONDecodeError, ValueError) as e:
-            return web.Response(status=400, text=f"Bad Request: {e}")
-        user_tokens = new_token_data
-        new_mk_owner = None
-        for tkn, perms in user_tokens.items():
-            if perms.get("mk_control", False):
-                new_mk_owner = tkn
-                break
-        active_mk_token = new_mk_owner
-        logger.info(f"Updated user tokens. Now tracking {len(user_tokens)} tokens.")
-        if not config_gate.is_set():
-            config_gate.set()
-            logger.info("Configuration gate is now open. WebSocket server will accept connections.")
-        asyncio.create_task(reconcile_clients())
-        return web.Response(status=200, text="OK")
-
-    if "DEV_MODE" in os.environ:
-        try:
-            dev_version_file = pathlib.Path(
-                "../../addons/selkies-web-core/selkies-version.txt"
-            )
-            if dev_version_file.parent.exists():
-                dev_version_file.touch(exist_ok=True)
-        except OSError:
-            pass
-
-    global TARGET_FRAMERATE
-    processed_framerate = settings.framerate
-    min_fr, max_fr = processed_framerate
-    if min_fr == max_fr:
-        TARGET_FRAMERATE = min_fr
-    else:
-        fr_def = next((s for s in SETTING_DEFINITIONS if s['name'] == 'framerate'), None)
-        TARGET_FRAMERATE = fr_def['meta']['default_value'] if fr_def else 60
-
-    initial_encoder = settings.encoder
-
-    if not settings.debug[0] and PULSEAUDIO_AVAILABLE:
-        logging.getLogger("pulsectl").setLevel(logging.WARNING)
-
-    logger.info(f"Starting Selkies (WebSocket Mode) with settings: {vars(settings)}")
-    logger.info(
-        f"Initial Encoder: {initial_encoder}, Framerate: {TARGET_FRAMERATE}"
-    )
-
-    event_loop = asyncio.get_running_loop()
-
-    app = SelkiesStreamingApp(
-        event_loop,
-        framerate=TARGET_FRAMERATE,
-        encoder=initial_encoder,
-        mode="websockets",
-    )
-    app.server_enable_resize = ENABLE_RESIZE
-    app.last_resize_success = True
-    logger.info(
-        f"SelkiesStreamingApp initialized: encoder={app.encoder}, display={app.display_width}x{app.display_height}"
-    )
-
-    data_server = DataStreamingServer(
-        port=settings.port,
-        app=app,
-        uinput_mouse_socket=UINPUT_MOUSE_SOCKET,
-        js_socket_path=JS_SOCKET_PATH,
-        enable_clipboard=settings.clipboard_enabled,
-        enable_cursors=ENABLE_CURSORS,
-        cursor_size=CURSOR_SIZE,
-        cursor_scale=1.0,
-        cursor_debug=DEBUG_CURSORS,
-        audio_device_name=settings.audio_device_name,
-        cli_args=settings,
-        is_secure_mode=is_secure_mode,
-    )
-    if settings.enable_rate_control[0]:
-        data_server.rc_mode = RateControlMode(settings.rate_control_mode)
-    app.data_streaming_server = data_server
-
-    clipboard_mode = "false"
-    if settings.clipboard_enabled[0]:
-        c_in, c_out = settings.clipboard_in_enabled[0], settings.clipboard_out_enabled[0]
-        if c_in and c_out: clipboard_mode = "true"
-        elif c_in: clipboard_mode = "in"
-        elif c_out: clipboard_mode = "out"
-
-    input_handler = InputHandler(
-        app,
-        UINPUT_MOUSE_SOCKET,
-        JS_SOCKET_PATH,
-        clipboard_mode,
-        str(settings.enable_binary_clipboard[0]).lower(),
-        ENABLE_CURSORS,
-        CURSOR_SIZE,
-        1.0,
-        DEBUG_CURSORS,
-        data_server_instance=data_server,
-        is_wayland=IS_WAYLAND,
-        wayland_socket_index=settings.wayland_socket_index,
-    )
-    data_server.input_handler = (
-        input_handler
-    )
-
-    input_handler.on_clipboard_read = app.send_ws_clipboard_data
-
-    input_handler.on_set_fps = app.set_framerate
-    if ENABLE_RESIZE:
-        input_handler.on_resize = lambda res_str, display_id='primary': on_resize_handler(
-            res_str, app, data_server, display_id
-        )
-    else:
-        input_handler.on_resize = lambda res_str, display_id='primary': logger.warning("Resize disabled.")
-        input_handler.on_scaling_ratio = lambda scale_val: logger.warning(
-            "Scaling disabled."
-        )
-
-    tasks_to_run = []
-    data_server_task = asyncio.create_task(data_server.run_server(), name="DataServer")
-    tasks_to_run.append(data_server_task)
-
-    control_plane_runner = None
-    if is_secure_mode:
-        api_app = web.Application()
-        api_app.router.add_post('/tokens', handle_tokens_post)
-        control_plane_runner = web.AppRunner(api_app)
-        await control_plane_runner.setup()
-        site = web.TCPSite(control_plane_runner, '0.0.0.0', settings.control_port)
-        await site.start()
-        logger.info(f"Control Plane API listening on port {settings.control_port}")
-
-    if hasattr(input_handler, "connect"):
-        tasks_to_run.append(
-            asyncio.create_task(input_handler.connect(), name="InputConnect")
-        )
-    if hasattr(input_handler, "start_clipboard"):
-        input_handler.clipboard_monitor_task = asyncio.create_task(input_handler.start_clipboard(), name="ClipboardMon")
-        tasks_to_run.append(input_handler.clipboard_monitor_task)
-    if hasattr(input_handler, "start_cursor_monitor"):
-        tasks_to_run.append(
-            asyncio.create_task(input_handler.start_cursor_monitor(), name="CursorMon")
-        )
-
-    try:
-        logger.info("All main components initialized. Running server...")
-        if data_server_task:
-            await data_server_task
-            if data_server_task.exception():
-                logger.error(
-                    "DataStreamingServer task exited with an exception.",
-                    exc_info=data_server_task.exception(),
-                )
-            else:
-                logger.info("DataStreamingServer task completed.")
+async def reconcile_clients():
+    """Iterate through connected clients and disconnect those with invalid/changed permissions."""
+    global user_tokens, client_permissions
+    connected_websockets = list(client_permissions.keys())
+    current_tokens = user_tokens.copy()
+    for ws in connected_websockets:
+        if ws.closed:
+            continue
+        perms = client_permissions.get(ws)
+        if not perms or perms.get("token") is None:
+            continue
+        token = perms["token"]
+        remote_address = perms.get('remote_address', 'unknown')
+        new_perms = current_tokens.get(token)
+        should_disconnect = False
+        reason = ""
+        if not new_perms:
+            should_disconnect, reason = True, "Token revoked"
         else:
-            logger.error("DataStreamingServer task was not created. Cannot run.")
+            old_role, old_slot = perms.get("role"), perms.get("slot")
+            new_role = new_perms.get("role")
+            new_slot = new_perms.get("slot")
 
-    except asyncio.CancelledError:
-        logger.info("Main application task was cancelled.")
-    except Exception as e_main:
-        logger.critical(f"Critical error in main execution: {e_main}", exc_info=True)
-    finally:
-        if control_plane_runner:
-            await control_plane_runner.cleanup()
-            logger.info("Control Plane API shut down.")
-        logger.info("Main loop ending or interrupted. Performing cleanup...")
-
-        all_tasks_for_cleanup = [
-            t for t in tasks_to_run if t and t is not data_server_task and not t.done()
-        ]
-
-        for task in all_tasks_for_cleanup:
-            logger.debug(f"Cancelling task: {task.get_name()}")
-            task.cancel()
-
-        if all_tasks_for_cleanup:
-            await asyncio.gather(*all_tasks_for_cleanup, return_exceptions=True)
-            logger.info("Auxiliary tasks cancellation complete.")
-
-        if app and hasattr(app, "stop_pipeline"):
-            logger.info("Stopping SelkiesStreamingApp pipelines...")
-            await app.stop_pipeline()
-
-        if input_handler:
-            logger.info("Stopping global InputHandler components...")
-            if hasattr(input_handler, "stop_clipboard"):
-                input_handler.stop_clipboard()
-            if hasattr(input_handler, "stop_cursor_monitor"):
-                input_handler.stop_cursor_monitor()
-            if hasattr(input_handler, "stop_js_server") and asyncio.iscoroutinefunction(
-                input_handler.stop_js_server
-            ):
-                await input_handler.stop_js_server()
-            if hasattr(input_handler, "disconnect") and asyncio.iscoroutinefunction(
-                input_handler.disconnect
-            ):
-                await input_handler.disconnect()
-        if (
-            data_server
-            and hasattr(data_server, "stop")
-            and asyncio.iscoroutinefunction(data_server.stop)
-        ):
-            logger.info("Ensuring DataStreamingServer resources are released...")
-            await data_server.stop()
-        logger.info("Cleanup complete. Exiting.")
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(ws_entrypoint())
-    except KeyboardInterrupt:
-        logger.info("Application stopped by KeyboardInterrupt.")
-    except SystemExit as e:
-        logger.info(f"Application exited with code {e.code}.")
-    except Exception:
-        logger.critical("Unhandled exception at entrypoint:", exc_info=True)
-    finally:
-        logging.shutdown()
+            if old_role != new_role:
+                should_disconnect, reason = True, "Permissions changed significantly"
+            
+            elif old_slot != new_slot:
+                data_logger.info(f"Updating client {remote_address} for slot change: {old_slot} -> {new_slot}")
+                update_payload = json.dumps({"role": new_role, "slot": new_slot})
+                update_message = f"ROLE_UPDATE,{update_payload}"
+                try:
+                    await ws.send_str(update_message)
+                    client_permissions[ws]['role'] = new_role
+                    client_permissions[ws]['slot'] = new_slot
+                except (ConnectionResetError, OSError, RuntimeError):
+                    data_logger.warning(f"Could not send role update to {remote_address}, connection closed.")
+        if should_disconnect:
+            data_logger.info(f"Disconnecting client {remote_address} due to: {reason}")
+            try:
+                await ws.close(code=4002, message=reason.encode())
+            except (ConnectionResetError, OSError, RuntimeError):
+                pass
+        has_mk_access = False
+        if active_mk_token is not None:
+            if token == active_mk_token:
+                has_mk_access = True
+        elif new_perms.get("role") == "controller":
+            has_mk_access = True
+        
+        mk_msg = "MK_ACCESS,1" if has_mk_access else "MK_ACCESS,0"
+        try:
+            await ws.send_str(mk_msg)
+        except (ConnectionResetError, OSError, RuntimeError):
+            pass

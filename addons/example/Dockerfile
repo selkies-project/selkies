@@ -227,6 +227,7 @@ Pin-Priority: -1" > /etc/apt/preferences.d/firefox-nosnap && \
         jstest-gtk \
         dnsutils \
         coturn \
+        gettext \
         # NGINX web server
         nginx \
         libnginx-mod-http-fancyindex \
