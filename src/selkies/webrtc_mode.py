@@ -42,7 +42,7 @@ from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configurat
 from .settings import settings, AppSettings, SETTING_DEFINITIONS
 from types import SimpleNamespace
 from .webrtc_utils import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor
-from .stream_server import BaseStreamingService, CentralisedStreamServer
+from .stream_server import BaseStreamingService, CentralizedStreamServer
 
 logger = logging.getLogger("webrtc")
 logger.setLevel(logging.INFO)
@@ -75,7 +75,7 @@ def get_server_settings() -> dict:
 
 
 class WebRTCService(BaseStreamingService):
-    def __init__(self, supervisor: CentralisedStreamServer):
+    def __init__(self, supervisor: CentralizedStreamServer):
         super().__init__("webrtc")
         self.settings: Optional[AppSettings] = settings
         self.tasks: List[asyncio.Task] = []

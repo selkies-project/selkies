@@ -10,17 +10,11 @@ import logging
 from .settings import settings
 from .webrtc_mode import WebRTCService
 from .selkies import DataStreamingServer
-from .stream_server import CentralisedStreamServer
+from .stream_server import CentralizedStreamServer
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-if __name__ == "__main__" and __package__ is None:
-    current_script_dir = os.path.dirname(os.path.abspath(__file__))
-    package_container_dir = os.path.dirname(current_script_dir)
-    if package_container_dir not in sys.path:
-        sys.path.insert(0, package_container_dir)
 
 
 async def run():
@@ -28,7 +22,7 @@ async def run():
     Main entry point for the Selkies streaming server.
     """
     # Create the centralised server with settings
-    server = CentralisedStreamServer(settings)
+    server = CentralizedStreamServer(settings)
 
     # Register services
     server.register_service("webrtc", WebRTCService(server))

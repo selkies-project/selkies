@@ -37,6 +37,7 @@ dependencies = [
     "pcmflux",
     "xkbcommon",
     "distro",
+    "importlib-resources>=6.0; python_version < '3.9'",
     # PulseAudio Microphone
     "pulsectl",
     "pasimple",
@@ -67,5 +68,3 @@ selkies-resize = "selkies.display_utils:entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-# Namespaces allow us to include non-python packages
-namespaces = true

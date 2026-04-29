@@ -8,15 +8,22 @@ import ssl
 import hmac
 import json
 import html
+import shutil
 import base64
 import pathlib
 import asyncio
 import logging
 import urllib.parse
 import aiofiles
+import tempfile
 from aiohttp import web
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple, Any
+try:
+    import importlib_resources as importlib_resources
+except ImportError:
+    import importlib.resources as importlib_resources
+
 from abc import ABCMeta, abstractmethod
 
 
@@ -41,7 +48,7 @@ class BaseStreamingService(metaclass=ABCMeta):
         pass
 
 
-class CentralisedStreamServer:
+class CentralizedStreamServer:
     def __init__(self, settings, services: Dict[str, BaseStreamingService] = None):
         self.settings = settings
         self.services = services or {}
@@ -60,6 +67,7 @@ class CentralisedStreamServer:
         ).resolve()
         self.header_html = "nginx/header.html"
         self.footer_html = "nginx/footer.html"
+        self.web_files_ctx = None
 
         # Constants
         self.STREAMING_MODE_WEBRTC = "webrtc"
@@ -139,35 +147,6 @@ class CentralisedStreamServer:
             return max(cert_mtime, key_mtime)
         except OSError:
             return 0.0
-
-    def _get_static_content_path(self) -> str:
-        web_path = ""
-        try:
-            import importlib.util
-
-            spec = importlib.util.find_spec(self.STATIC_CONTENT_PATH)
-            if spec and spec.submodule_search_locations:
-                # For namespace packages or directory packages
-                web_path = spec.submodule_search_locations[0]
-            else:
-                raise RuntimeError(
-                    f"Could not find static content package: {self.STATIC_CONTENT_PATH}"
-                )
-        except RuntimeError as e:
-            logger.warning(f"{e}: checking web_root path")
-            web_root = getattr(self.settings, "web_root", "")
-            if web_root:
-                web_path = os.path.expanduser(web_root)
-                if os.path.isdir(web_path) and os.path.isfile(
-                    os.path.join(web_path, "index.html")
-                ):
-                    logger.info(f"Using web_root directory: {web_path}")
-                    return web_path
-                logger.error(
-                    f"web_root directory {web_path} not found or missing index.html"
-                )
-                return ""
-        return web_path
 
     async def _watch_and_reload_certs(self):
         """Background task: periodically checks whether the TLS certificate or
@@ -258,7 +237,6 @@ class CentralisedStreamServer:
         mode = supervisor.current_mode
         auth_header = request.headers.get("Authorization")
         token_path = request.path.endswith("/tokens")
-
         if (
             mode == self.STREAMING_MODE_WEBSOCKETS
             and settings.master_token
@@ -379,6 +357,64 @@ class CentralisedStreamServer:
     async def handle_health(self, _) -> web.Response:
         return web.Response(text="OK")
 
+    async def _get_static_content_path(self) -> str:
+        web_path = ""
+
+        web_root = getattr(self.settings, "web_root", "")
+        if web_root:
+            web_path = os.path.expanduser(web_root)
+            if os.path.isdir(web_path) and os.path.isfile(os.path.join(web_path, "index.html")):
+                logger.info(f"Using custom web_root directory: {web_path}")
+                return web_path
+            logger.warning(f"web_root directory {web_path} not found or missing index.html")
+
+        logger.info("Defaulting to packaged web files.")
+        try:
+            package_path = importlib_resources.files(self.STATIC_CONTENT_PATH)
+            # Create a temporary directory and copy contents
+            self.web_files_ctx = tempfile.TemporaryDirectory(prefix="selkies_web")
+            temp_path = pathlib.Path(self.web_files_ctx.name)
+            await asyncio.to_thread(self._copy_traversable, package_path, temp_path)
+ 
+            if (temp_path / "index.html").exists():
+                logger.info(f"Using extracted package path from temp dir: {temp_path}")
+                return str(temp_path)
+            else:
+                logger.warning("Packaged web content missing index.html")
+                self.web_files_ctx.cleanup()
+        except Exception as e:
+            logger.error(f"Failed to extract packaged web files: {e}")
+            self.web_files_ctx.cleanup()
+
+        return ""
+
+    def _copy_traversable(self, src: Any, dst: pathlib.Path):
+        """Recursively copy a Traversable (file or directory) to a filesystem path."""
+        if src.is_file():
+            with src.open('rb') as f_src, open(dst, 'wb') as f_dst:
+                shutil.copyfileobj(f_src, f_dst)
+        elif src.is_dir():
+            dst.mkdir(exist_ok=True)
+            for child in src.iterdir():
+                self._copy_traversable(child, dst / child.name)
+
+    async def _read_template(self, template_name: str) -> Tuple[bool, str]:
+        if not self.static_fs_path:
+            logger.error(f"Cannot read template {template_name}: no static_fs_path available")
+            return False, ""
+
+        fs_path = os.path.join(self.static_fs_path, template_name)
+        if not os.path.exists(fs_path):
+            logger.warning(f"Template not found: {fs_path}")
+            return False, ""
+
+        try:
+            async with aiofiles.open(fs_path, "r") as f:
+                return True, await f.read()
+        except Exception as e:
+            logger.error(f"Failed to read template {template_name}: {e}")
+            return False, ""
+
     async def fancy_index_handler(self, request: web.Request):
         rel_path = request.match_info.get("path", "").lstrip("/")
         full_path = (self.upload_dir / rel_path).resolve()
@@ -426,13 +462,12 @@ class CentralisedStreamServer:
         # Sort: Directories first, then alphabetically
         items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
 
-        header_path = os.path.join(self.static_fs_path, self.header_html)
-        footer_path = os.path.join(self.static_fs_path, self.footer_html)
-
-        async with aiofiles.open(header_path, "r") as f:
-            header = await f.read()
-        async with aiofiles.open(footer_path, "r") as f:
-            footer = await f.read()
+        he_fetched, header = await self._read_template(self.header_html)
+        if not he_fetched:
+            return web.Response(status=500, text=f"Failed to load header template: {self.header_html}")
+        fo_fetched, footer = await self._read_template(self.footer_html)
+        if not fo_fetched:
+            return web.Response(status=500, text=f"Failed to load footer template: {self.footer_html}")
 
         # Build Table Rows with proper escaping
         rows = ""
@@ -493,6 +528,8 @@ class CentralisedStreamServer:
         )
         if api_prefix:
             logger.info(f"Prepending api prefix: {api_prefix!r} to router handlers")
+        else:
+            logger.info(f"** prefix; {api_prefix}")
         self.app.add_routes(
             [
                 web.get(f"{api_prefix}/status", self.handle_status),
@@ -505,9 +542,8 @@ class CentralisedStreamServer:
         for service in self.services.values():
             service.register_routes(api_prefix, self.app.router)
 
-        self.static_fs_path = self._get_static_content_path()
+        self.static_fs_path = await self._get_static_content_path()
         if self.static_fs_path:
-
             async def index_handler(_):
                 return web.FileResponse(os.path.join(self.static_fs_path, "index.html"))
 
@@ -567,9 +603,11 @@ class CentralisedStreamServer:
                 pass
 
         await self._stop_service()
+
+        if self.web_files_ctx:
+                self.web_files_ctx.cleanup()
         if self.site:
             await self.site.stop()
-
         if self.runner:
             await self.runner.cleanup()
             logger.info("Server cleanup complete.")

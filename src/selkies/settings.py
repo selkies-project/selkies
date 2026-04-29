@@ -51,8 +51,8 @@ SETTING_DEFINITIONS = [
     {
         "name": "web_root",
         "type": "str",
-        "default": "/opt/selkies-web",
-        "help": 'Path to directory containing web application files, default: "/opt/selkies-web"',
+        "default": "",
+        "help": 'Path to directory containing web application files. Defaults to web files packaged with Selkies application',
     },
     {
         "name": "audio_enabled",

@@ -962,7 +962,7 @@ class DataStreamingServer(BaseStreamingService):
         self._is_wm_swapped = False
         self._wm_swap_is_supported = None
 
-    def initialise(self):
+    def initialize(self):
         """
         Initialize the DataStreamingServer components including SelkiesStreamingApp and InputHandler.
         This should be called before run().
@@ -3264,7 +3264,7 @@ class DataStreamingServer(BaseStreamingService):
         Start the DataStreamingServer and all its components.
         """
         self._shutdown_called = False
-        self.initialise()
+        self.initialize()
 
         logger.info("Starting DataStreamingServer...")
         
