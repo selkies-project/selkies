@@ -1189,35 +1189,35 @@ class WebRTCInput:
 
     async def send_x11_keypress(self, keysym, down=True):
         if self.is_wayland and self.wayland_input:
-            is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
-            is_symbol = False
-            
-            if is_printable:
-                unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
-                try:
-                    char = chr(unicode_codepoint)
-                    if not char.isalpha() and char != ' ' and char != '-':
-                        is_symbol = True
-                except ValueError:
-                    pass
-
-            if is_symbol or keysym == 0x20AC:
-                await self._xdotool_fallback(keysym, down)
-                return
-
             scancode = self.wayland_scancode_map.get(keysym)
-            
             if scancode is None and (0x20 <= keysym <= 0xFF):
                 try:
                     lower_sym = ord(chr(keysym).lower())
                     scancode = self.wayland_scancode_map.get(lower_sym)
                 except: pass
 
-            if down and scancode is not None and hasattr(self, 'wayland_shift_required_keys') and keysym in self.wayland_shift_required_keys:
-                if 65505 not in self.active_modifiers and 65506 not in self.active_modifiers:
-                    scancode = None
+            force_fallback = False
+            is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000) or keysym == 0x20AC
+            
+            if down and is_printable:
+                if scancode is not None and hasattr(self, 'wayland_shift_required_keys'):
+                    shift_pressed = 65505 in self.active_modifiers or 65506 in self.active_modifiers
+                    altgr_pressed = 65027 in self.active_modifiers
+                    ctrl_pressed = 65507 in self.active_modifiers or 65508 in self.active_modifiers
+                    alt_pressed = 65513 in self.active_modifiers or 65514 in self.active_modifiers
+                    meta_pressed = 65511 in self.active_modifiers or 65512 in self.active_modifiers
+                    has_shortcut_mod = ctrl_pressed or alt_pressed or meta_pressed
+                    requires_shift = keysym in self.wayland_shift_required_keys
+                    if not has_shortcut_mod:
+                        if requires_shift != shift_pressed:
+                            force_fallback = True
+                        elif altgr_pressed:
+                            force_fallback = True
 
-            if scancode:
+            if scancode is None or keysym == 0x20AC or ((keysym & 0xFF000000) == 0x01000000):
+                force_fallback = True
+
+            if not force_fallback and scancode is not None:
                 try:
                     self.wayland_input.inject_key(scancode, 1 if down else 0)
                 except Exception as e:
@@ -1768,8 +1768,6 @@ class WebRTCInput:
             return True
         input_bytes = data if isinstance(data, bytes) else data.encode('utf-8')
 
-        # Ensure LANG is set to a UTF-8 locale
-        # Helpful when running as portable application too, where LANG may be unset
         env = self._get_wl_env() if self.is_wayland else os.environ.copy()
         if 'LANG' not in env or env['LANG'] == 'C':
             env['LANG'] = 'C.UTF-8'
@@ -1781,14 +1779,13 @@ class WebRTCInput:
                     *cmd,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, # FIX: Prevent daemon from keeping pipe open
+                    stderr=subprocess.DEVNULL,
                     env=env
                 )
                 if process.stdin:
                     process.stdin.write(input_bytes)
                     await process.stdin.drain()
                     process.stdin.close()
-                # Should now return instantly instead of hitting the 2.0s timeout
                 await asyncio.wait_for(process.communicate(), timeout=2.0)
                 if process.returncode == 0:
                     return True
