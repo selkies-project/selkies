@@ -19,194 +19,306 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-import asyncio
-import base64
-import json
-import logging
 import ssl
-import websockets
-import websockets.asyncio.client
+import json
+import base64
+import aiohttp
+import asyncio
+import logging
+from typing import Any, Callable, Dict, Optional, Awaitable
+from aiohttp import ClientWebSocketResponse, WSMsgType
 
 logger = logging.getLogger("signaling_client")
 logger.setLevel(logging.INFO)
-# websockets logs an error if a connection is opened and closed before any data is sent.
-# The client seems to do same thing, causing an inital handshake error.
-logging.getLogger("websockets").setLevel(logging.CRITICAL)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
+
 
 class WebRTCSignalingError(Exception):
+    """Base exception for signaling errors."""
+
     pass
 
-class WebRTCSignalingErrorNoPeer(Exception):
+
+class WebRTCSignalingErrorNoPeer(WebRTCSignalingError):
+    """Exception raised when no peer is found."""
+
     pass
 
-class WebRTCSignaling:
-    def __init__(self, server, enable_https=False, enable_basic_auth=False,
-                 basic_auth_user=None, basic_auth_password=None):
-        """Initialize the signaling instance"""
 
+class WebRTCSignalingClient:
+    """WebSocket signaling client for WebRTC peer connection establishment.
+
+    Uses aiohttp for WebSocket communication with the signaling server.
+    Supports automatic reconnection on connection failures.
+    """
+
+    def __init__(
+        self,
+        server: str,
+        enable_https: bool = False,
+        enable_basic_auth: bool = False,
+        basic_auth_user: Optional[str] = None,
+        basic_auth_password: Optional[str] = None,
+    ) -> None:
+        """Initialize the signaling client.
+
+        Args:
+            server: WebSocket server URL (e.g., 'ws://localhost:8080/ws').
+            enable_https: Whether to use WSS (secure WebSocket).
+            enable_basic_auth: Whether to use HTTP Basic Authentication.
+            basic_auth_user: Username for basic auth.
+            basic_auth_password: Password for basic auth.
+        """
         self.server = server
-        self.peer_type = 'server'
+        self.peer_type = "server"
         self.enable_https = enable_https
         self.enable_basic_auth = enable_basic_auth
         self.basic_auth_user = basic_auth_user
         self.basic_auth_password = basic_auth_password
-        self.conn = None
-        self.stop_event = asyncio.Event()
-        self.task = None
 
-        self.on_ice = lambda ice, client_peer_id: logger.warning('unhandled ice event')
-        self.on_sdp = lambda sdp_type, sdp, client_peer_id: logger.warning('unhandled sdp event')
-        self.on_connect = lambda res, scale: logger.warning('unhandled on_connect callback')
-        self.on_disconnect = lambda: logger.warning('unhandled on_disconnect callback')
-        self.on_session_start = lambda client_peer_id, client_type: logger.warning('unhandled on_session_start callback')
-        self.on_session_end = lambda client_peer_id, client_type: logger.warning('unhandled on_session_end callback')
-        self.on_error = lambda v: logger.warning('unhandled on_error callback: %s', v)
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws: Optional[ClientWebSocketResponse] = None
+        self._stop_event = asyncio.Event()
+        self._task: Optional[asyncio.Task] = None
+
+        # Callbacks - to be overridden by the consumer
+        self.on_ice: Callable[[Dict[str, Any], str], Awaitable[None]] = (
+            lambda ice, client_peer_id: logger.warning("unhandled ice event")
+        )
+        self.on_sdp: Callable[[str, str, str], Awaitable[None]] = (
+            lambda sdp_type, sdp, client_peer_id: logger.warning("unhandled sdp event")
+        )
+        self.on_disconnect: Callable[[], Awaitable[None]] = lambda: logger.warning(
+            "unhandled on_disconnect callback"
+        )
+        self.on_session_start: Callable[[str, str], Awaitable[None]] = (
+            lambda client_peer_id, client_type: logger.warning(
+                "unhandled on_session_start callback"
+            )
+        )
+        self.on_session_end: Callable[[str, str], Awaitable[None]] = (
+            lambda client_peer_id, client_type: logger.warning(
+                "unhandled on_session_end callback"
+            )
+        )
+        self.on_error: Callable[[Exception], Awaitable[None]] = lambda v: logger.warning(
+            "unhandled on_error callback: %s", v
+        )
 
     def start(self) -> None:
-        self.stop_event.clear()
-        self.task = asyncio.create_task(self.connect_and_listen())
+        """Start the signaling client connection task."""
+        self._stop_event.clear()
+        self._task = asyncio.create_task(self.connect_and_listen())
 
-    async def connect_and_listen(self):
-        """Connects to and registers id with signaling server.
-        Listens for incoming messages continuously. Reconnects on failure.
+    async def connect_and_listen(self) -> None:
+        """Connect to the signaling server and listen for messages.
+
+        Automatically reconnects on connection failures.
         """
-        sslctx = None
+        ssl_ctx: Optional[ssl.SSLContext] = None
         if self.enable_https:
-            sslctx = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
-            sslctx.check_hostname = False
-            sslctx.verify_mode = ssl.CERT_NONE
-        headers = None
-        if self.enable_basic_auth:
-            auth64 = base64.b64encode(bytes("{}:{}".format(self.basic_auth_user, self.basic_auth_password), "ascii")).decode("ascii")
-            headers = [("Authorization", "Basic {}".format(auth64))]
+            ssl_ctx = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
 
-        while not self.stop_event.is_set():
+        headers: Optional[Dict[str, str]] = None
+        if self.enable_basic_auth and self.basic_auth_user and self.basic_auth_password:
+            auth64 = base64.b64encode(
+                f"{self.basic_auth_user}:{self.basic_auth_password}".encode("ascii")
+            ).decode("ascii")
+            headers = {"Authorization": f"Basic {auth64}"}
+
+        while not self._stop_event.is_set():
             try:
-                logger.info(f"Connecting to signaling server")
-                self.conn = await websockets.asyncio.client.connect(self.server, additional_headers=headers, ssl=sslctx)
-
-                await self.conn.send('HELLO {}'.format(self.peer_type))
-                await self.listen()
+                logger.info("Connecting to signaling server")
+                self._session = aiohttp.ClientSession()
+                self._ws = await self._session.ws_connect(
+                    self.server,
+                    headers=headers,
+                    ssl=ssl_ctx,
+                    heartbeat=30,
+                )
+                await self._ws.send_str(f"HELLO {self.peer_type}")
+                await self._listen()
             except asyncio.CancelledError:
                 pass
-            except (ConnectionRefusedError, OSError) as err:
-                logger.warning(f"Connection refused, retrying... {err}")
+            except (
+                aiohttp.WSServerHandshakeError,
+                aiohttp.ClientConnectionError,
+                OSError,
+            ) as err:
+                logger.warning(f"Connection failed, retrying... {err}")
                 await asyncio.sleep(2)
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("Connection closed, attempting to reconnect...")
+            except aiohttp.ClientError as e:
+                logger.warning(f"Client error, attempting to reconnect... {e}")
                 await asyncio.sleep(2)
             except Exception as e:
                 logger.exception(f"Unexpected error: {e}")
                 await asyncio.sleep(2)
-            
-            await asyncio.sleep(0.5)
+            finally:
+                await self._cleanup_connection()
+                if not self._stop_event.is_set():
+                    await asyncio.sleep(0.1)
 
-    async def send_ice(self, mlineindex, candidate, client_peer_id):
-        """Sends the ice candidate to peer
+    async def _cleanup_connection(self) -> None:
+        """Clean up WebSocket connection and session resources."""
+        if self._ws is not None and not self._ws.closed:
+            await self._ws.close()
+        self._ws = None
 
-        Arguments:
-            mlineindex {integer} -- the mlineindex
-            candidate {string} -- the candidate
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
+    async def send_ice(
+        self, mlineindex: int, candidate: str, client_peer_id: str
+    ) -> None:
+        """Send ICE candidate to peer via signaling server.
+
+        Args:
+            mlineindex: The media line index for the ICE candidate.
+            candidate: The ICE candidate string.
+            client_peer_id: The peer ID to send the candidate to.
         """
+        if self._ws is None or self._ws.closed:
+            raise WebRTCSignalingError("WebSocket connection not available")
 
-        msg = json.dumps({'ice': {'candidate': candidate, 'sdpMLineIndex': mlineindex}})
-        await self.conn.send(str(client_peer_id) + ' ' + msg)
+        msg = json.dumps({"ice": {"candidate": candidate, "sdpMLineIndex": mlineindex}})
+        await self._ws.send_str(f"{client_peer_id} {msg}")
 
-    async def send_sdp(self, sdp_type, sdp, client_peer_id):
-        """Sends the SDP to peer
+    async def send_sdp(self, sdp_type: str, sdp: str, client_peer_id: str) -> None:
+        """Send SDP to peer via signaling server.
 
-        Arguments:
-            sdp_type {string} -- SDP type, answer or offer.
-            sdp {string} -- the SDP
+        Args:
+            sdp_type: SDP type ('offer' or 'answer').
+            sdp: The SDP content.
+            client_peer_id: The peer ID to send the SDP to.
         """
+        if self._ws is None or self._ws.closed:
+            raise WebRTCSignalingError("WebSocket connection not available")
 
         logger.info(f"sending sdp type: {sdp_type} to client_peer_id: {client_peer_id}")
         logger.debug("SDP:\n%s" % sdp)
 
-        msg = json.dumps({'sdp': {'type': sdp_type, 'sdp': sdp}})
-        await self.conn.send(str(client_peer_id) + ' ' + msg)
+        msg = json.dumps({"sdp": {"type": sdp_type, "sdp": sdp}})
+        await self._ws.send_str(f"{client_peer_id} {msg}")
 
-    async def stop(self):
-        self.stop_event.set()
-        if self.conn is not None:
-            await self.conn.close()
-            self.conn = None
-            if self.task:
-                await self.task
-        logger.info("Signaling stopped")
+    async def stop(self) -> None:
+        """Stop the signaling client and clean up resources."""
+        logger.info("Stopping signaling client...")
+        self._stop_event.set()
 
-    async def listen(self):
-        """Handles messages from the signaling server websocket.
+        # Cancel the connection task if running
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
 
-        Message types:
-          HELLO: response from server indicating peer is registered.
-          ERROR*: error messages from server.
-          SESSION_START: indicates a new session has been started with a client.
-          SESSION_END: indicates the session with a client has ended.
-          {"sdp": ...}: JSON SDP message
-          {"ice": ...}: JSON ICE message
+        await self._cleanup_connection()
+        logger.info("Signaling client stopped")
 
-        Callbacks:
+    async def _listen(self) -> None:
+        """Listen for and process incoming signaling messages.
 
-        on_connect: fired when HELLO is received.
-        on_session_start: fired after setup_call() succeeds and SESSION_OK is received.
-        on_session_end: fired when SESSION_END message is received.
-        on_error(WebRTCSignalingErrorNoPeer): fired when setup_call() fails and peer not found message is received.
-        on_error(WebRTCSignalingError): fired when message parsing fails or unexpected message is received.
-
+        Message types handled:
+            HELLO: Server acknowledgment of registration.
+            SESSION_START: New session started with a client.
+            SESSION_END: Session with a client ended.
+            ERROR: Error messages from server.
+            JSON SDP/ICE: WebRTC negotiation messages.
         """
+        if self._ws is None:
+            raise WebRTCSignalingError("WebSocket connection not available")
+
         try:
-            async for message in self.conn:
-                if message == 'HELLO':
-                    logger.info("ws connection established with signaling server")
-                elif message.startswith('SESSION_START'):
-                    toks = message.strip().split(' ')
-                    if len(toks) == 3:
-                        # peer_id is of format client-<UUID>
-                        _, client_peer_id, client_type = toks
-                        await self.on_session_start(client_peer_id, client_type)
-                    else:
-                        logger.error(f"invalid SESSION_START message: {message}")
-                elif message.startswith('SESSION_END'):
-                    toks = message.strip().split(' ')
-                    if len(toks) == 3:
-                        _, client_peer_id, client_type = toks
-                        await self.on_session_end(client_peer_id, client_type)
-                    else:
-                        logger.error(f"invalid SESSION_END message: {message}")
-                elif message.startswith('ERROR'):
-                    await self.on_error(WebRTCSignalingError("unhandled signaling message: %s" % message))
-                else:
-                    # Attempt to parse JSON SDP or ICE message
-                    data = None
-                    client_peer_id = None
-                    try:
-                        client_peer_id, message = message.split(' ', maxsplit=1)
-                        data = json.loads(message)
-                    except Exception as e:
-                        if isinstance(e, json.decoder.JSONDecodeError):
-                            await self.on_error(WebRTCSignalingError("error parsing message as JSON: %s" % message))
-                        else:
-                            await self.on_error(WebRTCSignalingError("failed to parse message: %s" % message))
-                        continue
-                    if data.get("sdp", None):
-                        logger.info(f"received SDP from client_peer_id: {client_peer_id}")
-                        logger.debug(f"SDP:\n{data['sdp']}")
-                        await self.on_sdp(data['sdp'].get('type'), data['sdp'].get('sdp'), client_peer_id)
-                    elif data.get("ice", None):
-                        logger.info(f"received ICE from client_peer_id: {client_peer_id}")
-                        logger.debug(f"ICE:\n{data.get('ice')}")
-                        await self.on_ice(data['ice'], client_peer_id)
-                    else:
-                        await self.on_error(WebRTCSignalingError("unhandled JSON message: %s", json.dumps(data)))
+            async for msg in self._ws:
+                if msg.type == WSMsgType.TEXT:
+                    await self._process_message(msg.data)
+                elif msg.type == WSMsgType.CLOSED:
+                    logger.warning("WebSocket connection closed by server")
+                    break
+                elif msg.type == WSMsgType.ERROR:
+                    logger.error(f"WebSocket error: {self._ws.exception()}")
+                    break
         except asyncio.CancelledError:
             pass
-        except websockets.exceptions.ConnectionClosed as e:
-            logger.warning(f"Signaling server closed the connection {e}", exc_info=True)
+        except aiohttp.ClientError as e:
+            logger.warning(
+                f"Signaling server closed the connection: {e}", exc_info=True
+            )
         except Exception as e:
-            logger.error(f"Error signaling client: {e}", exc_info=True)
+            logger.error(f"Error processing signaling message: {e}", exc_info=True)
         finally:
-            if self.conn:
-                await self.conn.close()
-            self.conn = None
             await self.on_disconnect()
+
+    async def _process_message(self, message: str) -> None:
+        """Process a single signaling message.
+
+        Args:
+            message: The raw message string from the WebSocket.
+        """
+        if message == "HELLO":
+            logger.info("WebSocket connection established with signaling server")
+
+        elif message.startswith("SESSION_START"):
+            toks = message.strip().split(" ")
+            if len(toks) == 3:
+                # peer_id is of format client-<UUID>
+                _, client_peer_id, client_type = toks
+                await self.on_session_start(client_peer_id, client_type)
+            else:
+                logger.error(f"invalid SESSION_START message: {message}")
+
+        elif message.startswith("SESSION_END"):
+            toks = message.strip().split(" ")
+            if len(toks) == 3:
+                _, client_peer_id, client_type = toks
+                await self.on_session_end(client_peer_id, client_type)
+            else:
+                logger.error(f"invalid SESSION_END message: {message}")
+
+        elif message.startswith("ERROR"):
+            await self.on_error(
+                WebRTCSignalingError(f"unhandled signaling message: {message}")
+            )
+
+        else:
+            # Attempt to parse JSON SDP or ICE message
+            client_peer_id: Optional[str] = None
+            data: Optional[Dict[str, Any]] = None
+
+            try:
+                client_peer_id, message = message.split(" ", maxsplit=1)
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                await self.on_error(
+                    WebRTCSignalingError(f"error parsing message as JSON: {message}")
+                )
+                return
+            except ValueError:
+                await self.on_error(
+                    WebRTCSignalingError(f"failed to parse message: {message}")
+                )
+                return
+
+            if data is None:
+                return
+
+            if data.get("sdp"):
+                logger.info(f"received SDP from client_peer_id: {client_peer_id}")
+                logger.debug(f"SDP:\n{data['sdp']}")
+                await self.on_sdp(
+                    data["sdp"].get("type", ""),
+                    data["sdp"].get("sdp", ""),
+                    client_peer_id,
+                )
+            elif data.get("ice"):
+                logger.info(f"received ICE from client_peer_id: {client_peer_id}")
+                logger.debug(f"ICE:\n{data.get('ice')}")
+                await self.on_ice(data["ice"], client_peer_id)
+            else:
+                await self.on_error(
+                    WebRTCSignalingError(f"unhandled JSON message: {json.dumps(data)}")
+                )

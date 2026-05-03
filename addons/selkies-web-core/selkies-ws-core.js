@@ -951,7 +951,7 @@ const initializeUI = () => {
   statusDisplayElement.textContent = 'Connecting...';
   videoContainer.appendChild(statusDisplayElement);
   overlayInput = document.createElement('input');
-  overlayInput.type = 'text';
+  overlayInput.type = 'search';
   overlayInput.readOnly = false;
   overlayInput.autocomplete = 'off';
   overlayInput.id = 'overlayInput';
@@ -1008,7 +1008,7 @@ const initializeUI = () => {
 
   if (!document.getElementById('keyboard-input-assist')) {
     const keyboardInputAssist = document.createElement('input');
-    keyboardInputAssist.type = 'text';
+    keyboardInputAssist.type = 'search';
     keyboardInputAssist.id = 'keyboard-input-assist';
     keyboardInputAssist.style.position = 'absolute';
     keyboardInputAssist.style.left = '-9999px';
@@ -2799,6 +2799,18 @@ function handleDecodedFrame(frame) {
   let websocketEndpointURL = new URL(`${ws_protocol}${window.location.host}${pathname}`);
   if (isTokenAuthMode) {
       websocketEndpointURL.search = `?token=${authToken}`;
+  } else if (isSharedMode) {
+      // Pass role/slot as query params so the server can assign permissions
+      // (URL fragments are never transmitted to the server per HTTP spec)
+      const wsParams = new URLSearchParams();
+      wsParams.set('role', 'viewer');
+      if (detectedSharedModeType && detectedSharedModeType.startsWith('player')) {
+          const playerSlot = detectedSharedModeType.replace('player', '');
+          if (playerSlot >= 2 && playerSlot <= 4) {
+              wsParams.set('slot', playerSlot);
+          }
+      }
+      websocketEndpointURL.search = wsParams.toString();
   }
   websocketEndpointURL.pathname += 'websockets';
 
