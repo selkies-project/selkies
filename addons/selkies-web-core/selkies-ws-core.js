@@ -2411,10 +2411,13 @@ function handleDecodedFrame(frame) {
         const physicalFrameWidth = frame.codedWidth;
         const physicalFrameHeight = frame.codedHeight;
 
+        const logicalFrameWidth = physicalFrameWidth / dpr;
+        const logicalFrameHeight = physicalFrameHeight / dpr;
+
         if ((manual_width !== physicalFrameWidth || manual_height !== physicalFrameHeight) && physicalFrameWidth > 0 && physicalFrameHeight > 0) {
             manual_width = physicalFrameWidth;
             manual_height = physicalFrameHeight;
-            console.log(`Shared mode (decoded H264): Updated dimensions from H.264 frame to ${manual_width}x${manual_height} (Physical)`);
+            console.log(`Shared mode (decoded H264): Updated manual (logical) dimensions from H.264 frame to ${manual_width.toFixed(2)}x${manual_height.toFixed(2)} (Physical: ${physicalFrameWidth}x${physicalFrameHeight})`);
             applyManualCanvasStyle(manual_width, manual_height, true);
         }
     }
@@ -2458,9 +2461,14 @@ function handleDecodedFrame(frame) {
           const firstStripeFrame = decodedStripesQueue[0].frame;
           if (firstStripeFrame && firstStripeFrame.codedWidth > 0) {
               const physicalStripeCodedWidth = firstStripeFrame.codedWidth;
-              if (manual_width !== physicalStripeCodedWidth && physicalStripeCodedWidth > 0) {
-                  manual_width = physicalStripeCodedWidth;
-                  console.log(`Shared mode (VNC stripe paint): Updated Width from VNC stripe to ${manual_width} (Physical). Waiting on stream_resolution for height.`);
+              const logicalStripeCodedWidth = physicalStripeCodedWidth / dpr_for_conversion;
+              if (manual_width !== logicalStripeCodedWidth && logicalStripeCodedWidth > 0) {
+                  if (manual_width > 0 && manual_height > 0) {
+                      const ratio = logicalStripeCodedWidth / manual_width;
+                      manual_height = roundDownToEven(manual_height * ratio);
+                  }
+                  manual_width = logicalStripeCodedWidth;
+                  console.log(`Shared mode (VNC stripe paint): Updated manual (logical) Width from VNC stripe to ${manual_width.toFixed(2)} (Stripe Coded: ${physicalStripeCodedWidth}, DPR for conversion: ${dpr_for_conversion})`);
                   if (manual_height && manual_width > 0 && manual_height > 0) {
                       applyManualCanvasStyle(manual_width, manual_height, true);
                   }
@@ -2485,9 +2493,14 @@ function handleDecodedFrame(frame) {
             const firstStripeImage = jpegStripeRenderQueue[0].image;
             if (firstStripeImage && firstStripeImage.codedWidth > 0) {
                 const physicalImageCodedWidth = firstStripeImage.codedWidth;
-                if (manual_width !== physicalImageCodedWidth && physicalImageCodedWidth > 0) {
-                    manual_width = physicalImageCodedWidth;
-                    console.log(`Shared mode (JPEG stripe paint): Updated Width from JPEG stripe to ${manual_width} (Physical). Waiting on stream_resolution for height.`);
+                const logicalImageCodedWidth = physicalImageCodedWidth / dpr_for_conversion;
+                if (manual_width !== logicalImageCodedWidth && logicalImageCodedWidth > 0) {
+                    if (manual_width > 0 && manual_height > 0) {
+                        const ratio = logicalImageCodedWidth / manual_width;
+                        manual_height = roundDownToEven(manual_height * ratio);
+                    }
+                    manual_width = logicalImageCodedWidth;
+                    console.log(`Shared mode (JPEG stripe paint): Updated manual (logical) Width from JPEG stripe to ${manual_width.toFixed(2)} (Image Coded: ${physicalImageCodedWidth}, DPR for conversion: ${dpr_for_conversion})`);
                     if (manual_height && manual_width > 0 && manual_height > 0) {
                         applyManualCanvasStyle(manual_width, manual_height, true);
                     }
@@ -3645,12 +3658,14 @@ function handleDecodedFrame(frame) {
                  const evenPhysicalNewWidth = roundDownToEven(physicalNewWidth);
                  const evenPhysicalNewHeight = roundDownToEven(physicalNewHeight);
 
-                 let dimensionsChanged = (manual_width !== evenPhysicalNewWidth || manual_height !== evenPhysicalNewHeight);
+                 const logicalNewWidth = evenPhysicalNewWidth / dpr_for_conversion;
+                 const logicalNewHeight = evenPhysicalNewHeight / dpr_for_conversion;
+                 let dimensionsChanged = (manual_width !== logicalNewWidth || manual_height !== logicalNewHeight);
 
                  if (dimensionsChanged) {
-                   console.log(`Shared mode: Received new stream resolution ${evenPhysicalNewWidth}x${evenPhysicalNewHeight} (physical).`);
-                   manual_width = evenPhysicalNewWidth;
-                   manual_height = evenPhysicalNewHeight;
+                   console.log(`Shared mode: Received new stream resolution ${logicalNewWidth.toFixed(2)}x${logicalNewHeight.toFixed(2)} (logical).`);
+                   manual_width = logicalNewWidth;
+                   manual_height = logicalNewHeight;
                    applyManualCanvasStyle(manual_width, manual_height, true);
                  }
 
