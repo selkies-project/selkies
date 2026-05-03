@@ -2408,17 +2408,13 @@ function handleDecodedFrame(frame) {
     }
 
     if (isSharedMode && identifiedEncoderModeForShared === 'h264_full_frame' && sharedClientState === 'ready') {
-        const dpr_for_conversion = useCssScaling ? 1 : (window.devicePixelRatio || 1);
         const physicalFrameWidth = frame.codedWidth;
         const physicalFrameHeight = frame.codedHeight;
 
-        const logicalFrameWidth = physicalFrameWidth / dpr;
-        const logicalFrameHeight = physicalFrameHeight / dpr;
-
-        if ((manual_width !== logicalFrameWidth || manual_height !== logicalFrameHeight) && logicalFrameWidth > 0 && logicalFrameHeight > 0) {
-            manual_width = logicalFrameWidth;
-            manual_height = logicalFrameHeight;
-            console.log(`Shared mode (decoded H264): Updated manual (logical) dimensions from H.264 frame to ${manual_width.toFixed(2)}x${manual_height.toFixed(2)} (Physical: ${physicalFrameWidth}x${physicalFrameHeight})`);
+        if ((manual_width !== physicalFrameWidth || manual_height !== physicalFrameHeight) && physicalFrameWidth > 0 && physicalFrameHeight > 0) { 
+            manual_width = physicalFrameWidth;
+            manual_height = physicalFrameHeight;
+            console.log(`Shared mode (decoded H264): Updated dimensions from H.264 frame to ${manual_width}x${manual_height} (Physical)`);
             applyManualCanvasStyle(manual_width, manual_height, true);
         }
     }
