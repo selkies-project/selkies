@@ -3035,6 +3035,43 @@ document.addEventListener('DOMContentLoaded', () => {
         const stripeHeight = dataView.getUint16(8, false);
         const h264Payload = arrayBuffer.slice(EXPECTED_HEADER_LENGTH);
 
+        if (isSharedMode) {
+            if (!sharedClientHasReceivedKeyframe) {
+                if (video_frame_type_byte === 0x01) {
+                    console.log("Shared mode: First keyframe received for x264enc fullframe. Opening the gate.");
+                    sharedClientHasReceivedKeyframe = true;
+                } else {
+                    return;
+                }
+            }
+            if (h264Payload.byteLength === 0) return;
+
+            if (decoder && decoder.state === 'configured') {
+                const chunkType = (video_frame_type_byte === 0x01) ? 'key' : 'delta';
+                if (chunkType === 'delta' && !mainDecoderHasKeyframe) {
+                    return;
+                }
+                if (chunkType === 'key') {
+                    mainDecoderHasKeyframe = true;
+                }
+                const chunk = new EncodedVideoChunk({
+                    type: chunkType,
+                    timestamp: performance.now() * 1000,
+                    data: h264Payload
+                });
+                try {
+                    decoder.decode(chunk);
+                } catch (e) {
+                    initiateFallback(e, 'main_decoder_decode');
+                }
+            } else {
+                if (!decoder || decoder.state === 'closed' || decoder.state === 'unconfigured') {
+                    triggerInitializeDecoder();
+                }
+            }
+            return;
+        }
+
         const canProcessVncStripe =
             (!isSharedMode && isVideoPipelineActive && (currentEncoderMode === 'x264enc' || currentEncoderMode === 'x264enc-striped'));
 
