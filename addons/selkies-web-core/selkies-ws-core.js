@@ -737,9 +737,8 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     return;
   }
 
-  const dpr = (isSharedMode || window.is_manual_resolution_mode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
-  const internalBufferWidth = roundDownToEven(targetWidth * dpr);
-  const internalBufferHeight = roundDownToEven(targetHeight * dpr);
+  const internalBufferWidth = roundDownToEven(targetWidth);
+  const internalBufferHeight = roundDownToEven(targetHeight);
 
   if (canvas.width !== internalBufferWidth || canvas.height !== internalBufferHeight) {
     canvas.width = internalBufferWidth;
@@ -2415,9 +2414,9 @@ function handleDecodedFrame(frame) {
         const logicalFrameWidth = physicalFrameWidth / dpr;
         const logicalFrameHeight = physicalFrameHeight / dpr;
 
-        if ((manual_width !== logicalFrameWidth || manual_height !== logicalFrameHeight) && logicalFrameWidth > 0 && logicalFrameHeight > 0) {
-            manual_width = logicalFrameWidth;
-            manual_height = logicalFrameHeight;
+        if ((manual_width !== physicalFrameWidth || manual_height !== physicalFrameHeight) && physicalFrameWidth > 0 && physicalFrameHeight > 0) {
+            manual_width = physicalFrameWidth;
+            manual_height = physicalFrameHeight;
             console.log(`Shared mode (decoded H264): Updated manual (logical) dimensions from H.264 frame to ${manual_width.toFixed(2)}x${manual_height.toFixed(2)} (Physical: ${physicalFrameWidth}x${physicalFrameHeight})`);
             applyManualCanvasStyle(manual_width, manual_height, true);
         }
