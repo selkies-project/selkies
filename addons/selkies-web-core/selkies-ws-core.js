@@ -2363,20 +2363,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (isSharedMode) {
-      const physicalFrameWidth = frame.codedWidth;
-      const physicalFrameHeight = frame.codedHeight;
+        const physicalFrameWidth = frame.displayWidth;
+        const physicalFrameHeight = frame.displayHeight;
 
-      if ((manual_width !== physicalFrameWidth || manual_height !== physicalFrameHeight) && physicalFrameWidth > 0 && physicalFrameHeight > 0) {
-        manual_width = physicalFrameWidth;
-        manual_height = physicalFrameHeight;
-        console.log(`Shared mode(decoded H264) : Updated dimensions from H.264 frame to $ {
-          manual_width
+        if ((manual_width !== physicalFrameWidth || manual_height !== physicalFrameHeight) && physicalFrameWidth > 0 && physicalFrameHeight > 0) { 
+            manual_width = physicalFrameWidth;
+            manual_height = physicalFrameHeight;
+            console.log(`Shared mode (decoded H264): Updated dimensions from H.264 frame to ${manual_width}x${manual_height} (Physical)`);
+            applyManualCanvasStyle(manual_width, manual_height, true);
         }
-        x$ {
-          manual_height
-        } (Physical)`);
-        applyManualCanvasStyle(manual_width, manual_height, true);
-      }
     }
 
     if (isGStreamerH264Mode) {
