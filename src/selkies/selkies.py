@@ -3421,6 +3421,13 @@ async def ws_entrypoint():
     is_secure_mode = bool(settings.master_token)
     if is_secure_mode:
         logger.info("Secure Mode ENABLED (SELKIES_MASTER_TOKEN is set).")
+        settings.encoder = "x264enc"
+        for s_def in SETTING_DEFINITIONS:
+            if s_def['name'] == 'encoder':
+                s_def['meta']['allowed'] = ['x264enc']
+                s_def['default'] = 'x264enc'
+                break
+ 
     else:
         logger.info("Legacy Mode ENABLED (SELKIES_MASTER_TOKEN is not set).")
         config_gate.set()
