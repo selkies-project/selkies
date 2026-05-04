@@ -142,6 +142,35 @@ except ImportError:
     )
     X11_KEYSYM_MAP = {}
 
+CYRILLIC_TO_QWERTY_KEYSYM = {
+    0x06CA: 0x0071, # Й -> q
+    0x06C3: 0x0077, # Ц -> w
+    0x06D5: 0x0065, # У -> e
+    0x06CB: 0x0072, # К -> r
+    0x06C5: 0x0074, # Е -> t
+    0x06CE: 0x0079, # Н -> y
+    0x06C7: 0x0075, # Г -> u
+    0x06DB: 0x0069, # Ш -> i
+    0x06DD: 0x006F, # Щ -> o
+    0x06DA: 0x0070, # З -> p
+    0x06C6: 0x0061, # Ф -> a
+    0x06D9: 0x0073, # Ы -> s
+    0x06D7: 0x0064, # В -> d
+    0x06C1: 0x0066, # А -> f
+    0x06D0: 0x0067, # П -> g
+    0x06D2: 0x0068, # Р -> h
+    0x06CF: 0x006A, # О -> j
+    0x06CC: 0x006B, # Л -> k
+    0x06C4: 0x006C, # Д -> l
+    0x06D1: 0x007A, # Я -> z
+    0x06DE: 0x0078, # Ч -> x
+    0x06D3: 0x0063, # С -> c
+    0x06CD: 0x0076, # М -> v
+    0x06C9: 0x0062, # И -> b
+    0x06D4: 0x006E, # Т -> n
+    0x06D8: 0x006D, # Ь -> m
+}
+
 class JsConfigCtypes(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char * CONTROLLER_NAME_MAX_LEN),
@@ -816,6 +845,8 @@ class WebRTCInput:
         }
         self.active_modifiers = set()
         self.atomically_typed_keys = set()
+        self.translated_keys = set() # Track translated keysyms
+        self.ACTION_MODIFIER_KEYSYMS = {65507, 65508, 65513, 65514, 65511, 65512}
         self.MODIFIER_KEYSYMS = {
             65505, 65506,  # Shift_L, Shift_R
             65507, 65508,  # Control_L, Control_R
@@ -1195,6 +1226,15 @@ class WebRTCInput:
                 elif self.mouse: self.mouse.release(btn_uinput_or_pynput)
 
     async def send_x11_keypress(self, keysym, down=True):
+        if down:
+            if (self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS) and keysym in CYRILLIC_TO_QWERTY_KEYSYM:
+                self.translated_keys.add(keysym)
+                keysym = CYRILLIC_TO_QWERTY_KEYSYM[keysym]
+        else:
+            if keysym in self.translated_keys:
+                self.translated_keys.discard(keysym)
+                keysym = CYRILLIC_TO_QWERTY_KEYSYM[keysym]
+
         if self.is_wayland and self.wayland_input:
             scancode = self.wayland_scancode_map.get(keysym)
             if scancode is None and (0x20 <= keysym <= 0xFF):
