@@ -39,6 +39,13 @@ except ImportError:
     xkb = None
 
 try:
+    libxkb = ctypes.CDLL("libxkbcommon.so.0")
+    libxkb.xkb_keysym_to_utf8.argtypes = [ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t]
+    libxkb.xkb_keysym_to_utf8.restype = ctypes.c_int
+except Exception:
+    libxkb = None
+
+try:
     import pynput
     import Xlib
     from Xlib import display
@@ -1302,7 +1309,16 @@ class WebRTCInput:
             elif keysym_number == 0x20AC:
                 char_to_type = '€'
             else:
-                if XK is not None:
+                if libxkb is not None:
+                    try:
+                        buf = ctypes.create_string_buffer(8)
+                        res = libxkb.xkb_keysym_to_utf8(keysym_number, buf, 8)
+                        if res > 0:
+                            char_to_type = buf.value.decode('utf-8')
+                    except Exception:
+                        pass
+
+                if not char_to_type and XK is not None:
                     try:
                         keysym_name = XK.keysym_to_string(keysym_number)
                         if keysym_name and len(keysym_name) == 1:
@@ -1325,7 +1341,7 @@ class WebRTCInput:
                     await asyncio.wait_for(process_wtype.communicate(), timeout=1.0)
                 except Exception as e:
                     logger_webrtc_input.warning(f"wtype fallback failed: {e}")
-            
+
             return
 
         if not self.xdisplay:
