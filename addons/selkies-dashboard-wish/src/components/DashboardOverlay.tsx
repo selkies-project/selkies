@@ -9,12 +9,18 @@ interface DashboardOverlayProps {
   container: Element | null;
 }
 
+// --- Constants ---
+const urlHash = window.location.hash;
+const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
+const isSecondaryDisplay = displayId === 'display2';
+
 function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElement | null {
   const [isGamepadEnabled, setIsGamepadEnabled] = useState<boolean>(false);
   const [showStats, setShowStats] = useState<boolean>(true);
   const [isVideoActive, setIsVideoActive] = useState<boolean>(true);
   const [isAudioActive, setIsAudioActive] = useState<boolean>(true);
   const [isMicrophoneActive, setIsMicrophoneActive] = useState<boolean>(false);
+  const [isViewer, setIsViewer] = useState<boolean>(false);
 
   // Add message event listener for status updates
   React.useEffect(() => {
@@ -26,6 +32,8 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
           if (message.video !== undefined) setIsVideoActive(message.video);
           if (message.audio !== undefined) setIsAudioActive(message.audio);
           if (message.microphone !== undefined) setIsMicrophoneActive(message.microphone);
+        } else if (message.type === 'clientRoleUpdate' && message.role === 'viewer') {
+          setIsViewer(true);
         } else if (message.type === 'sidebarButtonStatusUpdate') {
           if (message.video !== undefined) setIsVideoActive(message.video);
           if (message.audio !== undefined) setIsAudioActive(message.audio);
@@ -107,8 +115,8 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
     <TooltipProvider>
       <div className="h-screen w-screen">
         {/* Top Menu as primary navigation */}
-        {showStats && (
-          <TopMenu 
+        {showStats && !isViewer && (
+          <TopMenu
             isVideoActive={isVideoActive}
             isAudioActive={isAudioActive}
             isMicrophoneActive={isMicrophoneActive}
@@ -120,9 +128,9 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
             toggleStats={() => setShowStats(false)}
           />
         )}
-        
+
         {/* Gamepad component */}
-        {isGamepadEnabled && (
+        {isGamepadEnabled && !isSecondaryDisplay && (
           <Gamepad isGamepadEnabled={isGamepadEnabled} onGamepadToggle={setIsGamepadEnabled} />
         )}
       </div>
