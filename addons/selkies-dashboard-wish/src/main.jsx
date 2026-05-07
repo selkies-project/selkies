@@ -34,7 +34,7 @@ const playerClientModes = ['#player2', '#player3', '#player4'];
   await detectInitialMode();
   // Prevent selkies-core from auto-initializing
   window.__SELKIES_DEFER_INITIALIZATION = true;
-  await import(/* @vite-ignore */ './selkies-core.js');
+  await import('./selkies-core.js');
   // Initialize with the mode detected from server
   window.selkiesCoreInitialize();
   if (!noDashboardModes.includes(currentHash)) {

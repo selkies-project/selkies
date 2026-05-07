@@ -12,7 +12,13 @@ export default ({ mode }) => {
 
   return defineConfig({
     base: '',
-    plugins: [react(), tailwindcss(), ViteMinifyPlugin()],
+    plugins: [
+      react({
+        exclude: 'src/selkies-core.js'
+      }),
+      tailwindcss(),
+      ViteMinifyPlugin()
+    ],
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "./src"),
