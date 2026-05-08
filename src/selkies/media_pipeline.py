@@ -22,21 +22,26 @@
 import asyncio
 import logging
 import ctypes
+import pulsectl_asyncio
 from enum import Enum
 from abc import ABCMeta, abstractmethod
+from typing import Callable, Awaitable
 
-from pixelflux import CaptureSettings, ScreenCapture, StripeCallback
+from pixelflux import CaptureSettings, ScreenCapture
 from pcmflux import AudioCapture, AudioCaptureSettings, AudioChunkCallback
 
 logger = logging.getLogger("media_pipeline")
 logger.setLevel(logging.INFO)
 
+
 class RateControlMode(str, Enum):
     CBR = "cbr"
     CRF = "crf"
 
+
 class MediaPipelineError(Exception):
     pass
+
 
 class MediaPipeline(metaclass=ABCMeta):
     @abstractmethod
@@ -79,6 +84,7 @@ class MediaPipeline(metaclass=ABCMeta):
     async def set_crf(self, crf: int):
         pass
 
+
 class MediaPipelinePixel(MediaPipeline):
     def __init__(
         self,
@@ -91,9 +97,9 @@ class MediaPipelinePixel(MediaPipeline):
         height: int = 1080,
         audio_channels: int = 2,
         audio_enabled: bool = True,
-        audio_device_name = 'output.monitor',
+        audio_device_name="output.monitor",
         crf: int = 23,
-        rc_mode: RateControlMode = RateControlMode.CBR
+        rc_mode: RateControlMode = RateControlMode.CBR,
     ):
         self.async_event_loop = async_event_loop
         self.audio_channels = audio_channels
@@ -110,8 +116,12 @@ class MediaPipelinePixel(MediaPipeline):
         self.audio_enabled = audio_enabled
         self.audio_device_name = audio_device_name
         self.capture_cursor = False
-        self.produce_data = lambda buf, pts, kind: logger.warning('unhandled produce_data')
-        self.send_data_channel_message = lambda msg: logger.warning('unhandled send_data_channel_message')
+        self.produce_data: Callable[[bytes, int, str], Awaitable[None]] = lambda buf, pts, kind: logger.warning(
+            "unhandled produce_data"
+        )
+        self.send_data_channel_message: Callable[[str], None] = lambda msg: logger.warning(
+            "unhandled send_data_channel_message"
+        )
 
         self.capture_module = None
         self.pcmflux_module = None
@@ -155,7 +165,9 @@ class MediaPipelinePixel(MediaPipeline):
             await self.restart_screen_capture()
             logger.info(f"Updated rate control mode to: {self.rc_mode}")
         except AttributeError:
-            logger.error("Video capture module does not support rate control mode updation")
+            logger.error(
+                "Video capture module does not support rate control mode updation"
+            )
         except Exception as e:
             logger.info(f"Error updating rate control mode {e}", exc_info=True)
 
@@ -188,12 +200,20 @@ class MediaPipelinePixel(MediaPipeline):
         if not self._is_screen_capturing or self.capture_module is None:
             return
 
-        if self.rc_mode == RateControlMode.CRF or new_bitrate <= 0 or self.video_bitrate == new_bitrate:
+        if (
+            self.rc_mode == RateControlMode.CRF
+            or new_bitrate <= 0
+            or self.video_bitrate == new_bitrate
+        ):
             return
 
         try:
-            await self.async_event_loop.run_in_executor(None, self.capture_module.update_video_bitrate, new_bitrate * 1000)
-            logger.info(f"Updated video bitrate: {self.video_bitrate}Mbps -> {new_bitrate}Mbps")
+            await self.async_event_loop.run_in_executor(
+                None, self.capture_module.update_video_bitrate, new_bitrate * 1000
+            )
+            logger.info(
+                f"Updated video bitrate: {self.video_bitrate}Mbps -> {new_bitrate}Mbps"
+            )
             self.video_bitrate = new_bitrate
         except AttributeError:
             logger.error("Video capture module does not support video bitrate updation")
@@ -208,12 +228,16 @@ class MediaPipelinePixel(MediaPipeline):
         if not self._is_pcmflux_capturing or self.pcmflux_module is None:
             return
 
-        if  new_bitrate <= 0 or self.audio_bitrate == new_bitrate:
+        if new_bitrate <= 0 or self.audio_bitrate == new_bitrate:
             return
 
         try:
-            await self.async_event_loop.run_in_executor(None, self.pcmflux_module.update_audio_bitrate, new_bitrate)
-            logger.info(f"Updated audio bitrate: {self.audio_bitrate // 1000} -> {new_bitrate // 1000} kbps")
+            await self.async_event_loop.run_in_executor(
+                None, self.pcmflux_module.update_audio_bitrate, new_bitrate
+            )
+            logger.info(
+                f"Updated audio bitrate: {self.audio_bitrate // 1000} -> {new_bitrate // 1000} kbps"
+            )
             self.audio_bitrate = new_bitrate
         except AttributeError:
             logger.error("Audio capture module does not support audio bitrate updation")
@@ -233,7 +257,9 @@ class MediaPipelinePixel(MediaPipeline):
                 return
 
             self.framerate = framerate
-            await self.async_event_loop.run_in_executor(None, self.capture_module.update_framerate, float(self.framerate))
+            await self.async_event_loop.run_in_executor(
+                None, self.capture_module.update_framerate, float(self.framerate)
+            )
             logger.info(f"Updated framerate to: {self.framerate}")
 
     async def dynamic_idr_frame(self):
@@ -241,7 +267,9 @@ class MediaPipelinePixel(MediaPipeline):
         if not self._is_screen_capturing or self.capture_module is None:
             return
         try:
-            await self.async_event_loop.run_in_executor(None, self.capture_module.request_idr_frame)
+            await self.async_event_loop.run_in_executor(
+                None, self.capture_module.request_idr_frame
+            )
             logger.info("IDR frame requested successfully")
         except AttributeError:
             logger.error("ScreenCapture module does not support IDR frame request")
@@ -269,7 +297,7 @@ class MediaPipelinePixel(MediaPipeline):
             cs.h264_bitrate_kbps = self.video_bitrate * 1000  # Convert Mbps to kbps
             cs.vaapi_render_node_index = -1
             if self.encoder_rtc == "x264enc":
-                cs.use_cpu = True        
+                cs.use_cpu = True
         return cs
 
     async def start_screen_capture(self):
@@ -277,27 +305,38 @@ class MediaPipelinePixel(MediaPipeline):
             return
 
         settings = self.generate_capture_settings()
+
         def screen_capture_callback(result_ptr, _):
             if not result_ptr:
                 return
             try:
                 result = result_ptr.contents
                 if result.size > 0:
-                    data_bytes = bytes(result.data[10:result.size])
+                    data_bytes = bytes(result.data[10 : result.size])
                     if not hasattr(result, "frame_id"):
-                        logger.error(f"frame_id from callback is empty: {result.frame_id}")
+                        logger.error(
+                            f"Missing frame_id from screen capture result, skipping frame"
+                        )
                     else:
                         # Generate pts from frame_id
                         pts_step = 90000 // self.framerate
                         pts = result.frame_id * pts_step
-                        asyncio.run_coroutine_threadsafe(self.produce_data(data_bytes, pts, "video"), self.async_event_loop)
+                        asyncio.run_coroutine_threadsafe(
+                            self.produce_data(data_bytes, pts, "video"),
+                            self.async_event_loop,
+                        )
 
             except Exception as e:
                 logger.error(f"Error in capture callback: {e}", exc_info=False)
 
         try:
             self.capture_module = ScreenCapture()
-            await self.async_event_loop.run_in_executor(None, self.capture_module.start_capture, settings, screen_capture_callback)
+            await self.async_event_loop.run_in_executor(
+                None,
+                self.capture_module.start_capture,
+                settings,
+                screen_capture_callback,
+            )
             self._is_screen_capturing = True
             logger.info("Started screen capture module")
         except Exception as e:
@@ -305,12 +344,13 @@ class MediaPipelinePixel(MediaPipeline):
             self.capture_module = None
             self._is_screen_capturing = False
 
-
     async def stop_screen_capture(self):
         if not self._is_screen_capturing or self.capture_module is None:
             return
         try:
-            await self.async_event_loop.run_in_executor(None, self.capture_module.stop_capture)
+            await self.async_event_loop.run_in_executor(
+                None, self.capture_module.stop_capture
+            )
             self.capture_module = None
             self._is_screen_capturing = False
             logger.info("Stopped screen capture module")
@@ -338,7 +378,11 @@ class MediaPipelinePixel(MediaPipeline):
         logger.info("Starting pcmflux audio pipeline...")
         try:
             capture_settings = AudioCaptureSettings()
-            device_name_bytes = self.audio_device_name.encode('utf-8') if self.audio_device_name else None
+            device_name_bytes = (
+                self.audio_device_name.encode("utf-8")
+                if self.audio_device_name
+                else None
+            )
             capture_settings.device_name = device_name_bytes
             capture_settings.sample_rate = 48000
             capture_settings.channels = self.audio_channels
@@ -350,8 +394,10 @@ class MediaPipelinePixel(MediaPipeline):
             capture_settings.debug_logging = False
             pcmflux_settings = capture_settings
 
-            logger.info(f"pcmflux settings: device='{self.audio_device_name}', "
-                        f"bitrate={capture_settings.opus_bitrate}, channels={capture_settings.channels}")
+            logger.info(
+                f"pcmflux settings: device='{self.audio_device_name}', "
+                f"bitrate={capture_settings.opus_bitrate}, channels={capture_settings.channels}"
+            )
 
             def audio_capture_callback(result_ptr, user_data):
                 if not result_ptr:
@@ -359,23 +405,168 @@ class MediaPipelinePixel(MediaPipeline):
                 try:
                     result = result_ptr.contents
                     if result.data and result.size > 0:
-                        data_bytes = bytes(ctypes.cast(
-                            result.data, ctypes.POINTER(ctypes.c_ubyte * result.size)
-                        ).contents)
+                        data_bytes = bytes(
+                            ctypes.cast(
+                                result.data,
+                                ctypes.POINTER(ctypes.c_ubyte * result.size),
+                            ).contents
+                        )
 
-                        asyncio.run_coroutine_threadsafe(self.produce_data(data_bytes, result.pts, "audio"), self.async_event_loop)
+                        asyncio.run_coroutine_threadsafe(
+                            self.produce_data(data_bytes, result.pts, "audio"),
+                            self.async_event_loop,
+                        )
                 except Exception as e:
                     logger.info(f"Error audio capture callback: {e}")
 
             pcmflux_callback = AudioChunkCallback(audio_capture_callback)
             self.pcmflux_module = AudioCapture()
-            await self.async_event_loop.run_in_executor(None, self.pcmflux_module.start_capture, pcmflux_settings, pcmflux_callback)
+            await self.async_event_loop.run_in_executor(
+                None,
+                self.pcmflux_module.start_capture,
+                pcmflux_settings,
+                pcmflux_callback,
+            )
             self._is_pcmflux_capturing = True
+            asyncio.create_task(self._enforce_audio_routing())
             logger.info("pcmflux audio capture started successfully.")
         except Exception as e:
             logger.error(f"Failed to start pcmflux audio pipeline: {e}", exc_info=True)
             await self._stop_audio_pipeline()
             return
+
+    async def _enforce_audio_routing(self):
+        """
+        PipeWire often ignores requested audio device and connects recording apps
+        to the default source. This could happen when switching between
+        streaming modes. So route the pcmflux stream to correct source.
+        """
+        # Give pcmflux a fraction of a second to initialize its PA stream
+        await asyncio.sleep(0.5)
+        pulse = None
+        try:
+            pulse = pulsectl_asyncio.PulseAsync("selkies-webrtc-router")
+            await pulse.connect()
+        except Exception as e:
+            logger.error(
+                f"Failed to connect to PulseAudio for routing enforcement: {e}"
+            )
+            return
+
+        try:
+            current_source_list = await pulse.source_list()
+            correct_source = None
+            for s in current_source_list:
+                if s.name == self.audio_device_name:
+                    correct_source = s
+                    break
+
+            if not correct_source:
+                logger.warning(
+                    f"Routing enforcement: Target source '{self.audio_device_name}' not found."
+                )
+                return
+
+            source_outputs = await pulse.source_output_list()
+            for output in source_outputs:
+                app_name = output.proplist.get("application.name", "")
+                if app_name == "pcmflux":
+                    if output.source != correct_source.index:
+                        connected_source_name = "Unknown"
+                        for s in current_source_list:
+                            if s.index == output.source:
+                                connected_source_name = s.name
+                                break
+                        logger.warning(
+                            f"WebRTC pcmflux connected to wrong source "
+                            f"'{connected_source_name}', moving to '{correct_source.name}'"
+                        )
+                        try:
+                            await pulse.source_output_move(output.index, correct_source.index)
+                            logger.info(
+                                f"Successfully moved WebRTC pcmflux to '{correct_source.name}'"
+                            )
+                        except Exception as move_e:
+                            logger.error(f"Failed to move WebRTC pcmflux: {move_e}")
+                    else:
+                        logger.info(
+                            f"WebRTC pcmflux correctly connected to '{correct_source.name}'"
+                        )
+                    break
+        except Exception as e:
+            logger.error(f"Error enforcing WebRTC audio routing: {e}")
+        finally:
+            if pulse is not None:
+                pulse.close()
+
+    async def _ensure_audio_device(self):
+        """
+        Verify the configured audio_device_name is a valid source.
+        If not, attempt to fallback to the default sink's monitor
+        """
+        pulse = None
+        try:
+            pulse = pulsectl_asyncio.PulseAsync("selkies-media-pipeline")
+            await pulse.connect()
+        except Exception as e:
+            logger.error(f"Failed to connect to PulseAudio/PipeWire: {e}")
+            return
+
+        try:
+            default_sink_name = None
+            default_monitor_name = None
+            try:
+                server_info = await pulse.server_info()
+                default_sink_name = server_info.default_sink_name
+                logger.info(
+                    f"Default sink from PulseAudio/PipeWire: '{default_sink_name}'"
+                )
+                if default_sink_name:
+                    default_monitor_name = f"{default_sink_name}.monitor"
+            except Exception as e:
+                logger.warning(f"Could not determine default sink: {e}")
+
+            available_sources = set()
+            try:
+                sources = await pulse.source_list()
+                for src in sources:
+                    available_sources.add(src.name)
+            except Exception as e:
+                logger.error(f"Failed to enumerate audio sources: {e}")
+                return
+
+            if self.audio_device_name and self.audio_device_name in available_sources:
+                logger.info(
+                    f"Configured audio device '{self.audio_device_name}' is valid."
+                )
+            else:
+                if self.audio_device_name:
+                    logger.warning(
+                        f"Configured audio device '{self.audio_device_name}' not found "
+                        f"in available sources."
+                    )
+                # Fallback to default sink's monitor if available
+                if default_monitor_name and default_monitor_name in available_sources:
+                    logger.info(
+                        f"Falling back to default sink monitor: '{default_monitor_name}'"
+                    )
+                    self.audio_device_name = default_monitor_name
+                elif "auto_null.monitor" in available_sources:
+                    logger.info(
+                        "Default sink monitor not available; falling back to 'auto_null.monitor'"
+                    )
+                    # Pipewiere's default sink monitor
+                    self.audio_device_name = "auto_null.monitor"
+                else:
+                    logger.error(
+                        "No valid audio source found. Audio capture will likely fail. "
+                        f"Available sources: {sorted(available_sources)}"
+                    )
+        except Exception as e:
+            logger.error(f"Error enforcing WebRTC audio routing: {e}")
+        finally:
+            if pulse is not None:
+                pulse.close()
 
     async def _stop_audio_pipeline(self):
         if not self._is_pcmflux_capturing or not self.pcmflux_module:
@@ -385,7 +576,9 @@ class MediaPipelinePixel(MediaPipeline):
         self._is_pcmflux_capturing = False
         if self.pcmflux_module:
             try:
-                await self.async_event_loop.run_in_executor(None, self.pcmflux_module.stop_capture)
+                await self.async_event_loop.run_in_executor(
+                    None, self.pcmflux_module.stop_capture
+                )
             except Exception as e:
                 logger.error(f"Error during pcmflux stop_capture: {e}")
             finally:
@@ -404,7 +597,12 @@ class MediaPipelinePixel(MediaPipeline):
                 await self.start_screen_capture()
 
                 if self.audio_enabled:
+                    await self._ensure_audio_device()
                     await self._start_audio_pipeline()
+                else:
+                    logger.info(
+                        "Audio pipeline is disabled, skipping audio capture startup."
+                    )
                 self._running = True
             except Exception as e:
                 logger.error(f"Error starting media pipelines: {e}", exc_info=True)

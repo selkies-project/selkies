@@ -58,7 +58,7 @@ SETTING_DEFINITIONS = [
         "name": "audio_enabled",
         "type": "bool",
         "default": True,
-        "help": "Enable server-to-client audio streaming.",
+        "help": "Enable server-to-client audio streaming. Disabling this will also disable microphone support.",
     },
     {
         "name": "microphone_enabled",
@@ -778,6 +778,7 @@ class AppSettings:
         self._add_arguments(parser)
         args, _ = parser.parse_known_args()
         self._process_and_set_attributes(args)
+        self._post_process_settings()
 
     def _add_arguments(self, parser):
         """Programmatically add arguments to the parser from definitions."""
@@ -907,6 +908,14 @@ class AppSettings:
         for name, value in processed.items():
             setattr(self, name, value)
 
+    def _post_process_settings(self):
+        """Additional processing of config data after initial parsing."""
+        audio_enabled = self.audio_enabled[0]
+        if not audio_enabled and self.microphone_enabled[0]:
+            logging.warning(
+                "Microphone support requires audio to be enabled. Disabling microphone support."
+            )
+            self.microphone_enabled = (False, self.microphone_enabled[1])
 
 settings = AppSettings(SETTING_DEFINITIONS)
 

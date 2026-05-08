@@ -39,7 +39,7 @@ dependencies = [
     "distro",
     "importlib-resources>=6.0; python_version < '3.9'",
     # PulseAudio Microphone
-    "pulsectl",
+    "pulsectl-asyncio",
     "pasimple",
     # WebRTC
     "aioice>=0.10.1,<1.0.0",

@@ -318,16 +318,13 @@ if [ ! -z "${DEV_MODE+x}" ]; then
     "python3" -m selkies \
       --addr="${addr}" \
       --port="${port}" \
-      --enable_basic_auth="false" \
+      --enable-basic-auth="false" \
       --mode="${SELKIES_MODE:-websockets}"
 else
   # Start Selkies
   exec selkies \
     --addr="${addr}" \
     --port="${port}" \
-    --enable_basic_auth="false" \
-    --enable_metrics_http="true" \
-    --mode="${SELKIES_MODE:-websockets}" \
     $@
 fi
 

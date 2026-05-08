@@ -41,6 +41,8 @@ let isGamepadEnabled;
 let lastReceivedVideoFrameId = -1;
 let mainDecoderHasKeyframe = false;
 let initializationComplete = false;
+let audioEnabled = true;
+let microphoneEnabled = true;
 // Display related resources
 let displayId = 'primary';
 let displayPosition = 'right';
@@ -1803,6 +1805,10 @@ function receiveMessage(event) {
             console.log("Secondary display: Audio control blocked.");
             break;
         }
+        if (!audioEnabled) {
+          console.log("Audio is disabled. Audio pipeline control blocked.");
+          break;
+        }
         if (isAudioPipelineActive !== desiredState) {
           isAudioPipelineActive = desiredState;
           stateChangedFromControl = true;
@@ -1819,6 +1825,10 @@ function receiveMessage(event) {
       } else if (pipeline === 'microphone') {
         if (isSharedMode) {
           console.log("Shared mode: Microphone control blocked.");
+          break;
+        }
+        if (!microphoneEnabled) {
+          console.log("Microphone is disabled. Microphone pipeline control blocked.");
           break;
         }
         if (desiredState) {
@@ -1843,6 +1853,10 @@ function receiveMessage(event) {
       console.log('Received audioDeviceSelected message:', message);
       if (isSharedMode && message.context === 'input') {
           console.log("Shared mode: Audio input device selection ignored.");
+          break;
+      }
+      if (!audioEnabled) {
+          console.log("Audio control flag is disabled. Audio device selection blocked.");
           break;
       }
       const {
@@ -3876,6 +3890,32 @@ function handleDecodedFrame(frame) {
           isAudioPipelineActive = false;
           window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
           if (audioDecoderWorker) audioDecoderWorker.postMessage({ type: 'updatePipelineStatus', data: { isActive: false } });
+        } else if (event.data === 'AUDIO_DISABLED' && !isSharedMode) {
+          console.log("Server reports audio is disabled. Tearing down audio workers.");
+          audioEnabled = false;
+          isAudioPipelineActive = false;
+          if (audioDecoderWorker) {
+            audioDecoderWorker.postMessage({ type: 'updatePipelineStatus', data: { isActive: false } });
+            audioDecoderWorker.postMessage({ type: 'close' });
+            setTimeout(() => {
+              if (audioDecoderWorker) {
+                audioDecoderWorker.terminate();
+                audioDecoderWorker = null;
+              }
+            }, 50);
+          }
+          if (audioContext) {
+            try { audioContext.close(); } catch (e) { console.error("Error closing AudioContext on AUDIO_DISABLED:", e); }
+            audioContext = null;
+            audioWorkletNode = null;
+            audioWorkletProcessorPort = null;
+          }
+          window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
+        } else if (event.data === 'MICROPHONE_DISABLED' && !isSharedMode) {
+          console.log("Server reports microphone is disabled. Stopping microphone capture.");
+          microphoneEnabled = false;
+          stopMicrophoneCapture();
+          window.postMessage({ type: 'pipelineStatusUpdate', microphone: false }, window.location.origin);
         } else {
           if (window.webrtcInput && window.webrtcInput.on_message && !isSharedMode) {
             window.webrtcInput.on_message(event.data);
