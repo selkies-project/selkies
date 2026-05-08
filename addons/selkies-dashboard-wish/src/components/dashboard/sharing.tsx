@@ -5,7 +5,7 @@ import { Card, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Info } from "lucide-react";
 import { toast } from "sonner";
-import { computeRenderableSettings } from "@/lib/utils";
+import { computeRenderableSettings } from "@/utils";
 
 const sharingLinks = [
 	{

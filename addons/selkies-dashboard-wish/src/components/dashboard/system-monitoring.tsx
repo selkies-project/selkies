@@ -6,6 +6,7 @@ import {
 	ChevronDown,
 	ChevronUp
 } from "lucide-react";
+import { getPrefixedKey } from "@/utils";
 
 // Declare global window properties
 declare global {
@@ -136,7 +137,7 @@ export function SystemMonitoring() {
 	const [latencyMs, setLatencyMs] = useState(0);
 	const [videoBitrateMbps, setVideoBitrateMbps] = useState(0);
 	const [isWebrtc, setIsWebrtc] = useState(() => {
-		const saved = localStorage.getItem(`${window.location.href.split('#')[0].replace(/[^a-zA-Z0-9.-_]/g, '_')}_stream_mode`);
+		const saved = localStorage.getItem(getPrefixedKey('stream_mode'));
 		return saved === 'webrtc';
 	});
 

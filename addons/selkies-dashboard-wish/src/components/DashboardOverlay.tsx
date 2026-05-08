@@ -78,7 +78,7 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
       if (event.ctrlKey && event.shiftKey && event.key === "F") {
         event.preventDefault();
         if (!document.fullscreenElement) {
-          document.documentElement.requestFullscreen();
+          window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
         }
       }
 

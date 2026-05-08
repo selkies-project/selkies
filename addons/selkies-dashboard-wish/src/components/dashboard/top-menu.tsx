@@ -45,7 +45,7 @@ import { Settings } from "@/components/dashboard/settings";
 import { SystemMonitoring } from "@/components/dashboard/system-monitoring";
 import { Sharing } from "@/components/dashboard/sharing";
 import { SelkiesLogo } from "@/components/logo";
-import { computeRenderableSettings } from "@/lib/utils";
+import { computeRenderableSettings } from "@/utils";
 
 // --- Constants ---
 const urlHash = window.location.hash;
@@ -872,9 +872,11 @@ export function TopMenu({
                     className="h-6 w-6"
                     onClick={() => {
                       if (document.fullscreenElement) {
-                        document.exitFullscreen();
+                        if (document.exitFullscreen) {
+                          document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
+                        }
                       } else {
-                        document.documentElement.requestFullscreen();
+                        window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
                       }
                     }}
                   >

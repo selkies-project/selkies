@@ -3,16 +3,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { computeRenderableSettings } from "@/lib/utils";
-
-// --- Storage Key Prefixing ---
-const getStorageAppName = () => {
-	if (typeof window === 'undefined') return '';
-	const urlForKey = window.location.href.split('#')[0];
-	return urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
-};
-const storageAppName = getStorageAppName();
-const getPrefixedKey = (key: string) => `${storageAppName}_${key}`;
+import { computeRenderableSettings, getPrefixedKey } from "@/utils";
 
 const DEFAULT_ENABLE_BINARY_CLIPBOARD = false;
 

@@ -12,34 +12,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { ChevronUp } from "lucide-react";
 import React, { useState, useEffect, useCallback } from "react";
-import { computeRenderableSettings, getRoutePrefix } from "@/lib/utils";
+import { computeRenderableSettings, getRoutePrefix, getPrefixedKey } from "@/utils";
 
 // --- Multi-display Constants ---
 const urlHash = window.location.hash;
 const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
-
-const PER_DISPLAY_SETTINGS = [
-    'video_bitrate', 'framerate', 'h264_crf', 'h264_fullcolor',
-    'h264_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
-    'h264_paintover_crf', 'h264_paintover_burst_frames', 'use_paint_over_quality',
-    'is_manual_resolution_mode', 'manual_width', 'manual_height',
-    'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode'
-];
-
-// --- Storage Key Prefixing ---
-const getStorageAppName = () => {
-    if (typeof window === 'undefined') return '';
-    const urlForKey = window.location.href.split('#')[0];
-    return urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
-};
-const storageAppName = getStorageAppName();
-const getPrefixedKey = (key: string) => {
-    const prefixedKey = `${storageAppName}_${key}`;
-    if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
-        return `${prefixedKey}_display2`;
-    }
-    return prefixedKey;
-};
 
 // Constants
 const audioBitrateOptions = [32000, 64000, 96000, 128000, 192000, 256000, 320000, 512000];
@@ -424,6 +401,24 @@ export function Settings() {
             setVideoBitRate(final);
             localStorage.setItem(getPrefixedKey("video_bitrate"), final.toString());
         }
+
+        // Audio bitrate
+        const s_audio_bitrate = serverSettings.audio_bitrate;
+        if (s_audio_bitrate) {
+            const stored = getStoredInt("audio_bitrate");
+            const final = s_audio_bitrate.allowed.includes(stored) ? stored : s_audio_bitrate.value;
+            setAudioBitRate(final);
+            localStorage.setItem(getPrefixedKey("audio_bitrate"), final.toString());
+        }
+
+        // HiDPI / CSS scaling — server can lock this
+        const s_use_css_scaling = serverSettings.use_css_scaling;
+        if (s_use_css_scaling) {
+            const authoritativeValue = localStorage.getItem(getPrefixedKey("use_css_scaling")) === 'true';
+            if (hidpiEnabled === authoritativeValue) {
+                setHidpiEnabled(!authoritativeValue);
+            }
+        }
     }, [serverSettings]);
 
     // Audio device population
@@ -583,7 +578,6 @@ export function Settings() {
             if (!response.ok) {
                 throw new Error(`Request failed with status ${response.status}`);
             }
-            await response.json();
             setStreamMode(mode);
             localStorage.setItem(getPrefixedKey('stream_mode'), mode);
             window.postMessage({ type: "mode", mode }, window.location.origin);

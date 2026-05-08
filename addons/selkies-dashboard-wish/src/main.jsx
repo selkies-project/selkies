@@ -4,7 +4,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App.tsx';
 import PlayerGamepadButton from './components/dashboard/PlayerGamepadButton.tsx';
 import './index.css';
-import { getRoutePrefix } from './lib/utils.ts';
+import { getRoutePrefix } from './utils.ts';
 
 // Probe the server for the currently active streaming mode
 // before importing selkies-core.
