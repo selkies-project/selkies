@@ -38,6 +38,20 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <linux/input-event-codes.h>
 
 /**
+ * @brief Definitions for O_TMPFILE and mode requirement checking.
+ *
+ * O_TMPFILE allows creating unnamed temporary files, which requires a third
+ * 'mode' argument just like O_CREAT. The NEEDS_MODE macro safely identifies
+ * if the flags passed to open/openat require extracting this mode argument
+ * from the variadic list to prevent creating files with 000 permissions.
+ */
+#ifndef O_TMPFILE
+#define __O_TMPFILE     020000000
+#define O_TMPFILE       (__O_TMPFILE | O_DIRECTORY)
+#endif
+#define NEEDS_MODE(flags) (((flags) & O_CREAT) || (((flags) & O_TMPFILE) == O_TMPFILE))
+
+/**
  * @brief Defines the data type for ioctl request codes.
  *
  * This type is defined as `unsigned long` if `__GLIBC__` is defined,
@@ -134,6 +148,8 @@ static int g_sji_log_enabled = 0;
  */
 static int (*real_open)(const char *pathname, int flags, ...) = NULL;
 static int (*real_open64)(const char *pathname, int flags, ...) = NULL;
+static int (*real_openat)(int dirfd, const char *pathname, int flags, ...) = NULL;
+static int (*real_openat64)(int dirfd, const char *pathname, int flags, ...) = NULL;
 static int (*real_ioctl)(int fd, ioctl_request_t request, ...) = NULL;
 static int (*real_epoll_ctl)(int epfd, int op, int fd, struct epoll_event *event) = NULL;
 static int (*real_close)(int fd) = NULL;
@@ -414,6 +430,8 @@ __attribute__((constructor)) void init_interposer() {
     if (load_real_func((void *)&real_stat, "stat") < 0) sji_log_error("CRITICAL: Failed to load real 'stat'.");
     if (load_real_func((void *)&real_lstat, "lstat") < 0) sji_log_error("CRITICAL: Failed to load real 'lstat'.");
     load_real_func((void *)&real_open64, "open64");
+    load_real_func((void *)&real_openat, "openat");
+    load_real_func((void *)&real_openat64, "openat64");
     sji_log_info("Selkies Joystick Interposer initialized. Logging is %s.", g_sji_log_enabled ? "ENABLED" : "DISABLED");
 }
 
@@ -821,7 +839,6 @@ static int common_open_logic(const char *pathname, int flags, js_interposer_t **
  */
 int open(const char *pathname, int flags, ...) {
     if (!real_open) {
-        sji_log_error("CRITICAL: real_open not loaded. Cannot proceed with open call.");
         errno = EFAULT;
         return -1;
     }
@@ -830,11 +847,10 @@ int open(const char *pathname, int flags, ...) {
     int result_fd = common_open_logic(pathname, flags, &interposer);
 
     if (result_fd == -2) {
-        mode_t mode = 0;
-        if (flags & O_CREAT) {
+        if (NEEDS_MODE(flags)) {
             va_list args;
             va_start(args, flags);
-            mode = va_arg(args, mode_t);
+            mode_t mode = va_arg(args, mode_t);
             va_end(args);
             result_fd = real_open(pathname, flags, mode);
         } else {
@@ -847,6 +863,7 @@ int open(const char *pathname, int flags, ...) {
 #ifdef open64
 #undef open64
 #endif
+
 /**
  * @brief Intercepted `open64()` system call.
  *
@@ -864,7 +881,6 @@ int open(const char *pathname, int flags, ...) {
  */
 int open64(const char *pathname, int flags, ...) {
     if (!real_open64 && !real_open) {
-        sji_log_error("CRITICAL: Neither real_open64 nor real_open loaded. Cannot proceed with open64 call.");
         errno = EFAULT;
         return -1;
     }
@@ -873,19 +889,139 @@ int open64(const char *pathname, int flags, ...) {
     int result_fd = common_open_logic(pathname, flags, &interposer);
 
     if (result_fd == -2) {
-        mode_t mode = 0;
-        if (flags & O_CREAT) {
+        if (NEEDS_MODE(flags)) {
             va_list args;
             va_start(args, flags);
-            mode = va_arg(args, mode_t);
+            mode_t mode = va_arg(args, mode_t);
             va_end(args);
-        }
 
-        if (real_open64) {
-            result_fd = (flags & O_CREAT) ? real_open64(pathname, flags, mode) : real_open64(pathname, flags);
+            if (real_open64) {
+                result_fd = real_open64(pathname, flags, mode);
+            } else {
+                result_fd = real_open(pathname, flags, mode);
+            }
         } else {
-            sji_log_info("real_open64 not available, falling back to real_open for: %s", pathname);
-            result_fd = (flags & O_CREAT) ? real_open(pathname, flags, mode) : real_open(pathname, flags);
+            if (real_open64) {
+                result_fd = real_open64(pathname, flags);
+            } else {
+                result_fd = real_open(pathname, flags);
+            }
+        }
+    }
+    return result_fd;
+}
+
+/**
+ * @brief Intercepted `openat()` system call.
+ *
+ * Resolves the full path if a relative path and directory fd are provided.
+ * Uses `common_open_logic()` to handle interposition for target device paths.
+ * Safely extracts and passes the `mode` argument if file creation flags
+ * (O_CREAT or O_TMPFILE) are present to prevent permission bugs.
+ *
+ * @param dirfd The directory file descriptor.
+ * @param pathname The path to the file to open.
+ * @param flags Flags for opening the file.
+ * @param ... Optional `mode_t mode` argument if file creation flags are set.
+ * @return A file descriptor on success, or -1 on error (`errno` is set).
+ */
+int openat(int dirfd, const char *pathname, int flags, ...) {
+    if (!real_openat) {
+        errno = EFAULT;
+        return -1;
+    }
+
+    char full_path[4096];
+    const char *check_path = pathname;
+
+    if (pathname && pathname[0] != '/' && dirfd != AT_FDCWD) {
+        char procfd[64];
+        snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", dirfd);
+        ssize_t len = readlink(procfd, full_path, sizeof(full_path) - 1);
+        if (len != -1) {
+            full_path[len] = '/';
+            strncpy(full_path + len + 1, pathname, sizeof(full_path) - len - 2);
+            full_path[sizeof(full_path) - 1] = '\0';
+            check_path = full_path;
+        }
+    }
+
+    js_interposer_t *interposer = NULL;
+    int result_fd = common_open_logic(check_path, flags, &interposer);
+
+    if (result_fd == -2) {
+        if (NEEDS_MODE(flags)) {
+            va_list args;
+            va_start(args, flags);
+            mode_t mode = va_arg(args, mode_t);
+            va_end(args);
+            result_fd = real_openat(dirfd, pathname, flags, mode);
+        } else {
+            result_fd = real_openat(dirfd, pathname, flags);
+        }
+    }
+    return result_fd;
+}
+
+#ifdef openat64
+#undef openat64
+#endif
+
+/**
+ * @brief Intercepted `openat64()` system call.
+ *
+ * 64-bit variant of the intercepted `openat()` system call. Resolves relative
+ * paths, applies interposer logic, and safely handles variadic `mode` arguments.
+ * Falls back to `real_openat()` if `real_openat64` is not available.
+ *
+ * @param dirfd The directory file descriptor.
+ * @param pathname The path to the file to open.
+ * @param flags Flags for opening the file.
+ * @param ... Optional `mode_t mode` argument if file creation flags are set.
+ * @return A file descriptor on success, or -1 on error (`errno` is set).
+ */
+int openat64(int dirfd, const char *pathname, int flags, ...) {
+    if (!real_openat64 && !real_openat) {
+        errno = EFAULT;
+        return -1;
+    }
+
+    char full_path[4096];
+    const char *check_path = pathname;
+
+    if (pathname && pathname[0] != '/' && dirfd != AT_FDCWD) {
+        char procfd[64];
+        snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", dirfd);
+        ssize_t len = readlink(procfd, full_path, sizeof(full_path) - 1);
+        if (len != -1) {
+            full_path[len] = '/';
+            strncpy(full_path + len + 1, pathname, sizeof(full_path) - len - 2);
+            full_path[sizeof(full_path) - 1] = '\0';
+            check_path = full_path;
+        }
+    }
+
+    js_interposer_t *interposer = NULL;
+    int result_fd = common_open_logic(check_path, flags, &interposer);
+
+    if (result_fd == -2) {
+        if (NEEDS_MODE(flags)) {
+            va_list args;
+            va_start(args, flags);
+            mode_t mode = va_arg(args, mode_t);
+            va_end(args);
+
+            if (real_openat64) {
+                result_fd = real_openat64(dirfd, pathname, flags, mode);
+            } else {
+                result_fd = real_openat(dirfd, pathname, flags, mode);
+            }
+        } else {
+            if (real_openat64) {
+                result_fd = real_openat64(dirfd, pathname, flags);
+            } else {
+                result_fd = real_openat(dirfd, pathname, flags);
+            }
         }
     }
     return result_fd;
