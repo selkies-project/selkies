@@ -41,6 +41,8 @@ let isGamepadEnabled;
 let lastReceivedVideoFrameId = -1;
 let mainDecoderHasKeyframe = false;
 let initializationComplete = false;
+let audioEnabled = true;
+let microphoneEnabled = true;
 // Display related resources
 let displayId = 'primary';
 let displayPosition = 'right';
@@ -142,7 +144,12 @@ if (authToken) {
         }
     }
 }
-let sharedClientState = 'ready';
+let sharedClientState = 'idle'; // Possible states: 'idle', 'awaiting_identification', 'configuring', 'ready', 'error'
+let identifiedEncoderModeForShared = null; // e.g., 'h264_full_frame', 'jpeg', 'x264enc-striped'
+const SHARED_PROBING_TIMEOUT_MS = 7000; // Timeout for waiting for the first video packet
+let sharedProbingTimeoutId = null;
+let sharedProbingAttempts = 0;
+const MAX_SHARED_PROBING_ATTEMPTS = 3; // e.g., initial + 2 retries
 let isSharedMode = detectedSharedModeType !== null;
 let sharedClientHasReceivedKeyframe = false;
 
@@ -1798,6 +1805,10 @@ function receiveMessage(event) {
             console.log("Secondary display: Audio control blocked.");
             break;
         }
+        if (!audioEnabled) {
+          console.log("Audio is disabled. Audio pipeline control blocked.");
+          break;
+        }
         if (isAudioPipelineActive !== desiredState) {
           isAudioPipelineActive = desiredState;
           stateChangedFromControl = true;
@@ -1814,6 +1825,10 @@ function receiveMessage(event) {
       } else if (pipeline === 'microphone') {
         if (isSharedMode) {
           console.log("Shared mode: Microphone control blocked.");
+          break;
+        }
+        if (!microphoneEnabled) {
+          console.log("Microphone is disabled. Microphone pipeline control blocked.");
           break;
         }
         if (desiredState) {
@@ -1838,6 +1853,10 @@ function receiveMessage(event) {
       console.log('Received audioDeviceSelected message:', message);
       if (isSharedMode && message.context === 'input') {
           console.log("Shared mode: Audio input device selection ignored.");
+          break;
+      }
+      if (!audioEnabled) {
+          console.log("Audio control flag is disabled. Audio device selection blocked.");
           break;
       }
       const {
@@ -2169,7 +2188,45 @@ function sendStatsMessage() {
   console.log('Sent stats message via window.postMessage:', stats);
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+function startSharedModeProbingTimeout() {
+    clearTimeout(sharedProbingTimeoutId);
+    sharedProbingTimeoutId = setTimeout(() => {
+        console.warn(`Shared mode (${detectedSharedModeType}): Timeout waiting for video identification packet (attempt ${sharedProbingAttempts + 1}/${MAX_SHARED_PROBING_ATTEMPTS}).`);
+        sharedProbingAttempts++;
+        if (sharedProbingAttempts < MAX_SHARED_PROBING_ATTEMPTS) {
+            if (sharedClientState === 'awaiting_identification') {
+                console.log(`Shared mode (${detectedSharedModeType}): Probing timeout. Attempting to re-trigger stream with STOP/START_VIDEO.`);
+                if (websocket && websocket.readyState === WebSocket.OPEN) {
+                    websocket.send('STOP_VIDEO');
+                    setTimeout(() => {
+                        if (websocket && websocket.readyState === WebSocket.OPEN) {
+                            websocket.send('START_VIDEO');
+                            console.log(`Shared mode (${detectedSharedModeType}): Sent START_VIDEO after probing timeout.`);
+                        }
+                    }, 250);
+                }
+                startSharedModeProbingTimeout();
+            } else {
+                 console.log(`Shared mode: Probing timeout fired but state is ${sharedClientState}. Not retrying automatically.`);
+            }
+        } else {
+            console.error("Shared mode: Failed to identify video type after multiple attempts. Entering error state. Stream may not be active or correctly configured on server/primary client.");
+            sharedClientState = 'error';
+            if (statusDisplayElement) {
+                statusDisplayElement.textContent = 'Error: Could not identify video stream.';
+                statusDisplayElement.classList.remove('hidden');
+            }
+        }
+    }, SHARED_PROBING_TIMEOUT_MS);
+}
+
+function clearSharedModeProbingTimeout() {
+    clearTimeout(sharedProbingTimeoutId);
+    sharedProbingTimeoutId = null;
+}
+
+
+function initWebsockets() {
   async function initializeDecoder() {
     mainDecoderHasKeyframe = false;
     if (decoder && decoder.state !== 'closed') {
@@ -2719,6 +2776,18 @@ document.addEventListener('DOMContentLoaded', () => {
   let websocketEndpointURL = new URL(`${ws_protocol}${window.location.host}${pathname}`);
   if (isTokenAuthMode) {
       websocketEndpointURL.search = `?token=${authToken}`;
+  } else if (isSharedMode) {
+      // Pass role/slot as query params so the server can assign permissions
+      // (URL fragments are never transmitted to the server per HTTP spec)
+      const wsParams = new URLSearchParams();
+      wsParams.set('role', 'viewer');
+      if (detectedSharedModeType && detectedSharedModeType.startsWith('player')) {
+          const playerSlot = detectedSharedModeType.replace('player', '');
+          if (playerSlot >= 2 && playerSlot <= 4) {
+              wsParams.set('slot', playerSlot);
+          }
+      }
+      websocketEndpointURL.search = wsParams.toString();
   }
   websocketEndpointURL.pathname += 'websockets';
 
@@ -3720,6 +3789,32 @@ document.addEventListener('DOMContentLoaded', () => {
           isAudioPipelineActive = false;
           window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
           if (audioDecoderWorker) audioDecoderWorker.postMessage({ type: 'updatePipelineStatus', data: { isActive: false } });
+        } else if (event.data === 'AUDIO_DISABLED' && !isSharedMode) {
+          console.log("Server reports audio is disabled. Tearing down audio workers.");
+          audioEnabled = false;
+          isAudioPipelineActive = false;
+          if (audioDecoderWorker) {
+            audioDecoderWorker.postMessage({ type: 'updatePipelineStatus', data: { isActive: false } });
+            audioDecoderWorker.postMessage({ type: 'close' });
+            setTimeout(() => {
+              if (audioDecoderWorker) {
+                audioDecoderWorker.terminate();
+                audioDecoderWorker = null;
+              }
+            }, 50);
+          }
+          if (audioContext) {
+            try { audioContext.close(); } catch (e) { console.error("Error closing AudioContext on AUDIO_DISABLED:", e); }
+            audioContext = null;
+            audioWorkletNode = null;
+            audioWorkletProcessorPort = null;
+          }
+          window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
+        } else if (event.data === 'MICROPHONE_DISABLED' && !isSharedMode) {
+          console.log("Server reports microphone is disabled. Stopping microphone capture.");
+          microphoneEnabled = false;
+          stopMicrophoneCapture();
+          window.postMessage({ type: 'pipelineStatusUpdate', microphone: false }, window.location.origin);
         } else {
           if (window.webrtcInput && window.webrtcInput.on_message && !isSharedMode) {
             window.webrtcInput.on_message(event.data);
@@ -3808,7 +3903,13 @@ document.addEventListener('DOMContentLoaded', () => {
       }, 5000);
     }
   };
-});
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initWebsockets);
+} else {
+  initWebsockets();
+}
 
 function cleanupVideoBuffer() {
   let closedCount = 0;

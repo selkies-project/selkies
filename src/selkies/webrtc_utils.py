@@ -8,22 +8,19 @@ import aiohttp
 import aiofiles
 import logging
 import urllib.parse
+import hashlib
+import hmac
+import base64
+from aiohttp import web
 from watchdog.observers import Observer
-from .signaling_server import generate_rtc_config
 from typing import Tuple, List, Dict, Any, Optional, Union
 from watchdog.events import FileClosedEvent, FileSystemEventHandler
 
 import os
 import csv
-import json
-import random
-import asyncio
-import logging
-import argparse
 from datetime import datetime
-from http.server import HTTPServer
 from collections import OrderedDict
-from prometheus_client import MetricsHandler
+from prometheus_client import generate_latest, REGISTRY
 from prometheus_client import Gauge, Histogram, Info
 
 
@@ -102,6 +99,50 @@ def _log_asyncio_task_error(task: asyncio.Task) -> None:
 def _schedule_rtc_callback(loop: asyncio.AbstractEventLoop, callback, stun_servers: List[str], turn_servers: List[str], rtc_config: bytes) -> None:
     task = loop.create_task(_dispatch_rtc_callback(callback, stun_servers, turn_servers, rtc_config))
     task.add_done_callback(_log_asyncio_task_error)
+
+
+def generate_rtc_config(turn_host, turn_port, shared_secret, user, protocol='udp', turn_tls=False, stun_host=None, stun_port=None):
+    # Use shared secret to generate HMAC credential
+
+    # Sanitize user for credential compatibility
+    user = user.replace(":", "-")
+
+    # Credential expires in 24 hours
+    expiry_hour = 24
+
+    exp = int(time.time()) + expiry_hour * 3600
+    username = "{}:{}".format(exp, user)
+
+    # Generate HMAC credential
+    hashed = hmac.new(bytes(shared_secret, "utf-8"), bytes(username, "utf-8"), hashlib.sha1).digest()
+    password = base64.b64encode(hashed).decode()
+
+    # Configure STUN servers
+    stun_list = []
+    seen_stun = set()
+    if stun_host is not None and stun_port is not None:
+        _append_stun_url(stun_list, seen_stun, str(stun_host), stun_port)
+    _append_stun_url(stun_list, seen_stun, str(turn_host), turn_port)
+    _append_stun_url(stun_list, seen_stun, "stun.l.google.com", 19302)
+    _append_stun_url(stun_list, seen_stun, "stun.cloudflare.com", 3478)
+
+    rtc_config = {}
+    rtc_config["lifetimeDuration"] = "{}s".format(expiry_hour * 3600)
+    rtc_config["blockStatus"] = "NOT_BLOCKED"
+    rtc_config["iceTransportPolicy"] = "all"
+    rtc_config["iceServers"] = []
+    rtc_config["iceServers"].append({
+        "urls": stun_list
+    })
+    rtc_config["iceServers"].append({
+        "urls": [
+            "{}:{}:{}?transport={}".format('turns' if turn_tls else 'turn', _format_ice_host(str(turn_host)), turn_port, protocol)
+        ],
+        "username": username,
+        "credential": password
+    })
+
+    return json.dumps(rtc_config, indent=2)
 
 class HMACRTCMonitor:
     def __init__(
@@ -705,17 +746,14 @@ logger_metrics.setLevel(logging.INFO)
 FPS_HIST_BUCKETS = (0, 20, 40, 60)
 
 class Metrics:
-    def __init__(self, port: int = 8000, using_webrtc_csv: bool = False):
-        self.port = port
-        self.server = HTTPServer(('localhost', self.port), MetricsHandler)
-        self._task: Optional[asyncio.Task] = None
+    def __init__(self, using_webrtc_csv: bool = False):
+        self.using_webrtc_csv = using_webrtc_csv
 
         self.fps = Gauge('fps', 'Frames per second observed by client')
         self.fps_hist = Histogram('fps_hist', 'Histogram of FPS observed by client', buckets=FPS_HIST_BUCKETS)
         self.gpu_utilization = Gauge('gpu_utilization', 'Utilization percentage reported by GPU')
         self.latency = Gauge('latency', 'Latency observed by client')
         self.webrtc_statistics = Info('webrtc_statistics', 'WebRTC Statistics from the client')
-        self.using_webrtc_csv = using_webrtc_csv
         self.stats_video_file_path: Optional[str] = None
         self.stats_audio_file_path: Optional[str] = None
         self.prev_stats_video_header_len: Optional[str]  = None
@@ -730,25 +768,31 @@ class Metrics:
 
     def set_latency(self, latency_ms):
         self.latency.set(latency_ms)
+    
+    def unregister(self):
+        """Unregister all metrics from the global registry."""
+        try:
+            REGISTRY.unregister(self.fps)
+            REGISTRY.unregister(self.fps_hist)
+            REGISTRY.unregister(self.gpu_utilization)
+            REGISTRY.unregister(self.latency)
+            REGISTRY.unregister(self.webrtc_statistics)
+        except KeyError:
+            # Metrics might have already been unregistered
+            pass
 
-    def start_http(self):
-        if self._task is not None:
-            logger_metrics.warning("Metrics server is already runningg")
-            return
-        self._task = asyncio.create_task(asyncio.to_thread(self.server.serve_forever))
-        logger_metrics.info(f"Metrics server started on port {self.port}")
-
-    async def stop_http(self):
-        if self._task is None:
-            logger_metrics.warning("Metrics server is not running, might have already been stopped")
-            return
-        if self.server:
-            self.server.shutdown()
-            self.server.server_close()
-        if self._task and not self._task.done():
-            await self._task
-        self._task = None
-        logger_metrics.info(f"Metrics server stopped")
+    async def handle_metrics_request(self, request: web.Request):
+        """Async handler for metrics endpoint"""
+        data = await asyncio.to_thread(generate_latest)
+        return web.Response(
+            body=data,
+            content_type='text/plain; version=1.0.0',
+            headers={
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            }
+        )
 
     async def set_webrtc_stats(self, webrtc_stat_type: str, webrtc_stats: str) -> None:
         webrtc_stats_obj = await asyncio.to_thread(json.loads, webrtc_stats)
