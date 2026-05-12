@@ -39,6 +39,13 @@ except ImportError:
     xkb = None
 
 try:
+    libxkb = ctypes.CDLL("libxkbcommon.so.0")
+    libxkb.xkb_keysym_to_utf8.argtypes = [ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t]
+    libxkb.xkb_keysym_to_utf8.restype = ctypes.c_int
+except Exception:
+    libxkb = None
+
+try:
     import pynput
     import Xlib
     from Xlib import display
@@ -134,6 +141,35 @@ except ImportError:
         "Keysym mapping will rely entirely on fallback."
     )
     X11_KEYSYM_MAP = {}
+
+CYRILLIC_TO_QWERTY_KEYSYM = {
+    0x06CA: 0x0071, # Й -> q
+    0x06C3: 0x0077, # Ц -> w
+    0x06D5: 0x0065, # У -> e
+    0x06CB: 0x0072, # К -> r
+    0x06C5: 0x0074, # Е -> t
+    0x06CE: 0x0079, # Н -> y
+    0x06C7: 0x0075, # Г -> u
+    0x06DB: 0x0069, # Ш -> i
+    0x06DD: 0x006F, # Щ -> o
+    0x06DA: 0x0070, # З -> p
+    0x06C6: 0x0061, # Ф -> a
+    0x06D9: 0x0073, # Ы -> s
+    0x06D7: 0x0064, # В -> d
+    0x06C1: 0x0066, # А -> f
+    0x06D0: 0x0067, # П -> g
+    0x06D2: 0x0068, # Р -> h
+    0x06CF: 0x006A, # О -> j
+    0x06CC: 0x006B, # Л -> k
+    0x06C4: 0x006C, # Д -> l
+    0x06D1: 0x007A, # Я -> z
+    0x06DE: 0x0078, # Ч -> x
+    0x06D3: 0x0063, # С -> c
+    0x06CD: 0x0076, # М -> v
+    0x06C9: 0x0062, # И -> b
+    0x06D4: 0x006E, # Т -> n
+    0x06D8: 0x006D, # Ь -> m
+}
 
 class JsConfigCtypes(ctypes.Structure):
     _fields_ = [
@@ -809,6 +845,8 @@ class WebRTCInput:
         }
         self.active_modifiers = set()
         self.atomically_typed_keys = set()
+        self.translated_keys = set() # Track translated keysyms
+        self.ACTION_MODIFIER_KEYSYMS = {65507, 65508, 65513, 65514, 65511, 65512}
         self.MODIFIER_KEYSYMS = {
             65505, 65506,  # Shift_L, Shift_R
             65507, 65508,  # Control_L, Control_R
@@ -1188,36 +1226,45 @@ class WebRTCInput:
                 elif self.mouse: self.mouse.release(btn_uinput_or_pynput)
 
     async def send_x11_keypress(self, keysym, down=True):
+        if down:
+            if (self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS) and keysym in CYRILLIC_TO_QWERTY_KEYSYM:
+                self.translated_keys.add(keysym)
+                keysym = CYRILLIC_TO_QWERTY_KEYSYM[keysym]
+        else:
+            if keysym in self.translated_keys:
+                self.translated_keys.discard(keysym)
+                keysym = CYRILLIC_TO_QWERTY_KEYSYM[keysym]
+
         if self.is_wayland and self.wayland_input:
-            is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
-            is_symbol = False
-            
-            if is_printable:
-                unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
-                try:
-                    char = chr(unicode_codepoint)
-                    if not char.isalpha() and char != ' ' and char != '-':
-                        is_symbol = True
-                except ValueError:
-                    pass
-
-            if is_symbol or keysym == 0x20AC:
-                await self._xdotool_fallback(keysym, down)
-                return
-
             scancode = self.wayland_scancode_map.get(keysym)
-            
             if scancode is None and (0x20 <= keysym <= 0xFF):
                 try:
                     lower_sym = ord(chr(keysym).lower())
                     scancode = self.wayland_scancode_map.get(lower_sym)
                 except: pass
 
-            if down and scancode is not None and hasattr(self, 'wayland_shift_required_keys') and keysym in self.wayland_shift_required_keys:
-                if 65505 not in self.active_modifiers and 65506 not in self.active_modifiers:
-                    scancode = None
+            force_fallback = False
+            is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000) or keysym == 0x20AC
+            
+            if down and is_printable:
+                if scancode is not None and hasattr(self, 'wayland_shift_required_keys'):
+                    shift_pressed = 65505 in self.active_modifiers or 65506 in self.active_modifiers
+                    altgr_pressed = 65027 in self.active_modifiers
+                    ctrl_pressed = 65507 in self.active_modifiers or 65508 in self.active_modifiers
+                    alt_pressed = 65513 in self.active_modifiers or 65514 in self.active_modifiers
+                    meta_pressed = 65511 in self.active_modifiers or 65512 in self.active_modifiers
+                    has_shortcut_mod = ctrl_pressed or alt_pressed or meta_pressed
+                    requires_shift = keysym in self.wayland_shift_required_keys
+                    if not has_shortcut_mod:
+                        if requires_shift != shift_pressed:
+                            force_fallback = True
+                        elif altgr_pressed:
+                            force_fallback = True
 
-            if scancode:
+            if scancode is None or keysym == 0x20AC or ((keysym & 0xFF000000) == 0x01000000):
+                force_fallback = True
+
+            if not force_fallback and scancode is not None:
                 try:
                     self.wayland_input.inject_key(scancode, 1 if down else 0)
                 except Exception as e:
@@ -1302,7 +1349,16 @@ class WebRTCInput:
             elif keysym_number == 0x20AC:
                 char_to_type = '€'
             else:
-                if XK is not None:
+                if libxkb is not None:
+                    try:
+                        buf = ctypes.create_string_buffer(8)
+                        res = libxkb.xkb_keysym_to_utf8(keysym_number, buf, 8)
+                        if res > 0:
+                            char_to_type = buf.value.decode('utf-8')
+                    except Exception:
+                        pass
+
+                if not char_to_type and XK is not None:
                     try:
                         keysym_name = XK.keysym_to_string(keysym_number)
                         if keysym_name and len(keysym_name) == 1:
@@ -1325,7 +1381,7 @@ class WebRTCInput:
                     await asyncio.wait_for(process_wtype.communicate(), timeout=1.0)
                 except Exception as e:
                     logger_webrtc_input.warning(f"wtype fallback failed: {e}")
-            
+
             return
 
         if not self.xdisplay:
@@ -1768,8 +1824,6 @@ class WebRTCInput:
             return True
         input_bytes = data if isinstance(data, bytes) else data.encode('utf-8')
 
-        # Ensure LANG is set to a UTF-8 locale
-        # Helpful when running as portable application too, where LANG may be unset
         env = self._get_wl_env() if self.is_wayland else os.environ.copy()
         if 'LANG' not in env or env['LANG'] == 'C':
             env['LANG'] = 'C.UTF-8'
@@ -1781,14 +1835,13 @@ class WebRTCInput:
                     *cmd,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, # FIX: Prevent daemon from keeping pipe open
+                    stderr=subprocess.DEVNULL,
                     env=env
                 )
                 if process.stdin:
                     process.stdin.write(input_bytes)
                     await process.stdin.drain()
                     process.stdin.close()
-                # Should now return instantly instead of hitting the 2.0s timeout
                 await asyncio.wait_for(process.communicate(), timeout=2.0)
                 if process.returncode == 0:
                     return True
