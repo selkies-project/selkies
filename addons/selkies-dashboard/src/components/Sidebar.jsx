@@ -13,7 +13,8 @@ const PER_DISPLAY_SETTINGS = [
     'h264_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
     'h264_paintover_crf', 'h264_paintover_burst_frames', 'use_paint_over_quality',
     'is_manual_resolution_mode', 'manual_width', 'manual_height', 'encoder',
-    'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode', 'video_bitrate'
+    'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode', 'video_bitrate',
+    'force_aligned_resolution'
 ];
 
 const encoderOptions = [
@@ -630,6 +631,7 @@ function Sidebar() {
 
     const hypotheticalHidpi = s.hidpi_enabled || { value: true, locked: false };
     newRenderable.hidpi = hypotheticalHidpi.locked !== true;
+    newRenderable.forceAlignedResolution = isRenderable('force_aligned_resolution');
 
     newRenderable.enableSharing = s.enable_sharing?.value ?? true;
     newRenderable.enableShared = s.enable_shared?.value ?? true;
@@ -946,6 +948,12 @@ function Sidebar() {
         setHidpiEnabled(!authoritativeValue);
       }
     }
+    const s_force_aligned_resolution = serverSettings.force_aligned_resolution;
+    if (s_force_aligned_resolution) {
+      const final = s_force_aligned_resolution.locked ? s_force_aligned_resolution.value : getStoredBool("force_aligned_resolution");
+      setForceAlignedResolution(final);
+      localStorage.setItem(getPrefixedKey("force_aligned_resolution"), String(final));
+    }
   }, [serverSettings]);
 
   const { t, raw } = translator;
@@ -1059,6 +1067,10 @@ function Sidebar() {
   const [hidpiEnabled, setHidpiEnabled] = useState(() => {
     const saved = localStorage.getItem(getPrefixedKey("use_css_scaling"));
     return saved !== "true";
+  });
+  const [forceAlignedResolution, setForceAlignedResolution] = useState(() => {
+    const saved = localStorage.getItem(getPrefixedKey("force_aligned_resolution"));
+    return saved !== null ? saved === "true" : false;
   });
   const [antiAliasing, setAntiAliasing] = useState(() => {
     const saved = localStorage.getItem(getPrefixedKey("antiAliasingEnabled"));
@@ -1523,6 +1535,12 @@ function Sidebar() {
       { type: "setUseCssScaling", value: !newHidpiState },
       window.location.origin
     );
+  };
+  const handleForceAlignedResolutionToggle = () => {
+    const newState = !forceAlignedResolution;
+    setForceAlignedResolution(newState);
+    debouncedPostSetting({ force_aligned_resolution: newState });
+    localStorage.setItem(getPrefixedKey("force_aligned_resolution"), String(newState));
   };
   const handleAntiAliasingToggle = () => {
     const newState = !antiAliasing;
@@ -2710,6 +2728,26 @@ function Sidebar() {
                           aria-pressed={hidpiEnabled}
                           title={t(hidpiEnabled ? "sections.screen.hidpiDisableTitle" : "sections.screen.hidpiEnableTitle",
                                   hidpiEnabled ? "Disable HiDPI (Use CSS Scaling)" : "Enable HiDPI (Pixel Perfect)")}
+                        >
+                          <span className="toggle-button-sidebar-knob"></span>
+                        </button>
+                      </div>
+                    )}
+                    {(renderableSettings.forceAlignedResolution ?? true) && (
+                      <div className="dev-setting-item toggle-item">
+                        <label
+                          htmlFor="forceAlignedResolutionToggle"
+                          title={t("sections.screen.forceAlignedResolutionDetails", "Forces the display resolution to be a multiple of 16 pixels")}
+                        >
+                          {t("sections.screen.forceAlignedResolutionLabel", "Force Aligned Resolution")}
+                        </label>
+                        <button
+                          id="forceAlignedResolutionToggle"
+                          className={`toggle-button-sidebar ${forceAlignedResolution ? "active" : ""}`}
+                          onClick={handleForceAlignedResolutionToggle}
+                          aria-pressed={forceAlignedResolution}
+                          disabled={!serverSettings || serverSettings.force_aligned_resolution?.locked}
+                          title={t(forceAlignedResolution ? "sections.screen.forceAlignedResolutionDisableTitle" : "sections.screen.forceAlignedResolutionEnableTitle", forceAlignedResolution ? "Disable Force Aligned Resolution" : "Enable Force Aligned Resolution")}
                         >
                           <span className="toggle-button-sidebar-knob"></span>
                         </button>

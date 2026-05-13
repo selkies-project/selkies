@@ -50,7 +50,7 @@ const PER_DISPLAY_SETTINGS = [
     'h264_paintover_crf', 'h264_paintover_burst_frames', 'use_paint_over_quality',
     'is_manual_resolution_mode', 'manual_width', 'manual_height',
     'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
-    'video_bitrate'
+    'video_bitrate', 'force_aligned_resolution'
 ];
 // Microphone related resources
 let micStream = null;
@@ -185,6 +185,7 @@ let h264_paintover_burst_frames = 5;
 let use_paint_over_quality = true;
 let audio_bitrate = 320000;
 let videoBitrate = 8;
+let force_aligned_resolution = false;
 let showStart = true;
 let status = 'connecting';
 let loadingText = '';
@@ -395,6 +396,7 @@ if (displayId === 'display2') {
 enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 clipboard_in_enabled = getBoolParam('clipboard_in_enabled', true);
 clipboard_out_enabled = getBoolParam('clipboard_out_enabled', true);
+force_aligned_resolution = getBoolParam('force_aligned_resolution', force_aligned_resolution);
 setIntParam('framerate', framerate);
 setIntParam('h264_crf', h264_crf);
 setIntParam('jpeg_quality', jpeg_quality);
@@ -405,6 +407,7 @@ setIntParam('audio_bitrate', audio_bitrate);
 setStringParam('encoder', currentEncoderMode);
 setIntParam('scaling_dpi', scalingDPI);
 setIntParam('video_bitrate', videoBitrate);
+setBoolParam('force_aligned_resolution', force_aligned_resolution);
 
 if (isSharedMode) {
     manual_width = 1280;
@@ -454,8 +457,9 @@ window.applyTimestamp = (msg) => {
   return `[${ts}] ${msg}`;
 };
 
-const roundDownToEven = (num) => {
-  return Math.floor(num / 2) * 2;
+const alignResolution = (num) => {
+  const alignment = force_aligned_resolution ? 16 : 2;
+  return Math.floor(num / alignment) * alignment;
 };
 
 const isChromium = (() => {
@@ -648,17 +652,18 @@ function getCurrentSettingsPayload() {
     settingsToSend['enable_binary_clipboard'] = getBoolParam('enable_binary_clipboard', false);
     settingsToSend['rate_control_mode'] = getStringParam('rate_control_mode', 'crf');
     settingsToSend['video_bitrate'] = getIntParam('video_bitrate', 8);
+    settingsToSend['force_aligned_resolution'] = getBoolParam('force_aligned_resolution', false);
     if (window.is_manual_resolution_mode && manual_width != null && manual_height != null) {
         settingsToSend['is_manual_resolution_mode'] = true;
-        settingsToSend['manual_width'] = roundDownToEven(manual_width);
-        settingsToSend['manual_height'] = roundDownToEven(manual_height);
+        settingsToSend['manual_width'] = alignResolution(manual_width);
+        settingsToSend['manual_height'] = alignResolution(manual_height);
     } else {
         const videoContainer = document.querySelector('.video-container');
         const rect = videoContainer ? videoContainer.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
         settingsToSend['is_manual_resolution_mode'] = false;
-        
-        let initW = roundDownToEven(rect.width * dpr);
-        let initH = roundDownToEven(rect.height * dpr);
+
+        let initW = alignResolution(rect.width * dpr);
+        let initH = alignResolution(rect.height * dpr);
         if (initW > 4080) initW = 4080;
         if (initH > 4080) initH = 4080;
 
@@ -701,12 +706,12 @@ function sendResolutionToServer(width, height) {
   let dprUsed = 1;
 
   if (window.is_manual_resolution_mode) {
-    realWidth = roundDownToEven(width);
-    realHeight = roundDownToEven(height);
+    realWidth = alignResolution(width);
+    realHeight = alignResolution(height);
   } else {
     dprUsed = useCssScaling ? 1 : (window.devicePixelRatio || 1);
-    realWidth = roundDownToEven(width * dprUsed);
-    realHeight = roundDownToEven(height * dprUsed);
+    realWidth = alignResolution(width * dprUsed);
+    realHeight = alignResolution(height * dprUsed);
   }
 
   if (realWidth > 4080) realWidth = 4080;
@@ -733,8 +738,8 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
   }
 
   const dpr = (isSharedMode || window.is_manual_resolution_mode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
-  const internalBufferWidth = roundDownToEven(targetWidth * dpr);
-  const internalBufferHeight = roundDownToEven(targetHeight * dpr);
+  const internalBufferWidth = alignResolution(targetWidth * dpr);
+  const internalBufferHeight = alignResolution(targetHeight * dpr);
 
   if (canvas.width !== internalBufferWidth || canvas.height !== internalBufferHeight) {
     canvas.width = internalBufferWidth;
@@ -776,8 +781,10 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
   } else {
     cssWidthStr = `${targetWidth}px`;
     cssHeightStr = `${targetHeight}px`;
-    topStr = '0px';
-    leftStr = '0px';
+    const topOffset = (containerHeight - targetHeight) / 2;
+    const leftOffset = (containerWidth - targetWidth) / 2;
+    topStr = `${topOffset}px`;
+    leftStr = `${leftOffset}px`;
 
     canvas.style.position = 'absolute';
     canvas.style.width = cssWidthStr;
@@ -785,7 +792,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     canvas.style.top = topStr;
     canvas.style.left = leftStr;
     canvas.style.objectFit = 'fill';
-    console.log(`Applied manual style (Exact): CSS ${targetWidth}x${targetHeight}, Buffer ${internalBufferWidth}x${internalBufferHeight}, Pos 0,0`);
+    console.log(`Applied manual style (Exact): CSS ${targetWidth}x${targetHeight}, Buffer ${internalBufferWidth}x${internalBufferHeight}, Pos ${leftOffset.toFixed(2)},${topOffset.toFixed(2)}`);
   }
   canvas.style.display = 'block';
   updateCanvasImageRendering();
@@ -811,8 +818,8 @@ function resetCanvasStyle(streamWidth, streamHeight) {
   }
 
   const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1); 
-  const internalBufferWidth = roundDownToEven(streamWidth * dpr);
-  const internalBufferHeight = roundDownToEven(streamHeight * dpr);
+  const internalBufferWidth = alignResolution(streamWidth * dpr);
+  const internalBufferHeight = alignResolution(streamHeight * dpr);
 
   if (canvas.width !== internalBufferWidth || canvas.height !== internalBufferHeight) {
     canvas.width = internalBufferWidth;
@@ -1383,19 +1390,19 @@ const initializeInput = () => {
 
     console.log("handleResizeUI: Auto-resize triggered (e.g., by window resize event).");
     const windowResolution = inputInstance.getWindowResolution();
-    let evenWidth = roundDownToEven(windowResolution[0]);
-    let evenHeight = roundDownToEven(windowResolution[1]);
+    let evenWidth = alignResolution(windowResolution[0]);
+    let evenHeight = alignResolution(windowResolution[1]);
 
     const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
     const MAX_DIM = 4080;
     
     if (evenWidth * dpr > MAX_DIM) {
         evenWidth = Math.floor(MAX_DIM / dpr);
-        evenWidth = roundDownToEven(evenWidth);
+        evenWidth = alignResolution(evenWidth);
     }
     if (evenHeight * dpr > MAX_DIM) {
         evenHeight = Math.floor(MAX_DIM / dpr);
-        evenHeight = roundDownToEven(evenHeight);
+        evenHeight = alignResolution(evenHeight);
     }
 
     if (evenWidth <= 0 || evenHeight <= 0) {
@@ -1419,11 +1426,11 @@ const initializeInput = () => {
     let currentAutoWidth, currentAutoHeight;
     if (videoContainer) {
       const rect = videoContainer.getBoundingClientRect();
-      currentAutoWidth = roundDownToEven(rect.width);
-      currentAutoHeight = roundDownToEven(rect.height);
+      currentAutoWidth = alignResolution(rect.width);
+      currentAutoHeight = alignResolution(rect.height);
     } else {
-      currentAutoWidth = roundDownToEven(window.innerWidth);
-      currentAutoHeight = roundDownToEven(window.innerHeight);
+      currentAutoWidth = alignResolution(window.innerWidth);
+      currentAutoHeight = alignResolution(window.innerHeight);
     }
     if (currentAutoWidth <= 0 || currentAutoHeight <= 0) {
       console.warn(`initializeInput: Current auto-calculated dimensions are invalid (${currentAutoWidth}x${currentAutoHeight}). Defaulting canvas style to 1024x768 (logical) for initial setup. The resolution sent by onopen should prevail on the server.`);
@@ -1625,8 +1632,8 @@ function receiveMessage(event) {
             applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
           } else if (!isSharedMode) {
             const currentWindowRes = window.webrtcInput ? window.webrtcInput.getWindowResolution() : [window.innerWidth, window.innerHeight];
-            const autoWidth = roundDownToEven(currentWindowRes[0]);
-            const autoHeight = roundDownToEven(currentWindowRes[1]);
+            const autoWidth = alignResolution(currentWindowRes[0]);
+            const autoHeight = alignResolution(currentWindowRes[1]);
             sendResolutionToServer(autoWidth, autoHeight);
             resetCanvasStyle(autoWidth, autoHeight);
           } else {
@@ -1678,8 +1685,8 @@ function receiveMessage(event) {
       }
       console.log(`Setting manual resolution: ${width}x${height} (logical)`);
       window.is_manual_resolution_mode = true;
-      manual_width = roundDownToEven(width);
-      manual_height = roundDownToEven(height);
+      manual_width = alignResolution(width);
+      manual_height = alignResolution(height);
       console.log(`Rounded logical resolution to even numbers: ${manual_width}x${manual_height}`);
       setIntParam('manual_width', manual_width);
       setIntParam('manual_height', manual_height);
@@ -1707,8 +1714,8 @@ function receiveMessage(event) {
       setIntParam('manual_height', null);
       setBoolParam('is_manual_resolution_mode', false);
       const currentWindowRes = window.webrtcInput ? window.webrtcInput.getWindowResolution() : [window.innerWidth, window.innerHeight];
-      const autoWidth = roundDownToEven(currentWindowRes[0]);
-      const autoHeight = roundDownToEven(currentWindowRes[1]);
+      const autoWidth = alignResolution(currentWindowRes[0]);
+      const autoHeight = alignResolution(currentWindowRes[1]);
       resetCanvasStyle(autoWidth, autoHeight);
       if (currentEncoderMode === 'x264enc' || currentEncoderMode === 'x264enc-striped') {
         console.log("Clearing VNC stripe decoders due to resolution reset to window.");
@@ -2134,6 +2141,11 @@ function handleSettingsMessage(settings) {
     setIntParam('video_bitrate', videoBitrate);
     settingsChanged = true;
   }
+  if (settings.force_aligned_resolution !== undefined) {
+    force_aligned_resolution = !!settings.force_aligned_resolution;
+    setBoolParam('force_aligned_resolution', force_aligned_resolution);
+    settingsChanged = true;
+  }
   if (settingsChanged) {
     sendFullSettingsUpdateToServer('handleSettingsMessage');
   }
@@ -2187,8 +2199,8 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (window.webrtcInput && typeof window.webrtcInput.getWindowResolution === 'function') {
       try {
         const currentRes = window.webrtcInput.getWindowResolution();
-        const autoWidth = roundDownToEven(currentRes[0]);
-        const autoHeight = roundDownToEven(currentRes[1]);
+        const autoWidth = alignResolution(currentRes[0]);
+        const autoHeight = alignResolution(currentRes[1]);
         if (autoWidth > 0 && autoHeight > 0) {
           targetWidth = autoWidth;
           targetHeight = autoHeight;
@@ -2197,9 +2209,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
-    const actualCodedWidth = roundDownToEven(targetWidth * dpr);
-    const actualCodedHeight = roundDownToEven(targetHeight * dpr);
-
+    const actualCodedWidth = alignResolution(targetWidth * dpr);
+    const actualCodedHeight = alignResolution(targetHeight * dpr);
     decoder = new VideoDecoder({
       output: handleDecodedFrame,
       error: (e) => initiateFallback(e, 'main_decoder'),
@@ -2402,8 +2413,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (isSharedMode) {
       if (manual_width && manual_height && manual_width > 0 && manual_height > 0) {
-          const expectedPhysicalCanvasWidth = roundDownToEven(manual_width * dpr);
-          const expectedPhysicalCanvasHeight = roundDownToEven(manual_height * dpr);
+          const expectedPhysicalCanvasWidth = alignResolution(manual_width * dpr);
+          const expectedPhysicalCanvasHeight = alignResolution(manual_height * dpr);
           if (canvas.width !== expectedPhysicalCanvasWidth || canvas.height !== expectedPhysicalCanvasHeight) {
             console.log(`Shared mode (paintVideoFrame): Canvas buffer ${canvas.width}x${canvas.height} out of sync with expected physical ${expectedPhysicalCanvasWidth}x${expectedPhysicalCanvasHeight} (logical: ${manual_width}x${manual_height}). Re-applying style.`);
             applyManualCanvasStyle(manual_width, manual_height, true);
@@ -2796,11 +2807,13 @@ document.addEventListener('DOMContentLoaded', () => {
         'audio_bitrate', 'h264_fullcolor', 'h264_streaming_mode',
         'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'h264_paintover_crf',
         'h264_paintover_burst_frames', 'use_paint_over_quality', 'scaling_dpi',
-        'enable_binary_clipboard', 'rate_control_mode', 'video_bitrate'
+        'enable_binary_clipboard', 'rate_control_mode', 'video_bitrate',
+        'force_aligned_resolution'
       ];
       const booleanSettingKeys = [
         'is_manual_resolution_mode', 'h264_fullcolor', 'h264_streaming_mode',
-        'use_cpu', 'use_paint_over_quality', 'enable_binary_clipboard'
+        'use_cpu', 'use_paint_over_quality', 'enable_binary_clipboard',
+        'force_aligned_resolution'
       ];
       const integerSettingKeys = [
         'framerate', 'h264_crf', 'audio_bitrate', 'jpeg_quality',
@@ -2839,8 +2852,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (is_manual_resolution_mode && manual_width != null && manual_height != null) {
         settingsToSend['is_manual_resolution_mode'] = true;
-        settingsToSend['manual_width'] = roundDownToEven(manual_width);
-        settingsToSend['manual_height'] = roundDownToEven(manual_height);
+        settingsToSend['manual_width'] = alignResolution(manual_width);
+        settingsToSend['manual_height'] = alignResolution(manual_height);
       } else {
         const videoContainer = document.querySelector('.video-container');
         const rect = videoContainer ? videoContainer.getBoundingClientRect() : {
@@ -2848,8 +2861,8 @@ document.addEventListener('DOMContentLoaded', () => {
           height: window.innerHeight
         };
         settingsToSend['is_manual_resolution_mode'] = false;
-        settingsToSend['initialClientWidth'] = roundDownToEven(rect.width * dpr);
-        settingsToSend['initialClientHeight'] = roundDownToEven(rect.height * dpr);
+        settingsToSend['initialClientWidth'] = alignResolution(rect.width * dpr);
+        settingsToSend['initialClientHeight'] = alignResolution(rect.height * dpr);
       }
  
       settingsToSend['useCssScaling'] = useCssScaling;
@@ -3518,9 +3531,8 @@ document.addEventListener('DOMContentLoaded', () => {
                const physicalNewHeight = parseInt(obj.height, 10);
 
                if (physicalNewWidth > 0 && physicalNewHeight > 0) {
-                 const evenPhysicalNewWidth = roundDownToEven(physicalNewWidth);
-                 const evenPhysicalNewHeight = roundDownToEven(physicalNewHeight);
-
+                 const evenPhysicalNewWidth = alignResolution(physicalNewWidth);
+                 const evenPhysicalNewHeight = alignResolution(physicalNewHeight);
                  const logicalNewWidth = evenPhysicalNewWidth / dpr_for_conversion;
                  const logicalNewHeight = evenPhysicalNewHeight / dpr_for_conversion;
                  let dimensionsChanged = (manual_width !== logicalNewWidth || manual_height !== logicalNewHeight);

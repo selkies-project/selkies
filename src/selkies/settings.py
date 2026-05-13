@@ -58,6 +58,7 @@ COMMON_SETTING_DEFINITIONS = [
     {'name': 'manual_width', 'type': 'int', 'default': 0, 'help': 'Lock width to a fixed value. Setting this forces manual resolution mode.'},
     {'name': 'manual_height', 'type': 'int', 'default': 0, 'help': 'Lock height to a fixed value. Setting this forces manual resolution mode.'},
     {'name': 'scaling_dpi', 'type': 'enum', 'default': '96', 'meta': {'allowed': ['96', '120', '144', '168', '192', '216', '240', '264', '288']}, 'help': 'The default DPI for UI scaling.'},
+    {'name': 'force_aligned_resolution', 'type': 'bool', 'default': False, 'help': 'Forces the display resolution to be a multiple of 16 pixels.'},
 
     # Input & Client Behavior Settings
     {'name': 'enable_binary_clipboard', 'type': 'bool', 'default': False, 'help': 'Allow binary data (e.g., images) on the clipboard.'},
