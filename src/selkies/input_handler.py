@@ -2043,9 +2043,8 @@ class WebRTCInput:
         while True:
             try:
                 if unicode_buffer:
-                    flush_timeout = 0.05 if getattr(self, 'use_clipboard_fallback', False) else 0.005
                     try:
-                        msg_type, data = await asyncio.wait_for(self.keyboard_queue.get(), timeout=flush_timeout)
+                        msg_type, data = await asyncio.wait_for(self.keyboard_queue.get(), timeout=0.05)
                     except asyncio.TimeoutError:
                         await flush_buffer()
                         continue
