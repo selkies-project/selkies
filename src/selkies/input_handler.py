@@ -2029,7 +2029,7 @@ class WebRTCInput:
                     await self._inject_unicode_via_clipboard(combined_text)
                 else:
                     try:
-                        cmd = ["wtype", combined_text]
+                        cmd = ["wtype", "--", combined_text]
                         proc = await subprocess.create_subprocess_exec(
                             *cmd,
                             stdout=subprocess.DEVNULL,
