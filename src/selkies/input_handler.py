@@ -1122,7 +1122,7 @@ class WebRTCInput:
         # Initialize persistent gamepad instances
         await self._initialize_persistent_gamepads()
 
-        if getattr(self, 'use_clipboard_fallback', False):
+        if self.is_wayland:
             self.keyboard_worker_task = asyncio.create_task(self._keyboard_worker())        
 
     async def _initialize_persistent_gamepads(self):
@@ -2024,13 +2024,27 @@ class WebRTCInput:
             if unicode_buffer:
                 combined_text = "".join(unicode_buffer)
                 unicode_buffer.clear()
-                await self._inject_unicode_via_clipboard(combined_text)
+
+                if getattr(self, 'use_clipboard_fallback', False):
+                    await self._inject_unicode_via_clipboard(combined_text)
+                else:
+                    try:
+                        cmd = ["wtype", combined_text]
+                        proc = await subprocess.create_subprocess_exec(
+                            *cmd,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            env=self._get_wl_env()
+                        )
+                        await asyncio.wait_for(proc.communicate(), timeout=2.0)
+                    except Exception as e:
+                        logger_webrtc_input.warning(f"Batched wtype failed: {e}")
 
         while True:
             try:
                 if unicode_buffer:
                     try:
-                        msg_type, data = await asyncio.wait_for(self.keyboard_queue.get(), timeout=0.15)
+                        msg_type, data = await asyncio.wait_for(self.keyboard_queue.get(), timeout=0.05)
                     except asyncio.TimeoutError:
                         await flush_buffer()
                         continue
@@ -2099,7 +2113,7 @@ class WebRTCInput:
             self.on_ping_response(float("%.3f" % ((time.time() - self.ping_start) / 2 * 1000)))
         elif msg_type == "kd":
             keysym = int(toks[1])
-            if getattr(self, 'use_clipboard_fallback', False):
+            if self.is_wayland:
                 self.keyboard_queue.put_nowait(("kd", keysym))
             else:
                 is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
@@ -2107,20 +2121,20 @@ class WebRTCInput:
                     self.active_modifiers.add(keysym)
                 if is_printable and not self.active_modifiers:
                     unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
-                    try:            
+                    try:
                         char_to_type = chr(unicode_codepoint)
-                        if not self.is_wayland and (not char_to_type.isalpha() and char_to_type != ' '):
+                        if not char_to_type.isalpha() and char_to_type != ' ':
                             await self.on_message(f"co,end,{char_to_type}")
                             self.atomically_typed_keys.add(keysym)
                         else:
                             await self.send_x11_keypress(keysym, down=True)
                     except (ValueError, TypeError):
                         await self.send_x11_keypress(keysym, down=True)
-                else:   
+                else:
                     await self.send_x11_keypress(keysym, down=True)
         elif msg_type == "ku":
             keysym = int(toks[1])
-            if getattr(self, 'use_clipboard_fallback', False):
+            if self.is_wayland:
                 self.keyboard_queue.put_nowait(("ku", keysym))
             else:
                 if keysym in self.MODIFIER_KEYSYMS:
@@ -2131,7 +2145,7 @@ class WebRTCInput:
                 else:
                     await self.send_x11_keypress(keysym, down=False)
         elif msg_type == "kr":
-            if getattr(self, 'use_clipboard_fallback', False):
+            if self.is_wayland:
                 self.keyboard_queue.put_nowait(("kr", None))
             else:
                 await self.reset_keyboard()
@@ -2338,13 +2352,13 @@ class WebRTCInput:
         elif msg_type in ["_stats_video", "_stats_audio"]: 
             try: await self.on_client_webrtc_stats(msg_type, ",".join(toks[1:]))
             except: logger_webrtc_input.error("Failed to parse WebRTC Statistics")
-        elif msg_type == "co" and toks[1] == "end": 
+        elif msg_type == "co" and toks[1] == "end":
             try:
                 text_to_type = msg[7:]
-                if getattr(self, 'use_clipboard_fallback', False):
+                if self.is_wayland:
                     self.keyboard_queue.put_nowait(("co_end", text_to_type))
                 else:
-                    cmd = ["wtype", "--", text_to_type] if self.is_wayland else ["xdotool", "type", text_to_type]
+                    cmd = ["xdotool", "type", text_to_type]
                     process = await subprocess.create_subprocess_exec(
                         *cmd,
                         stdout=subprocess.PIPE,
