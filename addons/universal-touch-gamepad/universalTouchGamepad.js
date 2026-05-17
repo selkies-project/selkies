@@ -236,10 +236,9 @@
                 { id: 'dpadDown_mod', index: 13, label: DOWN_ARROW_SVG, style: { left: '160px', bottom: '30px', width: '40px', height: '40px' } },
                 { id: 'dpadLeft_mod', index: 14, label: LEFT_ARROW_SVG, style: { left: '120px', bottom: '60px', width: '40px', height: '40px' } },
                 { id: 'dpadRight_mod', index: 15, label: RIGHT_ARROW_SVG, style: { left: '200px', bottom: '60px', width: '40px', height: '40px' } },
-                { id: 'home_mod', index: 16, label: HOME_ICON_SVG, style: { left: 'calc(50% - 20px)', bottom: '250px', width: '40px', height: '40px', borderRadius: '50%'} },
-                { id: 'select_mod', index: 8, label: 'VIEW', shape: 'squircle', style: { left: 'calc(50% - 75px)', bottom: '200px', width: '60px', height: '30px'} },
-                { id: 'start_mod', index: 9, label: 'MENU', shape: 'squircle', style: { right: 'calc(50% - 100px)', bottom: '200px', width: '60px', height: '30px' } },
-                { id: 'share_mod', index: 17, label: 'SHARE', shape: 'squircle', style: { left: 'calc(50% - 30px)', bottom: '150px', width: '60px', height: '25px', fontSize:'8px' } },
+                { id: 'home_mod', index: 16, label: HOME_ICON_SVG, style: { left: 'calc(50% - 32px)', bottom: '100px', width: '40px', height: '40px', borderRadius: '50%'} },
+                { id: 'select_mod', index: 8, label: 'VIEW', shape: 'squircle', style: { left: 'calc(50% - 85px)', bottom: '50px', width: '60px', height: '30px'} },
+                { id: 'start_mod', index: 9, label: 'MENU', shape: 'squircle', style: { right: 'calc(50% - 90px)', bottom: '50px', width: '60px', height: '30px' } },
                 { id: 'buttonY_mod', index: 3, label: 'Y', style: { right: '125px', bottom: '180px', width: '45px', height: '45px', borderRadius: '50%' } },
                 { id: 'buttonX_mod', index: 2, label: 'X', style: { right: '175px', bottom: '140px', width: '45px', height: '45px', borderRadius: '50%' } },
                 { id: 'buttonB_mod', index: 1, label: 'B', style: { right: '75px', bottom: '140px', width: '45px', height: '45px', borderRadius: '50%' } },
@@ -254,7 +253,7 @@
             clusters: [
                 { id: 'dpadCluster_mod', style: { left: '110px', bottom: '20px', width: '140px', height: '120px' }, buttonIds: ['dpadUp_mod', 'dpadDown_mod', 'dpadLeft_mod', 'dpadRight_mod'] },
                 { id: 'faceCluster_mod', style: { right: '55px', bottom: '80px', width: '175px', height: '155px' }, buttonIds: ['buttonY_mod', 'buttonX_mod', 'buttonB_mod', 'buttonA_mod'] },
-                { id: 'systemCluster_mod', style: { left: 'calc(50% - 85px)', bottom: '140px', width: '170px', height: '150px' }, buttonIds: ['home_mod', 'select_mod', 'start_mod', 'share_mod'] },
+                { id: 'systemCluster_mod', style: { left: 'calc(50% - 95px)', bottom: '40px', width: '190px', height: '120px' }, buttonIds: ['home_mod', 'select_mod', 'start_mod'] },
                 { id: 'shoulderL1_mod', style: { left: '30px', bottom: '230px', width: '130px', height: '55px' }, buttonIds: ['L1_mod'] },
                 { id: 'shoulderR1_mod', style: { right: '30px', bottom: '230px', width: '130px', height: '55px' }, buttonIds: ['R1_mod'] },
             ]
