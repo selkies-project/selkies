@@ -1768,6 +1768,10 @@ class DataStreamingServer(BaseStreamingService):
         active_uploads_by_path_conn = {}
         active_upload_target_path_conn = None
         upload_dir_valid = upload_dir_path is not None
+        system_monitor_task_ws = None
+        gpu_monitor_task_ws = None
+        stats_sender_task_ws = None
+        network_monitor_task_ws = None
         
         mic_setup_done = False
         mic_disabled_sent = False
@@ -1793,21 +1797,25 @@ class DataStreamingServer(BaseStreamingService):
 
         self._shared_stats_ws = {}
         gpu_id_for_stats = getattr(self.app, "gpu_id", GPU_ID_DEFAULT)
-        self._system_monitor_task_ws = asyncio.create_task(
+        system_monitor_task_ws = asyncio.create_task(
             _collect_system_stats_ws(self._shared_stats_ws)
         )
+        self._system_monitor_task_ws = system_monitor_task_ws
         if GPUtil.getGPUs():
-            self._gpu_monitor_task_ws = asyncio.create_task(
+            gpu_monitor_task_ws = asyncio.create_task(
                 _collect_gpu_stats_ws(self._shared_stats_ws, gpu_id=gpu_id_for_stats)
             )
-        self._stats_sender_task_ws = asyncio.create_task(
+            self._gpu_monitor_task_ws = gpu_monitor_task_ws
+        stats_sender_task_ws = asyncio.create_task(
             _send_stats_periodically_ws(
                 websocket, self._shared_stats_ws
             )
         )
-        self._network_monitor_task_ws = asyncio.create_task(
+        self._stats_sender_task_ws = stats_sender_task_ws
+        network_monitor_task_ws = asyncio.create_task(
             _collect_network_stats_ws(self._shared_stats_ws, self)
         )
+        self._network_monitor_task_ws = network_monitor_task_ws
 
         pulse = None
         try:
@@ -2718,35 +2726,13 @@ class DataStreamingServer(BaseStreamingService):
             else:
                 data_logger.info(f"Unregistered client at {raddr} disconnected. No display reconfiguration needed.")
 
-            if "_stats_sender_task_ws" in locals():
-                _task_to_cancel = locals()["_stats_sender_task_ws"]
-                if _task_to_cancel and not _task_to_cancel.done():
-                    _task_to_cancel.cancel()
-                    try:
-                        await _task_to_cancel
-                    except asyncio.CancelledError:
-                        pass
-
-            if "_system_monitor_task_ws" in locals():
-                _task_to_cancel = locals()["_system_monitor_task_ws"]
-                if _task_to_cancel and not _task_to_cancel.done():
-                    _task_to_cancel.cancel()
-                    try:
-                        await _task_to_cancel
-                    except asyncio.CancelledError:
-                        pass
-
-            if "_gpu_monitor_task_ws" in locals():
-                _task_to_cancel = locals()["_gpu_monitor_task_ws"]
-                if _task_to_cancel and not _task_to_cancel.done():
-                    _task_to_cancel.cancel()
-                    try:
-                        await _task_to_cancel
-                    except asyncio.CancelledError:
-                        pass
-
-            if "_network_monitor_task_ws" in locals():
-                _task_to_cancel = locals()["_network_monitor_task_ws"]
+            monitor_tasks = [
+                stats_sender_task_ws,
+                system_monitor_task_ws,
+                gpu_monitor_task_ws,
+                network_monitor_task_ws,
+            ]
+            for _task_to_cancel in monitor_tasks:
                 if _task_to_cancel and not _task_to_cancel.done():
                     _task_to_cancel.cancel()
                     try:
