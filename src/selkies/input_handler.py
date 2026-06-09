@@ -1723,6 +1723,45 @@ class WebRTCInput:
             logger_webrtc_input.warning("Failed to access clipboard file %s: %s", file_path, e)
             return None, None
 
+    async def _kill_and_reap_process(self, proc, description):
+        logger_webrtc_input.warning(
+            "Timed out waiting for clipboard command '%s' pid=%s; killing it.",
+            description,
+            getattr(proc, "pid", "unknown"),
+        )
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            logger_webrtc_input.warning(
+                "Timed-out clipboard command '%s' pid=%s could not be reaped promptly.",
+                description,
+                getattr(proc, "pid", "unknown"),
+            )
+
+    async def _communicate_or_kill(self, proc, timeout, description):
+        try:
+            return await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            await self._kill_and_reap_process(proc, description)
+            raise
+
+    async def _wait_or_kill(self, proc, timeout, description):
+        try:
+            return await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            await self._kill_and_reap_process(proc, description)
+            raise
+
+    def _clipboard_has_consumers(self):
+        if getattr(self.gst_webrtc_app, "mode", None) != "websockets":
+            return True
+        server = self.data_server_instance or getattr(self.gst_webrtc_app, "data_streaming_server", None)
+        return bool(server and getattr(server, "clients", None))
+
     async def read_clipboard(self, use_binary=False):
         """Reads clipboard. Supports Wayland (wl-paste) and X11 (xclip)."""
         if self.is_wayland:
@@ -1732,7 +1771,7 @@ class WebRTCInput:
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     env=self._get_wl_env()
                 )
-                stdout_types, _ = await asyncio.wait_for(proc_types.communicate(), timeout=1.0)
+                stdout_types, _ = await self._communicate_or_kill(proc_types, 1.0, "wl-paste --list-types")
                 
                 if proc_types.returncode != 0:
                     return None, None
@@ -1748,7 +1787,7 @@ class WebRTCInput:
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=self._get_wl_env()
                         )
-                        stdout_data, _ = await asyncio.wait_for(proc_data.communicate(), timeout=2.0)
+                        stdout_data, _ = await self._communicate_or_kill(proc_data, 2.0, f"wl-paste --type {target_mime}")
                         if proc_data.returncode == 0 and stdout_data:
                             return stdout_data, target_mime
                 text_mimes = ['text/plain', 'text/plain;charset=utf-8', 'UTF8_STRING', 'STRING']
@@ -1758,7 +1797,7 @@ class WebRTCInput:
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         env=self._get_wl_env()
                     )
-                    stdout_text, _ = await asyncio.wait_for(proc_text.communicate(), timeout=1.0)
+                    stdout_text, _ = await self._communicate_or_kill(proc_text, 1.0, "wl-paste --no-newline")
                     if proc_text.returncode == 0:
                         return stdout_text.decode('utf-8', errors='replace'), 'text/plain'
 
@@ -1772,7 +1811,7 @@ class WebRTCInput:
                 "xclip", "-selection", "clipboard", "-o", "-t", "TARGETS",
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
-            stdout_targets, _ = await asyncio.wait_for(proc_targets.communicate(), timeout=1)
+            stdout_targets, _ = await self._communicate_or_kill(proc_targets, 1, "xclip TARGETS")
             if proc_targets.returncode != 0:
                 return None, None
             targets = stdout_targets.decode().strip().split('\n')
@@ -1783,7 +1822,7 @@ class WebRTCInput:
                             "xclip", "-selection", "clipboard", "-o", "-t", mime_type,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE
                         )
-                        stdout_data, _ = await asyncio.wait_for(proc_data.communicate(), timeout=3)
+                        stdout_data, _ = await self._communicate_or_kill(proc_data, 3, f"xclip {mime_type}")
                         if proc_data.returncode == 0 and stdout_data:
                             return stdout_data, mime_type
 
@@ -1793,7 +1832,7 @@ class WebRTCInput:
                         "xclip", "-selection", "clipboard", "-o", "-t", "text/uri-list",
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE
                     )
-                    stdout_data, _ = await asyncio.wait_for(proc_data.communicate(), timeout=1)
+                    stdout_data, _ = await self._communicate_or_kill(proc_data, 1, "xclip text/uri-list")
                     if proc_data.returncode == 0 and stdout_data:
                         lines = stdout_data.decode("utf-8", errors="replace").splitlines()
                         for line in lines:
@@ -1819,7 +1858,7 @@ class WebRTCInput:
                     "xclip", "-selection", "clipboard", "-o", "-t", "UTF8_STRING",
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
-                stdout_text, _ = await asyncio.wait_for(proc_text.communicate(), timeout=1)
+                stdout_text, _ = await self._communicate_or_kill(proc_text, 1, "xclip UTF8_STRING")
                 if proc_text.returncode == 0:
                     return stdout_text.decode(), 'text/plain'
             return None, None
@@ -1850,15 +1889,7 @@ class WebRTCInput:
                     process.stdin.write(input_bytes)
                     await process.stdin.drain()
                     process.stdin.close()
-                try:
-                    await asyncio.wait_for(process.communicate(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
-                    await process.wait()
-                    raise
+                await self._communicate_or_kill(process, 2.0, f"wl-copy --type {mime_type}")
                 if process.returncode == 0:
                     return True
                 else:
@@ -1881,15 +1912,7 @@ class WebRTCInput:
                 process.stdin.write(input_bytes)
                 await process.stdin.drain()
                 process.stdin.close()
-            try:
-                return_code = await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-                raise
+            return_code = await self._wait_or_kill(process, 2.0, f"xclip -i {target_mime}")
             if return_code == 0:
                 return True
             else:
@@ -1907,9 +1930,14 @@ class WebRTCInput:
         
         logger_webrtc_input.info(f"Clipboard monitor running (binary mode: {self.enable_binary_clipboard in ['true', 'out']})")
         self.clipboard_running = True
-        last_data_bytes = b""
+        last_data_bytes = None
         while self.clipboard_running:
             try:
+                if not self._clipboard_has_consumers():
+                    last_data_bytes = None
+                    await asyncio.sleep(0.5)
+                    continue
+
                 if getattr(self, 'clipboard_paused', False):
                     await asyncio.sleep(0.1)
                     continue
