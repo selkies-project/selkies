@@ -3,6 +3,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import GamepadVisualizer from "./GamepadVisualizer";
 import { getTranslator } from "../translations";
 import yaml from "js-yaml";
+import { getRoutePrefix } from "../utils.js";
 
 // --- Constants ---
 const urlHash = window.location.hash;
@@ -93,7 +94,6 @@ const DEFAULT_VIDEO_BITRATE = 8;   // in mbps
 const RATE_CONTROL_CBR = "cbr";
 const RATE_CONTROL_CRF = "crf";
 
-// --- Helper Functions ---
 function formatBytes(bytes, decimals = 2, rawDict) {
   const zeroBytesText = rawDict?.zeroBytes || "0 Bytes";
   if (bytes === null || bytes === undefined || bytes === 0)
@@ -1002,7 +1002,9 @@ function Sidebar() {
   };
 
   const [streamMode, setStreamMode] = useState(
-    localStorage.getItem(getPrefixedKey("stream_mode")) || DEFAULT_STREAM_MODE
+    localStorage.getItem(getPrefixedKey("stream_mode")) ||
+      (typeof window !== "undefined" && window.__SELKIES_STREAMING_MODE__) ||
+      DEFAULT_STREAM_MODE
   );
   const [encoderRTC, setEncoderRTC] = useState(
     localStorage.getItem(getPrefixedKey("encoder_rtc")) || DEFAULT_WEBRTC_ENCODER
@@ -1663,7 +1665,7 @@ function Sidebar() {
     const newMode = event.target.value;
     console.log("Change of stream mode requested:", newMode);
     try {
-      const response = await fetch("/switch", {
+      const response = await fetch(`${getRoutePrefix()}/switch`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
