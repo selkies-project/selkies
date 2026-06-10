@@ -1066,6 +1066,31 @@ class DataStreamingServer(BaseStreamingService):
         data_logger.info(f"Broadcasting display config update: {message_str}")
         await _broadcast_to_clients(self.clients, message_str)
 
+    def refresh_cursor_cache(self):
+        if not self.app:
+            return None
+
+        cursor_data = None
+        if self.input_handler and hasattr(self.input_handler, "get_current_cursor_data"):
+            cursor_data = self.input_handler.get_current_cursor_data()
+
+        if cursor_data is not None:
+            self.app.last_cursor_sent = cursor_data
+
+        return self.app.last_cursor_sent
+
+    async def send_current_cursor(self, websocket, raddr):
+        cursor_data = self.refresh_cursor_cache()
+        if not cursor_data:
+            return
+
+        data_logger.info(f"Sending current cursor to client {raddr}")
+        try:
+            msg_str = json.dumps(cursor_data)
+            await websocket.send_str(f"cursor,{msg_str}")
+        except Exception as e:
+            data_logger.warning(f"Failed to send current cursor to client {raddr}: {e}")
+
     def _pcmflux_audio_callback(self, result_ptr, user_data):
         """
         C-style callback passed to pcmflux, called from its capture thread.
@@ -1684,6 +1709,7 @@ class DataStreamingServer(BaseStreamingService):
                 "role": permissions.get("role"),
                 "slot": permissions.get("slot"),
                 "remote_address": remote_address,
+                "data_server": self,
             }
             data_logger.info(f"Client {remote_address} authenticated with token. Role: {permissions.get('role')}, Slot: {permissions.get('slot')}")
             auth_success_payload = json.dumps({
@@ -1745,13 +1771,7 @@ class DataStreamingServer(BaseStreamingService):
                 self.data_ws = None
             return
 
-        if self.app and self.app.last_cursor_sent:
-            data_logger.info(f"Sending last known cursor to new client {raddr}")
-            try:
-                msg_str = json.dumps(self.app.last_cursor_sent)
-                await websocket.send_str(f"cursor,{msg_str}")
-            except Exception as e:
-                data_logger.warning(f"Failed to send initial cursor to new client {raddr}: {e}")
+        await self.send_current_cursor(websocket, raddr)
 
         server_settings_payload = {"type": "server_settings", "settings": {}}
         for setting_def in SETTING_DEFINITIONS:
@@ -3739,5 +3759,9 @@ async def reconcile_clients():
         mk_msg = "MK_ACCESS,1" if has_mk_access else "MK_ACCESS,0"
         try:
             await ws.send_str(mk_msg)
+            if has_mk_access:
+                data_server = perms.get("data_server")
+                if data_server:
+                    await data_server.send_current_cursor(ws, remote_address)
         except (ConnectionResetError, OSError, RuntimeError):
             pass
