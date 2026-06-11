@@ -1371,14 +1371,22 @@ class WebRTCInput:
                     await self._inject_unicode_via_clipboard(char_to_type)
                     return
                 try:
-                    command_wtype = ["wtype", char_to_type]
+                    command_wtype = ["wtype", "--", char_to_type]
                     process_wtype = await subprocess.create_subprocess_exec(
                         *command_wtype,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         env=self._get_wl_env()
                     )
-                    await asyncio.wait_for(process_wtype.communicate(), timeout=1.0)
+                    try:
+                        await asyncio.wait_for(process_wtype.communicate(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        try:
+                            process_wtype.kill()
+                        except ProcessLookupError:
+                            pass
+                        await process_wtype.wait()
+                        raise
                 except Exception as e:
                     logger_webrtc_input.warning(f"wtype fallback failed: {e}")
 
@@ -1842,7 +1850,15 @@ class WebRTCInput:
                     process.stdin.write(input_bytes)
                     await process.stdin.drain()
                     process.stdin.close()
-                await asyncio.wait_for(process.communicate(), timeout=2.0)
+                try:
+                    await asyncio.wait_for(process.communicate(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    await process.wait()
+                    raise
                 if process.returncode == 0:
                     return True
                 else:
@@ -1865,7 +1881,15 @@ class WebRTCInput:
                 process.stdin.write(input_bytes)
                 await process.stdin.drain()
                 process.stdin.close()
-            return_code = await asyncio.wait_for(process.wait(), timeout=2.0)
+            try:
+                return_code = await asyncio.wait_for(process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+                raise
             if return_code == 0:
                 return True
             else:
@@ -2036,7 +2060,15 @@ class WebRTCInput:
                             stderr=subprocess.DEVNULL,
                             env=self._get_wl_env()
                         )
-                        await asyncio.wait_for(proc.communicate(), timeout=2.0)
+                        try:
+                            await asyncio.wait_for(proc.communicate(), timeout=2.0)
+                        except asyncio.TimeoutError:
+                            try:
+                                proc.kill()
+                            except ProcessLookupError:
+                                pass
+                            await proc.wait()
+                            raise
                     except Exception as e:
                         logger_webrtc_input.warning(f"Batched wtype failed: {e}")
 

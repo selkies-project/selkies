@@ -1442,6 +1442,7 @@ class DataStreamingServer(BaseStreamingService):
         parsed["displayPosition"] = get_str("displayPosition")
         parsed["rate_control_mode"] = get_str("rate_control_mode")
         parsed["video_bitrate"] = get_int("video_bitrate")
+        parsed["force_aligned_resolution"] = get_bool("force_aligned_resolution")
         data_logger.debug(f"Parsed client settings: {parsed}")
         return parsed
 
@@ -1539,6 +1540,24 @@ class DataStreamingServer(BaseStreamingService):
                 target_h = old_display_height if old_display_height > 0 else 768
             if target_w % 2 != 0: target_w -= 1
             if target_h % 2 != 0: target_h -= 1
+            display_state["force_aligned_resolution"] = sanitize_value(
+                "force_aligned_resolution", settings.get("force_aligned_resolution")
+            )
+            if server_is_manual:
+                # A server-forced resolution may only be altered by the
+                # server's own setting, never by a client-side toggle.
+                apply_alignment = getattr(self.cli_args, "force_aligned_resolution")[0]
+            else:
+                apply_alignment = display_state["force_aligned_resolution"]
+            if apply_alignment:
+                aligned_w = target_w - (target_w % 16)
+                aligned_h = target_h - (target_h % 16)
+                if aligned_w >= 16 and aligned_h >= 16:
+                    if aligned_w != target_w or aligned_h != target_h:
+                        data_logger.info(
+                            f"Aligning resolution for '{display_id}' from {target_w}x{target_h} to {aligned_w}x{aligned_h} (16-pixel alignment)."
+                        )
+                    target_w, target_h = aligned_w, aligned_h
             resolution_actually_changed = (target_w != old_display_width or target_h != old_display_height)
             position_actually_changed = (new_position != old_position)
             if resolution_actually_changed or position_actually_changed:
@@ -3629,6 +3648,15 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
 
         if data_server_instance and display_id in data_server_instance.display_clients:
             client_info = data_server_instance.display_clients[display_id]
+            if client_info.get('force_aligned_resolution'):
+                aligned_w = target_w - (target_w % 16)
+                aligned_h = target_h - (target_h % 16)
+                if aligned_w >= 16 and aligned_h >= 16:
+                    if aligned_w != target_w or aligned_h != target_h:
+                        logger_gst_app_resize.info(
+                            f"Aligning resize request for '{display_id}' from {target_w}x{target_h} to {aligned_w}x{aligned_h} (16-pixel alignment)."
+                        )
+                    target_w, target_h = aligned_w, aligned_h
             if client_info.get('width') == target_w and client_info.get('height') == target_h:
                 logger_gst_app_resize.info(f"Redundant resize request for {display_id} to {target_w}x{target_h}. No action.")
                 return

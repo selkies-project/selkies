@@ -803,7 +803,10 @@ function Sidebar() {
   useEffect(() => {
     if (!serverSettings) return;
     const getStoredInt = (key) => parseInt(localStorage.getItem(getPrefixedKey(key)), 10);
-    const getStoredBool = (key) => localStorage.getItem(getPrefixedKey(key)) === 'true';
+    const getStoredBool = (key, fallback = false) => {
+      const stored = localStorage.getItem(getPrefixedKey(key));
+      return stored !== null ? stored === 'true' : fallback;
+    };
     const s_encoder = serverSettings.encoder;
     if (s_encoder) {
       const stored = localStorage.getItem(getPrefixedKey("encoder"));
@@ -885,26 +888,25 @@ function Sidebar() {
     }
     const s_use_paint_over_quality = serverSettings.use_paint_over_quality;
     if (s_use_paint_over_quality) {
-      const stored = localStorage.getItem(getPrefixedKey("use_paint_over_quality"));
-      const final = s_use_paint_over_quality.locked ? s_use_paint_over_quality.value : (stored !== null ? stored === 'true' : s_use_paint_over_quality.value);
+      const final = s_use_paint_over_quality.locked ? s_use_paint_over_quality.value : getStoredBool("use_paint_over_quality", s_use_paint_over_quality.value);
       setUsePaintOverQuality(final);
       localStorage.setItem(getPrefixedKey("use_paint_over_quality"), String(final));
     }
     const s_h264_fullcolor = serverSettings.h264_fullcolor;
     if (s_h264_fullcolor) {
-      const final = s_h264_fullcolor.locked ? s_h264_fullcolor.value : getStoredBool("h264_fullcolor");
+      const final = s_h264_fullcolor.locked ? s_h264_fullcolor.value : getStoredBool("h264_fullcolor", s_h264_fullcolor.value);
       setH264FullColor(final);
       localStorage.setItem(getPrefixedKey("h264_fullcolor"), String(final));
     }
     const s_h264_streaming_mode = serverSettings.h264_streaming_mode;
     if (s_h264_streaming_mode) {
-      const final = s_h264_streaming_mode.locked ? s_h264_streaming_mode.value : getStoredBool("h264_streaming_mode");
+      const final = s_h264_streaming_mode.locked ? s_h264_streaming_mode.value : getStoredBool("h264_streaming_mode", s_h264_streaming_mode.value);
       setH264StreamingMode(final);
       localStorage.setItem(getPrefixedKey("h264_streaming_mode"), String(final));
     }
     const s_use_cpu = serverSettings.use_cpu;
     if (s_use_cpu) {
-      const final = s_use_cpu.locked ? s_use_cpu.value : getStoredBool("use_cpu");
+      const final = s_use_cpu.locked ? s_use_cpu.value : getStoredBool("use_cpu", s_use_cpu.value);
       setUseCpu(final);
       localStorage.setItem(getPrefixedKey("use_cpu"), String(final));
     }
@@ -917,13 +919,13 @@ function Sidebar() {
     }
     const s_enable_binary_clipboard = serverSettings.enable_binary_clipboard;
     if (s_enable_binary_clipboard) {
-      const final = s_enable_binary_clipboard.locked ? s_enable_binary_clipboard.value : getStoredBool("enable_binary_clipboard");
+      const final = s_enable_binary_clipboard.locked ? s_enable_binary_clipboard.value : getStoredBool("enable_binary_clipboard", s_enable_binary_clipboard.value);
       setEnableBinaryClipboard(final);
       localStorage.setItem(getPrefixedKey("enable_binary_clipboard"), String(final));
     }
     const s_use_browser_cursors = serverSettings.use_browser_cursors;
     if (s_use_browser_cursors) {
-      const final = s_use_browser_cursors.locked ? s_use_browser_cursors.value : getStoredBool("use_browser_cursors");
+      const final = s_use_browser_cursors.locked ? s_use_browser_cursors.value : getStoredBool("use_browser_cursors", s_use_browser_cursors.value);
       setUseBrowserCursors(final);
     }
     const s_rate_control_mode = serverSettings.rate_control_mode;
@@ -950,7 +952,7 @@ function Sidebar() {
     }
     const s_force_aligned_resolution = serverSettings.force_aligned_resolution;
     if (s_force_aligned_resolution) {
-      const final = s_force_aligned_resolution.locked ? s_force_aligned_resolution.value : getStoredBool("force_aligned_resolution");
+      const final = s_force_aligned_resolution.locked ? s_force_aligned_resolution.value : getStoredBool("force_aligned_resolution", s_force_aligned_resolution.value);
       setForceAlignedResolution(final);
       localStorage.setItem(getPrefixedKey("force_aligned_resolution"), String(final));
     }

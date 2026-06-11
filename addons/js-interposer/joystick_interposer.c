@@ -938,11 +938,11 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
         char procfd[64];
         snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", dirfd);
         ssize_t len = readlink(procfd, full_path, sizeof(full_path) - 1);
-        if (len != -1) {
-            full_path[len] = '/';
-            strncpy(full_path + len + 1, pathname, sizeof(full_path) - len - 2);
-            full_path[sizeof(full_path) - 1] = '\0';
-            check_path = full_path;
+        if (len > 0 && (size_t)len < sizeof(full_path) - 1) {
+            int written = snprintf(full_path + len, sizeof(full_path) - (size_t)len, "/%s", pathname);
+            if (written > 0 && (size_t)written < sizeof(full_path) - (size_t)len) {
+                check_path = full_path;
+            }
         }
     }
 
@@ -993,11 +993,11 @@ int openat64(int dirfd, const char *pathname, int flags, ...) {
         char procfd[64];
         snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", dirfd);
         ssize_t len = readlink(procfd, full_path, sizeof(full_path) - 1);
-        if (len != -1) {
-            full_path[len] = '/';
-            strncpy(full_path + len + 1, pathname, sizeof(full_path) - len - 2);
-            full_path[sizeof(full_path) - 1] = '\0';
-            check_path = full_path;
+        if (len > 0 && (size_t)len < sizeof(full_path) - 1) {
+            int written = snprintf(full_path + len, sizeof(full_path) - (size_t)len, "/%s", pathname);
+            if (written > 0 && (size_t)written < sizeof(full_path) - (size_t)len) {
+                check_path = full_path;
+            }
         }
     }
 

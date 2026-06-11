@@ -1646,7 +1646,7 @@ export class Input {
         this._latestMouseY = visualClientY;
         if (this._trackpadMode) return;
         const client_dpr = window.devicePixelRatio || 1;
-        const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || this.isSharedMode) ? 1 : client_dpr;
+        const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || window.isManualResolutionMode || this.isSharedMode) ? 1 : client_dpr;
         const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
         var mtype = "m";
         let canvas = document.getElementById('videoCanvas');
@@ -1689,6 +1689,21 @@ export class Input {
                     this.y = Math.max(0, Math.min(canvas.height, Math.round(coordY)));
                 } else {
                     this.x = 0; this.y = 0;
+                }
+            } else if (window.isManualResolutionMode && videoEle) {
+                // TODO: the below code is redundant, can be made genric to canvas and video element
+                const vidoeRect = videoEle.getBoundingClientRect();
+                if (vidoeRect.width > 0 && vidoeRect.height > 0 && videoEle.width > 0 && videoEle.height > 0) {
+                    const mouseX_on_video = event.clientX - vidoeRect.left;
+                    const mouseY_on_video = event.clientY - vidoeRect.top;
+                    const scaleX = videoEle.width / vidoeRect.width;
+                    const scaleY = videoEle.height / vidoeRect.height;
+                    let serverX = mouseX_on_video * scaleX;
+                    let serverY = mouseY_on_video * scaleY;
+                    this.x = Math.max(0, Math.min(videoEle.width, Math.round(serverX))); // Assign scaled absolute to this.x
+                    this.y = Math.max(0, Math.min(videoEle.height, Math.round(serverY))); // Assign scaled absolute to this.y
+                } else {
+                    this.x = 0; this.y = 0; // Fallback
                 }
             } else { // Auto resolution mode (non-manual)
                 if (!this.m) {
@@ -1881,7 +1896,7 @@ export class Input {
         this._latestMouseX = touchPoint.clientX;
         this._latestMouseY = touchPoint.clientY;
         const client_dpr = window.devicePixelRatio || 1; // Actual client DPR
-        const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || this.isSharedMode) ? 1 : client_dpr;
+        const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || window.isManualResolutionMode || this.isSharedMode) ? 1 : client_dpr;
         let canvas = document.getElementById('videoCanvas');
 
         if ((window.is_manual_resolution_mode || this.isSharedMode) && canvas) {
