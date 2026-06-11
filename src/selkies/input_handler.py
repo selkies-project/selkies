@@ -1989,6 +1989,25 @@ class WebRTCInput:
         logger_webrtc_input.info("stopping cursor monitor")
         self.cursors_running = False
 
+    def get_current_cursor_data(self):
+        if self.is_wayland:
+            return None
+        if not self.enable_cursors or not self.xdisplay:
+            return None
+        try:
+            if not self.xdisplay.has_extension("XFIXES"):
+                if self.xdisplay.query_extension("XFIXES") is None:
+                    logger_webrtc_input.error(
+                        "XFIXES extension not supported, cannot fetch current cursor"
+                    )
+                    return None
+            screen = self.xdisplay.screen()
+            cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
+            return self.cursor_to_msg(cursor_image)
+        except Exception as e:
+            logger_webrtc_input.warning("exception from fetching current cursor image: %s", e)
+            return None
+
     def _cursor_image_to_pil(self, cursor):
         byte_data = b''.join(p.to_bytes(4, 'little') for p in cursor.cursor_image)
         return Image.frombytes("RGBA", (cursor.width, cursor.height), byte_data, "raw", "BGRA")
