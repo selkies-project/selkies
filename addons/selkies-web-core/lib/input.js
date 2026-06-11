@@ -1646,7 +1646,7 @@ export class Input {
         this._latestMouseY = visualClientY;
         if (this._trackpadMode) return;
         const client_dpr = window.devicePixelRatio || 1;
-        const dpr_for_input_coords = this.useCssScaling ? 1 : client_dpr;
+        const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || window.isManualResolutionMode || this.isSharedMode) ? 1 : client_dpr;
         const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
         var mtype = "m";
         let canvas = document.getElementById('videoCanvas');
@@ -1896,7 +1896,7 @@ export class Input {
         this._latestMouseX = touchPoint.clientX;
         this._latestMouseY = touchPoint.clientY;
         const client_dpr = window.devicePixelRatio || 1; // Actual client DPR
-        const dpr_for_input_coords = this.useCssScaling ? 1 : client_dpr;
+        const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || window.isManualResolutionMode || this.isSharedMode) ? 1 : client_dpr;
         let canvas = document.getElementById('videoCanvas');
 
         if ((window.is_manual_resolution_mode || this.isSharedMode) && canvas) {

@@ -173,6 +173,12 @@ SETTING_DEFINITIONS = [
         },
         "help": "The default DPI for UI scaling.",
     },
+    {
+        "name": "force_aligned_resolution",
+        "type": "bool",
+        "default": False,
+        "help": "Forces the display resolution to be a multiple of 16 pixels.",
+    },
     # Input & Client Behavior Settings
     {
         "name": "enable_binary_clipboard",
