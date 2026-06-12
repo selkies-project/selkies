@@ -18,6 +18,8 @@ from watchdog.events import FileClosedEvent, FileSystemEventHandler
 
 import os
 import csv
+import stat
+import threading
 from datetime import datetime
 from collections import OrderedDict
 from prometheus_client import generate_latest, REGISTRY
@@ -92,6 +94,9 @@ async def _dispatch_rtc_callback(callback, stun_servers: List[str], turn_servers
 def _log_asyncio_task_error(task: asyncio.Task) -> None:
     try:
         task.result()
+    except asyncio.CancelledError:
+        # Expected when pending callback tasks are cancelled at shutdown.
+        pass
     except Exception as e:
         logger_rtcice.warning(f"Error in on_rtc_config callback task: {e}")
 
@@ -283,6 +288,67 @@ class RESTRTCMonitor:
         if self._task:
             await self._task
 
+class CloudflareRTCMonitor:
+    """Periodically refreshes Cloudflare TURN credentials before they expire.
+
+    Cloudflare credentials are minted with a finite TTL (default 24h); without a
+    refresh, a server running longer than the TTL would hand out expired TURN
+    credentials to newly connecting clients until restart.
+    """
+    def __init__(
+        self,
+        turn_token_id: str,
+        api_token: str,
+        ttl: int = 86400,
+        period: Optional[int] = None,
+        enabled: bool = True
+    ):
+        self.turn_token_id = turn_token_id
+        self.api_token = api_token
+        self.ttl = ttl
+        # Refresh well within the credential lifetime (default: half the TTL).
+        self.period = period if period is not None else max(60, ttl // 2)
+        self.enabled = enabled
+        self.stop_event = asyncio.Event()
+        self._task: Optional[asyncio.Task] = None
+        self.on_rtc_config = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
+
+    def start(self):
+        if not self.enabled:
+            return
+        self.stop_event.clear()
+        self._task = asyncio.create_task(self._monitor_loop())
+        logger_rtcice.info("Cloudflare TURN RTC monitor started")
+
+    async def _monitor_loop(self):
+        try:
+            while not self.stop_event.is_set():
+                # Wait first: the initial fetch already happened at startup.
+                try:
+                    await asyncio.wait_for(self.stop_event.wait(), timeout=self.period)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+
+                try:
+                    json_config = await fetch_cloudflare_turn(self.turn_token_id, self.api_token, self.ttl)
+                    wrapped_config = json.dumps({"iceServers": [json_config["iceServers"]]})
+                    stun_servers, turn_servers, rtc_config = parse_rtc_config(wrapped_config)
+                    await _dispatch_rtc_callback(self.on_rtc_config, stun_servers, turn_servers, rtc_config)
+                except Exception as e:
+                    logger_rtcice.warning(f"could not refresh Cloudflare TURN config in periodic monitor: {e}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger_rtcice.error(f"Error in Cloudflare TURN RTC monitor: {e}")
+        finally:
+            logger_rtcice.info("Cloudflare TURN RTC monitor stopped")
+
+    async def stop(self):
+        self.stop_event.set()
+        if self._task:
+            await self._task
+
 class RTCConfigFileMonitor(FileSystemEventHandler):
     def __init__(self, rtc_file: str, enabled: bool = True):
         self.enabled = enabled
@@ -313,18 +379,15 @@ class RTCConfigFileMonitor(FileSystemEventHandler):
         await asyncio.to_thread(self._shutdown_observer)
         logger_rtcice.info("RTC config file monitor stopped")
 
-     # This method overrides the one in FileSystemEventHandler
-    def on_closed(self, event):
-        """
-        Called by the watchdog thread when a file write is closed.
-        This is a synchronous method.
-        """
-        if not isinstance(event, FileClosedEvent):
-            return
-        if os.path.abspath(event.src_path) != self.rtc_file:
-            return
+    def _reload_config(self, src_path: str):
+        """Read, parse, and dispatch the updated RTC config. Runs on the watchdog thread."""
         try:
-            logger_rtcice.info(f"Detected RTC JSON file change: {event.src_path}")
+            logger_rtcice.info(f"Detected RTC JSON file change: {src_path}")
+            if not _is_trusted_config_file(self.rtc_file):
+                logger_rtcice.error(
+                    f"Refusing to reload RTC config file '{self.rtc_file}': unsafe ownership or permissions."
+                )
+                return
             with open(self.rtc_file, 'rb') as f:
                 data = f.read()
 
@@ -339,6 +402,25 @@ class RTCConfigFileMonitor(FileSystemEventHandler):
             )
         except Exception as e:
             logger_rtcice.warning(f"Could not read or parse RTC JSON file: {self.rtc_file}: {e}")
+
+    # These methods override FileSystemEventHandler. React to in-place writes
+    # (on_closed) and to the atomic write-temp-then-rename pattern, which
+    # surfaces as a move (or create) of the target rather than a close.
+    def on_closed(self, event):
+        if not isinstance(event, FileClosedEvent):
+            return
+        if os.path.abspath(event.src_path) != self.rtc_file:
+            return
+        self._reload_config(event.src_path)
+
+    def on_moved(self, event):
+        dest = getattr(event, "dest_path", None)
+        if dest and os.path.abspath(dest) == self.rtc_file:
+            self._reload_config(dest)
+
+    def on_created(self, event):
+        if os.path.abspath(event.src_path) == self.rtc_file:
+            self._reload_config(event.src_path)
 
 def make_turn_rtc_config_json_legacy(
     turn_host: str,
@@ -584,7 +666,8 @@ async def fetch_turn_rest(
         params['key'] = turn_api_key
         params['api'] = turn_api_key
 
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=10, connect=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
             async with session.get(uri, headers=auth_headers, params=params) as response:
                 content = await response.read()
@@ -594,6 +677,8 @@ async def fetch_turn_rest(
                 if not content:
                     raise Exception("Data from REST API service was empty")
                 return parse_rtc_config(content)
+        except asyncio.TimeoutError as e:
+            raise Exception("Timeout while fetching REST API config") from e
         except aiohttp.ClientError as e:
             raise Exception(f"Network error while fetching REST API config: {e}") from e
 
@@ -607,14 +692,18 @@ async def fetch_cloudflare_turn(turn_token_id: str, api_token: str, ttl: int = 8
     uri = f"https://rtc.live.cloudflare.com/v1/turn/keys/{turn_token_id}/credentials/generate"
     data_payload = {"ttl": ttl}
 
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=10, connect=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
             async with session.post(uri, headers=auth_headers, json=data_payload) as response:
                 response.raise_for_status()
                 return await response.json()
         except aiohttp.ClientResponseError as e:
-            body = await e.response.text() if hasattr(e, 'response') else ''
-            raise Exception(f"Could not obtain Cloudflare TURN credentials: {e.status} {e.message}. Body: {body}") from e
+            # ClientResponseError carries no `.response`, and the body is gone
+            # once the `async with` exits; report status/message only.
+            raise Exception(f"Could not obtain Cloudflare TURN credentials: {e.status} {e.message}.") from e
+        except asyncio.TimeoutError as e:
+            raise Exception("Timeout while fetching Cloudflare credentials") from e
         except aiohttp.ClientError as e:
             raise Exception(f"Network error while fetching Cloudflare credentials: {e}") from e
 
@@ -629,16 +718,52 @@ async def try_cloudflare(args: Any) -> Optional[Tuple[List[str], List[str], byte
 
     try:
         json_config = await fetch_cloudflare_turn(args.cloudflare_turn_token_id, args.cloudflare_turn_api_token)
-        logger_rtcice.info(f"Successfully fetched RTC configuration from Cloudflare: {json_config}")
+        # Do not log json_config: it contains live TURN username/credential values.
+        logger_rtcice.info("Successfully fetched RTC configuration from Cloudflare.")
         wrapped_config = json.dumps({"iceServers": [json_config["iceServers"]]})
         return parse_rtc_config(wrapped_config)
     except Exception as e:
         logger_rtcice.warning(f"Failed to fetch TURN config from Cloudflare: {e}")
         return None
 
+def _is_trusted_config_file(path: str) -> bool:
+    """Return True only if `path` is safe to trust as an RTC config source.
+
+    The RTC config file overrides all STUN/TURN settings, and its default
+    location (e.g. /tmp/rtc.json) lives in a world-writable directory where a
+    different local user could plant or alter it. Require the file to be owned by
+    root or the current user and to be writable by neither group nor others.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        logger_rtcice.warning(f"Could not stat RTC config file '{path}': {e}")
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        logger_rtcice.warning(f"Refusing to follow symlinked RTC config file '{path}'.")
+        return False
+    if st.st_uid not in (0, os.getuid()):
+        logger_rtcice.warning(
+            f"RTC config file '{path}' is owned by uid {st.st_uid}, not root or the current user ({os.getuid()})."
+        )
+        return False
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        logger_rtcice.warning(
+            f"RTC config file '{path}' is group- or world-writable (mode {oct(stat.S_IMODE(st.st_mode))}); refusing to trust it."
+        )
+        return False
+    return True
+
+
 async def try_json_file(args: Any) -> Optional[Tuple[List[str], List[str], bytes]]:
     """Attempts to configure RTC from a local JSON file."""
     if not os.path.exists(args.rtc_config_json):
+        return None
+
+    if not _is_trusted_config_file(args.rtc_config_json):
+        logger_rtcice.error(
+            f"Refusing to use RTC config file '{args.rtc_config_json}': unsafe ownership or permissions."
+        )
         return None
 
     logger_rtcice.warning(f"Using JSON file '{args.rtc_config_json}' for RTC config, overrides all other STUN/TURN settings.")
@@ -711,11 +836,13 @@ async def get_rtc_configuration(args: Any) -> Tuple[List[str], List[str], bytes,
     monitoring_utilities_used = {
         "using_hmac_turn": False,
         "using_rtc_config_json": False,
-        "using_rest_api": False
+        "using_rest_api": False,
+        "using_cloudflare_turn": False
     }
 
     # Try each method in order of priority, returning on the first success
     if config := await try_cloudflare(args):
+        monitoring_utilities_used["using_cloudflare_turn"] = True
         return *config, monitoring_utilities_used
 
     if config := await try_json_file(args):
@@ -756,8 +883,14 @@ class Metrics:
         self.webrtc_statistics = Info('webrtc_statistics', 'WebRTC Statistics from the client')
         self.stats_video_file_path: Optional[str] = None
         self.stats_audio_file_path: Optional[str] = None
-        self.prev_stats_video_header_len: Optional[str]  = None
-        self.prev_stats_audio_header_len: Optional[str]  = None
+        self.prev_stats_video_header_len: Optional[int]  = None
+        self.prev_stats_audio_header_len: Optional[int]  = None
+        # Serializes CSV writes (which run in worker threads) so concurrent stat
+        # messages cannot interleave rows or race the shared prev_stats state.
+        self._csv_lock = threading.Lock()
+        # Hold strong references to in-flight write tasks so they are not garbage
+        # collected before completion (and their exceptions stay observed).
+        self._csv_tasks: set = set()
 
     def set_fps(self, fps):
         self.fps.set(fps)
@@ -798,31 +931,38 @@ class Metrics:
         webrtc_stats_obj = await asyncio.to_thread(json.loads, webrtc_stats)
         sanitized_stats = await asyncio.to_thread(self.sanitize_json_stats, webrtc_stats_obj)
         if self.using_webrtc_csv:
-            if webrtc_stat_type == "_stats_audio":
-                asyncio.create_task(asyncio.to_thread(self.write_webrtc_stats_csv, sanitized_stats, self.stats_audio_file_path))
-            else:
-                asyncio.create_task(asyncio.to_thread(self.write_webrtc_stats_csv, sanitized_stats, self.stats_video_file_path))
+            csv_path = self.stats_audio_file_path if webrtc_stat_type == "_stats_audio" else self.stats_video_file_path
+            task = asyncio.create_task(asyncio.to_thread(self.write_webrtc_stats_csv, sanitized_stats, csv_path))
+            self._csv_tasks.add(task)
+            task.add_done_callback(self._csv_tasks.discard)
         await asyncio.to_thread(self.webrtc_statistics.info, sanitized_stats)
 
     def sanitize_json_stats(self, obj_list: List[Dict[str, Any]]) -> OrderedDict:
         """A helper function to process data to a structure
            For example: reportName.fieldName:value
         """
-        obj_type = []
+        obj_type = set()
         sanitized_stats = OrderedDict()
-        for i in range(len(obj_list)):
-            curr_key = obj_list[i].get('type')
-            if  curr_key in obj_type:
-                # Append id at suffix to eliminate duplicate types
-                curr_key = curr_key + str("-") + obj_list[i].get('id')
-                obj_type.append(curr_key)
+        for entry in obj_list:
+            # Stats come from the (untrusted) browser client; skip entries that
+            # are not dicts and default a missing/non-string 'type'.
+            if not isinstance(entry, dict):
+                continue
+            curr_key = entry.get('type')
+            if not isinstance(curr_key, str):
+                curr_key = "unknown"
+            if curr_key in obj_type:
+                # Append id as suffix to eliminate duplicate types
+                entry_id = entry.get('id')
+                curr_key = curr_key + "-" + (entry_id if isinstance(entry_id, str) else str(entry_id))
+                obj_type.add(curr_key)
             else:
-                obj_type.append(curr_key)
+                obj_type.add(curr_key)
 
-            for key, val in obj_list[i].items():
-                unique_type = curr_key + str(".")  + key
+            for key, val in entry.items():
+                unique_type = curr_key + "." + str(key)
                 if not isinstance(val, str):
-                    sanitized_stats[unique_type] =  str(val)
+                    sanitized_stats[unique_type] = str(val)
                 else:
                     sanitized_stats[unique_type] = val
 
@@ -837,10 +977,9 @@ class Metrics:
 
         dt = datetime.now()
         timestamp = dt.strftime("%d/%B/%Y:%H:%M:%S")
-        try:
-            with open(file_path, 'a+') as stats_file:
-                csv_writer = csv.writer(stats_file, quotechar='"')
-
+        # Writes run in worker threads; serialize them.
+        with self._csv_lock:
+            try:
                 # Prepare the data
                 headers = ["timestamp"]
                 headers += obj.keys()
@@ -853,102 +992,109 @@ class Metrics:
                 for val in obj.values():
                     values.extend(['"{}"'.format(val) if isinstance(val, str) and ';' in val else val])
 
-                if 'audio' in file_path:
-                    # Audio stats
-                    if self.prev_stats_audio_header_len is None:
-                        csv_writer.writerow(headers)
-                        csv_writer.writerow(values)
-                        self.prev_stats_audio_header_len = len(headers)
-                    elif self.prev_stats_audio_header_len == len(headers):
-                        csv_writer.writerow(values)
-                    else:
-                        # Update the data after obtaining new fields
-                        self.prev_stats_audio_header_len = self.update_webrtc_stats_csv(file_path, headers, values)
-                else:
-                    # Video stats
-                    if self.prev_stats_video_header_len is None:
-                        csv_writer.writerow(headers)
-                        csv_writer.writerow(values)
-                        self.prev_stats_video_header_len = len(headers)
-                    elif self.prev_stats_video_header_len == len(headers):
-                        csv_writer.writerow(values)
-                    else:
-                        # Update the data after obtaining new fields
-                        self.prev_stats_video_header_len = self.update_webrtc_stats_csv(file_path, headers, values)
+                is_audio = 'audio' in file_path
+                prev_len = self.prev_stats_audio_header_len if is_audio else self.prev_stats_video_header_len
 
-        except Exception as e:
-            logger_metrics.error("writing WebRTC Statistics to CSV file: " + str(e))
+                if prev_len is not None and prev_len != len(headers):
+                    # The field set changed: rewrite the CSV with the merged
+                    # schema. Must run with no open handle on file_path, as
+                    # os.replace() onto an open file fails on Windows.
+                    new_len = self.update_webrtc_stats_csv(file_path, headers, values)
+                    if is_audio:
+                        self.prev_stats_audio_header_len = new_len
+                    else:
+                        self.prev_stats_video_header_len = new_len
+                    return
+
+                with open(file_path, 'a+', newline='') as stats_file:
+                    csv_writer = csv.writer(stats_file, quotechar='"')
+                    if prev_len is None:
+                        csv_writer.writerow(headers)
+                        csv_writer.writerow(values)
+                        if is_audio:
+                            self.prev_stats_audio_header_len = len(headers)
+                        else:
+                            self.prev_stats_video_header_len = len(headers)
+                    else:
+                        csv_writer.writerow(values)
+
+            except Exception as e:
+                logger_metrics.error("writing WebRTC Statistics to CSV file: " + str(e))
 
     def update_webrtc_stats_csv(self, file_path: str, headers: List[str], values: List[Any]):
-        """Copies data from one CSV file to another to facilite dynamic updates to the data structure
-           by handling empty values and appending new data.
+        """Rewrites the CSV when the set of stat fields changes, aligning the
+           previously-stored rows onto the new (union) header layout by field
+           name. Missing fields are filled with "NaN". Returns the new header
+           length, or the previous length on failure.
         """
-        prev_headers = None
-        prev_values = []
+        prev_len = self.prev_stats_audio_header_len if 'audio' in file_path else self.prev_stats_video_header_len
 
         try:
-            with open(file_path, 'r') as stats_file:
-                csv_reader = csv.reader(stats_file, delimiter=',')
-
-                # Fetch all existing data
-                header_indicator = 0
-                for row in csv_reader:
-                    if header_indicator == 0:
-                        prev_headers = row
-                        header_indicator += 1
-                    else:
-                        prev_values.append(row)
-
-                # Sometimes columns might not exist in new data
-                if len(headers) < len(prev_headers):
-                    for i in prev_headers:
-                        if i not in headers:
-                            values.insert(prev_headers.index(i), "NaN")
-                else:
-                    i, j, k = 0, 0, 0
-                    while i < len(headers):
-                        if headers[i] != prev_headers[j]:
-                            # If there is a mismatch, update all previous rows with a placeholder to represent an empty value, using `NaN` here
-                            for row in prev_values:
-                                row.insert(i, "NaN")
-                            i += 1
-                            k += 1  # track number of values added
+            prev_headers = None
+            prev_values = []
+            try:
+                with open(file_path, 'r', newline='') as stats_file:
+                    csv_reader = csv.reader(stats_file, delimiter=',')
+                    for idx, row in enumerate(csv_reader):
+                        if idx == 0:
+                            prev_headers = row
                         else:
-                            i += 1
-                            j += 1
+                            prev_values.append(row)
+            except FileNotFoundError:
+                # File deleted externally since the last write; recreate it
+                # below with the current schema.
+                pass
 
-                    j += k
-                    # When new fields are at the end
-                    while j < i:
-                        for row in prev_values:
-                            row.insert(j, "NaN")
-                        j += 1
-
-                # Validation check to confirm modified rows are of same length
-                if len(prev_values[0]) != len(values):
-                    logger_metrics.warning("There's a mismatch; columns could be misaligned with headers")
-
-            # Purge existing file
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            else:
-                logger_metrics.warning("File {} doesn't exist to purge".format(file_path))
-
-            # Create a new file with updated data
-            with open(file_path, "a") as stats_file:
-                csv_writer = csv.writer(stats_file)
-
-                if len(headers) > len(prev_headers):
+            # No usable prior content (empty or header-only file): (re)write the
+            # current schema plus this row.
+            if not prev_headers:
+                with open(file_path, 'w', newline='') as stats_file:
+                    csv_writer = csv.writer(stats_file)
                     csv_writer.writerow(headers)
-                else:
-                    csv_writer.writerow(prev_headers)
-                csv_writer.writerows(prev_values)
-                csv_writer.writerow(values)
+                    csv_writer.writerow(values)
+                return len(headers)
 
-                logger_metrics.debug("WebRTC Statistics file {} created with updated data".format(file_path))
-            return len(headers) if len(headers) > len(prev_headers) else len(prev_headers)
+            # Union header: keep the previous column order, then append any
+            # genuinely new fields at the end. Remap every previous row and the
+            # new row onto that union by field name, filling gaps with "NaN".
+            merged_headers = list(prev_headers)
+            seen_names = set(prev_headers)
+            for name in headers:
+                if name not in seen_names:
+                    merged_headers.append(name)
+                    seen_names.add(name)
+
+            prev_index = {name: pos for pos, name in enumerate(prev_headers)}
+            new_index = {name: pos for pos, name in enumerate(headers)}
+
+            def remap(row_values, src_index):
+                out = []
+                for name in merged_headers:
+                    pos = src_index.get(name)
+                    if pos is not None and pos < len(row_values):
+                        out.append(row_values[pos])
+                    else:
+                        out.append("NaN")
+                return out
+
+            remapped_prev = [remap(row, prev_index) for row in prev_values]
+            remapped_new = remap(values, new_index)
+
+            # Rewrite via a temp file + atomic replace so an interrupted rewrite
+            # cannot truncate or corrupt the existing stats.
+            tmp_path = file_path + ".tmp"
+            with open(tmp_path, 'w', newline='') as stats_file:
+                csv_writer = csv.writer(stats_file)
+                csv_writer.writerow(merged_headers)
+                csv_writer.writerows(remapped_prev)
+                csv_writer.writerow(remapped_new)
+            os.replace(tmp_path, file_path)
+
+            logger_metrics.debug("WebRTC Statistics file {} rewritten with updated schema".format(file_path))
+            return len(merged_headers)
         except Exception as e:
             logger_metrics.error("writing WebRTC Statistics to CSV file: " + str(e))
+            return prev_len
 
     def initialize_webrtc_csv_file(self, webrtc_stats_dir: str ='/tmp'):
         """Initializes the WebRTC Statistics file upon every new WebRTC connection

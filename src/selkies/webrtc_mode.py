@@ -41,7 +41,7 @@ from .display_utils import resize_display, set_dpi, set_cursor_size
 from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
 from .settings import settings, AppSettings, SETTING_DEFINITIONS
 from types import SimpleNamespace
-from .webrtc_utils import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor
+from .webrtc_utils import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
 from .stream_server import BaseStreamingService, CentralizedStreamServer
 
 logger = logging.getLogger("webrtc")
@@ -55,6 +55,10 @@ def get_server_settings() -> dict:
     for setting_def in SETTING_DEFINITIONS:
         name = setting_def["name"]
         if name in ["port", "dri_node", "debug", "audio_device_name", "watermark_path"]:
+            continue
+        # Never broadcast secrets/credentials (master_token, passwords, TURN
+        # secrets, etc.) to clients.
+        if setting_def.get("sensitive"):
             continue
         value = getattr(settings, name)
         if setting_def["type"] == "bool":
@@ -95,6 +99,7 @@ class WebRTCService(BaseStreamingService):
         self.mon_hmac_turn: Optional[HMACRTCMonitor] = None
         self.mon_rest_api: Optional[RESTRTCMonitor] = None
         self.mon_rtc_config_file: Optional[RTCConfigFileMonitor] = None
+        self.mon_cloudflare_turn: Optional[CloudflareRTCMonitor] = None
         self.peer_manager: Optional[WebRTCPeerManagement] = None
         self.supervisor = supervisor
 
@@ -685,6 +690,14 @@ class WebRTCService(BaseStreamingService):
                 )
                 self.mon_rtc_config_file.on_rtc_config = self.mon_rtc_config
                 await self.mon_rtc_config_file.start()
+            if self.monitoring_utils_used.get("using_cloudflare_turn", False):
+                self.mon_cloudflare_turn = CloudflareRTCMonitor(
+                    turn_token_id=self.args.cloudflare_turn_token_id,
+                    api_token=self.args.cloudflare_turn_api_token,
+                    enabled=True,
+                )
+                self.mon_cloudflare_turn.on_rtc_config = self.mon_rtc_config
+                self.mon_cloudflare_turn.start()
 
     async def shutdown(self) -> None:
         """Gracefully shutdown all components."""
@@ -797,6 +810,14 @@ class WebRTCService(BaseStreamingService):
                 (
                     _await_with_timeout(
                         self.mon_rtc_config_file.stop(), "RTC Config File Monitor", 2.0
+                    )
+                )
+            )
+        if self.mon_cloudflare_turn:
+            stop_coros.append(
+                (
+                    _await_with_timeout(
+                        self.mon_cloudflare_turn.stop(), "Cloudflare TURN RTC Monitor", 2.0
                     )
                 )
             )

@@ -156,12 +156,14 @@ SETTING_DEFINITIONS = [
         "name": "manual_width",
         "type": "int",
         "default": 0,
+        "meta": {"min": 0, "max": 7680},
         "help": "Lock width to a fixed value. Setting this forces manual resolution mode.",
     },
     {
         "name": "manual_height",
         "type": "int",
         "default": 0,
+        "meta": {"min": 0, "max": 4320},
         "help": "Lock height to a fixed value. Setting this forces manual resolution mode.",
     },
     {
@@ -768,6 +770,26 @@ SETTING_DEFINITIONS = [
         "help": "Directory to save the uploaded content, in absolute path format. Default to '~/Desktop' directory",
     },
 ]
+
+# Settings whose values are secrets/credential material and must NEVER be exposed
+# to clients (e.g. broadcast in the server_settings payload). Marking is centralized
+# here and surfaced via a 'sensitive' flag on the definition so every consumer that
+# iterates SETTING_DEFINITIONS can exclude them uniformly. When adding a new secret
+# setting, add its name here.
+SENSITIVE_SETTING_NAMES = frozenset({
+    "master_token",
+    "https_key",
+    "basic_auth_user",
+    "basic_auth_password",
+    "turn_rest_api_key",
+    "turn_shared_secret",
+    "turn_password",
+    "cloudflare_turn_token_id",
+    "cloudflare_turn_api_token",
+})
+for _setting_def in SETTING_DEFINITIONS:
+    if _setting_def["name"] in SENSITIVE_SETTING_NAMES:
+        _setting_def["sensitive"] = True
 
 
 class AppSettings:
