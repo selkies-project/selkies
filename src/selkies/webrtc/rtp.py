@@ -131,7 +131,9 @@ class HeaderExtensionsMap:
             elif x_id == self.__ids.transport_sequence_number:
                 values.transport_sequence_number = unpack("!H", x_value)[0]
             elif x_id == self.__ids.playout_delay:
-                byte1, byte2, byte3 = struct.unpack('!BBB', x_value)
+                if len(x_value) < 3:
+                    continue  # malformed length; skip rather than raise struct.error
+                byte1, byte2, byte3 = struct.unpack('!BBB', x_value[:3])
                 min_value = (byte1 << 4 | byte2 >> 4)
                 max_value = ((byte2 & 0x0F) << 8 | byte3)
                 values.playout_delay = (min_value, max_value)
@@ -251,6 +253,8 @@ def unpack_remb_fci(data: bytes) -> tuple[int, list[int]]:
     """
     if len(data) < 8 or data[0:4] != b"REMB":
         raise ValueError("Invalid REMB prefix")
+    if len(data) < 8 + 4 * data[4]:
+        raise ValueError("Invalid REMB length")  # declared SSRC count exceeds buffer
 
     exponent = (data[5] & 0xFC) >> 2
     mantissa = ((data[5] & 0x03) << 16) | (data[6] << 8) | data[7]

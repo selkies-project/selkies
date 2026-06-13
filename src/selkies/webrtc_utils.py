@@ -872,6 +872,13 @@ logger_metrics.setLevel(logging.INFO)
 
 FPS_HIST_BUCKETS = (0, 20, 40, 60)
 
+# Bounds for the diagnostic WebRTC stats CSV. Field names come from the
+# (untrusted) browser client; cap the union header width and the number of
+# retained rows carried across a schema-change rewrite so a churning/hostile
+# client cannot grow the file unbounded.
+WEBRTC_CSV_MAX_HEADERS = 2048
+WEBRTC_CSV_MAX_RETAINED_ROWS = 100000
+
 class Metrics:
     def __init__(self, using_webrtc_csv: bool = False):
         self.using_webrtc_csv = using_webrtc_csv
@@ -885,6 +892,9 @@ class Metrics:
         self.stats_audio_file_path: Optional[str] = None
         self.prev_stats_video_header_len: Optional[int]  = None
         self.prev_stats_audio_header_len: Optional[int]  = None
+        # Track header names so a same-count field swap still triggers a remap.
+        self.prev_stats_video_header_names: Optional[Tuple[str, ...]] = None
+        self.prev_stats_audio_header_names: Optional[Tuple[str, ...]] = None
         # Serializes CSV writes (which run in worker threads) so concurrent stat
         # messages cannot interleave rows or race the shared prev_stats state.
         self._csv_lock = threading.Lock()
@@ -904,6 +914,10 @@ class Metrics:
     
     def unregister(self):
         """Unregister all metrics from the global registry."""
+        # Cancel any in-flight CSV write tasks so they do not outlive teardown.
+        # Iterate a copy: the done-callback mutates the set as tasks finish.
+        for task in list(self._csv_tasks):
+            task.cancel()
         try:
             REGISTRY.unregister(self.fps)
             REGISTRY.unregister(self.fps_hist)
@@ -928,14 +942,18 @@ class Metrics:
         )
 
     async def set_webrtc_stats(self, webrtc_stat_type: str, webrtc_stats: str) -> None:
-        webrtc_stats_obj = await asyncio.to_thread(json.loads, webrtc_stats)
-        sanitized_stats = await asyncio.to_thread(self.sanitize_json_stats, webrtc_stats_obj)
+        sanitized_stats = await asyncio.to_thread(self._parse_and_sanitize_stats, webrtc_stats)
         if self.using_webrtc_csv:
-            csv_path = self.stats_audio_file_path if webrtc_stat_type == "_stats_audio" else self.stats_video_file_path
-            task = asyncio.create_task(asyncio.to_thread(self.write_webrtc_stats_csv, sanitized_stats, csv_path))
+            is_audio = webrtc_stat_type == "_stats_audio"
+            csv_path = self.stats_audio_file_path if is_audio else self.stats_video_file_path
+            task = asyncio.create_task(asyncio.to_thread(self.write_webrtc_stats_csv, sanitized_stats, csv_path, is_audio))
             self._csv_tasks.add(task)
             task.add_done_callback(self._csv_tasks.discard)
-        await asyncio.to_thread(self.webrtc_statistics.info, sanitized_stats)
+        # Cheap inline dict copy; not worth a thread dispatch.
+        self.webrtc_statistics.info(sanitized_stats)
+
+    def _parse_and_sanitize_stats(self, webrtc_stats: str) -> OrderedDict:
+        return self.sanitize_json_stats(json.loads(webrtc_stats))
 
     def sanitize_json_stats(self, obj_list: List[Dict[str, Any]]) -> OrderedDict:
         """A helper function to process data to a structure
@@ -943,21 +961,41 @@ class Metrics:
         """
         obj_type = set()
         sanitized_stats = OrderedDict()
+        # Per-type occurrence counter for a content-stable dedup suffix. Keying
+        # the suffix on the global enumerate() index made every column name
+        # shift whenever the stats list reordered/inserted, which churned the
+        # CSV schema (full rewrites) and grew the union header unbounded. A
+        # per-type counter (and the entry 'id' when present) keeps a given
+        # logical stat mapped to the same column across messages.
+        type_counts: Dict[str, int] = {}
         for entry in obj_list:
             # Stats come from the (untrusted) browser client; skip entries that
             # are not dicts and default a missing/non-string 'type'.
             if not isinstance(entry, dict):
                 continue
-            curr_key = entry.get('type')
-            if not isinstance(curr_key, str):
-                curr_key = "unknown"
+            base_key = entry.get('type')
+            if not isinstance(base_key, str):
+                base_key = "unknown"
+            # Per-base-type occurrence index, stable across reorders/inserts.
+            occurrence = type_counts.get(base_key, 0)
+            type_counts[base_key] = occurrence + 1
+            curr_key = base_key
             if curr_key in obj_type:
-                # Append id as suffix to eliminate duplicate types
+                # Prefer the entry's stable 'id'; fall back to the per-type
+                # occurrence index. Both are stable across reorders/inserts,
+                # unlike the prior global loop index.
                 entry_id = entry.get('id')
-                curr_key = curr_key + "-" + (entry_id if isinstance(entry_id, str) else str(entry_id))
-                obj_type.add(curr_key)
-            else:
-                obj_type.add(curr_key)
+                if isinstance(entry_id, str) and entry_id:
+                    suffix = entry_id
+                else:
+                    suffix = str(occurrence)
+                candidate_key = curr_key + "-" + suffix
+                collision = 0
+                while candidate_key in obj_type:
+                    collision += 1
+                    candidate_key = curr_key + "-" + suffix + "-" + str(collision)
+                curr_key = candidate_key
+            obj_type.add(curr_key)
 
             for key, val in entry.items():
                 unique_type = curr_key + "." + str(key)
@@ -968,11 +1006,13 @@ class Metrics:
 
         return sanitized_stats
 
-    def write_webrtc_stats_csv(self, obj: dict, file_path: str) -> None:
+    def write_webrtc_stats_csv(self, obj: dict, file_path: str, is_audio: bool = False) -> None:
         """Writes the WebRTC statistics to a CSV file.
 
         Arguments:
             obj_list {[list of object]} -- list of Python objects/dictionary
+            is_audio {bool} -- whether this is the audio stream (passed by the
+                caller rather than re-derived from the file path).
         """
 
         dt = datetime.now()
@@ -988,22 +1028,37 @@ class Metrics:
                 if len(headers) < 15:
                     return
 
+                # Pass raw values to csv.writer; pre-quoting would be double-quoted.
                 values = [timestamp]
-                for val in obj.values():
-                    values.extend(['"{}"'.format(val) if isinstance(val, str) and ';' in val else val])
+                values.extend(obj.values())
 
-                is_audio = 'audio' in file_path
+                header_names = tuple(headers)
                 prev_len = self.prev_stats_audio_header_len if is_audio else self.prev_stats_video_header_len
+                prev_names = self.prev_stats_audio_header_names if is_audio else self.prev_stats_video_header_names
 
-                if prev_len is not None and prev_len != len(headers):
+                if prev_len is not None and prev_names != header_names:
+                    if prev_names is not None and frozenset(prev_names) == frozenset(header_names):
+                        # Same field SET, different order only: no schema change.
+                        # Avoid an O(N) file rewrite (which previously fired on
+                        # every reorder, e.g. ICE churn reshuffling the stats
+                        # list). Append a single row remapped into the stored
+                        # column order so the CSV stays consistent.
+                        value_by_name = dict(zip(headers, values))
+                        remapped = [value_by_name.get(name, "NaN") for name in prev_names]
+                        with open(file_path, 'a+', newline='') as stats_file:
+                            csv.writer(stats_file, quotechar='"').writerow(remapped)
+                        return
+
                     # The field set changed: rewrite the CSV with the merged
                     # schema. Must run with no open handle on file_path, as
                     # os.replace() onto an open file fails on Windows.
-                    new_len = self.update_webrtc_stats_csv(file_path, headers, values)
+                    new_len, new_names = self.update_webrtc_stats_csv(file_path, headers, values, is_audio)
                     if is_audio:
                         self.prev_stats_audio_header_len = new_len
+                        self.prev_stats_audio_header_names = new_names
                     else:
                         self.prev_stats_video_header_len = new_len
+                        self.prev_stats_video_header_names = new_names
                     return
 
                 with open(file_path, 'a+', newline='') as stats_file:
@@ -1013,21 +1068,25 @@ class Metrics:
                         csv_writer.writerow(values)
                         if is_audio:
                             self.prev_stats_audio_header_len = len(headers)
+                            self.prev_stats_audio_header_names = header_names
                         else:
                             self.prev_stats_video_header_len = len(headers)
+                            self.prev_stats_video_header_names = header_names
                     else:
                         csv_writer.writerow(values)
 
             except Exception as e:
                 logger_metrics.error("writing WebRTC Statistics to CSV file: " + str(e))
 
-    def update_webrtc_stats_csv(self, file_path: str, headers: List[str], values: List[Any]):
+    def update_webrtc_stats_csv(self, file_path: str, headers: List[str], values: List[Any], is_audio: bool = False):
         """Rewrites the CSV when the set of stat fields changes, aligning the
            previously-stored rows onto the new (union) header layout by field
-           name. Missing fields are filled with "NaN". Returns the new header
-           length, or the previous length on failure.
+           name. Missing fields are filled with "NaN". Returns a tuple of the
+           new header length and the new header-name tuple, or the previous
+           length/names on failure.
         """
-        prev_len = self.prev_stats_audio_header_len if 'audio' in file_path else self.prev_stats_video_header_len
+        prev_len = self.prev_stats_audio_header_len if is_audio else self.prev_stats_video_header_len
+        prev_names = self.prev_stats_audio_header_names if is_audio else self.prev_stats_video_header_names
 
         try:
             prev_headers = None
@@ -1052,17 +1111,28 @@ class Metrics:
                     csv_writer = csv.writer(stats_file)
                     csv_writer.writerow(headers)
                     csv_writer.writerow(values)
-                return len(headers)
+                return len(headers), tuple(headers)
 
             # Union header: keep the previous column order, then append any
             # genuinely new fields at the end. Remap every previous row and the
             # new row onto that union by field name, filling gaps with "NaN".
+            # The union width is capped so untrusted/churning field names cannot
+            # widen every future row without bound.
             merged_headers = list(prev_headers)
             seen_names = set(prev_headers)
             for name in headers:
                 if name not in seen_names:
+                    if len(merged_headers) >= WEBRTC_CSV_MAX_HEADERS:
+                        logger_metrics.warning(
+                            "WebRTC Statistics header width capped at %d columns; "
+                            "dropping additional fields", WEBRTC_CSV_MAX_HEADERS)
+                        break
                     merged_headers.append(name)
                     seen_names.add(name)
+
+            # Bound retained history: carry only the most recent rows forward.
+            if len(prev_values) > WEBRTC_CSV_MAX_RETAINED_ROWS:
+                prev_values = prev_values[-WEBRTC_CSV_MAX_RETAINED_ROWS:]
 
             prev_index = {name: pos for pos, name in enumerate(prev_headers)}
             new_index = {name: pos for pos, name in enumerate(headers)}
@@ -1091,10 +1161,10 @@ class Metrics:
             os.replace(tmp_path, file_path)
 
             logger_metrics.debug("WebRTC Statistics file {} rewritten with updated schema".format(file_path))
-            return len(merged_headers)
+            return len(merged_headers), tuple(merged_headers)
         except Exception as e:
             logger_metrics.error("writing WebRTC Statistics to CSV file: " + str(e))
-            return prev_len
+            return prev_len, prev_names
 
     def initialize_webrtc_csv_file(self, webrtc_stats_dir: str ='/tmp'):
         """Initializes the WebRTC Statistics file upon every new WebRTC connection
@@ -1103,8 +1173,14 @@ class Metrics:
         timestamp = dt.strftime("%Y-%m-%d:%H:%M:%S")
         self.stats_video_file_path = '{}/selkies-stats-video-{}.csv'.format(webrtc_stats_dir, timestamp)
         self.stats_audio_file_path = '{}/selkies-stats-audio-{}.csv'.format(webrtc_stats_dir, timestamp)
-        self.prev_stats_video_header_len = None
-        self.prev_stats_audio_header_len = None
+        # Reset under _csv_lock so a worker thread cannot observe a torn
+        # (len, names) pair (e.g. prev_len=old while prev_names=None) and
+        # spuriously enter the rewrite branch.
+        with self._csv_lock:
+            self.prev_stats_video_header_len = None
+            self.prev_stats_audio_header_len = None
+            self.prev_stats_video_header_names = None
+            self.prev_stats_audio_header_names = None
 
 
 # ---------------- Monitoring utilities ----------------

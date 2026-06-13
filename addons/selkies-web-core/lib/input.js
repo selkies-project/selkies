@@ -1073,7 +1073,9 @@ const KeyboardUtil = {
             if ((location === undefined) || (location > 3)) {
                 location = 0;
             }
-            if (key === 'Meta') {
+            if (key === 'Meta' && (browser.isMac() || browser.isIOS())) {
+                // macOS-only: Option reports key='Meta'. On Linux this remap
+                // breaks xkb Ctrl/Alt swaps (AltLeft must not force Meta).
                 let code = KeyboardUtil.getKeyCode(evt);
                 if (code === 'AltLeft') { return KeyTable.XK_Meta_L; }
                 if (code === 'AltRight') { return KeyTable.XK_Meta_R; }
@@ -1158,6 +1160,10 @@ export class Input {
         this._EVENT_MARKER = '_GUAC_KEYBOARD_HANDLED_BY_' + this._guacKeyboardID;
 
         this._keyDownList = {}; // Maps event.code -> keysym
+        // While any key is held, heartbeat the held keysyms so the server can
+        // auto-release them if a key-up is lost to congestion (stuck keys).
+        this._keyHeartbeatTimer = null;
+        this._KEY_HEARTBEAT_INTERVAL = 100;
         this._altGrArmed = false;
         this._altGrTimeout = null;
         this._altGrCtrlTime = 0;
@@ -1313,13 +1319,44 @@ export class Input {
         }
         
         this.send((down ? "kd," : "ku,") + finalKeysymToSend);
+        if (down) this._startKeyHeartbeat();
+        else if (Object.keys(this._keyDownList).length === 0) this._stopKeyHeartbeat();
+    }
+
+    _startKeyHeartbeat() {
+        if (this._keyHeartbeatTimer !== null) return;
+        this._keyHeartbeatTimer = setInterval(() => {
+            const held = Object.values(this._keyDownList);
+            if (held.length === 0) { this._stopKeyHeartbeat(); return; }
+            this.send("kh," + held.join(","));
+        }, this._KEY_HEARTBEAT_INTERVAL);
+    }
+
+    _stopKeyHeartbeat() {
+        if (this._keyHeartbeatTimer !== null) {
+            clearInterval(this._keyHeartbeatTimer);
+            this._keyHeartbeatTimer = null;
+        }
     }
 
     resetKeyboard() {
+        this._stopKeyHeartbeat();
         for (const code in this._keyDownList) {
             this._sendKeyEvent(this._keyDownList[code], code, false);
         }
         this._keyDownList = {};
+    }
+
+    _onVisibilityChange() {
+        // Browsers throttle setInterval (the held-key heartbeat) for hidden/backgrounded
+        // tabs, which can exceed the server's stale-key window and spuriously auto-release a
+        // physically-held key. Releasing held keys when the page becomes hidden makes that
+        // deterministic -- and is the desired behavior anyway, since no key should remain
+        // held while the tab is not visible. ('blur' alone misses tab-switch/minimize/full
+        // occlusion, which is exactly when timer throttling kicks in.)
+        if (document.visibilityState === 'hidden') {
+            this.resetKeyboard();
+        }
     }
 
     _guac_markEvent(e) {
@@ -1587,8 +1624,11 @@ export class Input {
             const codepoint = text.charCodeAt(i);
             const keysym = Keysyms.lookup(codepoint);
             if (keysym) {
-                this._sendKeyEvent(keysym, 'Unidentified', true);
-                this._sendKeyEvent(keysym, 'Unidentified', false);
+                // Synthetic text is press-then-immediately-release: send kd/ku directly
+                // (like _handleMobileInput) rather than through _sendKeyEvent, which would
+                // start and stop the held-key heartbeat setInterval for every character.
+                this.send("kd," + keysym);
+                this.send("ku," + keysym);
             }
         }
     }
@@ -2240,20 +2280,12 @@ export class Input {
         const button = (direction === 'up') ? 4 : 3;
         const mask = 1 << button;
 
-        // In trackpad mode, scroll is a relative event with NO pointer motion.
-        // We must always use m2 with a 0,0 delta to prevent the cursor from moving.
+        // Send a discrete press+release pulse instead of holding the bit: the
+        // server only scrolls on a 0->1 transition, so a held bit coalesces
+        // rapid wheel events. Scroll bits are never kept in the persistent mask.
         const mtype = "m2";
-        const x = 0;
-        const y = 0;
-
-        this.buttonMask |= mask;
-        this.send([ mtype, x, y, this.buttonMask, magnitude ].join(","));
-        setTimeout(() => {
-             if ((this.buttonMask & mask) !== 0) {
-                this.buttonMask &= ~mask;
-                this.send([ mtype, x, y, this.buttonMask, magnitude ].join(","));
-             }
-        }, 10);
+        this.send([ mtype, 0, 0, this.buttonMask | mask, magnitude ].join(","));
+        this.send([ mtype, 0, 0, this.buttonMask & ~mask, magnitude ].join(","));
     }
 
     _triggerHorizontalMouseWheel(direction, magnitude) {
@@ -2261,19 +2293,9 @@ export class Input {
         const button = (direction === 'left') ? 6 : 7;
         const mask = 1 << button;
 
-        // In trackpad mode, scroll is a relative event with NO pointer motion.
         const mtype = "m2";
-        const x = 0;
-        const y = 0;
-
-        this.buttonMask |= mask;
-        this.send([ mtype, x, y, this.buttonMask, magnitude ].join(","));
-        setTimeout(() => {
-             if ((this.buttonMask & mask) !== 0) {
-                this.buttonMask &= ~mask;
-                this.send([ mtype, x, y, this.buttonMask, magnitude ].join(","));
-             }
-        }, 10);
+        this.send([ mtype, 0, 0, this.buttonMask | mask, magnitude ].join(","));
+        this.send([ mtype, 0, 0, this.buttonMask & ~mask, magnitude ].join(","));
     }
 
     _dropThreshold() {
@@ -2512,6 +2534,8 @@ export class Input {
         this.listeners_context.push(addListener(window, 'keydown', this._handleKeyDown, this, true));
         this.listeners_context.push(addListener(window, 'keyup', this._handleKeyUp, this, true));
         this.listeners_context.push(addListener(window, 'blur', this.resetKeyboard, this));
+        this.listeners_context.push(addListener(document, 'visibilitychange', this._onVisibilityChange, this));
+        this.listeners_context.push(addListener(window, 'pagehide', this.resetKeyboard, this));
         this.listeners_context.push(addListener(this.keyboardInputAssist, 'input', this._handleMobileInput, this));
         this.listeners_context.push(addListener(document, 'mousedown', this._handleOutsideClick, this, true));
         this.listeners_context.push(addListener(document, 'touchstart', this._handleOutsideClick, this, true));
@@ -2564,6 +2588,7 @@ export class Input {
     }
 
     detach_context() {
+        this._stopKeyHeartbeat();
         removeListeners(this.listeners_context);
         this.listeners_context = [];
         this.element.style.cursor = 'auto';

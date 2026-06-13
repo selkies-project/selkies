@@ -846,7 +846,8 @@ function Sidebar() {
     const s_audio_bitrate = serverSettings.audio_bitrate;
     if (s_audio_bitrate) {
       const stored = getStoredInt("audio_bitrate");
-      const final = s_audio_bitrate.allowed.includes(stored) ? stored : s_audio_bitrate.value;
+      // allowed holds strings; compare as string and keep result numeric
+      const final = s_audio_bitrate.allowed.includes(String(stored)) ? stored : parseInt(s_audio_bitrate.value, 10);
       setAudioBitrate(final);
       localStorage.setItem(getPrefixedKey("audio_bitrate"), final);
     }

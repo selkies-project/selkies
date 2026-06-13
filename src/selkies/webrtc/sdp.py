@@ -130,7 +130,8 @@ H264_PROFILE_PATTERNS = [
 
 def candidate_from_sdp(sdp: str) -> RTCIceCandidate:
     bits = sdp.split()
-    assert len(bits) >= 8
+    if len(bits) < 8:
+        raise ValueError("SDP does not have enough properties")
 
     candidate = RTCIceCandidate(
         component=int(bits[1]),
@@ -183,7 +184,8 @@ def grouplines(sdp: str) -> tuple[list[str], list[list[str]]]:
 
 def ipaddress_from_sdp(sdp: str) -> str:
     m = re.match("^IN (IP4|IP6) ([^ ]+)$", sdp)
-    assert m
+    if not m:
+        raise ValueError("Could not parse address from `%s`" % sdp)
     return m.group(2)
 
 
@@ -198,7 +200,10 @@ def parameters_from_sdp(sdp: str) -> ParametersDict:
         if "=" in param:
             k, v = param.split("=", 1)
             if k in FMTP_INT_PARAMETERS:
-                parameters[k] = int(v)
+                try:
+                    parameters[k] = int(v)
+                except ValueError:
+                    parameters[k] = v
             else:
                 parameters[k] = v
         else:
@@ -216,17 +221,22 @@ def parameters_to_sdp(parameters: ParametersDict) -> str:
     return ";".join(params)
 
 
-def parse_attr(line: str) -> tuple[str, Optional[str]]:
+def parse_attr(line: str) -> tuple[str, str]:
     if ":" in line:
         bits = line[2:].split(":", 1)
         return bits[0], bits[1]
     else:
-        return line[2:], None
+        # Normalize colon-less 'a=<flag>' lines to an empty value rather than
+        # None so every downstream branch (value.split(), 'x' in value,
+        # int(value)) degrades gracefully on malformed/flag attributes instead
+        # of raising AttributeError/TypeError. Well-formed 'a=key:val' lines are
+        # unaffected (they always take the colon branch).
+        return line[2:], ""
 
 
 def parse_h264_profile_level_id(profile_str: str) -> tuple[H264Profile, H264Level]:
     if not isinstance(profile_str, str) or not re.match(
-        "[0-9a-f]{6}", profile_str, re.I
+        "^[0-9a-f]{6}$", profile_str, re.I
     ):
         raise ValueError("Expected a 6 character hexadecimal string")
 
@@ -238,7 +248,10 @@ def parse_h264_profile_level_id(profile_str: str) -> tuple[H264Profile, H264Leve
     if level_idc == H264Level.LEVEL1_1:
         level = H264Level.LEVEL1_B if (profile_iop & 0x10) else H264Level.LEVEL1_1
     else:
-        level = H264Level(level_idc)
+        try:
+            level = H264Level(level_idc)
+        except ValueError:
+            raise ValueError(f"Unrecognized level_idc = {level_idc}")
 
     for idc, pattern, profile in H264_PROFILE_PATTERNS:
         if idc == profile_idc and pattern.matches(profile_iop):
@@ -263,7 +276,11 @@ def parse_group(
 ) -> None:
     bits = value.split()
     if bits:
-        dest.append(GroupDescription(semantic=bits[0], items=list(map(type, bits[1:]))))
+        try:
+            items = list(map(type, bits[1:]))
+        except ValueError:
+            return
+        dest.append(GroupDescription(semantic=bits[0], items=items))
 
 
 @dataclass
@@ -414,8 +431,10 @@ class SessionDescription:
         ice_password = None
         ice_usernameFragment = None
 
-        def find_codec(pt: int) -> RTCRtpCodecParameters:
-            return next(filter(lambda x: x.payloadType == pt, current_media.rtp.codecs))
+        def find_codec(pt: int) -> Optional[RTCRtpCodecParameters]:
+            return next(
+                filter(lambda x: x.payloadType == pt, current_media.rtp.codecs), None
+            )
 
         session_lines, media_groups = grouplines(sdp)
 
@@ -435,7 +454,10 @@ class SessionDescription:
             elif line.startswith("a="):
                 attr, value = parse_attr(line)
                 if attr == "fingerprint":
-                    algorithm, fingerprint = value.split()
+                    fp_bits = value.split()
+                    if len(fp_bits) != 2:
+                        continue
+                    algorithm, fingerprint = fp_bits
                     dtls_fingerprints.append(
                         RTCDtlsFingerprint(algorithm=algorithm, value=fingerprint)
                     )
@@ -457,7 +479,8 @@ class SessionDescription:
         # parse media
         for media_lines in media_groups:
             m = re.match("^m=([^ ]+) ([0-9]+) ([A-Z/]+) (.+)$", media_lines[0])
-            assert m
+            if not m:
+                raise ValueError("Could not parse media line `%s`" % media_lines[0])
 
             # check payload types are valid
             kind = m.group(1)
@@ -466,8 +489,12 @@ class SessionDescription:
             if kind in ["audio", "video"]:
                 fmt_int = [int(x) for x in fmt]
                 for pt in fmt_int:
-                    assert pt >= 0 and pt < 256
-                    assert pt not in rtp.FORBIDDEN_PAYLOAD_TYPES
+                    if not (pt >= 0 and pt < 256):
+                        raise ValueError("Payload type must be in range [0, 256[")
+                    if pt in rtp.FORBIDDEN_PAYLOAD_TYPES:
+                        raise ValueError(
+                            "Payload type `%d` is forbidden" % pt
+                        )
 
             current_media = MediaDescription(
                 kind=kind, port=int(m.group(2)), profile=m.group(3), fmt=fmt_int or fmt
@@ -493,7 +520,12 @@ class SessionDescription:
                     elif attr == "end-of-candidates":
                         current_media.ice_candidates_complete = True
                     elif attr == "extmap":
-                        ext_id, ext_uri = value.split()
+                        if not value:
+                            continue
+                        ext_bits = value.split()
+                        if len(ext_bits) < 2:
+                            continue
+                        ext_id, ext_uri = ext_bits[0], ext_bits[1]
                         if "/" in ext_id:
                             ext_id, ext_direction = ext_id.split("/")
                         extension = RTCRtpHeaderExtensionParameters(
@@ -501,7 +533,10 @@ class SessionDescription:
                         )
                         current_media.rtp.headerExtensions.append(extension)
                     elif attr == "fingerprint":
-                        algorithm, fingerprint = value.split()
+                        fp_bits = value.split()
+                        if len(fp_bits) != 2:
+                            continue
+                        algorithm, fingerprint = fp_bits
                         current_media.dtls.fingerprints.append(
                             RTCDtlsFingerprint(algorithm=algorithm, value=fingerprint)
                         )
@@ -520,6 +555,8 @@ class SessionDescription:
                     elif attr == "msid":
                         current_media.msid = value
                     elif attr == "rtcp":
+                        if not value or " " not in value:
+                            continue
                         port, rest = value.split(" ", 1)
                         current_media.rtcp_port = int(port)
                         current_media.rtcp_host = ipaddress_from_sdp(rest)
@@ -530,8 +567,12 @@ class SessionDescription:
                     elif attr in DIRECTIONS:
                         current_media.direction = attr
                     elif attr == "rtpmap":
+                        if not value or " " not in value:
+                            continue
                         format_id, format_desc = value.split(" ", 1)
                         bits = format_desc.split("/")
+                        if len(bits) < 2:
+                            continue
                         if current_media.kind == "audio":
                             if len(bits) > 2:
                                 channels = int(bits[2])
@@ -547,6 +588,8 @@ class SessionDescription:
                         )
                         current_media.rtp.codecs.append(codec)
                     elif attr == "sctpmap":
+                        if not value or " " not in value:
+                            continue
                         format_id, format_desc = value.split(" ", 1)
                         getattr(current_media, attr)[int(format_id)] = format_desc
                     elif attr == "sctp-port":
@@ -554,8 +597,12 @@ class SessionDescription:
                     elif attr == "ssrc-group":
                         parse_group(current_media.ssrc_group, value, type=int)
                     elif attr == "ssrc":
+                        if not value or " " not in value:
+                            continue
                         ssrc_str, ssrc_desc = value.split(" ", 1)
                         ssrc = int(ssrc_str)
+                        if ":" not in ssrc_desc:
+                            continue
                         ssrc_attr, ssrc_value = ssrc_desc.split(":", 1)
 
                         try:
@@ -576,11 +623,19 @@ class SessionDescription:
                 if line.startswith("a="):
                     attr, value = parse_attr(line)
                     if attr == "fmtp":
+                        if not value or " " not in value:
+                            continue
                         format_id, format_desc = value.split(" ", 1)
                         codec = find_codec(int(format_id))
+                        if codec is None:
+                            continue
                         codec.parameters = parameters_from_sdp(format_desc)
                     elif attr == "rtcp-fb":
+                        if not value:
+                            continue
                         bits = value.split(" ", 2)
+                        if len(bits) < 2:
+                            continue
                         for codec in current_media.rtp.codecs:
                             if bits[0] in ["*", str(codec.payloadType)]:
                                 codec.rtcpFeedback.append(

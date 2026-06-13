@@ -12,7 +12,7 @@ const STREAM_MODE_WEBSOCKETS = "websockets";
 
 // Set storage key based on URL
 const urlForKey = window.location.href.split('#')[0];
-const storageAppName = urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
+const storageAppName = urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
 const getPrefixedKey = (key) => {return `${storageAppName}_${key}`}
 
 let mode = null;

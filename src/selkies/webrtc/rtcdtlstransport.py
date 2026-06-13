@@ -37,6 +37,7 @@ import datetime
 import enum
 import logging
 import os
+import struct
 import traceback
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, Type, TypeVar, Union
@@ -633,7 +634,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
     async def _handle_rtcp_data(self, data: bytes) -> None:
         try:
             packets = RtcpPacket.parse(data)
-        except ValueError as exc:
+        except (ValueError, struct.error) as exc:
             self.__log_debug("x RTCP parsing failed: %s", exc)
             return
 
@@ -645,7 +646,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
     async def _handle_rtp_data(self, data: bytes, arrival_time_ms: int) -> None:
         try:
             packet = RtpPacket.parse(data, self._rtp_header_extensions_map)
-        except ValueError as exc:
+        except (ValueError, struct.error) as exc:
             self.__log_debug("x RTP parsing failed: %s", exc)
             return
 

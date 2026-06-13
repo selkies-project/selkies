@@ -202,38 +202,9 @@ class JsConfigCtypes(ctypes.Structure):
         ("num_btns", ctypes.c_uint16),
         ("num_axes", ctypes.c_uint16),
         ("btn_map", ctypes.c_uint16 * INTERPOSER_MAX_BTNS),
-        ("axes_map", ctypes.c_uint8 * INTERPOSER_MAX_AXES)
+        ("axes_map", ctypes.c_uint8 * INTERPOSER_MAX_AXES),
+        ("final_alignment_padding", ctypes.c_uint8 * 6)
     ]
-
-    def pack_to_bytes(self):
-        # This format string MUST exactly match the order and types in _fields_
-        # and the C struct, assuming standard C packing ('=').
-        # '=' means standard C types, native byte order, and proper padding.
-        # 's' for char array (name) - ctypes.c_char * X is like char[X]
-        # 'H' for uint16_t
-        # 'B' for uint8_t
-        # 'x' can be used for explicit padding if needed, but '=' should handle most.
-
-        # Construct the format string dynamically based on constants
-        # This is robust if INTERPOSER_MAX_BTNS or AXES changes.
-        f"={CONTROLLER_NAME_MAX_LEN}sHHHHH{INTERPOSER_MAX_BTNS}H{INTERPOSER_MAX_AXES}B"
-        
-        # Ensure name is bytes and correctly truncated/padded for fixed-size char array
-        name_bytes = self.name.encode('utf-8')[:CONTROLLER_NAME_MAX_LEN]
-        # Pad with nulls if shorter than CONTROLLER_NAME_MAX_LEN
-        name_bytes = name_bytes.ljust(CONTROLLER_NAME_MAX_LEN, b'\0')
-
-        return struct.pack(
-            pack_format,
-            name_bytes, # Must be bytes
-            self.vendor,
-            self.product,
-            self.version,
-            self.num_btns,
-            self.num_axes,
-            *self.btn_map,  # Unpack the array
-            *self.axes_map   # Unpack the array
-        )
 
 # Get the size of the C-compatible struct
 EXPECTED_C_STRUCT_SIZE = ctypes.sizeof(JsConfigCtypes)
@@ -935,6 +906,8 @@ class WebRTCInput:
         self.multipart_clipboard_mime_type = "text/plain"
         self.multipart_clipboard_total_size = 0
         self.multipart_clipboard_in_progress = False
+        self.multipart_clipboard_id = None
+        self.multipart_clipboard_kind = None
         self.data_server_instance = data_server_instance
         self.on_update_settings = lambda settings_json: logger_webrtc_input.warning("unhandled update_settings")
         self.is_wayland = is_wayland
@@ -945,6 +918,23 @@ class WebRTCInput:
         self.clipboard_injection_lock = asyncio.Lock()
         self.keyboard_queue = asyncio.Queue()
         self.keyboard_worker_task = None
+        # Stuck-key recovery: the client heartbeats every held key ('kh'); if a
+        # key stops being heartbeated (its key-up was lost to congestion) the
+        # sweep auto-releases it. Heartbeats only refresh timestamps, so they add
+        # no input latency. window must comfortably exceed the client interval.
+        self.pressed_keys = {}            # keysym -> last heartbeat (monotonic)
+        # Upper bound on simultaneously-tracked held keys. Far above any real
+        # keyboard's concurrent-hold count, but caps memory under a kd-flood so
+        # the dict can't grow without bound (the sweep self-heals it otherwise).
+        self.max_pressed_keys = 1024
+        # Release a key unseen for this long. The client heartbeats every 100 ms,
+        # but browsers throttle setInterval to >=1 s for hidden/occluded tabs, so
+        # 2.0 s leaves headroom above that worst case to avoid false-releasing a
+        # physically-held key while a tab is backgrounded (still bounds a genuinely
+        # lost key-up to ~2 s of stuck input, well under a human-noticeable hang).
+        self.key_stale_window = 2.0       # release a key unseen for this long
+        self.key_sweep_interval = 0.1
+        self.key_sweep_task = None
         self.on_update_rate_control_mode = lambda mode: logger_webrtc_input.warning("unhandled on_update_rate_control_mode")
         self.on_update_crf = lambda value: logger_webrtc_input.warning("unhandled on_update_crf")
 
@@ -974,7 +964,12 @@ class WebRTCInput:
                 logger_webrtc_input.error(f"Failed to initialize Wayland input: {e}")
 
     def _build_wayland_keymap(self):
-        """Builds a reverse mapping from Keysyms to Scancodes using xkbcommon."""
+        """Builds a reverse mapping from Keysyms to evdev scancodes using xkbcommon.
+
+        xkb reports keycodes in X11 convention (evdev + 8); pixelflux's Wayland
+        inject_key expects evdev (kernel) scancodes and re-adds +8 for smithay,
+        so the stored value is kc - 8.
+        """
         if not self.xkb_keymap:
             return
         
@@ -997,13 +992,13 @@ class WebRTCInput:
                 for sym in syms_0:
                     level_0_keys.add(sym)
                     if sym not in self.wayland_scancode_map:
-                        self.wayland_scancode_map[sym] = kc
+                        self.wayland_scancode_map[sym] = kc - 8
 
             syms_1 = self.xkb_keymap.key_get_syms_by_level(kc, 0, 1)
             if syms_1:
                 for sym in syms_1:
                     if sym not in self.wayland_scancode_map:
-                        self.wayland_scancode_map[sym] = kc
+                        self.wayland_scancode_map[sym] = kc - 8
                         if sym not in level_0_keys:
                             self.wayland_shift_required_keys.add(sym)
 
@@ -1147,7 +1142,9 @@ class WebRTCInput:
         await self._initialize_persistent_gamepads()
 
         if self.is_wayland:
-            self.keyboard_worker_task = asyncio.create_task(self._keyboard_worker())        
+            self.keyboard_worker_task = asyncio.create_task(self._keyboard_worker())
+        if self.key_sweep_task is None:
+            self.key_sweep_task = asyncio.create_task(self._key_stale_sweep())
 
     async def _initialize_persistent_gamepads(self):
         logger_webrtc_input.info(f"Initializing {self.num_gamepads} persistent gamepad instances...")
@@ -1195,6 +1192,61 @@ class WebRTCInput:
         if self.keyboard_worker_task:
             self.keyboard_worker_task.cancel()
             self.keyboard_worker_task = None
+        if self.key_sweep_task:
+            self.key_sweep_task.cancel()
+            self.key_sweep_task = None
+        self.pressed_keys.clear()
+
+    async def _key_stale_sweep(self):
+        """Auto-release keys whose heartbeats stopped (lost key-up), so a key is
+        never stuck held when the network drops packets."""
+        try:
+            while True:
+                await asyncio.sleep(self.key_sweep_interval)
+                if not self.pressed_keys:
+                    continue
+                now = time.monotonic()
+                stale = [k for k, seen in self.pressed_keys.items() if now - seen > self.key_stale_window]
+                for keysym in stale:
+                    # Re-check: a heartbeat or re-press during a prior await may
+                    # have refreshed this key, so don't release a now-live key.
+                    seen = self.pressed_keys.get(keysym)
+                    if seen is None or time.monotonic() - seen <= self.key_stale_window:
+                        continue
+                    was_atomic = keysym in self.atomically_typed_keys
+                    self.pressed_keys.pop(keysym, None)
+                    logger_webrtc_input.warning(f"Auto-releasing key {keysym} (heartbeat lost).")
+                    # An atomically-typed key was never physically held on X11.
+                    if was_atomic and not self.is_wayland:
+                        self.atomically_typed_keys.discard(keysym)
+                        continue
+                    try:
+                        if self.is_wayland:
+                            # Wayland injection is serialized through keyboard_queue;
+                            # no shared X11 state is touched across an await here.
+                            self.active_modifiers.discard(keysym)
+                            self.atomically_typed_keys.discard(keysym)
+                            self.keyboard_queue.put_nowait(("ku", keysym))
+                        else:
+                            # X11 injection is not queue-serialized: defer the
+                            # modifier/atomic state discard until *after* the
+                            # release so a kd dispatched during the await still
+                            # observes the correct active_modifiers. Then re-check
+                            # whether a re-press repopulated pressed_keys with a
+                            # newer timestamp during the await; if so, the key is
+                            # live again, so re-inject the press instead of leaving
+                            # X11 released while the server believes it held.
+                            await self.send_x11_keypress(keysym, down=False)
+                            repressed = self.pressed_keys.get(keysym)
+                            if repressed is not None and time.monotonic() - repressed <= self.key_stale_window:
+                                await self.send_x11_keypress(keysym, down=True)
+                            else:
+                                self.active_modifiers.discard(keysym)
+                                self.atomically_typed_keys.discard(keysym)
+                    except Exception as e:
+                        logger_webrtc_input.warning(f"Failed to auto-release key {keysym}: {e}")
+        except asyncio.CancelledError:
+            pass
 
     async def reset_keyboard(self):
         if self.is_wayland:
@@ -1206,6 +1258,14 @@ class WebRTCInput:
                     if scancode:
                         try: self.wayland_input.inject_key(scancode, 0)
                         except: pass
+            # Clear server-side key state so a reset can't leave stuck-modifier desync.
+            self.active_modifiers.clear()
+            self.active_shortcut_modifiers.clear()
+            self.atomically_typed_keys.clear()
+            self.translated_keys.clear()
+            # Drop heartbeat-tracked keys too; otherwise the stale-sweep would
+            # auto-release a key the reset just cleared (mirrors disconnect()).
+            self.pressed_keys.clear()
             return
 
         if not self.keyboard or not self.xdisplay : 
@@ -1217,6 +1277,14 @@ class WebRTCInput:
         for k in [lctrl, lshift, lalt, rctrl, rshift, ralt, lmeta, rmeta, keyf, keyF, keym, keyM, escape]:
             try: await self.send_x11_keypress(k, down=False)
             except Exception as e: logger_webrtc_input.warning(f"Error resetting key {k}: {e}")
+        # Clear server-side key state (after the release loop consumes it) to avoid stuck-modifier desync.
+        self.active_modifiers.clear()
+        self.active_shortcut_modifiers.clear()
+        self.atomically_typed_keys.clear()
+        self.translated_keys.clear()
+        # Drop heartbeat-tracked keys too; otherwise the stale-sweep would
+        # auto-release a key the reset just cleared (mirrors disconnect()).
+        self.pressed_keys.clear()
     
     def send_mouse(self, action, data):
         if action == MOUSE_POSITION:
@@ -1333,7 +1401,7 @@ class WebRTCInput:
                 process = await subprocess.create_subprocess_exec(
                     *command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
-                await asyncio.wait_for(process.communicate(), timeout=0.5)
+                await self._communicate_or_kill(process, 0.5, "xdotool key")
                 if process.returncode == 0:
                     return
             except Exception:
@@ -1473,7 +1541,7 @@ class WebRTCInput:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
-            stdout_key, stderr_key = await asyncio.wait_for(process_key.communicate(), timeout=1.0)
+            stdout_key, stderr_key = await self._communicate_or_kill(process_key, 1.0, "xdotool keydown")
             if process_key.returncode == 0 and not (stderr_key and (b"No such key name" in stderr_key or b"Error:" in stderr_key.lower())):
                 fallback_succeeded = True
             else:
@@ -1489,7 +1557,7 @@ class WebRTCInput:
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE
                         )
-                        await asyncio.wait_for(process_type.communicate(), timeout=1.0)
+                        await self._communicate_or_kill(process_type, 1.0, "xdotool type")
                         if process_type.returncode == 0:
                             fallback_succeeded = True
                     except (asyncio.TimeoutError, FileNotFoundError, Exception):
@@ -1530,7 +1598,7 @@ class WebRTCInput:
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             env=self._get_wl_env()
                         )
-                        await asyncio.wait_for(proc.communicate(), timeout=1.0)
+                        await self._communicate_or_kill(proc, 1.0, "wl-copy --clear")
                     except Exception:
                         pass
 
@@ -1544,6 +1612,11 @@ class WebRTCInput:
                 self.clipboard_paused = False
 
     async def send_x11_mouse(self, x, y, button_mask, scroll_magnitude, relative=False, display_id='primary'):
+        # Clamp client-controlled magnitude so the X11 scroll loop can't block the event loop (DoS).
+        try:
+            scroll_magnitude = max(0, min(int(scroll_magnitude), 64))
+        except (TypeError, ValueError):
+            scroll_magnitude = 0
         if relative:
             final_x = self.last_x + x
             final_y = self.last_y + y
@@ -2207,6 +2280,19 @@ class WebRTCInput:
             except Exception as e:
                 logger_webrtc_input.error(f"Error in keyboard worker: {e}", exc_info=True)
 
+    def _reset_multipart_clipboard(self):
+        """Reset all multi-part clipboard receive state to its idle defaults.
+
+        Used on completion/abort so no field (size, mime type, buffer, id, kind)
+        is left stale to bleed into the next cbs/cws transfer.
+        """
+        self.multipart_clipboard_buffer = None
+        self.multipart_clipboard_in_progress = False
+        self.multipart_clipboard_id = None
+        self.multipart_clipboard_kind = None
+        self.multipart_clipboard_total_size = 0
+        self.multipart_clipboard_mime_type = "text/plain"
+
     async def on_message(self, msg: str, display_id='primary'):
         # A malformed client message must not tear down the transport connection.
         try:
@@ -2225,6 +2311,10 @@ class WebRTCInput:
             self.on_ping_response(float("%.3f" % ((time.time() - self.ping_start) / 2 * 1000)))
         elif msg_type == "kd":
             keysym = int(toks[1])
+            # Bound the held-key map so a kd-flood of distinct keysyms can't grow
+            # it without limit; an existing key is always refreshed in place.
+            if keysym in self.pressed_keys or len(self.pressed_keys) < self.max_pressed_keys:
+                self.pressed_keys[keysym] = time.monotonic()
             if self.is_wayland:
                 self.keyboard_queue.put_nowait(("kd", keysym))
             else:
@@ -2246,6 +2336,7 @@ class WebRTCInput:
                     await self.send_x11_keypress(keysym, down=True)
         elif msg_type == "ku":
             keysym = int(toks[1])
+            self.pressed_keys.pop(keysym, None)
             if self.is_wayland:
                 self.keyboard_queue.put_nowait(("ku", keysym))
             else:
@@ -2261,6 +2352,22 @@ class WebRTCInput:
                 self.keyboard_queue.put_nowait(("kr", None))
             else:
                 await self.reset_keyboard()
+        elif msg_type == "kh":
+            # Heartbeat for held keys: refresh timestamps only (no injection),
+            # so it costs nothing but keeps the stale-sweep from releasing them.
+            now = time.monotonic()
+            for tok in toks[1:]:
+                try:
+                    keysym = int(tok)
+                except ValueError:
+                    continue
+                # Atomically-typed keys (X11) were never physically held; do not
+                # let an ongoing heartbeat pin their lingering pressed_keys entry
+                # past the stale window — let the sweep reap it.
+                if keysym in self.atomically_typed_keys:
+                    continue
+                if keysym in self.pressed_keys:
+                    self.pressed_keys[keysym] = now
         elif msg_type in ["m", "m2"]:
             relative = msg_type == "m2"
             try: x, y, button_mask, scroll_magnitude = [int(i) for i in toks[1:]]
@@ -2327,10 +2434,15 @@ class WebRTCInput:
         elif msg_type == "cws":
             if self.enable_clipboard in ["true", "in"]:
                 try:
-                    declared_size = int(toks[1])
+                    transfer_id = toks[1]
+                    declared_size = int(toks[2])
                     if declared_size < 0 or declared_size > MULTIPART_CLIPBOARD_MAX_SIZE:
                         logger_webrtc_input.error(f"Rejecting multi-part clipboard write: declared size {declared_size} out of bounds (max {MULTIPART_CLIPBOARD_MAX_SIZE}).")
                         return
+                    if self.multipart_clipboard_in_progress and transfer_id != self.multipart_clipboard_id:
+                        logger_webrtc_input.warning(f"Aborting previous in-progress clipboard transfer {self.multipart_clipboard_id} for new transfer {transfer_id}.")
+                    self.multipart_clipboard_id = transfer_id
+                    self.multipart_clipboard_kind = "text"
                     self.multipart_clipboard_total_size = declared_size
                     self.multipart_clipboard_mime_type = "text/plain"
                     self.multipart_clipboard_buffer = io.BytesIO()
@@ -2343,11 +2455,16 @@ class WebRTCInput:
         elif msg_type == "cbs":
             if self.enable_clipboard in ["true", "in"]:
                 try:
-                    declared_size = int(toks[2])
+                    transfer_id = toks[1]
+                    declared_size = int(toks[3])
                     if declared_size < 0 or declared_size > MULTIPART_CLIPBOARD_MAX_SIZE:
                         logger_webrtc_input.error(f"Rejecting multi-part clipboard write: declared size {declared_size} out of bounds (max {MULTIPART_CLIPBOARD_MAX_SIZE}).")
                         return
-                    self.multipart_clipboard_mime_type = toks[1]
+                    if self.multipart_clipboard_in_progress and transfer_id != self.multipart_clipboard_id:
+                        logger_webrtc_input.warning(f"Aborting previous in-progress clipboard transfer {self.multipart_clipboard_id} for new transfer {transfer_id}.")
+                    self.multipart_clipboard_id = transfer_id
+                    self.multipart_clipboard_kind = "binary"
+                    self.multipart_clipboard_mime_type = toks[2]
                     self.multipart_clipboard_total_size = declared_size
                     self.multipart_clipboard_buffer = io.BytesIO()
                     self.multipart_clipboard_in_progress = True
@@ -2357,21 +2474,37 @@ class WebRTCInput:
             else:
                 logger_webrtc_input.warning("Rejecting multi-part clipboard write: inbound clipboard disabled.")
         elif msg_type == "cwd" or msg_type == "cbd":
-            if self.multipart_clipboard_in_progress:
+            expected_kind = "text" if msg_type == "cwd" else "binary"
+            # A well-formed chunk is "<type>,<id>,<b64>" (3 tokens). Validate the
+            # token count *before* indexing so a malformed (e.g. comma-less) chunk
+            # mid-transfer doesn't raise IndexError and leave the multipart state
+            # half-open, accumulating until cwe/overflow.
+            if len(toks) < 3:
+                logger_webrtc_input.warning(f"Malformed clipboard chunk ({msg_type}): missing fields; aborting transfer.")
+                self._reset_multipart_clipboard()
+            elif not (self.multipart_clipboard_in_progress and toks[1] == self.multipart_clipboard_id and self.multipart_clipboard_kind == expected_kind):
+                logger_webrtc_input.warning(f"Ignoring mismatched clipboard chunk ({msg_type}): id/kind does not match active transfer.")
+            else:
                 try:
-                    chunk_data = base64.b64decode(toks[1])
+                    chunk_data = base64.b64decode(toks[2])
                     if self.multipart_clipboard_buffer.tell() + len(chunk_data) > self.multipart_clipboard_total_size:
                         logger_webrtc_input.error("Multi-part clipboard exceeded its declared size; aborting transfer.")
-                        self.multipart_clipboard_buffer = None
-                        self.multipart_clipboard_in_progress = False
+                        self._reset_multipart_clipboard()
                         return
                     self.multipart_clipboard_buffer.write(chunk_data)
                 except Exception as e:
                     logger_webrtc_input.error(f"Failed to process clipboard data chunk: {e}")
-                    self.multipart_clipboard_buffer = None
-                    self.multipart_clipboard_in_progress = False
+                    self._reset_multipart_clipboard()
         elif msg_type == "cwe" or msg_type == "cbe":
-            if self.multipart_clipboard_in_progress:
+            expected_kind = "text" if msg_type == "cwe" else "binary"
+            # A well-formed end is "<type>,<id>" (2 tokens). Guard the count
+            # before indexing toks[1] so a malformed end doesn't raise mid-state.
+            if len(toks) < 2:
+                logger_webrtc_input.warning(f"Malformed clipboard end ({msg_type}): missing id; aborting transfer.")
+                self._reset_multipart_clipboard()
+            elif not (self.multipart_clipboard_in_progress and toks[1] == self.multipart_clipboard_id and self.multipart_clipboard_kind == expected_kind):
+                logger_webrtc_input.warning(f"Ignoring mismatched clipboard end ({msg_type}): id/kind does not match active transfer.")
+            else:
                 received_size = self.multipart_clipboard_buffer.tell()
                 if received_size != self.multipart_clipboard_total_size:
                     logger_webrtc_input.error(f"Multi-part clipboard size mismatch. Expected {self.multipart_clipboard_total_size}, got {received_size}. Aborting.")
@@ -2388,9 +2521,8 @@ class WebRTCInput:
                             if await self.write_clipboard(data, mime_type=mime_type):
                                 logger_webrtc_input.info(f"Set multi-part binary clipboard content ({mime_type}), size: {len(data)} bytes")
                     asyncio.create_task(_write_multipart())
-                self.multipart_clipboard_buffer = None
-                self.multipart_clipboard_in_progress = False
-        elif msg_type == "cr": 
+                self._reset_multipart_clipboard()
+        elif msg_type == "cr":
             if self.enable_clipboard in ["true", "out"]:
                 data, mime_type = await self.read_clipboard(use_binary=self.enable_binary_clipboard in ["true", "out"])
                 if data:
@@ -2493,7 +2625,7 @@ class WebRTCInput:
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE
                     )
-                    await asyncio.wait_for(process.communicate(), timeout=0.5)
+                    await self._communicate_or_kill(process, 0.5, "xdotool type co,end")
             except Exception as e: logger_webrtc_input.warning(f"Error with co,end type: {e}")
         elif msg_type == "_ebc":
             try:
@@ -2521,12 +2653,17 @@ class WebRTCInput:
             if self.upload_dir_path is None:
                 logger_webrtc_input.warning("Upload directory doesn't exits, skipping the file upload")
                 return
-            _, file, size = toks[0].split(":", 2)
+            _, b64file, size = toks[0].split(":", 2)
+            file = base64.b64decode(b64file).decode('utf-8', 'replace')
             self.handle_upload_dir(file, size)
 
         elif toks[0].startswith("FILE_UPLOAD_END:"):
-            toks = toks[0].split(":", 2)
-            logger_webrtc_input.info("Received FILE UPLOAD END: " + " ".join(toks[1:]))
+            end_toks = toks[0].split(":", 1)
+            try:
+                end_file_log = base64.b64decode(end_toks[1]).decode('utf-8', 'replace') if len(end_toks) > 1 else ""
+            except Exception:
+                end_file_log = end_toks[1] if len(end_toks) > 1 else ""
+            logger_webrtc_input.info("Received FILE UPLOAD END: " + end_file_log)
             if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
                 self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
                 logger_webrtc_input.info(f"Upload finished: {self.active_upload_target_path_conn}")
@@ -2543,7 +2680,12 @@ class WebRTCInput:
                     pass
                 del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
             self.active_upload_target_path_conn = None
-            logger_webrtc_input.info(f"Purged the file {toks[0].split(':', 2)[1]}")
+            error_toks = toks[0].split(":", 2)
+            try:
+                purged_file_log = base64.b64decode(error_toks[1]).decode('utf-8', 'replace') if len(error_toks) > 1 else ""
+            except Exception:
+                purged_file_log = error_toks[1] if len(error_toks) > 1 else ""
+            logger_webrtc_input.info(f"Purged the file {purged_file_log}")
         elif toks[0].startswith("SETTINGS"):
             settings_data = ','.join(toks[1:]) if len(toks) > 1 else ""
             logger_webrtc_input.info(f"Received SETTINGS message: {settings_data}")

@@ -169,10 +169,17 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
 
 async def generate_xrandr_gtf_modeline(res_wh_str):
     """Generates an xrandr modeline string using cvt or gtf."""
+    tool_name = "cvt"  # bind before any work so the error path can reference it
+    # Validate before the try so the clear "Invalid resolution format" error
+    # propagates instead of being re-wrapped as a misleading tool failure.
+    parts = res_wh_str.split("x")
+    if len(parts) != 2:
+        raise Exception(
+            f"Invalid resolution format for modeline generation: {res_wh_str}"
+        )
+    w_str, h_str = parts
     try:
-        w_str, h_str = res_wh_str.split("x")
         cmd = ["cvt", w_str, h_str, "60"]
-        tool_name = "cvt"
         try:
             process = await subprocess.create_subprocess_exec(
                 *cmd,
@@ -202,10 +209,6 @@ async def generate_xrandr_gtf_modeline(res_wh_str):
         raise Exception(
             f"Failed to generate modeline using {tool_name} for {res_wh_str}: {e}"
         ) from e
-    except ValueError:
-        raise Exception(
-            f"Invalid resolution format for modeline generation: {res_wh_str}"
-        )
     match = re.search(r'Modeline\s+"([^"]+)"\s+(.*)', modeline_output)
     if not match:
         raise Exception(
