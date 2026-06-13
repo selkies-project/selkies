@@ -49,6 +49,11 @@ logger.setLevel(logging.INFO)
 
 CURSOR_SIZE = 32
 
+# Default int bounds (mirror selkies.py). Min is not 0: settings without an
+# explicit min may use -1 sentinels that must not be clamped up.
+INT_SETTING_DEFAULT_MAX = 1_000_000
+INT_SETTING_DEFAULT_MIN = -1_000_000
+
 
 def get_server_settings() -> dict:
     server_settings_payload = {"settings": {}}
@@ -300,6 +305,8 @@ class WebRTCService(BaseStreamingService):
         self.media_pipeline.send_data_channel_message = (
             self.rtc_app.send_media_data_over_channel
         )
+        # Resend cursor on pipeline (re)start: a slept/woken tab clears its cursor canvas.
+        self.media_pipeline.on_pipeline_started = self.send_current_cursor
 
         # RTCApp callbacks
         self.rtc_app.request_idr_frame = self.media_pipeline.dynamic_idr_frame
@@ -362,7 +369,32 @@ class WebRTCService(BaseStreamingService):
         self.rtc_app.send_media_data_over_channel(
             "server_settings", server_settings_payload
         )
-        self.rtc_app.send_cursor_data(self.rtc_app.last_cursor_sent)
+        self.send_current_cursor()
+
+    def send_current_cursor(self) -> None:
+        """Resend the current cursor over the data channel (on channel open / video restart).
+
+        Idempotent; a slept/woken tab clears its cursor canvas and needs it back.
+        """
+        if not self.rtc_app:
+            return
+        cursor_data = None
+        if self.input_handler and hasattr(
+            self.input_handler, "get_current_cursor_data"
+        ):
+            try:
+                cursor_data = self.input_handler.get_current_cursor_data()
+            except Exception as e:
+                logger.warning(f"Failed to fetch current cursor data: {e}")
+        # Fall back to the last cursor the app sent if a fresh one isn't available.
+        if cursor_data is None:
+            cursor_data = self.rtc_app.last_cursor_sent
+        if not cursor_data:
+            return
+        try:
+            self.rtc_app.send_cursor_data(cursor_data)
+        except Exception as e:
+            logger.warning(f"Failed to send current cursor to client: {e}")
 
     async def handle_video_bitrate_change(self, bitrate: int) -> None:
         """Handle video bitrate change request."""
@@ -560,7 +592,8 @@ class WebRTCService(BaseStreamingService):
                 elif setting_def["type"] == "enum":
                     allowed_values = setting_def["meta"]["allowed"]
                     if str(client_value) in allowed_values:
-                        return client_value
+                        # Normalize to str so later equality checks don't flip on str-vs-int.
+                        return str(client_value)
                     server_default = (
                         allowed_values[0] if allowed_values else setting_def["default"]
                     )
@@ -568,6 +601,19 @@ class WebRTCService(BaseStreamingService):
                         f"Client value for '{name}' ('{client_value}') is not in the allowed list {allowed_values}. Using server default '{server_default}'."
                     )
                     return server_default
+                elif setting_def["type"] == "int":
+                    sanitized = int(client_value)
+                    meta = setting_def.get("meta", {})
+                    # Floor uses a negative default, not 0, to preserve -1 sentinels.
+                    min_val = meta.get("min", INT_SETTING_DEFAULT_MIN)
+                    # Cap client integers so they can't request resource-exhausting values.
+                    max_val = meta.get("max", INT_SETTING_DEFAULT_MAX)
+                    clamped = max(min_val, min(sanitized, max_val))
+                    if clamped != sanitized:
+                        logger.warning(
+                            f"Client value for '{name}' ({client_value}) was clamped to {clamped} (bounds: {min_val}-{max_val})."
+                        )
+                    return clamped
                 elif setting_def["type"] == "bool":
                     server_val, is_locked = server_limit
                     client_bool = str(client_value).lower() in ["true", "1"]
@@ -578,7 +624,8 @@ class WebRTCService(BaseStreamingService):
                             )
                         return server_val
                     return client_bool
-            except (ValueError, TypeError, IndexError):
+            except (ValueError, TypeError, IndexError, OverflowError):
+                # OverflowError guards JSON inf (1e999 -> int(inf)); fall back to default.
                 def_val_meta = setting_def.get("meta", {}).get("default_value")
                 return (
                     def_val_meta

@@ -6,31 +6,12 @@ import argparse
 import os
 import logging
 
-# Settings Precedence and Naming Convention
-# -----------------------------------------
-# The settings in this file follow a clear order of precedence:
-#
-# 1. Command-line (CLI) arguments (e.g., --port 9000) have the highest precedence.
-# 2. The standard environment variable (e.g., export SELKIES_PORT=9000) is used if no CLI flag is set.
-# 3. A legacy environment variable (e.g., export CUSTOM_WS_PORT=8888), if defined for the setting,
-#    is used as a FALLBACK if the standard environment variable is not set.
-# 4. The 'default' value in the SETTING_DEFINITIONS list is used if none of the above are set.
-#
-# Naming is automatically derived from the 'name' key in each setting's definition.
-# A setting with `name: 'my_setting_name'` will correspond to:
-#   - CLI Flag: --my-setting-name
-#   - Standard Environment Variable: SELKIES_MY_SETTING_NAME
-#
-# Examples and Special Handling:
-# ------------------------------
-# - Simple setting (port): `export SELKIES_PORT=9000`
-#
-# - List/Enum settings (encoder): `export SELKIES_ENCODER="jpeg,x264enc"`
-#   The first item (`jpeg`) becomes the default. The full list (`['jpeg', 'x264enc']`)
-#   becomes the allowed options. Providing a single value locks the choice.
-#
-# - Boolean locking (use_cpu): `export SELKIES_USE_CPU="true|locked"`
-#   The `|locked` suffix prevents the user from changing the value disabling the input for it.
+# Settings precedence: CLI flag > SELKIES_<NAME> env > legacy env_var > 'default'.
+# Names derive from 'name': my_setting -> --my-setting / SELKIES_MY_SETTING.
+# Special syntax:
+#   - List/enum (e.g. SELKIES_ENCODER="jpeg,x264enc"): first item is default,
+#     full list is the allowed options; a single value locks the choice.
+#   - Bool "true|locked": the |locked suffix forbids the client changing it.
 
 SETTING_DEFINITIONS = [
     # -------------------- Common Settings for both modes --------------------
@@ -45,6 +26,8 @@ SETTING_DEFINITIONS = [
         "name": "port",
         "type": "int",
         "default": 8081,
+        "min": 1,
+        "max": 65535,
         'env_var': 'CUSTOM_WS_PORT',
         "help": 'Port to start the streaming service, default: "8081"',
     },
@@ -93,8 +76,8 @@ SETTING_DEFINITIONS = [
     {
         "name": "command_enabled",
         "type": "bool",
-        "default": True,
-        "help": "Enable parsing of command websocket messages.",
+        "default": False,
+        "help": "Enable parsing of command websocket messages. Disabled by default for security; opt in with SELKIES_COMMAND_ENABLED=true (or --command-enabled true).",
     },
     {
         "name": "file_transfers",
@@ -398,6 +381,7 @@ SETTING_DEFINITIONS = [
         "name": "cert_reload_interval",
         "type": "int",
         "default": 30,
+        "min": 0,
         "help": "Seconds between checks for SSL certificate file changes when HTTPS is enabled, set to 0 to disable automatic certificate reloading",
     },
     {
@@ -524,6 +508,7 @@ SETTING_DEFINITIONS = [
         "name": "wayland_socket_index",
         "type": "int",
         "default": 0,
+        "min": 0,
         "help": "Index for the Wayland command socket (e.g. 0 for wayland-0).",
     },
     # -------------------- WEBRTC Settings --------------------
@@ -586,6 +571,8 @@ SETTING_DEFINITIONS = [
         "name": "turn_port",
         "type": "int",
         "default": 443,
+        "min": 1,
+        "max": 65535,
         "help": "TURN port when generating RTC config from shared secret or using long-term credentials",
     },
     {
@@ -628,6 +615,8 @@ SETTING_DEFINITIONS = [
         "name": "stun_port",
         "type": "int",
         "default": 19302,
+        "min": 1,
+        "max": 65535,
         "help": 'STUN port for NAT hole punching with WebRTC, change to your internal STUN/TURN server for local networks without internet, defaults to "19302"',
     },
     {
@@ -701,18 +690,23 @@ SETTING_DEFINITIONS = [
         "name": "video_packetloss_percent",
         "type": "int",
         "default": 0,
+        "min": 0,
+        "max": 100,
         "help": 'Expected packet loss percentage (percent) for ULP/RED Forward Error Correction (FEC) in video, use "0" to disable FEC, less effective because of other mechanisms including NACK/PLI, enabling not recommended if Google Congestion Control is enabled',
     },
     {
         "name": "audio_channels",
         "type": "int",
         "default": 2,
+        "min": 1,
         "help": "Number of audio channels, defaults to stereo (2 channels)",
     },
     {
         "name": "audio_packetloss_percent",
         "type": "int",
         "default": 0,
+        "min": 0,
+        "max": 100,
         "help": 'Expected packet loss percentage (percent) for ULP/RED Forward Error Correction (FEC) in audio, use "0" to disable FEC',
     },
     {
@@ -771,11 +765,8 @@ SETTING_DEFINITIONS = [
     },
 ]
 
-# Settings whose values are secrets/credential material and must NEVER be exposed
-# to clients (e.g. broadcast in the server_settings payload). Marking is centralized
-# here and surfaced via a 'sensitive' flag on the definition so every consumer that
-# iterates SETTING_DEFINITIONS can exclude them uniformly. When adding a new secret
-# setting, add its name here.
+# Secret/credential settings, flagged 'sensitive' so consumers exclude them from
+# client broadcasts. Add new secrets here.
 SENSITIVE_SETTING_NAMES = frozenset({
     "master_token",
     "https_key",
@@ -895,6 +886,15 @@ class AppSettings:
                             ]
                 elif stype == "int":
                     processed_value = int(raw_value)
+                    # Clamp to bounds from top-level ("min"/"max") or "meta" (top-level
+                    # wins); only when declared, so -1/negative sentinels are preserved.
+                    meta = setting.get("meta") or {}
+                    lo = setting.get("min", meta.get("min"))
+                    hi = setting.get("max", meta.get("max"))
+                    if lo is not None:
+                        processed_value = max(lo, processed_value)
+                    if hi is not None:
+                        processed_value = min(hi, processed_value)
                 elif stype == "str":
                     processed_value = str(raw_value)
                 elif stype == "range":
@@ -905,6 +905,15 @@ class AppSettings:
                     else:
                         locked_val = int(val_str)
                         processed_value = (locked_val, locked_val)
+                    # Clamp the meta default into the range; sort first so an inverted
+                    # range ("100-1") can't push it past the ceiling.
+                    meta = setting.get("meta")
+                    if meta is not None and "default_value" in meta:
+                        range_min, range_max = processed_value
+                        lo, hi = sorted((range_min, range_max))
+                        meta["default_value"] = max(
+                            lo, min(meta["default_value"], hi)
+                        )
             except (ValueError, TypeError, IndexError) as e:
                 logging.error(
                     f"Could not parse setting '{name}' with value '{raw_value}'. Using default. Error: {e}"
@@ -929,10 +938,10 @@ class AppSettings:
             processed["is_manual_resolution_mode"] = (True, True)
             if processed.get("manual_width", 0) <= 0:
                 processed["manual_width"] = 1024
-                logging.info("Manual width not set or invalid, defaulting to 1280.")
+                logging.info("Manual width not set or invalid, defaulting to 1024.")
             if processed.get("manual_height", 0) <= 0:
                 processed["manual_height"] = 768
-                logging.info("Manual height not set or invalid, defaulting to 720.")
+                logging.info("Manual height not set or invalid, defaulting to 768.")
         for name, value in processed.items():
             setattr(self, name, value)
 

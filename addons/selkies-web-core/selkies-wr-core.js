@@ -30,6 +30,16 @@ import { WebRTCDemoSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
 import ClipboardWorker from './clipboard-worker.js?worker'
 
+// Base64 so paths survive the ',' and ':' delimiters in FILE_UPLOAD messages.
+function b64Path(p) {
+	return btoa(unescape(encodeURIComponent(String(p))));
+}
+
+// Per-transfer id so concurrent multipart clipboard sends are not interleaved.
+let __clipboardTransferCounter = 0;
+// Mirrors the server's command_enabled; default true for older servers that don't advertise it.
+let serverCommandEnabled = true;
+
 function InitUI() {
 	let style = document.createElement('style');
 	style.textContent = `
@@ -229,6 +239,8 @@ export default function webrtc() {
 	let showStart = false;
 	let showDrawer = false;
 	// TODO: how do we want to handle the log and debug entries
+	const MAX_LOG_ENTRIES = 1000; // cap write-only buffers so they can't grow for the whole session
+	const pushCapped = (arr, v) => { arr.push(v); if (arr.length > MAX_LOG_ENTRIES) arr.shift(); };
 	let logEntries = [];
 	let debugEntries = [];
 	let status = 'connecting';
@@ -283,6 +295,10 @@ export default function webrtc() {
 	var statWatchEnabled = false;
 	var webrtc = null;
 	var input = null;
+	// track interval ids so they can be cleared on cleanup/reconnect (avoid leaks/double-start)
+	let statsLoopId = null;
+	let metricsLoopId = null;
+	let receiverIntervalIds = [];
 	let useCssScaling = false;
 	// Webrtc mode has video and audio active by default,
 	// and no microphone support yet.
@@ -338,7 +354,7 @@ export default function webrtc() {
 
 	// Set storage key based on URL
 	const urlForKey = window.location.href.split('#')[0];
-	const storageAppName = urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
+	const storageAppName = urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
 
 	const getIntParam = (key, default_value) => {
 		const prefixedKey = `${storageAppName}_${key}`;
@@ -755,9 +771,10 @@ export default function webrtc() {
 				resetToWindowResolution(...currentWindowRes);
 				sendResolutionToServer(...currentWindowRes);
 				enableAutoResize();
-				setIntParam('manualWidth', null);
-				setIntParam('manualHeight', null);
-				setBoolParam('isManualResolutionMode', false);
+				// Use snake_case keys (read at init); the old camelCase keys were never read back.
+				setIntParam('manual_width', null);
+				setIntParam('manual_height', null);
+				setBoolParam('is_manual_resolution_mode', false);
 				window.isManualResolutionMode = false;
 				break;
 			case "setManualResolution":
@@ -773,9 +790,10 @@ export default function webrtc() {
 				manualHeight = height;
 				applyManualStyle(manualWidth, manualHeight, scaleLocal);
 				sendResolutionToServer(manualWidth, manualHeight);
-				setIntParam('manualWidth', manualWidth);
-				setIntParam('manualHeight', manualHeight);
-				setBoolParam('isManualResolutionMode', true);
+				// Use snake_case keys (read at init) so the choice persists across reloads.
+				setIntParam('manual_width', manualWidth);
+				setIntParam('manual_height', manualHeight);
+				setBoolParam('is_manual_resolution_mode', true);
 				window.isManualResolutionMode = true;
 				break;
 			case "setUseCssScaling":
@@ -803,7 +821,12 @@ export default function webrtc() {
 				handleSettingsMessage(message.settings);
 				break;
 			case "command":
-				if (message.value !== null || message.value !== undefined) {
+				if (!serverCommandEnabled) {
+					console.log("Command sending suppressed: server has command_enabled=false; not sending 'cmd,'.");
+					break;
+				}
+				// && (not ||) so only a real value is forwarded, not the string "null"/"undefined".
+				if (message.value !== null && message.value !== undefined) {
 					const commandString = message.value;
 					console.log(`Received 'command' message with value: "${commandString}"`);
 					webrtc.sendDataChannelMessage(`cmd,${commandString}`);
@@ -906,9 +929,7 @@ export default function webrtc() {
 			event.target.value = null;
 			return;
 		}
-		// For every user action 'upload' an auxiliary data is dynamically created.
-		// Currently only one aux channel is allowed to operate at a given time, since the backend
-		// doesn't support simultaneous reception of multiple files, yet.
+		// One aux channel at a time: the backend can't receive multiple files concurrently yet.
 		if (!webrtc.createAuxDataChannel()) {
 			console.warn("Simultaneous uploading of files with distinct upload operations is not supported yet");
 			const errorMsg = "Please let the ongoing upload complete.";
@@ -960,7 +981,7 @@ export default function webrtc() {
 				fileSize: file.size
 				}
 			}, window.location.origin);
-			webrtc.sendDataChannelMessage(`FILE_UPLOAD_START:${pathToSend}:${file.size}`)
+			webrtc.sendDataChannelMessage(`FILE_UPLOAD_START:${b64Path(pathToSend)}:${file.size}`)
 
 			let offset = 0;
 			const reader = new FileReader();
@@ -968,7 +989,7 @@ export default function webrtc() {
 				if (e.target.error) {
 					const readErrorMsg = `File read error for ${pathToSend}: ${e.target.error}`;
 					window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: readErrorMsg }}, window.location.origin);
-					webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${pathToSend}:File read error`)
+					webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:File read error`)
 					reject(e.target.error);
 					return;
 				}
@@ -998,7 +1019,7 @@ export default function webrtc() {
 						// Data channels work asynchronously due to their underlying implementation,
 						// so we need to wait for its buffer to drain before sending the end message.
 						await webrtc.awaitForAuxBufferToDrain();
-						webrtc.sendDataChannelMessage(`FILE_UPLOAD_END:${pathToSend}`);
+						webrtc.sendDataChannelMessage(`FILE_UPLOAD_END:${b64Path(pathToSend)}`);
 						window.postMessage({
 						type: 'fileUpload',
 						payload: {
@@ -1012,14 +1033,14 @@ export default function webrtc() {
 				} catch (error) {
 					const sendErrorMsg = `error during upload of ${pathToSend}: ${error.message || error}`;
 					window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: sendErrorMsg }}, window.location.origin);
-					webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${pathToSend}:send error`);
+					webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:send error`);
 					reject(error);
 				}
 			};
 			reader.onerror = function(e) {
 				const generalReadError = `General file reader error for ${pathToSend}: ${e.target.error}`;
 				window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: generalReadError }}, window.location.origin);
-				webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${pathToSend}:General file reader error`)
+				webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:General file reader error`)
 				reject(e.target.error);
 			};
 
@@ -1084,7 +1105,7 @@ export default function webrtc() {
 				message: errorMsg
 				}
 			}, window.location.origin);
-			webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:GENERAL:Processing failed`)
+			webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${b64Path('GENERAL')}:Processing failed`)
 		}
 		webrtc.closeAuxDataChannel();
 	}
@@ -1116,7 +1137,7 @@ export default function webrtc() {
 				type: 'fileUpload',
 				payload: { status: 'error', fileName: pathToSend, message: `Error processing file: ${err.message || err}` }
 				}, window.location.origin);
-				webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${pathToSend}:Client-side file processing error`)
+				webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:Client-side file processing error`)
 			}
 		} else if (entry.isDirectory) {
 			console.log(`Processing directory: ${pathToSend}`);
@@ -1145,10 +1166,12 @@ export default function webrtc() {
 		var previousAudioJitterBufferDelay = 0.0;
 		var previousAudioJitterBufferEmittedCount = 0;
 		var statsStart = new Date().getTime() / 1000;
-		var statsLoop = setInterval(async () => {
-			webrtc.getConnectionStats().then((stats) => {
-				statWatchEnabled = true;
-				var now = new Date().getTime() / 1000;
+		if (statsLoopId !== null) return; // already running; non-racy gate
+		statWatchEnabled = true; // set synchronously before async work
+		statsLoopId = setInterval(async () => {
+			var now = new Date().getTime() / 1000;
+			try {
+				const stats = await webrtc.getConnectionStats();
 				connectionStat = {};
 
 				// Connection latency in milliseconds
@@ -1186,7 +1209,6 @@ export default function webrtc() {
 				// Format latency
 				connectionStat.connectionLatency =  Math.max(connectionStat.connectionVideoLatency, connectionStat.connectionAudioLatency);
 
-				statsStart = now;
 				window.fps = connectionStat.connectionFrameRate;
 				window.network_stats = {
 					"bandwidth_mbps": (parseInt(stats.general.availableReceiveBandwidth) / 1e+6),
@@ -1194,7 +1216,13 @@ export default function webrtc() {
 				};
 				window.video_bitrate = connectionStat.connectionVideoBitrate;
 				if (enableWebrtcStatics) webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
-			});
+			} catch (e) {
+				// webrtc may be null after cleanup; log anything unexpected for observability
+				if (webrtc !== null) console.warn("Error collecting connection stats:", e);
+			} finally {
+				// Always re-anchor the window so a mid-body throw doesn't widen the next bitrate interval
+				statsStart = now;
+			}
 		// Stats refresh interval (1000 ms)
 		}, 1000);
 	}
@@ -1319,24 +1347,25 @@ export default function webrtc() {
 				}
 			} else {
 				console.log(`Sending large clipboard data (${totalSize} bytes) in multiple parts.`);
+				const tid = ++__clipboardTransferCounter;
 				if (mimeType === 'text/plain') {
-					webrtc.sendDataChannelMessage(`cws,${totalSize}`);
+					webrtc.sendDataChannelMessage(`cws,${tid},${totalSize}`);
 				} else {
-					webrtc.sendDataChannelMessage(`cbs,${mimeType},${totalSize}`);
+					webrtc.sendDataChannelMessage(`cbs,${tid},${mimeType},${totalSize}`);
 				}
 				for (let offset = 0; offset < b64Size; offset += CLIPBOARD_CHUNK_SIZE) {
 					const b64Chunk = fullBase64.substring(offset, offset + CLIPBOARD_CHUNK_SIZE);
 					if (mimeType === 'text/plain') {
-						webrtc.sendDataChannelMessage(`cwd,${b64Chunk}`);
+						webrtc.sendDataChannelMessage(`cwd,${tid},${b64Chunk}`);
 					} else {
-						webrtc.sendDataChannelMessage(`cbd,${b64Chunk}`);
+						webrtc.sendDataChannelMessage(`cbd,${tid},${b64Chunk}`);
 					}
 					await new Promise(resolve => setTimeout(resolve, 10));
 				}
 				if (mimeType === 'text/plain') {
-					webrtc.sendDataChannelMessage('cwe');
+					webrtc.sendDataChannelMessage(`cwe,${tid}`);
 				} else {
-					webrtc.sendDataChannelMessage('cbe');
+					webrtc.sendDataChannelMessage(`cbe,${tid}`);
 				}
 				console.log('Finished sending multi-part clipboard data.');
 			}
@@ -1590,11 +1619,11 @@ export default function webrtc() {
 			// assign the handlers to respective objects
 			// TODO: Need to handle the logEntries and DebugEntries list
 			signaling.onstatus = (message) => {
-				logEntries.push(applyTimestamp("[signaling] " + message));
+				pushCapped(logEntries, applyTimestamp("[signaling] " + message));
 				console.log("[signaling] " + message);
 			};
 			signaling.onerror = (message) => {
-				logEntries.push(applyTimestamp("[signaling] [ERROR] " + message))
+				pushCapped(logEntries, applyTimestamp("[signaling] [ERROR] " + message))
 				console.log("[signaling ERROR] " + message);
 			};
 
@@ -1615,17 +1644,17 @@ export default function webrtc() {
 
 			// Send webrtc status and error messages to logs.
 			webrtc.onstatus = (message) => {
-				logEntries.push(applyTimestamp("[webrtc] " + message));
+				pushCapped(logEntries, applyTimestamp("[webrtc] " + message));
 				console.log("[webrtc] " + message);
 			};
 			webrtc.onerror = (message) => {
-				logEntries.push(applyTimestamp("[webrtc] [ERROR] " + message));
+				pushCapped(logEntries, applyTimestamp("[webrtc] [ERROR] " + message));
 				console.log("[webrtc] [ERROR] " + message);
 			};
 
 			if (debug) {
-				signaling.ondebug = (message) => { debugEntries.push("[signaling] " + message); };
-				webrtc.ondebug = (message) => { debugEntries.push(applyTimestamp("[webrtc] " + message)) };
+				signaling.ondebug = (message) => { pushCapped(debugEntries, "[signaling] " + message); };
+				webrtc.ondebug = (message) => { pushCapped(debugEntries, applyTimestamp("[webrtc] " + message)) };
 			}
 
 			webrtc.ongpustats = (stats) => {
@@ -1637,6 +1666,9 @@ export default function webrtc() {
 				videoConnected = state;
 				if (videoConnected === "connected") {
 					// Repeatedly emit minimum latency target
+					// clear stale receiver loops before re-creating on a 'connected' transition
+					receiverIntervalIds.forEach(clearInterval);
+					receiverIntervalIds = [];
 					webrtc.peerConnection.getReceivers().forEach((receiver) => {
 						let intervalLoop = setInterval(async () => {
 							if (receiver.track.readyState !== "live" || receiver.transport.state !== "connected") {
@@ -1646,6 +1678,7 @@ export default function webrtc() {
 								receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0;
 							}
 						}, 15);
+						receiverIntervalIds.push(intervalLoop);
 					});
 					status = state;
 					if (!statWatchEnabled) {
@@ -1687,7 +1720,8 @@ export default function webrtc() {
 				sendClientPersistedSettings();
 
 				// Send client-side metrics over data channel every 5 seconds
-				setInterval(async () => {
+				if (metricsLoopId !== null) clearInterval(metricsLoopId); // avoid duplicate on data channel reopen
+				metricsLoopId = setInterval(async () => {
 					if (connectionStat.connectionFrameRate === parseInt(connectionStat.connectionFrameRate, 10)) {
 						webrtc.sendDataChannelMessage(`_f,${connectionStat.connectionFrameRate}`);
 					}
@@ -1788,6 +1822,10 @@ export default function webrtc() {
 				}
 				console.log("Received server settings payload:", obj.settings);
 				const changes = sanitizeAndStoreSettings(obj.settings);
+				// Gate 'cmd,' on the server-advertised value, not window.command_enabled
+				// (a persisted client pref); absent/malformed => true for older servers.
+				const ce = obj.settings && obj.settings.command_enabled;
+				serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
 				window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
 				if (Object.keys(changes).length > 0) {
 					// TODO: server-side handling of settings updates
@@ -1800,10 +1838,10 @@ export default function webrtc() {
 					const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value, 10) : 0;
 					if (serverWidth > 0 && serverHeight > 0) {
 						console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
-						window.is_manual_resolution_mode = true;
+						window.isManualResolutionMode = true;
 						manualWidth = serverWidth;
 						manualHeight = serverHeight;
-						applyManualStyle(manualWidth, manualHeight, scaleLocallyManual);
+						applyManualStyle(manualWidth, manualHeight, scaleLocal);
 					} else {
 						console.warn("Server dictated manual mode but did not provide valid dimensions.");
 					}
@@ -1863,9 +1901,9 @@ export default function webrtc() {
 					}
 
 					if (config.iceServers.length > 1) {
-							debugEntries.push(applyTimestamp("using TURN servers: " + config.iceServers[1].urls.join(", ")));
+							pushCapped(debugEntries, applyTimestamp("using TURN servers: " + config.iceServers[1].urls.join(", ")));
 					} else {
-							debugEntries.push(applyTimestamp("no TURN servers found."));
+							pushCapped(debugEntries, applyTimestamp("no TURN servers found."));
 					}
 					webrtc.rtcPeerConfig = config;
 					webrtc.connect();
@@ -1947,6 +1985,11 @@ export default function webrtc() {
 			videoConnected = "";
 			audioConnected = "";
 			statWatchEnabled = false;
+			// clear polling timers so they don't leak/fire on null webrtc after reconnect
+			if (statsLoopId !== null) { clearInterval(statsLoopId); statsLoopId = null; }
+			if (metricsLoopId !== null) { clearInterval(metricsLoopId); metricsLoopId = null; }
+			receiverIntervalIds.forEach(clearInterval);
+			receiverIntervalIds = [];
 			webrtc = null;
 			input = null;
 			useCssScaling = false;

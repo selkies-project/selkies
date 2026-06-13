@@ -846,7 +846,10 @@ function Sidebar() {
     const s_audio_bitrate = serverSettings.audio_bitrate;
     if (s_audio_bitrate) {
       const stored = getStoredInt("audio_bitrate");
-      const final = s_audio_bitrate.allowed.includes(stored) ? stored : s_audio_bitrate.value;
+      // allowed holds strings; compare as string and keep result numeric
+      let final = s_audio_bitrate.allowed.includes(String(stored)) ? stored : parseInt(s_audio_bitrate.value, 10);
+      // Guard NaN so a bad server value can't persist and break the slider.
+      if (Number.isNaN(final)) final = DEFAULT_AUDIO_BITRATE;
       setAudioBitrate(final);
       localStorage.setItem(getPrefixedKey("audio_bitrate"), final);
     }
@@ -1427,7 +1430,9 @@ function Sidebar() {
     debouncedPostSetting({ video_bitrate: selectedVideoBitrate})
   };
   const handleAudioBitrateChange = (event) => {
-    const selectedAudioBitrate = parseInt(event.target.value, 10);
+    // Fall back to default on a non-numeric value so we never push NaN.
+    let selectedAudioBitrate = parseInt(event.target.value, 10);
+    if (Number.isNaN(selectedAudioBitrate)) selectedAudioBitrate = DEFAULT_AUDIO_BITRATE;
     setAudioBitrate(selectedAudioBitrate)
     debouncedPostSetting({ audio_bitrate: selectedAudioBitrate})
   }
@@ -1667,15 +1672,36 @@ function Sidebar() {
     const newMode = event.target.value;
     console.log("Change of stream mode requested:", newMode);
     try {
-      const response = await fetch(`${getRoutePrefix()}/switch`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ mode: newMode }),
-      });
+      // /switch is gated on the master token (Bearer) when set, or Basic creds via
+      // same-origin. With Basic Auth off, the Bearer is required but the dashboard
+      // isn't given it: on a 401 prompt once, keep it in sessionStorage, and retry.
+      const MASTER_TOKEN_KEY = "selkies_master_token";
+      const doSwitch = () => {
+        const headers = { "Content-Type": "application/json" };
+        let storedToken = null;
+        try { storedToken = sessionStorage.getItem(MASTER_TOKEN_KEY); } catch (_) {}
+        if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;
+        return fetch(`${getRoutePrefix()}/switch`, {
+          method: "POST",
+          headers,
+          credentials: "same-origin",
+          body: JSON.stringify({ mode: newMode }),
+        });
+      };
+      let response = await doSwitch();
+      if (response.status === 401) {
+        const entered = (typeof window !== "undefined" && window.prompt)
+          ? window.prompt("Switching the stream mode requires the Selkies master token:")
+          : null;
+        if (entered && entered.trim()) {
+          try { sessionStorage.setItem(MASTER_TOKEN_KEY, entered.trim()); } catch (_) {}
+          response = await doSwitch();
+        }
+      }
 
       if (!response.ok) {
+        // Drop a stale token on 401 so the next attempt re-prompts.
+        if (response.status === 401) { try { sessionStorage.removeItem(MASTER_TOKEN_KEY); } catch (_) {} }
         throw new Error(`Request failed with status ${response.status}`);
       }
       const data = await response.json();

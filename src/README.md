@@ -198,7 +198,7 @@ The table below lists all available server settings.
 | `SELKIES_CLIPBOARD_ENABLED` | `--clipboard-enabled` | `True` | Enable clipboard synchronization. |
 | `SELKIES_CLIPBOARD_IN_ENABLED` | `--clipboard-in-enabled` | `True` | Enable client-to-server clipboard synchronization (ignored if `SELKIES_CLIPBOARD_ENABLED` is false). |
 | `SELKIES_CLIPBOARD_OUT_ENABLED` | `--clipboard-out-enabled` | `True` | Enable server-to-client clipboard synchronization (ignored if `SELKIES_CLIPBOARD_ENABLED` is false). |
-| `SELKIES_COMMAND_ENABLED` | `--command-enabled` | `True` | Enable parsing of command websocket messages. |
+| `SELKIES_COMMAND_ENABLED` | `--command-enabled` | `False` | Enable parsing of `command` websocket messages. Disabled by default for security; opt in explicitly. |
 | `SELKIES_FILE_TRANSFERS` | `--file-transfers` | `'upload,download'` | Allowed file transfer directions (comma-separated: "upload,download"). Set to "" or "none" to disable. |
 | `SELKIES_ENCODER` | `--encoder` | `'x264enc'` | The default video encoder. |
 | `SELKIES_FRAMERATE` | `--framerate` | `'8-120'` | Allowed framerate range or a fixed value. |
@@ -223,7 +223,7 @@ The table below lists all available server settings.
 | `SELKIES_PORT` (or `CUSTOM_WS_PORT`) | `--port` | `8082` | Port for the data websocket server. |
 | `SELKIES_CONTROL_PORT` | `--control-port` | `8083` | Port for the internal control plane API, used for managing access tokens when in secure mode. |
 | `SELKIES_MASTER_TOKEN` | `--master-token` | `''` | Master token to enable secure mode. If set, clients must authenticate using tokens provided via the control plane API. |
-| `SELKIES_DRI_NODE` (or `DRI_NODE`) | `--dri-node` | `''` | Path to the DRI render node for VA-API. |
+| `SELKIES_DRI_NODE` (or `DRI_NODE`) | `--dri-node` | `''` | Path to the DRI render node for VA-API. When unset, the GPU/render node is auto-selected (delegated to pixelflux); set this to pin a specific node. |
 | `SELKIES_AUDIO_DEVICE_NAME` | `--audio-device-name` | `'output.monitor'` | Audio device name for pcmflux capture. |
 | `SELKIES_WATERMARK_PATH` (or `WATERMARK_PNG`) | `--watermark-path` | `''` | Absolute path to the watermark PNG file. |
 | `SELKIES_WATERMARK_LOCATION` (or `WATERMARK_LOCATION`) | `--watermark-location` | `-1` | Watermark location enum (0-6). |

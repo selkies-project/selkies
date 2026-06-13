@@ -232,11 +232,7 @@ class CentralizedStreamServer:
 
     @staticmethod
     def _check_master_token(auth_header, master_token) -> bool:
-        """Constant-time check of a `Bearer <master_token>` Authorization header.
-
-        Compares as UTF-8 bytes so non-ASCII input cannot raise from
-        hmac.compare_digest, and is timing-safe (no short-circuit on the secret).
-        """
+        """Timing-safe check of a `Bearer <master_token>` header (UTF-8 bytes so non-ASCII is safe)."""
         if not auth_header or not auth_header.startswith("Bearer "):
             return False
         parts = auth_header.split()
@@ -256,25 +252,27 @@ class CentralizedStreamServer:
         mode = supervisor.current_mode
         auth_header = request.headers.get("Authorization")
         path = request.path
-        token_path = path.endswith("/tokens")
-        if (
-            mode == self.STREAMING_MODE_WEBSOCKETS
-            and settings.master_token
-            and token_path
-        ):
+        # Match the exact route, not a suffix, so /foo/tokens isn't treated as control-plane.
+        api_prefix = (
+            ("/" + settings.subfolder.strip("/"))
+            if settings.subfolder
+            else ""
+        )
+        token_path = path == f"{api_prefix}/tokens"
+        # Gate /tokens on the master token whenever set, independent of streaming mode.
+        if settings.master_token and token_path:
             if not self._check_master_token(auth_header, settings.master_token):
                 return web.Response(status=401, text="Unauthorized")
             return await handler(request)
 
-        # The state-changing /switch endpoint requires the master token when
-        # Basic Auth is disabled. /status stays open: it only reports the
-        # active mode, and the dashboard probes it without credentials at
-        # page load to pick the right client core.
-        is_control_path = path.endswith("/switch")
-        if settings.master_token and not settings.enable_basic_auth[0] and is_control_path:
-            if not self._check_master_token(auth_header, settings.master_token):
+        # /switch (when master_token set): accept a Bearer master token, else fall
+        # through to the Basic check if Basic Auth is on, else 401. (/status stays open.)
+        is_control_path = path == f"{api_prefix}/switch"
+        if settings.master_token and is_control_path:
+            if self._check_master_token(auth_header, settings.master_token):
+                return await handler(request)
+            if not settings.enable_basic_auth[0]:
                 return web.Response(status=401, text="Unauthorized")
-            return await handler(request)
 
         # Authentication flow for regular Selkies deployment
         if not settings.enable_basic_auth[0]:
@@ -293,8 +291,7 @@ class CentralizedStreamServer:
             if ":" not in auth_decoded:
                 return web.Response(status=401, text="Invalid Credentials")
             username, password = auth_decoded.split(":", 1)
-            # Compare as UTF-8 bytes so non-ASCII credentials don't raise from
-            # hmac.compare_digest (which rejects non-ASCII str operands).
+            # Compare as UTF-8 bytes; hmac.compare_digest rejects non-ASCII str.
             is_valid = hmac.compare_digest(
                 username.encode("utf-8"), str(settings.basic_auth_user).encode("utf-8")
             ) and hmac.compare_digest(
@@ -371,9 +368,8 @@ class CentralizedStreamServer:
         await self.services[self.current_mode].stop()
         if self.active_task:
             try:
-                # Give the service's own teardown room to finish (it can include
-                # several ~2s gamepad-close waits) before forcing a cancel that
-                # would interrupt cleanup mid-way and leak resources.
+                # Let the service teardown finish (can include ~2s gamepad-close waits)
+                # before a forced cancel that would leak resources.
                 await asyncio.wait_for(self.active_task, timeout=15)
             except asyncio.TimeoutError:
                 logger.warning(

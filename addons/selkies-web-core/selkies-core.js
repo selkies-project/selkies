@@ -12,8 +12,55 @@ const STREAM_MODE_WEBSOCKETS = "websockets";
 
 // Set storage key based on URL
 const urlForKey = window.location.href.split('#')[0];
-const storageAppName = urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
+const storageAppName = urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
 const getPrefixedKey = (key) => {return `${storageAppName}_${key}`}
+
+// One-time migration of localStorage settings to the corrected prefix: an earlier
+// regex bug (`.-_` read as a char range) left a different prefix, orphaning saved settings.
+(function migrateStorageKeys() {
+    try {
+        if (typeof localStorage === 'undefined') return;
+        // Legacy prefix: old sanitizer kept a-z and 0x2E-0x5F; char codes avoid a regex range.
+        let oldAppName = '';
+        for (let i = 0; i < urlForKey.length; i++) {
+            const c = urlForKey.charCodeAt(i);
+            oldAppName += ((c >= 0x2E && c <= 0x5F) || (c >= 0x61 && c <= 0x7A)) ? urlForKey[i] : '_';
+        }
+        // No-op when the buggy regex produced the same prefix (nothing to migrate).
+        if (oldAppName === storageAppName) return;
+        const migratedFlagKey = `${storageAppName}_storage_key_migrated`;
+        if (localStorage.getItem(migratedFlagKey) !== null) return; // already migrated
+
+        const oldPrefix = `${oldAppName}_`;
+        const newPrefix = `${storageAppName}_`;
+
+        // Snapshot keys first; we mutate localStorage inside the loop.
+        const allKeys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k !== null) allKeys.push(k);
+        }
+        // Only migrate if NEW-prefixed keys are absent but OLD-prefixed keys exist,
+        // so we never clobber settings the user already saved under the new prefix.
+        const hasNew = allKeys.some((k) => k.startsWith(newPrefix));
+        const oldKeys = allKeys.filter((k) => k.startsWith(oldPrefix));
+        if (!hasNew && oldKeys.length > 0) {
+            for (const oldKey of oldKeys) {
+                const suffix = oldKey.slice(oldPrefix.length);
+                const newKey = newPrefix + suffix;
+                if (localStorage.getItem(newKey) === null) {
+                    const val = localStorage.getItem(oldKey);
+                    if (val !== null) localStorage.setItem(newKey, val);
+                }
+            }
+            console.log(`Migrated ${oldKeys.length} setting(s) from old storage prefix "${oldPrefix}" to "${newPrefix}".`);
+        }
+        // Guard so this runs at most once, regardless of whether anything was copied.
+        localStorage.setItem(migratedFlagKey, '1');
+    } catch (e) {
+        console.warn('Storage key migration skipped due to error:', e);
+    }
+})();
 
 let mode = null;
 

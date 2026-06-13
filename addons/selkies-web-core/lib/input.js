@@ -1073,7 +1073,9 @@ const KeyboardUtil = {
             if ((location === undefined) || (location > 3)) {
                 location = 0;
             }
-            if (key === 'Meta') {
+            if (key === 'Meta' && (browser.isMac() || browser.isIOS())) {
+                // macOS-only: Option reports key='Meta'. On Linux this remap
+                // breaks xkb Ctrl/Alt swaps (AltLeft must not force Meta).
                 let code = KeyboardUtil.getKeyCode(evt);
                 if (code === 'AltLeft') { return KeyTable.XK_Meta_L; }
                 if (code === 'AltRight') { return KeyTable.XK_Meta_R; }
@@ -1158,6 +1160,10 @@ export class Input {
         this._EVENT_MARKER = '_GUAC_KEYBOARD_HANDLED_BY_' + this._guacKeyboardID;
 
         this._keyDownList = {}; // Maps event.code -> keysym
+        // While any key is held, heartbeat the held keysyms so the server can
+        // auto-release them if a key-up is lost to congestion (stuck keys).
+        this._keyHeartbeatTimer = null;
+        this._KEY_HEARTBEAT_INTERVAL = 100;
         this._altGrArmed = false;
         this._altGrTimeout = null;
         this._altGrCtrlTime = 0;
@@ -1313,13 +1319,53 @@ export class Input {
         }
         
         this.send((down ? "kd," : "ku,") + finalKeysymToSend);
+        if (down) this._startKeyHeartbeat();
+        else if (Object.keys(this._keyDownList).length === 0) this._stopKeyHeartbeat();
+    }
+
+    _startKeyHeartbeat() {
+        if (this._keyHeartbeatTimer !== null) return;
+        this._keyHeartbeatTimer = setInterval(() => {
+            const held = Object.values(this._keyDownList);
+            if (held.length === 0) { this._stopKeyHeartbeat(); return; }
+            this.send("kh," + held.join(","));
+        }, this._KEY_HEARTBEAT_INTERVAL);
+    }
+
+    _stopKeyHeartbeat() {
+        if (this._keyHeartbeatTimer !== null) {
+            clearInterval(this._keyHeartbeatTimer);
+            this._keyHeartbeatTimer = null;
+        }
+    }
+
+    // Synthetic press+release (kd/ku direct) without touching _keyDownList or the
+    // heartbeat, so momentary paths (Unidentified text, ISO_Level3_Shift, CapsLock,
+    // JP toggles) don't churn the setInterval per char. Safe: never Numpad, released same call.
+    _sendMomentaryKey(keysym) {
+        if (keysym === null) return;
+        this.send("kd," + keysym);
+        this.send("ku," + keysym);
     }
 
     resetKeyboard() {
+        this._stopKeyHeartbeat();
+        // Cancel the pending Windows-AltGr timer so it can't fire after a reset and
+        // synthesize a stray Control keydown while the page is hidden/detached.
+        clearTimeout(this._altGrTimeout);
+        this._altGrArmed = false;
         for (const code in this._keyDownList) {
             this._sendKeyEvent(this._keyDownList[code], code, false);
         }
         this._keyDownList = {};
+    }
+
+    _onVisibilityChange() {
+        // Release held keys when hidden: throttled heartbeats in a backgrounded tab can
+        // exceed the server's stale-key window (and no key should stay held while hidden).
+        if (document.visibilityState === 'hidden') {
+            this.resetKeyboard();
+        }
     }
 
     _guac_markEvent(e) {
@@ -1390,8 +1436,7 @@ export class Input {
         }
 
         if (code === 'Unidentified' && keysym) {
-            this._sendKeyEvent(keysym, code, true);
-            this._sendKeyEvent(keysym, code, false);
+            this._sendMomentaryKey(keysym);
             _stopEvent(event);
             return;
         }
@@ -1421,9 +1466,10 @@ export class Input {
         }
 
         if ((browser.isMac() || browser.isIOS()) && keysym === KeyTable.XK_ISO_Level3_Shift) {
+            // macOS Option(Right) -> ISO_Level3_Shift sends its keyup unreliably, so
+            // holding the bit leaves AltGr stuck. Emit a momentary press+release instead.
             console.log(`macOS: AltRight pressed, sending ISO_Level3_Shift momentarily`);
-            this._sendKeyEvent(KeyTable.XK_ISO_Level3_Shift, code, true);
-            this._sendKeyEvent(KeyTable.XK_ISO_Level3_Shift, code, false);
+            this._sendMomentaryKey(KeyTable.XK_ISO_Level3_Shift);
             _stopEvent(event);
             return;
         }
@@ -1433,8 +1479,7 @@ export class Input {
         }
 
         if ((browser.isMac() || browser.isIOS()) && (code === 'CapsLock')) {
-            this._sendKeyEvent(KeyTable.XK_Caps_Lock, 'CapsLock', true);
-            this._sendKeyEvent(KeyTable.XK_Caps_Lock, 'CapsLock', false);
+            this._sendMomentaryKey(KeyTable.XK_Caps_Lock);
             _stopEvent(event);
             return;
         }
@@ -1444,8 +1489,7 @@ export class Input {
             KeyTable.XK_Katakana, KeyTable.XK_Hiragana, KeyTable.XK_Romaji
         ];
         if (browser.isWindows() && jpBadKeys.includes(keysym)) {
-            this._sendKeyEvent(keysym, code, true);
-            this._sendKeyEvent(keysym, code, false);
+            this._sendMomentaryKey(keysym);
             _stopEvent(event);
             return;
         }
@@ -1587,8 +1631,10 @@ export class Input {
             const codepoint = text.charCodeAt(i);
             const keysym = Keysyms.lookup(codepoint);
             if (keysym) {
-                this._sendKeyEvent(keysym, 'Unidentified', true);
-                this._sendKeyEvent(keysym, 'Unidentified', false);
+                // Synthetic text: send kd/ku directly, not via _sendKeyEvent, to skip
+                // per-character heartbeat churn.
+                this.send("kd," + keysym);
+                this.send("ku," + keysym);
             }
         }
     }
@@ -2240,20 +2286,12 @@ export class Input {
         const button = (direction === 'up') ? 4 : 3;
         const mask = 1 << button;
 
-        // In trackpad mode, scroll is a relative event with NO pointer motion.
-        // We must always use m2 with a 0,0 delta to prevent the cursor from moving.
+        // Pulse (press+release), not a held bit: the server scrolls on each 0->1
+        // edge, so a held bit would coalesce rapid wheel events. Build both halves
+        // from buttonMask so a held Back/Forward (shared bits 3/4) isn't released.
         const mtype = "m2";
-        const x = 0;
-        const y = 0;
-
-        this.buttonMask |= mask;
-        this.send([ mtype, x, y, this.buttonMask, magnitude ].join(","));
-        setTimeout(() => {
-             if ((this.buttonMask & mask) !== 0) {
-                this.buttonMask &= ~mask;
-                this.send([ mtype, x, y, this.buttonMask, magnitude ].join(","));
-             }
-        }, 10);
+        this.send([ mtype, 0, 0, this.buttonMask | mask, magnitude ].join(","));
+        this.send([ mtype, 0, 0, this.buttonMask, magnitude ].join(","));
     }
 
     _triggerHorizontalMouseWheel(direction, magnitude) {
@@ -2261,19 +2299,11 @@ export class Input {
         const button = (direction === 'left') ? 6 : 7;
         const mask = 1 << button;
 
-        // In trackpad mode, scroll is a relative event with NO pointer motion.
+        // Same pulse strategy as _triggerMouseWheel (release half restores the mask
+        // so a held button on a shared bit isn't released).
         const mtype = "m2";
-        const x = 0;
-        const y = 0;
-
-        this.buttonMask |= mask;
-        this.send([ mtype, x, y, this.buttonMask, magnitude ].join(","));
-        setTimeout(() => {
-             if ((this.buttonMask & mask) !== 0) {
-                this.buttonMask &= ~mask;
-                this.send([ mtype, x, y, this.buttonMask, magnitude ].join(","));
-             }
-        }, 10);
+        this.send([ mtype, 0, 0, this.buttonMask | mask, magnitude ].join(","));
+        this.send([ mtype, 0, 0, this.buttonMask, magnitude ].join(","));
     }
 
     _dropThreshold() {
@@ -2512,6 +2542,8 @@ export class Input {
         this.listeners_context.push(addListener(window, 'keydown', this._handleKeyDown, this, true));
         this.listeners_context.push(addListener(window, 'keyup', this._handleKeyUp, this, true));
         this.listeners_context.push(addListener(window, 'blur', this.resetKeyboard, this));
+        this.listeners_context.push(addListener(document, 'visibilitychange', this._onVisibilityChange, this));
+        this.listeners_context.push(addListener(window, 'pagehide', this.resetKeyboard, this));
         this.listeners_context.push(addListener(this.keyboardInputAssist, 'input', this._handleMobileInput, this));
         this.listeners_context.push(addListener(document, 'mousedown', this._handleOutsideClick, this, true));
         this.listeners_context.push(addListener(document, 'touchstart', this._handleOutsideClick, this, true));
@@ -2564,6 +2596,7 @@ export class Input {
     }
 
     detach_context() {
+        this._stopKeyHeartbeat();
         removeListeners(this.listeners_context);
         this.listeners_context = [];
         this.element.style.cursor = 'auto';
