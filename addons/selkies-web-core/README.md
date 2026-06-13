@@ -16,6 +16,25 @@ Before interacting with the client via `postMessage`, it must first connect to t
     *   `#shared` or `#playerX`: Assigns a specific controller slot or viewer role.
     *   `#display2-<position>`: Configures the client to act as a secondary monitor extending the primary display.
 
+### URL Query Parameters
+
+*   **`token`** — Access token for Token Authentication Mode (see above).
+*   **`offscreen_worker`** — `false` disables the OffscreenCanvas worker rendering path (see *Video Rendering* below). Defaults to `true`, and only takes effect on browsers that lack a video track generator.
+
+---
+
+## Video Rendering & Browser Support
+
+The WebSocket client renders decoded H.264 frames through a zero-copy sink wherever the browser provides one, keeping decoded frames off the main thread:
+
+*   **Chromium:** `MediaStreamTrackGenerator` feeding a `<video>` element.
+*   **Safari / others:** `VideoTrackGenerator` (with a canvas fallback).
+*   **Firefox** (no track generator): decoded `VideoFrame`s are transferred to a Web Worker that composites them on an `OffscreenCanvas`. This path is on by default and can be disabled with `?offscreen_worker=false`.
+
+The H.264 decoder is configured from the profile/level parsed from the stream's actual SPS (on Chromium) rather than a heuristic guess. The client can also ask the server for a fresh keyframe (`REQUEST_KEYFRAME`), e.g. after its decoder is recreated. The server-rendered cursor is automatically restored after a tab is backgrounded and woken (both WebSocket and WebRTC modes).
+
+Held keys are protected against loss: the client heartbeats each held key so the server can auto-release any key whose key-up was dropped, preventing stuck keys after network congestion or a tab switch.
+
 ---
 
 ## 1. Window Messaging API (Dashboard -> Client)
@@ -88,7 +107,7 @@ All messages sent to the client must be JavaScript objects with a `type` propert
         *   `encoder` (String): Video encoder (e.g., `'x264enc'`, `'jpeg'`, `'x264enc-striped'`).
         *   `audio_bitrate` (Number): Audio bitrate in bps (e.g., 320000).
         *   `scaling_dpi` (Number): Custom DPI scaling for the remote desktop.
-        *   `enable_binary_clipboard` (Boolean): Enables image copy/pasting.
+        *   `enable_binary_clipboard` (Boolean): Enables image (binary) copy/pasting. The matching `clipboard_in_enabled` / `clipboard_out_enabled` flags toggle paste-into-session and copy-from-session.
         *   *Advanced Toggles:* `use_cpu`, `h264_fullcolor`, `h264_streaming_mode`, `jpeg_quality`, `use_paint_over_quality`.
 *   **`clipboardUpdateFromUI`**
     *   **Payload:** `{ type: 'clipboardUpdateFromUI', text: <string> }`
@@ -143,6 +162,7 @@ The client pushes state changes and telemetry back to the parent window (`window
 *   **`clipboardContentUpdate`**
     *   **Payload:** `{ type: 'clipboardContentUpdate', text: <string> }`
     *   **Description:** Sent when the client receives new clipboard content from the server. If the payload was an image (binary clipboard), the text will read `"Image (mime/type) received from session and copied to clipboard."`
+    *   **Note:** On `Ctrl/Cmd + C` the client sends a `REQUEST_CLIPBOARD` message to fetch the server's current clipboard, so copy-from-session reflects the latest server contents. Large contents and file paths (base64-encoded) are transferred in multiple parts automatically.
 
 ### File Uploads
 *   **`fileUpload`**

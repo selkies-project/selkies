@@ -169,10 +169,16 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
 
 async def generate_xrandr_gtf_modeline(res_wh_str):
     """Generates an xrandr modeline string using cvt or gtf."""
+    tool_name = "cvt"  # bind before any work so the error path can reference it
+    # Validate WxH (two positive ints) before invoking cvt/gtf for a clear error.
+    parts = res_wh_str.split("x")
+    if len(parts) != 2 or not all(p.isdigit() and int(p) > 0 for p in parts):
+        raise Exception(
+            f"Invalid resolution format for modeline generation: {res_wh_str}"
+        )
+    w_str, h_str = parts
     try:
-        w_str, h_str = res_wh_str.split("x")
         cmd = ["cvt", w_str, h_str, "60"]
-        tool_name = "cvt"
         try:
             process = await subprocess.create_subprocess_exec(
                 *cmd,
@@ -202,10 +208,6 @@ async def generate_xrandr_gtf_modeline(res_wh_str):
         raise Exception(
             f"Failed to generate modeline using {tool_name} for {res_wh_str}: {e}"
         ) from e
-    except ValueError:
-        raise Exception(
-            f"Invalid resolution format for modeline generation: {res_wh_str}"
-        )
     match = re.search(r'Modeline\s+"([^"]+)"\s+(.*)', modeline_output)
     if not match:
         raise Exception(
@@ -284,9 +286,8 @@ async def _run_mate_gsettings(dpi_value, logger):
     # MATE: org.mate.interface window-scaling-factor
     try:
         target_mate_scale_float = float(dpi_value) / 96.0
-        # For fractional scales (e.g., 1.5), MATE's integer window-scaling-factor
-        # should be 1. We rely on font DPI / text scaling for the fractional part.
-        # If it's an integer scale (e.g., 2.0 for 192 DPI), then use that integer.
+        # window-scaling-factor is integer-only: use it for whole scales, else 1
+        # (fractional part handled via font DPI).
         if target_mate_scale_float == int(target_mate_scale_float):
             mate_window_scaling_factor = int(target_mate_scale_float)
         else:

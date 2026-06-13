@@ -434,9 +434,7 @@ class RTCApp:
     def update_rtc_config(self, stun_servers: List[str], turn_servers: List[str]):
         """Updates the RTC configuration with new STUN and TURN servers."""
 
-        # TODO: Changing ICE servers on an existing peer connection is not supported by aiortc.
-        # A new peer connection would need to be created for the changes to take effect, or
-        # renegotiation logic would need to be implemented in aiortc.
+        # TODO: aiortc can't change ICE servers on a live peer connection (needs a new one).
         self.stun_servers = stun_servers
         self.turn_servers = turn_servers
         logger.warning("aiortc doesn't support ICE servers updation yet")
@@ -592,6 +590,16 @@ class RTCApp:
             logger.info("Peer connection established", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "closed":
             await self.on_peer_connection_lost(client_peer_id, client_type)
+            # Pop by identity, not key: a reconnect may have re-registered the same
+            # client_peer_id during the await above, and we must not orphan it.
+            removed = None
+            if self.peer_connections.get(client_peer_id) is peer_obj:
+                removed = self.peer_connections.pop(client_peer_id, None)
+            if removed is not None and removed.get('client_type') == ClientType.CONTROLLER:
+                self.media_relay = None
+                self.aux_data_channel = None
+                self.video_pipeline_bridge = None
+                self.audio_pipeline_bridge = None
             logger.info("Peer connection closed", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "connecting":
             logger.info("Peer connection is connecting", extra={'client_peer_id': client_peer_id, 'client_type': client_type})

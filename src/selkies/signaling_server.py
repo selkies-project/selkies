@@ -68,9 +68,8 @@ class WebRTCPeerManagement:
         self.enable_player4: bool = options.enable_player4
         self.lock: asyncio.Lock = asyncio.Lock()
 
-        # RTC config - can be str or dict. Apply the same ownership/permission
-        # checks as webrtc_utils.try_json_file(): this content is served verbatim
-        # to clients, and the default location lives in a world-writable /tmp.
+        # RTC config (str or dict), served verbatim to clients from world-writable
+        # /tmp by default: ownership/permission-checked like webrtc_utils.try_json_file().
         self.rtc_config: Optional[Any] = None
         if os.path.exists(options.rtc_config_file):
             logger.info("parsing rtc_config_file: {}".format(options.rtc_config_file))
@@ -186,12 +185,10 @@ class WebRTCPeerManagement:
         if not room_peers or uid not in room_peers:
             return
         room_peers.remove(uid)
-        # Free the room once it becomes empty to avoid unbounded growth of
-        # self.rooms over repeated join/leave cycles.
+        # Free empty rooms so self.rooms can't grow unbounded over join/leave cycles.
         if not room_peers:
             del self.rooms[room_id]
-        # Iterate a snapshot: the awaits below can interleave with the join
-        # path mutating this set.
+        # Iterate a snapshot: the awaits below can interleave with a concurrent join.
         for pid in list(room_peers):
             peer = self.peers.get(pid)
             if not peer:
@@ -201,6 +198,66 @@ class WebRTCPeerManagement:
             msg = "ROOM_PEER_LEFT {}".format(uid)
             logger.info("room {}: {} -> {}: {}".format(room_id, uid, pid, msg))
             await wsp.send_str(msg)
+
+    def _evict_dead_peer_locked(self, pid: str):
+        """Detach a dead peer from shared state (in-memory only) while holding self.lock.
+
+        Returns zero-arg coroutine factories for the partner notifications
+        (SESSION_END / ROOM_PEER_LEFT / close); the caller MUST run them AFTER
+        releasing the lock so a slow partner socket can't stall other handshakes.
+        """
+        deferred = []
+        peer = self.peers.get(pid)
+
+        # --- session teardown (mirrors cleanup_session) ---
+        if pid in self.sessions:
+            other_id = self.sessions[pid]
+            del self.sessions[pid]
+            if peer is not None:
+                other_peer = self.peers.get(other_id)
+                if other_peer is not None:
+                    wso = other_peer.ws
+                    if peer.client_type == "controller":
+                        logger.info(
+                            "Closing connection to {}, client type {!r}".format(
+                                other_id, other_peer.client_type
+                            )
+                        )
+                        deferred.append(
+                            lambda ws=wso: ws.close(
+                                code=1000, message=b"Connection closed"
+                            )
+                        )
+                    elif peer.client_type == "viewer":
+                        msg = "SESSION_END {} {}".format(pid, peer.client_type)
+                        logger.info("{} -> {}: {}".format(pid, other_id, msg))
+                        deferred.append(lambda ws=wso, m=msg: ws.send_str(m))
+
+        # --- room teardown (mirrors cleanup_room) ---
+        peer_status = getattr(peer, "peer_status", None) if peer else None
+        if peer_status and peer_status != "session":
+            room_peers: Optional[Set[str]] = self.rooms.get(peer_status)
+            if room_peers and pid in room_peers:
+                room_peers.remove(pid)
+                if not room_peers:
+                    del self.rooms[peer_status]
+                msg = "ROOM_PEER_LEFT {}".format(pid)
+                for other_pid in list(room_peers):
+                    other_peer = self.peers.get(other_pid)
+                    if not other_peer:
+                        continue
+                    logger.info(
+                        "room {}: {} -> {}: {}".format(
+                            peer_status, pid, other_pid, msg
+                        )
+                    )
+                    deferred.append(
+                        lambda ws=other_peer.ws, m=msg: ws.send_str(m)
+                    )
+
+        # Finally drop the dead peer itself.
+        self.peers.pop(pid, None)
+        return deferred
 
     async def remove_peer(self, uid: str) -> None:
         """Remove a peer and clean up associated resources.
@@ -259,15 +316,7 @@ class WebRTCPeerManagement:
             client_strict_viewer: Whether client is strict viewer
         """
         peer_status = None
-        self.peers[uid] = Peer(
-            uid=uid,
-            ws=ws,
-            raddr=raddr,
-            peer_type=peer_type,
-            client_type=client_type,
-            client_slot=client_slot,
-            client_strict_viewer=client_strict_viewer,
-        )
+        # Peer was already registered atomically in hello_peer; don't re-create it.
         logger.info(
             f"Registered peer {uid} at {raddr} with peer_type {peer_type} and client_type {client_type}"
         )
@@ -310,10 +359,9 @@ class WebRTCPeerManagement:
                         if not other_peer:
                             logger.warning(f"Peer {other_id} not found for session message relay")
                             continue
-                        # Only relay between the two peers that actually share a
-                        # session. self.sessions is unidirectional (client -> server),
-                        # so accept either direction but reject a message aimed at an
-                        # unrelated peer (e.g. another client in sharing mode).
+                        # Only relay between session partners. self.sessions is
+                        # unidirectional (client->server), so accept either direction
+                        # but reject a message aimed at an unrelated peer.
                         if not (
                             self.sessions.get(uid) == other_id
                             or self.sessions.get(other_id) == uid
@@ -402,9 +450,8 @@ class WebRTCPeerManagement:
                     # Register session
                     peer.peer_status = peer_status = "session"
                     callee_peer.peer_status = "session"
-                    # We only store session between caller and callee, where caller is
-                    # always of peer_type 'client' and callee is 'server', so we can handle
-                    # termination of sessions clearly if client disconnects.
+                    # Store session caller->callee (client->server) so termination is
+                    # unambiguous when the client disconnects.
                     self.sessions[uid] = callee_id
                 # Requested joining or creation of a room
                 elif msg.startswith("ROOM"):
@@ -431,9 +478,11 @@ class WebRTCPeerManagement:
                     await ws.send_str("ROOM_OK {}".format(room_peers))
                     # Enter room
                     peer.peer_status = peer_status = room_id
-                    self.rooms[room_id].add(uid)
+                    # setdefault: a concurrent cleanup_room may have deleted the room during the await.
+                    room_set = self.rooms.setdefault(room_id, set())
+                    room_set.add(uid)
                     # Iterate a snapshot: peers can join/leave across the awaits.
-                    for pid in list(self.rooms[room_id]):
+                    for pid in list(room_set):
                         if pid == uid:
                             continue
                         peer = self.peers.get(pid)
@@ -478,112 +527,191 @@ class WebRTCPeerManagement:
         client_type = None
         client_slot = None
         client_strict_viewer = None
-        async with self.lock:
-            if len(toks) > 2:
-                # peer_type is either 'server' or 'client'
-                # client_type is either 'viewer' or 'controller'
-                hello, peer_type, json_metadata_str = toks
-                try:
-                    json_metadata = json.loads(json_metadata_str)
-                    client_type = json_metadata.get("client_type")
-                    client_slot = json_metadata.get("client_slot")
-                    client_strict_viewer = json_metadata.get("client_strict_viewer")
-                except json.JSONDecodeError:
+        # Partner notifications for evicted dead peers: collected under the lock but
+        # flushed after release so a slow partner socket can't stall other handshakes.
+        dead_peer_notifications = []
+        result = None
+        try:
+            async with self.lock:
+                if len(toks) > 2:
+                    # peer_type is either 'server' or 'client'
+                    # client_type is either 'viewer' or 'controller'
+                    hello, peer_type, json_metadata_str = toks
+                    try:
+                        json_metadata = json.loads(json_metadata_str)
+                        client_type = json_metadata.get("client_type")
+                        client_slot = json_metadata.get("client_slot")
+                        client_strict_viewer = json_metadata.get("client_strict_viewer")
+                    except json.JSONDecodeError:
+                        await ws.close(code=1002, message=b"invalid protocol")
+                        raise Exception("Invalid JSON metadata from {!r}".format(raddr))
+                    # Normalize client_slot to int so collision checks hold (1.0 != a
+                    # distinct slot); None stays None, bool and non-coercible are rejected.
+                    if client_slot is not None:
+                        if isinstance(client_slot, bool):
+                            await ws.close(code=1002, message=b"invalid protocol")
+                            raise Exception(
+                                "Invalid client_slot {!r} from {!r}".format(
+                                    client_slot, raddr
+                                )
+                            )
+                        try:
+                            client_slot = int(client_slot)
+                        except (TypeError, ValueError):
+                            await ws.close(code=1002, message=b"invalid protocol")
+                            raise Exception(
+                                "Invalid client_slot {!r} from {!r}".format(
+                                    client_slot, raddr
+                                )
+                            )
+                else:
+                    hello, peer_type = toks
+
+                if hello != "HELLO":
                     await ws.close(code=1002, message=b"invalid protocol")
-                    raise Exception("Invalid JSON metadata from {!r}".format(raddr))
-            else:
-                hello, peer_type = toks
+                    raise Exception("Invalid hello from {!r}".format(raddr))
+                if peer_type not in ("server", "client"):
+                    await ws.close(code=1002, message=b"invalid protocol")
+                    raise Exception("Invalid peer type from {!r}".format(raddr))
+                if peer_type == "client" and client_type not in ("viewer", "controller"):
+                    await ws.close(code=1002, message=b"invalid protocol")
+                    raise Exception("Invalid client type from {!r}".format(raddr))
 
-            if hello != "HELLO":
-                await ws.close(code=1002, message=b"invalid protocol")
-                raise Exception("Invalid hello from {!r}".format(raddr))
-            if peer_type not in ("server", "client"):
-                await ws.close(code=1002, message=b"invalid protocol")
-                raise Exception("Invalid peer type from {!r}".format(raddr))
-            if peer_type == "client" and client_type not in ("viewer", "controller"):
-                await ws.close(code=1002, message=b"invalid protocol")
-                raise Exception("Invalid client type from {!r}".format(raddr))
+                if peer_type == "client":
+                    if not self.enable_sharing:
+                        client_exists = next(
+                            (
+                                peer
+                                for peer in self.peers.values()
+                                if hasattr(peer, "peer_type") and peer.peer_type == "client"
+                            ),
+                            None,
+                        )
+                        if client_exists:
+                            logger.info("peer: {}".format(self.peers))
+                            await ws.close(
+                                code=4000,
+                                message=b"Multiple connections not allowed in non-sharing mode.",
+                            )
+                            raise Exception(
+                                "Multiple connections not allowed in non-sharing mode; connection from {!r}".format(
+                                    raddr
+                                )
+                            )
+                    else:
+                        allowed_slots = self.allowed_client_slots()
+                        if client_slot != -1 and (client_slot not in allowed_slots):
+                            await ws.close(
+                                code=4000, message=b"Invalid player id provided, check URL."
+                            )
+                            raise Exception(
+                                "Invalid client slot provided {!r}".format(client_slot)
+                            )
+                        # Slot uniqueness; -1 is the "unassigned" sentinel and is exempt.
+                        if client_slot != -1:
+                            colliding = [
+                                (pid, peer)
+                                for pid, peer in self.peers.items()
+                                if getattr(peer, "client_slot", None) == client_slot
+                            ]
+                            # Evict dead holders (closed socket not yet reaped) so a
+                            # reconnect into the same slot isn't blocked.
+                            live_collision = False
+                            for pid, peer in colliding:
+                                if getattr(peer, "ws", None) is not None and not peer.ws.closed:
+                                    live_collision = True
+                                    continue
+                                # Detach the dead holder from shared state now (frees
+                                # the slot); defer its partner socket I/O until unlocked.
+                                dead_peer_notifications.extend(
+                                    self._evict_dead_peer_locked(pid)
+                                )
+                                logger.info(
+                                    "Evicting dead peer {!r} holding slot {!r} for reconnect from {!r}".format(
+                                        pid, client_slot, raddr
+                                    )
+                                )
+                            if live_collision:
+                                await ws.close(
+                                    code=4000,
+                                    message=b"Player slot already in use.",
+                                )
+                                raise Exception(
+                                    "Player slot {!r} already in use; connection from {!r}".format(
+                                        client_slot, raddr
+                                    )
+                                )
 
-            if peer_type == "client":
-                if not self.enable_sharing:
-                    client_exists = next(
+                    # clients with hash #shared
+                    if not self.enable_shared and client_strict_viewer:
+                        await ws.close(
+                            code=4000, message=b"Strict shared clients are not enabled."
+                        )
+                        raise Exception(
+                            "Strict shared clients are disabled; connection from {!r}".format(
+                                raddr
+                            )
+                        )
+
+                    peer_controller = next(
                         (
                             peer
                             for peer in self.peers.values()
-                            if hasattr(peer, "peer_type") and peer.peer_type == "client"
+                            if hasattr(peer, "client_type")
+                            and peer.client_type == "controller"
                         ),
                         None,
                     )
-                    if client_exists:
-                        logger.info("peer: {}".format(self.peers))
-                        await ws.close(
-                            code=4000,
-                            message=b"Multiple connections not allowed in non-sharing mode.",
-                        )
-                        raise Exception(
-                            "Multiple connections not allowed in non-sharing mode; connection from {!r}".format(
-                                raddr
+                    if client_type == "controller":
+                        if peer_controller:
+                            await ws.close(
+                                code=4000,
+                                message=b"Duplicate controller. A client of type 'controller' already exists.",
                             )
-                        )
-                else:
-                    allowed_slots = self.allowed_client_slots()
-                    if client_slot != -1 and (client_slot not in allowed_slots):
-                        await ws.close(
-                            code=4000, message=b"Invalid player id provided, check URL."
-                        )
-                        raise Exception(
-                            "Invalid client slot provided {!r}".format(client_slot)
-                        )
+                            raise Exception(
+                                "Duplicate controllers not allowed; connection from {!r}".format(
+                                    raddr
+                                )
+                            )
+                    if client_type == "viewer":
+                        if not peer_controller:
+                            await ws.close(
+                                code=4000,
+                                message=b"No controller detected. Viewer clients require an existing controller client.",
+                            )
+                            raise Exception(
+                                "No controller detected for client of type 'viewer'; connection from {!r}".format(
+                                    raddr
+                                )
+                            )
 
-                # clients with hash #shared
-                if not self.enable_shared and client_strict_viewer:
-                    await ws.close(
-                        code=4000, message=b"Strict shared clients are not enabled."
-                    )
-                    raise Exception(
-                        "Strict shared clients are disabled; connection from {!r}".format(
-                            raddr
-                        )
-                    )
-
-                peer_controller = next(
-                    (
-                        peer
-                        for peer in self.peers.values()
-                        if hasattr(peer, "client_type")
-                        and peer.client_type == "controller"
-                    ),
-                    None,
+                # Generate unique peer ID
+                uid = str(uuid.uuid4())
+                puid = "-".join([peer_type, uid])
+                # Send back a HELLO
+                await ws.send_str("HELLO")
+                # Register under the same lock as validation so check-and-insert is atomic.
+                self.peers[puid] = Peer(
+                    uid=puid,
+                    ws=ws,
+                    raddr=raddr,
+                    peer_type=peer_type,
+                    client_type=client_type,
+                    client_slot=client_slot,
+                    client_strict_viewer=client_strict_viewer,
                 )
-                if client_type == "controller":
-                    if peer_controller:
-                        await ws.close(
-                            code=4000,
-                            message=b"Duplicate controller. A client of type 'controller' already exists.",
-                        )
-                        raise Exception(
-                            "Duplicate controllers not allowed; connection from {!r}".format(
-                                raddr
-                            )
-                        )
-                if client_type == "viewer":
-                    if not peer_controller:
-                        await ws.close(
-                            code=4000,
-                            message=b"No controller detected. Viewer clients require an existing controller client.",
-                        )
-                        raise Exception(
-                            "No controller detected for client of type 'viewer'; connection from {!r}".format(
-                                raddr
-                            )
-                        )
-
-            # Generate unique peer ID
-            uid = str(uuid.uuid4())
-            puid = "-".join([peer_type, uid])
-            # Send back a HELLO
-            await ws.send_str("HELLO")
-            return puid, peer_type, client_type, client_slot, client_strict_viewer
+                result = (puid, peer_type, client_type, client_slot, client_strict_viewer)
+        finally:
+            # Flush deferred dead-peer notifications outside the lock (bounded per
+            # socket so a blocked partner can't wedge this handshake); best-effort.
+            for make_coro in dead_peer_notifications:
+                try:
+                    await asyncio.wait_for(make_coro(), timeout=5)
+                except Exception as exc:
+                    logger.debug(
+                        "Deferred dead-peer notification failed/timed out: {}".format(exc)
+                    )
+        return result
 
     async def signaling_handler(self, ws: WebSocketResponse, raddr: str) -> None:
         """Signaling handler to manage the peers connected for signaling purposes.

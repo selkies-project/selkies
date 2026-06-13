@@ -28,6 +28,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <sys/ioctl.h>
 #include <linux/ioctl.h>
 #include <sys/epoll.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
@@ -37,6 +38,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <linux/input.h>
 #include <linux/input-event-codes.h>
 #include <pthread.h>
+
+/* We interpose libc entry points whose `pathname` is __nonnull, but a real caller
+ * can pass NULL and our `if (pathname)` guards forward it for the real EFAULT.
+ * The guards are intentional, so silence the false-positive -Wnonnull-compare. */
+#pragma GCC diagnostic ignored "-Wnonnull-compare"
 
 /**
  * @brief Definitions for O_TMPFILE and mode requirement checking.
@@ -205,30 +211,30 @@ static void interposer_log(const char *level, const char *func_name, int line_nu
     }
 
     char buffer[2048];
-    int current_pos = 0;
+    size_t current_pos = 0;
     ssize_t written_bytes_count;
     int printed_len;
 
     printed_len = snprintf(buffer + current_pos, sizeof(buffer) - current_pos, "[%lu]", (unsigned long)time(NULL));
     if (printed_len > 0) {
-        current_pos += (printed_len < (sizeof(buffer) - current_pos)) ? printed_len : (sizeof(buffer) - current_pos -1);
+        current_pos += ((size_t)printed_len < (sizeof(buffer) - current_pos)) ? (size_t)printed_len : (sizeof(buffer) - current_pos - 1);
     }
 
-    if (current_pos < sizeof(buffer) -1) {
+    if (current_pos < sizeof(buffer) - 1) {
         printed_len = snprintf(buffer + current_pos, sizeof(buffer) - current_pos,
                                 "[SJI]%s[%s:%d] ", level, func_name, line_num);
         if (printed_len > 0) {
-            current_pos += (printed_len < (sizeof(buffer) - current_pos)) ? printed_len : (sizeof(buffer) - current_pos -1);
+            current_pos += ((size_t)printed_len < (sizeof(buffer) - current_pos)) ? (size_t)printed_len : (sizeof(buffer) - current_pos - 1);
         }
     }
 
-    if (current_pos < sizeof(buffer) -1) {
+    if (current_pos < sizeof(buffer) - 1) {
         va_list argp;
         va_start(argp, format);
         printed_len = vsnprintf(buffer + current_pos, sizeof(buffer) - current_pos, format, argp);
         va_end(argp);
         if (printed_len > 0) {
-            current_pos += (printed_len < (sizeof(buffer) - current_pos)) ? printed_len : (sizeof(buffer) - current_pos -1);
+            current_pos += ((size_t)printed_len < (sizeof(buffer) - current_pos)) ? (size_t)printed_len : (sizeof(buffer) - current_pos - 1);
         }
     }
 
@@ -241,7 +247,7 @@ static void interposer_log(const char *level, const char *func_name, int line_nu
          buffer[sizeof(buffer) - 1] = '\n';
          current_pos = sizeof(buffer);
     }
-    
+
     buffer[ (current_pos < sizeof(buffer)) ? current_pos : (sizeof(buffer)-1) ] = '\0';
 
     size_t len_to_write = (current_pos < sizeof(buffer)) ? current_pos : (sizeof(buffer)-1);
@@ -495,16 +501,7 @@ static js_interposer_t *find_interposer_for_fd_locked(int fd, int *open_flags_ou
     return NULL;
 }
 
-/**
- * @brief Library constructor function, called when the library is loaded.
- *
- * This function performs essential one-time initialization:
- * 1. Initializes the logging system via `sji_logging_init()`.
- * 2. Loads pointers to the real libc functions that will be intercepted
- *    (e.g., `open`, `ioctl`, `read`, `close`, `epoll_ctl`, `write`, `access`).
- *    It also attempts to load `open64` if available.
- * Critical failures during function loading are logged.
- */
+/* Library constructor: init logging and load pointers to the real libc functions we intercept. */
 __attribute__((constructor)) void init_interposer() {
     sji_logging_init();
 
@@ -650,10 +647,11 @@ int fstat(int fd, struct stat *buf) {
     if (interposer != NULL) {
         memset(buf, 0, sizeof(struct stat));
         fill_fake_stat(interposer->open_dev_name, buf);
-
-        sji_log_debug("Intercepted fstat for fd %d (%s), returning fake rdev %d:%d",
-            fd, interposer->open_dev_name, major(buf->st_rdev), minor(buf->st_rdev));
+        /* Snapshot the device name (static string), then log after unlock so a blocked stderr can't stall other hooked calls. */
+        const char *dev = interposer->open_dev_name;
         pthread_mutex_unlock(&interposers_mutex);
+        sji_log_debug("Intercepted fstat for fd %d (%s), returning fake rdev %d:%d",
+            fd, dev, major(buf->st_rdev), minor(buf->st_rdev));
         return 0;
     }
     pthread_mutex_unlock(&interposers_mutex);
@@ -784,14 +782,15 @@ static int read_socket_config(int sockfd, js_config_t *config_dest) {
         bytes_read_total += current_read;
     }
 
-    sji_log_info("Successfully read joystick config from sockfd %d: Name='%s', Vnd=0x%04x, Prd=0x%04x, Ver=0x%04x, Btns=%u, Axes=%u",
-                 sockfd, config_dest->name, config_dest->vendor, config_dest->product, config_dest->version,
-                 config_dest->num_btns, config_dest->num_axes);
-
+    /* Terminate the peer-supplied name before the %s log below reads past it. */
     if (strnlen(config_dest->name, CONTROLLER_NAME_MAX_LEN) == CONTROLLER_NAME_MAX_LEN) {
         config_dest->name[CONTROLLER_NAME_MAX_LEN-1] = '\0';
         sji_log_warn("Config name from server was not null-terminated within max length; forced termination.");
     }
+
+    sji_log_info("Successfully read joystick config from sockfd %d: Name='%s', Vnd=0x%04x, Prd=0x%04x, Ver=0x%04x, Btns=%u, Axes=%u",
+                 sockfd, config_dest->name, config_dest->vendor, config_dest->product, config_dest->version,
+                 config_dest->num_btns, config_dest->num_axes);
 
     /* Clamp the button/axis counts to the static array bounds. These values come
      * straight from the socket peer and are otherwise trusted verbatim; without
@@ -893,40 +892,19 @@ connect_fail:
     return -1;
 }
 
-/**
- * @brief Common logic for handling intercepted `open()` and `open64()` calls.
- *
- * This function checks if the `pathname` matches one of the device paths
- * configured for interposition. If it does, a NEW socket connection is
- * established for this open() call: every application handle owns a dedicated
- * connection, so each open() returns a unique file descriptor (as POSIX
- * requires), `O_NONBLOCK` applies per handle, and every handle receives every
- * device event (the server broadcasts to all connections of a device).
- *
- * `connect_interposer_socket()` runs WITHOUT `interposers_mutex` held (it can
- * block for the connect timeout plus the config-read timeout, and holding the
- * lock would stall every other thread's interposed read/close/ioctl/fstat on
- * ANY fd for that long). The connected fd is private to this thread until it
- * is published into the slot's handle table under the lock, so concurrent
- * scanners never observe a half-initialized handle. If `O_NONBLOCK` was
- * specified in `flags`, `make_socket_nonblocking()` is called for the socket
- * while it is still private to this thread.
- * The `found_interposer_ptr` is updated to point to the matched interposer.
- *
- * @param pathname The file path being opened.
- * @param flags The flags passed to `open()` or `open64()`.
- * @param found_interposer_ptr Output parameter; on successful interposition,
- *                             this will point to the `js_interposer_t` structure
- *                             for the opened device.
- * @return The socket file descriptor if the device is successfully interposed.
- *         -1 if an error occurs during interposition. `errno` will be set
- *            (`EIO` on connection failure, `EMFILE` when the device already
- *            has SJI_MAX_HANDLES_PER_DEVICE open handles).
- *         -2 if the `pathname` is not recognized as an interposable device.
- *            The caller should then proceed to call the real `open()`/`open64()`.
- */
+/* Shared open()/open64() interposition. Each open of a matched device gets its OWN
+ * socket connection (unique fd per POSIX, per-handle O_NONBLOCK, every handle gets
+ * every event). connect_interposer_socket() runs WITHOUT interposers_mutex (it can
+ * block on timeouts and would stall every other interposed call); the fd stays
+ * private to this thread until published under the lock.
+ * Returns the socket fd; -1 on error (errno EIO on connect fail, EMFILE at
+ * SJI_MAX_HANDLES_PER_DEVICE); -2 if not an interposable path (caller uses real open). */
 static int common_open_logic(const char *pathname, int flags, js_interposer_t **found_interposer_ptr) {
     *found_interposer_ptr = NULL;
+
+    if (pathname == NULL) {
+        return -2;  /* let the real open*() set errno=EFAULT for a NULL path */
+    }
 
     /* Match the slot by device name without the lock: the name fields are set
      * once at static initialization and never mutated. */
@@ -983,8 +961,10 @@ static int common_open_logic(const char *pathname, int flags, js_interposer_t **
     int open_handles = interposer->handle_count;
     pthread_mutex_unlock(&interposers_mutex);
 
+    /* Gate the fcntl so the success path performs no extra syscall and leaves errno untouched when logging is off. */
+    int sock_flags = g_sji_log_enabled ? fcntl(new_fd, F_GETFL, 0) : 0;
     sji_log_info("Successfully interposed 'open' for %s (app_flags=0x%x), socket_fd: %d (%d handle(s) open). Socket flags: 0x%x",
-                 pathname, flags, new_fd, open_handles, fcntl(new_fd, F_GETFL, 0));
+                 pathname, flags, new_fd, open_handles, sock_flags);
     return new_fd;
 }
 
@@ -1235,13 +1215,16 @@ int close(int fd) {
             }
             int ret = real_close(fd);
             int close_errno = errno;
+            /* Snapshot under the lock, then log outside it so a blocked stderr can't stall other hooked calls. */
+            const char *dev = interposer->open_dev_name;  /* static string constant, safe after unlock */
+            int remaining = interposer->handle_count;
+            pthread_mutex_unlock(&interposers_mutex);
             if (ret != 0) {
                 sji_log_error("real_close on socket fd %d for %s failed: %s. Handle retired anyway.",
-                              fd, interposer->open_dev_name, strerror(close_errno));
+                              fd, dev, strerror(close_errno));
             }
             sji_log_info("Intercepted 'close' for interposed fd %d (device %s); %d handle(s) still open.",
-                         fd, interposer->open_dev_name, interposer->handle_count);
-            pthread_mutex_unlock(&interposers_mutex);
+                         fd, dev, remaining);
             errno = close_errno;
             return ret;
         }
@@ -1332,7 +1315,52 @@ ssize_t read(int fd, void *buf, size_t count) {
         if (peeked <= 0) {
             bytes_read = peeked; /* error (e.g. EAGAIN) or EOF; handled below */
         } else {
+            /* Peek and consuming recv() aren't atomic; a partial consume must
+             * finish draining the event or the stream desyncs. Bounded so a
+             * stalled peer cannot hang the caller. */
             bytes_read = recv(fd, buf, event_size, MSG_DONTWAIT);
+            if (bytes_read > 0 && (size_t)bytes_read < event_size) {
+                size_t event_consumed = (size_t)bytes_read;
+                /* Drain budget for the partial event: bounded poll() (not a spin)
+                 * caps the stall at ~10ms if the peer stalls mid-event. */
+                const int drain_budget_ms = 10;
+                struct timespec drain_start;
+                clock_gettime(CLOCK_MONOTONIC, &drain_start);
+                while (event_consumed < event_size) {
+                    ssize_t tail = recv(fd, (char *)buf + event_consumed,
+                                        event_size - event_consumed, MSG_DONTWAIT);
+                    if (tail > 0) {
+                        event_consumed += (size_t)tail;
+                        continue;
+                    }
+                    if (tail == 0) {
+                        break; /* EOF mid-event; surface the short count below. */
+                    }
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        break; /* hard error */
+                    }
+                    /* Remainder not buffered yet; wait (efficiently) for the
+                     * rest, but only for the time left in the budget. */
+                    struct timespec drain_now;
+                    clock_gettime(CLOCK_MONOTONIC, &drain_now);
+                    long elapsed_ms = (drain_now.tv_sec - drain_start.tv_sec) * 1000L +
+                                      (drain_now.tv_nsec - drain_start.tv_nsec) / 1000000L;
+                    int remaining_ms = drain_budget_ms - (int)elapsed_ms;
+                    if (remaining_ms <= 0) {
+                        break; /* drain budget exhausted */
+                    }
+                    struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+                    int prc = poll(&pfd, 1, remaining_ms);
+                    if (prc <= 0) {
+                        /* timeout (0) or poll error/EINTR (<0): stop draining
+                         * and surface the short count below. */
+                        break;
+                    }
+                    /* Readable (or POLLHUP/POLLERR): loop and let recv() report
+                     * the new bytes, EOF, or the hard error. */
+                }
+                bytes_read = (ssize_t)event_consumed;
+            }
         }
     } else {
         /* Blocking: wait for a whole event so a short read cannot desync the
@@ -1359,7 +1387,7 @@ ssize_t read(int fd, void *buf, size_t count) {
     } else {
         sji_log_debug("SOCKET_READ_OK: read %zd bytes from socket_fd %d (%s)",
                      bytes_read, fd, interposer->open_dev_name);
-        if (bytes_read < event_size && bytes_read > 0) {
+        if (bytes_read > 0 && (size_t)bytes_read < event_size) {
             sji_log_warn("SOCKET_READ_PARTIAL: read %zd bytes from socket_fd %d (%s), but expected %zu. This might cause issues.",
                          bytes_read, fd, interposer->open_dev_name, event_size);
         }
@@ -1393,17 +1421,25 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) {
         pthread_mutex_lock(&interposers_mutex);
         js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL);
+        const char *dev = NULL;
+        int nb_ret = 0;
         if (interposer != NULL) {
-            sji_log_info("epoll_ctl %s for interposed socket fd %d (%s). Ensuring O_NONBLOCK.",
-                         (op == EPOLL_CTL_ADD ? "ADD" : "MOD"), fd, interposer->open_dev_name);
+            /* Snapshot the device name (static string) and flip O_NONBLOCK under the lock;
+             * defer all logging until after unlock so a blocked stderr can't stall other hooked calls. */
+            dev = interposer->open_dev_name;
             /* Each handle owns its own connection, so this flips only the
              * caller's handle to non-blocking, not other handles of the device. */
-            if (make_socket_nonblocking(fd) == -1) {
-                sji_log_warn("epoll_ctl: Failed to ensure O_NONBLOCK for socket fd %d (%s). Epoll behavior might be affected.",
-                             fd, interposer->open_dev_name);
-            }
+            nb_ret = make_socket_nonblocking(fd);
         }
         pthread_mutex_unlock(&interposers_mutex);
+        if (dev != NULL) {
+            sji_log_info("epoll_ctl %s for interposed socket fd %d (%s). Ensuring O_NONBLOCK.",
+                         (op == EPOLL_CTL_ADD ? "ADD" : "MOD"), fd, dev);
+            if (nb_ret == -1) {
+                sji_log_warn("epoll_ctl: Failed to ensure O_NONBLOCK for socket fd %d (%s). Epoll behavior might be affected.",
+                             fd, dev);
+            }
+        }
     }
     return real_epoll_ctl(epfd, op, fd, event);
 }
@@ -1431,6 +1467,8 @@ int intercept_js_ioctl(js_interposer_t *interposer, int fd, ioctl_request_t requ
     uint8_t *u8_ptr;
     uint16_t *u16_ptr;
     int ret_val = 0;
+    (void)fd; /* fd is part of the handler signature for symmetry with the EV
+               * handler; this handler operates on *interposer, not the fd. */
     errno = 0;
 
     if (_IOC_TYPE(request) != 'j') {
@@ -1543,7 +1581,7 @@ exit_js_ioctl:
  * @return 0 on success, or a positive value if the ioctl returns data (e.g., string length or effect ID).
  *         -1 on error (`errno` is set appropriately).
  */
-int intercept_ev_ioctl(js_interposer_t *interposer, int fd, ioctl_request_t request, void *arg) {
+int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd, ioctl_request_t request, void *arg) {
     struct input_absinfo *absinfo_ptr;
     struct input_id *id_ptr;
     struct ff_effect *effect_s_ptr;
@@ -1616,7 +1654,7 @@ int intercept_ev_ioctl(js_interposer_t *interposer, int fd, ioctl_request_t requ
             len = ioctl_size; 
             if (!arg || len <= 0) { errno = EFAULT; ret_val = -1; goto exit_ev_ioctl; }
 
-            ptrdiff_t interposer_array_idx = interposer - interposers;
+            ptrdiff_t interposer_array_idx = array_idx;
             int gamepad_idx = -1;
 
             if (interposer_array_idx >= 0 && (size_t)interposer_array_idx < NUM_INTERPOSERS() && interposer->type == DEV_TYPE_EV) {
@@ -1641,8 +1679,8 @@ int intercept_ev_ioctl(js_interposer_t *interposer, int fd, ioctl_request_t requ
             len = ioctl_size;
             if (!arg || len <= 0) { errno = EFAULT; ret_val = -1; goto exit_ev_ioctl; }
 
-            ptrdiff_t interposer_array_idx = interposer - interposers;
-            int gamepad_idx = -1; 
+            ptrdiff_t interposer_array_idx = array_idx;
+            int gamepad_idx = -1;
 
             if (interposer_array_idx >= NUM_JS_INTERPOSERS && (size_t)interposer_array_idx < NUM_INTERPOSERS() && interposer->type == DEV_TYPE_EV) {
                 gamepad_idx = interposer_array_idx - NUM_JS_INTERPOSERS;
@@ -1891,23 +1929,45 @@ int ioctl(int fd, ioctl_request_t request, ...) {
         return real_ioctl(fd, request, arg_ptr);
     }
 
-    /* Hold the lock across the dispatch so a concurrent close() cannot zero
-     * js_config (the button/axis maps and counts) mid-read. The ioctl handlers
-     * perform no blocking I/O. */
+    /* Snapshot the fields the handlers read under the lock, then run the handler
+     * unlocked so blocking logging can't stall other hooked calls. interposers[]
+     * is static, so the live slot stays valid; JSIOCSCORR is persisted back below. */
+    js_interposer_t snapshot;
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.type = interposer->type;
+    memcpy(snapshot.open_dev_name, interposer->open_dev_name, sizeof(snapshot.open_dev_name));
+    snapshot.corr = interposer->corr;
+    snapshot.js_config = interposer->js_config;
+    ptrdiff_t array_idx = interposer - interposers;
+    pthread_mutex_unlock(&interposers_mutex);
+
     int ioctl_ret;
-    if (interposer->type == DEV_TYPE_JS) {
-        ioctl_ret = intercept_js_ioctl(interposer, fd, request, arg_ptr);
-    } else if (interposer->type == DEV_TYPE_EV) {
-        ioctl_ret = intercept_ev_ioctl(interposer, fd, request, arg_ptr);
+    errno = 0;
+    if (snapshot.type == DEV_TYPE_JS) {
+        ioctl_ret = intercept_js_ioctl(&snapshot, fd, request, arg_ptr);
+    } else if (snapshot.type == DEV_TYPE_EV) {
+        /* The EV handler delegates 'j'-type ioctls (incl. JSIOCSCORR) to the
+         * JS handler, which writes snapshot.corr just like the JS path. */
+        ioctl_ret = intercept_ev_ioctl(&snapshot, array_idx, fd, request, arg_ptr);
     } else {
         sji_log_error("IOCTL(%s): Interposer has unknown type %d for fd %d. This should not happen. Setting EINVAL.",
-                       interposer->open_dev_name, interposer->type, fd);
-        pthread_mutex_unlock(&interposers_mutex);
+                       snapshot.open_dev_name, snapshot.type, fd);
         errno = EINVAL;
         return -1;
     }
-    int ioctl_errno = errno;
-    pthread_mutex_unlock(&interposers_mutex);
-    errno = ioctl_errno;
+
+    /* JSIOCSCORR is the only handler write: persist snapshot.corr back to the live
+     * slot (re-acquire the lock, re-validate the fd still owns it). Save/restore
+     * errno so the lock/lookup can't perturb the handler's reported errno. */
+    if (ioctl_ret >= 0 && _IOC_TYPE(request) == 'j' && _IOC_NR(request) == 0x21) {
+        int saved_errno = errno;
+        pthread_mutex_lock(&interposers_mutex);
+        js_interposer_t *live = find_interposer_for_fd_locked(fd, NULL);
+        if (live != NULL) {
+            live->corr = snapshot.corr;
+        }
+        pthread_mutex_unlock(&interposers_mutex);
+        errno = saved_errno;
+    }
     return ioctl_ret;
 }
