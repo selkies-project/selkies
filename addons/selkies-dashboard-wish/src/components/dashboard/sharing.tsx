@@ -5,6 +5,7 @@ import { Card, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Info } from "lucide-react";
 import { toast } from "sonner";
+import { computeRenderableSettings } from "@/utils";
 
 const sharingLinks = [
 	{
@@ -40,9 +41,8 @@ interface SharingProps {
 
 export const Sharing = ({ show, onClose }: SharingProps) => {
 	const [copiedId, setCopiedId] = useState<string | null>(null);
-	const [serverSettings, setServerSettings] = useState<any>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>({});
-	
+
 	const baseUrl =
 		typeof window !== "undefined" ? window.location.href.split("#")[0] : "";
 
@@ -54,7 +54,7 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 				event.data?.type === "serverSettings"
 			) {
 				console.log("Sharing received server settings:", event.data.payload);
-				setServerSettings(event.data.payload);
+				setRenderableSettings(computeRenderableSettings(event.data.payload));
 			}
 		};
 		window.addEventListener("message", handleMessage);
@@ -62,22 +62,6 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 			window.removeEventListener("message", handleMessage);
 		};
 	}, []);
-
-	// --- Update Renderable Settings from Server Settings ---
-	useEffect(() => {
-		if (!serverSettings) return;
-
-		const newRenderable: any = {};
-		const s = serverSettings;
-
-		newRenderable.enableSharing = s.enable_sharing?.value ?? true;
-		newRenderable.enableShared = s.enable_shared?.value ?? true;
-		newRenderable.enablePlayer2 = s.enable_player2?.value ?? true;
-		newRenderable.enablePlayer3 = s.enable_player3?.value ?? true;
-		newRenderable.enablePlayer4 = s.enable_player4?.value ?? true;
-
-		setRenderableSettings(newRenderable);
-	}, [serverSettings]);
 
 	const handleCopyLink = async (fullUrl: string, id: string, label: string) => {
 		if (!navigator.clipboard) {

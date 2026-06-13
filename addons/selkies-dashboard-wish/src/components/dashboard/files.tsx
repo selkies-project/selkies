@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { ChevronLeft, X } from "lucide-react";
+import { X } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { toast } from "sonner";
+import { computeRenderableSettings } from "@/utils";
 
 // Helper function to format bytes
 function formatBytes(bytes: number, decimals = 2): string {
@@ -20,6 +21,7 @@ interface FilesProps {
 
 export function Files({}: FilesProps = {}) {
     const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
+    const [renderableSettings, setRenderableSettings] = useState<any>({});
 
     const handleUploadClick = () => {
         window.dispatchEvent(new CustomEvent('requestFileUpload'));
@@ -29,13 +31,19 @@ export function Files({}: FilesProps = {}) {
         setIsFilesModalOpen(!isFilesModalOpen);
     };
 
-    // Listen for file upload events
+    // Listen for file upload events and server settings
     useEffect(() => {
         const handleWindowMessage = (event: MessageEvent) => {
             if (event.origin !== window.location.origin) return;
             const message = event.data;
+
+            if (typeof message !== 'object' || message === null) return;
+
+            if (message.type === 'serverSettings') {
+                setRenderableSettings(computeRenderableSettings(message.payload));
+            }
             
-            if (typeof message === 'object' && message !== null && message.type === 'fileUpload') {
+            if (message.type === 'fileUpload') {
                 const { status, fileName, progress, message: errMsg } = message.payload;
 
                 if (status === 'start') {
@@ -63,23 +71,32 @@ export function Files({}: FilesProps = {}) {
         return () => window.removeEventListener('message', handleWindowMessage);
     }, []);
 
+    const showUpload = renderableSettings.fileUpload ?? true;
+    const showDownload = renderableSettings.fileDownload ?? true;
+
+    if (!showUpload && !showDownload) return null;
+
     return (
         <>
             <div className="w-auto p-4 flex flex-col gap-2">
-                <Button 
-                    variant="outline" 
-                    className="mb-2"
-                    onClick={handleUploadClick}
-                >
-                    Upload Files
-                </Button>
-                <Button 
-                    variant="outline" 
-                    className="mb-2"
-                    onClick={toggleFilesModal}
-                >
-                    Download Files
-                </Button>
+                {showUpload && (
+                    <Button
+                        variant="outline"
+                        className="mb-2"
+                        onClick={handleUploadClick}
+                    >
+                        Upload Files
+                    </Button>
+                )}
+                {showDownload && (
+                    <Button
+                        variant="outline"
+                        className="mb-2"
+                        onClick={toggleFilesModal}
+                    >
+                        Download Files
+                    </Button>
+                )}
             </div>
 
             <Dialog open={isFilesModalOpen} onOpenChange={setIsFilesModalOpen}>

@@ -2,23 +2,54 @@ import { useState, useEffect, useRef } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { computeRenderableSettings, getPrefixedKey } from "@/utils";
+
+const DEFAULT_ENABLE_BINARY_CLIPBOARD = false;
 
 export function Clipboard() {
 	const [dashboardClipboardContent, setDashboardClipboardContent] = useState('');
 	const [clipboardImageUrl, setClipboardImageUrl] = useState<string | null>(null);
+	const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
+		const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
+		return saved !== null ? saved === 'true' : DEFAULT_ENABLE_BINARY_CLIPBOARD;
+	});
+	const [renderableSettings, setRenderableSettings] = useState<any>({});
 	const fileInputRef = useRef<HTMLInputElement>(null);
 
-	// --- Message Listener for Clipboard Updates ---
+	const handleBinaryClipboardToggle = () => {
+		const newState = !enableBinaryClipboard;
+		setEnableBinaryClipboard(newState);
+		localStorage.setItem(getPrefixedKey('enable_binary_clipboard'), newState.toString());
+		window.postMessage(
+			{ type: 'settings', settings: { enable_binary_clipboard: newState } },
+			window.location.origin
+		);
+	};
+
+	// --- Message Listener for Clipboard and Server Settings Updates ---
 	useEffect(() => {
 		const handleWindowMessage = (event: MessageEvent) => {
 			if (event.origin !== window.location.origin) return;
 			const message = event.data;
 
-			if (typeof message === 'object' && message !== null) {
-				if (message.type === 'clipboardContentUpdate') {
-					if (typeof message.text === 'string') {
-						setDashboardClipboardContent(message.text);
-					}
+			if (typeof message !== 'object' || message === null) return;
+
+			if (message.type === 'clipboardContentUpdate') {
+				if (typeof message.text === 'string') {
+					setDashboardClipboardContent(message.text);
+				}
+			}
+
+			if (message.type === 'serverSettings') {
+				const payload = message.payload;
+				setRenderableSettings(computeRenderableSettings(payload));
+				const s = payload?.enable_binary_clipboard;
+				if (s) {
+					const saved = localStorage.getItem(getPrefixedKey('enable_binary_clipboard'));
+					const final = s.locked ? s.value : (saved !== null ? saved === 'true' : s.value);
+					setEnableBinaryClipboard(final);
+					localStorage.setItem(getPrefixedKey('enable_binary_clipboard'), String(final));
 				}
 			}
 		};
@@ -71,6 +102,16 @@ export function Clipboard() {
 
 	return (
 		<div className="w-[300px] p-4 flex flex-col gap-2">
+			{(renderableSettings.binaryClipboard ?? true) && (
+				<div className="flex items-center justify-between">
+					<Label className="text-sm font-medium">Binary Clipboard</Label>
+					<Switch
+						checked={enableBinaryClipboard}
+						onCheckedChange={handleBinaryClipboardToggle}
+					/>
+				</div>
+			)}
+
 			<Label htmlFor="dashboardClipboardTextarea">Clipboard</Label>
 			<Textarea
 				id="dashboardClipboardTextarea"

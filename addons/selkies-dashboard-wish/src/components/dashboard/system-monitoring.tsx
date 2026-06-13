@@ -6,6 +6,7 @@ import {
 	ChevronDown,
 	ChevronUp
 } from "lucide-react";
+import { getPrefixedKey } from "@/utils";
 
 // Declare global window properties
 declare global {
@@ -108,7 +109,14 @@ function RadialGauge({ metric, size }: RadialGaugeProps) {
 	);
 }
 
-const STATS_READ_INTERVAL_MS = 100;
+// Declare additional global window properties
+declare global {
+	interface Window {
+		video_bitrate?: number;
+	}
+}
+
+const STATS_READ_INTERVAL_MS = 500;
 const MAX_AUDIO_BUFFER = 10;
 const MAX_BANDWIDTH_MBPS = 1000;
 const MAX_LATENCY_MS = 1000;
@@ -127,6 +135,11 @@ export function SystemMonitoring() {
 	const [gpuMemTotal, setGpuMemTotal] = useState<number | null>(null);
 	const [bandwidthMbps, setBandwidthMbps] = useState(0);
 	const [latencyMs, setLatencyMs] = useState(0);
+	const [videoBitrateMbps, setVideoBitrateMbps] = useState(0);
+	const [isWebrtc, setIsWebrtc] = useState(() => {
+		const saved = localStorage.getItem(getPrefixedKey('stream_mode'));
+		return saved === 'webrtc';
+	});
 
 	// Read stats periodically
 	useEffect(() => {
@@ -154,9 +167,22 @@ export function SystemMonitoring() {
 			const netStats = window.network_stats;
 			setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
 			setLatencyMs(netStats?.latency_ms ?? 0);
+			setVideoBitrateMbps(window.video_bitrate || 0);
 		};
 		const intervalId = setInterval(readStats, STATS_READ_INTERVAL_MS);
 		return () => clearInterval(intervalId);
+	}, []);
+
+	useEffect(() => {
+		const handleMessage = (event: MessageEvent) => {
+			if (event.origin !== window.location.origin) return;
+			const message = event.data;
+			if (message?.type === 'mode') {
+				setIsWebrtc(message.mode === 'webrtc');
+			}
+		};
+		window.addEventListener('message', handleMessage);
+		return () => window.removeEventListener('message', handleMessage);
 	}, []);
 
 	const formatMemory = (bytes: number | null): string => {
@@ -204,9 +230,10 @@ export function SystemMonitoring() {
 	const hasSysMemData = window.system_stats?.mem_used !== undefined && window.system_stats?.mem_total !== undefined && sysMemUsed !== null && sysMemTotal !== null;
 	const hasGpuMemData = window.gpu_stats?.mem_used !== undefined || window.gpu_stats?.memory_used !== undefined || window.gpu_stats?.used_gpu_memory_bytes !== undefined || gpuMemUsed !== null;
 	const hasFpsData = true;
-	const hasAudioData = true;
+	const hasAudioData = !isWebrtc;
 	const hasBandwidthData = true;
 	const hasLatencyData = true;
+	const hasVideoBitrateData = isWebrtc;
 
 	// Create metrics array for recharts - only include metrics that have data
 	const allMetrics = [
@@ -244,6 +271,13 @@ export function SystemMonitoring() {
 			max: 60,
 			fill: "hsl(220, 100%, 50%)",
 			hasData: hasFpsData
+		},
+		{
+			name: "Video Bitrate",
+			current: videoBitrateMbps,
+			max: 50,
+			fill: "hsl(280, 100%, 60%)",
+			hasData: hasVideoBitrateData
 		},
 		{
 			name: "Audio",
@@ -369,6 +403,15 @@ export function SystemMonitoring() {
 										<div className={`w-2 h-2 rounded-full ${status.color.replace('text-', 'bg-')}`} />
 									);
 								})()}
+							</div>
+						</div>
+					)}
+
+					{hasVideoBitrateData && (
+						<div className="flex justify-between items-center py-1">
+							<span className="text-sm text-muted-foreground">Video Bitrate</span>
+							<div className="flex items-center gap-2">
+								<span className="text-sm font-medium text-card-foreground">{videoBitrateMbps} Mbps</span>
 							</div>
 						</div>
 					)}
