@@ -13,7 +13,7 @@ from aiohttp.web_ws import WebSocketResponse
 from aiohttp import web, WSMessage, WSMsgType
 from typing import Dict, Set, Optional, Any, Tuple, List
 
-from .webrtc_utils import generate_rtc_config
+from .webrtc_utils import generate_rtc_config, _is_trusted_config_file
 
 logger = logging.getLogger("signaling")
 
@@ -68,11 +68,20 @@ class WebRTCPeerManagement:
         self.enable_player4: bool = options.enable_player4
         self.lock: asyncio.Lock = asyncio.Lock()
 
-        # RTC config - can be str or dict
+        # RTC config - can be str or dict. Apply the same ownership/permission
+        # checks as webrtc_utils.try_json_file(): this content is served verbatim
+        # to clients, and the default location lives in a world-writable /tmp.
         self.rtc_config: Optional[Any] = None
         if os.path.exists(options.rtc_config_file):
             logger.info("parsing rtc_config_file: {}".format(options.rtc_config_file))
-            self.rtc_config = self.read_file(options.rtc_config_file)
+            if _is_trusted_config_file(options.rtc_config_file):
+                self.rtc_config = self.read_file(options.rtc_config_file)
+            else:
+                logger.error(
+                    "Refusing to use RTC config file {!r}: unsafe ownership or permissions.".format(
+                        options.rtc_config_file
+                    )
+                )
 
         # Validate TURN arguments
         if self.turn_shared_secret:
@@ -80,6 +89,22 @@ class WebRTCPeerManagement:
                 raise Exception(
                     "missing turn_host or turn_port options with turn_shared_secret"
                 )
+
+    def read_file(self, path: str) -> Optional[str]:
+        """Read and return the contents of a file as a string.
+
+        Args:
+            path: Path to the file to read
+
+        Returns:
+            File contents as a string, or None if the file cannot be read.
+        """
+        try:
+            with open(path, "r") as f:
+                return f.read()
+        except OSError as e:
+            logger.error("Failed to read rtc_config_file {!r}: {}".format(path, e))
+            return None
 
     def set_rtc_config(self, rtc_config: Any) -> None:
         """Set the RTC configuration.
@@ -157,11 +182,17 @@ class WebRTCPeerManagement:
             uid: Peer ID to remove
             room_id: Room ID to remove from
         """
-        room_peers: Set[str] = self.rooms[room_id]
-        if uid not in room_peers:
+        room_peers: Optional[Set[str]] = self.rooms.get(room_id)
+        if not room_peers or uid not in room_peers:
             return
         room_peers.remove(uid)
-        for pid in room_peers:
+        # Free the room once it becomes empty to avoid unbounded growth of
+        # self.rooms over repeated join/leave cycles.
+        if not room_peers:
+            del self.rooms[room_id]
+        # Iterate a snapshot: the awaits below can interleave with the join
+        # path mutating this set.
+        for pid in list(room_peers):
             peer = self.peers.get(pid)
             if not peer:
                 continue
@@ -279,9 +310,24 @@ class WebRTCPeerManagement:
                         if not other_peer:
                             logger.warning(f"Peer {other_id} not found for session message relay")
                             continue
+                        # Only relay between the two peers that actually share a
+                        # session. self.sessions is unidirectional (client -> server),
+                        # so accept either direction but reject a message aimed at an
+                        # unrelated peer (e.g. another client in sharing mode).
+                        if not (
+                            self.sessions.get(uid) == other_id
+                            or self.sessions.get(other_id) == uid
+                        ):
+                            logger.warning(
+                                f"Rejecting session relay {uid} -> {other_id}: not session partners"
+                            )
+                            continue
+                        if other_peer.peer_status != "session":
+                            logger.warning(
+                                f"Rejecting session relay {uid} -> {other_id}: target not in a session"
+                            )
+                            continue
                         wso = other_peer.ws
-                        status = other_peer.peer_status
-                        assert status == "session"
                         logger.info("{} -> {}: {}".format(uid, other_id, msg))
                         msg_string = "{} {}".format(uid, msg_string)
                         await wso.send_str(msg_string)
@@ -339,9 +385,6 @@ class WebRTCPeerManagement:
                     if callee_id not in self.peers:
                         await ws.send_str("ERROR peer server not found")
                         continue
-                    if peer_status is not None:
-                        await ws.send_str("ERROR peer {!r} busy".format(callee_id))
-                        continue
                     await ws.send_str("SESSION_OK " + str(callee_id))
                     callee_peer = self.peers.get(callee_id)
                     if not callee_peer:
@@ -389,7 +432,8 @@ class WebRTCPeerManagement:
                     # Enter room
                     peer.peer_status = peer_status = room_id
                     self.rooms[room_id].add(uid)
-                    for pid in self.rooms[room_id]:
+                    # Iterate a snapshot: peers can join/leave across the awaits.
+                    for pid in list(self.rooms[room_id]):
                         if pid == uid:
                             continue
                         peer = self.peers.get(pid)
@@ -596,8 +640,8 @@ class WebRTCPeerManagement:
             username = request_headers.get(self.turn_auth_header_name, "")
             if not username:
                 logger.warning(
-                    f"HTTP GET {path} 401 - missing auth header: {self.turn_auth_header_name}. "
-                    f"Using a default username"
+                    f"HTTP GET {path} - missing auth header: {self.turn_auth_header_name}. "
+                    "Generating credential with an empty username"
                 )
 
             logger.info("Generating HMAC credential for user: {}".format(username))

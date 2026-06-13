@@ -33,6 +33,7 @@ from PIL import Image
 import urllib.parse
 import urllib.request
 from .media_pipeline import RateControlMode
+from .settings import settings
 try:
     from xkbcommon import xkb
 except ImportError:
@@ -68,6 +69,27 @@ import aiofiles
 
 logger_webrtc_input = logging.getLogger("webrtc_input")
 logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
+
+# Upper bound on a single multi-part clipboard transfer (bytes). The declared
+# size and the accumulated chunks are both checked against this so a client
+# cannot grow the in-memory buffer without bound (memory-exhaustion DoS).
+MULTIPART_CLIPBOARD_MAX_SIZE = 64 * 1024 * 1024
+
+
+def _is_within_directory(directory: str, target: str) -> bool:
+    """Return True if `target` is `directory` itself or strictly inside it.
+
+    Compares on path-segment boundaries via os.path.commonpath rather than a
+    bare string prefix (which would accept sibling dirs sharing a name prefix).
+    Both paths should already be absolute/realpath-resolved by the caller.
+    """
+    directory = os.path.abspath(directory)
+    target = os.path.abspath(target)
+    try:
+        return os.path.commonpath([directory, target]) == directory
+    except ValueError:
+        # Raised for paths on different drives or a mix of absolute/relative.
+        return False
 
 # EVDEV Event Codes (from linux/input-event-codes.h)
 EV_SYN = 0x00
@@ -507,14 +529,17 @@ class SelkiesGamepad:
             buttons_evdev_codes = controller_config.get("buttons", [])
             axes_evdev_codes = controller_config.get("axes", [])
 
-            num_actual_btns = len(buttons_evdev_codes)
-            num_actual_axes = len(axes_evdev_codes)
+            # Clamp the reported counts to the array capacity so the value packed
+            # into the C js_config_t can never exceed the (truncated) btn_map /
+            # axes_map array lengths, which would otherwise drive an out-of-bounds
+            # read in the C interposer.
+            num_actual_btns = min(len(buttons_evdev_codes), INTERPOSER_MAX_BTNS)
+            num_actual_axes = min(len(axes_evdev_codes), INTERPOSER_MAX_AXES)
 
             padded_btn_map_for_pack = list(buttons_evdev_codes)
             if len(padded_btn_map_for_pack) > INTERPOSER_MAX_BTNS:
                 logging.warning(f"Controller '{name_str}' has {len(padded_btn_map_for_pack)} buttons, truncating to {INTERPOSER_MAX_BTNS} for config.")
                 padded_btn_map_for_pack = padded_btn_map_for_pack[:INTERPOSER_MAX_BTNS]
-                # num_actual_btns is already set correctly to the original length before potential truncation for the array
             else:
                 padded_btn_map_for_pack.extend([0] * (INTERPOSER_MAX_BTNS - len(padded_btn_map_for_pack)))
 
@@ -522,7 +547,6 @@ class SelkiesGamepad:
             if len(padded_axes_map_for_pack) > INTERPOSER_MAX_AXES:
                 logging.warning(f"Controller '{name_str}' has {len(padded_axes_map_for_pack)} axes, truncating to {INTERPOSER_MAX_AXES} for config.")
                 padded_axes_map_for_pack = padded_axes_map_for_pack[:INTERPOSER_MAX_AXES]
-                # num_actual_axes is already set
             else:
                 padded_axes_map_for_pack.extend([0] * (INTERPOSER_MAX_AXES - len(padded_axes_map_for_pack)))
 
@@ -2184,6 +2208,15 @@ class WebRTCInput:
                 logger_webrtc_input.error(f"Error in keyboard worker: {e}", exc_info=True)
 
     async def on_message(self, msg: str, display_id='primary'):
+        # A malformed client message must not tear down the transport connection.
+        try:
+            await self._dispatch_message(msg, display_id)
+        except (IndexError, ValueError) as e:
+            logger_webrtc_input.warning(f"Malformed client message {msg[:64]!r}: {e}")
+        except Exception as e:
+            logger_webrtc_input.error(f"Error handling client message {msg[:64]!r}: {e}", exc_info=True)
+
+    async def _dispatch_message(self, msg: str, display_id='primary'):
         toks = msg.split(",")
         msg_type = toks[0]
 
@@ -2294,7 +2327,11 @@ class WebRTCInput:
         elif msg_type == "cws":
             if self.enable_clipboard in ["true", "in"]:
                 try:
-                    self.multipart_clipboard_total_size = int(toks[1])
+                    declared_size = int(toks[1])
+                    if declared_size < 0 or declared_size > MULTIPART_CLIPBOARD_MAX_SIZE:
+                        logger_webrtc_input.error(f"Rejecting multi-part clipboard write: declared size {declared_size} out of bounds (max {MULTIPART_CLIPBOARD_MAX_SIZE}).")
+                        return
+                    self.multipart_clipboard_total_size = declared_size
                     self.multipart_clipboard_mime_type = "text/plain"
                     self.multipart_clipboard_buffer = io.BytesIO()
                     self.multipart_clipboard_in_progress = True
@@ -2306,8 +2343,12 @@ class WebRTCInput:
         elif msg_type == "cbs":
             if self.enable_clipboard in ["true", "in"]:
                 try:
+                    declared_size = int(toks[2])
+                    if declared_size < 0 or declared_size > MULTIPART_CLIPBOARD_MAX_SIZE:
+                        logger_webrtc_input.error(f"Rejecting multi-part clipboard write: declared size {declared_size} out of bounds (max {MULTIPART_CLIPBOARD_MAX_SIZE}).")
+                        return
                     self.multipart_clipboard_mime_type = toks[1]
-                    self.multipart_clipboard_total_size = int(toks[2])
+                    self.multipart_clipboard_total_size = declared_size
                     self.multipart_clipboard_buffer = io.BytesIO()
                     self.multipart_clipboard_in_progress = True
                     logger_webrtc_input.info(f"Starting multi-part binary clipboard receive ({self.multipart_clipboard_mime_type}), total size: {self.multipart_clipboard_total_size}")
@@ -2319,9 +2360,15 @@ class WebRTCInput:
             if self.multipart_clipboard_in_progress:
                 try:
                     chunk_data = base64.b64decode(toks[1])
+                    if self.multipart_clipboard_buffer.tell() + len(chunk_data) > self.multipart_clipboard_total_size:
+                        logger_webrtc_input.error("Multi-part clipboard exceeded its declared size; aborting transfer.")
+                        self.multipart_clipboard_buffer = None
+                        self.multipart_clipboard_in_progress = False
+                        return
                     self.multipart_clipboard_buffer.write(chunk_data)
                 except Exception as e:
                     logger_webrtc_input.error(f"Failed to process clipboard data chunk: {e}")
+                    self.multipart_clipboard_buffer = None
                     self.multipart_clipboard_in_progress = False
         elif msg_type == "cwe" or msg_type == "cbe":
             if self.multipart_clipboard_in_progress:
@@ -2387,6 +2434,9 @@ class WebRTCInput:
             if re.fullmatch(r"^\d+(\.\d+)?$", scale): await self.on_scaling_ratio(float(scale))
             else: logger_webrtc_input.warning(f"Rejecting scaling change, invalid: {scale}")
         elif msg_type == "cmd":
+            if not settings.command_enabled[0]:
+                logger_webrtc_input.warning("Received 'cmd' message, but command execution is disabled by server settings.")
+                return
             if len(toks) > 1:
                 command_to_run = ",".join(toks[1:])
                 logger_webrtc_input.info(f"Attempting to execute command: '{command_to_run}'")
@@ -2530,6 +2580,9 @@ class WebRTCInput:
         try:
             rel_path_from_client, size_str = filename, filesize
             file_size = int(size_str)
+            if file_size < 0:
+                logger_webrtc_input.error(f"Rejecting upload with invalid negative declared size: {file_size}")
+                return
 
             sane_rel_path = rel_path_from_client.strip('/\\')
             sane_rel_path = os.path.normpath(sane_rel_path)
@@ -2538,21 +2591,22 @@ class WebRTCInput:
             if not path_components or sane_rel_path.startswith(os.sep) or sane_rel_path.startswith('/') or \
                 sane_rel_path.startswith('\\') or ".." in path_components:
                 logger_webrtc_input.error(f"Invalid or malicious relative path from client: '{rel_path_from_client}'. Discarding.")
+                return
 
             sane_rel_path = os.path.join(*path_components)
             final_server_path = os.path.join(self.upload_dir_path, sane_rel_path)
-            real_upload_dir = os.path.realpath(self.upload_dir_path)
-            intended_parent_dir_abs = os.path.abspath(os.path.dirname(final_server_path))
-            real_upload_dir_abs = os.path.abspath(real_upload_dir)
+            real_upload_dir_abs = os.path.realpath(self.upload_dir_path)
+            # Resolve symlinks on the parent before the containment check.
+            intended_parent_dir_abs = os.path.realpath(os.path.dirname(final_server_path))
 
-            if not intended_parent_dir_abs.startswith(real_upload_dir_abs):
+            if not _is_within_directory(real_upload_dir_abs, intended_parent_dir_abs):
                 logger_webrtc_input.error(f"Path escape attempt detected: '{final_server_path}' (from client: '{rel_path_from_client}') is outside of '{real_upload_dir_abs}'. Discarding.")
                 return
 
             target_dir = os.path.dirname(final_server_path)
 
             if target_dir and target_dir != real_upload_dir_abs and not os.path.exists(target_dir):
-                if not os.path.abspath(target_dir).startswith(real_upload_dir_abs):
+                if not _is_within_directory(real_upload_dir_abs, os.path.realpath(target_dir)):
                     logger_webrtc_input.error(f"Directory creation escape attempt: '{target_dir}' is outside of '{real_upload_dir_abs}'. Discarding.")
                     return
                 try:
@@ -2569,8 +2623,13 @@ class WebRTCInput:
                     logger_webrtc_input.warning(f"Error closing previous upload stream {self.active_upload_target_path_conn}: {e_close_old}")
                 del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
 
-            self.active_uploads_by_path_conn[final_server_path] = open(final_server_path, "wb")
+            # O_NOFOLLOW prevents writing through a symlink planted at the final
+            # path component (the parent path was already symlink-resolved above).
+            upload_fd = os.open(final_server_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+            self.active_uploads_by_path_conn[final_server_path] = os.fdopen(upload_fd, "wb")
             self.active_upload_target_path_conn = final_server_path
+            self.active_upload_declared_size = file_size
+            self.active_upload_bytes_written = 0
             logger_webrtc_input.info(f"Upload started: {final_server_path} (client rel_path: '{rel_path_from_client}', size: {file_size})")
         except ValueError:
             logger_webrtc_input.error(f"Invalid FILE_UPLOAD_START format: {filename}")
@@ -2585,7 +2644,22 @@ class WebRTCInput:
         if data_type == 0x01:  # inidicates file data
             if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
                 try:
+                    # Enforce the declared upload size so a client cannot stream
+                    # unlimited data (e.g. after declaring size=1) to exhaust disk.
+                    declared = getattr(self, "active_upload_declared_size", None)
+                    written = getattr(self, "active_upload_bytes_written", 0)
+                    if declared is not None and written + len(payload) > declared:
+                        logger_webrtc_input.error(f"Upload to {self.active_upload_target_path_conn} exceeded its declared size ({declared} bytes); aborting.")
+                        self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
+                        try:
+                            os.remove(self.active_upload_target_path_conn)
+                        except OSError:
+                            pass
+                        del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
+                        self.active_upload_target_path_conn = None
+                        return
                     self.active_uploads_by_path_conn[self.active_upload_target_path_conn].write(payload)
+                    self.active_upload_bytes_written = written + len(payload)
                 except Exception as e_write:
                     logger_webrtc_input.error(f"File write error for {self.active_upload_target_path_conn}: {e_write}")
                     try:

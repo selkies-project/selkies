@@ -43,6 +43,7 @@ data_logger = logging.getLogger("data_websocket")
 X11_CAPTURE_AVAILABLE = False
 PCMFLUX_AVAILABLE = False
 
+import aiofiles
 import asyncio
 import base64
 import ctypes
@@ -106,6 +107,26 @@ except OSError as e:
 user_tokens = {}
 client_permissions = {}
 active_mk_token = None
+
+# Fallback upper bound for client-supplied integer settings that declare no
+# explicit max in their definition, to prevent resource-exhaustion from absurd
+# values.
+INT_SETTING_DEFAULT_MAX = 1_000_000
+
+def _path_is_within(directory, target):
+    """Return True if `target` is `directory` itself or strictly inside it.
+
+    Compares on path-segment boundaries via os.path.commonpath rather than a
+    bare string prefix (which would accept sibling dirs sharing a name prefix).
+    Both arguments should already be absolute/realpath-resolved by the caller.
+    """
+    directory = os.path.abspath(directory)
+    target = os.path.abspath(target)
+    try:
+        return os.path.commonpath([directory, target]) == directory
+    except ValueError:
+        return False
+
 
 async def _broadcast_to_clients(clients, message):
     """Broadcast concurrently to all clients - only remove on clear connection errors."""
@@ -922,7 +943,7 @@ class DataStreamingServer(BaseStreamingService):
         self._shared_stats_ws = {}
         self.uinput_mouse_socket = UINPUT_MOUSE_SOCKET
         self.js_socket_path = JS_SOCKET_PATH
-        self.enable_clipboard = self.cli_args.clipboard_enabled
+        self.enable_clipboard = self.cli_args.clipboard_enabled[0]
         self.enable_binary_clipboard = self.cli_args.enable_binary_clipboard[0]
         self.enable_cursors = ENABLE_CURSORS
         self.cursor_size = CURSOR_SIZE
@@ -932,6 +953,9 @@ class DataStreamingServer(BaseStreamingService):
         self.client_settings_received = asyncio.Event()
         self._reconfigure_lock = asyncio.Lock()
         self._is_reconfiguring = False
+        # Set when a reconfiguration is requested while one is already running, so
+        # the latest state is reconciled afterwards instead of being dropped.
+        self._reconfigure_pending = False
         self._bytes_sent_in_interval = 0
         self._last_bandwidth_calc_time = time.monotonic()
         # Frame-based backpressure settings
@@ -1512,10 +1536,26 @@ class DataStreamingServer(BaseStreamingService):
                 elif setting_def['type'] == 'enum':
                     allowed_values = setting_def['meta']['allowed']
                     if str(client_value) in allowed_values:
-                        return client_value
+                        # Return the value in the same (string) type as the allowed
+                        # list and the stored default, so later equality checks
+                        # don't spuriously flip on str-vs-int mismatches.
+                        return str(client_value)
                     server_default = allowed_values[0] if allowed_values else setting_def['default']
                     data_logger.warning(f"Client value for '{name}' ('{client_value}') is not in the allowed list {allowed_values}. Using server default '{server_default}'.")
                     return server_default
+                elif setting_def['type'] == 'int':
+                    sanitized = int(client_value)
+                    meta = setting_def.get('meta', {})
+                    min_val = meta.get('min', 0)
+                    # Bound client-supplied integers (e.g. manual_width/height) so a
+                    # client cannot request an absurd value that exhausts resources
+                    # (e.g. a giant framebuffer). Falls back to a generous cap when
+                    # the setting declares no explicit max.
+                    max_val = meta.get('max', INT_SETTING_DEFAULT_MAX)
+                    clamped = max(min_val, min(sanitized, max_val))
+                    if clamped != sanitized:
+                        data_logger.warning(f"Client value for '{name}' ({client_value}) was clamped to {clamped} (bounds: {min_val}-{max_val}).")
+                    return clamped
                 elif setting_def['type'] == 'bool':
                     server_val, is_locked = server_limit
                     client_bool = str(client_value).lower() in ['true', '1']
@@ -1778,6 +1818,10 @@ class DataStreamingServer(BaseStreamingService):
             name = setting_def['name']
             if name in ['port', 'dri_node', 'debug', 'audio_device_name', 'watermark_path']:
                 continue
+            # Never broadcast secrets/credentials (master_token, passwords, TURN
+            # secrets, etc.) to clients.
+            if setting_def.get('sensitive'):
+                continue
             value = getattr(settings, name)
             if setting_def['type'] == 'bool':
                 bool_val, is_locked = value
@@ -1812,6 +1856,8 @@ class DataStreamingServer(BaseStreamingService):
         self._backpressure_send_frames_enabled = True
         active_uploads_by_path_conn = {}
         active_upload_target_path_conn = None
+        active_upload_declared_size = None
+        active_upload_bytes_written = 0
         upload_dir_valid = upload_dir_path is not None
         system_monitor_task_ws = None
         gpu_monitor_task_ws = None
@@ -1884,6 +1930,8 @@ class DataStreamingServer(BaseStreamingService):
 
             async for msg in websocket:
                 if msg.type == WSMsgType.BINARY:
+                    if not msg.data:
+                        continue
                     msg_type, payload = msg.data[0], msg.data[1:]
                     if msg_type == 0x01:
                         if (
@@ -1891,10 +1939,30 @@ class DataStreamingServer(BaseStreamingService):
                             and active_upload_target_path_conn
                             in active_uploads_by_path_conn
                         ):
+                            # Enforce the declared upload size so a client cannot
+                            # stream unlimited data (e.g. after declaring size=1)
+                            # and exhaust disk.
+                            if (
+                                active_upload_declared_size is not None
+                                and active_upload_bytes_written + len(payload) > active_upload_declared_size
+                            ):
+                                data_logger.error(
+                                    f"Upload to {active_upload_target_path_conn} exceeded its declared size "
+                                    f"({active_upload_declared_size} bytes); aborting."
+                                )
+                                try:
+                                    active_uploads_by_path_conn[active_upload_target_path_conn].close()
+                                    os.remove(active_upload_target_path_conn)
+                                except Exception:
+                                    pass
+                                del active_uploads_by_path_conn[active_upload_target_path_conn]
+                                active_upload_target_path_conn = None
+                                continue
                             try:
                                 active_uploads_by_path_conn[
                                     active_upload_target_path_conn
                                 ].write(payload)
+                                active_upload_bytes_written += len(payload)
                             except Exception as e_write:
                                 data_logger.error(
                                     f"File write error for {active_upload_target_path_conn}: {e_write}"
@@ -2148,10 +2216,6 @@ class DataStreamingServer(BaseStreamingService):
 
                 elif msg.type == WSMsgType.TEXT:
                     message = msg.data
-                    if message.startswith("SETTINGS,"):
-                        client_perms = client_permissions.get(websocket)
-                        client_role = client_perms.get("role") if client_perms else "controller"
-
                     perms = client_permissions.get(websocket)
                     if perms and perms.get("role") == "viewer":
                         allowed_viewer_prefixes = [
@@ -2175,6 +2239,9 @@ class DataStreamingServer(BaseStreamingService):
                         try:
                             _, rel_path_from_client, size_str = message.split(":", 2)
                             file_size = int(size_str)
+                            if file_size < 0:
+                                data_logger.error(f"Rejecting upload with invalid negative declared size: {file_size}")
+                                continue
 
                             sane_rel_path = rel_path_from_client.strip('/\\')
                             sane_rel_path = os.path.normpath(sane_rel_path)
@@ -2188,23 +2255,23 @@ class DataStreamingServer(BaseStreamingService):
                                ".." in path_components:
                                 data_logger.error(f"Invalid or malicious relative path from client: '{rel_path_from_client}'. Discarding.")
                                 continue
-                            
+
                             sane_rel_path = os.path.join(*path_components)
 
                             final_server_path = os.path.join(upload_dir_path, sane_rel_path)
 
-                            real_upload_dir = os.path.realpath(upload_dir_path)
-                            intended_parent_dir_abs = os.path.abspath(os.path.dirname(final_server_path))
-                            real_upload_dir_abs = os.path.abspath(real_upload_dir)
+                            real_upload_dir_abs = os.path.realpath(upload_dir_path)
+                            # Resolve symlinks on the parent before the containment check.
+                            intended_parent_dir_abs = os.path.realpath(os.path.dirname(final_server_path))
 
-                            if not intended_parent_dir_abs.startswith(real_upload_dir_abs):
+                            if not _path_is_within(real_upload_dir_abs, intended_parent_dir_abs):
                                  data_logger.error(f"Path escape attempt detected: '{final_server_path}' (from client: '{rel_path_from_client}') is outside of '{real_upload_dir_abs}'. Discarding.")
                                  continue
 
                             target_dir = os.path.dirname(final_server_path)
-                            
+
                             if target_dir and target_dir != real_upload_dir_abs and not os.path.exists(target_dir):
-                                if not os.path.abspath(target_dir).startswith(real_upload_dir_abs):
+                                if not _path_is_within(real_upload_dir_abs, os.path.realpath(target_dir)):
                                     data_logger.error(f"Directory creation escape attempt: '{target_dir}' is outside of '{real_upload_dir_abs}'. Discarding.")
                                     continue
                                 try:
@@ -2225,8 +2292,13 @@ class DataStreamingServer(BaseStreamingService):
                                     data_logger.warning(f"Error closing previous upload stream {active_upload_target_path_conn}: {e_close_old}")
                                 del active_uploads_by_path_conn[active_upload_target_path_conn]
 
-                            active_uploads_by_path_conn[final_server_path] = open(final_server_path, "wb")
+                            # O_NOFOLLOW prevents writing through a symlink planted at the
+                            # final path component (the parent was already symlink-resolved).
+                            upload_fd = os.open(final_server_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+                            active_uploads_by_path_conn[final_server_path] = os.fdopen(upload_fd, "wb")
                             active_upload_target_path_conn = final_server_path
+                            active_upload_declared_size = file_size
+                            active_upload_bytes_written = 0
                             data_logger.info(
                                 f"Upload started: {final_server_path} (client rel_path: '{rel_path_from_client}', size: {file_size})"
                             )
@@ -2448,42 +2520,6 @@ class DataStreamingServer(BaseStreamingService):
                         except (IndexError, ValueError):
                             data_logger.warning(f"Malformed CLIENT_FRAME_ACK from {raddr}: {message}")
 
-                    elif message.startswith("FILE_UPLOAD_END:"):
-                        if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
-                        ):
-                            active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ].close()
-                            data_logger.info(
-                                f"Upload finished: {active_upload_target_path_conn}"
-                            )
-                            del active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ]
-                        active_upload_target_path_conn = None
-
-                    elif message.startswith("FILE_UPLOAD_ERROR:"):
-                        data_logger.error(f"Client reported upload error: {message}")
-                        if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
-                        ):
-                            active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ].close()
-                            try:
-                                os.remove(active_upload_target_path_conn)
-                            except OSError:
-                                pass
-                            del active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ]
-                        active_upload_target_path_conn = None
-
                     elif message == "START_VIDEO":
                         perms = client_permissions.get(websocket)
                         if perms and perms.get("role") == "viewer":
@@ -2685,6 +2721,22 @@ class DataStreamingServer(BaseStreamingService):
                             data_logger.warning("Received 'cmd' message, but command execution is disabled by server settings.")
                             continue
 
+                        # In secure mode, 'cmd' requires the same authority as
+                        # keyboard/mouse input: the active mk-token holder, or a
+                        # controller when no mk-token is set.
+                        if self.is_secure_mode:
+                            cmd_perms = client_permissions.get(websocket)
+                            cmd_token = cmd_perms.get("token") if cmd_perms else None
+                            if active_mk_token is not None:
+                                if cmd_token != active_mk_token:
+                                    data_logger.warning(f"BLOCK (Secure Mode): 'cmd' from {remote_address} dropped; client is not the active controller.")
+                                    continue
+                            else:
+                                cmd_role = cmd_perms.get("role") if cmd_perms else "viewer"
+                                if cmd_role != "controller":
+                                    data_logger.warning(f"BLOCK (Secure Mode): 'cmd' from {remote_address} dropped; client is not a controller.")
+                                    continue
+
                         toks = message.split(',')
                         if len(toks) > 1:
                             command_to_run = ",".join(toks[1:])
@@ -2726,7 +2778,7 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.warning(f"BLOCK (Secure Mode): Malformed gamepad message from {remote_address}: {message}")
                                 continue
 
-                        if self.is_secure_mode and message.split(',')[0] in ["kd", "ku", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr"]:
+                        if self.is_secure_mode and message.split(',')[0] in ["kd", "ku", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr"]:
                             perms = client_permissions.get(websocket)
                             token = perms.get("token") if perms else None
                             
@@ -2869,8 +2921,9 @@ class DataStreamingServer(BaseStreamingService):
             if not self.clients:
                  data_logger.info(f"Last client ({raddr}) disconnected. All pipelines should have been stopped by reconfigure_displays.")
                  self.capture_cursor = False
-                 async with self._reconfigure_lock:
-                     await self.shutdown_pipelines()
+                 # shutdown_pipelines() -> reconfigure_displays() acquires
+                 # _reconfigure_lock itself; it must not be held here.
+                 await self.shutdown_pipelines()
 
             data_logger.info(f"Data WS handler for {raddr} finished all cleanup.")
 
@@ -2895,20 +2948,6 @@ class DataStreamingServer(BaseStreamingService):
             await asyncio.sleep(poll_interval)
         return None
 
-    async def _cleanup_client(self, websocket, display_id):
-        """Removes a client and triggers reconfiguration if necessary."""
-        _cleanup_raddr = client_permissions.get(websocket, {}).get("remote_address", "unknown")
-        data_logger.info(f"Cleaning up Data WS handler for {_cleanup_raddr} (Display ID: {display_id})...")
-        self.display_clients.pop(display_id, None)
-
-        if self._is_reconfiguring:
-            data_logger.warning(f"Client '{display_id}' disconnected DURING a reconfiguration. "
-                                "A new reconfiguration will NOT be triggered to prevent a loop.")
-            return
-
-        data_logger.info(f"Client for {display_id} removed. Triggering display reconfiguration.")
-        async with self._reconfigure_lock:
-            await self.reconfigure_displays()
 
     async def _run_detached_command(self, cmd_list: list, description: str):
         """Runs a command via the shell using 'nohup ... &' to detach it from the server process."""
@@ -2989,164 +3028,179 @@ class DataStreamingServer(BaseStreamingService):
         This is called on connect, disconnect, or settings change.
         """
         if self._reconfigure_lock.locked():
-            data_logger.warning("Reconfiguration already in progress. Ignoring concurrent request.")
+            # A pass is already running; flag it to run again with the latest
+            # state once it finishes (last-write-wins coalescing).
+            self._reconfigure_pending = True
+            data_logger.info("Reconfiguration already in progress; coalescing this request.")
             return
-        async with self._reconfigure_lock:
-            self._is_reconfiguring = True
-            data_logger.info("Starting display reconfiguration...")
-            try:
-                current_display_count = len(self.display_clients)
-                if not IS_WAYLAND and self._wm_swap_is_supported is None:
-                    if which("xfce4-session") or which("startplasma-x11"):
-                        self._wm_swap_is_supported = True
-                    else:
-                        self._wm_swap_is_supported = False
-                if (not IS_WAYLAND and current_display_count > 1 and self._wm_swap_is_supported and not self._is_wm_swapped):
-                    data_logger.info("Multi-monitor setup: switching to Openbox with a minimal config.")
-                    config_path = "/tmp/openbox_selkies_config.xml"
-                    config_content = "<openbox_config></openbox_config>\n"
-                    try:
-                        with open(config_path, "w") as f:
-                            f.write(config_content)
-                        data_logger.info(f"Wrote minimal Openbox config to {config_path}")
-                        openbox_cmd = ["openbox", "--config-file", config_path, "--replace"]
-                    except IOError as e:
-                        data_logger.error(f"Could not write Openbox config to {config_path}: {e}. Proceeding without custom config.")
-                        openbox_cmd = ["openbox", "--replace"]
-                    await self._run_detached_command(openbox_cmd, "switch to openbox")
-                    self._is_wm_swapped = True
-                if self.capture_instances or any(d.get('backpressure_task') for d in self.display_clients.values()):
-                    data_logger.info("Stopping all existing capture and backpressure tasks...")
-                    stop_bp_tasks = [self._ensure_backpressure_task_is_stopped(disp_id) for disp_id in self.display_clients.keys()]
-                    if stop_bp_tasks:
-                        await asyncio.gather(*stop_bp_tasks, return_exceptions=True)
-                    stop_capture_tasks = [
-                        self.capture_loop.run_in_executor(None, inst['module'].stop_capture)
-                        for inst in self.capture_instances.values() if inst.get('module')
-                    ]
-                    if stop_capture_tasks:
-                        await asyncio.gather(*stop_capture_tasks, return_exceptions=True)
+        while True:
+            async with self._reconfigure_lock:
+                self._reconfigure_pending = False
+                self._is_reconfiguring = True
+                data_logger.info("Starting display reconfiguration...")
+                try:
+                    await self._reconfigure_displays_locked()
+                except Exception as e:
+                    data_logger.error(f"A critical error occurred during display reconfiguration: {e}", exc_info=True)
+                finally:
+                    self._last_display_count = len(self.display_clients)
+                    self._is_reconfiguring = False
+                    data_logger.info("Reconfiguration process complete (state unlocked).")
+            # Run another pass if requests were coalesced while the lock was
+            # held; checked on every exit path (a pass may return early).
+            if not self._reconfigure_pending:
+                break
 
-                    for display_id, inst in self.capture_instances.items():
-                        sender_task = inst.get('sender_task')
-                        if sender_task and not sender_task.done():
-                            sender_task.cancel()
-                    self.capture_instances.clear()
-                    self.video_chunk_queues.clear()
-                    data_logger.info("All capture instances, senders, and backpressure tasks stopped.")
-                if not self.display_clients:
-                    data_logger.warning("No display clients connected. Video pipelines remain stopped.")
-                    _, _, _, _, screen_name = await get_new_res("1x1")
-                    if screen_name:
-                        current_monitors = await self._get_current_monitors()
-                        for monitor_name in current_monitors:
-                            await self._run_command(["xrandr", "--delmonitor", monitor_name], f"cleanup monitor {monitor_name}")
+    async def _reconfigure_displays_locked(self):
+        """One reconfiguration pass. Must only be called by reconfigure_displays()
+        with _reconfigure_lock held; early returns here abort just this pass."""
+        current_display_count = len(self.display_clients)
+        if not IS_WAYLAND and self._wm_swap_is_supported is None:
+            if which("xfce4-session") or which("startplasma-x11"):
+                self._wm_swap_is_supported = True
+            else:
+                self._wm_swap_is_supported = False
+        if (not IS_WAYLAND and current_display_count > 1 and self._wm_swap_is_supported and not self._is_wm_swapped):
+            data_logger.info("Multi-monitor setup: switching to Openbox with a minimal config.")
+            config_path = "/tmp/openbox_selkies_config.xml"
+            config_content = "<openbox_config></openbox_config>\n"
+            try:
+                async with aiofiles.open(config_path, "w") as f:
+                    await f.write(config_content)
+                data_logger.info(f"Wrote minimal Openbox config to {config_path}")
+                openbox_cmd = ["openbox", "--config-file", config_path, "--replace"]
+            except IOError as e:
+                data_logger.error(f"Could not write Openbox config to {config_path}: {e}. Proceeding without custom config.")
+                openbox_cmd = ["openbox", "--replace"]
+            await self._run_detached_command(openbox_cmd, "switch to openbox")
+            self._is_wm_swapped = True
+        if self.capture_instances or any(d.get('backpressure_task') for d in self.display_clients.values()):
+            data_logger.info("Stopping all existing capture and backpressure tasks...")
+            stop_bp_tasks = [self._ensure_backpressure_task_is_stopped(disp_id) for disp_id in self.display_clients.keys()]
+            if stop_bp_tasks:
+                await asyncio.gather(*stop_bp_tasks, return_exceptions=True)
+            stop_capture_tasks = [
+                self.capture_loop.run_in_executor(None, inst['module'].stop_capture)
+                for inst in self.capture_instances.values() if inst.get('module')
+            ]
+            if stop_capture_tasks:
+                await asyncio.gather(*stop_capture_tasks, return_exceptions=True)
+
+            for display_id, inst in self.capture_instances.items():
+                sender_task = inst.get('sender_task')
+                if sender_task and not sender_task.done():
+                    sender_task.cancel()
+            self.capture_instances.clear()
+            self.video_chunk_queues.clear()
+            data_logger.info("All capture instances, senders, and backpressure tasks stopped.")
+        if not self.display_clients:
+            data_logger.warning("No display clients connected. Video pipelines remain stopped.")
+            _, _, _, _, screen_name = await get_new_res("1x1")
+            if screen_name:
+                current_monitors = await self._get_current_monitors()
+                for monitor_name in current_monitors:
+                    await self._run_command(["xrandr", "--delmonitor", monitor_name], f"cleanup monitor {monitor_name}")
+            return
+        data_logger.info("Calculating new extended desktop layout from ALL clients...")
+        layouts = {}
+        total_width = 0
+        total_height = 0
+        primary_client = self.display_clients.get('primary')
+        secondary_client = None
+        secondary_id = None
+        for display_id, client in self.display_clients.items():
+            if display_id != 'primary':
+                secondary_client = client
+                secondary_id = display_id
+                break
+        if primary_client and not secondary_client:
+            p_w, p_h = primary_client.get('width', 0), primary_client.get('height', 0)
+            if p_w > 0 and p_h > 0:
+                layouts['primary'] = {'x': 0, 'y': 0, 'w': p_w, 'h': p_h}
+                total_width, total_height = p_w, p_h
+        elif primary_client and secondary_client:
+            p_w, p_h = primary_client.get('width', 0), primary_client.get('height', 0)
+            s_w, s_h = secondary_client.get('width', 0), secondary_client.get('height', 0)
+            position = secondary_client.get('position', 'right')
+            if p_w > 0 and p_h > 0 and s_w > 0 and s_h > 0:
+                if position == 'right':
+                    layouts['primary'] = {'x': 0, 'y': 0, 'w': p_w, 'h': p_h}
+                    layouts[secondary_id] = {'x': p_w, 'y': 0, 'w': s_w, 'h': s_h}
+                    total_width, total_height = p_w + s_w, max(p_h, s_h)
+                elif position == 'left':
+                    layouts[secondary_id] = {'x': 0, 'y': 0, 'w': s_w, 'h': s_h}
+                    layouts['primary'] = {'x': s_w, 'y': 0, 'w': p_w, 'h': p_h}
+                    total_width, total_height = p_w + s_w, max(p_h, s_h)
+                elif position == 'down':
+                    layouts['primary'] = {'x': 0, 'y': 0, 'w': p_w, 'h': p_h}
+                    layouts[secondary_id] = {'x': 0, 'y': p_h, 'w': s_w, 'h': s_h}
+                    total_width, total_height = max(p_w, s_w), p_h + s_h
+                elif position == 'up':
+                    layouts[secondary_id] = {'x': 0, 'y': 0, 'w': s_w, 'h': s_h}
+                    layouts['primary'] = {'x': 0, 'y': s_h, 'w': p_w, 'h': p_h}
+                    total_width, total_height = max(p_w, s_w), p_h + s_h
+        if total_width == 0 or total_height == 0:
+            data_logger.error("Calculated total display size is zero. Aborting reconfiguration.")
+            return
+        aligned_total_width = (total_width + 7) & ~7
+        if aligned_total_width != total_width:
+            data_logger.info(f"Aligned total width from {total_width} to {aligned_total_width} for xrandr.")
+            total_width = aligned_total_width
+        self.display_layouts = layouts
+        data_logger.info(f"Layout calculated: Total Size={total_width}x{total_height}. Layouts: {layouts}")
+        if not IS_WAYLAND:
+            _, _, available_resolutions, _, screen_name = await get_new_res("1x1")
+            if not screen_name:
+                data_logger.error("CRITICAL: Could not determine screen name from xrandr. Aborting.")
+                return
+            current_monitors = await self._get_current_monitors()
+            for monitor_name in current_monitors:
+                await self._run_command(["xrandr", "--delmonitor", monitor_name], f"delete old monitor {monitor_name}")
+            total_mode_str = f"{total_width}x{total_height}"
+            if total_mode_str not in available_resolutions:
+                data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
+                try:
+                    _, modeline_params = await generate_xrandr_gtf_modeline(total_mode_str)
+                    await self._run_command(["xrandr", "--newmode", total_mode_str] + modeline_params.split(), "create new mode")
+                    await self._run_command(["xrandr", "--addmode", screen_name, total_mode_str], "add new mode")
+                except Exception as e:
+                    data_logger.error(f"FATAL: Could not create extended mode {total_mode_str}: {e}. Aborting.")
                     return
-                data_logger.info("Calculating new extended desktop layout from ALL clients...")
-                layouts = {}
-                total_width = 0
-                total_height = 0
-                primary_client = self.display_clients.get('primary')
-                secondary_client = None
-                secondary_id = None
-                for display_id, client in self.display_clients.items():
-                    if display_id != 'primary':
-                        secondary_client = client
-                        secondary_id = display_id
-                        break
-                if primary_client and not secondary_client:
-                    p_w, p_h = primary_client.get('width', 0), primary_client.get('height', 0)
-                    if p_w > 0 and p_h > 0:
-                        layouts['primary'] = {'x': 0, 'y': 0, 'w': p_w, 'h': p_h}
-                        total_width, total_height = p_w, p_h
-                elif primary_client and secondary_client:
-                    p_w, p_h = primary_client.get('width', 0), primary_client.get('height', 0)
-                    s_w, s_h = secondary_client.get('width', 0), secondary_client.get('height', 0)
-                    position = secondary_client.get('position', 'right')
-                    if p_w > 0 and p_h > 0 and s_w > 0 and s_h > 0:
-                        if position == 'right':
-                            layouts['primary'] = {'x': 0, 'y': 0, 'w': p_w, 'h': p_h}
-                            layouts[secondary_id] = {'x': p_w, 'y': 0, 'w': s_w, 'h': s_h}
-                            total_width, total_height = p_w + s_w, max(p_h, s_h)
-                        elif position == 'left':
-                            layouts[secondary_id] = {'x': 0, 'y': 0, 'w': s_w, 'h': s_h}
-                            layouts['primary'] = {'x': s_w, 'y': 0, 'w': p_w, 'h': p_h}
-                            total_width, total_height = p_w + s_w, max(p_h, s_h)
-                        elif position == 'down':
-                            layouts['primary'] = {'x': 0, 'y': 0, 'w': p_w, 'h': p_h}
-                            layouts[secondary_id] = {'x': 0, 'y': p_h, 'w': s_w, 'h': s_h}
-                            total_width, total_height = max(p_w, s_w), p_h + s_h
-                        elif position == 'up':
-                            layouts[secondary_id] = {'x': 0, 'y': 0, 'w': s_w, 'h': s_h}
-                            layouts['primary'] = {'x': 0, 'y': s_h, 'w': p_w, 'h': p_h}
-                            total_width, total_height = max(p_w, s_w), p_h + s_h
-                if total_width == 0 or total_height == 0:
-                    data_logger.error("Calculated total display size is zero. Aborting reconfiguration.")
-                    return
-                aligned_total_width = (total_width + 7) & ~7
-                if aligned_total_width != total_width:
-                    data_logger.info(f"Aligned total width from {total_width} to {aligned_total_width} for xrandr.")
-                    total_width = aligned_total_width
-                self.display_layouts = layouts
-                data_logger.info(f"Layout calculated: Total Size={total_width}x{total_height}. Layouts: {layouts}")
-                if not IS_WAYLAND:
-                    _, _, available_resolutions, _, screen_name = await get_new_res("1x1")
-                    if not screen_name:
-                        data_logger.error("CRITICAL: Could not determine screen name from xrandr. Aborting.")
-                        return
-                    current_monitors = await self._get_current_monitors()
-                    for monitor_name in current_monitors:
-                        await self._run_command(["xrandr", "--delmonitor", monitor_name], f"delete old monitor {monitor_name}")
-                    total_mode_str = f"{total_width}x{total_height}"
-                    if total_mode_str not in available_resolutions:
-                        data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
-                        try:
-                            _, modeline_params = await generate_xrandr_gtf_modeline(total_mode_str)
-                            await self._run_command(["xrandr", "--newmode", total_mode_str] + modeline_params.split(), "create new mode")
-                            await self._run_command(["xrandr", "--addmode", screen_name, total_mode_str], "add new mode")
-                        except Exception as e:
-                            data_logger.error(f"FATAL: Could not create extended mode {total_mode_str}: {e}. Aborting.")
-                            return
-                    await self._run_command(["xrandr", "--fb", total_mode_str, "--output", screen_name, "--mode", total_mode_str], "set framebuffer")
-                    data_logger.info("Defining logical monitors for the window manager...")
-                    for display_id, layout in layouts.items():
-                        geometry = f"{layout['w']}/0x{layout['h']}/0+{layout['x']}+{layout['y']}"
-                        monitor_name = f"selkies-{display_id}"
-                        cmd = ["xrandr", "--setmonitor", monitor_name, geometry, screen_name]
-                        await self._run_command(cmd, f"set logical monitor {monitor_name}")
-                    if 'primary' in layouts:
-                        await self._run_command(
-                            ["xrandr", "--output", screen_name, "--primary"],
-                            "set primary output"
-                        )
-                data_logger.info("Starting separate capture instances for each ACTIVE display region...")
-                for display_id, layout in layouts.items():
-                    client_data = self.display_clients.get(display_id)
-                    if client_data and client_data.get('video_active', False):
-                        data_logger.info(f"Client '{display_id}' is active. Starting its capture.")
-                        try:
-                            await self._start_capture_for_display(
-                                display_id=display_id,
-                                width=layout['w'], height=layout['h'],
-                                x_offset=layout['x'], y_offset=layout['y']
-                            )
-                            await self._start_backpressure_task_if_needed(display_id)
-                        except Exception as e:
-                            data_logger.error(
-                                f"Failed to start capture for display '{display_id}' during reconfiguration. "
-                                f"This display will not stream. Error: {e}", exc_info=False
-                            )
-                    else:
-                        data_logger.info(f"Client '{display_id}' is connected but not active. Skipping video start.")
-                await self.broadcast_stream_resolution()
-                await self.broadcast_display_config()
-                data_logger.info("Display reconfiguration finished successfully.")
-            except Exception as e:
-                data_logger.error(f"A critical error occurred during display reconfiguration: {e}", exc_info=True)
-            finally:
-                self._last_display_count = len(self.display_clients)
-                self._is_reconfiguring = False
-                data_logger.info("Reconfiguration process complete (state unlocked).")
+            await self._run_command(["xrandr", "--fb", total_mode_str, "--output", screen_name, "--mode", total_mode_str], "set framebuffer")
+            data_logger.info("Defining logical monitors for the window manager...")
+            for display_id, layout in layouts.items():
+                geometry = f"{layout['w']}/0x{layout['h']}/0+{layout['x']}+{layout['y']}"
+                monitor_name = f"selkies-{display_id}"
+                cmd = ["xrandr", "--setmonitor", monitor_name, geometry, screen_name]
+                await self._run_command(cmd, f"set logical monitor {monitor_name}")
+            if 'primary' in layouts:
+                await self._run_command(
+                    ["xrandr", "--output", screen_name, "--primary"],
+                    "set primary output"
+                )
+        data_logger.info("Starting separate capture instances for each ACTIVE display region...")
+        for display_id, layout in layouts.items():
+            client_data = self.display_clients.get(display_id)
+            if client_data and client_data.get('video_active', False):
+                data_logger.info(f"Client '{display_id}' is active. Starting its capture.")
+                try:
+                    await self._start_capture_for_display(
+                        display_id=display_id,
+                        width=layout['w'], height=layout['h'],
+                        x_offset=layout['x'], y_offset=layout['y']
+                    )
+                    await self._start_backpressure_task_if_needed(display_id)
+                except Exception as e:
+                    data_logger.error(
+                        f"Failed to start capture for display '{display_id}' during reconfiguration. "
+                        f"This display will not stream. Error: {e}", exc_info=False
+                    )
+            else:
+                data_logger.info(f"Client '{display_id}' is connected but not active. Skipping video start.")
+        await self.broadcast_stream_resolution()
+        await self.broadcast_display_config()
+        data_logger.info("Display reconfiguration finished successfully.")
+
 
     async def _video_chunk_sender(self, display_id: str):
         """
@@ -3470,14 +3524,19 @@ class DataStreamingServer(BaseStreamingService):
         try:
             new_token_data = await request.json()
             if not isinstance(new_token_data, dict): raise ValueError("Payload must be a JSON object")
+            # Validate the full payload before mutating global auth state.
+            for tkn, perms in new_token_data.items():
+                if not isinstance(perms, dict):
+                    raise ValueError(f"Token entry for {tkn!r} must be a JSON object")
         except (json.JSONDecodeError, ValueError) as e:
             return web.Response(status=400, text=f"Bad Request: {e}")
-        user_tokens = new_token_data
+
         new_mk_owner = None
-        for tkn, perms in user_tokens.items():
+        for tkn, perms in new_token_data.items():
             if perms.get("mk_control", False):
                 new_mk_owner = tkn
                 break
+        user_tokens = new_token_data
         active_mk_token = new_mk_owner
         logger.info(f"Updated user tokens. Now tracking {len(user_tokens)} tokens.")
         if not self.config_gate.is_set():
@@ -3735,6 +3794,9 @@ async def reconcile_clients():
                 await ws.close(code=4002, message=reason.encode())
             except (ConnectionResetError, OSError, RuntimeError):
                 pass
+            # new_perms is None when the token was revoked; nothing below
+            # applies to a client being disconnected.
+            continue
         has_mk_access = False
         if active_mk_token is not None:
             if token == active_mk_token:
