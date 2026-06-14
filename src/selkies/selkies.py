@@ -1115,6 +1115,56 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e:
             data_logger.warning(f"Failed to send current cursor to client {raddr}: {e}")
 
+    async def send_current_clipboard(self, websocket, raddr):
+        """Re-assert the current server clipboard to a freshly connected client.
+
+        The clipboard monitor (WebRTCInput.start_clipboard) only emits on
+        *change*, so a client that connects - or reconnects after a page
+        reload or a resumed session - when the clipboard is unchanged since the
+        previous client left never receives the existing contents, and the
+        server->client clipboard bridge looks dead. A single connect-time send
+        is not reliable either: the client may only start reading a moment
+        later, or briefly re-assert its own local clipboard right after load and
+        overwrite the value before it reads it back. So re-send the current text
+        clipboard directly to this socket periodically for a bounded window
+        after connect, until the socket closes or leaves the client set.
+        Outbound text only; binary and large payloads stay on the
+        monitor/multipart path. Runs as a background task (see ws_handler), so
+        it never blocks connection setup.
+        """
+        ih = self.input_handler
+        if not ih or getattr(ih, "enable_clipboard", "") not in ("true", "out"):
+            return
+        from .input_handler import CLIPBOARD_CHUNK_SIZE
+        # ~60s window, re-asserting every 2s: long enough to overlap a slow
+        # client's initial read loop, short enough not to linger.
+        deadline = time.monotonic() + 60.0
+        first = True
+        while time.monotonic() < deadline:
+            if not first:
+                await asyncio.sleep(2.0)
+            first = False
+            if websocket not in self.clients:
+                return
+            try:
+                clip_data, clip_mime = await ih.read_clipboard(use_binary=False)
+                if not clip_data or clip_mime != "text/plain":
+                    continue
+                clip_bytes = clip_data.encode("utf-8") if isinstance(clip_data, str) else clip_data
+                if not (0 < len(clip_bytes) < CLIPBOARD_CHUNK_SIZE):
+                    continue
+                encoded = base64.b64encode(clip_bytes).decode("ascii")
+                await websocket.send_str(f"clipboard,{encoded}")
+                data_logger.debug(f"Re-sent current clipboard ({len(clip_bytes)} bytes) to client {raddr}")
+            except (ConnectionResetError, OSError, RuntimeError):
+                # Socket gone - stop the loop.
+                return
+            except Exception as e:
+                # Transient read/send hiccup (e.g. an xclip timeout during a
+                # navigation burst): skip this tick, keep the window open.
+                data_logger.debug(f"Transient clipboard re-send skip for client {raddr}: {e}")
+                continue
+
     def _pcmflux_audio_callback(self, result_ptr, user_data):
         """
         C-style callback passed to pcmflux, called from its capture thread.
@@ -1812,6 +1862,9 @@ class DataStreamingServer(BaseStreamingService):
             return
 
         await self.send_current_cursor(websocket, raddr)
+        # Fire-and-forget: read_clipboard spawns xclip/wl-paste, which can take
+        # up to a second; do not block server_settings and stream startup on it.
+        asyncio.create_task(self.send_current_clipboard(websocket, raddr))
 
         server_settings_payload = {"type": "server_settings", "settings": {}}
         for setting_def in SETTING_DEFINITIONS:
