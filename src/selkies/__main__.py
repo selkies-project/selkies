@@ -31,6 +31,7 @@ from .webrtc_mode import WebRTCService
 from .selkies import DataStreamingServer
 from .stream_server import CentralizedStreamServer
 from .webcam import stop_shared_webcam
+from . import audit as _audit
 
 
 logging.basicConfig(level=logging.INFO)
@@ -111,6 +112,21 @@ async def run() -> None:
 
     await wait_for_app_ready(settings.app_ready_file, settings.app_wait_ready[0])
 
+    # Configure the optional audit webhook (opt-in; empty URL is a no-op).
+    # str-type settings are stored as plain strings, so they are read
+    # directly (not via the [0] tuple accessor used for bool/range types).
+    try:
+        _audit_timeout = float(getattr(settings, "audit_webhook_timeout", "2.0") or "2.0")
+    except (TypeError, ValueError):
+        _audit_timeout = 2.0
+    _audit.configure(
+        url=getattr(settings, "audit_webhook_url", "") or "",
+        token=getattr(settings, "audit_webhook_token", "") or "",
+        timeout_seconds=_audit_timeout,
+    )
+    if getattr(settings, "audit_webhook_url", ""):
+        logger.info("audit webhook enabled, target=%s", settings.audit_webhook_url)
+
     server = CentralizedStreamServer(settings)
 
     server.register_service("webrtc", WebRTCService(server))
@@ -123,6 +139,9 @@ async def run() -> None:
         await server.run()
     finally:
         await stop_shared_webcam()
+        # Drain in-flight audit POSTs and close the aiohttp session so we do
+        # not leak the connector / emit unclosed-session warnings on shutdown.
+        await _audit.close()
 
 
 def main() -> None:
