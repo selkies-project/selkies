@@ -59,6 +59,7 @@ from shutil import which
 from signal import SIGINT, signal
 from .stream_server import BaseStreamingService
 from .settings import settings, SETTING_DEFINITIONS
+from . import audit as _audit
 
 try:
     from pcmflux import AudioCapture, AudioCaptureSettings, AudioChunkCallback
@@ -210,6 +211,7 @@ class SelkiesStreamingApp:
                 return
             data_bytes = data.encode('utf-8') if not is_binary and isinstance(data, str) else data
             total_size = len(data_bytes)
+            _audit.emit("clipboard.send", mime_type=mime_type, size_bytes=total_size)
             from .input_handler import CLIPBOARD_CHUNK_SIZE
             if total_size < CLIPBOARD_CHUNK_SIZE:
                 encoded_data = base64.b64encode(data_bytes).decode('ascii')
@@ -2323,6 +2325,15 @@ class DataStreamingServer(BaseStreamingService):
                             data_logger.info(
                                 f"Upload finished: {active_upload_target_path_conn}"
                             )
+                            try:
+                                _au_size = os.path.getsize(active_upload_target_path_conn)
+                            except OSError:
+                                _au_size = -1
+                            _audit.emit(
+                                "file.upload.end",
+                                filename=os.path.basename(active_upload_target_path_conn),
+                                size_bytes=_au_size,
+                            )
                             del active_uploads_by_path_conn[
                                 active_upload_target_path_conn
                             ]
@@ -2345,6 +2356,11 @@ class DataStreamingServer(BaseStreamingService):
                             del active_uploads_by_path_conn[
                                 active_upload_target_path_conn
                             ]
+                        _audit.emit(
+                            "file.upload.error",
+                            filename=os.path.basename(active_upload_target_path_conn) if active_upload_target_path_conn else "",
+                            error=message.split(":", 2)[1] if ":" in message else "",
+                        )
                         active_upload_target_path_conn = None
 
                     elif message.startswith("SETTINGS,"):
