@@ -104,6 +104,25 @@ SETTING_DEFINITIONS = [
         "help": 'Allowed file transfer directions (comma-separated: "upload,download"). Set to "" or "none" to disable.',
     },
     {
+        "name": "audit_webhook_url",
+        "type": "str",
+        "default": "",
+        "help": "Optional HTTPS URL that receives best-effort JSON POSTs for clipboard and file-transfer events. Only metadata is sent (event type, byte size, mime type, timestamp); payload content is never logged. Empty disables the audit channel.",
+    },
+    {
+        "name": "audit_webhook_token",
+        "type": "str",
+        "default": "",
+        "sensitive": True,
+        "help": "Optional Bearer token sent as Authorization header on audit webhook POSTs. Use this to authenticate Selkies against the audit collector. Empty omits the Authorization header.",
+    },
+    {
+        "name": "audit_webhook_timeout",
+        "type": "str",
+        "default": "2.0",
+        "help": "Per-request timeout in seconds (float) for audit webhook POSTs. Audit is fire-and-forget; on timeout the event is dropped with a warning log line. Default 2.0.",
+    },
+    {
         "name": "framerate",
         "type": "range",
         "default": "8-120",

@@ -34,6 +34,7 @@ import urllib.parse
 import urllib.request
 from .media_pipeline import RateControlMode
 from .settings import settings
+from . import audit as _audit
 try:
     from xkbcommon import xkb
 except ImportError:
@@ -2379,6 +2380,12 @@ class WebRTCInput:
                     logger_webrtc_input.info(f"Finished multi-part clipboard receive. Total size: {received_size}")
                     data = self.multipart_clipboard_buffer.getvalue()
                     mime_type = self.multipart_clipboard_mime_type
+                    _audit.emit(
+                        "clipboard.receive",
+                        mime_type=mime_type,
+                        size_bytes=len(data),
+                        multipart=True,
+                    )
                     async def _write_multipart():
                         if mime_type == "text/plain":
                             text_data = data.decode("utf-8", "ignore")
@@ -2402,6 +2409,12 @@ class WebRTCInput:
                 try:
                     _, mime_type, b64_data = toks
                     data_bytes = base64.b64decode(b64_data)
+                    _audit.emit(
+                        "clipboard.receive",
+                        mime_type=mime_type,
+                        size_bytes=len(data_bytes),
+                        multipart=False,
+                    )
                     async def _write_cb():
                         if await self.write_clipboard(data_bytes, mime_type=mime_type):
                             logger_webrtc_input.info(f"Set binary clipboard content ({mime_type}), size: {len(data_bytes)} bytes")
@@ -2414,6 +2427,12 @@ class WebRTCInput:
             if self.enable_clipboard in ["true", "in"]:
                 try: 
                     data = base64.b64decode(toks[1]).decode("utf-8", 'ignore')
+                    _audit.emit(
+                        "clipboard.receive",
+                        mime_type="text/plain",
+                        size_bytes=len(data.encode("utf-8")),
+                        multipart=False,
+                    )
                     async def _write_cw():
                         if await self.write_clipboard(data):
                             logger_webrtc_input.info(f"Set clipboard content, length: {len(data)}")
