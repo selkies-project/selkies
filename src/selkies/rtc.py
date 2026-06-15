@@ -592,6 +592,13 @@ class RTCApp:
             logger.info("Peer connection established", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "closed":
             await self.on_peer_connection_lost(client_peer_id, client_type)
+            # Drop the entry so it doesn't leak when the media connection dies without a SESSION_END.
+            removed = self.peer_connections.pop(client_peer_id, None)
+            if removed is not None and removed.get('client_type') == ClientType.CONTROLLER:
+                self.media_relay = None
+                self.aux_data_channel = None
+                self.video_pipeline_bridge = None
+                self.audio_pipeline_bridge = None
             logger.info("Peer connection closed", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "connecting":
             logger.info("Peer connection is connecting", extra={'client_peer_id': client_peer_id, 'client_type': client_type})

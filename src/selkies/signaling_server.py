@@ -259,15 +259,7 @@ class WebRTCPeerManagement:
             client_strict_viewer: Whether client is strict viewer
         """
         peer_status = None
-        self.peers[uid] = Peer(
-            uid=uid,
-            ws=ws,
-            raddr=raddr,
-            peer_type=peer_type,
-            client_type=client_type,
-            client_slot=client_slot,
-            client_strict_viewer=client_strict_viewer,
-        )
+        # Peer was already registered atomically in hello_peer; don't re-create it.
         logger.info(
             f"Registered peer {uid} at {raddr} with peer_type {peer_type} and client_type {client_type}"
         )
@@ -431,9 +423,11 @@ class WebRTCPeerManagement:
                     await ws.send_str("ROOM_OK {}".format(room_peers))
                     # Enter room
                     peer.peer_status = peer_status = room_id
-                    self.rooms[room_id].add(uid)
+                    # setdefault: a concurrent cleanup_room may have deleted the room during the await.
+                    room_set = self.rooms.setdefault(room_id, set())
+                    room_set.add(uid)
                     # Iterate a snapshot: peers can join/leave across the awaits.
-                    for pid in list(self.rooms[room_id]):
+                    for pid in list(room_set):
                         if pid == uid:
                             continue
                         peer = self.peers.get(pid)
@@ -534,6 +528,42 @@ class WebRTCPeerManagement:
                         raise Exception(
                             "Invalid client slot provided {!r}".format(client_slot)
                         )
+                    # Slot uniqueness; -1 is the "unassigned" sentinel and is exempt.
+                    if client_slot != -1:
+                        colliding = [
+                            (pid, peer)
+                            for pid, peer in self.peers.items()
+                            if getattr(peer, "client_slot", None) == client_slot
+                        ]
+                        # A peer whose socket is already closed (ungraceful drop
+                        # not yet reaped by recv_msg_ping) must not block a
+                        # legitimate reconnect into the same slot: evict the dead
+                        # holder(s) here so the new registration can proceed.
+                        live_collision = False
+                        for pid, peer in colliding:
+                            if getattr(peer, "ws", None) is not None and not peer.ws.closed:
+                                live_collision = True
+                                continue
+                            await self.cleanup_session(pid)
+                            peer_status = getattr(peer, "peer_status", None)
+                            if peer_status and peer_status != "session":
+                                await self.cleanup_room(pid, peer_status)
+                            self.peers.pop(pid, None)
+                            logger.info(
+                                "Evicting dead peer {!r} holding slot {!r} for reconnect from {!r}".format(
+                                    pid, client_slot, raddr
+                                )
+                            )
+                        if live_collision:
+                            await ws.close(
+                                code=4000,
+                                message=b"Player slot already in use.",
+                            )
+                            raise Exception(
+                                "Player slot {!r} already in use; connection from {!r}".format(
+                                    client_slot, raddr
+                                )
+                            )
 
                 # clients with hash #shared
                 if not self.enable_shared and client_strict_viewer:
@@ -583,6 +613,16 @@ class WebRTCPeerManagement:
             puid = "-".join([peer_type, uid])
             # Send back a HELLO
             await ws.send_str("HELLO")
+            # Register under the same lock as validation so check-and-insert is atomic.
+            self.peers[puid] = Peer(
+                uid=puid,
+                ws=ws,
+                raddr=raddr,
+                peer_type=peer_type,
+                client_type=client_type,
+                client_slot=client_slot,
+                client_strict_viewer=client_strict_viewer,
+            )
             return puid, peer_type, client_type, client_slot, client_strict_viewer
 
     async def signaling_handler(self, ws: WebSocketResponse, raddr: str) -> None:

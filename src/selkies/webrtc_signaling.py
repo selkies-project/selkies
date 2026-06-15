@@ -303,22 +303,42 @@ class WebRTCSignalingClient:
                 )
                 return
 
-            if data is None:
+            if not isinstance(data, dict):
+                # A non-object JSON payload (e.g. a bare `null`, number, string
+                # or array) is a single malformed message, not a transport
+                # failure. Routing it through on_error would tear down the
+                # shared signaling connection for all peers, so treat it as a
+                # per-message no-op instead.
+                logger.warning(
+                    f"ignoring non-object JSON signaling message from "
+                    f"{client_peer_id}: {message}"
+                )
                 return
 
-            if data.get("sdp"):
-                logger.info(f"received SDP from client_peer_id: {client_peer_id}")
-                logger.debug(f"SDP:\n{data['sdp']}")
-                await self.on_sdp(
-                    data["sdp"].get("type", ""),
-                    data["sdp"].get("sdp", ""),
-                    client_peer_id,
+            try:
+                if isinstance(data.get("sdp"), dict):
+                    logger.info(f"received SDP from client_peer_id: {client_peer_id}")
+                    logger.debug(f"SDP:\n{data['sdp']}")
+                    await self.on_sdp(
+                        data["sdp"].get("type", ""),
+                        data["sdp"].get("sdp", ""),
+                        client_peer_id,
+                    )
+                elif isinstance(data.get("ice"), dict):
+                    logger.info(f"received ICE from client_peer_id: {client_peer_id}")
+                    logger.debug(f"ICE:\n{data.get('ice')}")
+                    await self.on_ice(data["ice"], client_peer_id)
+                else:
+                    await self.on_error(
+                        WebRTCSignalingError(
+                            f"unhandled JSON message: {json.dumps(data)}"
+                        )
+                    )
+            except Exception as e:
+                # A malformed/stale SDP or ICE must not tear down the shared
+                # signaling connection for all peers.
+                logger.error(
+                    f"Error dispatching signaling message from {client_peer_id}: {e}",
+                    exc_info=True,
                 )
-            elif data.get("ice"):
-                logger.info(f"received ICE from client_peer_id: {client_peer_id}")
-                logger.debug(f"ICE:\n{data.get('ice')}")
-                await self.on_ice(data["ice"], client_peer_id)
-            else:
-                await self.on_error(
-                    WebRTCSignalingError(f"unhandled JSON message: {json.dumps(data)}")
-                )
+                return

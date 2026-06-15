@@ -326,6 +326,8 @@ export class WebRTCDemo {
 			}).catch(() => {
 				this._setError("Error creating local SDP");
 			});
+		}).catch((e) => {
+			this._setError('Error setting remote description: ' + e);
 		});
 	}
 
@@ -404,7 +406,7 @@ export class WebRTCDemo {
 			if (this.ongpustats !== null) {
 					this.ongpustats(msg.data);
 			}
-		} else if (msg.type.startsWith('clipboard-msg')) {
+		} else if (typeof msg.type === 'string' && msg.type.startsWith('clipboard-msg')) {
 			if (typeof this.onclipboardcontent === 'function') {
 				this.onclipboardcontent(msg);
 			}
@@ -422,9 +424,9 @@ export class WebRTCDemo {
 				this.oncursorchange(cursorData)
 			}
 		} else if (msg.type === 'system') {
-			if (msg.action !== null) {
-				this._setDebug("received system msg, action: " + msg.data.action);
+			if (msg.data != null && msg.data.action != null) {
 				var action = msg.data.action;
+				this._setDebug("received system msg, action: " + action);
 				if (this.onsystemaction !== null) {
 					this.onsystemaction(action);
 				}
@@ -608,7 +610,7 @@ export class WebRTCDemo {
 		const pollInterval = 50;
 		const start = Date.now();
 
-		return new Promise(resolve => {
+		return new Promise((resolve, reject) => {
 			if (this._aux_channel === null) {
 				resolve();
 				return;

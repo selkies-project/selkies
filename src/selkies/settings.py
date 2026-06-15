@@ -93,8 +93,8 @@ SETTING_DEFINITIONS = [
     {
         "name": "command_enabled",
         "type": "bool",
-        "default": True,
-        "help": "Enable parsing of command websocket messages.",
+        "default": False,
+        "help": "Enable parsing of command websocket messages. Disabled by default for security; opt in with SELKIES_COMMAND_ENABLED=true (or --command-enabled true).",
     },
     {
         "name": "file_transfers",
@@ -707,6 +707,7 @@ SETTING_DEFINITIONS = [
         "name": "audio_channels",
         "type": "int",
         "default": 2,
+        "min": 1,
         "help": "Number of audio channels, defaults to stereo (2 channels)",
     },
     {
@@ -905,6 +906,14 @@ class AppSettings:
                     else:
                         locked_val = int(val_str)
                         processed_value = (locked_val, locked_val)
+                    # Clamp the meta default into the parsed range so the default
+                    # path cannot bypass the configured bounds.
+                    meta = setting.get("meta")
+                    if meta is not None and "default_value" in meta:
+                        range_min, range_max = processed_value
+                        meta["default_value"] = max(
+                            range_min, min(meta["default_value"], range_max)
+                        )
             except (ValueError, TypeError, IndexError) as e:
                 logging.error(
                     f"Could not parse setting '{name}' with value '{raw_value}'. Using default. Error: {e}"
@@ -929,10 +938,10 @@ class AppSettings:
             processed["is_manual_resolution_mode"] = (True, True)
             if processed.get("manual_width", 0) <= 0:
                 processed["manual_width"] = 1024
-                logging.info("Manual width not set or invalid, defaulting to 1280.")
+                logging.info("Manual width not set or invalid, defaulting to 1024.")
             if processed.get("manual_height", 0) <= 0:
                 processed["manual_height"] = 768
-                logging.info("Manual height not set or invalid, defaulting to 720.")
+                logging.info("Manual height not set or invalid, defaulting to 768.")
         for name, value in processed.items():
             setattr(self, name, value)
 

@@ -46,9 +46,12 @@ PCMFLUX_AVAILABLE = False
 import aiofiles
 import asyncio
 import base64
+import concurrent.futures
 import ctypes
+import functools
 import json
 import re
+import sys
 from asyncio import subprocess
 import time
 from enum import Enum
@@ -80,14 +83,18 @@ except ImportError:
     )
 
 try:
-    from pixelflux import CaptureSettings, ScreenCapture, StripeCallback
+    from pixelflux import CaptureSettings, ScreenCapture, StripeCallback, OwnedFrame
 
     X11_CAPTURE_AVAILABLE = True
     data_logger.info("pixelflux library found. Striped encoding modes available.")
-except ImportError:
+except (ImportError, RuntimeError) as e:
+    # ImportError: library missing. RuntimeError: pixelflux raises this at import
+    # on a CaptureSettings ABI/size mismatch (version skew between the wrapper and
+    # the .so). Catch both so a mixed-version deployment degrades to "striped
+    # encoding unavailable" instead of crashing the whole server at startup.
     X11_CAPTURE_AVAILABLE = False
     data_logger.warning(
-        "pixelflux library not found. Striped encoding modes unavailable."
+        f"pixelflux library unavailable ({e}). Striped encoding modes unavailable."
     )
 
 from .input_handler import WebRTCInput as InputHandler, SelkiesGamepad, GamepadMapper
@@ -112,6 +119,8 @@ active_mk_token = None
 # explicit max in their definition, to prevent resource-exhaustion from absurd
 # values.
 INT_SETTING_DEFAULT_MAX = 1_000_000
+# Sentinel-safe floor: not 0, since some int settings use -1 etc. as sentinels.
+INT_SETTING_DEFAULT_MIN = -1_000_000
 
 def _path_is_within(directory, target):
     """Return True if `target` is `directory` itself or strictly inside it.
@@ -140,7 +149,7 @@ async def _broadcast_to_clients(clients, message):
         if client.closed:
             closed_clients.add(client)
             continue
-        if isinstance(message, bytes):
+        if isinstance(message, (bytes, bytearray, memoryview)):
             task = client.send_bytes(message)
         else:
             task = client.send_str(message)
@@ -410,7 +419,7 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
-            await rmmmode_proc.communicate()
+            await rmmode_proc.communicate()
             return False
         logger_gst_app_resize.info(f"Successfully ran: {' '.join(cmd_add)}")
 
@@ -438,10 +447,15 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
 
 async def generate_xrandr_gtf_modeline(res_wh_str):
     """Generates an xrandr modeline string using cvt or gtf."""
+    tool_name = "cvt"
     try:
-        w_str, h_str = res_wh_str.split("x")
+        try:
+            w_str, h_str = res_wh_str.split("x")
+        except ValueError:
+            raise Exception(
+                f"Invalid resolution format for modeline generation: {res_wh_str}"
+            )
         cmd = ["cvt", w_str, h_str, "60"]
-        tool_name = "cvt"
         try:
             process = await subprocess.create_subprocess_exec(
                 *cmd,
@@ -471,10 +485,6 @@ async def generate_xrandr_gtf_modeline(res_wh_str):
         raise Exception(
             f"Failed to generate modeline using {tool_name} for {res_wh_str}: {e}"
         ) from e
-    except ValueError:
-        raise Exception(
-            f"Invalid resolution format for modeline generation: {res_wh_str}"
-        )
     match = re.search(r'Modeline\s+"([^"]+)"\s+(.*)', modeline_output)
     if not match:
         raise Exception(
@@ -504,6 +514,9 @@ def parse_dri_node_to_index(node_path: str) -> int:
     except (ValueError, IndexError) as e:
         logger.warning(f"Could not parse DRI node path '{node_path}': {e}. VA-API will be disabled.")
         return -1
+
+# AUTO_GPU render-node detection now lives in pixelflux (the device library owns
+# hardware detection); selkies forwards only an explicit --dri-node.
 
 async def _run_xrdb(dpi_value, logger):
     """Helper function to apply DPI via xrdb and xsettingsd."""
@@ -940,7 +953,15 @@ class DataStreamingServer(BaseStreamingService):
         self._system_monitor_task_ws = None
         self._gpu_monitor_task_ws = None
         self._stats_sender_task_ws = None
+        self._network_monitor_task_ws = None
         self._shared_stats_ws = {}
+        # Instance-wide holder so all connections read one consistent bandwidth value.
+        self._shared_network_stats = {}
+        # Cached once; avoids a blocking nvidia-smi probe per connection.
+        self._gpu_available = None
+        # Serializes the first-connection GPU probe so concurrent first
+        # connections don't both spawn nvidia-smi and defeat the cache above.
+        self._gpu_probe_lock = asyncio.Lock()
         self.uinput_mouse_socket = UINPUT_MOUSE_SOCKET
         self.js_socket_path = JS_SOCKET_PATH
         self.enable_clipboard = self.cli_args.clipboard_enabled[0]
@@ -970,6 +991,7 @@ class DataStreamingServer(BaseStreamingService):
         self.display_clients = {}
         self.video_chunk_queues = {}
         self.capture_instances = {}
+        self._last_keyframe_request = {}  # display_id -> monotonic, rate-limits client IDR requests
 
         # pcmflux audio capture state
         self.audio_device_name = self.cli_args.audio_device_name
@@ -1126,9 +1148,18 @@ class DataStreamingServer(BaseStreamingService):
                     result.data, ctypes.POINTER(ctypes.c_ubyte * result.size)
                 ).contents)
 
-                if self.pcmflux_capture_loop and not self.pcmflux_capture_loop.is_closed():
-                    asyncio.run_coroutine_threadsafe(
-                        self.pcmflux_audio_queue.put(data_bytes), self.pcmflux_capture_loop)
+                # Snapshot loop+queue: this runs on pcmflux's capture thread, which
+                # can null either out during teardown.
+                loop = self.pcmflux_capture_loop
+                q = self.pcmflux_audio_queue
+                if loop is None or q is None or loop.is_closed():
+                    return
+                def _do_put():
+                    try:
+                        q.put_nowait(data_bytes)
+                    except asyncio.QueueFull:
+                        pass  # drop rather than grow unbounded
+                loop.call_soon_threadsafe(_do_put)
     
     async def _pcmflux_send_audio_chunks(self):
         """
@@ -1199,7 +1230,7 @@ class DataStreamingServer(BaseStreamingService):
 
             self.pcmflux_callback = AudioChunkCallback(self._pcmflux_audio_callback)
             self.pcmflux_module = AudioCapture()
-            self.pcmflux_audio_queue = asyncio.Queue()
+            self.pcmflux_audio_queue = asyncio.Queue(maxsize=getattr(self, 'BACKPRESSURE_QUEUE_SIZE', 120))
 
             await self.pcmflux_capture_loop.run_in_executor(
                 None, self.pcmflux_module.start_capture, self.pcmflux_settings, self.pcmflux_callback
@@ -1307,6 +1338,7 @@ class DataStreamingServer(BaseStreamingService):
 
         data_logger.info(f"Resetting frame IDs for display '{display_id}'.")
         display_state['last_sent_frame_id'] = 0
+        display_state['has_sent_any_frame'] = False
         display_state['acknowledged_frame_id'] = -1
         
         message = f"PIPELINE_RESETTING {display_id}"
@@ -1378,20 +1410,26 @@ class DataStreamingServer(BaseStreamingService):
                     display_state['last_ack_update_time'] = time.monotonic()
                     continue
 
-                client_fps = display_state.get('latest_client_fps', 0.0)
+                # Adaptive client-FPS was never wired up; use configured framerate.
+                client_fps = display_state.get('framerate', 60)
                 if client_fps <= 0:
-                    client_fps = display_state.get('framerate', 60)
+                    client_fps = 60
 
                 server_id, client_id = current_server_frame_id, last_client_acked_frame_id
 
-                if abs(server_id - client_id) > FRAME_ID_SUSPICIOUS_GAP_THRESHOLD:
+                # Circular distance, so the suspicious-gap test is not tripped at the uint16 wrap.
+                wrapped = (server_id - client_id) % (MAX_UINT16_FRAME_ID + 1)
+
+                if wrapped > FRAME_ID_SUSPICIOUS_GAP_THRESHOLD:
                     display_state['backpressure_enabled'] = True
                     display_state['last_ack_update_time'] = time.monotonic()
                     continue
-                
-                if server_id == 0: continue
 
-                frame_desync = (server_id - client_id) if server_id >= client_id else ((MAX_UINT16_FRAME_ID - client_id) + server_id + 1)
+                # Distinguish 'no frame sent yet' from the counter legitimately wrapping to 0.
+                if not display_state.get('has_sent_any_frame', False):
+                    continue
+
+                frame_desync = wrapped
                 allowed_desync_frames = (self.allowed_desync_ms / 1000.0) * client_fps
                 current_rtt_ms = display_state.get('smoothed_rtt', 0.0)
                 latency_adjustment_frames = (current_rtt_ms / 1000.0) * client_fps if current_rtt_ms > self.latency_threshold_for_adjustment_ms else 0
@@ -1487,7 +1525,7 @@ class DataStreamingServer(BaseStreamingService):
         parsed["use_paint_over_quality"] = get_bool("use_paint_over_quality")
         parsed["scaling_dpi"] = get_int("scaling_dpi")
         parsed["enable_binary_clipboard"] = get_bool("enable_binary_clipboard")
-        parsed["displayId"] = get_str("displayId")
+        parsed["displayId"] = get_str("displayId") or "primary"
         parsed["displayPosition"] = get_str("displayPosition")
         parsed["rate_control_mode"] = get_str("rate_control_mode")
         parsed["video_bitrate"] = get_int("video_bitrate")
@@ -1546,7 +1584,8 @@ class DataStreamingServer(BaseStreamingService):
                 elif setting_def['type'] == 'int':
                     sanitized = int(client_value)
                     meta = setting_def.get('meta', {})
-                    min_val = meta.get('min', 0)
+                    # Sentinel-safe floor (not 0) so negative sentinels like -1 survive.
+                    min_val = meta.get('min', INT_SETTING_DEFAULT_MIN)
                     # Bound client-supplied integers (e.g. manual_width/height) so a
                     # client cannot request an absurd value that exhausts resources
                     # (e.g. a giant framebuffer). Falls back to a generous cap when
@@ -1599,6 +1638,11 @@ class DataStreamingServer(BaseStreamingService):
             elif is_initial_settings:
                 target_w = settings.get("initialClientWidth")
                 target_h = settings.get("initialClientHeight")
+                # Cap client-supplied dimensions so they cannot reach xrandr --fb unbounded.
+                if isinstance(target_w, int):
+                    target_w = max(1, min(target_w, 7680))
+                if isinstance(target_h, int):
+                    target_h = max(1, min(target_h, 4320))
             if not isinstance(target_w, int) or target_w <= 0:
                 target_w = old_display_width if old_display_width > 0 else 1024
             if not isinstance(target_h, int) or target_h <= 0:
@@ -1702,36 +1746,42 @@ class DataStreamingServer(BaseStreamingService):
             audio_bitrate_changed = self.app.audio_bitrate != old_settings.get('audio_bitrate')
             if audio_bitrate_changed and self.is_pcmflux_capturing:
                 audio_restart_needed = True
-        if audio_restart_needed:
-            data_logger.info("Restarting audio pipeline due to settings update.")
-            await self._stop_pcmflux_pipeline()
-            await self._start_pcmflux_pipeline()
+            # Restart shared capture/audio pipelines under the lock so they
+            # cannot race reconfigure_displays() / START_STOP_*.
+            if audio_restart_needed:
+                data_logger.info("Restarting audio pipeline due to settings update.")
+                await self._stop_pcmflux_pipeline()
+                await self._start_pcmflux_pipeline()
+            needs_fallback_reconfigure = False
+            if not (is_initial_settings or dimensional_change) and video_params_changed:
+                data_logger.info(
+                    f"Video parameters changed for '{display_id}'. "
+                    "Restarting its capture stream without reconfiguring displays."
+                )
+                if hasattr(self, 'display_layouts') and display_id in self.display_layouts:
+                    layout = self.display_layouts[display_id]
+                    await self._stop_capture_for_display(display_id)
+                    await self._start_capture_for_display(
+                        display_id=display_id,
+                        width=layout['w'], height=layout['h'],
+                        x_offset=layout['x'], y_offset=layout['y']
+                    )
+                    await self._start_backpressure_task_if_needed(display_id)
+                else:
+                    data_logger.warning(
+                        f"Cannot restart capture for '{display_id}': no layout found. "
+                        "Triggering full reconfiguration as a fallback."
+                    )
+                    needs_fallback_reconfigure = True
+        # reconfigure_displays() self-acquires the lock; call it OUTSIDE.
         if is_initial_settings or dimensional_change:
             data_logger.info(
                 f"Initial setup or dimensional change detected for '{display_id}'. "
                 "Performing full display reconfiguration."
             )
             await self.reconfigure_displays()
-        elif video_params_changed:
-            data_logger.info(
-                f"Video parameters changed for '{display_id}'. "
-                "Restarting its capture stream without reconfiguring displays."
-            )
-            if hasattr(self, 'display_layouts') and display_id in self.display_layouts:
-                layout = self.display_layouts[display_id]
-                await self._stop_capture_for_display(display_id)
-                await self._start_capture_for_display(
-                    display_id=display_id,
-                    width=layout['w'], height=layout['h'],
-                    x_offset=layout['x'], y_offset=layout['y']
-                )
-                await self._start_backpressure_task_if_needed(display_id)
-            else:
-                data_logger.warning(
-                    f"Cannot restart capture for '{display_id}': no layout found. "
-                    "Triggering full reconfiguration as a fallback."
-                )
-                await self.reconfigure_displays()
+        elif needs_fallback_reconfigure:
+            await self.reconfigure_displays()
         if is_initial_settings and self.client_settings_received and not self.client_settings_received.is_set():
             self.client_settings_received.set()
 
@@ -1784,6 +1834,7 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.warning(
                     f"Client {ip_address} reconnecting too quickly ({elapsed_ms:.1f}ms). Rejecting connection."
                 )
+                client_permissions.pop(websocket, None)
                 await websocket.close(code=4029, message=b"Rate limited: reconnecting too quickly")
                 return
         self.last_connection_times[ip_address] = current_time
@@ -1807,6 +1858,7 @@ class DataStreamingServer(BaseStreamingService):
             await websocket.send_str(f"MODE {self.mode}")
         except (ConnectionResetError, OSError, RuntimeError):
             self.clients.discard(websocket)
+            client_permissions.pop(websocket, None)
             if self.data_ws is websocket:
                 self.data_ws = None
             return
@@ -1859,20 +1911,21 @@ class DataStreamingServer(BaseStreamingService):
         active_upload_declared_size = None
         active_upload_bytes_written = 0
         upload_dir_valid = upload_dir_path is not None
-        system_monitor_task_ws = None
-        gpu_monitor_task_ws = None
+        # Per-connection stats sender; the system/gpu/network collectors it reads
+        # from are instance-wide singletons created/torn down on self.
         stats_sender_task_ws = None
-        network_monitor_task_ws = None
-        
+
         mic_setup_done = False
         mic_disabled_sent = False
         mic_error = False
         pa_module_index = None
         pa_stream = None
+        pa_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)  # ordered, serialized pa writes
+        loop = asyncio.get_running_loop()
         pulse = None
-        
+
         # Audio buffer management
-        audio_buffer = []
+        audio_buffer = bytearray()
         buffer_max_size = 24000 * 2 * 2  # 2 seconds at 24kHz, 16-bit mono
         
         # Define virtual source details
@@ -1886,30 +1939,55 @@ class DataStreamingServer(BaseStreamingService):
                 f"Data WS handler for {raddr}: Critical - self.input_handler (global) is not set. Input processing will fail."
             )
 
-        self._shared_stats_ws = {}
         gpu_id_for_stats = getattr(self.app, "gpu_id", GPU_ID_DEFAULT)
-        system_monitor_task_ws = asyncio.create_task(
-            _collect_system_stats_ws(self._shared_stats_ws)
-        )
-        self._system_monitor_task_ws = system_monitor_task_ws
-        if GPUtil.getGPUs():
-            gpu_monitor_task_ws = asyncio.create_task(
-                _collect_gpu_stats_ws(self._shared_stats_ws, gpu_id=gpu_id_for_stats)
-            )
-            self._gpu_monitor_task_ws = gpu_monitor_task_ws
-        stats_sender_task_ws = asyncio.create_task(
-            _send_stats_periodically_ws(
-                websocket, self._shared_stats_ws
-            )
-        )
-        self._stats_sender_task_ws = stats_sender_task_ws
-        network_monitor_task_ws = asyncio.create_task(
-            _collect_network_stats_ws(self._shared_stats_ws, self)
-        )
-        self._network_monitor_task_ws = network_monitor_task_ws
 
         pulse = None
         try:
+            # Probe the GPU once behind a lock. The probe spawns/blocks on
+            # nvidia-smi, so it is awaited here inside the try: a cancel/raise during
+            # the probe then runs the finally, which cleans up pa_executor (created
+            # before the try) instead of leaking it. The lock prevents concurrent
+            # first-connections from both running the probe and defeating the
+            # _gpu_available cache.
+            if self._gpu_available is None:
+                async with self._gpu_probe_lock:
+                    if self._gpu_available is None:
+                        self._gpu_available = bool(
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, GPUtil.getGPUs
+                            )
+                        )
+
+            # System/GPU/network collectors are instance-wide singletons: with N
+            # viewers, per-connection collectors would mean N psutil/GPUtil polls
+            # per second (GPUtil spawns nvidia-smi). They write to a persistent
+            # shared dict; per-connection stats senders read (not pop) from it.
+            if (
+                self._system_monitor_task_ws is None
+                or self._system_monitor_task_ws.done()
+            ):
+                self._system_monitor_task_ws = asyncio.create_task(
+                    _collect_system_stats_ws(self._shared_stats_ws)
+                )
+            if self._gpu_available and (
+                self._gpu_monitor_task_ws is None
+                or self._gpu_monitor_task_ws.done()
+            ):
+                self._gpu_monitor_task_ws = asyncio.create_task(
+                    _collect_gpu_stats_ws(self._shared_stats_ws, gpu_id=gpu_id_for_stats)
+                )
+            stats_sender_task_ws = asyncio.create_task(
+                _send_stats_periodically_ws(
+                    websocket, self._shared_stats_ws, self
+                )
+            )
+            self._stats_sender_task_ws = stats_sender_task_ws
+            # Single instance-wide collector; per-connection tasks would race the byte counters.
+            if self._network_monitor_task_ws is None or self._network_monitor_task_ws.done():
+                self._network_monitor_task_ws = asyncio.create_task(
+                    _collect_network_stats_ws(self._shared_network_stats, self)
+                )
+
             if PULSEAUDIO_AVAILABLE:
                 if not settings.audio_enabled[0] or not settings.microphone_enabled[0]:
                     data_logger.info("Audio is disabled in settings. Skipping PulseAudio setup.")
@@ -2180,27 +2258,33 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.info(
                                     f"Opening new pasimple playback stream to 'input' at 24000 Hz (s16le, mono)."
                                 )
-                                pa_stream = pasimple.PaSimple(
-                                    pasimple.PA_STREAM_PLAYBACK,
-                                    pasimple.PA_SAMPLE_S16LE,
-                                    1,
-                                    24000,
-                                    "SelkiesClientMic",
-                                    "MicStream",
-                                    device_name="input",
+                                # Blocking IPC; keep it off the event loop.
+                                pa_stream = await loop.run_in_executor(
+                                    pa_executor,
+                                    functools.partial(
+                                        pasimple.PaSimple,
+                                        pasimple.PA_STREAM_PLAYBACK,
+                                        pasimple.PA_SAMPLE_S16LE,
+                                        1,
+                                        24000,
+                                        "SelkiesClientMic",
+                                        "MicStream",
+                                        device_name="input",
+                                    ),
                                 )
-                            
+
                             audio_buffer.extend(payload)
-                            
+
                             if len(audio_buffer) > buffer_max_size:
-                                audio_buffer = audio_buffer[len(audio_buffer)//2:]
+                                del audio_buffer[:len(audio_buffer)//2]
                                 data_logger.warning("Audio buffer overflow, dropping old audio to prevent drift")
-                            
+
                             if pa_stream and len(audio_buffer) >= len(payload):
                                 chunk_size = len(payload)
                                 data_to_write = bytes(audio_buffer[:chunk_size])
-                                audio_buffer[:chunk_size] = []
-                                pa_stream.write(data_to_write)
+                                del audio_buffer[:chunk_size]
+                                # Blocking pa write; offload so it can't stall the video/input loop.
+                                await loop.run_in_executor(pa_executor, pa_stream.write, data_to_write)
                                     
                         except Exception as e_pa_write:
                             data_logger.error(
@@ -2212,6 +2296,7 @@ class DataStreamingServer(BaseStreamingService):
                                     pa_stream.close()
                                 except:
                                     pass
+                                pa_stream = None  # Force reopen of a fresh stream on next frame.
                             audio_buffer.clear()
 
                 elif msg.type == WSMsgType.TEXT:
@@ -2224,7 +2309,7 @@ class DataStreamingServer(BaseStreamingService):
                             "js,",
                         ]
                         if active_mk_token and perms.get("token") == active_mk_token:
-                            allowed_viewer_prefixes.extend(["kd", "ku", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr"])
+                            allowed_viewer_prefixes.extend(["kd", "ku", "kh", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr"])
                         if not any(message.startswith(prefix) for prefix in allowed_viewer_prefixes):
                             data_logger.warning(f"DENIED unauthorized message from viewer {remote_address}: {message[:100]}...")
                             continue
@@ -2237,7 +2322,9 @@ class DataStreamingServer(BaseStreamingService):
                             data_logger.error("Upload dir invalid, skipping upload.")
                             continue
                         try:
-                            _, rel_path_from_client, size_str = message.split(":", 2)
+                            _, b64rel, size_str = message.split(":", 2)
+                            # Path is base64 so it may contain ':' without breaking the wire format.
+                            rel_path_from_client = base64.b64decode(b64rel).decode('utf-8', 'replace')
                             file_size = int(size_str)
                             if file_size < 0:
                                 data_logger.error(f"Rejecting upload with invalid negative declared size: {file_size}")
@@ -2329,7 +2416,15 @@ class DataStreamingServer(BaseStreamingService):
                         active_upload_target_path_conn = None
 
                     elif message.startswith("FILE_UPLOAD_ERROR:"):
-                        data_logger.error(f"Client reported upload error: {message}")
+                        # Decode the base64 path for logging only.
+                        try:
+                            _, b64rel_err, err_reason = message.split(":", 2)
+                            client_err_path = base64.b64decode(b64rel_err).decode('utf-8', 'replace')
+                            data_logger.error(
+                                f"Client reported upload error for '{client_err_path}': {err_reason}"
+                            )
+                        except Exception:
+                            data_logger.error(f"Client reported upload error: {message}")
                         if (
                             active_upload_target_path_conn
                             and active_upload_target_path_conn
@@ -2429,13 +2524,13 @@ class DataStreamingServer(BaseStreamingService):
                                     'width': 0, 'height': 0, 'position': 'right',
                                     'acknowledged_frame_id': -1,
                                     'last_sent_frame_id': 0,
+                                    'has_sent_any_frame': False,
                                     'sent_timestamps': OrderedDict(),
                                     'rtt_samples': deque(maxlen=RTT_SMOOTHING_SAMPLES),
                                     'smoothed_rtt': 0.0,
                                     'backpressure_enabled': True,
                                     'backpressure_task': None,
                                     'last_ack_update_time': time.monotonic(),
-                                    'latest_client_fps': 0.0,
                                     'video_active': True,
                                     'encoder': self.app.encoder,
                                     'framerate': self.app.framerate,
@@ -2545,6 +2640,10 @@ class DataStreamingServer(BaseStreamingService):
                                     )
                                     await self._start_backpressure_task_if_needed(client_display_id)
                                     await websocket.send_str("VIDEO_STARTED")
+                                    # Re-send the cursor: the client clears its cursor
+                                    # canvas on tab hide, so without this it stays invisible
+                                    # until the next cursor change after waking the tab.
+                                    await self.send_current_cursor(websocket, remote_address)
                                 except Exception as e:
                                     data_logger.error(f"Failed to restart individual stream for '{client_display_id}': {e}", exc_info=True)
                                     await self.reconfigure_displays()
@@ -2552,6 +2651,7 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.warning(f"No layout found for '{client_display_id}' on START_VIDEO. Performing full reconfiguration.")
                                 await self.reconfigure_displays()
                                 await websocket.send_str("VIDEO_STARTED")
+                                await self.send_current_cursor(websocket, remote_address)
                         else:
                             data_logger.info(f"Received START_VIDEO from a shared client ({remote_address}). Triggering reconfiguration.")
                             await self.reconfigure_displays()
@@ -2566,6 +2666,17 @@ class DataStreamingServer(BaseStreamingService):
                                 await websocket.send_str("VIDEO_STOPPED")
                             except (ConnectionResetError, OSError, RuntimeError):
                                 pass
+
+                    elif message == "REQUEST_KEYFRAME":
+                        # Client asks for an IDR (e.g. its decoder was recreated and
+                        # is dropping deltas). Rate-limited so it can't be spammed.
+                        instance = self.capture_instances.get(client_display_id)
+                        module = instance.get('module') if instance else None
+                        if module and hasattr(module, 'request_idr_frame'):
+                            now = time.monotonic()
+                            if now - self._last_keyframe_request.get(client_display_id, 0.0) >= 0.25:
+                                self._last_keyframe_request[client_display_id] = now
+                                await self.capture_loop.run_in_executor(None, module.request_idr_frame)
 
                     elif message == "START_AUDIO":
                         async def _handle_start_audio_request():
@@ -2778,7 +2889,7 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.warning(f"BLOCK (Secure Mode): Malformed gamepad message from {remote_address}: {message}")
                                 continue
 
-                        if self.is_secure_mode and message.split(',')[0] in ["kd", "ku", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr"]:
+                        if self.is_secure_mode and message.split(',')[0] in ["kd", "ku", "kh", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr"]:
                             perms = client_permissions.get(websocket)
                             token = perms.get("token") if perms else None
                             
@@ -2823,11 +2934,12 @@ class DataStreamingServer(BaseStreamingService):
             else:
                 data_logger.info(f"Unregistered client at {raddr} disconnected. No display reconfiguration needed.")
 
+            # Only the stats sender is per-connection; the system/gpu/network
+            # collectors are instance-wide singletons torn down on last-client
+            # disconnect (below), so cancelling them here would kill stats for
+            # the clients that remain.
             monitor_tasks = [
                 stats_sender_task_ws,
-                system_monitor_task_ws,
-                gpu_monitor_task_ws,
-                network_monitor_task_ws,
             ]
             for _task_to_cancel in monitor_tasks:
                 if _task_to_cancel and not _task_to_cancel.done():
@@ -2852,9 +2964,35 @@ class DataStreamingServer(BaseStreamingService):
                         f"Client {raddr} disconnected, but other clients remain. Frame backpressure task continues."
                     )
 
-            if "pa_stream" in locals() and locals()["pa_stream"]:
+            # Close on the FIFO pa_executor worker, not the loop thread: a cancelled
+            # write may still be in-flight on the worker, and concurrent close+write
+            # on the (non-thread-safe) pa_simple handle is a UAF. This also keeps the
+            # blocking pa_simple_free off the event loop.
+            _pa_executor = locals().get("pa_executor")
+            _pa_stream = locals().get("pa_stream")
+            if _pa_executor:
+                if _pa_stream:
+                    def _close_pa_stream(_stream=_pa_stream, _addr=raddr):
+                        try:
+                            _stream.close()
+                            data_logger.debug(f"Closed PulseAudio stream for {_addr}.")
+                        except Exception as e_pa_close:
+                            data_logger.error(
+                                f"Error closing PulseAudio stream for {_addr}: {e_pa_close}"
+                            )
+                    try:
+                        _pa_executor.submit(_close_pa_stream)
+                    except RuntimeError:
+                        # Executor already shut down (cannot submit): close inline as a
+                        # last resort so the handle is not leaked.
+                        _close_pa_stream()
+                # wait=True joins the in-flight write (if any) and the close above,
+                # so the handle is fully released before we return.
+                _pa_executor.shutdown(wait=True)
+            elif _pa_stream:
+                # No executor (audio path never set one up): close directly.
                 try:
-                    locals()["pa_stream"].close()
+                    _pa_stream.close()
                     data_logger.debug(f"Closed PulseAudio stream for {raddr}.")
                 except Exception as e_pa_close:
                     data_logger.error(
@@ -2920,6 +3058,19 @@ class DataStreamingServer(BaseStreamingService):
 
             if not self.clients:
                  data_logger.info(f"Last client ({raddr}) disconnected. All pipelines should have been stopped by reconfigure_displays.")
+                 # Tear down the instance-wide stats collectors only when no clients
+                 # remain. Null each ref so a fast reconnect restarts the collector
+                 # (cancel is async). System/GPU were singletonized like the network
+                 # monitor to avoid N psutil/GPUtil polls per second under N viewers.
+                 for _singleton_attr in (
+                     "_network_monitor_task_ws",
+                     "_system_monitor_task_ws",
+                     "_gpu_monitor_task_ws",
+                 ):
+                     _singleton_task = getattr(self, _singleton_attr, None)
+                     if _singleton_task and not _singleton_task.done():
+                         _singleton_task.cancel()
+                     setattr(self, _singleton_attr, None)
                  self.capture_cursor = False
                  # shutdown_pipelines() -> reconfigure_displays() acquires
                  # _reconfigure_lock itself; it must not be held here.
@@ -2999,7 +3150,7 @@ class DataStreamingServer(BaseStreamingService):
                 for line in output.splitlines()[1:]:
                     parts = line.split()
                     if len(parts) >= 4:
-                        monitors.append(parts[1])
+                        monitors.append(parts[1].lstrip('+*'))
         except Exception as e:
             data_logger.error(f"Failed to list current monitors: {e}")
         return monitors
@@ -3050,6 +3201,25 @@ class DataStreamingServer(BaseStreamingService):
             # held; checked on every exit path (a pass may return early).
             if not self._reconfigure_pending:
                 break
+
+    async def _signal_all_displays_stopped(self):
+        """Mark all displays inactive and send VIDEO_STOPPED, for reconfiguration abort paths."""
+        # Snapshot the items: this awaits ws.send_str() inside the loop, and a
+        # concurrent connect/disconnect can mutate self.display_clients across the
+        # await, which would raise "dictionary changed size during iteration" and
+        # abort the pass (skipping VIDEO_STOPPED for the remaining displays).
+        for display_id, client_data in list(self.display_clients.items()):
+            client_data['video_active'] = False
+            # Re-validate against the live dict: the entry may have been removed
+            # by a disconnect during a prior iteration's await.
+            if self.display_clients.get(display_id) is not client_data:
+                continue
+            ws = client_data.get('ws')
+            if ws:
+                try:
+                    await ws.send_str("VIDEO_STOPPED")
+                except (ConnectionResetError, OSError, RuntimeError):
+                    pass
 
     async def _reconfigure_displays_locked(self):
         """One reconfiguration pass. Must only be called by reconfigure_displays()
@@ -3122,6 +3292,9 @@ class DataStreamingServer(BaseStreamingService):
             p_w, p_h = primary_client.get('width', 0), primary_client.get('height', 0)
             s_w, s_h = secondary_client.get('width', 0), secondary_client.get('height', 0)
             position = secondary_client.get('position', 'right')
+            if position not in ('right', 'left', 'up', 'down'):
+                data_logger.warning(f"Invalid display position '{position}'; falling back to 'right'.")
+                position = 'right'
             if p_w > 0 and p_h > 0 and s_w > 0 and s_h > 0:
                 if position == 'right':
                     layouts['primary'] = {'x': 0, 'y': 0, 'w': p_w, 'h': p_h}
@@ -3141,6 +3314,7 @@ class DataStreamingServer(BaseStreamingService):
                     total_width, total_height = max(p_w, s_w), p_h + s_h
         if total_width == 0 or total_height == 0:
             data_logger.error("Calculated total display size is zero. Aborting reconfiguration.")
+            await self._signal_all_displays_stopped()
             return
         aligned_total_width = (total_width + 7) & ~7
         if aligned_total_width != total_width:
@@ -3152,6 +3326,7 @@ class DataStreamingServer(BaseStreamingService):
             _, _, available_resolutions, _, screen_name = await get_new_res("1x1")
             if not screen_name:
                 data_logger.error("CRITICAL: Could not determine screen name from xrandr. Aborting.")
+                await self._signal_all_displays_stopped()
                 return
             current_monitors = await self._get_current_monitors()
             for monitor_name in current_monitors:
@@ -3165,6 +3340,7 @@ class DataStreamingServer(BaseStreamingService):
                     await self._run_command(["xrandr", "--addmode", screen_name, total_mode_str], "add new mode")
                 except Exception as e:
                     data_logger.error(f"FATAL: Could not create extended mode {total_mode_str}: {e}. Aborting.")
+                    await self._signal_all_displays_stopped()
                     return
             await self._run_command(["xrandr", "--fb", total_mode_str, "--output", screen_name, "--mode", total_mode_str], "set framebuffer")
             data_logger.info("Defining logical monitors for the window manager...")
@@ -3228,16 +3404,19 @@ class DataStreamingServer(BaseStreamingService):
                     if not primary_viewers:
                         queue.task_done()
                         continue
+                    # Skip the send when primary backpressure is disabled (matches the secondary path).
+                    primary_state = self.display_clients.get('primary')
+                    if primary_state is not None and not primary_state.get('backpressure_enabled', True):
+                        queue.task_done()
+                        continue
                     now = time.monotonic()
-                    for client_ws in primary_viewers:
-                        for primary_client_info in self.display_clients.values():
-                            if primary_client_info.get('ws') is client_ws:
-                                if primary_client_info.get('backpressure_enabled', True):
-                                    primary_client_info['sent_timestamps'][frame_id] = now
-                                    primary_client_info['last_sent_frame_id'] = frame_id
-                                    if len(primary_client_info['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
-                                        primary_client_info['sent_timestamps'].popitem(last=False)
-                                break
+                    # Only the 'primary' entry feeds the backpressure task; O(1) instead of a scan.
+                    if primary_state is not None and primary_state.get('ws') in primary_viewers:
+                        primary_state['sent_timestamps'][frame_id] = now
+                        primary_state['last_sent_frame_id'] = frame_id
+                        primary_state['has_sent_any_frame'] = True
+                        if len(primary_state['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
+                            primary_state['sent_timestamps'].popitem(last=False)
                     try:
                         await _broadcast_to_clients(primary_viewers, data_chunk)
                         self._bytes_sent_in_interval += len(data_chunk) * len(primary_viewers)
@@ -3253,6 +3432,7 @@ class DataStreamingServer(BaseStreamingService):
                     now = time.monotonic()
                     client_info['sent_timestamps'][frame_id] = now
                     client_info['last_sent_frame_id'] = frame_id
+                    client_info['has_sent_any_frame'] = True
                     if len(client_info['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
                         client_info['sent_timestamps'].popitem(last=False)
                     try:
@@ -3286,29 +3466,52 @@ class DataStreamingServer(BaseStreamingService):
             display_state = self.display_clients.get(display_id, {})
             encoder_for_this_capture = display_state.get('encoder', self.app.encoder)
 
+            deferred_capture = bool(settings.deferred_free)
+
             def queue_data_for_display(result_ptr, user_data):
                 if not result_ptr:
                     return
                 try:
                     result = result_ptr.contents
-                    if result.size > 0:
-                        data_bytes = bytes(result.data[:result.size])
-                        if encoder_for_this_capture == "jpeg":
-                            final_data_to_queue = b"\x03\x00" + data_bytes
-                        else:
-                            final_data_to_queue = data_bytes
-                        
+                    if not (result.data and result.size > 0):
+                        return
+
+                    if deferred_capture:
+                        # Zero-copy: take ownership of the C buffer FIRST, before any
+                        # step that can fail or early-return. In deferred mode pixelflux's
+                        # _internal_c_callback does NOT free the buffer, so once we are
+                        # here something must -- OwnedFrame.take frees it itself if it
+                        # cannot construct, and once it succeeds the OwnedFrame's refcount
+                        # alone owns the buffer, so every later return/exception below
+                        # frees it by dropping `owner`. (No leak if the queue is gone mid
+                        # teardown, or if memoryview()/scheduling raises.)
+                        owner = OwnedFrame.take(result_ptr)
+                        if owner is None:
+                            return
                         queue = self.video_chunk_queues.get(display_id)
-                        if queue:
-                            item_to_queue = {'data': final_data_to_queue, 'frame_id': result.frame_id}
-                            
-                            def do_put():
-                                try:
-                                    queue.put_nowait(item_to_queue)
-                                except asyncio.QueueFull:
-                                    pass
-                            
-                            self.capture_loop.call_soon_threadsafe(do_put)
+                        if not queue:
+                            return  # owner drops here -> buffer freed by refcount
+                        # OwnedFrame's PEP 688 buffer-export keeps the buffer alive until
+                        # the queue item AND every WebSocket transport that retained a
+                        # slice have released it; freed exactly once (OwnedFrame.__del__).
+                        item_to_queue = {'data': owner.memoryview(), 'owner': owner,
+                                         'frame_id': result.frame_id}
+                    else:
+                        queue = self.video_chunk_queues.get(display_id)
+                        if not queue:
+                            return
+                        data_bytes = ctypes.string_at(result.data, result.size)
+                        if encoder_for_this_capture == "jpeg":
+                            data_bytes = b"\x03\x00" + data_bytes
+                        item_to_queue = {'data': data_bytes, 'frame_id': result.frame_id}
+
+                    def do_put():
+                        try:
+                            queue.put_nowait(item_to_queue)
+                        except asyncio.QueueFull:
+                            pass  # item (and its OwnedFrame) dropped here -> buffer freed by refcount
+
+                    self.capture_loop.call_soon_threadsafe(do_put)
 
                 except Exception as e:
                     data_logger.error(f"Error in capture callback for {display_id}: {e}", exc_info=False)
@@ -3407,9 +3610,28 @@ class DataStreamingServer(BaseStreamingService):
         cs.damage_block_threshold = 10
         cs.damage_block_duration = 20
         cs.use_cpu = display_state.get('use_cpu', self._initial_use_cpu)
+        # Deferred-free zero-copy: hand the encoded H.264 buffer straight to the
+        # WebSocket with no copy. aiohttp writes frames >16KB zero-copy and, on a
+        # partial socket write, retains a memoryview of the buffer past send_bytes
+        # (flushed later in _write_ready) -- so the buffer must outlive the transport.
+        # OwnedFrame provides exactly that on Python 3.12+ via its PEP 688 buffer
+        # export: the transport's retained view keeps the buffer alive, and it is
+        # freed (once) only after every consumer has released it. Not for Wayland
+        # (Rust owns its buffers) or JPEG (re-framed with a 2-byte prefix -> needs a
+        # copy). On Python < 3.12 there is no __buffer__ dunder, so we fall back to
+        # the synchronous copy (deferred_free stays False) rather than risk the UAF.
+        cs.deferred_free = (
+            sys.version_info >= (3, 12) and (not IS_WAYLAND) and encoder != "jpeg"
+        )
         
-        if self.cli_args.dri_node:
-            cs.vaapi_render_node_index = parse_dri_node_to_index(self.cli_args.dri_node)
+        # Explicit --dri-node only; AUTO_GPU is detected inside pixelflux (-1 = auto).
+        # Explicit --dri-node forwarded as a PATH (authoritative; pixelflux uses it
+        # directly, avoiding the positional-index ambiguity). AUTO_GPU is detected
+        # inside pixelflux. Index kept as the legacy VAAPI-vs-NVENC gate hint.
+        dri_node = self.cli_args.dri_node
+        if dri_node:
+            cs.vaapi_render_node_path = dri_node.encode('utf-8')
+            cs.vaapi_render_node_index = parse_dri_node_to_index(dri_node)
         else:
             cs.vaapi_render_node_index = -1
 
@@ -3593,8 +3815,10 @@ async def _collect_gpu_stats_ws(shared_data, gpu_id=0, interval_seconds=1):
     data_logger.debug(
         f"GPU monitor loop (WS mode) for GPU {gpu_id}, interval: {interval_seconds}s"
     )
+    loop = asyncio.get_running_loop()
     try:
-        gpus = GPUtil.getGPUs()
+        # GPUtil.getGPUs() spawns/blocks on nvidia-smi; keep it off the event loop.
+        gpus = await loop.run_in_executor(None, GPUtil.getGPUs)
         if not gpus:
             data_logger.warning("No GPUs detected for GPU monitor (WS).")
             return
@@ -3604,7 +3828,7 @@ async def _collect_gpu_stats_ws(shared_data, gpu_id=0, interval_seconds=1):
 
         while True:
             try:
-                gpus = GPUtil.getGPUs()
+                gpus = await loop.run_in_executor(None, GPUtil.getGPUs)
                 if not gpus or gpu_id >= len(gpus):
                     data_logger.error(f"GPU {gpu_id} no longer available.")
                     break
@@ -3617,6 +3841,8 @@ async def _collect_gpu_stats_ws(shared_data, gpu_id=0, interval_seconds=1):
                     "memory_total": gpu.memoryTotal * 1024 * 1024,
                     "memory_used": gpu.memoryUsed * 1024 * 1024,
                 }
+            except asyncio.CancelledError:
+                raise
             except Exception as e_gpu_stat:
                 data_logger.error(
                     f"GPU monitor (WS): Error getting stats for ID {gpu_id}: {e_gpu_stat}"
@@ -3659,13 +3885,16 @@ async def _collect_network_stats_ws(shared_data, server_instance, interval_secon
     except Exception as e:
         data_logger.error(f"Network monitor (WS) error: {e}", exc_info=True)
 
-async def _send_stats_periodically_ws(websocket, shared_data, interval_seconds=5):
+async def _send_stats_periodically_ws(websocket, shared_data, server_instance, interval_seconds=5):
     try:
         while True:
             await asyncio.sleep(interval_seconds)
-            system_stats = shared_data.pop("system", None)
-            gpu_stats = shared_data.pop("gpu", None)
-            network_stats = shared_data.pop("network", None)
+            # Read (don't pop): the system/gpu/network collectors are instance-wide
+            # singletons and there may be many concurrent per-connection senders;
+            # popping would let one sender starve the others of each sample.
+            system_stats = shared_data.get("system")
+            gpu_stats = shared_data.get("gpu")
+            network_stats = server_instance._shared_network_stats.get("network")
             try:
                 if not websocket:  # Check if websocket is still valid
                     data_logger.info("Stats sender: WS closed or invalid.")
@@ -3701,6 +3930,9 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
     try:
         w_str, h_str = res_str.split("x")
         target_w, target_h = int(w_str), int(h_str)
+        # Cap so a client-driven resize cannot reach xrandr --fb unbounded.
+        target_w = min(target_w, 7680)
+        target_h = min(target_h, 4320)
 
         if target_w <= 0 or target_h <= 0:
             logger_gst_app_resize.error(f"Invalid target dimensions in resize request: {target_w}x{target_h}. Ignoring.")

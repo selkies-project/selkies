@@ -256,22 +256,24 @@ class CentralizedStreamServer:
         mode = supervisor.current_mode
         auth_header = request.headers.get("Authorization")
         path = request.path
-        token_path = path.endswith("/tokens")
-        if (
-            mode == self.STREAMING_MODE_WEBSOCKETS
-            and settings.master_token
-            and token_path
-        ):
+        # Match the exact route, not a suffix, so /foo/tokens isn't treated as control-plane.
+        api_prefix = (
+            ("/" + settings.subfolder.strip("/"))
+            if settings.subfolder
+            else ""
+        )
+        token_path = path == f"{api_prefix}/tokens"
+        # Gate /tokens on the master token whenever set, independent of streaming mode.
+        if settings.master_token and token_path:
             if not self._check_master_token(auth_header, settings.master_token):
                 return web.Response(status=401, text="Unauthorized")
             return await handler(request)
 
-        # The state-changing /switch endpoint requires the master token when
-        # Basic Auth is disabled. /status stays open: it only reports the
-        # active mode, and the dashboard probes it without credentials at
-        # page load to pick the right client core.
-        is_control_path = path.endswith("/switch")
-        if settings.master_token and not settings.enable_basic_auth[0] and is_control_path:
+        # /switch requires the master token whenever set, regardless of Basic Auth.
+        # /status stays open: the dashboard probes it without credentials at page
+        # load to pick the right client core.
+        is_control_path = path == f"{api_prefix}/switch"
+        if settings.master_token and is_control_path:
             if not self._check_master_token(auth_header, settings.master_token):
                 return web.Response(status=401, text="Unauthorized")
             return await handler(request)

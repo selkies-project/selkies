@@ -49,6 +49,11 @@ logger.setLevel(logging.INFO)
 
 CURSOR_SIZE = 32
 
+# Default int bounds (mirror selkies.py). Min is not 0: settings without an
+# explicit min may use -1 sentinels that must not be clamped up.
+INT_SETTING_DEFAULT_MAX = 1_000_000
+INT_SETTING_DEFAULT_MIN = -1_000_000
+
 
 def get_server_settings() -> dict:
     server_settings_payload = {"settings": {}}
@@ -560,7 +565,8 @@ class WebRTCService(BaseStreamingService):
                 elif setting_def["type"] == "enum":
                     allowed_values = setting_def["meta"]["allowed"]
                     if str(client_value) in allowed_values:
-                        return client_value
+                        # Normalize to str so later equality checks don't flip on str-vs-int.
+                        return str(client_value)
                     server_default = (
                         allowed_values[0] if allowed_values else setting_def["default"]
                     )
@@ -568,6 +574,19 @@ class WebRTCService(BaseStreamingService):
                         f"Client value for '{name}' ('{client_value}') is not in the allowed list {allowed_values}. Using server default '{server_default}'."
                     )
                     return server_default
+                elif setting_def["type"] == "int":
+                    sanitized = int(client_value)
+                    meta = setting_def.get("meta", {})
+                    # Floor uses a negative default, not 0, to preserve -1 sentinels.
+                    min_val = meta.get("min", INT_SETTING_DEFAULT_MIN)
+                    # Cap client integers so they can't request resource-exhausting values.
+                    max_val = meta.get("max", INT_SETTING_DEFAULT_MAX)
+                    clamped = max(min_val, min(sanitized, max_val))
+                    if clamped != sanitized:
+                        logger.warning(
+                            f"Client value for '{name}' ({client_value}) was clamped to {clamped} (bounds: {min_val}-{max_val})."
+                        )
+                    return clamped
                 elif setting_def["type"] == "bool":
                     server_val, is_locked = server_limit
                     client_bool = str(client_value).lower() in ["true", "1"]

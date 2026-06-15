@@ -21,6 +21,7 @@
 
 import asyncio
 import logging
+import os
 import ctypes
 import pulsectl_asyncio
 from enum import Enum
@@ -287,6 +288,11 @@ class MediaPipelinePixel(MediaPipeline):
         cs.capture_cursor = self.capture_cursor
         cs.output_mode = 1
         cs.auto_adjust_screen_capture_size = True
+        # WebRTC carries its own framing, so omit pixelflux's per-stripe header
+        # (and the Python strip it would need). Only the C++/X11 backend honors
+        # this today; the Rust/Wayland backend still emits the header.
+        self._omit_stripe_headers = os.environ.get("PIXELFLUX_WAYLAND") != "true"
+        cs.omit_stripe_headers = self._omit_stripe_headers
 
         if self.encoder_rtc in ["nvh264enc", "x264enc"]:
             cs.h264_streaming_mode = True
@@ -311,8 +317,15 @@ class MediaPipelinePixel(MediaPipeline):
                 return
             try:
                 result = result_ptr.contents
-                if result.size > 0:
-                    data_bytes = bytes(result.data[10 : result.size])
+                hdr = 0 if getattr(self, "_omit_stripe_headers", False) else 10
+                if result.data and result.size > hdr:  # NULL-safe; string_at segfaults on NULL
+                    if hdr == 0:
+                        data_bytes = ctypes.string_at(result.data, result.size)
+                    else:
+                        # Single offset copy: skip the per-stripe header without
+                        # materializing the full buffer first (avoids the ~2x copy).
+                        base = ctypes.cast(result.data, ctypes.c_void_p).value
+                        data_bytes = ctypes.string_at(base + hdr, result.size - hdr)
                     if not hasattr(result, "frame_id"):
                         logger.error(
                             f"Missing frame_id from screen capture result, skipping frame"
@@ -606,7 +619,14 @@ class MediaPipelinePixel(MediaPipeline):
                 self._running = True
             except Exception as e:
                 logger.error(f"Error starting media pipelines: {e}", exc_info=True)
-                await self.stop_media_pipeline()
+                # Inline teardown: stop_media_pipeline() would re-enter the held lock and deadlock.
+                try:
+                    await self.stop_screen_capture()
+                    if self.audio_enabled:
+                        await self._stop_audio_pipeline()
+                except Exception:
+                    logger.error("Error during start-failure cleanup", exc_info=True)
+                self._running = False
 
     async def stop_media_pipeline(self):
         async with self.async_lock:
