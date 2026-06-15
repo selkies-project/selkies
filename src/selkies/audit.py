@@ -3,11 +3,10 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 """
-Best-effort audit-event emitter for clipboard and file-transfer events.
+Best-effort audit-event emitter for clipboard and file-upload events.
 
-Selkies sessions can carry data between the remote browser and the
-server desktop in three channels: bidirectional clipboard, file
-upload (browser to server) and file download (server to browser).
+This covers the two data channels the Selkies Python package handles:
+bidirectional clipboard and file upload (browser to server).
 Deployments that need a tamper-evident record of those transfers,
 without forcing the operator to maintain a Selkies code patch, can
 configure the ``audit_webhook_url`` setting.
