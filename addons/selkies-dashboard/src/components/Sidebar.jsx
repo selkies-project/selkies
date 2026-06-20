@@ -1,5 +1,12 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
 // src/components/Sidebar.jsx
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { displayLabel } from "../../../selkies-web-core/lib/util.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import { getTranslator } from "../translations";
 import yaml from "js-yaml";
@@ -10,22 +17,23 @@ const urlHash = window.location.hash;
 const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
 
 const PER_DISPLAY_SETTINGS = [
-    'framerate', 'h264_crf', 'h264_fullcolor',
-    'h264_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
-    'h264_paintover_crf', 'h264_paintover_burst_frames', 'use_paint_over_quality',
+    'framerate', 'video_crf', 'video_fullcolor',
+    'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
+    'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
     'is_manual_resolution_mode', 'manual_width', 'manual_height', 'encoder',
     'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode', 'video_bitrate',
     'force_aligned_resolution'
 ];
 
 const encoderOptions = [
-  "x264enc",
-  "x264enc-striped",
+  "h264enc",
+  "h264enc-striped",
+  "openh264enc",
   "jpeg",
 ];
 
 const encoderOptionsWR = [
-  "x264enc",
+  "h264enc",
   "nvh264enc",
   "vp8enc",
 ]
@@ -88,7 +96,7 @@ const STREAM_MODE_WEBRTC = "webrtc";
 const STREAM_MODE_WEBSOCKETS = "websockets";
 const STREAMING_MODES= [STREAM_MODE_WEBRTC, STREAM_MODE_WEBSOCKETS]
 const DEFAULT_STREAM_MODE = STREAM_MODE_WEBSOCKETS;
-const DEFAULT_WEBRTC_ENCODER = "x264enc";
+const DEFAULT_WEBRTC_ENCODER = "h264enc";
 const DEFAULT_AUDIO_BITRATE = 128000;  // in bps
 const DEFAULT_VIDEO_BITRATE = 8;   // in mbps
 const RATE_CONTROL_CBR = "cbr";
@@ -523,8 +531,12 @@ function AppsModal({ isOpen, onClose, t }) {
 
 const getStorageAppName = () => {
   if (typeof window === 'undefined') return '';
-  const urlForKey = window.location.href.split('#')[0];
-  return urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
+  // Origin + pathname only (NOT the full URL): a per-session ?token=... must not mint
+  // a new localStorage namespace each connect. Must match the cores' derivation.
+  const urlForKey = window.location.origin + window.location.pathname;
+  // Must match the streaming cores' prefix sanitizer ([._-] literal class, not
+  // the buggy [.-_] range) so dashboard and cores share one storage prefix.
+  return urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
 };
 const storageAppName = getStorageAppName();
 const getPrefixedKey = (key) => {
@@ -538,11 +550,17 @@ const getPrefixedKey = (key) => {
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
   const [isToggleVisible, setIsToggleVisible] = useState(true);
+  // Viewer-designated clients (shared/player URL modes, or a server-assigned
+  // viewer role) must not see server-wide controls like the transport switch.
+  const [isViewerRole, setIsViewerRole] = useState(() => {
+    const h = (typeof window !== "undefined" ? window.location.hash : "").toLowerCase();
+    return h.startsWith("#shared") || /^#player[234]$/.test(h);
+  });
   const toggleSidebar = () => {
     setIsOpen(!isOpen);
   };
   const isSecondaryDisplay = displayId === 'display2';
-  const [langCode, setLangCode] = useState("en");
+  const [, setLangCode] = useState("en");
   const [translator, setTranslator] = useState(() => getTranslator("en"));
   useEffect(() => {
     window.postMessage({ type: 'sidebarVisibilityChanged', isOpen: isOpen }, window.location.origin);
@@ -617,11 +635,11 @@ function Sidebar() {
     newRenderable.framerate = isRenderable('framerate');
     newRenderable.jpeg_quality = isRenderable('jpeg_quality');
     newRenderable.paint_over_jpeg_quality = isRenderable('paint_over_jpeg_quality');
-    newRenderable.h264_crf = isRenderable('h264_crf');
-    newRenderable.h264PaintoverCRF = isRenderable('h264_paintover_crf');
+    newRenderable.video_crf = isRenderable('video_crf');
+    newRenderable.videoPaintoverCRF = isRenderable('video_paintover_crf');
     newRenderable.usePaintOverQuality = isRenderable('use_paint_over_quality');
-    newRenderable.h264StreamingMode = isRenderable('h264_streaming_mode');
-    newRenderable.h264FullColor = isRenderable('h264_fullcolor');
+    newRenderable.videoStreamingMode = isRenderable('video_streaming_mode');
+    newRenderable.videoFullColor = isRenderable('video_fullcolor');
     newRenderable.use_cpu = isRenderable('use_cpu');
     newRenderable.uiScaling = isRenderable('scaling_dpi');
     newRenderable.binaryClipboard = isRenderable('enable_binary_clipboard');
@@ -750,7 +768,7 @@ function Sidebar() {
         ));
     setIsMobile(!!mobileCheck);
 
-    if (!!mobileCheck) {
+    if (mobileCheck) {
       setSectionsOpen((prev) => ({ ...prev, gamepads: true }));
     }
 
@@ -813,17 +831,14 @@ function Sidebar() {
       const final = s_encoder.allowed.includes(stored) ? stored : s_encoder.value;
       setEncoder(final);
       setDynamicEncoderOptions(s_encoder.allowed);
-      localStorage.setItem(getPrefixedKey("encoder"), final);
     }
     const s_encoder_rtc = serverSettings.encoder_rtc;
     if (s_encoder_rtc) {
-      const stored = localStorage.getItem(getPrefixedKey("encoder_rtc"));
       // FIXME: overriding with server sent value for now, as server doesn't support
       // change of encoder on the fly, yet.
       const final = s_encoder_rtc.value;
       setEncoderRTC(final);
       setDynamicEncoderOptions(s_encoder_rtc.allowed);
-      localStorage.setItem(getPrefixedKey("encoder_rtc"), final);
     }
     const s_framerate = serverSettings.framerate;
     if (s_framerate) {
@@ -832,7 +847,6 @@ function Sidebar() {
         ? Math.max(s_framerate.min, Math.min(s_framerate.max, stored))
         : s_framerate.default;
       setFramerate(final);
-      localStorage.setItem(getPrefixedKey("framerate"), final);
     }
     const s_video_bitrate = serverSettings.video_bitrate;
     if (s_video_bitrate) {
@@ -841,26 +855,28 @@ function Sidebar() {
         ? Math.max(s_video_bitrate.min, Math.min(s_video_bitrate.max, stored))
         : s_video_bitrate.default;
       setVideoBitrate(final);
-      localStorage.setItem(getPrefixedKey("video_bitrate"), final);
     }
     const s_audio_bitrate = serverSettings.audio_bitrate;
     if (s_audio_bitrate) {
       const stored = getStoredInt("audio_bitrate");
       // allowed holds strings; compare as string and keep result numeric
-      let final = s_audio_bitrate.allowed.includes(String(stored)) ? stored : parseInt(s_audio_bitrate.value, 10);
-      // Guard NaN so a bad server value can't persist and break the slider.
-      if (Number.isNaN(final)) final = DEFAULT_AUDIO_BITRATE;
+      let final = s_audio_bitrate.allowed?.includes(String(stored)) ? stored : parseInt(s_audio_bitrate.value, 10);
+      // Guard NaN so a bad server value can't persist and break the slider. Fall back to
+      // the server's max allowed value (320000 by default) rather than a hardcoded client default.
+      if (Number.isNaN(final)) {
+        const allowed = s_audio_bitrate.allowed;
+        const maxAllowed = parseInt(allowed?.[allowed.length - 1], 10);
+        final = Number.isNaN(maxAllowed) ? 320000 : maxAllowed;
+      }
       setAudioBitrate(final);
-      localStorage.setItem(getPrefixedKey("audio_bitrate"), final);
     }
-    const s_h264_crf = serverSettings.h264_crf;
-    if (s_h264_crf) {
-      const stored = getStoredInt("h264_crf");
+    const s_video_crf = serverSettings.video_crf;
+    if (s_video_crf) {
+      const stored = getStoredInt("video_crf");
       const final = !isNaN(stored)
-        ? Math.max(s_h264_crf.min, Math.min(s_h264_crf.max, stored))
-        : s_h264_crf.default;
+        ? Math.max(s_video_crf.min, Math.min(s_video_crf.max, stored))
+        : s_video_crf.default;
       setVideoCRF(final);
-      localStorage.setItem(getPrefixedKey("h264_crf"), final);
     }
     const s_jpeg_quality = serverSettings.jpeg_quality;
     if (s_jpeg_quality) {
@@ -869,7 +885,6 @@ function Sidebar() {
         ? Math.max(s_jpeg_quality.min, Math.min(s_jpeg_quality.max, stored))
         : s_jpeg_quality.default;
       setJpegQuality(final);
-      localStorage.setItem(getPrefixedKey("jpeg_quality"), final);
     }
     const s_paint_over_jpeg_quality = serverSettings.paint_over_jpeg_quality;
     if (s_paint_over_jpeg_quality) {
@@ -878,53 +893,45 @@ function Sidebar() {
         ? Math.max(s_paint_over_jpeg_quality.min, Math.min(s_paint_over_jpeg_quality.max, stored))
         : s_paint_over_jpeg_quality.default;
       setPaintOverJpegQuality(final);
-      localStorage.setItem(getPrefixedKey("paint_over_jpeg_quality"), final);
     }
-    const s_h264_paintover_crf = serverSettings.h264_paintover_crf;
-    if (s_h264_paintover_crf) {
-      const stored = getStoredInt("h264_paintover_crf");
+    const s_video_paintover_crf = serverSettings.video_paintover_crf;
+    if (s_video_paintover_crf) {
+      const stored = getStoredInt("video_paintover_crf");
       const final = !isNaN(stored)
-        ? Math.max(s_h264_paintover_crf.min, Math.min(s_h264_paintover_crf.max, stored))
-        : s_h264_paintover_crf.default;
-      setH264PaintoverCRF(final);
-      localStorage.setItem(getPrefixedKey("h264_paintover_crf"), final);
+        ? Math.max(s_video_paintover_crf.min, Math.min(s_video_paintover_crf.max, stored))
+        : s_video_paintover_crf.default;
+      setVideoPaintoverCRF(final);
     }
     const s_use_paint_over_quality = serverSettings.use_paint_over_quality;
     if (s_use_paint_over_quality) {
       const final = s_use_paint_over_quality.locked ? s_use_paint_over_quality.value : getStoredBool("use_paint_over_quality", s_use_paint_over_quality.value);
       setUsePaintOverQuality(final);
-      localStorage.setItem(getPrefixedKey("use_paint_over_quality"), String(final));
     }
-    const s_h264_fullcolor = serverSettings.h264_fullcolor;
-    if (s_h264_fullcolor) {
-      const final = s_h264_fullcolor.locked ? s_h264_fullcolor.value : getStoredBool("h264_fullcolor", s_h264_fullcolor.value);
-      setH264FullColor(final);
-      localStorage.setItem(getPrefixedKey("h264_fullcolor"), String(final));
+    const s_video_fullcolor = serverSettings.video_fullcolor;
+    if (s_video_fullcolor) {
+      const final = s_video_fullcolor.locked ? s_video_fullcolor.value : getStoredBool("video_fullcolor", s_video_fullcolor.value);
+      setVideoFullColor(final);
     }
-    const s_h264_streaming_mode = serverSettings.h264_streaming_mode;
-    if (s_h264_streaming_mode) {
-      const final = s_h264_streaming_mode.locked ? s_h264_streaming_mode.value : getStoredBool("h264_streaming_mode", s_h264_streaming_mode.value);
-      setH264StreamingMode(final);
-      localStorage.setItem(getPrefixedKey("h264_streaming_mode"), String(final));
+    const s_video_streaming_mode = serverSettings.video_streaming_mode;
+    if (s_video_streaming_mode) {
+      const final = s_video_streaming_mode.locked ? s_video_streaming_mode.value : getStoredBool("video_streaming_mode", s_video_streaming_mode.value);
+      setVideoStreamingMode(final);
     }
     const s_use_cpu = serverSettings.use_cpu;
     if (s_use_cpu) {
       const final = s_use_cpu.locked ? s_use_cpu.value : getStoredBool("use_cpu", s_use_cpu.value);
       setUseCpu(final);
-      localStorage.setItem(getPrefixedKey("use_cpu"), String(final));
     }
     const s_scaling_dpi = serverSettings.scaling_dpi;
     if (s_scaling_dpi) {
       const stored = getStoredInt("scaling_dpi");
       const final = s_scaling_dpi.allowed.includes(String(stored)) ? stored : parseInt(s_scaling_dpi.value, 10);
       setSelectedDpi(final);
-      localStorage.setItem(getPrefixedKey("scaling_dpi"), final);
     }
     const s_enable_binary_clipboard = serverSettings.enable_binary_clipboard;
     if (s_enable_binary_clipboard) {
       const final = s_enable_binary_clipboard.locked ? s_enable_binary_clipboard.value : getStoredBool("enable_binary_clipboard", s_enable_binary_clipboard.value);
       setEnableBinaryClipboard(final);
-      localStorage.setItem(getPrefixedKey("enable_binary_clipboard"), String(final));
     }
     const s_use_browser_cursors = serverSettings.use_browser_cursors;
     if (s_use_browser_cursors) {
@@ -936,7 +943,6 @@ function Sidebar() {
       const stored = localStorage.getItem(getPrefixedKey("rate_control_mode"));
       const final = s_rate_control_mode.allowed.includes(stored) ? stored : s_rate_control_mode.value;
       setRateControlMode(final);
-      localStorage.setItem(getPrefixedKey("rate_control_mode"), final);
     }
     const s_ui_title = serverSettings.ui_title;
     if (s_ui_title) {
@@ -957,7 +963,6 @@ function Sidebar() {
     if (s_force_aligned_resolution) {
       const final = s_force_aligned_resolution.locked ? s_force_aligned_resolution.value : getStoredBool("force_aligned_resolution", s_force_aligned_resolution.value);
       setForceAlignedResolution(final);
-      localStorage.setItem(getPrefixedKey("force_aligned_resolution"), String(final));
     }
   }, [serverSettings]);
 
@@ -1029,24 +1034,20 @@ function Sidebar() {
     parseInt(localStorage.getItem(getPrefixedKey("framerate")), 10) ||
       DEFAULT_FRAMERATE
   );
-  const [videoBufferSize, setVideoBufferSize] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("videoBufferSize")), 10) ||
-      DEFAULT_VIDEO_BUFFER_SIZE
-  );
-  const [h264_crf, setVideoCRF] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("h264_crf")), 10) ||
+  const [video_crf, setVideoCRF] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("video_crf")), 10) ||
       DEFAULT_VIDEO_CRF
   );
-  const [h264PaintoverCRF, setH264PaintoverCRF] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("h264_paintover_crf")), 10) ||
+  const [videoPaintoverCRF, setVideoPaintoverCRF] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("video_paintover_crf")), 10) ||
       DEFAULT_H264_PAINTOVER_CRF
   );
   const [usePaintOverQuality, setUsePaintOverQuality] = useState(() => {
     const saved = localStorage.getItem(getPrefixedKey("use_paint_over_quality"));
     return saved !== null ? saved === 'true' : DEFAULT_USE_PAINT_OVER_QUALITY;
   });
-  const [h264FullColor, setH264FullColor] = useState(
-    localStorage.getItem(getPrefixedKey("h264_fullcolor")) === "true"
+  const [videoFullColor, setVideoFullColor] = useState(
+    localStorage.getItem(getPrefixedKey("video_fullcolor")) === "true"
   );
   const [jpeg_quality, setJpegQuality] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("jpeg_quality")), 10) ||
@@ -1059,8 +1060,8 @@ function Sidebar() {
   const [use_cpu, setUseCpu] = useState(
     localStorage.getItem(getPrefixedKey("use_cpu")) === "true"
   );
-  const [h264StreamingMode, setH264StreamingMode] = useState(
-    localStorage.getItem(getPrefixedKey("h264_streaming_mode")) === "true"
+  const [videoStreamingMode, setVideoStreamingMode] = useState(
+    localStorage.getItem(getPrefixedKey("video_streaming_mode")) === "true"
   );
   const [selectedDpi, setSelectedDpi] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")), 10) || DEFAULT_SCALING_DPI
@@ -1449,17 +1450,17 @@ function Sidebar() {
   const handleVideoCRFChange = (event) => {
     const selectedCRF = parseInt(event.target.value, 10);
     setVideoCRF(selectedCRF);
-    debouncedPostSetting({ h264_crf: selectedCRF });
+    debouncedPostSetting({ video_crf: selectedCRF });
   };
   const handleH264PaintoverCRFChange = (event) => {
     const selectedCRF = parseInt(event.target.value, 10);
-    setH264PaintoverCRF(selectedCRF);
-    debouncedPostSetting({ h264_paintover_crf: selectedCRF });
+    setVideoPaintoverCRF(selectedCRF);
+    debouncedPostSetting({ video_paintover_crf: selectedCRF });
   };
   const handleH264FullColorToggle = () => {
-    const newFullColorState = !h264FullColor;
-    setH264FullColor(newFullColorState);
-    debouncedPostSetting({ h264_fullcolor: newFullColorState });
+    const newFullColorState = !videoFullColor;
+    setVideoFullColor(newFullColorState);
+    debouncedPostSetting({ video_fullcolor: newFullColorState });
   };
   const handleUsePaintOverQualityToggle = () => {
     const newUsePaintOverQualityState = !usePaintOverQuality;
@@ -1472,9 +1473,9 @@ function Sidebar() {
     debouncedPostSetting({ use_cpu: newUseCpuState });
   };
   const handleH264StreamingModeToggle = () => {
-    const newStreamingModeState = !h264StreamingMode;
-    setH264StreamingMode(newStreamingModeState);
-    debouncedPostSetting({ h264_streaming_mode: newStreamingModeState });
+    const newStreamingModeState = !videoStreamingMode;
+    setVideoStreamingMode(newStreamingModeState);
+    debouncedPostSetting({ video_streaming_mode: newStreamingModeState });
   };
   const handleRateControlChange = (event) => {
     const selectedRateControl = event.target.value;
@@ -1679,7 +1680,7 @@ function Sidebar() {
       const doSwitch = () => {
         const headers = { "Content-Type": "application/json" };
         let storedToken = null;
-        try { storedToken = sessionStorage.getItem(MASTER_TOKEN_KEY); } catch (_) {}
+        try { storedToken = sessionStorage.getItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ }
         if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;
         return fetch(`${getRoutePrefix()}/switch`, {
           method: "POST",
@@ -1694,17 +1695,17 @@ function Sidebar() {
           ? window.prompt("Switching the stream mode requires the Selkies master token:")
           : null;
         if (entered && entered.trim()) {
-          try { sessionStorage.setItem(MASTER_TOKEN_KEY, entered.trim()); } catch (_) {}
+          try { sessionStorage.setItem(MASTER_TOKEN_KEY, entered.trim()); } catch { /* sessionStorage unavailable */ }
           response = await doSwitch();
         }
       }
 
       if (!response.ok) {
         // Drop a stale token on 401 so the next attempt re-prompts.
-        if (response.status === 401) { try { sessionStorage.removeItem(MASTER_TOKEN_KEY); } catch (_) {} }
+        if (response.status === 401) { try { sessionStorage.removeItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ } }
         throw new Error(`Request failed with status ${response.status}`);
       }
-      const data = await response.json();
+      await response.json();
       setStreamMode(newMode);
       window.postMessage(
         { type: "mode", mode: newMode },
@@ -1777,7 +1778,7 @@ function Sidebar() {
           return t("sections.stats.tooltipGpu", {
             value: gpuPercent.toFixed(1),
           });
-        case "sysmem":
+        case "sysmem": {
           const fu =
             sysMemUsed !== null ? formatBytes(sysMemUsed, 2, raw) : memNA;
           const ft =
@@ -1785,7 +1786,8 @@ function Sidebar() {
           return fu !== memNA && ft !== memNA
             ? t("sections.stats.tooltipSysMem", { used: fu, total: ft })
             : `${t("sections.stats.sysMemLabel")}: ${memNA}`;
-        case "gpumem":
+        }
+        case "gpumem": {
           const gu =
             gpuMemUsed !== null ? formatBytes(gpuMemUsed, 2, raw) : memNA;
           const gt =
@@ -1793,6 +1795,7 @@ function Sidebar() {
           return gu !== memNA && gt !== memNA
             ? t("sections.stats.tooltipGpuMem", { used: gu, total: gt })
             : `${t("sections.stats.gpuMemLabel")}: ${memNA}`;
+        }
         case "fps":
           return t("sections.stats.tooltipFps", { value: clientFps });
         case "audio":
@@ -1901,8 +1904,9 @@ function Sidebar() {
           if (message.audio !== undefined) setIsAudioActive(message.audio);
           if (message.microphone !== undefined)
             setIsMicrophoneActive(message.microphone);
-        } else if (message.type === 'clientRoleUpdate' && message.role === 'viewer') {
-          setIsToggleVisible(false);
+        } else if (message.type === 'clientRoleUpdate') {
+          setIsViewerRole(message.role === 'viewer');
+          if (message.role === 'viewer') setIsToggleVisible(false);
         } else if (message.type === "gamepadControl") {
           if (message.enabled !== undefined)
             setIsGamepadEnabled(message.enabled);
@@ -2149,17 +2153,17 @@ function Sidebar() {
     })
   );
 
+  // The encoder relevant to the active transport; CBR/CRF applies to every H.264 encoder on both.
+  const activeEncoder = isWebrtc ? encoderRTC : encoder;
+  const H264_ENCODERS = ["h264enc", "h264enc-striped", "openh264enc", "nvh264enc"];
   const showFPS = [
     "jpeg",
-    "x264enc-striped",
-    "x264enc",
+    "h264enc-striped",
+    "h264enc",
+    "openh264enc",
   ].includes(encoder);
-  const showBitrate = [
-  ].includes(encoder);
-  const showBufferSize = [
-  ].includes(encoder);
-  const showCRF = ["x264enc-striped", "x264enc"].includes(encoder);
-  const showH264Options = ["x264enc-striped", "x264enc"].includes(encoder);
+  const showCRF = H264_ENCODERS.includes(activeEncoder);
+  const showH264Options = H264_ENCODERS.includes(activeEncoder);
   const showJpegOptions = encoder === 'jpeg';
   const showPaintOverQualityToggle = showH264Options || showJpegOptions;
   if (serverSettings && serverSettings.ui_show_sidebar?.value === false) {
@@ -2435,7 +2439,7 @@ function Sidebar() {
             </div>
             {sectionsOpen.settings && (
                 <div className="sidebar-section-content" id="settings-content">
-                  {(renderableSettings.enableDualMode ?? false) && (
+                  {(renderableSettings.enableDualMode ?? false) && !isViewerRole && (
                     <div className="dev-setting-item">
                       {" "}
                       <label htmlFor="streamModeSelect">
@@ -2449,7 +2453,7 @@ function Sidebar() {
                         {" "}
                         {STREAMING_MODES.map((mode) => (
                           <option key={mode} value={mode}>
-                            {mode}
+                            {displayLabel(mode)}
                           </option>
                         ))}{" "}
                       </select>{" "}
@@ -2468,7 +2472,7 @@ function Sidebar() {
                     >
                       {(serverSettings?.encoder?.allowed || dynamicEncoderOptions).map((enc) => (
                         <option key={enc} value={enc}>
-                          {enc}
+                          {displayLabel(enc)}
                         </option>
                       ))}
                     </select>
@@ -2487,13 +2491,13 @@ function Sidebar() {
                     >
                       {(serverSettings?.encoder_rtc?.allowed || dynamicEncoderOptions).map((enc) => (
                         <option key={enc} value={enc}>
-                          {enc}
+                          {displayLabel(enc)}
                         </option>
                       ))}
                     </select>
                   </div>
                 )}
-                {(renderableSettings.enableRateControl ?? true) && (
+                {(renderableSettings.enableRateControl ?? true) && showH264Options && (
                   <div className="dev-setting-item">
                     <label htmlFor="rateControlSelect">
                       {t("sections.video.rateControlLabel")}
@@ -2506,7 +2510,7 @@ function Sidebar() {
                     >
                       {(serverSettings?.rate_control_mode?.allowed || rateControlOptions).map((rc) => (
                         <option key={rc} value={rc}>
-                          {rc.toUpperCase()}
+                          {displayLabel(rc)}
                         </option>
                       ))}
                     </select>
@@ -2531,8 +2535,7 @@ function Sidebar() {
                     />
                   </div>
                 )}
-                {((renderableSettings.enableRateControl && rateControlMode === RATE_CONTROL_CBR) ||
-                  (!renderableSettings.enableRateControl && isWebrtc)) && (renderableSettings.video_bitrate ?? true) && (
+                {showH264Options && rateControlMode === RATE_CONTROL_CBR && (renderableSettings.video_bitrate ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="videoBitrateSlider">
                       {t("sections.video.bitrateLabel", {
@@ -2593,39 +2596,38 @@ function Sidebar() {
                     )}
                   </>
                 )}
-                {((renderableSettings.enableRateControl && rateControlMode === RATE_CONTROL_CRF) ||
-                  (!renderableSettings.enableRateControl && !isWebrtc)) && showCRF && (renderableSettings.h264_crf ?? true) && (
+                {showCRF && rateControlMode === RATE_CONTROL_CRF && (renderableSettings.video_crf ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="videoCRFSlider">
-                      {t("sections.video.crfLabel", { crf: h264_crf })}
+                      {t("sections.video.crfLabel", { crf: video_crf })}
                     </label>
                     <input
                       type="range"
                       id="videoCRFSlider"
-                      min={serverSettings?.h264_crf?.min || 5}
-                      max={serverSettings?.h264_crf?.max || 50}
+                      min={serverSettings?.video_crf?.min || 5}
+                      max={serverSettings?.video_crf?.max || 50}
                       step="1"
-                      value={h264_crf}
+                      value={video_crf}
                       onChange={handleVideoCRFChange}
-                      disabled={!serverSettings || serverSettings.h264_crf?.min === serverSettings.h264_crf?.max}
+                      disabled={!serverSettings || serverSettings.video_crf?.min === serverSettings.video_crf?.max}
                       style={{ direction: 'rtl' }}
                     />
                   </div>
                 )}
-                {!isWebrtc && showCRF && (renderableSettings.h264PaintoverCRF ?? true) && (
+                {!isWebrtc && showCRF && (renderableSettings.videoPaintoverCRF ?? true) && (
                   <div className="dev-setting-item">
-                    <label htmlFor="h264PaintoverCRFSlider">
-                      {t("sections.video.paintoverCrfLabel", { crf: h264PaintoverCRF })}
+                    <label htmlFor="videoPaintoverCRFSlider">
+                      {t("sections.video.paintoverCrfLabel", { crf: videoPaintoverCRF })}
                     </label>
                     <input
                       type="range"
-                      id="h264PaintoverCRFSlider"
-                      min={serverSettings?.h264_paintover_crf?.min || 5}
-                      max={serverSettings?.h264_paintover_crf?.max || 50}
+                      id="videoPaintoverCRFSlider"
+                      min={serverSettings?.video_paintover_crf?.min || 5}
+                      max={serverSettings?.video_paintover_crf?.max || 50}
                       step="1"
-                      value={h264PaintoverCRF}
+                      value={videoPaintoverCRF}
                       onChange={handleH264PaintoverCRFChange}
-                      disabled={!serverSettings || serverSettings.h264_paintover_crf?.min === serverSettings.h264_paintover_crf?.max}
+                      disabled={!serverSettings || serverSettings.video_paintover_crf?.min === serverSettings.video_paintover_crf?.max}
                       style={{ direction: 'rtl' }}
                     />
                   </div>
@@ -2647,38 +2649,38 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {!isWebrtc && showH264Options && (renderableSettings.h264StreamingMode ?? true) && (
+                {!isWebrtc && showH264Options && (renderableSettings.videoStreamingMode ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label 
-                      htmlFor="h264StreamingModeToggle"
+                      htmlFor="videoStreamingModeToggle"
                       title={t("sections.video.streamingModeDetails")}
                     >
                       {t("sections.video.streamingModeLabel", "Turbo")}
                     </label>
                     <button
-                      id="h264StreamingModeToggle"
-                      className={`toggle-button-sidebar ${h264StreamingMode ? "active" : ""}`}
+                      id="videoStreamingModeToggle"
+                      className={`toggle-button-sidebar ${videoStreamingMode ? "active" : ""}`}
                       onClick={handleH264StreamingModeToggle}
-                      aria-pressed={h264StreamingMode}
-                      disabled={!serverSettings || serverSettings.h264_streaming_mode?.locked}
-                      title={t(h264StreamingMode ? "buttons.h264StreamingModeDisableTitle" : "buttons.h264StreamingModeEnableTitle")}
+                      aria-pressed={videoStreamingMode}
+                      disabled={!serverSettings || serverSettings.video_streaming_mode?.locked}
+                      title={t(videoStreamingMode ? "buttons.videoStreamingModeDisableTitle" : "buttons.videoStreamingModeEnableTitle")}
                     >
                       <span className="toggle-button-sidebar-knob"></span>
                     </button>
                   </div>
                 )}
-                {!isWebrtc && showH264Options && (renderableSettings.h264FullColor ?? true) && (
+                {!isWebrtc && showH264Options && (renderableSettings.videoFullColor ?? true) && (
                   <div className="dev-setting-item toggle-item">
-                    <label htmlFor="h264FullColorToggle">
+                    <label htmlFor="videoFullColorToggle">
                       {t("sections.video.fullColorLabel")}
                     </label>
                     <button
-                      id="h264FullColorToggle"
-                      className={`toggle-button-sidebar ${h264FullColor ? "active" : ""}`}
+                      id="videoFullColorToggle"
+                      className={`toggle-button-sidebar ${videoFullColor ? "active" : ""}`}
                       onClick={handleH264FullColorToggle}
-                      aria-pressed={h264FullColor}
-                      disabled={!serverSettings || serverSettings.h264_fullcolor?.locked}
-                      title={t(h264FullColor ? "buttons.h264FullColorDisableTitle" : "buttons.h264FullColorEnableTitle")}
+                      aria-pressed={videoFullColor}
+                      disabled={!serverSettings || serverSettings.video_fullcolor?.locked}
+                      title={t(videoFullColor ? "buttons.videoFullColorDisableTitle" : "buttons.videoFullColorEnableTitle")}
                     >
                       <span className="toggle-button-sidebar-knob"></span>
                     </button>

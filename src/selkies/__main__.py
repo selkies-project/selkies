@@ -17,10 +17,26 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+async def wait_for_app_ready(ready_file, app_wait_ready=False):
+    """Wait for the streaming app's ready signal: returns immediately unless
+    app_wait_ready is set, else polls until a sidecar creates ready_file."""
+    if app_wait_ready:
+        logger.info(f"Waiting for streaming app ready file: {ready_file}")
+    while app_wait_ready and not os.path.exists(ready_file):
+        await asyncio.sleep(0.2)
+
+
 async def run():
     """
     Main entry point for the Selkies streaming server.
     """
+    # Publish the resolved gamepad-socket directory so the LD_PRELOAD interposer in
+    # app processes (which reads SELKIES_JS_SOCKET_PATH) writes/reads sockets in the
+    # same directory selkies uses, regardless of how the setting was configured.
+    os.environ["SELKIES_JS_SOCKET_PATH"] = settings.js_socket_path
+
+    await wait_for_app_ready(settings.app_ready_file, settings.app_wait_ready[0])
+
     # Create the centralised server with settings
     server = CentralizedStreamServer(settings)
 

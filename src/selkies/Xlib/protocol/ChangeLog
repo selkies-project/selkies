@@ -1,0 +1,124 @@
+2006-07-22 Mike Grant <mgg@nobodymuch.org>
+	* Xlib/protocol/display.py: (mggrant) Fix for 1219457 - flushing
+	  was blocking and waiting for a read operation.  Added missing
+	  "import socket" per bug report #681511.  Fix for bug:1098695 &
+	  1098738.  The "recv" variable was being used for more than one
+	  thing - renamed one.
+
+	Changelog hasn't been maintained since 2002, but some of the more
+	significant comments from cvs logs follow:
+	* Xlib/protocol/request.py: (petli) Fix bugs in definition and
+	  method of GrabButton/Pointer
+
+2002-02-22  Peter Liljenberg  <peter.liljenberg@esdgkonsult.com>
+
+	* event.py(CirculateNotify, CirculateRequest): These are
+	identical, so subclass the common Circulate.
+
+2002-02-13  Peter Liljenberg  <peter.liljenberg@esdgkonsult.com>
+
+	* rq.py (ValueList.parse_binary_value): Use = both for calcsize
+	and unpacking.  Caused problems on Alpha.
+
+2002-02-11  Peter Liljenberg  <peter.liljenberg@esdgkonsult.com>
+
+	* request.py (GetWindowAttributes): Rename class to win_class. 
+	(AllocColorPlanes): Fix Pad(4) to Pad(8) in reply.
+
+	* rq.py (ReplyLength): Add a reply length field, for completeness
+	and easier unit test generation.
+
+2002-02-10  Peter Liljenberg  <peter.liljenberg@esdgkonsult.com>
+
+	* rq.py (DictWrapper.__cmp__): Let DictWrapper compare with plain
+	dictionaries. 
+	(Event.__init__): Set send_event to 0 when creating new events
+	objects, and allow events to be compared.
+
+	(Struct.parse_binary): Allow LengthFields to have a parse_value method.
+	(OddLength.parse_value): Decode field.
+	(String16.parse_binary_value): Handle OddLength fields.
+
+	(TextElements8.parse_binary_value): Bugfix: return values instead
+	of v.
+	(String8.parse_binary_value): Parse String8 with no LengthOf
+	field. 
+
+2002-02-09  Peter Liljenberg  <peter.liljenberg@esdgkonsult.com>
+
+	* rq.py (TextElements16): Bugfix: inherit TextElements8 instead of
+	TextElements16.  Found while preparing unit tests, whee.
+
+2002-01-14  Peter Liljenberg  <peter.liljenberg@esdgkonsult.com>
+
+	* display.py (Display.parse_event_response): Fix bug reported by
+	Ilpo Nyyssönen, whereby ReplyRequests which generates events
+	(e.g. get_property with delete = 1) will get dropped when the
+	event is received.
+
+2001-12-14  Peter Liljenberg  <peter.liljenberg@esdgkonsult.com>
+
+	* display.py (Display.parse_event_response): 
+	* rq.py (Event.__init__): Fixed bug in event type decoding: bit
+	0-6 is the event type, and bit 7 is set if the event was sent by
+	SendEvent. 
+	
+
+2001-01-16    <petli@cendio.se>
+
+	* event.py: Changed some class names so that they correspond
+	exactly to the event type constants.
+
+Tue Jan  9 10:03:25 2001  Peter Liljenberg  <petli@cendio.se>
+
+	* display.py (Display.send_request): Fixed a call to append() with
+	multiple arguments, something that modern Pythons don't allow.
+	
+
+2001-01-04    <petli@cendio.se>
+
+	* rq.py: The fix for 64-bit platforms didn't work, and close
+	scrutiny of structmodule.c shows why: it turns out that '='
+	translates into '<' or '>', the one the platform would use.  This
+	means B is one byte, H is two and L is four, and no extra
+	alignment, always.  '@', which is the default, selects native
+	number of bytes, which on Alpha means that 'L' is eight bytes.
+
+	Now the code goes to pains to ensure that '=' encoding is always
+	used, so _now_ it should work on all platforms.  Ahem.
+	
+
+2000-12-29    <petli@cendio.se>
+
+	* rq.py: Optimizations:
+	  + replace calls to Field.get_name() with access to attribute
+	    name. 
+	    (Struct.build_from_args): 
+
+Fri Dec 29 17:05:02 2000  Peter Liljenberg  <petli@cendio.se>
+
+	* rq.py: Alpha forces us to probe how many bytes each struct code
+	in 'bhil' represents, instead of being able to assume that b is 1,
+	h is 2 and l is 4.
+
+2000-12-21    <petli@cendio.se>
+
+	* request.py (SetClipRectangles): Fixed typo (attribute was
+	"rectangels"). 
+
+2000-12-20    <petli@cendio.se>
+
+	* rq.py (DictWrapper.__setitem__),
+	(DictWrapper.__delitem__),
+	(DictWrapper.__setattr__), 
+	(DictWrapper.__delattr__): 
+	Add a few methods to the DictWrapper, to make sure that even if
+	attributes are changed, all attributes can be found in the _data
+	mapping.
+
+	(ValueField.__init__): 
+	(Object.__init__): 
+	(ValueField.pack_value): 
+	(Set.__init__): 
+	Added a default parameter, so that structure elements with a
+	default value can be omitted when calling build_from_args.

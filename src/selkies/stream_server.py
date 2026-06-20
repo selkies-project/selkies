@@ -14,13 +14,14 @@ import pathlib
 import asyncio
 import logging
 import urllib.parse
-import aiofiles
 import tempfile
 from aiohttp import web
 from datetime import datetime
-from typing import Optional, Dict, Tuple, Any
+from prometheus_client import generate_latest
+from typing import Optional, Dict, Any
 try:
-    import importlib_resources as importlib_resources
+    # pyrefly: ignore[missing-import]
+    import importlib_resources as importlib_resources  # pyright: ignore[reportMissingImports]
 except ImportError:
     import importlib.resources as importlib_resources
 
@@ -28,6 +29,314 @@ from abc import ABCMeta, abstractmethod
 
 
 logger = logging.getLogger("stream_server")
+
+
+# Inlined header/footer HTML for the /files directory index.
+FILE_INDEX_HEADER = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="IE=edge">
+    <title>Desktop Files</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        :root {
+            --page-bg: #282c34;
+            --text-color: #abb2bf;
+            --header-color: #61dafb;
+            --border-color: #3a3f47;
+            --table-header-bg: #3a3f47;
+            --table-row-hover-bg: #454b54;
+            --link-color: #61dafb;
+            --link-hover-color: #a4d9f5;
+            --shadow-color: rgba(0, 0, 0, 0.5);
+
+            --container-max-width: 960px;
+            --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            --border-radius: 8px;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: var(--font-family);
+            background-color: var(--page-bg);
+            color: var(--text-color);
+            line-height: 1.6;
+            padding-top: 20px;
+            padding-bottom: 60px;
+        }
+        .page-container {
+            max-width: var(--container-max-width);
+            margin: 0 auto;
+            padding: 0 20px;
+            position: relative;
+        }
+        h1 {
+            color: var(--header-color);
+            font-size: 2em;
+            font-weight: 300;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid var(--border-color);
+            padding-right: 50px;
+        }
+        hr {
+            display: none;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 25px;
+            font-size: 0.95em;
+            border-radius: var(--border-radius);
+            overflow: hidden;
+            box-shadow: 0 4px 10px var(--shadow-color);
+        }
+        thead {
+            background-color: var(--table-header-bg);
+        }
+        th {
+            color: var(--header-color);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85em;
+            letter-spacing: 0.05em;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+        tbody tr {
+            transition: background-color 0.2s ease-in-out;
+        }
+        tbody tr:hover {
+            background-color: var(--table-row-hover-bg);
+        }
+        tbody tr:last-child td {
+            border-bottom: none;
+        }
+        td a {
+            color: var(--link-color);
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            transition: color 0.2s ease-in-out;
+        }
+        td a:hover {
+            color: var(--link-hover-color);
+            text-decoration: underline;
+        }
+        th a {
+            color: var(--link-color);
+            text-decoration: none;
+            transition: color 0.2s ease-in-out;
+        }
+        th a:hover {
+            color: var(--link-hover-color);
+            text-decoration: underline;
+        }
+        th a:visited {
+            color: var(--link-color);
+        }
+        th a:visited:hover {
+            color: var(--link-hover-color);
+        }
+        #reload-page-button {
+            position: absolute;
+            top: 0;
+            right: 0;
+            background-color: transparent;
+            color: var(--text-color);
+            border: none;
+            border-radius: var(--border-radius);
+            padding: 8px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.2s ease-in-out, transform 0.2s ease-in-out;
+            z-index: 10;
+        }
+        #reload-page-button:hover {
+            color: var(--link-hover-color);
+            transform: rotate(45deg);
+        }
+        #reload-page-button svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+        td:nth-child(1) {
+            word-break: break-all;
+        }
+
+        td:nth-child(2), th:nth-child(2) {
+            white-space: nowrap;
+            width: 180px;
+        }
+
+        td:nth-child(3), th:nth-child(3) {
+            text-align: right;
+            white-space: nowrap;
+            width: 100px;
+        }
+        td a::before {
+            display: inline-block;
+            content: '';
+            width: 1.1em;
+            height: 1.1em;
+            margin-right: 0.75em;
+            vertical-align: middle;
+            background-repeat: no-repeat;
+            background-size: contain;
+            background-position: center;
+            flex-shrink: 0;
+        }
+        td a[href="../"]::before {
+            background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>');
+        }
+        td a[href$="/"]:not([href="../"])::before {
+            background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>');
+        }
+        td a:not([href$="/"]):not([href="../"])::before {
+            background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M14 2H6c-1.11 0-2 .9-2 2v16c0 1.1.89 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>');
+        }
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-color);
+            font-size: 0.85em;
+            color: var(--text-color);
+            opacity: 0.7;
+        }
+        footer p {
+            margin: 0;
+        }
+        @media (max-width: 768px) {
+            body {
+                font-size: 14px;
+                padding-top: 10px;
+                padding-bottom: 40px;
+            }
+            .page-container {
+                padding: 0 10px;
+            }
+            h1 {
+                font-size: 1.6em;
+                padding-right: 40px;
+            }
+            #reload-page-button {
+                top: -2px;
+                right: 0px;
+            }
+            #reload-page-button svg {
+                width: 18px;
+                height: 18px;
+            }
+            th, td {
+                padding: 10px 8px;
+            }
+            table {
+                display: block;
+                overflow-x: auto;
+                white-space: nowrap;
+                -webkit-overflow-scrolling: touch;
+            }
+            th, td {
+                white-space: nowrap;
+            }
+            td:nth-child(1) {
+                min-width: 200px;
+            }
+            td:nth-child(2), th:nth-child(2) {
+                min-width: 150px;
+                width: auto;
+            }
+            td:nth-child(3), th:nth-child(3) {
+                min-width: 80px;
+                width: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="page-container">
+        <button id="reload-page-button" title="Reload Page">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+            </svg>
+        </button>
+
+        <h1>
+"""
+
+FILE_INDEX_FOOTER = """    </div> <!-- closes .page-container -->
+    <footer>
+        <p>&copy; <script>document.write(new Date().getFullYear())</script> Selkies.</p>
+    </footer>
+
+    <script>
+        const reloadButton = document.getElementById('reload-page-button');
+        if (reloadButton) {
+            reloadButton.addEventListener('click', function() {
+                window.location.reload();
+            });
+        }
+
+        function processDirectoryListing() {
+            const webPathPrefix = '/files/';
+            let diskPathPrefix = '';
+            const injectedPathPrefix = window.__SELKIES_INJECTED_PATH_PREFIX__ || '';
+            if (injectedPathPrefix) {
+                diskPathPrefix = injectedPathPrefix;
+            } else {
+                diskPathPrefix = '';
+            }
+            const h1 = document.querySelector('h1');
+
+            if (h1) {
+                const originalText = h1.textContent;
+                const newText = originalText.replace(webPathPrefix, diskPathPrefix);
+                h1.textContent = newText;
+            }
+
+            const isAtRoot = window.location.pathname === webPathPrefix;
+            if (isAtRoot) {
+                const parentLink = document.querySelector('table#list td.link a[href^="../"]');
+                if (parentLink && parentLink.textContent.trim() === "Parent directory/") {
+                    const parentRow = parentLink.closest('tr');
+                    if (parentRow) {
+                        parentRow.style.display = 'none';
+                    }
+                }
+            }
+        }
+
+        let attempts = 0;
+        const maxAttempts = 20;
+        const intervalId = setInterval(function() {
+            attempts++;
+            const h1 = document.querySelector('h1');
+            const table = document.getElementById('list');
+
+            if (h1 && table) {
+                clearInterval(intervalId);
+                processDirectoryListing();
+            } else if (attempts >= maxAttempts) {
+                clearInterval(intervalId);
+                processDirectoryListing();
+            }
+        }, 100);
+
+    </script>
+</body>
+</html>
+"""
 
 
 class BaseStreamingService(metaclass=ABCMeta):
@@ -43,13 +352,13 @@ class BaseStreamingService(metaclass=ABCMeta):
         """Logic to cleanup resources and stop loops."""
 
     @abstractmethod
-    def register_routes(self, prefix: str, main_router: web.UrlDispatcher):
+    def register_routes(self, api_prefix: str, main_router: web.UrlDispatcher):
         """Service registers its absolute paths directly on the main router."""
         pass
 
 
 class CentralizedStreamServer:
-    def __init__(self, settings, services: Dict[str, BaseStreamingService] = None):
+    def __init__(self, settings, services: Optional[Dict[str, BaseStreamingService]] = None):
         self.settings = settings
         self.services = services or {}
         self.current_mode: Optional[str] = None
@@ -63,11 +372,12 @@ class CentralizedStreamServer:
         self.ssl_context: Optional[ssl.SSLContext] = None
         self.static_fs_path: str = ""
         self.upload_dir = pathlib.Path(
-            os.path.expanduser(self.settings.upload_dir)
+            os.path.expanduser(self.settings.file_manager_path)
         ).resolve()
-        self.header_html = "nginx/header.html"
-        self.footer_html = "nginx/footer.html"
         self.web_files_ctx = None
+
+        self._clients_present = False
+        self._client_hook_tasks = set()
 
         # Constants
         self.STREAMING_MODE_WEBRTC = "webrtc"
@@ -83,6 +393,30 @@ class CentralizedStreamServer:
             "ico": "image/x-icon",
             "svg": "image/svg+xml",
         }
+
+    def set_clients_present(self, present: bool):
+        """Both modes report client presence here; run the configured hook
+        command when the first client connects / the last one disconnects."""
+        if present == self._clients_present:
+            return
+        self._clients_present = present
+        cmd = (self.settings.run_after_connect if present
+               else self.settings.run_after_disconnect)
+        if cmd:
+            # Hold a strong reference: the loop only keeps weak refs to tasks.
+            task = asyncio.create_task(self._run_client_hook(cmd, present))
+            self._client_hook_tasks.add(task)
+            task.add_done_callback(self._client_hook_tasks.discard)
+
+    async def _run_client_hook(self, cmd: str, present: bool):
+        name = "run_after_connect" if present else "run_after_disconnect"
+        try:
+            proc = await asyncio.create_subprocess_shell(cmd)
+            returncode = await proc.wait()
+            if returncode != 0:
+                logger.warning(f"{name} command exited with status {returncode}: {cmd}")
+        except OSError as e:
+            logger.error(f"Failed to run {name} command {cmd!r}: {e}")
 
     def _b64_decode(self, data: str) -> str:
         return base64.b64decode(data).decode("utf-8")
@@ -242,22 +576,75 @@ class CentralizedStreamServer:
             parts[1].encode("utf-8"), str(master_token).encode("utf-8")
         )
 
+    @staticmethod
+    def _is_ws_origin_allowed(request: web.Request, settings) -> bool:
+        """Whether a WebSocket upgrade's Origin is permitted.
+
+        Empty allowed_origins means same-origin only (plus non-browser clients that
+        send no Origin); '*' allows any; otherwise the Origin must be listed or match
+        the Host header.
+        """
+        origin = request.headers.get("Origin")
+        if not origin:
+            return True  # native/non-browser clients omit Origin
+        allowed = {
+            o.strip()
+            for o in (getattr(settings, "allowed_origins", "") or "").split(",")
+            if o.strip()
+        }
+        if "*" in allowed or origin in allowed:
+            return True
+        host = request.headers.get("Host")
+        if host:
+            try:
+                origin_parts = urllib.parse.urlsplit(origin)
+                if origin_parts.netloc == host:
+                    return True
+                # Reverse proxies routinely forward Host without the port (e.g.
+                # nginx's 'proxy_set_header Host $host' — this project's own
+                # bundled nginx config does), while a browser Origin carries any
+                # non-default port. A strict netloc comparison therefore rejects
+                # every same-origin connection reached via an explicit port
+                # (like the standard :6080 mapping). When the forwarded Host has
+                # no port to compare, fall back to comparing hostnames.
+                host_parts = urllib.parse.urlsplit("//" + host)
+                if (
+                    host_parts.port is None
+                    and origin_parts.hostname
+                    and origin_parts.hostname == host_parts.hostname
+                ):
+                    return True
+            except ValueError:
+                pass
+        return False
+
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
         """
         Global Guard: Handles Basic Auth for the entire server.
         """
         settings = request.app["settings"]
-        supervisor = request.app["supervisor"]
-        mode = supervisor.current_mode
         auth_header = request.headers.get("Authorization")
         path = request.path
+        # Reject cross-site WebSocket upgrades: a page from another origin can open our
+        # WS even where CORS blocks reading XHR responses. Non-browser clients send no
+        # Origin and pass.
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            if not self._is_ws_origin_allowed(request, settings):
+                logger.warning(
+                    "Rejected WebSocket upgrade from disallowed Origin: %r",
+                    request.headers.get("Origin", ""),
+                )
+                return web.Response(status=403, text="Forbidden origin")
         # Match the exact route, not a suffix, so /foo/tokens isn't treated as control-plane.
         api_prefix = (
             ("/" + settings.subfolder.strip("/"))
             if settings.subfolder
             else ""
         )
+        # Health/liveness endpoints stay open so k8s/LB probes reach them without credentials.
+        if path in (f"{api_prefix}/status", f"{api_prefix}/health"):
+            return await handler(request)
         token_path = path == f"{api_prefix}/tokens"
         # Gate /tokens on the master token whenever set, independent of streaming mode.
         if settings.master_token and token_path:
@@ -266,7 +653,7 @@ class CentralizedStreamServer:
             return await handler(request)
 
         # /switch (when master_token set): accept a Bearer master token, else fall
-        # through to the Basic check if Basic Auth is on, else 401. (/status stays open.)
+        # through to the Basic check if Basic Auth is on, else 401.
         is_control_path = path == f"{api_prefix}/switch"
         if settings.master_token and is_control_path:
             if self._check_master_token(auth_header, settings.master_token):
@@ -278,7 +665,25 @@ class CentralizedStreamServer:
         if not settings.enable_basic_auth[0]:
             logger.debug("Basic auth not enabled, forwarding to routers")
             return await handler(request)
+        is_ws_upgrade = request.headers.get("Upgrade", "").lower() == "websocket"
+        if is_ws_upgrade and settings.master_token:
+            # A browser cannot attach fresh Basic credentials to a WebSocket
+            # handshake, and these paths carry their own token gate (enforced in
+            # the ws handlers) whenever a master token is configured -- Basic
+            # adds no protection there, only an undebuggable 401.
+            return await handler(request)
         if not auth_header or not auth_header.startswith("Basic "):
+            if is_ws_upgrade:
+                # No challenge/retry exists for a WS handshake: without this log the
+                # rejection is invisible on both ends (the browser only reports a
+                # generic connection failure).
+                logger.warning(
+                    "Rejected WebSocket upgrade from %s: basic auth is enabled and the "
+                    "handshake carried no Authorization header (browsers only attach "
+                    "cached credentials; set a master token or disable basic auth for "
+                    "browser clients behind proxies).",
+                    request.remote,
+                )
             return web.Response(
                 status=401,
                 headers={
@@ -307,17 +712,6 @@ class CentralizedStreamServer:
         return await handler(request)
 
     def _update_auth_credentials(self):
-        custom_user = os.environ.get("CUSTOM_USER", None)
-        password = os.environ.get("PASSWORD", None)
-
-        # Update basic auth credentials to Sealskin provided ones
-        if custom_user and password:
-            logger.info(
-                "Overriding Basic Auth credentials from CUSTOM_USER/PASSWORD environment variables."
-            )
-            setattr(self.settings, "basic_auth_user", custom_user)
-            setattr(self.settings, "basic_auth_password", password)
-
         try:
             if self.settings.enable_basic_auth[0] and self.settings.basic_auth_password == "mypasswd":
                 logger.warning(
@@ -419,6 +813,19 @@ class CentralizedStreamServer:
     async def handle_health(self, _) -> web.Response:
         return web.Response(text="OK")
 
+    async def handle_metrics(self, request: web.Request) -> web.Response:
+        """Prometheus exposition of the process-global registry."""
+        data = await asyncio.to_thread(generate_latest)
+        return web.Response(
+            body=data,
+            content_type='text/plain; version=1.0.0',
+            headers={
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            }
+        )
+
     async def _get_static_content_path(self) -> str:
         web_path = ""
 
@@ -446,7 +853,14 @@ class CentralizedStreamServer:
                 self.web_files_ctx.cleanup()
         except Exception as e:
             logger.error(f"Failed to extract packaged web files: {e}")
-            self.web_files_ctx.cleanup()
+            # Guard cleanup: web_files_ctx may be unset if extraction failed before
+            # it was assigned. An unguarded cleanup() would raise and mask the real
+            # error logged above.
+            if self.web_files_ctx is not None:
+                try:
+                    self.web_files_ctx.cleanup()
+                except Exception:
+                    pass
 
         return ""
 
@@ -459,23 +873,6 @@ class CentralizedStreamServer:
             dst.mkdir(exist_ok=True)
             for child in src.iterdir():
                 self._copy_traversable(child, dst / child.name)
-
-    async def _read_template(self, template_name: str) -> Tuple[bool, str]:
-        if not self.static_fs_path:
-            logger.error(f"Cannot read template {template_name}: no static_fs_path available")
-            return False, ""
-
-        fs_path = os.path.join(self.static_fs_path, template_name)
-        if not os.path.exists(fs_path):
-            logger.warning(f"Template not found: {fs_path}")
-            return False, ""
-
-        try:
-            async with aiofiles.open(fs_path, "r") as f:
-                return True, await f.read()
-        except Exception as e:
-            logger.error(f"Failed to read template {template_name}: {e}")
-            return False, ""
 
     async def fancy_index_handler(self, request: web.Request):
         rel_path = request.match_info.get("path", "").lstrip("/")
@@ -493,6 +890,14 @@ class CentralizedStreamServer:
 
         if full_path.is_file():
             return web.FileResponse(full_path)
+
+        # A directory URL must end in "/" so its relative links (../, name/) resolve
+        # one level down instead of against the parent.
+        if not request.path.endswith("/"):
+            location = request.path + "/"
+            if request.query_string:
+                location += "?" + request.query_string
+            raise web.HTTPMovedPermanently(location)
 
         # If it's a directory, generate the "FancyIndex" HTML
         items = []
@@ -529,13 +934,6 @@ class CentralizedStreamServer:
         # Sort: Directories first, then alphabetically
         items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
 
-        he_fetched, header = await self._read_template(self.header_html)
-        if not he_fetched:
-            return web.Response(status=500, text=f"Failed to load header template: {self.header_html}")
-        fo_fetched, footer = await self._read_template(self.footer_html)
-        if not fo_fetched:
-            return web.Response(status=500, text=f"Failed to load footer template: {self.footer_html}")
-
         # Build Table Rows with proper escaping
         rows = ""
         for item in items:
@@ -558,7 +956,7 @@ class CentralizedStreamServer:
         path_injection = f"<script>window.__SELKIES_INJECTED_PATH_PREFIX__ = {js_safe_upload_dir};</script>"
 
         html_content = f"""
-        {header}
+        {FILE_INDEX_HEADER}
         {current_display_path}</h1>
         {path_injection}
         <table id="list">
@@ -573,7 +971,7 @@ class CentralizedStreamServer:
                 {rows}
             </tbody>
         </table>
-        {footer}
+        {FILE_INDEX_FOOTER}
         """
 
         return web.Response(text=html_content, content_type="text/html")
@@ -596,13 +994,16 @@ class CentralizedStreamServer:
         if api_prefix:
             logger.info(f"Prepending api prefix: {api_prefix!r} to router handlers")
 
-        self.app.add_routes(
-            [
-                web.get(f"{api_prefix}/status", self.handle_status),
-                web.get(f"{api_prefix}/health", self.handle_health),
-                web.post(f"{api_prefix}/switch", self.handle_switch),
-            ]
-        )
+        routes = [
+            web.get(f"{api_prefix}/status", self.handle_status),
+            web.get(f"{api_prefix}/health", self.handle_health),
+            web.post(f"{api_prefix}/switch", self.handle_switch),
+        ]
+        # The Prometheus registry is process-global, so one mode-agnostic
+        # endpoint serves both streaming modes.
+        if self.settings.enable_metrics_http[0]:
+            routes.append(web.get(f"{api_prefix}/metrics", self.handle_metrics))
+        self.app.add_routes(routes)
 
         # Register service routes
         for service in self.services.values():

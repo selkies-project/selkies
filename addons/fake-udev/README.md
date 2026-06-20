@@ -30,7 +30,7 @@ When an application linked against `libudev` is launched with this library prelo
 
 *   **Static Data:** All device information is hardcoded in `fake-libudev-core.c`. It does not interact with the system's actual udev daemon or sysfs beyond what's necessary for the simulation.
 *   **No Real Hardware Interaction:** These are purely virtual constructs. No actual `/dev/input/jsX` or `/dev/input/eventX` device nodes are created in the kernel. The library only makes applications *believe* they exist via `libudev`.
-*   **Monitor Stubs:** `udev_monitor_*` functions are mostly stubs. The library does **not** simulate hotplug events.
+*   **Hotplug via inotify:** `udev_monitor_*` is backed by an inotify watch on `/tmp`; creating/removing the interposer's device sockets (`/tmp/selkies_js*.sock`, `/tmp/selkies_event*.sock`) surfaces as `input`-subsystem `add`/`remove` events. Remaining `udev_monitor_*` calls are minimal.
 *   **HWDB Stubs:** `udev_hwdb_*` functions are stubs.
 *   **Limited Scope:** Primarily focused on the "input" subsystem and devices that look like gamepads. Other udev functionalities or device types are not implemented or are minimally stubbed.
 *   **Fixed Number of Devices:** The number of virtual gamepads is determined at compile time by `NUM_VIRTUAL_GAMEPADS`.

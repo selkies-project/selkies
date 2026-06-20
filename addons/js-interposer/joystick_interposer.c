@@ -174,6 +174,23 @@ static int (*real_access)(const char *pathname, int mode) = NULL;
 static int (*real_fstat)(int fd, struct stat *buf) = NULL;
 static int (*real_stat)(const char *pathname, struct stat *buf) = NULL;
 static int (*real_lstat)(const char *pathname, struct stat *buf) = NULL;
+#ifdef _LARGEFILE64_SOURCE
+static int (*real_stat64)(const char *pathname, struct stat64 *buf) = NULL;
+static int (*real_lstat64)(const char *pathname, struct stat64 *buf) = NULL;
+static int (*real_fstat64)(int fd, struct stat64 *buf) = NULL;
+#endif
+/* Pre-2.33 glibc lowers stat()/fstat()/lstat() at compile time to these versioned
+ * __*xstat symbols (with a leading struct-version int), so binaries built against
+ * old glibc -- Wine/Lutris/Steam runtimes and 32-bit builds -- never reach the
+ * stat() wrappers above. Interpose the versioned entry points too. */
+#ifdef __GLIBC__
+static int (*real___xstat)(int ver, const char *pathname, struct stat *buf) = NULL;
+static int (*real___lxstat)(int ver, const char *pathname, struct stat *buf) = NULL;
+static int (*real___fxstat)(int ver, int fd, struct stat *buf) = NULL;
+static int (*real___xstat64)(int ver, const char *pathname, struct stat64 *buf) = NULL;
+static int (*real___lxstat64)(int ver, const char *pathname, struct stat64 *buf) = NULL;
+static int (*real___fxstat64)(int ver, int fd, struct stat64 *buf) = NULL;
+#endif
 
 /**
  * @brief Initializes the logging system.
@@ -376,15 +393,29 @@ typedef struct {
 #define SJI_MAX_HANDLES_PER_DEVICE 16
 
 /**
+ * @brief Largest single device event we ever read in one go (input_event > js_event).
+ * Bounds the per-handle partial-event stash below.
+ */
+#define SJI_MAX_EVENT_SIZE (sizeof(struct input_event))
+
+/**
  * @brief One application open() handle: a dedicated socket connection.
  *
  * Members:
  *  - fd: Connected socket file descriptor returned to the application.
  *  - open_flags: Flags the application passed to open() for this handle.
+ *  - partial: Bytes of one event already dequeued from the SOCK_STREAM but not
+ *    yet delivered (a non-blocking read drained part of an event and then ran
+ *    out of budget). recv() removes these from the kernel buffer, so they cannot
+ *    be re-peeked; they are stashed here and prepended on the next read() of
+ *    this handle. Accessed only under interposers_mutex.
+ *  - partial_len: Number of valid leading bytes in `partial` (0 == none stashed).
  */
 typedef struct {
     int fd;
     int open_flags;
+    unsigned char partial[SJI_MAX_EVENT_SIZE];
+    size_t partial_len;
 } sji_handle_t;
 
 /**
@@ -482,9 +513,12 @@ static pthread_mutex_t interposers_mutex = PTHREAD_MUTEX_INITIALIZER;
  * @param fd The application file descriptor to look up.
  * @param open_flags_out Optional output; receives the open() flags recorded
  *                       for the matching handle.
+ * @param handle_idx_out Optional output; receives the index of the matching
+ *                       handle within the slot's handles[] (for per-handle state
+ *                       such as the partial-event stash).
  * @return Pointer to the owning slot, or NULL if `fd` is not interposed.
  */
-static js_interposer_t *find_interposer_for_fd_locked(int fd, int *open_flags_out) {
+static js_interposer_t *find_interposer_for_fd_locked(int fd, int *open_flags_out, int *handle_idx_out) {
     if (fd < 0) {
         return NULL;
     }
@@ -493,6 +527,9 @@ static js_interposer_t *find_interposer_for_fd_locked(int fd, int *open_flags_ou
             if (interposers[i].handles[h].fd == fd) {
                 if (open_flags_out != NULL) {
                     *open_flags_out = interposers[i].handles[h].open_flags;
+                }
+                if (handle_idx_out != NULL) {
+                    *handle_idx_out = h;
                 }
                 return &interposers[i];
             }
@@ -504,6 +541,23 @@ static js_interposer_t *find_interposer_for_fd_locked(int fd, int *open_flags_ou
 /* Library constructor: init logging and load pointers to the real libc functions we intercept. */
 __attribute__((constructor)) void init_interposer() {
     sji_logging_init();
+
+    // Socket directory: selkies writes the interposer sockets to js_socket_path
+    // (SELKIES_JS_SOCKET_PATH, default /tmp). Mirror a non-default directory onto each
+    // seeded socket path (basename kept) so gamepad connect still finds the sockets.
+    const char *sock_dir = getenv("SELKIES_JS_SOCKET_PATH");
+    if (sock_dir && sock_dir[0]) {
+        for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
+            const char *slash = strrchr(interposers[i].socket_path, '/');
+            const char *base = slash ? slash + 1 : interposers[i].socket_path;
+            char newpath[sizeof(interposers[i].socket_path)];
+            int n = snprintf(newpath, sizeof(newpath), "%s/%s", sock_dir, base);
+            if (n > 0 && (size_t)n < sizeof(newpath)) {
+                strncpy(interposers[i].socket_path, newpath, sizeof(interposers[i].socket_path) - 1);
+                interposers[i].socket_path[sizeof(interposers[i].socket_path) - 1] = '\0';
+            }
+        }
+    }
 
     if (load_real_func((void *)&real_open, "open") < 0) sji_log_error("CRITICAL: Failed to load real 'open'.");
     if (load_real_func((void *)&real_ioctl, "ioctl") < 0) sji_log_error("CRITICAL: Failed to load real 'ioctl'.");
@@ -610,26 +664,35 @@ int access(const char *pathname, int mode) {
  * Since our sockets are just unix sockets, they usually return 0 or a generic ID.
  * We must forge unique IDs (Major 13 for Input) matching the virtual path indices.
  */
+/* Field names are identical between struct stat and struct stat64, so a single
+ * macro fills either flavour without risking a layout mismatch between them. */
+#define FILL_FAKE_STAT_FIELDS(buf, path) do {                              \
+    (buf)->st_mode = S_IFCHR | 0666;                                       \
+    int _dev_num = -1;                                                     \
+    if (sscanf((path), "/dev/input/event%d", &_dev_num) == 1) {            \
+        (buf)->st_rdev = makedev(13, _dev_num);                            \
+    } else if (sscanf((path), "/dev/input/js%d", &_dev_num) == 1) {        \
+        (buf)->st_rdev = makedev(13, _dev_num);                            \
+    } else {                                                               \
+        (buf)->st_rdev = makedev(13, 9999);                                \
+    }                                                                      \
+    (buf)->st_uid = 0;                                                     \
+    (buf)->st_gid = 0;                                                     \
+    (buf)->st_size = 0;                                                    \
+    (buf)->st_blksize = 4096;                                              \
+    (buf)->st_blocks = 0;                                                  \
+    (buf)->st_nlink = 1;                                                   \
+} while (0)
+
 static void fill_fake_stat(const char* path, struct stat *buf) {
-    buf->st_mode = S_IFCHR | 0666;
-    
-    int dev_num = -1;
-    
-    if (sscanf(path, "/dev/input/event%d", &dev_num) == 1) {
-        buf->st_rdev = makedev(13, dev_num);
-    } else if (sscanf(path, "/dev/input/js%d", &dev_num) == 1) {
-        buf->st_rdev = makedev(13, dev_num);
-    } else {
-        buf->st_rdev = makedev(13, 9999); 
-    }
-    
-    buf->st_uid = 0;
-    buf->st_gid = 0;
-    buf->st_size = 0;
-    buf->st_blksize = 4096;
-    buf->st_blocks = 0;
-    buf->st_nlink = 1;
+    FILL_FAKE_STAT_FIELDS(buf, path);
 }
+
+#ifdef _LARGEFILE64_SOURCE
+static void fill_fake_stat64(const char* path, struct stat64 *buf) {
+    FILL_FAKE_STAT_FIELDS(buf, path);
+}
+#endif
 
 /**
  * @brief Intercepted `fstat()` system call.
@@ -643,7 +706,7 @@ int fstat(int fd, struct stat *buf) {
     }
 
     pthread_mutex_lock(&interposers_mutex);
-    js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL);
+    js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
     if (interposer != NULL) {
         memset(buf, 0, sizeof(struct stat));
         fill_fake_stat(interposer->open_dev_name, buf);
@@ -709,6 +772,191 @@ int lstat(const char *pathname, struct stat *buf) {
     }
     return real_lstat(pathname, buf);
 }
+
+/* Helper: is this one of our interposed device paths? */
+static int is_interposed_path(const char *pathname) {
+    if (!pathname) return 0;
+    for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
+        if (strcmp(pathname, interposers[i].open_dev_name) == 0) return 1;
+    }
+    return 0;
+}
+
+#ifdef _LARGEFILE64_SOURCE
+/**
+ * @brief Intercepted `stat64()` (LFS variant used by 64-bit-off_t callers).
+ */
+int stat64(const char *pathname, struct stat64 *buf) {
+    if (!real_stat64) {
+        if (load_real_func((void *)&real_stat64, "stat64") < 0) { errno = EFAULT; return -1; }
+    }
+    if (is_interposed_path(pathname)) {
+        memset(buf, 0, sizeof(struct stat64));
+        fill_fake_stat64(pathname, buf);
+        sji_log_debug("Intercepted stat64 for %s, returning fake rdev %d:%d",
+            pathname, major(buf->st_rdev), minor(buf->st_rdev));
+        return 0;
+    }
+    return real_stat64(pathname, buf);
+}
+
+/**
+ * @brief Intercepted `lstat64()`.
+ */
+int lstat64(const char *pathname, struct stat64 *buf) {
+    if (!real_lstat64) {
+        if (load_real_func((void *)&real_lstat64, "lstat64") < 0) { errno = EFAULT; return -1; }
+    }
+    if (is_interposed_path(pathname)) {
+        memset(buf, 0, sizeof(struct stat64));
+        fill_fake_stat64(pathname, buf);
+        sji_log_debug("Intercepted lstat64 for %s, returning fake rdev %d:%d",
+            pathname, major(buf->st_rdev), minor(buf->st_rdev));
+        return 0;
+    }
+    return real_lstat64(pathname, buf);
+}
+
+/**
+ * @brief Intercepted `fstat64()`.
+ */
+int fstat64(int fd, struct stat64 *buf) {
+    if (!real_fstat64) {
+        if (load_real_func((void *)&real_fstat64, "fstat64") < 0) { errno = EFAULT; return -1; }
+    }
+    pthread_mutex_lock(&interposers_mutex);
+    js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
+    if (interposer != NULL) {
+        memset(buf, 0, sizeof(struct stat64));
+        fill_fake_stat64(interposer->open_dev_name, buf);
+        const char *dev = interposer->open_dev_name;
+        pthread_mutex_unlock(&interposers_mutex);
+        sji_log_debug("Intercepted fstat64 for fd %d (%s), returning fake rdev %d:%d",
+            fd, dev, major(buf->st_rdev), minor(buf->st_rdev));
+        return 0;
+    }
+    pthread_mutex_unlock(&interposers_mutex);
+    return real_fstat64(fd, buf);
+}
+#endif /* _LARGEFILE64_SOURCE */
+
+#ifdef __GLIBC__
+/**
+ * @brief Intercepted `__xstat()` (pre-2.33 glibc lowering of `stat()`).
+ *
+ * The leading `ver` argument identifies the caller's struct-stat ABI version;
+ * for our forged nodes it is irrelevant, and for everything else it is forwarded
+ * verbatim to the real versioned symbol.
+ */
+int __xstat(int ver, const char *pathname, struct stat *buf) {
+    if (!real___xstat) {
+        if (load_real_func((void *)&real___xstat, "__xstat") < 0) { errno = EFAULT; return -1; }
+    }
+    if (is_interposed_path(pathname)) {
+        memset(buf, 0, sizeof(struct stat));
+        fill_fake_stat(pathname, buf);
+        sji_log_debug("Intercepted __xstat for %s, returning fake rdev %d:%d",
+            pathname, major(buf->st_rdev), minor(buf->st_rdev));
+        return 0;
+    }
+    return real___xstat(ver, pathname, buf);
+}
+
+/**
+ * @brief Intercepted `__lxstat()` (pre-2.33 glibc lowering of `lstat()`).
+ */
+int __lxstat(int ver, const char *pathname, struct stat *buf) {
+    if (!real___lxstat) {
+        if (load_real_func((void *)&real___lxstat, "__lxstat") < 0) { errno = EFAULT; return -1; }
+    }
+    if (is_interposed_path(pathname)) {
+        memset(buf, 0, sizeof(struct stat));
+        fill_fake_stat(pathname, buf);
+        sji_log_debug("Intercepted __lxstat for %s, returning fake rdev %d:%d",
+            pathname, major(buf->st_rdev), minor(buf->st_rdev));
+        return 0;
+    }
+    return real___lxstat(ver, pathname, buf);
+}
+
+/**
+ * @brief Intercepted `__fxstat()` (pre-2.33 glibc lowering of `fstat()`).
+ */
+int __fxstat(int ver, int fd, struct stat *buf) {
+    if (!real___fxstat) {
+        if (load_real_func((void *)&real___fxstat, "__fxstat") < 0) { errno = EFAULT; return -1; }
+    }
+    pthread_mutex_lock(&interposers_mutex);
+    js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
+    if (interposer != NULL) {
+        memset(buf, 0, sizeof(struct stat));
+        fill_fake_stat(interposer->open_dev_name, buf);
+        const char *dev = interposer->open_dev_name;
+        pthread_mutex_unlock(&interposers_mutex);
+        sji_log_debug("Intercepted __fxstat for fd %d (%s), returning fake rdev %d:%d",
+            fd, dev, major(buf->st_rdev), minor(buf->st_rdev));
+        return 0;
+    }
+    pthread_mutex_unlock(&interposers_mutex);
+    return real___fxstat(ver, fd, buf);
+}
+
+/**
+ * @brief Intercepted `__xstat64()` (pre-2.33 glibc lowering of `stat64()`).
+ */
+int __xstat64(int ver, const char *pathname, struct stat64 *buf) {
+    if (!real___xstat64) {
+        if (load_real_func((void *)&real___xstat64, "__xstat64") < 0) { errno = EFAULT; return -1; }
+    }
+    if (is_interposed_path(pathname)) {
+        memset(buf, 0, sizeof(struct stat64));
+        fill_fake_stat64(pathname, buf);
+        sji_log_debug("Intercepted __xstat64 for %s, returning fake rdev %d:%d",
+            pathname, major(buf->st_rdev), minor(buf->st_rdev));
+        return 0;
+    }
+    return real___xstat64(ver, pathname, buf);
+}
+
+/**
+ * @brief Intercepted `__lxstat64()` (pre-2.33 glibc lowering of `lstat64()`).
+ */
+int __lxstat64(int ver, const char *pathname, struct stat64 *buf) {
+    if (!real___lxstat64) {
+        if (load_real_func((void *)&real___lxstat64, "__lxstat64") < 0) { errno = EFAULT; return -1; }
+    }
+    if (is_interposed_path(pathname)) {
+        memset(buf, 0, sizeof(struct stat64));
+        fill_fake_stat64(pathname, buf);
+        sji_log_debug("Intercepted __lxstat64 for %s, returning fake rdev %d:%d",
+            pathname, major(buf->st_rdev), minor(buf->st_rdev));
+        return 0;
+    }
+    return real___lxstat64(ver, pathname, buf);
+}
+
+/**
+ * @brief Intercepted `__fxstat64()` (pre-2.33 glibc lowering of `fstat64()`).
+ */
+int __fxstat64(int ver, int fd, struct stat64 *buf) {
+    if (!real___fxstat64) {
+        if (load_real_func((void *)&real___fxstat64, "__fxstat64") < 0) { errno = EFAULT; return -1; }
+    }
+    pthread_mutex_lock(&interposers_mutex);
+    js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
+    if (interposer != NULL) {
+        memset(buf, 0, sizeof(struct stat64));
+        fill_fake_stat64(interposer->open_dev_name, buf);
+        const char *dev = interposer->open_dev_name;
+        pthread_mutex_unlock(&interposers_mutex);
+        sji_log_debug("Intercepted __fxstat64 for fd %d (%s), returning fake rdev %d:%d",
+            fd, dev, major(buf->st_rdev), minor(buf->st_rdev));
+        return 0;
+    }
+    pthread_mutex_unlock(&interposers_mutex);
+    return real___fxstat64(ver, fd, buf);
+}
+#endif /* __GLIBC__ */
 
 /**
  * @brief Reads the joystick configuration (`js_config_t`) from a connected socket.
@@ -1234,6 +1482,113 @@ int close(int fd) {
 }
 
 /**
+ * @brief Bounded best-effort drain of the remainder of one partially-read event.
+ *
+ * The peek and the consuming recv() are not atomic, so a non-blocking consume can
+ * return fewer than `event_size` bytes. Those bytes are already out of the kernel
+ * buffer and cannot be re-peeked, so the remainder must be drained here. The wait
+ * is capped (poll(), not a spin) so a peer that stalls mid-event cannot hang the
+ * caller. Writes into `buf` at `*consumed` and advances `*consumed`.
+ *
+ * @return 1 if the whole event is now in `buf`; 0 if only a partial prefix is
+ *         available (budget exhausted, EOF, or hard error mid-event) — `*consumed`
+ *         holds however many leading bytes were obtained, none lost.
+ */
+static int drain_event_remainder(int fd, void *buf, size_t *consumed, size_t event_size, int budget_ms) {
+    struct timespec drain_start;
+    clock_gettime(CLOCK_MONOTONIC, &drain_start);
+    while (*consumed < event_size) {
+        ssize_t tail = recv(fd, (char *)buf + *consumed, event_size - *consumed, MSG_DONTWAIT);
+        if (tail > 0) {
+            *consumed += (size_t)tail;
+            continue;
+        }
+        if (tail == 0) {
+            return 0; /* EOF mid-event */
+        }
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            return 0; /* hard error */
+        }
+        /* Remainder not buffered yet; wait (efficiently) for the rest, but only
+         * for the time left in the budget. */
+        struct timespec drain_now;
+        clock_gettime(CLOCK_MONOTONIC, &drain_now);
+        long elapsed_ms = (drain_now.tv_sec - drain_start.tv_sec) * 1000L +
+                          (drain_now.tv_nsec - drain_start.tv_nsec) / 1000000L;
+        int remaining_ms = budget_ms - (int)elapsed_ms;
+        if (remaining_ms <= 0) {
+            return 0; /* drain budget exhausted */
+        }
+        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+        int prc = poll(&pfd, 1, remaining_ms);
+        if (prc <= 0) {
+            return 0; /* timeout (0) or poll error/EINTR (<0) */
+        }
+        /* Readable (or POLLHUP/POLLERR): loop and let recv() report the new
+         * bytes, EOF, or the hard error. */
+    }
+    return 1;
+}
+
+/**
+ * @brief Stashes a partial-event prefix on the handle owning `fd`, under the lock.
+ *
+ * Called when a non-blocking read drained only part of an event and ran out of
+ * budget. The bytes are gone from the kernel buffer, so they are kept here and
+ * prepended on this handle's next read(). If the handle was closed concurrently
+ * (lookup miss) the bytes are dropped — but that fd is already dead, so nothing
+ * that could still be read is lost.
+ */
+static void stash_partial_event_locked(int fd, const void *buf, size_t len) {
+    if (len == 0 || len > SJI_MAX_EVENT_SIZE) {
+        return;
+    }
+    int handle_idx = -1;
+    js_interposer_t *slot = find_interposer_for_fd_locked(fd, NULL, &handle_idx);
+    if (slot != NULL && handle_idx >= 0) {
+        memcpy(slot->handles[handle_idx].partial, buf, len);
+        slot->handles[handle_idx].partial_len = len;
+    }
+}
+
+/**
+ * @brief Blocking-handle read of the rest of one event, starting at `*consumed`.
+ *
+ * recv(MSG_WAITALL) alone is not enough for a blocking handle: a signal caught
+ * after some bytes were transferred makes it return the short count, and
+ * returning that to the application would permanently desync the SOCK_STREAM.
+ * So keep receiving until the event completes, treating a short return as
+ * progress and restarting on EINTR. EINTR is surfaced only while nothing of
+ * the event has been consumed yet (normal blocking-read semantics); once bytes
+ * are held, the read is committed to finishing the event. `*consumed` always
+ * reflects the bytes present in `buf`, so on EOF/hard error the caller can
+ * stash the prefix and keep the stream aligned.
+ *
+ * @return 1 once the full event is in `buf`; 0 on EOF mid-event; -1 on hard
+ *         error (`errno` set).
+ */
+static int recv_event_rest_blocking(int fd, void *buf, size_t *consumed, size_t event_size) {
+    while (*consumed < event_size) {
+        ssize_t tail = recv(fd, (char *)buf + *consumed, event_size - *consumed, MSG_WAITALL);
+        if (tail > 0) {
+            *consumed += (size_t)tail; /* short == interrupted mid-event: keep going */
+            continue;
+        }
+        if (tail == 0) {
+            return 0; /* EOF */
+        }
+        if (errno == EINTR) {
+            if (*consumed == 0) {
+                return -1; /* nothing consumed: let the app see EINTR */
+            }
+            continue;
+        }
+        return -1;
+    }
+    return 1;
+}
+
+/**
  * @brief Intercepted `read()` system call.
  *
  * If `real_read` is not loaded, returns -1 with `errno` set to `EFAULT`.
@@ -1259,8 +1614,19 @@ ssize_t read(int fd, void *buf, size_t count) {
 
     js_interposer_t *interposer = NULL;
     int handle_open_flags = 0;
+    /* Snapshot (and consume) any partial-event prefix stashed by a previous
+     * budget-exhausted non-blocking read of this handle, under the same lock as
+     * the lookup so a concurrent close() can't tear the handle out mid-copy. */
+    unsigned char stashed[SJI_MAX_EVENT_SIZE];
+    size_t stashed_len = 0;
+    int handle_idx = -1;
     pthread_mutex_lock(&interposers_mutex);
-    interposer = find_interposer_for_fd_locked(fd, &handle_open_flags);
+    interposer = find_interposer_for_fd_locked(fd, &handle_open_flags, &handle_idx);
+    if (interposer != NULL && handle_idx >= 0 && interposer->handles[handle_idx].partial_len > 0) {
+        stashed_len = interposer->handles[handle_idx].partial_len;
+        memcpy(stashed, interposer->handles[handle_idx].partial, stashed_len);
+        interposer->handles[handle_idx].partial_len = 0;
+    }
     pthread_mutex_unlock(&interposers_mutex);
 
     if (interposer == NULL) {
@@ -1300,6 +1666,52 @@ ssize_t read(int fd, void *buf, size_t count) {
         socket_is_actually_nonblocking = (handle_open_flags & O_NONBLOCK);
     }
 
+    const int drain_budget_ms = 10;
+
+    /* Resume a previously-stashed partial event: those bytes are already out of
+     * the kernel buffer, so prepend them and drain only the remainder. Completing
+     * the event here (rather than ever returning a short count) is what keeps the
+     * SOCK_STREAM aligned across reads. */
+    if (stashed_len > 0) {
+        memcpy(buf, stashed, stashed_len);
+        size_t event_consumed = stashed_len;
+        if (socket_is_actually_nonblocking) {
+            if (!drain_event_remainder(fd, buf, &event_consumed, event_size, drain_budget_ms)) {
+                /* Still short: re-stash everything and ask the caller to retry.
+                 * No event bytes are lost — they live in the stash. */
+                pthread_mutex_lock(&interposers_mutex);
+                stash_partial_event_locked(fd, buf, event_consumed);
+                pthread_mutex_unlock(&interposers_mutex);
+                errno = EAGAIN;
+                return -1;
+            }
+        } else {
+            /* Blocking handle: a short return is not allowed, so block until
+             * the event completes (resumes across signal-shortened recvs). */
+            int rest = recv_event_rest_blocking(fd, buf, &event_consumed, event_size);
+            if (rest != 1) {
+                /* EOF or hard error before the event completed: re-stash so the
+                 * already-consumed prefix is not lost, then surface the result. */
+                if (rest == 0) {
+                    sji_log_info("SOCKET_READ_EOF: fd %d (%s) closed mid-stashed-event.",
+                                 fd, interposer->open_dev_name);
+                } else {
+                    sji_log_error("SOCKET_READ_ERR: fd %d (%s) failed completing stashed event: %s",
+                                  fd, interposer->open_dev_name, strerror(errno));
+                }
+                int saved_errno = errno;
+                pthread_mutex_lock(&interposers_mutex);
+                stash_partial_event_locked(fd, buf, event_consumed);
+                pthread_mutex_unlock(&interposers_mutex);
+                errno = saved_errno;
+                return rest; /* 0 (EOF) or -1 (error) */
+            }
+        }
+        sji_log_debug("SOCKET_READ_OK: completed stashed event (%zu bytes) on fd %d (%s)",
+                      event_consumed, fd, interposer->open_dev_name);
+        return (ssize_t)event_consumed;
+    }
+
     ssize_t bytes_read;
     if (socket_is_actually_nonblocking) {
         /* Non-blocking: never consume a partial event. Peek first and only
@@ -1316,56 +1728,45 @@ ssize_t read(int fd, void *buf, size_t count) {
             bytes_read = peeked; /* error (e.g. EAGAIN) or EOF; handled below */
         } else {
             /* Peek and consuming recv() aren't atomic; a partial consume must
-             * finish draining the event or the stream desyncs. Bounded so a
-             * stalled peer cannot hang the caller. */
+             * finish draining the event or the stream desyncs. */
             bytes_read = recv(fd, buf, event_size, MSG_DONTWAIT);
             if (bytes_read > 0 && (size_t)bytes_read < event_size) {
                 size_t event_consumed = (size_t)bytes_read;
-                /* Drain budget for the partial event: bounded poll() (not a spin)
-                 * caps the stall at ~10ms if the peer stalls mid-event. */
-                const int drain_budget_ms = 10;
-                struct timespec drain_start;
-                clock_gettime(CLOCK_MONOTONIC, &drain_start);
-                while (event_consumed < event_size) {
-                    ssize_t tail = recv(fd, (char *)buf + event_consumed,
-                                        event_size - event_consumed, MSG_DONTWAIT);
-                    if (tail > 0) {
-                        event_consumed += (size_t)tail;
-                        continue;
-                    }
-                    if (tail == 0) {
-                        break; /* EOF mid-event; surface the short count below. */
-                    }
-                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                        break; /* hard error */
-                    }
-                    /* Remainder not buffered yet; wait (efficiently) for the
-                     * rest, but only for the time left in the budget. */
-                    struct timespec drain_now;
-                    clock_gettime(CLOCK_MONOTONIC, &drain_now);
-                    long elapsed_ms = (drain_now.tv_sec - drain_start.tv_sec) * 1000L +
-                                      (drain_now.tv_nsec - drain_start.tv_nsec) / 1000000L;
-                    int remaining_ms = drain_budget_ms - (int)elapsed_ms;
-                    if (remaining_ms <= 0) {
-                        break; /* drain budget exhausted */
-                    }
-                    struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
-                    int prc = poll(&pfd, 1, remaining_ms);
-                    if (prc <= 0) {
-                        /* timeout (0) or poll error/EINTR (<0): stop draining
-                         * and surface the short count below. */
-                        break;
-                    }
-                    /* Readable (or POLLHUP/POLLERR): loop and let recv() report
-                     * the new bytes, EOF, or the hard error. */
+                if (!drain_event_remainder(fd, buf, &event_consumed, event_size, drain_budget_ms)) {
+                    /* Budget exhausted (or EOF/error) mid-event. Returning the
+                     * short count would permanently desync the SOCK_STREAM, so
+                     * stash the consumed prefix and surface EAGAIN; the next read
+                     * resumes and completes the event. No bytes are lost. */
+                    pthread_mutex_lock(&interposers_mutex);
+                    stash_partial_event_locked(fd, buf, event_consumed);
+                    pthread_mutex_unlock(&interposers_mutex);
+                    sji_log_debug("read: sockfd %d (%s) drained only %zu/%zu bytes; stashed and returning EAGAIN.",
+                                  fd, interposer->open_dev_name, event_consumed, event_size);
+                    errno = EAGAIN;
+                    return -1;
                 }
                 bytes_read = (ssize_t)event_consumed;
             }
         }
     } else {
         /* Blocking: wait for a whole event so a short read cannot desync the
-         * stream. MSG_WAITALL only returns short on EOF or an interrupting signal. */
-        bytes_read = recv(fd, buf, event_size, MSG_WAITALL);
+         * stream (resumes across signal-shortened recvs). */
+        size_t event_consumed = 0;
+        int rest = recv_event_rest_blocking(fd, buf, &event_consumed, event_size);
+        if (rest == 1) {
+            bytes_read = (ssize_t)event_consumed;
+        } else {
+            if (event_consumed > 0) {
+                /* EOF or hard error mid-event: keep the consumed prefix for the
+                 * next read so the stream stays aligned; never return it short. */
+                int saved_errno = errno;
+                pthread_mutex_lock(&interposers_mutex);
+                stash_partial_event_locked(fd, buf, event_consumed);
+                pthread_mutex_unlock(&interposers_mutex);
+                errno = saved_errno;
+            }
+            bytes_read = rest; /* 0 (EOF) or -1 (error) */
+        }
     }
 
     if (bytes_read == -1) {
@@ -1420,7 +1821,7 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
 
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) {
         pthread_mutex_lock(&interposers_mutex);
-        js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL);
+        js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
         const char *dev = NULL;
         int nb_ret = 0;
         if (interposer != NULL) {
@@ -1591,6 +1992,7 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
     unsigned int i;
     int ret_val = 0;
     errno = 0;
+    (void)fd; /* kept for dispatcher symmetry with intercept_js_ioctl */
 
     char ioctl_type = _IOC_TYPE(request);
     unsigned int ioctl_nr = _IOC_NR(request);
@@ -1687,10 +2089,12 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
             }
 
             if (gamepad_idx != -1) {
-                snprintf((char *)arg, len, "SJI-EV%d", gamepad_idx);
+                /* Must match the "uniq" sysattr published by fake-udev for the
+                 * same pad so udev and evdev agree on the device's unique id. */
+                snprintf((char *)arg, len, "SGVP%04d", gamepad_idx);
             } else {
                 sji_log_warn("IOCTL_EV(%s): EVIOCGUNIQ - Could not determine valid gamepad index for unique ID. Using fallback.", interposer->open_dev_name);
-                strncpy((char *)arg, "SJI-EV-UNKNOWN", len -1);
+                strncpy((char *)arg, "SGVP-UNKNOWN", len -1);
             }
             ((char *)arg)[len - 1] = '\0'; 
             ret_val = strlen((char *)arg); 
@@ -1703,15 +2107,15 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
         if (ioctl_nr == _IOC_NR(EVIOCGPROP(0))) {
             len = ioctl_size;
             if (!arg || len <=0 ) { errno = EFAULT; ret_val = -1; goto exit_ev_ioctl; }
+            // Report NO input properties: a real gamepad (the X-Box 360 pad we emulate)
+            // sets none. The old code advertised INPUT_PROP_POINTING_STICK, which makes
+            // udev/libinput input_id classify the device as a pointing-stick (pointer)
+            // and exclude it from joystick enumeration -- this is why SDL2-evdev apps
+            // such as Xemu failed to detect the pad while the legacy
+            // /dev/input/jsX path (used by other emulators) still worked.
             memset(arg, 0, len);
-
-            if (INPUT_PROP_POINTING_STICK / 8 < (unsigned int)len) {
-                ((unsigned char *)arg)[INPUT_PROP_POINTING_STICK / 8] |= (1 << (INPUT_PROP_POINTING_STICK % 8));
-                sji_log_info("IOCTL_EV(%s): EVIOCGPROP(%d) - Added INPUT_PROP_POINTING_STICK", interposer->open_dev_name, len);
-            } else {
-                sji_log_warn("IOCTL_EV(%s): EVIOCGPROP(%d) - Buffer too small for INPUT_PROP_POINTING_STICK", interposer->open_dev_name, len);
-            }
-            ret_val = 0;
+            ret_val = (int)len;
+            sji_log_info("IOCTL_EV(%s): EVIOCGPROP(%d) -> no properties (gamepad)", interposer->open_dev_name, len);
             goto exit_ev_ioctl;
         }
 
@@ -1870,9 +2274,15 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
                 break;
         }
     } else if (ioctl_type == 'j') {
-        sji_log_info("IOCTL_EV_COMPAT(%s): Joystick ioctl 0x%lx (Type 'j', NR 0x%02x) on EVDEV device. Delegating to JS handler.",
+        /* A real kernel evdev node rejects legacy joydev (JSIOC*) ioctls with
+         * ENOTTY; modern SDL relies on that to tell an evdev node apart from a
+         * legacy /dev/input/jsX and to pick the proper VID/PID-based GUID. Answer
+         * these here exactly as the kernel would rather than the classic-js path
+         * (JSIOC* remain fully served on the real /dev/input/jsX nodes). */
+        sji_log_info("IOCTL_EV(%s): Joystick ioctl 0x%lx (Type 'j', NR 0x%02x) on EVDEV device. Reporting ENOTTY (kernel-faithful).",
                        interposer->open_dev_name, (unsigned long)request, ioctl_nr);
-        return intercept_js_ioctl(interposer, fd, request, arg);
+        errno = ENOTTY;
+        ret_val = -1;
     } else {
         sji_log_warn("IOCTL_EV(%s): Received ioctl with unexpected type '%c' (request 0x%lx, NR 0x%02x). Setting ENOTTY.",
                        interposer->open_dev_name, ioctl_type, (unsigned long)request, ioctl_nr);
@@ -1922,7 +2332,7 @@ int ioctl(int fd, ioctl_request_t request, ...) {
 
     js_interposer_t *interposer = NULL;
     pthread_mutex_lock(&interposers_mutex);
-    interposer = find_interposer_for_fd_locked(fd, NULL);
+    interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
 
     if (interposer == NULL) {
         pthread_mutex_unlock(&interposers_mutex);
@@ -1958,13 +2368,23 @@ int ioctl(int fd, ioctl_request_t request, ...) {
 
     /* JSIOCSCORR is the only handler write: persist snapshot.corr back to the live
      * slot (re-acquire the lock, re-validate the fd still owns it). Save/restore
-     * errno so the lock/lookup can't perturb the handler's reported errno. */
+     * errno so the lock/lookup can't perturb the handler's reported errno.
+     *
+     * Identity guard against fd-reuse TOCTOU: between the unlock above and this
+     * re-lock, fd could be closed and reused for a DIFFERENT device's handle. The
+     * re-found slot must be the same slot we snapshotted (array_idx), or we'd write
+     * stale correction data into the wrong device. corr is device-global, so a same
+     * slot match is correct even if the matched handle is a new open() of that
+     * device; only a different slot is the hazard. */
     if (ioctl_ret >= 0 && _IOC_TYPE(request) == 'j' && _IOC_NR(request) == 0x21) {
         int saved_errno = errno;
         pthread_mutex_lock(&interposers_mutex);
-        js_interposer_t *live = find_interposer_for_fd_locked(fd, NULL);
-        if (live != NULL) {
+        js_interposer_t *live = find_interposer_for_fd_locked(fd, NULL, NULL);
+        if (live != NULL && (live - interposers) == array_idx) {
             live->corr = snapshot.corr;
+        } else {
+            sji_log_warn("IOCTL(%s): skipping JSIOCSCORR persist-back; fd %d no longer owns the original slot (reuse race).",
+                         snapshot.open_dev_name, fd);
         }
         pthread_mutex_unlock(&interposers_mutex);
         errno = saved_errno;

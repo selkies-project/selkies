@@ -17,30 +17,31 @@ authors = [
     {name = "Seungmin Kim", email = "8457324+ehfd@users.noreply.github.com"},
     {name = "Ryan Kuba", email = "ryankuba@gmail.com"},
 ]
-description = "Open-Source Low-Latency Linux WebRTC HTML5 Remote Desktop and 3D Graphics / Game Streaming Platform with GStreamer"
+description = "Open-Source Low-Latency Linux WebRTC HTML5 Remote Desktop and 3D Graphics / Game Streaming Platform"
 readme = "README.md"
 license = "MPL-2.0"
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = [
-    "gputil",
     "prometheus_client",
     "msgpack",
-    "pynput",
     "psutil",
     "watchdog",
     "Pillow",
-    "python-xlib @ https://github.com/selkies-project/python-xlib/archive/master.zip",
+    "six",
     "pixelflux",
     "pcmflux",
     "xkbcommon",
-    "distro",
-    "importlib-resources>=6.0; python_version < '3.9'",
     # PulseAudio Microphone
     "pulsectl-asyncio",
-    "pasimple",
     # WebRTC
     "aioice>=0.10.1,<1.0.0",
     "av",
@@ -52,6 +53,10 @@ dependencies = [
     "pyopenssl>=25.0.0",
     "aiohttp>=3.7.0",
     "aiofiles>=25.1.0",
+    # GPU stats: NVML in-process for NVIDIA (pure ctypes; no-op without NVIDIA) +
+    # aitop's multi-vendor monitors for AMD/Intel/Apple.
+    "nvidia-ml-py",
+    "aitop",
 ]
 
 [project.urls]
@@ -68,3 +73,46 @@ selkies-resize = "selkies.display_utils:entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Type checkers run as bug-finders on this largely unannotated codebase:
+# inference-noise categories (Optional/attribute/argument inference on untyped
+# values, guarded-import callables, aiohttp/av stub strictness) are disabled;
+# every rule left enabled must stay clean.
+# Run: pyright --pythonpath <env-python>   (from this directory)
+[tool.pyright]
+include = ["src/selkies"]
+exclude = ["src/selkies/Xlib"]
+pythonVersion = "3.12"
+reportOptionalMemberAccess = "none"
+reportAttributeAccessIssue = "none"
+reportArgumentType = "none"
+reportOperatorIssue = "none"
+reportOptionalOperand = "none"
+reportOptionalCall = "none"
+reportOptionalSubscript = "none"
+reportOptionalIterable = "none"
+reportCallIssue = "none"
+reportReturnType = "none"
+reportAssignmentType = "none"
+reportGeneralTypeIssues = "none"
+reportPrivateImportUsage = "none"
+reportRedeclaration = "none"
+reportIndexIssue = "none"
+
+# Run: pyrefly check --python-interpreter-path <env-python>  (from this directory)
+[tool.pyrefly]
+project_includes = ["src/selkies"]
+project_excludes = ["src/selkies/Xlib"]
+python_version = "3.12"
+
+[tool.pyrefly.errors]
+missing-attribute = false
+bad-argument-type = false
+unsupported-operation = false
+bad-index = false
+bad-assignment = false
+bad-return = false
+not-callable = false
+not-async = false
+no-matching-overload = false
+bad-specialization = false

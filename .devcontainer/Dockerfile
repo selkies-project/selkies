@@ -66,7 +66,6 @@ ARG PIP_BREAK_SYSTEM_PACKAGES=1
 RUN sudo apt-get update && sudo apt-get install --no-install-recommends -y \
         xvfb \
         coturn \
-        nginx \
         imagemagick \
         python3-venv && \
     sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \

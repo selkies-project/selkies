@@ -11,7 +11,7 @@ import concurrent.futures
 from dataclasses import dataclass
 from aiohttp.web_ws import WebSocketResponse
 from aiohttp import web, WSMessage, WSMsgType
-from typing import Dict, Set, Optional, Any, Tuple, List
+from typing import Awaitable, Callable, Dict, Set, Optional, Any, Tuple, List
 
 from .webrtc_utils import generate_rtc_config, _is_trusted_config_file
 
@@ -44,6 +44,9 @@ class WebRTCPeerManagement:
         # Format: {room_id: {peer1_id, peer2_id, peer3_id, ...}}
         # Room dict with a set of peers in each room
         self.rooms: Dict[str, Set[str]] = {}
+        # Called with True/False as browser (client-type) peers come and go;
+        # the server's own signaling peer does not count.
+        self.on_client_presence: Optional[Callable[[bool], None]] = None
 
         # Options
         self.keepalive_timeout: int = options.keepalive_timeout
@@ -206,7 +209,7 @@ class WebRTCPeerManagement:
         (SESSION_END / ROOM_PEER_LEFT / close); the caller MUST run them AFTER
         releasing the lock so a slow partner socket can't stall other handshakes.
         """
-        deferred = []
+        deferred: List[Callable[[], Awaitable[Any]]] = []
         peer = self.peers.get(pid)
 
         # --- session teardown (mirrors cleanup_session) ---
@@ -217,21 +220,15 @@ class WebRTCPeerManagement:
                 other_peer = self.peers.get(other_id)
                 if other_peer is not None:
                     wso = other_peer.ws
-                    if peer.client_type == "controller":
-                        logger.info(
-                            "Closing connection to {}, client type {!r}".format(
-                                other_id, other_peer.client_type
-                            )
-                        )
-                        deferred.append(
-                            lambda ws=wso: ws.close(
-                                code=1000, message=b"Connection closed"
-                            )
-                        )
-                    elif peer.client_type == "viewer":
-                        msg = "SESSION_END {} {}".format(pid, peer.client_type)
-                        logger.info("{} -> {}: {}".format(pid, other_id, msg))
-                        deferred.append(lambda ws=wso, m=msg: ws.send_str(m))
+                    # This runs only for slot-reconnect eviction (the sole caller). Unlike a
+                    # normal controller disconnect (cleanup_session closes the server), here a
+                    # replacement client is connecting into the same slot, so closing the
+                    # server socket would cascade (remove_peer(server) closes ALL clients,
+                    # including the just-registered replacement -> self-terminating reconnect).
+                    # Notify the server the session ended (as for viewers) and keep it alive.
+                    msg = "SESSION_END {} {}".format(pid, peer.client_type)
+                    logger.info("{} -> {}: {}".format(pid, other_id, msg))
+                    deferred.append(lambda ws=wso, m=msg: ws.send_str(m))
 
         # --- room teardown (mirrors cleanup_room) ---
         peer_status = getattr(peer, "peer_status", None) if peer else None
@@ -264,6 +261,9 @@ class WebRTCPeerManagement:
         Args:
             uid: Peer ID to remove
         """
+        # Collect socket closes under the lock but await them AFTER releasing it,
+        # so a slow socket can't serialize all signaling (mirrors hello_peer).
+        deferred_closes: List[Callable[[], Awaitable[Any]]] = []
         async with self.lock:
             await self.cleanup_session(uid)
 
@@ -281,19 +281,30 @@ class WebRTCPeerManagement:
                     del self.peers[uid]
                     for p in list(self.peers.values()):
                         if p.peer_type == "client":
-                            ws = p.ws
-                            await ws.close(
-                                code=4000,
-                                message=b"Server disconnected, closing connection.",
+                            deferred_closes.append(
+                                lambda cws=p.ws: cws.close(
+                                    code=4000,
+                                    message=b"Server disconnected, closing connection.",
+                                )
                             )
                 else:
                     del self.peers[uid]
-                    await ws.close(code=1000, message=b"Connection closed")
+                    deferred_closes.append(
+                        lambda cws=ws: cws.close(
+                            code=1000, message=b"Connection closed"
+                        )
+                    )
                     logger.info(
                         "Disconnected from peer {!r} at {!r} of client_type {!r}".format(
                             uid, raddr, client_type
                         )
                     )
+        # Flush closes outside the lock; bounded per socket, best-effort.
+        for make_coro in deferred_closes:
+            try:
+                await asyncio.wait_for(make_coro(), timeout=5)
+            except Exception as exc:
+                logger.debug("Deferred peer close failed/timed out: {}".format(exc))
 
     async def peer_connection_handler(
         self,
@@ -529,7 +540,7 @@ class WebRTCPeerManagement:
         client_strict_viewer = None
         # Partner notifications for evicted dead peers: collected under the lock but
         # flushed after release so a slow partner socket can't stall other handshakes.
-        dead_peer_notifications = []
+        dead_peer_notifications: List[Callable[[], Awaitable[Any]]] = []
         result = None
         try:
             async with self.lock:
@@ -579,15 +590,28 @@ class WebRTCPeerManagement:
 
                 if peer_type == "client":
                     if not self.enable_sharing:
-                        client_exists = next(
-                            (
-                                peer
-                                for peer in self.peers.values()
-                                if hasattr(peer, "peer_type") and peer.peer_type == "client"
-                            ),
-                            None,
-                        )
-                        if client_exists:
+                        existing_clients = [
+                            (pid, peer)
+                            for pid, peer in self.peers.items()
+                            if hasattr(peer, "peer_type") and peer.peer_type == "client"
+                        ]
+                        # Evict dead holders (closed socket not yet reaped) so a
+                        # reconnect isn't blocked by a stale peer; reject only when
+                        # a live client already occupies the single slot.
+                        live_client = False
+                        for pid, peer in existing_clients:
+                            if getattr(peer, "ws", None) is not None and not peer.ws.closed:
+                                live_client = True
+                                continue
+                            dead_peer_notifications.extend(
+                                self._evict_dead_peer_locked(pid)
+                            )
+                            logger.info(
+                                "Evicting dead client {!r} for non-sharing reconnect from {!r}".format(
+                                    pid, raddr
+                                )
+                            )
+                        if live_client:
                             logger.info("peer: {}".format(self.peers))
                             await ws.close(
                                 code=4000,
@@ -653,27 +677,63 @@ class WebRTCPeerManagement:
                             )
                         )
 
-                    peer_controller = next(
+                    controller_entry = next(
                         (
-                            peer
-                            for peer in self.peers.values()
+                            (pid, peer)
+                            for pid, peer in self.peers.items()
                             if hasattr(peer, "client_type")
                             and peer.client_type == "controller"
                         ),
                         None,
                     )
+                    peer_controller = controller_entry[1] if controller_entry else None
                     if client_type == "controller":
-                        if peer_controller:
-                            await ws.close(
-                                code=4000,
-                                message=b"Duplicate controller. A client of type 'controller' already exists.",
+                        if peer_controller is not None:
+                            # Evict a dead controller (closed socket not yet reaped)
+                            # so a controller reconnect isn't blocked by a stale peer.
+                            # _evict_dead_peer_locked keeps the server alive (sends
+                            # SESSION_END rather than closing the server socket).
+                            assert controller_entry is not None
+                            ctrl_pid, ctrl_peer = controller_entry
+                            ctrl_ws = getattr(ctrl_peer, "ws", None)
+                            if ctrl_ws is not None and not ctrl_ws.closed:
+                                await ws.close(
+                                    code=4000,
+                                    message=b"Duplicate controller. A client of type 'controller' already exists.",
+                                )
+                                raise Exception(
+                                    "Duplicate controllers not allowed; connection from {!r}".format(
+                                        raddr
+                                    )
+                                )
+                            dead_peer_notifications.extend(
+                                self._evict_dead_peer_locked(ctrl_pid)
                             )
-                            raise Exception(
-                                "Duplicate controllers not allowed; connection from {!r}".format(
-                                    raddr
+                            peer_controller = None
+                            logger.info(
+                                "Evicting dead controller {!r} for reconnect from {!r}".format(
+                                    ctrl_pid, raddr
                                 )
                             )
                     if client_type == "viewer":
+                        # Admit a viewer only against a LIVE controller. Reap a
+                        # dead (closed, unreaped) controller and treat as absent,
+                        # matching the liveness-aware sibling checks above instead
+                        # of admitting the viewer to a stale peer.
+                        if peer_controller is not None:
+                            assert controller_entry is not None
+                            ctrl_pid, ctrl_peer = controller_entry
+                            ctrl_ws = getattr(ctrl_peer, "ws", None)
+                            if ctrl_ws is None or ctrl_ws.closed:
+                                dead_peer_notifications.extend(
+                                    self._evict_dead_peer_locked(ctrl_pid)
+                                )
+                                peer_controller = None
+                                logger.info(
+                                    "Evicting dead controller {!r}; rejecting viewer from {!r}".format(
+                                        ctrl_pid, raddr
+                                    )
+                                )
                         if not peer_controller:
                             await ws.close(
                                 code=4000,
@@ -688,9 +748,9 @@ class WebRTCPeerManagement:
                 # Generate unique peer ID
                 uid = str(uuid.uuid4())
                 puid = "-".join([peer_type, uid])
-                # Send back a HELLO
-                await ws.send_str("HELLO")
-                # Register under the same lock as validation so check-and-insert is atomic.
+                # Register under the same lock as validation so check-and-insert is
+                # atomic. HELLO is sent AFTER the lock (below) so a slow client
+                # socket can't serialize other handshakes.
                 self.peers[puid] = Peer(
                     uid=puid,
                     ws=ws,
@@ -711,6 +771,16 @@ class WebRTCPeerManagement:
                     logger.debug(
                         "Deferred dead-peer notification failed/timed out: {}".format(exc)
                     )
+        # Send HELLO outside the lock so a slow client socket can't serialize other
+        # handshakes. Reached only on success (validation failures raise above). The
+        # peer is already registered; if the send fails, unregister it so we don't
+        # leak a half-open peer (matches the old send-before-register failure path).
+        try:
+            await ws.send_str("HELLO")
+        except Exception:
+            async with self.lock:
+                self.peers.pop(result[0], None)
+            raise
         return result
 
     async def signaling_handler(self, ws: WebSocketResponse, raddr: str) -> None:
@@ -730,6 +800,7 @@ class WebRTCPeerManagement:
         except Exception as e:
             logger.error(f"Error during handshake with peer {raddr}: {e}")
             return
+        self._notify_client_presence()
 
         try:
             await self.peer_connection_handler(
@@ -750,6 +821,13 @@ class WebRTCPeerManagement:
         finally:
             if peer_id:
                 await self.remove_peer(peer_id)
+                self._notify_client_presence()
+
+    def _notify_client_presence(self):
+        if self.on_client_presence:
+            self.on_client_presence(
+                any(p.peer_type == "client" for p in self.peers.values())
+            )
 
     async def handle_turn_req(self, request: web.Request) -> web.Response:
         """

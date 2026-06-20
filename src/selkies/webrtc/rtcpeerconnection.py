@@ -40,7 +40,7 @@ from typing import Optional, Union
 from pyee.asyncio import AsyncIOEventEmitter
 
 from . import clock, rtp, sdp
-from .codecs import CODECS, HEADER_EXTENSIONS, is_rtx
+from .codecs import CODECS, HEADER_EXTENSIONS, is_red, is_rtx, red_block_payload_type
 from .events import RTCTrackEvent
 from .exceptions import (
     InternalError,
@@ -108,6 +108,15 @@ def filter_preferred_codecs(
                             break
 
                 break
+
+    # Drop audio/red whose inner opus payload type was not negotiated, so we
+    # never keep a redundancy codec without the codec it wraps (mirrors rtx/apt).
+    present_pts = {c.payloadType for c in filtered if not is_red(c)}
+    filtered = [
+        c
+        for c in filtered
+        if not is_red(c) or red_block_payload_type(c.parameters) in present_pts
+    ]
 
     return filtered
 
@@ -277,12 +286,29 @@ def create_media_description_for_transceiver(
         media.ssrc.append(
             sdp.SsrcDescription(ssrc=transceiver.sender._rtx_ssrc, cname=cname)
         )
-        media.ssrc_group = [
+        media.ssrc_group.append(
             sdp.GroupDescription(
                 semantic="FID",
                 items=[transceiver.sender._ssrc, transceiver.sender._rtx_ssrc],
             )
-        ]
+        )
+
+    # if FlexFEC is on the table, announce the repair stream (FEC-FR group) and
+    # declare our send resolution envelope (RFC 6236) for the video line.
+    if next(
+        (c for c in media.rtp.codecs if c.mimeType.lower() == "video/flexfec-03"), None
+    ):
+        media.ssrc.append(
+            sdp.SsrcDescription(ssrc=transceiver.sender._fec_ssrc, cname=cname)
+        )
+        media.ssrc_group.append(
+            sdp.GroupDescription(
+                semantic="FEC-FR",
+                items=[transceiver.sender._ssrc, transceiver.sender._fec_ssrc],
+            )
+        )
+    if transceiver.kind == "video":
+        media.imageattr = ["* send [x=[16:8192],y=[16:8192]] recv *"]
 
     add_transport_description(media, transceiver.receiver.transport)
 
@@ -1058,7 +1084,8 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         ]
         await asyncio.gather(*coros)
 
-        # FIXME: in aiortc 2.0.0 emit RTCTrackEvent directly
+        # Emits the bare track (the aiortc 1.x signature); the rtc.py listeners
+        # rely on receiving the track object itself.
         for event in trackEvents:
             self.emit("track", event.track)
 

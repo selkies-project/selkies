@@ -4,30 +4,39 @@
 
 **Choose between this section and [Advanced Install](#advanced-install) if you need to self-host on a standalone instance or use with HPC clusters. This section is recommended for starters.**
 
-This **Quick Start** uses a portable tarball distribution with most (but not all) dependencies included and supported with **any Linux distribution with `glibc ≥ 2.17`** (CentOS 7 or newer) to deploy Selkies-GStreamer.
+This **Quick Start** installs the Selkies Python package directly with `pip`. The package bundles the HTML5 web client and pulls in the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) extensions as dependencies. Selkies streams over plain WebSockets by default, serving the web interface, signaling, and media on a **single port (default `8081`)**; WebRTC is available as an opt-in transport (`--mode=webrtc`).
 
-Read [Conda Toolchain](component.md#conda-toolchain) for more details of this step and procedures for installing from the latest commit in the `main` branch.
+Read [Python Application](component.md#python-application) for more details of this step and procedures for installing from the latest commit in the `main` branch.
 
 **1. Install required dependencies, for Ubuntu or Debian-based distributions, run this command:**
 
 ```bash
-sudo apt-get update && sudo apt-get install --no-install-recommends -y jq tar gzip ca-certificates curl libpulse0 wayland-protocols libwayland-dev libwayland-egl1 x11-utils x11-xkb-utils x11-xserver-utils xserver-xorg-core libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 libxv1 libxtst6 libxext6 xvfb
+sudo apt-get update && sudo apt-get install --no-install-recommends -y python3 python3-pip python3-dev jq ca-certificates curl xserver-xorg-core xvfb x11-utils x11-xkb-utils x11-xserver-utils libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 libxtst6 libxext6 libpulse0 pulseaudio
 ```
 
-In the future, this host dependency requirement may be completely eliminated if relevant [conda-forge](https://conda-forge.org) feedstocks are available.
+For hardware-accelerated H.264 encoding, additionally install the relevant GPU drivers: NVENC is provided by the NVIDIA GPU driver (`libnvidia-encode`), while Intel and AMD GPUs use VA-API (install `libva2` and your vendor's VA-API driver, such as `intel-media-va-driver-non-free` for Intel or the AMDGPU driver for AMD). Optionally install `vainfo`, `intel-gpu-tools`, `radeontop`, or `nvtop` for GPU monitoring.
 
-**2. Download and unpack the latest stable release of the Selkies-GStreamer portable distribution inside a directory of your choice:**
+**2. Install the Selkies Python package**, which bundles the HTML5 web client (fill in `SELKIES_VERSION`):
 
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')"
-cd ~ && curl -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-gstreamer-portable-v${SELKIES_VERSION}_amd64.tar.gz" | tar -xzf -
+cd /tmp && curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-py3-none-any.whl" && sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall "selkies-${SELKIES_VERSION}-py3-none-any.whl" && rm -f "selkies-${SELKIES_VERSION}-py3-none-any.whl"
 ```
+
+Alternatively, install directly from the source tree (this also builds and installs the bundled web client):
+
+```bash
+git clone https://github.com/selkies-project/selkies.git
+cd selkies && sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall .
+```
+
+Either method installs the `selkies` and `selkies-resize` console commands.
 
 **3. Set your `DISPLAY` and `PULSE_SERVER` environment variables for the X.Org X11 display server or PulseAudio audio server.**
 
-**Check that you are using X.Org instead of Wayland (which is the default in many distributions but not supported) when using an existing display. You also need to be logged in from the login screen or autologin should be enabled.**
+**Selkies attaches to an existing X.Org X11 display and an already-running PulseAudio (or PipeWire-Pulse) server; it does not start them for you.** See [Advanced Install](#advanced-install) for commands to start a virtual `Xvfb` display and a PulseAudio/PipeWire server yourself.
 
-Set `DISPLAY` to an unoccupied display server ID (such as `:99`) if you want Selkies-GStreamer to start its own virtual X11 display server (defaults to `:0`), and keep environment variables `PULSE_RUNTIME_PATH` and `PULSE_SERVER` empty if you want Selkies-GStreamer to start a portable PulseAudio audio server.
+**Check that you are using X.Org instead of Wayland (which is the default in many distributions but not supported) when using an existing display. You also need to be logged in from the login screen or autologin should be enabled.**
 
 **The environment variables that are set here should also be set with the host application or desktop environment, else you will likely not have audio or be shown an error.**
 
@@ -40,29 +49,31 @@ export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR:-/tmp}/pulse}
 export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR:-/tmp}/pulse}/native}"
 ```
 
-**4. Run Selkies-GStreamer** (change `--encoder=` to another value such as `nvh264enc`, `vah264enc`, `vp9enc`, or `vp8enc`, if you want to [use different codecs or GPU acceleration](component.md#encoders))**:**
+**4. Run Selkies:**
 
 ```bash
-./selkies-gstreamer/selkies-gstreamer-run --addr=0.0.0.0 --port=8080 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=x264enc --enable_resize=false
+selkies --addr=0.0.0.0 --port=8081 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=h264enc --enable_resize=false
 ```
+
+In the default WebSocket mode, `--encoder=` accepts `h264enc` (default; hardware NVENC or VA-API when a supported GPU is available, otherwise software `x264`), `h264enc-striped`, `openh264enc` (software OpenH264), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc` and select the encoder with `--encoder-rtc=` (`h264enc`, the hardware-first default, or `openh264enc`).
 
 The default username (set with `--basic_auth_user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is the current user environment variable `$USER` (empty username if nonexistent), and the default password (set with `--basic_auth_password=` or `SELKIES_BASIC_AUTH_PASSWORD`), when not specified, is `mypasswd`.
 
-Use `--enable_resize=true` if you want to fit the remove resolution to the client window and skip the next section. You **must NOT** enable this option when streaming a physical monitor.
+Use `--enable_resize=true` if you want to fit the remote resolution to the client window and skip the next step. You **must NOT** enable this option when streaming a physical monitor.
 
 **5. Resize to your intended resolution (DO NOT resize when streaming a physical monitor):**
 
 ```bash
-./selkies-gstreamer/selkies-gstreamer-resize-run 1920x1080
+selkies-resize 1920x1080
 ```
 
 **6. Check the [**Joystick Interposer**](component.md#joystick-interposer) section if you need to use joystick/gamepad devices from your web browser client.**
 
 You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root path of your choice if using the `.tar.gz` tarball.
 
-**7. (MANDATORY) If the HTML5 web interface loads and the signaling connection works, but the WebRTC connection fails or the remote desktop does not start:**
+**7. (WebRTC mode only) If you switched to `--mode=webrtc` and the HTML5 web interface loads and the signaling connection works, but the WebRTC connection fails or the remote desktop does not start:**
 
-**Depending on your environment, this step may be mandatory. Moreover, when there is a very high latency or stutter, and the TURN server is shown as `staticauth.openrelay.metered.ca` with a `relay` connection, this section is very important.**
+**This step is only relevant to the opt-in WebRTC transport. The default WebSocket transport uses a single TCP port and needs no STUN/TURN server. In WebRTC mode, when there is very high latency or stutter and the TURN server is shown as `staticauth.openrelay.metered.ca` with a `relay` connection, this section is very important.**
 
 Please read [**WebRTC and Firewall Issues**](firewall.md).
 
@@ -72,61 +83,53 @@ Please read [**WebRTC and Firewall Issues**](firewall.md).
 
 Full desktop containers that can be used out-of-the-box are available in separate repositories. If you can deploy Docker® or Podman containers, this is the easiest way to get started.
 
-[`docker-nvidia-glx-desktop`](https://github.com/selkies-project/docker-nvidia-glx-desktop) and [`docker-nvidia-egl-desktop`](https://github.com/selkies-project/docker-nvidia-egl-desktop) are expandable ready-to-go out-of-the-box containerized remote desktop implementations of Selkies-GStreamer supporting hardware acceleration on NVIDIA and other GPUs.
+[`docker-nvidia-glx-desktop`](https://github.com/selkies-project/docker-nvidia-glx-desktop) and [`docker-nvidia-egl-desktop`](https://github.com/selkies-project/docker-nvidia-egl-desktop) are expandable ready-to-go out-of-the-box containerized remote desktop implementations of Selkies supporting hardware acceleration on NVIDIA and other GPUs.
 
 The [`selkies-vdi`](https://github.com/selkies-project/selkies-vdi) or [`selkies-examples`](https://github.com/selkies-project/selkies-examples) repositories from the [Selkies Project](https://github.com/selkies-project) provide containerized virtual desktop infrastructure (VDI) templates, but are outdated. Contributions to sync the projects with the current release are welcome.
 
 ## Minimal Container
 
-The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies-GStreamer quickly. The bare minimum Xfce4 desktop environment is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
+The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum Xfce4 desktop environment is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
 
 Instructions are available in the [Example Container](component.md#example-container) section.
 
-**(MANDATORY) Follow the instructions from [WebRTC and Firewall Issues](firewall.md) in order to make the container or self-hosted standalone instance using an external TURN server.**
+**With the default WebSocket transport, a single exposed port is all you need.** A TURN server only becomes relevant if you opt into the WebRTC transport (`--mode=webrtc`) inside a Docker® or Kubernetes container without `--network=host` or `hostNetwork: true`, or in other cases where the HTML5 web interface loads but the WebRTC connection fails. In that case, follow the instructions from [WebRTC and Firewall Issues](firewall.md) to make the container or self-hosted standalone instance use an external TURN server. This is required for all self-hosted WebRTC applications, unlike proprietary services which provide a TURN server for you.
 
-A TURN server is required if trying to use this project inside a Docker® or Kubernetes container without `--network=host` or `hostNetwork: true`, or in other cases where the HTML5 web interface loads but the connection fails. This is required for all WebRTC applications, especially since Selkies-GStreamer is self-hosted, unlike other proprietary services which provide a TURN server for you.
-
-## Advanced Install 
+## Advanced Install
 
 **Choose between [Quick Start](#quick-start) and this section.**
 
-This distribution is slightly more complicated to deploy, yet is the recommended `Dockerfile` build procedure. The below installation procedures allow using Ubuntu packages as dependencies for Selkies-GStreamer.
+This section installs from Ubuntu packages and shows a full run script, including how to start a virtual display and audio server yourself. It matches the reference `Dockerfile` build procedure.
 
 ### Backgrounds
 
-Selkies-GStreamer has a highly modularized architecture, composed of multiple components.
+Selkies has a modularized architecture, but at runtime it is a **single Python application**, packaged as the `selkies` wheel, that:
 
-Three mandatory components are required to run Selkies-GStreamer: the [standalone or distribution-provided build of GStreamer](https://github.com/selkies-project/selkies/tree/main/addons/gstreamer) with the most recent version (currently ≥ 1.22), the [Python component wheel package](https://github.com/selkies-project/selkies/tree/main/src/selkies) including the signaling server, and the [HTML5 web interface components](https://github.com/selkies-project/selkies/tree/main/addons/gst-web). Currently, Ubuntu 24.04 (Mint 22), 22.04 (Mint 21), 20.04 (Mint 20) are supported, but other operating systems should also work if using your own GStreamer build of the newest version (contributions for build workflows of more operating systems are welcome).
+- serves the HTML5 web client, which is bundled inside the wheel (at `src/selkies/selkies_web`) and served from the same single port;
+- captures and encodes the screen through the `pixelflux` extension (hardware H.264 via NVENC or VA-API, software H.264 via `x264` or OpenH264, or JPEG);
+- captures and encodes audio through the `pcmflux` extension (Opus);
+- injects keyboard, mouse, and gamepad input through a vendored `python-xlib` (XTEST/XFixes);
+- and, only for the opt-in WebRTC transport, uses a vendored fork of `aiortc`.
 
-All three of the components are built and packaged every [Release](https://github.com/selkies-project/selkies/releases). In addition, every latest commit gets built and is made available in container forms [`ghcr.io/selkies-project/selkies-gstreamer/gstreamer`](https://github.com/selkies-project/selkies/pkgs/container/selkies-gstreamer%2Fgstreamer), [`ghcr.io/selkies-project/selkies-gstreamer/py-build`](https://github.com/selkies-project/selkies/pkgs/container/selkies-gstreamer%2Fpy-build), and [`ghcr.io/selkies-project/selkies-gstreamer/gst-web`](https://github.com/selkies-project/selkies/pkgs/container/selkies-gstreamer%2Fgst-web).
+`pixelflux` and `pcmflux` are installed automatically as dependencies of the wheel. There is **no separate GStreamer build or web-interface package to install** — earlier releases shipped GStreamer, a Python wheel, and a `gst-web` interface as three separate components, but the GStreamer runtime has been fully removed and the web client is now bundled into the wheel.
 
 For more information, check the [Components](component.md#components) section.
 
 The [All-In-One Desktop Containers](#desktop-container) support unprivileged self-hosted Kubernetes clusters and Docker®/Podman.
 
-Example Google Compute Engine/Google Kubernetes Engine deployment configurations of all components are available in the [`infra/gce`](https://github.com/selkies-project/selkies/tree/main/infra/gce) and [`infra/gke`](https://github.com/selkies-project/selkies/tree/main/infra/gke) directories, but may be deprecated in favor of vendor-agnostic Kubernetes configurations.
-
 ### Install the packaged version on self-hosted standalone machines, cloud instances, or virtual machines
 
-**NOTE: You will need to use an external STUN/TURN server capable of `srflx` or `relay` type ICE connections if both your server and client have ports closed or are under a restrictive firewall. Either open the UDP and TCP port ranges 49152-65535 of your server, or follow the instructions from [WebRTC and Firewall Issues](firewall.md) to make the container work using an external TURN server.**
+**NOTE: STUN/TURN is only relevant to the opt-in WebRTC transport (`--mode=webrtc`). The default WebSocket transport uses a single TCP port. If you use WebRTC mode and both your server and client have closed ports or a restrictive firewall, you will need an external STUN/TURN server capable of `srflx` or `relay` type ICE connections; either open the UDP and TCP port ranges 49152-65535 of your server, or follow the instructions from [WebRTC and Firewall Issues](firewall.md).**
 
-While this instruction assumes that you are installing this project systemwide, it is possible to install and run all components completely within the userspace. Dependencies may also be installed without root permissions if you use the [**Quick Start**](#quick-start) procedures.
+While this instruction assumes that you are installing this project systemwide, it is possible to install and run all components completely within the userspace.
 
 **1. Install the dependencies, for Ubuntu or Debian-based distributions, run this command:**
 
 ```bash
-sudo apt-get update && sudo apt-get install --no-install-recommends -y jq tar gzip ca-certificates curl build-essential python3-pip python3-dev python3-gi python3-setuptools python3-wheel libgcrypt20 libgirepository-1.0-1 glib-networking libglib2.0-0 libgudev-1.0-0 alsa-utils jackd2 libjack-jackd2-0 libpulse0 libopus0 libvpx-dev x264 x265 libdrm2 libegl1 libgl1 libopengl0 libgles1 libgles2 libglvnd0 libglx0 wayland-protocols libwayland-dev libwayland-egl1 wmctrl xsel xdotool x11-utils x11-xkb-utils x11-xserver-utils xserver-xorg-core libx11-xcb1 libxcb-dri3-0 libxdamage1 libxfixes3 libxv1 libxtst6 libxext6
+sudo apt-get update && sudo apt-get install --no-install-recommends -y python3 python3-pip python3-dev jq ca-certificates curl xserver-xorg-core xvfb wmctrl x11-utils x11-xkb-utils x11-xserver-utils libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 libxtst6 libxext6 libpulse0 pulseaudio
 ```
 
-Install additional dependencies if using Ubuntu ≥ 22.04 (Mint 21) or a higher equivalent version of another operating system:
-
-```bash
-sudo apt-get update && sudo apt-get install --no-install-recommends -y xcvt libopenh264-dev svt-av1 aom-tools
-```
-
-If using supported NVIDIA GPUs, install NVENC (bundled with the GPU driver) and NVRTC (bundled with pre-built GStreamer component, check the [GStreamer Dockerfile](https://github.com/selkies-project/selkies/tree/main/addons/gstreamer/Dockerfile) for manual installation instructions).
-
-If using AMD or Intel GPUs, install its graphics and VA-API drivers, as well as `libva2`. The bundled VA-API driver in the AMDGPU Pro graphics driver is recommended for AMD GPUs and the `i965-va-driver-shaders` or `intel-media-va-driver-non-free` packages are recommended depending on your Intel GPU generation. Optionally install `vainfo`, `intel-gpu-tools`, `radeontop`, or `nvtop` for GPU monitoring.
+If using supported NVIDIA GPUs, NVENC is bundled with the GPU driver (`libnvidia-encode`). If using AMD or Intel GPUs, install its graphics and VA-API drivers, as well as `libva2`. The `intel-media-va-driver-non-free` package (or `i965-va-driver-shaders` depending on your Intel GPU generation) is recommended for Intel GPUs, and the bundled VA-API driver in the AMDGPU driver is recommended for AMD GPUs. Optionally install `vainfo`, `intel-gpu-tools`, `radeontop`, or `nvtop` for GPU monitoring.
 
 Use the following commands to retrieve the latest `SELKIES_VERSION` release, the current Ubuntu `DISTRIB_RELEASE`, and the current architecture `ARCH` in the following steps:
 
@@ -136,35 +139,15 @@ export DISTRIB_RELEASE="$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr
 export ARCH="$(dpkg --print-architecture)"
 ```
 
-**2. Unpack the GStreamer components of Selkies-GStreamer** (fill in `SELKIES_VERSION`, `DISTRIB_RELEASE`), using your own GStreamer build on any architecture can work **as long as it is the most recent stable version with the required plugins included:**
-
-Read [GStreamer](component.md#gstreamer) for more details of this step and procedures for installing from the latest commit in the `main` branch.
-
-```bash
-cd /opt && curl -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/gstreamer-selkies_gpl_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_amd64.tar.gz" | sudo tar -xzf -
-```
-
-This will install the GStreamer components to the default directory of `/opt/gstreamer`. If you are unpacking to a different directory, make sure to set the the environment variable `GSTREAMER_PATH` to the directory. GStreamer builds for `aarch64` are not provided but can be built following procedures in the [GStreamer Dockerfile](https://github.com/selkies-project/selkies/tree/main/addons/gstreamer/Dockerfile) or [Conda Dockerfile](https://github.com/selkies-project/selkies/tree/main/addons/conda/Dockerfile).
-
-**3. Install the Selkies-GStreamer Python components** (this component is pure Python and any operating system is compatible, fill in `SELKIES_VERSION`)**:**
+**2. Install the Selkies Python package** (this component is pure Python, bundles the HTML5 web client, and any operating system is compatible, fill in `SELKIES_VERSION`)**:**
 
 Read [Python Application](component.md#python-application) for more details of this step and procedures for installing from the latest commit in the `main` branch.
 
 ```bash
-cd /tmp && curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies_gstreamer-${SELKIES_VERSION}-py3-none-any.whl" && sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall "selkies_gstreamer-${SELKIES_VERSION}-py3-none-any.whl" && rm -f "selkies_gstreamer-${SELKIES_VERSION}-py3-none-any.whl"
+cd /tmp && curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-py3-none-any.whl" && sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall "selkies-${SELKIES_VERSION}-py3-none-any.whl" && rm -f "selkies-${SELKIES_VERSION}-py3-none-any.whl"
 ```
 
-**4. Unpack the Selkies-GStreamer HTML5 components:**
-
-Read [Web Application](component.md#web-application) for more details of this step and procedures for installing from the latest commit in the `main` branch.
-
-```bash
-cd /opt && curl -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-gstreamer-web_v${SELKIES_VERSION}.tar.gz" | sudo tar -xzf -
-```
-
-This will install the HTML5 components to the default directory of `/opt/gst-web`. If you are unpacking to a different directory, make sure to set the directory to the environment variable `SELKIES_WEB_ROOT` or add the command-line option `--web_root=` to Selkies-GStreamer. Note that you should change `manifest.json` and `cacheName` in `sw.js` to rebrand the web interface to a different name.
-
-**5. Install the Joystick Interposer to process gamepad input**, if you need to use joystick/gamepad devices from your web browser client (fill in `SELKIES_VERSION`, `DISTRIB_RELEASE`, and `ARCH` of either `amd64` for `x86_64`, and `arm64` for `aarch64`)**:**
+**3. Install the Joystick Interposer to process gamepad input**, if you need to use joystick/gamepad devices from your web browser client (fill in `SELKIES_VERSION`, `DISTRIB_RELEASE`, and `ARCH` of either `amd64` for `x86_64`, and `arm64` for `aarch64`)**:**
 
 Read [Joystick Interposer](component.md#joystick-interposer) for more details of this step and procedures for installing from the latest commit in the `main` branch.
 
@@ -172,11 +155,11 @@ Read [Joystick Interposer](component.md#joystick-interposer) for more details of
 cd /tmp && curl -o selkies-js-interposer.deb -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-js-interposer_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_${ARCH}.deb" && sudo apt-get update && sudo apt-get install --no-install-recommends -y ./selkies-js-interposer.deb && rm -f selkies-js-interposer.deb
 ```
 
-Alternatively, users may directly place the Joystick Interposer libraries from the `selkies-js-interposer_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_${ARCH}.tar.gz` tarball into the library path, for instance into `/usr/lib/i386-linux-gnu` and `/usr/lib/i386-linux-gnu`. More information can be found in [Joystick Interposer](component.md#joystick-interposer).
+Alternatively, users may directly place the Joystick Interposer libraries from the `selkies-js-interposer_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_${ARCH}.tar.gz` tarball into the library path, for instance into `/usr/lib/x86_64-linux-gnu` and `/usr/lib/i386-linux-gnu`. More information can be found in [Joystick Interposer](component.md#joystick-interposer).
 
 You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root path of your choice if using the `.tar.gz` tarball.
 
-**6. Run Selkies-GStreamer after changing the below script appropriately** (install `xvfb` and uncomment relevant sections if there is no real display, **DO NOT resize when streaming a physical monitor**)**:**
+**4. Run Selkies after changing the below script appropriately** (install `xvfb` and uncomment relevant sections if there is no real display, **DO NOT resize when streaming a physical monitor**)**:**
 
 **Check that you are using X.Org instead of Wayland (which is the default in many distributions but not supported) when using an existing display. You also need to be logged in from the login screen or autologin should be enabled.**
 
@@ -221,32 +204,29 @@ sudo chmod 777 /dev/input/js*
 # Replace this line with your desktop environment session or skip this line if already running, use VirtualGL `vglrun +wm xfce4-session` here if needed
 # [ "${START_XFCE4:-true}" = "true" ] && rm -rf ~/.config/xfce4 && xfce4-session &
 
-# Initialize the GStreamer environment after setting GSTREAMER_PATH to the path of your GStreamer directory
-export GST_DEBUG="*:2"
-export GSTREAMER_PATH=/opt/gstreamer
-. /opt/gstreamer/gst-env
 # Replace with your wanted resolution if using without resize, DO NOT USE if there is a physical display
-# selkies-gstreamer-resize 1920x1080
+# selkies-resize 1920x1080
 
 # Starts the remote desktop process
-# Change `--encoder=` to `nvh264enc`, `vah264enc`, `vp9enc`, or `vp8enc` for different video codecs or hardware encoders
+# In the default WebSocket mode, change `--encoder=` to `h264enc-striped`, `openh264enc`, or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
+# For the WebRTC transport instead, add `--mode=webrtc` and set `--encoder-rtc=` to `h264enc` or `openh264enc`
 # DO NOT set `--enable_resize=true` if there is a physical display
-selkies-gstreamer --addr=0.0.0.0 --port=8080 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=x264enc --enable_resize=false &
+selkies --addr=0.0.0.0 --port=8081 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=h264enc --enable_resize=false &
 ```
 
 The default username (set with `--basic_auth_user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is the current user environment variable `$USER` (empty username if nonexistent), and the default password (set with `--basic_auth_password=` or `SELKIES_BASIC_AUTH_PASSWORD`), when not specified, is `mypasswd`.
 
-**7. (MANDATORY) If the HTML5 web interface loads and the signaling connection works, but the WebRTC connection fails or the remote desktop does not start:**
+**5. (WebRTC mode only) If you switched to `--mode=webrtc` and the HTML5 web interface loads and the signaling connection works, but the WebRTC connection fails or the remote desktop does not start:**
 
-**Depending on your environment, this step may be mandatory. Moreover, when there is a very high latency or stutter, and the TURN server is shown as `staticauth.openrelay.metered.ca` with a `relay` connection, this section is very important.**
+**This step is only relevant to the opt-in WebRTC transport. In WebRTC mode, when there is very high latency or stutter and the TURN server is shown as `staticauth.openrelay.metered.ca` with a `relay` connection, this section is very important.**
 
 Please read [**WebRTC and Firewall Issues**](firewall.md).
 
-**8. Read [**Troubleshooting and FAQs**](faq.md) if something is not as intended and [**Usage**](usage.md) for more information on customizing.**
+**6. Read [**Troubleshooting and FAQs**](faq.md) if something is not as intended and [**Usage**](usage.md) for more information on customizing.**
 
 ### Install the latest build on self-hosted standalone machines, cloud instances, or virtual machines
 
-**Build artifacts for every `main` branch commit are available as an after logging into GitHub in [Actions](https://github.com/selkies-project/selkies/actions), and you do not need Docker® to download them.**
+**Build artifacts for every `main` branch commit are available after logging into GitHub in [Actions](https://github.com/selkies-project/selkies/actions), and you do not need Docker® to download them.**
 
 Otherwise, Docker®/Podman (or any equivalent) may be used if you want to use builds from the latest commit. Refer to [Components](component.md) for more information.
 

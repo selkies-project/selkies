@@ -73,193 +73,9 @@ fi
 # Wait for X server to start
 echo 'Waiting for X Socket' && until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done && echo 'X Server is ready'
 
-if [ "${SELKIES_NGINX_OVERRIDE:-0}" = "1" ] || [ "${SELKIES_NGINX_OVERRIDE:-0}" = "true" ]; then
-    addr="0.0.0.0"
-else
-    addr="localhost"
-fi
+addr="0.0.0.0"
 
-port="${SELKIES_PORT:-8081}"
-
-# Configure NGINX
-if [ "$(echo ${SELKIES_ENABLE_BASIC_AUTH} | tr '[:upper:]' '[:lower:]')" != "false" ]; then
-    htpasswd -bcm "${XDG_RUNTIME_DIR}/.htpasswd" "${SELKIES_BASIC_AUTH_USER:-${USER}}" "${SELKIES_BASIC_AUTH_PASSWORD:-${PASSWD}}"
-    # Overwrite with custom user/password if provided; required for sealskin env
-    if [ -n "${CUSTOM_USER}" ] && [ -n "${PASSWORD}" ]; then
-        htpasswd -bcm "${XDG_RUNTIME_DIR}/.htpasswd" "${CUSTOM_USER}" "${PASSWORD}"
-    fi
-fi
-if [ "$(echo "${SELKIES_ENABLE_HTTPS}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
-  echo "HTTPS is enabled"
-  LISTEN_SECURE="ssl"
-  PROXY_SCHEME="https"
-else
-  echo "HTTPS is disabled"
-  LISTEN_SECURE=""
-  PROXY_SCHEME="http"
-fi
-
-mkdir -p /etc/nginx/templates
-echo "# Selkies NGINX Configuration
-
-# Upstream definitions
-upstream selkies_backend {
-    # configure fail_timeout=0 to avoid nginx marking the backend as down
-    server ${addr}:${SELKIES_PORT:-8081} fail_timeout=0;
-}
-server {
-    access_log /dev/stdout;
-    error_log /dev/stderr;
-    listen ${NGINX_PORT:-8080} $LISTEN_SECURE;
-    listen [::]:${NGINX_PORT:-8080} $LISTEN_SECURE;
-    ssl_certificate ${SELKIES_HTTPS_CERT-/etc/ssl/certs/ssl-cert-snakeoil.pem};
-    ssl_certificate_key ${SELKIES_HTTPS_KEY-/etc/ssl/private/ssl-cert-snakeoil.key};
-    $(if [ \"$(echo \"${SELKIES_ENABLE_BASIC_AUTH}\" | tr '[:upper:]' '[:lower:]')\" != \"false\" ]; then echo "auth_basic \"Selkies\";"; echo -n "    auth_basic_user_file ${XDG_RUNTIME_DIR}/.htpasswd;"; fi)
-
-    location \${API_PREFIX} {
-        alias /opt/selkies-web/;
-        index index.html;
-        try_files \$uri /index.html;
-    }
-
-    location \${API_PREFIX}health {
-        proxy_http_version      1.1;
-        proxy_read_timeout      3600s;
-        proxy_send_timeout      3600s;
-        proxy_connect_timeout   3600s;
-        proxy_buffering         off;
-
-        client_max_body_size    10M;
-
-        proxy_pass $PROXY_SCHEME://selkies_backend;
-    }
-
-    location \${API_PREFIX}turn {
-        proxy_http_version      1.1;
-        proxy_read_timeout      3600s;
-        proxy_send_timeout      3600s;
-        proxy_connect_timeout   3600s;
-        proxy_buffering         off;
-
-        client_max_body_size    10M;
-
-        proxy_pass $PROXY_SCHEME://selkies_backend;
-    }
-
-    location \${API_PREFIX}ws {
-        proxy_set_header        Upgrade \$http_upgrade;
-        proxy_set_header        Connection \"upgrade\";
-
-        proxy_set_header        Host \$host;
-        proxy_set_header        X-Real-IP \$remote_addr;
-        proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header        X-Forwarded-Proto \$scheme;
-
-        proxy_http_version      1.1;
-        proxy_read_timeout      3600s;
-        proxy_send_timeout      3600s;
-        proxy_connect_timeout   3600s;
-        proxy_buffering         off;
-
-        client_max_body_size    10M;
-
-        proxy_pass $PROXY_SCHEME://selkies_backend;
-    }
-
-    location \${API_PREFIX}webrtc/signaling {
-        proxy_set_header        Upgrade \$http_upgrade;
-        proxy_set_header        Connection \"upgrade\";
-
-        proxy_set_header        Host \$host;
-        proxy_set_header        X-Real-IP \$remote_addr;
-        proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header        X-Forwarded-Proto \$scheme;
-
-        proxy_http_version      1.1;
-        proxy_read_timeout      3600s;
-        proxy_send_timeout      3600s;
-        proxy_connect_timeout   3600s;
-        proxy_buffering         off;
-
-        client_max_body_size    10M;
-
-        proxy_pass $PROXY_SCHEME://selkies_backend;
-    }
-
-    location \${API_PREFIX}websockets {
-        proxy_set_header        Upgrade \$http_upgrade;
-        proxy_set_header        Connection \"upgrade\";
-        proxy_set_header        Host \$host;
-        proxy_set_header        X-Real-IP \$remote_addr;
-        proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header        X-Forwarded-Proto \$scheme;
-        proxy_http_version      1.1;
-        proxy_read_timeout      3600s;
-        proxy_send_timeout      3600s;
-        proxy_connect_timeout   3600s;
-        proxy_buffering         off;
-        client_max_body_size    10M;
-        proxy_pass $PROXY_SCHEME://selkies_backend;
-    }
-
-    location \${API_PREFIX}tokens {
-        auth_basic off;
-        proxy_http_version      1.1;
-        proxy_read_timeout      3600s;
-        proxy_send_timeout      3600s;
-        proxy_connect_timeout   3600s;
-        proxy_buffering         off;
-
-        client_max_body_size    10M;
-
-        proxy_pass $PROXY_SCHEME://selkies_backend;
-    }
-
-    location \${API_PREFIX}files {
-        fancyindex on;
-        fancyindex_footer /nginx/footer.html;
-        fancyindex_header /nginx/header.html;
-        alias $HOME/${SELKIES_UPLOAD_DIR:-Desktop}/;
-    }
-
-    location \${API_PREFIX}switch {
-        proxy_http_version      1.1;
-        proxy_read_timeout      3600s;
-        proxy_send_timeout      3600s;
-        proxy_connect_timeout   3600s;
-        proxy_buffering         off;
-        client_max_body_size    10M;
-        proxy_pass $PROXY_SCHEME://selkies_backend;
-    }
-
-    location \${API_PREFIX}status {
-        proxy_http_version      1.1;
-        proxy_read_timeout      3600s;
-        proxy_send_timeout      3600s;
-        proxy_connect_timeout   3600s;
-        proxy_buffering         off;
-        client_max_body_size    10M;
-        proxy_pass $PROXY_SCHEME://selkies_backend;
-    }
-
-    location \${API_PREFIX}metrics {
-        proxy_http_version      1.1;
-        proxy_read_timeout      3600s;
-        proxy_send_timeout      3600s;
-        proxy_connect_timeout   3600s;
-        proxy_buffering         off;
-        client_max_body_size    10M;
-        proxy_pass $PROXY_SCHEME://selkies_backend;
-    }
-
-    error_page 500 502 503 504 /50x.html;
-    location = /50x.html {
-        root /opt/selkies-web/;
-    }
-}" | tee /etc/nginx/templates/selkies.conf.template > /dev/null
-
-export API_PREFIX="${SUBFOLDER:-/}"
-envsubst '$API_PREFIX' < /etc/nginx/templates/selkies.conf.template > /etc/nginx/conf.d/selkies.conf
+port="${SELKIES_PORT:-8080}"
 
 # Setup dev mode if defined
 if [ ! -z "${DEV_MODE+x}" ]; then
@@ -271,10 +87,10 @@ if [ ! -z "${DEV_MODE+x}" ]; then
     npm run serve &
   else
     # Build core
-    mkdir -p /opt/selkies-web/src /opt/selkies-web/nginx
+    mkdir -p /opt/selkies-web/src
     # Define the dist-packages path for selkies_web
     SELKIES_WEB_DIST="/home/${USER}/selkies/src/selkies/selkies_web"
-    mkdir -p "${SELKIES_WEB_DIST}/src" "${SELKIES_WEB_DIST}/nginx"
+    mkdir -p "${SELKIES_WEB_DIST}/src"
     cp /opt/selkies-web/icon.png /opt/selkies-web/manifest.json ${SELKIES_WEB_DIST}
 
     cd $HOME/selkies/addons/selkies-web-core
@@ -294,17 +110,11 @@ if [ ! -z "${DEV_MODE+x}" ]; then
       --exec "echo /opt/selkies-web/src/ ${SELKIES_WEB_DIST}/src/ | \
       xargs -n 1 cp ../universal-touch-gamepad/universalTouchGamepad.js" &
 
-    # Copy themes
-    cp -a nginx ../${DEV_MODE}/
-
     cd $HOME/selkies/addons/${DEV_MODE}
     npm install
     npm run build
     cp ../selkies-web-core/dist/clipboard-worker* dist/assets/
     cp -r dist/* /opt/selkies-web/
-    cp -r nginx/* /opt/selkies-web/nginx/
-    cp -r nginx/* "${SELKIES_WEB_DIST}/nginx"
-    sed -i "s|REPLACE_DOWNLOADS_PATH|${HOME}/${SELKIES_UPLOAD_DIR:-Desktop/}|g" /opt/selkies-web/nginx/footer.html
     sudo nodemon --watch ../${DEV_MODE}/src --exec "npm run build && \
       cp -r ../${DEV_MODE}/dist/* /opt/selkies-web/ && \
       cp ../selkies-web-core/dist/clipboard-worker* /opt/selkies-web/assets/ && \

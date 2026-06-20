@@ -84,8 +84,10 @@ class RTCRtpCodecParameters:
 
     def __str__(self) -> str:
         s = f"{self.name}/{self.clockRate}"
-        if self.channels == 2:
-            s += "/2"
+        # Multi-channel audio (stereo opus, surround multiopus) carries its channel
+        # count in the rtpmap encoding parameters.
+        if self.channels is not None and self.channels >= 2:
+            s += f"/{self.channels}"
         return s
 
 

@@ -25,8 +25,8 @@
  *   limitations under the License.
  */
 
-import { WebRTCDemo } from "./lib/webrtc";
-import { WebRTCDemoSignaling } from "./lib/signaling";
+import { WebRTCClient } from "./lib/webrtc";
+import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
 import ClipboardWorker from './clipboard-worker.js?worker'
 
@@ -238,13 +238,18 @@ export default function webrtc() {
 	let audioBitRate = 128000; // in kbps
 	let showStart = false;
 	let showDrawer = false;
-	// TODO: how do we want to handle the log and debug entries
-	const MAX_LOG_ENTRIES = 1000; // cap write-only buffers so they can't grow for the whole session
+	// Log/debug entries are retained in capped ring buffers (devtools inspection via
+	// window.selkiesLogs); everything is also mirrored to the console as it happens.
+	const MAX_LOG_ENTRIES = 1000; // cap so the buffers can't grow for the whole session
 	const pushCapped = (arr, v) => { arr.push(v); if (arr.length > MAX_LOG_ENTRIES) arr.shift(); };
 	let logEntries = [];
 	let debugEntries = [];
+	window.selkiesLogs = { log: logEntries, debug: debugEntries };
 	let status = 'connecting';
 	let clipboardStatus = 'disabled';
+	// Per-direction gates (server-synced): in = client->server, out = server->client.
+	let clipboard_in_enabled = true;
+	let clipboard_out_enabled = true;
 	let windowResolution = [];
 	let encoderLabel = "";
 	let encoder = "";
@@ -275,6 +280,9 @@ export default function webrtc() {
 
 	var videoElement = null;
 	var audioElement = null;
+	// Screen Wake Lock sentinel + preferred audio output device (parity with the WS core).
+	let wakeLockSentinel = null;
+	let preferredOutputDeviceId = null;
 	let serverLatency = 0;
 	let resizeRemote = false;
 	let scaleLocal = false;
@@ -298,7 +306,6 @@ export default function webrtc() {
 	// track interval ids so they can be cleared on cleanup/reconnect (avoid leaks/double-start)
 	let statsLoopId = null;
 	let metricsLoopId = null;
-	let receiverIntervalIds = [];
 	let useCssScaling = false;
 	// Webrtc mode has video and audio active by default,
 	// and no microphone support yet.
@@ -308,11 +315,19 @@ export default function webrtc() {
 	let isGamepadEnabled = true;
 
 	// 64KiB, excluding a byte for prefix
-	const UPLOAD_CHUNK_SIZE = 64 * 1024  - 1;
+	// Per-message budget on the data channel: the browser exposes the negotiated
+	// SCTP max-message-size (min of both ends); fall back to the RFC 8841 64 KiB
+	// default pre-negotiation, cap at 1 MiB to bound per-message buffering.
+	const dcMessageBudget = () => {
+		const nego = (typeof webrtc !== 'undefined' && webrtc && webrtc.peerConnection &&
+			webrtc.peerConnection.sctp && webrtc.peerConnection.sctp.maxMessageSize) || 0;
+		const limit = nego > 0 ? Math.min(nego, 1024 * 1024) : 64 * 1024;
+		return limit - 512;
+	};
 	const CLIENT_CONTROLLER = "controller";
 	const CLIENT_VIEWER = "viewer";
 	// leave some room for metadata in the message
-	const CLIPBOARD_CHUNK_SIZE = 64 * 1024 - 100;
+
 
 	let detectedSharedModeType = null;
 	let playerInputTargetIndex = 0;
@@ -328,6 +343,18 @@ export default function webrtc() {
 	};
 	let clipboardWorker = new ClipboardWorkerBridge();
 	let lastClipboardText = "";
+	// Server clipboard cache + pending Ctrl/Cmd+C requests (Safari/Firefox path).
+	let lastServerClipboardText = "";
+	let lastServerClipboardBlob = null;
+	let lastServerClipboardMime = "";
+	let pendingClipboardRequests = [];
+	const isChromium = (() => {
+		const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+			(navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+		const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
+		const isCriOS = /CriOS/.test(navigator.userAgent);
+		return typeof window.chrome !== 'undefined' && !isIOS && !isFirefox && !isCriOS;
+	})();
 
 	const hash = window.location.hash;
 	if (hash === '#shared') {
@@ -353,8 +380,19 @@ export default function webrtc() {
 	const isStrictViewer = detectedSharedModeType === "shared";
 
 	// Set storage key based on URL
-	const urlForKey = window.location.href.split('#')[0];
+	// Origin + pathname only (NOT the full URL): a per-session ?token=... must not mint
+	// a new localStorage namespace each connect. Must match selkies-core.js / ws-core.
+	const urlForKey = window.location.origin + window.location.pathname;
 	const storageAppName = urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+	// Guarded write: a full or unavailable store degrades to a warning instead of
+	// throwing QuotaExceededError into the caller.
+	const safeSetItem = (key, value) => {
+		try {
+			window.localStorage.setItem(key, value);
+		} catch (e) {
+			console.warn(`Selkies: could not persist '${key}' to localStorage:`, e);
+		}
+	};
 
 	const getIntParam = (key, default_value) => {
 		const prefixedKey = `${storageAppName}_${key}`;
@@ -366,7 +404,7 @@ export default function webrtc() {
 		if (value === null || value === undefined) {
 				window.localStorage.removeItem(prefixedKey);
 		} else {
-				window.localStorage.setItem(prefixedKey, value.toString());
+				safeSetItem(prefixedKey, value.toString());
 		}
 	};
 	const getBoolParam = (key, default_value) => {
@@ -382,7 +420,7 @@ export default function webrtc() {
 		if (value === null || value === undefined) {
 				window.localStorage.removeItem(prefixedKey);
 		} else {
-				window.localStorage.setItem(prefixedKey, value.toString());
+				safeSetItem(prefixedKey, value.toString());
 		}
 	};
 	const getStringParam = (key, default_value) => {
@@ -395,7 +433,7 @@ export default function webrtc() {
 		if (value === null || value === undefined) {
 				window.localStorage.removeItem(prefixedKey);
 		} else {
-				window.localStorage.setItem(prefixedKey, value.toString());
+				safeSetItem(prefixedKey, value.toString());
 		}
 	};
 
@@ -414,6 +452,57 @@ export default function webrtc() {
 		showStart = false;
 		if (playButtonElement) playButtonElement.classList.add('hidden');
 		webrtc.playStream();
+		requestWakeLock();
+	}
+
+	// Keep the screen awake while streaming. request() early-returns if already held
+	// and no-ops (with a warning) where the API is absent.
+	const requestWakeLock = async () => {
+		if (wakeLockSentinel !== null) return;
+		if ('wakeLock' in navigator) {
+			try {
+				wakeLockSentinel = await navigator.wakeLock.request('screen');
+				wakeLockSentinel.addEventListener('release', () => {
+					console.log('Screen Wake Lock was released automatically.');
+					wakeLockSentinel = null;
+				});
+				console.log('Screen Wake Lock is active.');
+			} catch (err) {
+				console.error(`Could not acquire Wake Lock: ${err.name}, ${err.message}`);
+			}
+		} else {
+			console.warn('Wake Lock API is not supported by this browser.');
+		}
+	};
+
+	const releaseWakeLock = async () => {
+		if (wakeLockSentinel !== null) {
+			await wakeLockSentinel.release();
+			wakeLockSentinel = null;
+		}
+	};
+
+	// A backgrounded tab drops the wake lock automatically; re-acquire when visible.
+	async function handleVisibilityChange() {
+		if (!document.hidden && wakeLockSentinel === null) {
+			await requestWakeLock();
+		}
+	}
+
+	// Route WebRTC audio to a chosen output device. The <video> element carries both
+	// audio and video (one bundled stream), so setSinkId on it moves the audio sink.
+	async function applyOutputDevice() {
+		if (!preferredOutputDeviceId || !videoElement) return;
+		if (!('setSinkId' in HTMLMediaElement.prototype) || typeof videoElement.setSinkId !== 'function') {
+			console.warn('setSinkId not supported; cannot select audio output device.');
+			return;
+		}
+		try {
+			await videoElement.setSinkId(preferredOutputDeviceId);
+			console.log(`Playback output set to device: ${preferredOutputDeviceId}`);
+		} catch (err) {
+			console.error(`Failed to set audio output device: ${err.name}, ${err.message}`);
+		}
 	}
 
 	function updateStatusDisplay() {
@@ -453,53 +542,52 @@ export default function webrtc() {
 		console.log("Sanitizing and storing settings based on server payload.");
 		const changes = {};
 
+		// Persist ONLY genuine user overrides. A server-pushed value with no stored
+		// override is applied to the runtime (window[key]) but NOT written to
+		// localStorage, so a later server-side change can still be re-pushed.
+		// Persisting server defaults here left them stuck against future updates.
 		for (const key in serverSettings) {
 			if (!serverSettings.hasOwnProperty(key)) continue;
 			const setting = serverSettings[key];
-			let sanitizedValue;
+			const finalKey = `${storageAppName}_${key}`;
+			const wasUnset = window.localStorage.getItem(finalKey) === null;
+
 			if (setting.min !== undefined && setting.max !== undefined) {
 				const clientValue = getIntParam(key, setting.default);
-				if (clientValue < setting.min || clientValue > setting.max) {
-					sanitizedValue = setting.default;
-					console.log(`Sanitizing '${key}': value ${clientValue} is out of range [${setting.min}-${setting.max}]. Resetting to default ${sanitizedValue}.`);
-					changes[key] = sanitizedValue;
+				if (wasUnset) {
+					window[key] = clientValue;
+				} else if (clientValue < setting.min || clientValue > setting.max) {
+					console.log(`Sanitizing '${key}': stored value ${clientValue} out of range [${setting.min}-${setting.max}]. Reverting to server default ${setting.default}.`);
+					window.localStorage.removeItem(finalKey);
+					window[key] = setting.default;
+					changes[key] = setting.default;
 				} else {
-					sanitizedValue = clientValue;
+					window[key] = clientValue;
+					setIntParam(key, clientValue);
 				}
-				window[key] = sanitizedValue;
-				setIntParam(key, sanitizedValue);
 			}
 			else if (setting.allowed !== undefined) {
 				const isNumericEnum = !isNaN(parseFloat(setting.allowed[0]));
-				let clientValueStr;
-
-				if (isNumericEnum) {
-					clientValueStr = getIntParam(key, parseInt(setting.value, 10)).toString();
+				const clientValueStr = isNumericEnum
+					? getIntParam(key, parseInt(setting.value, 10)).toString()
+					: getStringParam(key, setting.value);
+				const applyRuntime = (val) => { window[key] = isNumericEnum ? parseInt(val, 10) : val; };
+				if (wasUnset) {
+					applyRuntime(setting.value);
+				} else if (!setting.allowed.includes(clientValueStr)) {
+					console.log(`Sanitizing '${key}': stored "${clientValueStr}" not in allowed [${setting.allowed.join(', ')}]. Reverting to server default "${setting.value}".`);
+					window.localStorage.removeItem(finalKey);
+					applyRuntime(setting.value);
+					changes[key] = setting.value;
 				} else {
-					clientValueStr = getStringParam(key, setting.value);
-				}
-
-				if (!setting.allowed.includes(clientValueStr)) {
-					sanitizedValue = setting.value;
-					console.log(`Sanitizing '${key}': value "${clientValueStr}" is not in allowed list [${setting.allowed.join(', ')}]. Resetting to default "${sanitizedValue}".`);
-					changes[key] = sanitizedValue;
-				} else {
-					sanitizedValue = clientValueStr;
-				}
-
-				if (isNumericEnum) {
-					const numericValue = parseInt(sanitizedValue, 10);
-					window[key] = numericValue;
-					setIntParam(key, numericValue);
-				} else {
-					window[key] = sanitizedValue;
-					setStringParam(key, sanitizedValue);
+					applyRuntime(clientValueStr);
+					if (isNumericEnum) setIntParam(key, parseInt(clientValueStr, 10));
+					else setStringParam(key, clientValueStr);
 				}
 			}
 			else if (typeof setting.value === 'boolean') {
 				const serverValue = setting.value;
-				const isLocked = !!setting.locked;
-				if (isLocked) {
+				if (setting.locked) {
 					const clientValue = getBoolParam(key, !serverValue);
 					if (clientValue !== serverValue) {
 						console.log(`Sanitizing '${key}': setting is locked by server. Client value ${clientValue} is being overwritten with ${serverValue}.`);
@@ -507,14 +595,10 @@ export default function webrtc() {
 					}
 					window[key] = serverValue;
 					setBoolParam(key, serverValue);
+				} else if (wasUnset) {
+					window[key] = serverValue;
 				} else {
-					const prefixedKey = `${storageAppName}_${key}`;
-					const wasUnset = window.localStorage.getItem(prefixedKey) === null;
 					const clientValue = getBoolParam(key, serverValue);
-					if (wasUnset) {
-						console.log(`Initializing unlocked setting '${key}' for the first time with server default: ${serverValue}. Flagging as a change.`);
-						changes[key] = serverValue;
-					}
 					window[key] = clientValue;
 					setBoolParam(key, clientValue);
 				}
@@ -535,13 +619,13 @@ export default function webrtc() {
 		const knownSettings = [
 			'framerate', 'encoder_rtc', 'is_manual_resolution_mode',
 			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
-			'rate_control_mode', 'h264_crf'
+			'rate_control_mode', 'video_crf'
 		];
 		const booleanSettingKeys = [
 			'is_manual_resolution_mode', 'enable_binary_clipboard'
 		];
 		const integerSettingKeys = [
-			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_bitrate', 'h264_crf'
+			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_bitrate', 'video_crf'
 		];
 
 		for (const key in localStorage) {
@@ -797,24 +881,34 @@ export default function webrtc() {
 				window.isManualResolutionMode = true;
 				break;
 			case "setUseCssScaling":
-				// TODO: fix issues with hiDPI especially from andriod clients
-				// useCssScaling = message.value;
-				// setBoolParam('useCssScaling', useCssScaling);
-				// console.log(`Set useCssScaling to ${useCssScaling} and persisted.`);
-
-				// input.updateCssScaling();
-				// updateVideoImageRendering();
-				// if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
-				//     sendResolutionToServer(manualWidth, manualHeight);
-				//     applyManualStyle(manualWidth, manualHeight, scaleLocal);
-				// } else {
-				//     const currentWindowRes = input.getWindowResolution()
-				//     const autoWidth = roundDownToEven(currentWindowRes[0]);
-				//     const autoHeight = roundDownToEven(currentWindowRes[1]);
-				//     sendResolutionToServer(autoWidth, autoHeight);
-				//     resetToWindowResolution(autoWidth, autoHeight)
-				// }
-				console.warn("Skipping cssScaling since hidpi needs to be implemented")
+				// ws-core parity. hiDPI is handled by re-deriving the DPR everywhere the
+				// flag matters: sendResolutionToServer/resetToWindowResolution multiply by
+				// devicePixelRatio only when CSS scaling is off, and input.updateCssScaling
+				// realigns the coordinate math (touch included via the shared sink mapper).
+				if (typeof message.value === 'boolean') {
+					const changed = useCssScaling !== message.value;
+					useCssScaling = message.value;
+					setBoolParam('useCssScaling', useCssScaling);
+					console.log(`Set useCssScaling to ${useCssScaling} and persisted.`);
+					if (input && typeof input.updateCssScaling === 'function') {
+						input.updateCssScaling(useCssScaling);
+					}
+					if (changed) {
+						updateVideoImageRendering();
+						if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
+							sendResolutionToServer(manualWidth, manualHeight);
+							applyManualStyle(manualWidth, manualHeight, scaleLocal);
+						} else if (!isSharedMode && input) {
+							const currentWindowRes = input.getWindowResolution();
+							const autoWidth = roundDownToEven(currentWindowRes[0]);
+							const autoHeight = roundDownToEven(currentWindowRes[1]);
+							sendResolutionToServer(autoWidth, autoHeight);
+							resetToWindowResolution(autoWidth, autoHeight);
+						}
+					}
+				} else {
+					console.warn("Invalid value received for setUseCssScaling:", message.value);
+				}
 				break;
 			case "settings":
 				console.log("Received settings msg from dashboard:", message.settings);
@@ -832,6 +926,21 @@ export default function webrtc() {
 					webrtc.sendDataChannelMessage(`cmd,${commandString}`);
 				} else {
 					console.warn(`Received invalid command from dashboard: ${message.value}`)
+				}
+				break;
+			case 'pipelineControl':
+				// The only pipeline the WebRTC client toggles is the microphone (video and
+				// audio stay negotiated for the session); attach/detach the mic track.
+				if (message.pipeline === 'microphone' && webrtc && typeof webrtc.setMicrophone === 'function') {
+					const micOn = !!message.enabled;
+					webrtc.setMicrophone(micOn).then(() => {
+						isMicrophoneActive = micOn;
+						postSidebarButtonUpdate();
+					}).catch((e) => {
+						console.error('Microphone toggle failed:', e);
+						isMicrophoneActive = false;
+						postSidebarButtonUpdate();
+					});
 				}
 				break;
 			case 'gamepadControl':
@@ -852,6 +961,14 @@ export default function webrtc() {
 				}
 				const newClipboardText = message.text;
 				sendClipboardData(newClipboardText);
+				break;
+			case 'audioDeviceSelected':
+				// Output-device routing (setSinkId); mic-input device selection is not
+				// plumbed on the WebRTC mic path, so only 'output' is honored here.
+				if (message.context === 'output' && message.deviceId) {
+					preferredOutputDeviceId = message.deviceId;
+					applyOutputDevice();
+				}
 				break;
 			default:
 				break;
@@ -890,6 +1007,14 @@ export default function webrtc() {
 			setBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 			console.log(`Binary clipboard support ${enable_binary_clipboard ? 'enabled' : 'disabled'}`);
 		}
+		if (settings.clipboard_in_enabled !== undefined) {
+			clipboard_in_enabled = !!settings.clipboard_in_enabled;
+			setBoolParam('clipboard_in_enabled', clipboard_in_enabled);
+		}
+		if (settings.clipboard_out_enabled !== undefined) {
+			clipboard_out_enabled = !!settings.clipboard_out_enabled;
+			setBoolParam('clipboard_out_enabled', clipboard_out_enabled);
+		}
 		if (settings.rate_control_mode !== undefined) {
 			rateControlMode = settings.rate_control_mode;
 			webrtc.sendDataChannelMessage(`_rc,${rateControlMode}`);
@@ -897,10 +1022,10 @@ export default function webrtc() {
 			setStringParam('rate_control_mode', rateControlMode);
 			console.log(`Rate control mode set to ${rateControlMode}`);
 		}
-		if (settings.h264_crf !== undefined) {
-			crf = parseInt(settings.h264_crf, 10);
+		if (settings.video_crf !== undefined) {
+			crf = parseInt(settings.video_crf, 10);
 			webrtc.sendDataChannelMessage(`_crf,${crf}`);
-			setIntParam('h264_crf', crf);
+			setIntParam('video_crf', crf);
 			console.log(`H264 CRF set to ${crf}`);
 		}
 	}
@@ -1045,7 +1170,7 @@ export default function webrtc() {
 			};
 
 			function readChunk(startOffset) {
-				const slice = file.slice(startOffset, Math.min(startOffset + UPLOAD_CHUNK_SIZE, file.size));
+				const slice = file.slice(startOffset, Math.min(startOffset + dcMessageBudget(), file.size));
 				reader.readAsArrayBuffer(slice);
 			}
 			readChunk(0);
@@ -1152,7 +1277,10 @@ export default function webrtc() {
 		}
 	}
 
-	// TODO: How do we want to render rudimentary metrics?
+	// Metrics surfacing contract: the essentials are published on window (fps,
+	// network_stats, video_bitrate) for the sidebar/dashboard bridge, the full
+	// connectionStat object stays readable here, and enableWebrtcStatics optionally
+	// streams the raw reports to the server as `_stats_video`.
 	function enableStatWatch() {
 		if (isSharedMode) {
 			console.log("Shared mode detected, skipping stats watch setup.");
@@ -1197,6 +1325,14 @@ export default function webrtc() {
 				connectionStat.connectionAudioCodecName = stats.audio.codecName;
 				connectionStat.connectionAudioBitrate = (((stats.audio.bytesReceived - audioBytesReceivedStart) / (now - statsStart)) * 8 / 1e+3).toFixed(2);
 				audioBytesReceivedStart = stats.audio.bytesReceived;
+				// NetEQ concealment counters — the RED before/after acceptance metric.
+				connectionStat.connectionAudioConcealedSamples = stats.audio.concealedSamples;
+				connectionStat.connectionAudioConcealmentEvents = stats.audio.concealmentEvents;
+				connectionStat.connectionAudioTotalSamplesReceived = stats.audio.totalSamplesReceived;
+				connectionStat.connectionAudioPacketsDiscarded = stats.audio.packetsDiscarded;
+				// Anchor the time window with the byte baselines (success path only) so the
+				// next tick's byte window and time window cover the same interval.
+				statsStart = now;
 
 				// Latency stats
 				connectionStat.connectionVideoLatency = parseInt(Math.round(rtt + (1000.0 * (stats.video.jitterBufferDelay - previousVideoJitterBufferDelay) / (stats.video.jitterBufferEmittedCount - previousVideoJitterBufferEmittedCount) || 0)));
@@ -1217,19 +1353,17 @@ export default function webrtc() {
 				window.video_bitrate = connectionStat.connectionVideoBitrate;
 				if (enableWebrtcStatics) webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
 			} catch (e) {
-				// webrtc may be null after cleanup; log anything unexpected for observability
+				// webrtc may be null after cleanup; log anything unexpected for observability.
+				// Don't re-anchor statsStart here: on error the byte baselines are NOT updated,
+				// so advancing only the time window would inflate the next tick's bitrate.
 				if (webrtc !== null) console.warn("Error collecting connection stats:", e);
-			} finally {
-				// Always re-anchor the window so a mid-body throw doesn't widen the next bitrate interval
-				statsStart = now;
 			}
 		// Stats refresh interval (1000 ms)
 		}, 1000);
 	}
 
-	async function handleWindowFocus() {
-		webrtc.sendDataChannelMessage("kr");
-		if (!window.isSecureContext || isSharedMode || clipboardStatus !== "enabled") return;
+	async function readLocalClipboardAndSend() {
+		if (!window.isSecureContext || isSharedMode || clipboardStatus !== "enabled" || !clipboard_in_enabled) return;
 
 		try {
 			if (enable_binary_clipboard) {
@@ -1269,9 +1403,167 @@ export default function webrtc() {
 			}
 		} catch (err) {
 			if (err.name !== 'NotFoundError' && !err.message.includes('not focused')) {
-				console.warn(`Clipboard focus error: ${err.name}`);
+				console.warn(`Clipboard read error: ${err.name}`);
 			}
 		}
+	}
+
+	async function handleWindowFocus() {
+		webrtc.sendDataChannelMessage("kr");
+		// Chromium reads the clipboard on focus without friction. Firefox/WebKit raise an
+		// intrusive paste prompt on every focus read, so there the read is driven only by
+		// the Ctrl/Cmd+V keydown and paste-event handlers.
+		if (isChromium) {
+			readLocalClipboardAndSend();
+		}
+	}
+
+	// Settle pending REQUEST_CLIPBOARD promises with fresh server data.
+	function resolveServerClipboard(text, blob, mime) {
+		if (typeof text === 'string') { lastServerClipboardText = text; }
+		if (blob) { lastServerClipboardBlob = blob; }
+		if (mime) { lastServerClipboardMime = mime; }
+		if (pendingClipboardRequests.length === 0) return;
+		const reqs = pendingClipboardRequests;
+		pendingClipboardRequests = [];
+		for (const req of reqs) {
+			try {
+				if (req.wantBinary && blob) { req.resolve(blob); }
+				else { req.resolve(typeof text === 'string' ? text : (lastServerClipboardText || '')); }
+			} catch (_) { /* ignore */ }
+		}
+	}
+
+	// Ask the server for its clipboard; resolves on the next clipboard message, or
+	// falls back to the cached value after ~1s so the ClipboardItem promise (and the
+	// browser's transient activation) can't hang.
+	function requestServerClipboard(wantBinary) {
+		try { webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD'); } catch (_) {}
+		return new Promise((resolve) => {
+			const req = { wantBinary: !!wantBinary, settled: false };
+			req.resolve = (val) => {
+				if (req.settled) return;
+				req.settled = true;
+				const idx = pendingClipboardRequests.indexOf(req);
+				if (idx !== -1) pendingClipboardRequests.splice(idx, 1);
+				resolve(val);
+			};
+			pendingClipboardRequests.push(req);
+			setTimeout(() => {
+				if (wantBinary) {
+					req.resolve(lastServerClipboardBlob || new Blob([lastServerClipboardText || ''], { type: 'text/plain' }));
+				} else {
+					req.resolve(lastServerClipboardText || '');
+				}
+			}, 1000);
+		});
+	}
+
+	// Last-resort copy for browsers that reject navigator.clipboard.write.
+	async function execCommandCopyFallback(textPromise) {
+		let text = '';
+		try { text = await textPromise; } catch (_) { text = lastServerClipboardText || ''; }
+		if (typeof text !== 'string') text = lastServerClipboardText || '';
+		// Don't clobber the user's local clipboard with empty content (slow/empty server
+		// response on the first copy of a session).
+		if (!text) return;
+		const ta = document.createElement('textarea');
+		ta.value = text;
+		ta.setAttribute('readonly', '');
+		ta.style.position = 'fixed';
+		ta.style.top = '-9999px';
+		ta.style.opacity = '0';
+		document.body.appendChild(ta);
+		try {
+			ta.focus();
+			ta.select();
+			ta.setSelectionRange(0, ta.value.length);
+			if (!document.execCommand('copy')) console.warn('execCommand("copy") fallback returned false.');
+		} catch (err) {
+			console.warn(`execCommand("copy") fallback threw: ${err && err.name}`);
+		} finally {
+			document.body.removeChild(ta);
+		}
+	}
+
+	// Safari/Firefox reject navigator.clipboard from focus/message handlers (no
+	// transient activation), so mirror the sync onto Ctrl/Cmd+V (read) and
+	// Ctrl/Cmd+C (write) gestures. Chromium keeps the focus/message path. Never
+	// preventDefault: the keystroke must still reach the remote session.
+	function handleClipboardKeydown(event) {
+		if (isSharedMode || clipboardStatus !== "enabled") return;
+		if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+		// Fire once per physical keypress; don't spam clipboard ops on autorepeat.
+		if (event.repeat) return;
+		// Only drive remote-clipboard sync from the stream; don't hijack copy/paste in
+		// page form fields (settings UI, etc.). The stream's overlay input is exempt.
+		const ae = document.activeElement;
+		if (ae && ae.id !== 'overlayInput' &&
+			(ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable)) {
+			return;
+		}
+		const key = (event.key || '').toLowerCase();
+		if (key === 'v' && clipboard_in_enabled) {
+			readLocalClipboardAndSend();
+		} else if (key === 'c' && clipboard_out_enabled) {
+			// Advertise text/plain ONLY: a Ctrl/Cmd+C can't synchronously know whether the
+			// server's CURRENT clipboard is an image, and a stale lastServerClipboardMime
+			// would build a malformed ClipboardItem. Server images arrive via the push handler.
+			const textPromise = requestServerClipboard(false);
+			const items = {
+				'text/plain': textPromise.then((t) =>
+					new Blob([typeof t === 'string' ? t : (lastServerClipboardText || '')], { type: 'text/plain' }))
+			};
+			let writePromise = null;
+			try {
+				writePromise = navigator.clipboard.write([new ClipboardItem(items)]);
+			} catch (err) {
+				console.warn(`navigator.clipboard.write unavailable on Ctrl+C, using execCommand: ${err && err.name}`);
+				execCommandCopyFallback(textPromise);
+			}
+			if (writePromise && writePromise.catch) {
+				writePromise.catch((err) => {
+					console.warn(`navigator.clipboard.write rejected on Ctrl+C, using execCommand: ${err && err.name}`);
+					execCommandCopyFallback(textPromise);
+				});
+			}
+		}
+	}
+
+	// The 'v' keydown path reads via navigator.clipboard.read()/readText(), which
+	// WebKit/Safari reject with NotAllowedError even with an editable focused. The
+	// 'paste' event exposes event.clipboardData synchronously in both WebKit and
+	// Firefox, so drive paste-to-server from it there (the stream's overlayInput is
+	// the focused editable target, so the event fires and bubbles to the window).
+	// Don't preventDefault: the paste chord must still reach the remote session.
+	function handleClipboardPaste(event) {
+		if (isSharedMode || clipboardStatus !== "enabled" || !clipboard_in_enabled) return;
+		// Only drive remote-clipboard sync from the stream; don't hijack paste into
+		// page form fields (settings UI, etc.). The stream's overlay input is exempt.
+		const ae = document.activeElement;
+		if (ae && ae.id !== 'overlayInput' &&
+			(ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable)) {
+			return;
+		}
+		const cd = event.clipboardData;
+		if (!cd) return;
+		// Prefer an image when binary clipboard is on and the payload carries one.
+		if (enable_binary_clipboard && cd.items) {
+			for (let i = 0; i < cd.items.length; i++) {
+				const it = cd.items[i];
+				if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
+					const file = it.getAsFile();
+					if (file) {
+						file.arrayBuffer()
+							.then((buf) => sendClipboardData(buf, it.type))
+							.catch((err) => console.warn(`Paste image read failed: ${err && err.name}`));
+						return;
+					}
+				}
+			}
+		}
+		const text = cd.getData('text/plain');
+		if (text) sendClipboardData(text);
 	}
 
 	function handleWindowBlur() {
@@ -1314,7 +1606,7 @@ export default function webrtc() {
 	}
 
 	async function sendClipboardData(data, mimeType = 'text/plain') {
-		if (clipboardStatus !== "enabled" || data == null) return;
+		if (clipboardStatus !== "enabled" || !clipboard_in_enabled || data == null) return;
 
 		const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
 		let arrayBuffer;
@@ -1337,7 +1629,8 @@ export default function webrtc() {
 		try {
 			const { result: fullBase64 } = await clipboardWorker.encodeBinary(arrayBuffer);
 			const b64Size = fullBase64.length;
-			if (b64Size <= CLIPBOARD_CHUNK_SIZE) {
+			const clipboardChunk = dcMessageBudget();
+			if (b64Size <= clipboardChunk) {
 				if (mimeType === 'text/plain') {
 					webrtc.sendDataChannelMessage(`cw,${fullBase64}`);
 					console.log('Sent small clipboard text in single message.');
@@ -1353,8 +1646,8 @@ export default function webrtc() {
 				} else {
 					webrtc.sendDataChannelMessage(`cbs,${tid},${mimeType},${totalSize}`);
 				}
-				for (let offset = 0; offset < b64Size; offset += CLIPBOARD_CHUNK_SIZE) {
-					const b64Chunk = fullBase64.substring(offset, offset + CLIPBOARD_CHUNK_SIZE);
+				for (let offset = 0; offset < b64Size; offset += clipboardChunk) {
+					const b64Chunk = fullBase64.substring(offset, offset + clipboardChunk);
 					if (mimeType === 'text/plain') {
 						webrtc.sendDataChannelMessage(`cwd,${tid},${b64Chunk}`);
 					} else {
@@ -1559,38 +1852,31 @@ export default function webrtc() {
 				document.body.appendChild(keyboardInputAssist);
 				console.log("Dynamically added #keyboard-input-assist element.");
 			}
-			// Fetch locally stored application data
+			// Fetch locally stored application data. Reads with fallbacks only and
+			// persists nothing: a fresh profile keeps every key unset so server-pushed
+			// defaults stay re-pushable. Only genuine user actions (and
+			// sanitizeAndStoreSettings for keys the user already overrode) write localStorage.
 			appName = "webrtc"
 			debug = getBoolParam('debug', false);
-			setBoolParam('debug', debug);
 			turnSwitch = getBoolParam('turn_switch', false);
-			setBoolParam('turn_switch', turnSwitch);
 			resizeRemote = getBoolParam('resize_remote', resizeRemote);
-			setBoolParam('resize_remote', resizeRemote)
 			scaleLocal = getBoolParam('scaleLocallyManual', !resizeRemote);
-			setBoolParam('scaleLocallyManual', scaleLocal);
 			videoBitRate = getIntParam('video_bitrate', videoBitRate);
-			setIntParam('video_bitrate', videoBitRate);
 			videoFramerate = getIntParam('framerate', videoFramerate);
-			setIntParam('framerate', videoFramerate);
 			audioBitRate = getIntParam('audio_bitrate', audioBitRate);
-			setIntParam('audio_bitrate', audioBitRate);
 			window.isManualResolutionMode = getBoolParam('is_manual_resolution_mode', false);
-			setBoolParam('is_manual_resolution_mode', window.isManualResolutionMode);
 			isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
-			setBoolParam('isGamepadEnabled', isGamepadEnabled);
 			manualWidth = getIntParam('manual_width', null);
-			setIntParam('manual_width', manualWidth);
 			manualHeight = getIntParam('manual_height', null);
-			setIntParam('manual_height', manualHeight);
-			encoder = getStringParam('encoder_rtc', 'x264enc');
-			setStringParam('encoder_rtc', encoder)
+			encoder = getStringParam('encoder_rtc', 'h264enc');
 			rateControlMode = getStringParam('rate_control_mode', 'cbr');
-			setStringParam('rate_control_mode', rateControlMode);
-			useCssScaling = getBoolParam('useCssScaling', true);  // TODO: need to handle hiDPI
-			setBoolParam('useCssScaling', useCssScaling);
+			// hiDPI contract: CSS scaling on => DPR 1 everywhere (resolution + input);
+			// off => devicePixelRatio is applied by the resolution senders and input math.
+			useCssScaling = getBoolParam('useCssScaling', true);
 			enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
-			crf = getIntParam('h264_crf', crf);
+			clipboard_in_enabled = getBoolParam('clipboard_in_enabled', clipboard_in_enabled);
+			clipboard_out_enabled = getBoolParam('clipboard_out_enabled', clipboard_out_enabled);
+			crf = getIntParam('video_crf', crf);
 
 			if (!isSharedMode) {
 				// listen for dashboard messages (Dashboard -> core client)
@@ -1600,14 +1886,16 @@ export default function webrtc() {
 				// handlers to handle the drop in files/directories for upload
 				overlayInput.addEventListener('dragover', handleDragOver);
 				overlayInput.addEventListener('drop', handleDrop);
+				// re-acquire the screen wake lock when the tab returns to the foreground
+				document.addEventListener('visibilitychange', handleVisibilityChange);
 			}
 
 			// WebRTC entrypoint, connect to the signaling server
 			var pathname = getRoutePrefix() + "/";
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
 			var url = new URL(protocol + window.location.host + pathname + appName + "/signaling/");
-			var signaling = new WebRTCDemoSignaling(url, clientRole, clientSlot, isStrictViewer);
-			webrtc = new WebRTCDemo(signaling, videoElement, 1, isSharedMode);
+			var signaling = new WebRTCSignaling(url, clientRole, clientSlot, isStrictViewer);
+			webrtc = new WebRTCClient(signaling, videoElement, 1, isSharedMode);
 			const send = (data) => {
 				if (isSharedMode && isStrictViewer) return;
 				webrtc.sendDataChannelMessage(data);
@@ -1616,8 +1904,8 @@ export default function webrtc() {
 
 			setupKeyBoardAssisstant();
 
-			// assign the handlers to respective objects
-			// TODO: Need to handle the logEntries and DebugEntries list
+			// assign the handlers to respective objects; entries land in the capped
+			// window.selkiesLogs buffers and mirror to the console
 			signaling.onstatus = (message) => {
 				pushCapped(logEntries, applyTimestamp("[signaling] " + message));
 				console.log("[signaling] " + message);
@@ -1629,6 +1917,7 @@ export default function webrtc() {
 
 			signaling.ondisconnect = (reconnect) => {
 				videoElement.style.cursor = "auto";
+				releaseWakeLock();
 				if (reconnect) {
 					status = 'connecting';
 					webrtc.reset();
@@ -1665,25 +1954,13 @@ export default function webrtc() {
 			webrtc.onconnectionstatechange = (state) => {
 				videoConnected = state;
 				if (videoConnected === "connected") {
-					// Repeatedly emit minimum latency target
-					// clear stale receiver loops before re-creating on a 'connected' transition
-					receiverIntervalIds.forEach(clearInterval);
-					receiverIntervalIds = [];
-					webrtc.peerConnection.getReceivers().forEach((receiver) => {
-						let intervalLoop = setInterval(async () => {
-							if (receiver.track.readyState !== "live" || receiver.transport.state !== "connected") {
-								clearInterval(intervalLoop);
-								return;
-							} else {
-								receiver.jitterBufferTarget = receiver.jitterBufferDelayHint = receiver.playoutDelayHint = 0;
-							}
-						}, 15);
-						receiverIntervalIds.push(intervalLoop);
-					});
 					status = state;
 					if (!statWatchEnabled) {
 						enableStatWatch();
 					}
+					requestWakeLock();
+					// Re-assert the chosen output device on the (re)connected stream.
+					applyOutputDevice();
 				}
 				updateStatusDisplay();
 			};
@@ -1747,6 +2024,13 @@ export default function webrtc() {
 				// Actions to take whenever window changes focus
 				window.addEventListener('focus', handleWindowFocus);
 				window.addEventListener('blur', handleWindowBlur);
+				// Safari/Firefox clipboard parity: Ctrl/Cmd+V read, Ctrl/Cmd+C write.
+				if (!isChromium) {
+					window.addEventListener('keydown', handleClipboardKeydown, true);
+					// WebKit/Safari reject clipboard.read() from the keydown; the 'paste'
+					// event is allowed, so paste-to-server runs off it on non-Chromium.
+					window.addEventListener('paste', handleClipboardPaste, true);
+				}
 			}
 
 			webrtc.onclipboardcontent = async (msg) => {
@@ -1761,19 +2045,24 @@ export default function webrtc() {
 					}
 
 					if (isText) {
-						navigator.clipboard.writeText(content)
-							.then(() => {
-								window.postMessage({
-									type: 'clipboardContentUpdate',
-									text: content,
-								}, window.location.origin);
-								console.log('Successfully wrote text from server to local clipboard.');
-							})
-							.catch(err => {
-								console.log('Could not copy text to clipboard: ', err);
-							});
+						resolveServerClipboard(content, null, 'text/plain');
+						// Local write is gated per-direction (server->client = out).
+						if (clipboard_out_enabled) {
+							navigator.clipboard.writeText(content)
+								.then(() => {
+									window.postMessage({
+										type: 'clipboardContentUpdate',
+										text: content,
+									}, window.location.origin);
+									console.log('Successfully wrote text from server to local clipboard.');
+								})
+								.catch(err => {
+									console.log('Could not copy text to clipboard: ', err);
+								});
+						}
 					} else {
-						if (enable_binary_clipboard) {
+						if (enable_binary_clipboard && clipboard_out_enabled) {
+							try { content.getType(mimeType).then(b => resolveServerClipboard(undefined, b, mimeType)).catch(() => {}); } catch (_) {}
 							navigator.clipboard.write([content])
 								.then(() => {
 									window.postMessage({
@@ -1826,10 +2115,15 @@ export default function webrtc() {
 				// (a persisted client pref); absent/malformed => true for older servers.
 				const ce = obj.settings && obj.settings.command_enabled;
 				serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
+				// Per-direction clipboard gates are policy, so the server value wins
+				// (module mirrors, not window[...], gate the actual handlers).
+				const cin = obj.settings && obj.settings.clipboard_in_enabled;
+				if (cin && typeof cin.value === 'boolean') clipboard_in_enabled = cin.value;
+				const cout = obj.settings && obj.settings.clipboard_out_enabled;
+				if (cout && typeof cout.value === 'boolean') clipboard_out_enabled = cout.value;
 				window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
 				if (Object.keys(changes).length > 0) {
-					// TODO: server-side handling of settings updates
-					// console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
+					console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
 					handleSettingsMessage(changes);
 				}
 				if (obj.settings.is_manual_resolution_mode && obj.settings.is_manual_resolution_mode.value === true) {
@@ -1860,23 +2154,32 @@ export default function webrtc() {
 				}
 			}
 
-			// Safari without Permission API enabled fails
-			if (navigator.permissions) {
-				navigator.permissions.query({
-					name: 'clipboard-read'
-				}).then(permissionStatus => {
-					// Will be 'granted', 'denied' or 'prompt':
-					if (permissionStatus.state === 'granted') {
-							clipboardStatus = 'enabled';
-					}
+			// The clipboard-read permission query REJECTS with TypeError on Firefox
+			// and WebKit (Safari), which would leave clipboardStatus 'disabled' and
+			// kill the Ctrl/Cmd clipboard sync on those engines. There, gate on
+			// capability + secure context instead; per-call NotAllowed errors are
+			// already handled with execCommand/paste fallbacks. Chromium keeps the
+			// permission-query path, which reflects a real granted state there.
+			if (isChromium) {
+				if (navigator.permissions) {
+					navigator.permissions.query({
+						name: 'clipboard-read'
+					}).then(permissionStatus => {
+						// Will be 'granted', 'denied' or 'prompt':
+						if (permissionStatus.state === 'granted') {
+								clipboardStatus = 'enabled';
+						}
 
-					// Listen for changes to the permission state
-					permissionStatus.onchange = () => {
-							if (permissionStatus.state === 'granted') {
-									clipboardStatus = 'enabled';
-							}
-					};
-				});
+						// Listen for changes to the permission state
+						permissionStatus.onchange = () => {
+								if (permissionStatus.state === 'granted') {
+										clipboardStatus = 'enabled';
+								}
+						};
+					}).catch(() => {});
+				}
+			} else if (window.isSecureContext && navigator.clipboard) {
+				clipboardStatus = 'enabled';
 			}
 
 			// Fetch RTC configuration containing STUN/TURN servers.
@@ -1925,6 +2228,14 @@ export default function webrtc() {
 			window.removeEventListener("requestFileUpload", handleRequestFileUpload);
 			window.removeEventListener("focus", handleWindowFocus);
 			window.removeEventListener("blur", handleWindowBlur);
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
+			releaseWakeLock();
+			preferredOutputDeviceId = null;
+			// Mirror the non-Chromium keydown registration (capture=true) so it doesn't leak.
+			if (!isChromium) {
+				window.removeEventListener('keydown', handleClipboardKeydown, true);
+				window.removeEventListener('paste', handleClipboardPaste, true);
+			}
 
 			try {
 				clipboardWorker.terminate();
@@ -1988,8 +2299,6 @@ export default function webrtc() {
 			// clear polling timers so they don't leak/fire on null webrtc after reconnect
 			if (statsLoopId !== null) { clearInterval(statsLoopId); statsLoopId = null; }
 			if (metricsLoopId !== null) { clearInterval(metricsLoopId); metricsLoopId = null; }
-			receiverIntervalIds.forEach(clearInterval);
-			receiverIntervalIds = [];
 			webrtc = null;
 			input = null;
 			useCssScaling = false;
@@ -1997,6 +2306,8 @@ export default function webrtc() {
 			playerInputTargetIndex = 0;
 			enableWebrtcStatics = false;
 			enable_binary_clipboard = false;
+			// Reset the command gate to its default-true semantics for the next session.
+			serverCommandEnabled = true;
 			multipartClipboard = {
 				chunks: [],
 				mimeType: '',

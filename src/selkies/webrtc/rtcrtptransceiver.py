@@ -73,7 +73,7 @@ class RTCRtpTransceiver:
         self._offerDirection: Optional[str] = None
         self._preferred_codecs: list[RTCRtpCodecCapability] = []
 
-        # FIXME: this is only used by RTCPeerConnection
+        # Owned and driven by RTCPeerConnection's BUNDLE bookkeeping.
         self._bundled = False
         self._codecs: list[RTCRtpCodecParameters] = []
         self._headerExtensions: list[RTCRtpHeaderExtensionParameters] = []

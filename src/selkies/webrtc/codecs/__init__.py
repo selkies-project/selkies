@@ -47,6 +47,7 @@ from .g711 import PcmaDecoder, PcmaEncoder, PcmuDecoder, PcmuEncoder
 from .g722 import G722Decoder, G722Encoder
 from .h264 import H264Decoder, H264Encoder, h264_depayload
 from .opus import OpusDecoder, OpusEncoder
+from .red import RedOpusEncoder, red_block_payload_type
 from .vpx import Vp8Decoder, Vp8Encoder, vp8_depayload
 
 # The clockrate for G.722 is 8kHz even though the sampling rate is 16kHz.
@@ -60,11 +61,25 @@ PCMU_CODEC = RTCRtpCodecParameters(
 PCMA_CODEC = RTCRtpCodecParameters(
     mimeType="audio/PCMA", clockRate=8000, channels=1, payloadType=8
 )
+# Opus wrapped in RFC 2198 RED; offered first so peers negotiate redundancy,
+# with plain opus (PT96) as the fallback for peers that decline red.
+RED_CODEC = RTCRtpCodecParameters(
+    mimeType="audio/red",
+    clockRate=48000,
+    channels=2,
+    payloadType=63,
+    parameters={"96/96": None},
+)
 
 CODECS: dict[str, list[RTCRtpCodecParameters]] = {
     "audio": [
+        RED_CODEC,
         RTCRtpCodecParameters(
-            mimeType="audio/opus", clockRate=48000, channels=2, payloadType=96
+            mimeType="audio/opus",
+            clockRate=48000,
+            channels=2,
+            payloadType=96,
+            rtcpFeedback=[RTCRtcpFeedback(type="transport-cc")],
         ),
         G722_CODEC,
         PCMU_CODEC,
@@ -72,6 +87,37 @@ CODECS: dict[str, list[RTCRtpCodecParameters]] = {
     ],
     "video": [],
 }
+
+# Chromium's multistream-Opus surround layouts (matching libwebrtc).
+MULTIOPUS_LAYOUTS: dict[int, dict[str, str]] = {
+    6: {"channel_mapping": "0,4,1,2,3,5", "num_streams": "4", "coupled_streams": "2"},
+    8: {
+        "channel_mapping": "0,6,1,2,3,4,5,7",
+        "num_streams": "5",
+        "coupled_streams": "3",
+    },
+}
+
+
+def configure_multiopus(channels: int) -> None:
+    """Offer surround audio as Chromium's non-standard `multiopus` codec instead of
+    stereo opus/RED (browsers do not RED multiopus). No-op for unknown layouts."""
+    layout = MULTIOPUS_LAYOUTS.get(channels)
+    if layout is None:
+        return
+    CODECS["audio"] = [
+        RTCRtpCodecParameters(
+            mimeType="audio/multiopus",
+            clockRate=48000,
+            channels=channels,
+            payloadType=96,
+            rtcpFeedback=[RTCRtcpFeedback(type="transport-cc")],
+            parameters=dict(layout),
+        ),
+        G722_CODEC,
+        PCMU_CODEC,
+        PCMA_CODEC,
+    ]
 # Note, the id space for these extensions is shared across media types when BUNDLE
 # is negotiated. If you add a audio- or video-specific extension, make sure it has
 # a unique id.
@@ -83,6 +129,10 @@ HEADER_EXTENSIONS: dict[str, list[RTCRtpHeaderExtensionParameters]] = {
         RTCRtpHeaderExtensionParameters(
             id=2, uri="urn:ietf:params:rtp-hdrext:ssrc-audio-level"
         ),
+        RTCRtpHeaderExtensionParameters(
+            id=5,
+            uri="http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+        ),
     ],
     "video": [
         RTCRtpHeaderExtensionParameters(
@@ -93,7 +143,14 @@ HEADER_EXTENSIONS: dict[str, list[RTCRtpHeaderExtensionParameters]] = {
         ),
         RTCRtpHeaderExtensionParameters(
             id=4, uri="http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"
-        )
+        ),
+        RTCRtpHeaderExtensionParameters(
+            id=5,
+            uri="http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+        ),
+        RTCRtpHeaderExtensionParameters(
+            id=6, uri="http://www.webrtc.org/experiments/rtp-hdrext/video-timing"
+        ),
     ],
 }
 
@@ -115,7 +172,9 @@ def init_codecs() -> None:
                 rtcpFeedback=[
                     RTCRtcpFeedback(type="nack"),
                     RTCRtcpFeedback(type="nack", parameter="pli"),
+                    RTCRtcpFeedback(type="ccm", parameter="fir"),
                     RTCRtcpFeedback(type="goog-remb"),
+                    RTCRtcpFeedback(type="transport-cc"),
                 ],
                 parameters=parameters or {},
             ),
@@ -138,6 +197,18 @@ def init_codecs() -> None:
                 "profile-level-id": profile_level_id,
             },
         )
+
+    # FlexFEC (draft-03): one m-line-level repair stream (its SSRC is announced via
+    # the FEC-FR ssrc-group); Chrome negotiates it by default, other browsers drop it.
+    CODECS["video"].append(
+        RTCRtpCodecParameters(
+            mimeType="video/flexfec-03",
+            clockRate=90000,
+            payloadType=dynamic_pt,
+            parameters={"repair-window": "10000000"},
+        )
+    )
+    dynamic_pt += 1
 
 
 def depayload(codec: RTCRtpCodecParameters, payload: bytes) -> bytes:
@@ -186,7 +257,7 @@ def get_decoder(codec: RTCRtpCodecParameters) -> Decoder:
 
     if mimeType == "audio/g722":
         return G722Decoder()
-    elif mimeType == "audio/opus":
+    elif mimeType in ("audio/opus", "audio/multiopus"):
         return OpusDecoder()
     elif mimeType == "audio/pcma":
         return PcmaDecoder()
@@ -205,8 +276,12 @@ def get_encoder(codec: RTCRtpCodecParameters) -> Encoder:
 
     if mimeType == "audio/g722":
         return G722Encoder()
-    elif mimeType == "audio/opus":
+    elif mimeType in ("audio/opus", "audio/multiopus"):
+        # Multiopus reaches this encoder only as pre-encoded packets (pack()), which
+        # is channel-count-agnostic; the PCM encode() path stays stereo-only.
         return OpusEncoder()
+    elif mimeType == "audio/red":
+        return RedOpusEncoder(block_pt=red_block_payload_type(codec.parameters))
     elif mimeType == "audio/pcma":
         return PcmaEncoder()
     elif mimeType == "audio/pcmu":
@@ -221,6 +296,10 @@ def get_encoder(codec: RTCRtpCodecParameters) -> Encoder:
 
 def is_rtx(codec: Union[RTCRtpCodecCapability, RTCRtpCodecParameters]) -> bool:
     return codec.name.lower() == "rtx"
+
+
+def is_red(codec: Union[RTCRtpCodecCapability, RTCRtpCodecParameters]) -> bool:
+    return codec.name.lower() == "red"
 
 
 init_codecs()

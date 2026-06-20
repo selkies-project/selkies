@@ -5,15 +5,24 @@
 import argparse
 import os
 import logging
+import socket
+from typing import Any, Dict, List
 
-# Settings precedence: CLI flag > SELKIES_<NAME> env > legacy env_var > 'default'.
+# The x264enc / x264enc-striped encoder options were renamed to h264enc / h264enc-striped;
+# map the old values so existing configs (env/CLI) keep resolving to the same encoder.
+# Settings precedence: CLI flag > SELKIES_<NAME> env > fallback env_var(s) > 'default'.
 # Names derive from 'name': my_setting -> --my-setting / SELKIES_MY_SETTING.
 # Special syntax:
-#   - List/enum (e.g. SELKIES_ENCODER="jpeg,x264enc"): first item is default,
+#   - List/enum (e.g. SELKIES_ENCODER="jpeg,h264enc"): first item is default,
 #     full list is the allowed options; a single value locks the choice.
 #   - Bool "true|locked": the |locked suffix forbids the client changing it.
 
-SETTING_DEFINITIONS = [
+# One WebSocket message ceiling for BOTH directions: enforced on receive
+# (aiohttp max_msg_size) and advertised to clients so multipart chunk sizing
+# (clipboard, uploads) fills the frame on either end.
+WS_MAX_MESSAGE_BYTES = 8 * 1024 * 1024
+
+SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     # -------------------- Common Settings for both modes --------------------
     # Core Feature Toggles
     {
@@ -56,22 +65,10 @@ SETTING_DEFINITIONS = [
         "help": "Enable gamepad support.",
     },
     {
-        "name": "clipboard_enabled",
-        "type": "bool",
-        "default": True,
-        "help": "Enable clipboard synchronization.",
-    },
-    {
-        "name": "clipboard_in_enabled",
-        "type": "bool",
-        "default": True,
-        "help": "Enable client-to-server clipboard synchronization.",
-    },
-    {
-        "name": "clipboard_out_enabled",
-        "type": "bool",
-        "default": True,
-        "help": "Enable server-to-client clipboard synchronization.",
+        "name": "enable_clipboard",
+        "type": "str",
+        "default": "true",
+        "help": 'Clipboard policy for both transports: "true" (both directions), "in" (client-to-server only), "out" (server-to-client only), "false" (disabled).',
     },
     {
         "name": "command_enabled",
@@ -89,16 +86,16 @@ SETTING_DEFINITIONS = [
     {
         "name": "framerate",
         "type": "range",
-        "default": "8-120",
+        "default": "8-165",
         "meta": {"default_value": 60},
         "help": 'Allowed framerate range (e.g., "8-165") or a fixed value (e.g., "60").',
     },
     {
-        "name": "h264_crf",
+        "name": "video_crf",
         "type": "range",
         "default": "5-50",
         "meta": {"default_value": 25},
-        "help": 'Allowed H.264 CRF range (e.g., "5-50") or a fixed value.',
+        "help": 'Allowed video CRF (constant quality) range (e.g., "5-50") or a fixed value.',
     },
     {
         "name": "video_bitrate",
@@ -112,21 +109,66 @@ SETTING_DEFINITIONS = [
         "type": "enum",
         "default": "crf",
         "meta": {"allowed": ["crf", "cbr"]},
-        "help": "Rate control mode for video encoding (cbr or crf). Only effective when enable_rate_control is true.",
+        "help": "Rate control mode for the H.264 encoders (crf = constant quality/QP, cbr = constant bitrate). Honored for every H.264 encoder when enable_rate_control is true (the default).",
     },
     {
         "name": "enable_rate_control",
         "type": "bool",
-        "default": False,
-        "help": "Enable rate control for video encoding. Used in association with rate_control_mode.",
+        "default": True,
+        "help": "Honor the client-selected rate_control_mode (crf/cbr). Enabled by default so both modes are selectable; set false to lock the encoder to its built-in default.",
+    },
+    {
+        "name": "keyframe_interval",
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 300.0,
+        "help": "Seconds between scheduled video recovery keyframes (any video codec). 0 (default) keeps the GOP infinite: keyframes are sent only on demand (client join/reset, keyframe requests), which keeps bitrate and quality steady.",
+    },
+    {
+        "name": "video_min_qp",
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "max": 51,
+        "help": "CBR-mode minimum H.264 QP (0 = encoder default). Raising it caps bit spend on easy content when the bitrate budget is generous.",
+    },
+    {
+        "name": "video_max_qp",
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "max": 51,
+        "help": "CBR-mode maximum H.264 QP (0 = encoder default). Lowering it keeps screen text legible under motion at the cost of overshooting the bitrate target on hard content (measured at 720p60 scrolling text: 35 lifts x264 by ~19 dB at ~2.5x the target).",
     },
     # Audio Settings
+    {
+        "name": "audio_frame_duration_ms",
+        "type": "enum",
+        "default": "10",
+        "meta": {"allowed": ["2.5", "5", "10", "20", "40", "60"]},
+        "help": "Opus frame duration in milliseconds for server-to-client audio. Lower values cut audio latency (each frame must fill before it can be sent, and the client buffers a fixed number of frames) at a small bitrate-efficiency and packet-rate cost. On WebRTC the SDP ptime/minptime follow this value.",
+    },
     {
         "name": "audio_bitrate",
         "type": "enum",
         "default": "320000",
         "meta": {"allowed": ["64000", "128000", "192000", "256000", "320000"]},
         "help": "The default audio bitrate.",
+    },
+    {
+        "name": "audio_redundancy",
+        "type": "bool",
+        "default": True,
+        "help": "Enable Opus RED (RFC 2198) audio redundancy to cut dropouts/concealment under packet loss. On by default; carries prior frames as redundancy on WebRTC (browsers de-RED natively, plain-opus fallback for peers that decline) and, on WebSocket, is gated on every client supporting it.",
+    },
+    {
+        "name": "audio_redundancy_distance",
+        "type": "int",
+        "default": 2,
+        "min": 0,
+        "max": 4,
+        "help": "Number of prior Opus frames carried as RED redundancy when audio_redundancy is enabled (0-4; higher survives longer loss bursts at proportionally more bandwidth).",
     },
     # Display & Resolution Settings
     {
@@ -139,14 +181,18 @@ SETTING_DEFINITIONS = [
         "name": "manual_width",
         "type": "int",
         "default": 0,
-        "meta": {"min": 0, "max": 7680},
+        # Ceiling is the common GPU/X framebuffer limit, not 8K, so >8K manual
+        # resolutions still drive xrandr --fb without being silently clamped.
+        "meta": {"min": 0, "max": 16384},
         "help": "Lock width to a fixed value. Setting this forces manual resolution mode.",
     },
     {
         "name": "manual_height",
         "type": "int",
         "default": 0,
-        "meta": {"min": 0, "max": 4320},
+        # Ceiling is the common GPU/X framebuffer limit, not 8K, so >8K manual
+        # resolutions still drive xrandr --fb without being silently clamped.
+        "meta": {"min": 0, "max": 16384},
         "help": "Lock height to a fixed value. Setting this forces manual resolution mode.",
     },
     {
@@ -388,40 +434,48 @@ SETTING_DEFINITIONS = [
         "name": "enable_basic_auth",
         "type": "bool",
         "default": True,
-        "help": "Enable basic authentication on server, must set --basic_auth_password and optionally --basic_auth_user to enforce basic authentication",
+        "help": "Enable basic authentication on the server. On by default with the default credentials; set --basic_auth_password (a warning is logged while the well-known default password is in use).",
     },
     {
         "name": "basic_auth_user",
         "type": "str",
         "default": "ubuntu",
-        "help": "Username for basic authentication, default is to use the USER environment variable or a blank username if not present, must also set --basic_auth_password to enforce basic authentication",
+        "env_var": ["CUSTOM_USER", "USERNAME", "USER"],
+        "help": 'Username for basic authentication; resolves from the CUSTOM_USER, then USERNAME, then USER environment variables, and defaults to "ubuntu" when none is set.',
     },
     {
         "name": "basic_auth_password",
         "type": "str",
         "default": "mypasswd",
+        "env_var": "PASSWORD",
         "help": "Password used when basic authentication is set",
-    },
-    {
-        "name": "nginx_override",
-        "type": "bool",
-        "default": False,
-        "help": "Override nginx and serve web files from the installed selkies-web package.",
     },
     {
         "name": "subfolder",
         "type": "str",
         "default": "",
         "env_var": "SUBFOLDER",
-        "help": "A placeholder value for SUBFOLDER; only used in association with sealskin deployment",
+        "help": 'URL path prefix the server is reverse-proxied under; prepended to every route (websockets, tokens, metrics, static files). Needs both slashes, e.g. "/subfolder/".',
+    },
+    {
+        "name": "run_after_connect",
+        "type": "str",
+        "default": "",
+        "help": "Shell command run after the first client has connected ('' = off); runs again each time a client connects while no others are connected.",
+    },
+    {
+        "name": "run_after_disconnect",
+        "type": "str",
+        "default": "",
+        "help": "Shell command run after the last client has disconnected ('' = off), including on server shutdown while clients are connected.",
     },
     # -------------------- WEBSOCKETS Settings --------------------
     # Video & Encoder
     {
         "name": "encoder",
         "type": "enum",
-        "default": "x264enc",
-        "meta": {"allowed": ["x264enc", "x264enc-striped", "jpeg"]},
+        "default": "h264enc",
+        "meta": {"allowed": ["h264enc", "h264enc-striped", "openh264enc", "jpeg"]},
         "help": "The default video encoder.",
     },
     {
@@ -432,13 +486,13 @@ SETTING_DEFINITIONS = [
         "help": 'Allowed JPEG quality range (e.g., "1-100") or a fixed value.',
     },
     {
-        "name": "h264_fullcolor",
+        "name": "video_fullcolor",
         "type": "bool",
         "default": False,
         "help": "Enable H.264 full color range for pixelflux encoders.",
     },
     {
-        "name": "h264_streaming_mode",
+        "name": "video_streaming_mode",
         "type": "bool",
         "default": False,
         "help": "Enable H.264 streaming mode for pixelflux encoders.",
@@ -463,14 +517,14 @@ SETTING_DEFINITIONS = [
         "help": "Allowed JPEG paint-over quality range or a fixed value.",
     },
     {
-        "name": "h264_paintover_crf",
+        "name": "video_paintover_crf",
         "type": "range",
         "default": "5-50",
         "meta": {"default_value": 18},
         "help": "Allowed H.264 paint-over CRF range or a fixed value.",
     },
     {
-        "name": "h264_paintover_burst_frames",
+        "name": "video_paintover_burst_frames",
         "type": "range",
         "default": "1-30",
         "meta": {"default_value": 5},
@@ -484,11 +538,46 @@ SETTING_DEFINITIONS = [
     },
     # Server Startup & Operational Settings
     {
-        "name": "dri_node",
+        "name": "encode_dri",
         "type": "str",
         "default": "",
         "env_var": "DRI_NODE",
-        "help": "Path to the DRI render node for VA-API.",
+        "help": "Path to the DRI render node the ENCODER uses (VA-API/NVENC device selection).",
+    },
+    {
+        "name": "render_dri",
+        "type": "str",
+        "default": "",
+        "env_var": "DRINODE",
+        "help": "Path to the DRI render node the Wayland compositor RENDERS on (defaults to auto_gpu selection, else software rendering).",
+    },
+    {
+        "name": "auto_gpu",
+        "type": "str",
+        "default": "true",
+        "env_var": "AUTO_GPU",
+        "help": 'GPU auto-selection for rendering, enabled by default: "true" picks the first GPU; "false" disables it; otherwise a case-insensitive token picks the first GPU it matches — a vendor name (nvidia, amd/ati, intel, arm/mali, qualcomm/adreno, broadcom/videocore, apple, imagination/powervr, vmware, virtio, ...), a kernel driver name (amdgpu, i915, xe, nouveau, panfrost, msm, v3d, ...), a devicetree vendor prefix (qcom, rockchip, brcm, ...), or a raw PCI vendor ID (0x10de).',
+    },
+    {
+        "name": "wayland",
+        "type": "bool",
+        "default": False,
+        "env_var": "PIXELFLUX_WAYLAND",
+        "help": "Run the Wayland (headless compositor) backend instead of X11 capture/input.",
+    },
+    {
+        "name": "recording_socket",
+        "type": "str",
+        "default": "",
+        "env_var": "PIXELFLUX_RECORDING_SOCKET",
+        "help": "Unix socket path for the out-of-band H.264 recording tap ('' = off); pixelflux binds it and multiplexes the elementary stream to connected clients.",
+    },
+    {
+        "name": "file_manager_path",
+        "type": "str",
+        "default": "~/Desktop",
+        "env_var": "FILE_MANAGER_PATH",
+        "help": "Directory for client file transfers on both transports: uploads land here and the file-browser/download API serves it (created at startup if missing).",
     },
     {
         "name": "watermark_path",
@@ -513,12 +602,6 @@ SETTING_DEFINITIONS = [
     },
     # -------------------- WEBRTC Settings --------------------
     {
-        "name": "json_config",
-        "type": "str",
-        "default": "/tmp/selkies_config.json",
-        "help": "Path to the JSON file containing argument key-value pairs that are overlaid with CLI arguments or environment variables, this path must be writable",
-    },
-    {
         "name": "rtc_config_json",
         "type": "str",
         "default": "/tmp/rtc.json",
@@ -540,8 +623,8 @@ SETTING_DEFINITIONS = [
     {
         "name": "turn_rest_username",
         "type": "str",
-        "default": "selkies-hostname",
-        "help": "URI for TURN REST API service, default set to system hostname",
+        "default": "",
+        "help": "Username sent to the TURN REST API service (x-auth-user header); the service embeds it in the HMAC credential. Empty (default) sends the system hostname.",
     },
     {
         "name": "turn_rest_username_auth_header",
@@ -640,8 +723,13 @@ SETTING_DEFINITIONS = [
     {
         "name": "encoder_rtc",
         "type": "enum",
-        "default": "x264enc",
-        "meta": {"allowed": ["av1enc", "x264enc", "nvh264enc", "vp8enc"]},
+        "default": "h264enc",
+        # Only encoders the pipeline can actually PRODUCE may be listed (pixelflux emits
+        # H.264 only; other codecs are a future addition — the vendored webrtc stack keeps
+        # its VP8/RTP code for that). h264enc is hardware-first (NVENC/VA-API when present,
+        # else software x264 — same behavior as the WS path); openh264enc stays a separate
+        # software choice.
+        "meta": {"allowed": ["h264enc", "openh264enc"]},
         "help": "Video encoder to encode video media",
     },
     {
@@ -671,28 +759,14 @@ SETTING_DEFINITIONS = [
     {
         "name": "gpu_id",
         "type": "str",
-        "default": "0",
-        "help": "GPU ID for hardware video encoders, will use enumerated GPU ID (0, 1, ..., n) for NVIDIA and /dev/dri/renderD{128 + n} for VA-API",
-    },
-    {
-        "name": "keyframe_distance",
-        "type": "int",
-        "default": -1,
-        "help": 'Distance between video keyframes/GOP-frames in seconds, defaults to "-1" for infinite keyframe distance (ideal for low latency and preventing periodic blurs)',
+        "default": "",
+        "help": "GPU ID for hardware video encoders: selects /dev/dri/renderD{128 + n} and the GPU-stats index. Empty (default) sets no explicit pick, encoding on ID 0 — the first GPU — or on the GPU chosen by --auto-gpu; -1 disables hardware encoding. Ignored when --encode-dri specifies a device path.",
     },
     {
         "name": "congestion_control",
         "type": "bool",
         "default": False,
-        "help": "Enable Google Congestion Control (GCC), suggested if network conditions fluctuate and when bandwidth is >= 2 mbps but may lead to lower quality and microstutter due to adaptive bitrate in some encoders",
-    },
-    {
-        "name": "video_packetloss_percent",
-        "type": "int",
-        "default": 0,
-        "min": 0,
-        "max": 100,
-        "help": 'Expected packet loss percentage (percent) for ULP/RED Forward Error Correction (FEC) in video, use "0" to disable FEC, less effective because of other mechanisms including NACK/PLI, enabling not recommended if Google Congestion Control is enabled',
+        "help": "Adapt the video bitrate to the transport-wide-cc (GCC-style) bandwidth estimate from WebRTC receiver feedback. Effective in CBR rate-control mode; may trade quality/stability for congestion responsiveness.",
     },
     {
         "name": "audio_channels",
@@ -700,20 +774,6 @@ SETTING_DEFINITIONS = [
         "default": 2,
         "min": 1,
         "help": "Number of audio channels, defaults to stereo (2 channels)",
-    },
-    {
-        "name": "audio_packetloss_percent",
-        "type": "int",
-        "default": 0,
-        "min": 0,
-        "max": 100,
-        "help": 'Expected packet loss percentage (percent) for ULP/RED Forward Error Correction (FEC) in audio, use "0" to disable FEC',
-    },
-    {
-        "name": "enable_clipboard",
-        "type": "str",
-        "default": "true",
-        "help": "Enable or disable the clipboard features, supported values: true, false, in, out",
     },
     {
         "name": "enable_resize",
@@ -737,7 +797,8 @@ SETTING_DEFINITIONS = [
         "name": "cursor_size",
         "type": "int",
         "default": -1,
-        "help": "Cursor size in points for the local cursor, set instead XCURSOR_SIZE without of this argument to configure the cursor size for both the local and remote cursors",
+        "env_var": "XCURSOR_SIZE",
+        "help": "Cursor size in points at 96 DPI (scaled with the session DPI). Applies to the X11 server cursor, the Wayland compositor cursor theme, and the remote-cursor capture cap on both transports; -1 uses the platform default (32 on X11, 24 on Wayland).",
     },
     {
         "name": "enable_webrtc_statistics",
@@ -755,13 +816,21 @@ SETTING_DEFINITIONS = [
         "name": "enable_metrics_http",
         "type": "bool",
         "default": False,
-        "help": "Enable the Prometheus HTTP metrics port",
+        "help": "Enable the Prometheus HTTP /metrics endpoint.",
     },
     {
-        "name": "upload_dir",
+        "name": "backpressure_queue_size",
+        "type": "int",
+        "default": 120,
+        "min": 1,
+        "max": 100000,
+        "help": "Max frames/audio chunks buffered per stream before dropping under backpressure (WebSockets mode). Higher tolerates larger client hiccups at the cost of latency.",
+    },
+    {
+        "name": "allowed_origins",
         "type": "str",
-        "default": "~/Desktop",
-        "help": "Directory to save the uploaded content, in absolute path format. Default to '~/Desktop' directory",
+        "default": "",
+        "help": "Comma-separated browser Origins allowed to open the streaming WebSocket (cross-site WebSocket-hijacking guard). Empty (default) allows only same-origin plus non-browser clients that send no Origin; use '*' to allow any origin.",
     },
 ]
 
@@ -799,16 +868,27 @@ class AppSettings:
         self._process_and_set_attributes(args)
         self._post_process_settings()
 
+    @staticmethod
+    def _fallback_env_vars(setting):
+        """A setting's fallback env aliases as a tuple: `env_var` may be one
+        name or an ordered list of names (earlier entries win)."""
+        fallback = setting.get("env_var")
+        if not fallback:
+            return ()
+        if isinstance(fallback, str):
+            return (fallback,)
+        return tuple(fallback)
+
     def _add_arguments(self, parser):
         """Programmatically add arguments to the parser from definitions."""
         for setting in self._setting_definitions:
             name = setting["name"]
             cli_flag = f"--{name.replace('_', '-')}"
             standard_env_var = f"SELKIES_{name.upper()}"
-            legacy_env_var = setting.get("env_var")
+            fallback_env_vars = self._fallback_env_vars(setting)
             env_help_text = f"Env: {standard_env_var}"
-            if legacy_env_var:
-                env_help_text = f"Env: {standard_env_var} (or {legacy_env_var})"
+            if fallback_env_vars:
+                env_help_text = f"Env: {standard_env_var} (or {', '.join(fallback_env_vars)})"
             parser.add_argument(
                 cli_flag,
                 type=str,
@@ -825,13 +905,15 @@ class AppSettings:
             stype = setting["type"]
             cli_val = getattr(args, name, None)
             std_env_val = os.environ.get(f"SELKIES_{name.upper()}")
-            legacy_env_val = (
-                os.environ.get(setting["env_var"]) if setting.get("env_var") else None
-            )
+            fallback_env_val = None
+            for fallback_var in self._fallback_env_vars(setting):
+                fallback_env_val = os.environ.get(fallback_var)
+                if fallback_env_val is not None:
+                    break
             is_override = (
                 cli_val is not None
                 or std_env_val is not None
-                or legacy_env_val is not None
+                or fallback_env_val is not None
             )
             overrides[name] = is_override
 
@@ -842,8 +924,8 @@ class AppSettings:
                     std_env_val
                     if std_env_val is not None
                     else (
-                        legacy_env_val
-                        if legacy_env_val is not None
+                        fallback_env_val
+                        if fallback_env_val is not None
                         else setting["default"]
                     )
                 )
@@ -884,17 +966,22 @@ class AppSettings:
                                 for item in str(setting["default"]).split(",")
                                 if item.strip()
                             ]
-                elif stype == "int":
-                    processed_value = int(raw_value)
+                elif stype in ("int", "float"):
+                    processed_value = int(raw_value) if stype == "int" else float(raw_value)
                     # Clamp to bounds from top-level ("min"/"max") or "meta" (top-level
                     # wins); only when declared, so -1/negative sentinels are preserved.
                     meta = setting.get("meta") or {}
                     lo = setting.get("min", meta.get("min"))
                     hi = setting.get("max", meta.get("max"))
+                    orig = processed_value
                     if lo is not None:
                         processed_value = max(lo, processed_value)
                     if hi is not None:
                         processed_value = min(hi, processed_value)
+                    if processed_value != orig:
+                        logging.warning(
+                            f"Setting '{name}' value {orig} out of range [{lo},{hi}], clamped to {processed_value}"
+                        )
                 elif stype == "str":
                     processed_value = str(raw_value)
                 elif stype == "range":
@@ -953,6 +1040,21 @@ class AppSettings:
                 "Microphone support requires audio to be enabled. Disabling microphone support."
             )
             self.microphone_enabled = (False, self.microphone_enabled[1])
+
+        # The single clipboard policy knob for both transports; normalize so
+        # every consumer sees exactly one of the four values.
+        mode = str(self.enable_clipboard).split("|")[0].strip().lower()
+        if mode not in ("true", "false", "in", "out"):
+            logging.warning(
+                "Invalid enable_clipboard value %r; using 'true'.", self.enable_clipboard
+            )
+            mode = "true"
+        self.enable_clipboard = mode
+
+        # The TURN REST username identifies this host to the service; empty
+        # resolves to the machine hostname.
+        if not self.turn_rest_username:
+            self.turn_rest_username = socket.gethostname()
 
 settings = AppSettings(SETTING_DEFINITIONS)
 
