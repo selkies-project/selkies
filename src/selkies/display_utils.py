@@ -1,5 +1,10 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 import re
 import os
+import sys
 from asyncio import subprocess
 import asyncio
 from shutil import which
@@ -172,7 +177,7 @@ async def generate_xrandr_gtf_modeline(res_wh_str):
     tool_name = "cvt"  # bind before any work so the error path can reference it
     # Validate WxH (two positive ints) before invoking cvt/gtf for a clear error.
     parts = res_wh_str.split("x")
-    if len(parts) != 2 or not all(p.isdigit() and int(p) > 0 for p in parts):
+    if len(parts) != 2 or not all(p.isascii() and p.isdigit() and int(p) > 0 for p in parts):
         raise Exception(
             f"Invalid resolution format for modeline generation: {res_wh_str}"
         )
@@ -462,7 +467,6 @@ async def set_cursor_size(size):
     return False
 
 async def main():
-    import sys
     logging.basicConfig(level=logging.INFO)
 
     if len(sys.argv) < 2:
@@ -476,3 +480,39 @@ def entrypoint():
 
 if __name__ == "__main__":
     entrypoint()
+
+def parse_gpu_id(value) -> "int | None":
+    """The gpu_id setting as an int: None for empty/invalid (no explicit pick —
+    pixelflux encodes on ID 0 or the AUTO_GPU-selected device), -1 for the
+    explicit software-encode request, >= 0 for a device index."""
+    value = str(value or "").strip()
+    try:
+        gid = int(value)
+    except ValueError:
+        return None
+    return gid if gid >= -1 else None
+
+
+def parse_dri_node_to_index(node_path: str) -> int:
+    """
+    Parses a DRI node path like '/dev/dri/renderD128' into an index (e.g., 0).
+    Returns -1 if the path is invalid, malformed, or empty, which
+    disables hardware encoding in the capture module.
+    """
+    logger = logging.getLogger("display_utils")
+    if not node_path or not node_path.startswith('/dev/dri/renderD'):
+        if node_path:
+            logger.warning(f"Invalid DRI node format: '{node_path}'. Expected '/dev/dri/renderD...'. VA-API will be disabled.")
+        return -1
+    try:
+        num_str = node_path.split('renderD')[-1]
+        render_num = int(num_str)
+        index = render_num - 128
+        if index < 0:
+            logger.warning(f"Parsed DRI node number {render_num} from '{node_path}' is less than 128. Invalid.")
+            return -1
+        logger.info(f"Parsed DRI node '{node_path}' to index {index}.")
+        return index
+    except (ValueError, IndexError) as e:
+        logger.warning(f"Could not parse DRI node path '{node_path}': {e}. VA-API will be disabled.")
+        return -1

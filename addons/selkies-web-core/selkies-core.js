@@ -10,13 +10,29 @@ import websockets from "./selkies-ws-core";
 const STREAM_MODE_WEBRTC = "webrtc";
 const STREAM_MODE_WEBSOCKETS = "websockets";
 
-// Set storage key based on URL
-const urlForKey = window.location.href.split('#')[0];
+// Storage key namespace: origin + pathname only, NOT the full URL — a per-session
+// ?token=... in the query string must not mint a new localStorage namespace on every
+// connect (that leak eventually exhausts the origin quota and blanks the iframe).
+// Must match selkies-ws-core.js / selkies-wr-core.js / the dashboard Sidebar.
+const urlForKey = window.location.origin + window.location.pathname;
 const storageAppName = urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
 const getPrefixedKey = (key) => {return `${storageAppName}_${key}`}
+// Guarded write: a full or unavailable store degrades to a warning instead of
+// throwing QuotaExceededError into startup.
+const safeSetItem = (key, value) => {
+    try {
+        localStorage.setItem(key, value);
+    } catch (e) {
+        console.warn(`Selkies: could not persist '${key}' to localStorage:`, e);
+    }
+};
 
-// One-time migration of localStorage settings to the corrected prefix: an earlier
-// regex bug (`.-_` read as a char range) left a different prefix, orphaning saved settings.
+// One-time migration/cleanup covering both legacy key schemes:
+//   (a) keys from the old sanitizer (a `.-_` char range bug kept ?/=/: literal) AND the
+//       old full-href derivation — query-less ones migrate to the new prefix, while
+//       token-scoped ones (stable base + literal '?') are PRUNED, which also recovers
+//       browsers whose store the token leak already filled (removeItem never hits quota);
+//   (b) fixed-regex keys derived from a query-less href already equal the new prefix.
 (function migrateStorageKeys() {
     try {
         if (typeof localStorage === 'undefined') return;
@@ -25,6 +41,18 @@ const getPrefixedKey = (key) => {return `${storageAppName}_${key}`}
         for (let i = 0; i < urlForKey.length; i++) {
             const c = urlForKey.charCodeAt(i);
             oldAppName += ((c >= 0x2E && c <= 0x5F) || (c >= 0x61 && c <= 0x7A)) ? urlForKey[i] : '_';
+        }
+        // Prune token-scoped legacy keys every load (cheap, idempotent, frees quota
+        // before any writes below).
+        const tokenPrefix = oldAppName + '?';
+        const staleKeys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith(tokenPrefix)) staleKeys.push(k);
+        }
+        staleKeys.forEach((k) => localStorage.removeItem(k));
+        if (staleKeys.length) {
+            console.log(`Selkies: removed ${staleKeys.length} stale token-scoped localStorage keys.`);
         }
         // No-op when the buggy regex produced the same prefix (nothing to migrate).
         if (oldAppName === storageAppName) return;
@@ -50,13 +78,13 @@ const getPrefixedKey = (key) => {return `${storageAppName}_${key}`}
                 const newKey = newPrefix + suffix;
                 if (localStorage.getItem(newKey) === null) {
                     const val = localStorage.getItem(oldKey);
-                    if (val !== null) localStorage.setItem(newKey, val);
+                    if (val !== null) safeSetItem(newKey, val);
                 }
             }
             console.log(`Migrated ${oldKeys.length} setting(s) from old storage prefix "${oldPrefix}" to "${newPrefix}".`);
         }
         // Guard so this runs at most once, regardless of whether anything was copied.
-        localStorage.setItem(migratedFlagKey, '1');
+        safeSetItem(migratedFlagKey, '1');
     } catch (e) {
         console.warn('Storage key migration skipped due to error:', e);
     }
@@ -78,18 +106,19 @@ function handleMessage(event) {
     let message = event.data;
     if (message.mode !== undefined && message.type === "mode") {
         console.log(`Switching streaming mode to: ${message.mode}`);
-        localStorage.setItem(getPrefixedKey('stream_mode'), message.mode);
+        safeSetItem(getPrefixedKey('stream_mode'), message.mode);
 
         // wait for a few seconds to let the server switch modes
         setTimeout(() => {
-            // FIXME: for now going with a page reload rather than interchaning the modes without reload
+            // A full reload swaps the transport stacks; the cores are not built
+            // for an in-place mode hand-off.
             window.location.reload();
         }, 2000)
     }
 }
 
 function switchStreamingMode(newMode) {
-    localStorage.setItem(getPrefixedKey('stream_mode'), newMode);
+    safeSetItem(getPrefixedKey('stream_mode'), newMode);
     switch (newMode) {
         case STREAM_MODE_WEBRTC:
             mode = webrtc();

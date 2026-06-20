@@ -1,8 +1,10 @@
 # WebRTC and Firewall Issues
 
+**This entire document applies only to the opt-in WebRTC transport (`--mode=webrtc`).** The default WebSocket transport streams over a single TCP port (default `8081`) and does not perform UDP hole-punching, so it needs no STUN/TURN server and is not affected by the firewall issues described here. Reach for this page only after you have deliberately switched to WebRTC mode.
+
 WebRTC uses the UDP protocol (and may use TCP in some cases when UDP is not available) to transport your desktop.
 
-While WebRTC is the reason Selkies-GStreamer enjoys low latency and better performance compared to other solutions, your network firewall may still prevent you from connecting to your instance.
+While WebRTC lets Selkies enjoy low latency and better performance in restrictive peer-to-peer scenarios, your network firewall may still prevent your WebRTC connection from establishing.
 
 **(IMPORTANT) Instructions here are mandatory if the HTML5 web interface loads and the signaling connection says it works, but the WebRTC connection fails and therefore the remote desktop does not start.**
 
@@ -20,7 +22,7 @@ A configuration in your internet router called `Full Cone NAT` (otherwise called
 
 For an easy fix for containers, add the option `--network=host` to your Docker® command, or add `hostNetwork: true` under your Kubernetes YAML configuration file's pod `spec:` entry, which should be indented in the same depth as `containers:` (note that your cluster may have not allowed this, resulting in an error).
 
-**Note that running multiple desktop containers in one host under this configuration may be problematic and is not recommended. You must also pass new environment variables such as `-e DISPLAY=:22`, `-e NGINX_PORT=8082`, `-e SELKIES_PORT=8083`, and `-e SELKIES_METRICS_HTTP_PORT=9083` into the container, all not overlapping with any other X11 server or container in the same host. Access the container using the specified `NGINX_PORT`.**
+**Note that running multiple desktop containers in one host under this configuration may be problematic and is not recommended. You must also pass new environment variables such as `-e DISPLAY=:22` and `-e SELKIES_PORT=8082` into the container, all not overlapping with any other X11 server or container in the same host. Selkies serves the web interface, signaling, and streaming on this single port; access the container using the specified `SELKIES_PORT`.**
 
 This exposes your container to the host network, which disables container network isolation.
 
@@ -32,7 +34,7 @@ If this does not fix the connection issue (normally when the server is behind an
 
 A TURN server is required if trying to use this project inside a Docker® or Kubernetes container without host networking, or in other cases where the HTML5 web interface loads but the connection to the server fails.
 
-**This is required for all WebRTC applications, especially since Selkies-GStreamer is self-hosted, unlike other proprietary services that provide a TURN server as part of the infrastructure.**
+**This is required for all WebRTC applications, especially since Selkies is self-hosted, unlike other proprietary services that provide a TURN server as part of the infrastructure.**
 
 In most cases when either of your server or client does not have a restrictive firewall, the default Google STUN server configuration will work without additional configuration. However, when connecting from networks that cannot be traversed with STUN, a TURN server is required.
 
@@ -42,13 +44,13 @@ In most cases when either of your server or client does not have a restrictive f
 
 For self-hosting with restricted host networks, [Cloudflare Calls TURN](https://developers.cloudflare.com/calls/turn/overview/) provides free geodistributed TURN servers for the first 1000 GB per month (0.05 USD per GB afterwards), using the `--enable_cloudflare_turn=`, `--cloudflare_turn_token_id=`, and `--cloudflare_turn_api_token=` options. Other cloud TURN server services also exist.
 
-For higher data transfer quotas, using coTURN with the [Oracle Cloud Free Tier](https://www.oracle.com/cloud/free) Arm Compute Instance provides up to 10 TB Outbound Data Transfer every month, which accounts to a total of nearly 30 mbps bandwidth even when Selkies-GStreamer is utilized 24/7. You may also configure coTURN with any computer, server, cloud service, or virtual machine you want. Make sure to use a location that is as close as possible to the web client or the host server.
+For higher data transfer quotas, using coTURN with the [Oracle Cloud Free Tier](https://www.oracle.com/cloud/free) Arm Compute Instance provides up to 10 TB Outbound Data Transfer every month, which accounts to a total of nearly 30 mbps bandwidth even when Selkies is utilized 24/7. You may also configure coTURN with any computer, server, cloud service, or virtual machine you want. Make sure to use a location that is as close as possible to the web client or the host server.
 
-### Selkies-GStreamer with TURN Server Credentials
+### Selkies with TURN Server Credentials
 
 **Configure coTURN or any other TURN server by reading the later sections.**
 
-After configuring your TURN server, the following options are required to be used with Selkies-GStreamer:
+After configuring your TURN server, the following options are required to be used with Selkies:
 
 - TURN server hostname (command-line option `--turn_host=` or environment variable `SELKIES_TURN_HOST`, not used with `--rtc_config_json` JSON file authentication or `--turn_rest_uri` TURN REST API authentication)
 
@@ -64,27 +66,27 @@ After configuring your TURN server, the following options are required to be use
 
 There are currently four different supported TURN server authentication methods, in the order of priority:
 
-- Using the JSON configuration file authentication method with the `selkies-gstreamer --rtc_config_json=` option or the `SELKIES_RTC_CONFIG_JSON` environment variable. Selkies-GStreamer probes this file periodically, so it will automatically update the TURN authentication credentials if the JSON file is updated. **All other STUN/TURN credentials are overridden if this file exists.**
+- Using the JSON configuration file authentication method with the `selkies --rtc_config_json=` option or the `SELKIES_RTC_CONFIG_JSON` environment variable. Selkies probes this file periodically, so it will automatically update the TURN authentication credentials if the JSON file is updated. **All other STUN/TURN credentials are overridden if this file exists.**
 
-- Using the TURN REST API authentication method with the the `selkies-gstreamer --turn_rest_uri=` option or the `SELKIES_TURN_REST_URI` environment variable. Selkies-GStreamer probes this REST API endpoint periodically, so it will automatically update the TURN authentication credentials. Consult the **[TURN-REST](component.md#turn-rest)** section for more details of this authentication method. **All other STUN/TURN credentials below are overridden if this option is provided and is valid.**
+- Using the TURN REST API authentication method with the the `selkies --turn_rest_uri=` option or the `SELKIES_TURN_REST_URI` environment variable. Selkies probes this REST API endpoint periodically, so it will automatically update the TURN authentication credentials. Consult the **[TURN-REST](component.md#turn-rest)** section for more details of this authentication method. **All other STUN/TURN credentials below are overridden if this option is provided and is valid.**
 
-- **Note that the below two methods are only safe when the Selkies-GStreamer user also has legitimate control of the TURN server. Otherwise, if you maintain a multi-user environment, you are looking for the TURN REST API authentication method, right above.**
+- **Note that the below two methods are only safe when the Selkies user also has legitimate control of the TURN server. Otherwise, if you maintain a multi-user environment, you are looking for the TURN REST API authentication method, right above.**
 
-- Using traditional long-term credential authentication with a fixed username and password combination using the `selkies-gstreamer --turn_username= --turn_password=`, or both environment variables `SELKIES_TURN_USERNAME` and `SELKIES_TURN_PASSWORD`.
+- Using traditional long-term credential authentication with a fixed username and password combination using the `selkies --turn_username= --turn_password=`, or both environment variables `SELKIES_TURN_USERNAME` and `SELKIES_TURN_PASSWORD`.
 
-- Directly inputting the time-limited TURN shared secret credential using the `selkies-gstreamer --turn_shared_secret=` option or the `SELKIES_TURN_SHARED_SECRET` environment variable.
+- Directly inputting the time-limited TURN shared secret credential using the `selkies --turn_shared_secret=` option or the `SELKIES_TURN_SHARED_SECRET` environment variable.
 
 The `--turn_host=` and `--turn_port=` options or the equivalent environment variables `SELKIES_TURN_HOST` and `SELKIES_TURN_PORT` are required for traditional long-term credential authentication or time-limited TURN shared secret credential authentication, but are NOT used for the JSON configuration file authentication method and TURN REST API authentication method.
 
 Moreover, the `--stun_host=` and `--stun_port=` STUN server options, defaulting to `stun.l.google.com` and `19302` (the default Google STUN servers), take priority for for traditional long-term credential authentication or time-limited TURN shared secret credential authentication, but are NOT used for the JSON configuration file authentication method and TURN REST API authentication method. The JSON configuration file authentication method and TURN REST API authentication method takes the first STUN server received from their respective configuration file or API.
 
-If you are using Selkies-GStreamer in a private network without access to the internet, you must update the `--stun_host=` and `--stun_port=` options to your local STUN/TURN server if using traditional long-term credential authentication or time-limited TURN shared secret credential authentication. Else, you may have WebRTC connectivity issues. The JSON configuration file authentication method and TURN REST API authentication method uses the first STUN server received from the configuration file or API.
+If you are using Selkies in a private network without access to the internet, you must update the `--stun_host=` and `--stun_port=` options to your local STUN/TURN server if using traditional long-term credential authentication or time-limited TURN shared secret credential authentication. Else, you may have WebRTC connectivity issues. The JSON configuration file authentication method and TURN REST API authentication method uses the first STUN server received from the configuration file or API.
 
 ## coTURN
 
 An open-source TURN server for Linux or UNIX-like operating systems that may be used is [coTURN](https://github.com/coturn/coturn), available in major package repositories or as an official container [`coturn/coturn:latest`](https://hub.docker.com/r/coturn/coturn).
 
-The Selkies-GStreamer [coTURN](component.md#coturn) image [`ghcr.io/selkies-project/selkies-gstreamer/coturn:main`](https://github.com/selkies-project/selkies/pkgs/container/selkies-gstreamer%2Fcoturn) is also included in this repository, and may be used to host your own STUN/TURN infrastructure. As this image contains additional features for identifying the external server IP in cloud environments, usage of this container is recommended.
+The Selkies [coTURN](component.md#coturn) image [`ghcr.io/selkies-project/selkies/coturn:main`](https://github.com/selkies-project/selkies/pkgs/container/selkies%2Fcoturn) is also included in this repository, and may be used to host your own STUN/TURN infrastructure. As this image contains additional features for identifying the external server IP in cloud environments, usage of this container is recommended.
 
 [Pion TURN](https://github.com/pion/turn)'s `turn-server-simple` executable or [eturnal](https://eturnal.net) are recommended alternative TURN server implementations that support Windows as well as Linux or MacOS. [STUNner](https://github.com/l7mp/stunner) is a Kubernetes-native STUN and TURN deployment if Helm is possible to be used.
 
@@ -134,7 +136,7 @@ userdb=/tmp/turnserver.db
 # Prometheus statistics
 prometheus
 
-# Add `allow-loopback-peers` if coTURN and Selkies-GStreamer are on the same node
+# Add `allow-loopback-peers` if coTURN and Selkies are on the same node
 no-software-attribute
 no-rfc5780
 no-stun-backward-compatibility

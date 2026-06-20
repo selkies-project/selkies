@@ -309,6 +309,8 @@ class MediaDescription:
         # ssrc
         self.ssrc: list[SsrcDescription] = []
         self.ssrc_group: list[GroupDescription] = []
+        # RFC 6236 resolution envelopes, emitted verbatim as a=imageattr lines.
+        self.imageattr: list[str] = []
 
         # formats
         self.fmt = fmt
@@ -354,6 +356,8 @@ class MediaDescription:
 
         for group in self.ssrc_group:
             lines.append(f"a=ssrc-group:{group}")
+        for imageattr in self.imageattr:
+            lines.append(f"a=imageattr:{imageattr}")
         for ssrc_info in self.ssrc:
             for ssrc_attr in SSRC_INFO_ATTRS:
                 ssrc_value = getattr(ssrc_info, ssrc_attr)
@@ -515,7 +519,12 @@ class SessionDescription:
                 elif line.startswith("a="):
                     attr, value = parse_attr(line)
                     if attr == "candidate":
-                        current_media.ice_candidates.append(candidate_from_sdp(value))
+                        try:
+                            candidate = candidate_from_sdp(value)
+                        except ValueError:
+                            # Malformed candidate: skip this attr, not the whole offer.
+                            continue
+                        current_media.ice_candidates.append(candidate)
                     elif attr == "end-of-candidates":
                         current_media.ice_candidates_complete = True
                     elif attr == "extmap":
@@ -552,9 +561,12 @@ class SessionDescription:
                     elif attr == "ice-ufrag":
                         current_media.ice.usernameFragment = value
                     elif attr == "max-message-size":
-                        current_media.sctpCapabilities = RTCSctpCapabilities(
-                            maxMessageSize=int(value)
-                        )
+                        try:
+                            current_media.sctpCapabilities = RTCSctpCapabilities(
+                                maxMessageSize=int(value)
+                            )
+                        except ValueError:
+                            continue
                     elif attr == "mid":
                         current_media.rtp.muxId = value
                     elif attr == "msid":
@@ -563,12 +575,17 @@ class SessionDescription:
                         if not value or " " not in value:
                             continue
                         port, rest = value.split(" ", 1)
-                        current_media.rtcp_port = int(port)
-                        current_media.rtcp_host = ipaddress_from_sdp(rest)
+                        try:
+                            current_media.rtcp_port = int(port)
+                            # Malformed address: skip this attr, not the whole offer.
+                            current_media.rtcp_host = ipaddress_from_sdp(rest)
+                        except ValueError:
+                            continue
                     elif attr == "rtcp-mux":
                         current_media.rtcp_mux = True
                     elif attr == "setup":
-                        # Unknown setup value: skip; a None-role media section is dropped below.
+                        # Unknown setup value: dtls.role stays None; below it is set
+                        # to None (the media section itself is retained, not dropped).
                         role = DTLS_SETUP_ROLE.get(value)
                         if role is not None:
                             current_media.dtls.role = role
@@ -581,34 +598,48 @@ class SessionDescription:
                         bits = format_desc.split("/")
                         if len(bits) < 2:
                             continue
-                        if current_media.kind == "audio":
-                            if len(bits) > 2:
-                                channels = int(bits[2])
+                        try:
+                            if current_media.kind == "audio":
+                                if len(bits) > 2:
+                                    channels = int(bits[2])
+                                else:
+                                    channels = 1
                             else:
-                                channels = 1
-                        else:
-                            channels = None
-                        codec = RTCRtpCodecParameters(
-                            mimeType=current_media.kind + "/" + bits[0],
-                            channels=channels,
-                            clockRate=int(bits[1]),
-                            payloadType=int(format_id),
-                        )
+                                channels = None
+                            codec = RTCRtpCodecParameters(
+                                mimeType=current_media.kind + "/" + bits[0],
+                                channels=channels,
+                                clockRate=int(bits[1]),
+                                payloadType=int(format_id),
+                            )
+                        except ValueError:
+                            continue
                         current_media.rtp.codecs.append(codec)
                     elif attr == "sctpmap":
                         if not value or " " not in value:
                             continue
                         format_id, format_desc = value.split(" ", 1)
-                        getattr(current_media, attr)[int(format_id)] = format_desc
+                        try:
+                            getattr(current_media, attr)[int(format_id)] = format_desc
+                        except ValueError:
+                            continue
                     elif attr == "sctp-port":
-                        current_media.sctp_port = int(value)
+                        try:
+                            current_media.sctp_port = int(value)
+                        except ValueError:
+                            continue
                     elif attr == "ssrc-group":
                         parse_group(current_media.ssrc_group, value, type=int)
+                    elif attr == "imageattr":
+                        current_media.imageattr.append(value)
                     elif attr == "ssrc":
                         if not value or " " not in value:
                             continue
                         ssrc_str, ssrc_desc = value.split(" ", 1)
-                        ssrc = int(ssrc_str)
+                        try:
+                            ssrc = int(ssrc_str)
+                        except ValueError:
+                            continue
                         if ":" not in ssrc_desc:
                             continue
                         ssrc_attr, ssrc_value = ssrc_desc.split(":", 1)
@@ -634,7 +665,10 @@ class SessionDescription:
                         if not value or " " not in value:
                             continue
                         format_id, format_desc = value.split(" ", 1)
-                        codec = find_codec(int(format_id))
+                        try:
+                            codec = find_codec(int(format_id))
+                        except ValueError:
+                            continue
                         if codec is None:
                             continue
                         codec.parameters = parameters_from_sdp(format_desc)

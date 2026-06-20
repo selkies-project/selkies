@@ -38,6 +38,7 @@ import enum
 import logging
 import os
 import struct
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, Type, TypeVar, Union
@@ -399,6 +400,13 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._task: Optional[asyncio.Future[None]] = None
         self._transport = transport
 
+        # transport-wide congestion control: one sequence-number space shared by
+        # every sender on this transport, a bounded send history for matching the
+        # receiver's feedback, and the latest loss/delay estimate derived from it.
+        self._twcc_seq = 0
+        self._twcc_history: dict[int, tuple[int, float]] = {}
+        self.twcc_estimate: Optional[dict] = None
+
         # counters
         self.__rx_bytes = 0
         self.__rx_packets = 0
@@ -748,6 +756,79 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         await self.transport._send(data)
         self.__tx_bytes += len(data)
         self.__tx_packets += 1
+
+    def _twcc_next(self, size: int) -> int:
+        """Allocate the next transport-wide sequence number and record the packet's
+        size and send time for matching against the receiver's transport-cc feedback."""
+        seq = self._twcc_seq
+        self._twcc_seq = (self._twcc_seq + 1) & 0xFFFF
+        self._twcc_history[seq] = (size, time.time())
+        if len(self._twcc_history) > 2048:
+            for old in sorted(self._twcc_history)[:1024]:
+                self._twcc_history.pop(old, None)
+        return seq
+
+    def _twcc_process_feedback(self, fci: bytes) -> None:
+        """Decode a transport-cc feedback FCI (draft-holmer-rmcat-transport-wide-cc):
+        walk the packet-status chunks and receive deltas, join them against the send
+        history, and publish a loss / throughput / one-way-delay-trend estimate."""
+        if len(fci) < 8:
+            return
+        base_seq, status_count = struct.unpack("!HH", fci[0:4])
+        pos = 8
+        statuses: list[int] = []
+        while len(statuses) < status_count and pos + 2 <= len(fci):
+            chunk = struct.unpack("!H", fci[pos : pos + 2])[0]
+            pos += 2
+            if chunk & 0x8000 == 0:
+                symbol = (chunk >> 13) & 0x3
+                run = chunk & 0x1FFF
+                statuses.extend([symbol] * run)
+            elif chunk & 0x4000 == 0:
+                for i in range(14):
+                    statuses.append((chunk >> (13 - i)) & 0x1)
+            else:
+                for i in range(7):
+                    statuses.append((chunk >> (12 - 2 * i)) & 0x3)
+        statuses = statuses[:status_count]
+
+        received = bytes_acked = 0
+        delta_sum_us = 0.0
+        for i, symbol in enumerate(statuses):
+            if symbol in (1, 2):
+                received += 1
+                if pos < len(fci):
+                    if symbol == 1:
+                        delta_sum_us += fci[pos] * 250
+                        pos += 1
+                    elif pos + 2 <= len(fci):
+                        delta_sum_us += (
+                            struct.unpack("!h", fci[pos : pos + 2])[0] * 250
+                        )
+                        pos += 2
+                sent = self._twcc_history.pop((base_seq + i) & 0xFFFF, None)
+                if sent is not None:
+                    bytes_acked += sent[0]
+        if not statuses:
+            return
+        lost = len(statuses) - received
+        # Receive-side pacing span; against bytes_acked this bounds goodput, and its
+        # growth across feedbacks indicates queuing delay building up.
+        span_s = max(delta_sum_us / 1e6, 1e-4)
+        self.twcc_estimate = {
+            "received": received,
+            "lost": lost,
+            "loss_fraction": lost / len(statuses),
+            "bytes_acked": bytes_acked,
+            "recv_span_s": span_s,
+            "goodput_bps": int(bytes_acked * 8 / span_s) if received else 0,
+        }
+        logger.debug(
+            "TWCC feedback: recv=%d lost=%d goodput=%s bps",
+            received,
+            lost,
+            self.twcc_estimate["goodput_bps"],
+        )
 
     def _set_role(self, role: str) -> None:
         self._role = role

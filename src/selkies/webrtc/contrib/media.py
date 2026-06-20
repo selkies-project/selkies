@@ -275,6 +275,8 @@ class PlayerStreamTrack(MediaStreamTrack):
             data_time = data.time
         elif isinstance(data, Packet):
             data_time = float(data.pts * data.time_base)
+        else:
+            data_time = None
 
         # control playback rate
         if (

@@ -10,7 +10,7 @@ This server provides the backend infrastructure for establishing and managing in
 
 1.  **Dual-Mode Streaming Architecture:**
     *   **WebRTC Mode:** Facilitates full peer-to-peer (P2P) interactive streaming. This mode manages the complete WebRTC lifecycle, including signaling, media transport negotiation (SRTP), and data channel communication for low-latency interaction.
-    *   **WebSockets Streaming Mode:** Offers an alternative, server-relayed streaming approach. Media is streamed directly over WebSockets, supporting specialized, efficient protocols such as `jpeg-striped` and `x264enc-striped` (akin to the `pixelflux` methodology). This mode is advantageous in scenarios where P2P WebRTC is constrained or a simpler, direct stream is preferred.
+    *   **WebSockets Streaming Mode:** Offers an alternative, server-relayed streaming approach. Media is streamed directly over WebSockets, supporting specialized, efficient protocols such as `jpeg-striped` and `h264enc-striped` (akin to the `pixelflux` methodology). This mode is advantageous in scenarios where P2P WebRTC is constrained or a simpler, direct stream is preferred.
 
 2.  **WebRTC Connection Management (WebRTC Mode):**
     *   Handles Session Description Protocol (SDP) offer/answer exchanges.
@@ -19,8 +19,8 @@ This server provides the backend infrastructure for establishing and managing in
 
 3.  **Audio/Video Processing and Delivery:**
     *   Captures, encodes, and streams audio and video from the server.
-    *   Utilizes GStreamer for flexible and high-performance media pipeline construction, supporting various encoders (e.g., `x264enc`).
-    *   Delivers media via SRTP in WebRTC mode or custom WebSocket protocols (`jpeg-striped`, `x264enc-striped`) in WebSockets mode.
+    *   Captures and encodes media through the in-tree `pixelflux` (video) and `pcmflux` (audio) modules, supporting multiple encoders selected by name (e.g., `h264enc`).
+    *   Delivers media via SRTP in WebRTC mode or custom WebSocket protocols (`jpeg-striped`, `h264enc-striped`) in WebSockets mode.
     *   Supports dynamic adjustments to streaming parameters such as bitrate and framerate.
 
 4.  **Remote Input Handling:**
@@ -54,15 +54,15 @@ This server provides the backend infrastructure for establishing and managing in
 
 9.  **Token-Based Authentication & Authorization:**
     *   Features an optional secure mode, enabled by setting a `master_token`.
-    *   When enabled, it exposes a control plane API on a separate port (`control_port`) to manage temporary user access tokens.
+    *   When enabled, it exposes a token-management API (`POST /tokens`) on the main streaming port, gated by the master token.
     *   Clients must connect with a valid token (`?token=...`) to establish a WebSocket connection.
     *   Assigns roles (e.g., `controller`, `viewer`) and properties (e.g., gamepad `slot`) to clients based on their token.
     *   Enforces permissions on the server-side, restricting actions that viewers can perform.
     *   Automatically disconnects clients if their token is revoked or their permissions change.
 
-### Control Plane API for Token Management
+### Token Management API
 
-When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server runs a control plane API on the `control_port` (default: 8083). This API is used to dynamically set and update the access tokens that clients can use to connect.
+When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server exposes a token-management API on the main streaming port (default: 8081), gated by the master token. It is used to dynamically set and update the access tokens that clients can use to connect.
 
 **Endpoint:** `POST /tokens`
 
@@ -87,7 +87,7 @@ When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server runs a c
 
 **Example `curl` Command:**
 ```bash
-curl -X POST http://localhost:8083/tokens \
+curl -X POST http://localhost:8081/tokens \
 -H "Authorization: Bearer my-secret-master-token" \
 -H "Content-Type: application/json" \
 -d '{
@@ -99,7 +99,7 @@ curl -X POST http://localhost:8083/tokens \
 ## Technical Foundation
 
 *   **Primary Language/Runtime:** Python, leveraging `asyncio` for efficient asynchronous operations and I/O handling.
-*   **Media Framework:** GStreamer is extensively used for all media capture, encoding, and streaming pipeline management.
+*   **Media Framework:** Media capture and encoding are handled by the in-tree `pixelflux` (video) and `pcmflux` (audio) modules; WebRTC media transport uses the bundled `aiortc`-derived stack.
 *   **Communication Protocols:**
     *   WebRTC (SDP, ICE, SRTP, Data Channels) for P2P mode.
     *   WebSockets for signaling (WebRTC mode) and as a direct media transport (WebSockets streaming mode with custom protocols).
@@ -200,7 +200,7 @@ The table below lists all available server settings.
 | `SELKIES_CLIPBOARD_OUT_ENABLED` | `--clipboard-out-enabled` | `True` | Enable server-to-client clipboard synchronization (ignored if `SELKIES_CLIPBOARD_ENABLED` is false). |
 | `SELKIES_COMMAND_ENABLED` | `--command-enabled` | `False` | Enable parsing of `command` websocket messages. Disabled by default for security; opt in explicitly. |
 | `SELKIES_FILE_TRANSFERS` | `--file-transfers` | `'upload,download'` | Allowed file transfer directions (comma-separated: "upload,download"). Set to "" or "none" to disable. |
-| `SELKIES_ENCODER` | `--encoder` | `'x264enc'` | The default video encoder. |
+| `SELKIES_ENCODER` | `--encoder` | `'h264enc'` | The default video encoder. |
 | `SELKIES_FRAMERATE` | `--framerate` | `'8-120'` | Allowed framerate range or a fixed value. |
 | `SELKIES_H264_CRF` | `--h264-crf` | `'5-50'` | Allowed H.264 CRF range or a fixed value. |
 | `SELKIES_JPEG_QUALITY` | `--jpeg-quality` | `'1-100'` | Allowed JPEG quality range or a fixed value. |
@@ -220,9 +220,8 @@ The table below lists all available server settings.
 | `SELKIES_ENABLE_BINARY_CLIPBOARD` | `--enable-binary-clipboard` | `False` | Allow binary data on the clipboard. |
 | `SELKIES_USE_BROWSER_CURSORS` | `--use-browser-cursors` | `False` | Use browser CSS cursors instead of rendering to canvas. |
 | `SELKIES_USE_CSS_SCALING` | `--use-css-scaling` | `False` | HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched. |
-| `SELKIES_PORT` (or `CUSTOM_WS_PORT`) | `--port` | `8082` | Port for the data websocket server. |
-| `SELKIES_CONTROL_PORT` | `--control-port` | `8083` | Port for the internal control plane API, used for managing access tokens when in secure mode. |
-| `SELKIES_MASTER_TOKEN` | `--master-token` | `''` | Master token to enable secure mode. If set, clients must authenticate using tokens provided via the control plane API. |
+| `SELKIES_PORT` (or `CUSTOM_WS_PORT`) | `--port` | `8081` | Port for the data websocket server. |
+| `SELKIES_MASTER_TOKEN` | `--master-token` | `''` | Master token to enable secure mode. If set, clients must authenticate using tokens provided via the token-management API (`POST /tokens`). |
 | `SELKIES_DRI_NODE` (or `DRI_NODE`) | `--dri-node` | `''` | Path to the DRI render node for VA-API. When unset, the GPU/render node is auto-selected (delegated to pixelflux); set this to pin a specific node. |
 | `SELKIES_AUDIO_DEVICE_NAME` | `--audio-device-name` | `'output.monitor'` | Audio device name for pcmflux capture. |
 | `SELKIES_WATERMARK_PATH` (or `WATERMARK_PNG`) | `--watermark-path` | `''` | Absolute path to the watermark PNG file. |

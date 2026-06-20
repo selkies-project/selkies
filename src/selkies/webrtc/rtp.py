@@ -63,10 +63,12 @@ RTCP_RTPFB = 205
 RTCP_PSFB = 206
 
 RTCP_RTPFB_NACK = 1
+RTCP_RTPFB_TWCC = 15
 
 RTCP_PSFB_PLI = 1
 RTCP_PSFB_SLI = 2
 RTCP_PSFB_RPSI = 3
+RTCP_PSFB_FIR = 4
 RTCP_PSFB_APP = 15
 
 
@@ -80,6 +82,9 @@ class HeaderExtensions:
     transmission_offset: Optional[int] = None
     transport_sequence_number: Optional[int] = None
     playout_delay: Any = None
+    # (flags, encode_start, encode_finish, packetization_complete, pacer_exit,
+    #  network_ts, network2_ts) — u8 + 6x u16 ms deltas from the capture timestamp.
+    video_timing: Any = None
 
 
 class HeaderExtensionsMap:
@@ -109,6 +114,8 @@ class HeaderExtensionsMap:
                 self.__ids.transport_sequence_number = ext.id
             elif ext.uri == "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay":
                 self.__ids.playout_delay = ext.id
+            elif ext.uri == "http://www.webrtc.org/experiments/rtp-hdrext/video-timing":
+                self.__ids.video_timing = ext.id
 
     def get(self, extension_profile: int, extension_value: bytes) -> HeaderExtensions:
         values = HeaderExtensions()
@@ -122,11 +129,17 @@ class HeaderExtensionsMap:
             elif x_id == self.__ids.rtp_stream_id:
                 values.rtp_stream_id = x_value.decode("ascii")
             elif x_id == self.__ids.abs_send_time:
-                values.abs_send_time = unpack("!L", b"\00" + x_value)[0]
+                if len(x_value) < 3:
+                    continue  # malformed length; skip rather than raise struct.error
+                values.abs_send_time = unpack("!L", b"\00" + x_value[:3])[0]
             elif x_id == self.__ids.transmission_offset:
-                values.transmission_offset = unpack("!l", x_value + b"\00")[0] >> 8
+                if len(x_value) < 3:
+                    continue  # malformed length; skip rather than raise struct.error
+                values.transmission_offset = unpack("!l", x_value[:3] + b"\00")[0] >> 8
             elif x_id == self.__ids.audio_level:
-                vad_level = unpack("!B", x_value)[0]
+                if len(x_value) < 1:
+                    continue  # malformed length; skip rather than raise struct.error
+                vad_level = unpack("!B", x_value[:1])[0]
                 values.audio_level = (vad_level & 0x80 == 0x80, vad_level & 0x7F)
             elif x_id == self.__ids.transport_sequence_number:
                 values.transport_sequence_number = unpack("!H", x_value)[0]
@@ -137,6 +150,10 @@ class HeaderExtensionsMap:
                 min_value = (byte1 << 4 | byte2 >> 4)
                 max_value = ((byte2 & 0x0F) << 8 | byte3)
                 values.playout_delay = (min_value, max_value)
+            elif x_id == self.__ids.video_timing:
+                if len(x_value) < 13:
+                    continue  # malformed length; skip rather than raise struct.error
+                values.video_timing = unpack("!BHHHHHH", x_value[:13])
         return values
 
     def set(self, values: HeaderExtensions) -> tuple[int, bytes]:
@@ -200,6 +217,10 @@ class HeaderExtensionsMap:
                         values.playout_delay[1] & 0xFF
                     ),
                 )
+            )
+        if values.video_timing is not None and self.__ids.video_timing:
+            extensions.append(
+                (self.__ids.video_timing, pack("!BHHHHHH", *values.video_timing))
             )
         return pack_header_extensions(extensions)
 
@@ -537,6 +558,9 @@ class RtcpRtpfbPacket:
     # generick NACK
     lost: list[int] = field(default_factory=list)
 
+    # raw FCI bytes for formats with structured payloads (e.g. transport-cc)
+    fci: bytes = b""
+
     def __bytes__(self) -> bytes:
         payload = pack("!LL", self.ssrc, self.media_ssrc)
         if self.lost:
@@ -560,13 +584,14 @@ class RtcpRtpfbPacket:
 
         ssrc, media_ssrc = unpack("!LL", data[0:8])
         lost = []
-        for pos in range(8, len(data), 4):
-            pid, blp = unpack("!HH", data[pos : pos + 4])
-            lost.append(pid)
-            for d in range(0, 16):
-                if (blp >> d) & 1:
-                    lost.append(pid + d + 1)
-        return cls(fmt=fmt, ssrc=ssrc, media_ssrc=media_ssrc, lost=lost)
+        if fmt == RTCP_RTPFB_NACK:
+            for pos in range(8, len(data), 4):
+                pid, blp = unpack("!HH", data[pos : pos + 4])
+                lost.append(pid)
+                for d in range(0, 16):
+                    if (blp >> d) & 1:
+                        lost.append(pid + d + 1)
+        return cls(fmt=fmt, ssrc=ssrc, media_ssrc=media_ssrc, lost=lost, fci=data[8:])
 
 
 @dataclass
@@ -844,3 +869,56 @@ def wrap_rtx(
     rtx.csrc = packet.csrc
     rtx.extensions = packet.extensions
     return rtx
+
+
+def build_flexfec_03(
+    media_packets: list[bytes],
+    first_sequence_number: int,
+    protected_ssrc: int,
+    payload_type: int,
+    sequence_number: int,
+    timestamp: int,
+    ssrc: int,
+) -> bytes:
+    """
+    Build one FlexFEC (draft-03, R=0/F=0) repair packet XOR-protecting the given
+    serialized media packets, whose sequence numbers start at
+    `first_sequence_number` and are consecutive (single 15-bit mask block).
+
+    Recovery fields follow the draft: byte 0 covers P/X/CC, byte 1 covers M/PT,
+    plus 16-bit length recovery (packet length minus the fixed RTP header) and
+    32-bit timestamp recovery; the repair payload XORs everything after the
+    fixed header, zero-padded to the longest packet.
+    """
+    assert media_packets and len(media_packets) <= 15
+    recovery = bytearray(2)
+    length_recovery = 0
+    ts_recovery = 0
+    longest = max(len(p) for p in media_packets) - 12
+    payload_recovery = bytearray(longest)
+    mask = 0
+    for offset, media in enumerate(media_packets):
+        recovery[0] ^= media[0] & 0x3F  # P, X, CC (the version bits stay out)
+        recovery[1] ^= media[1]  # M, PT
+        length_recovery ^= len(media) - 12
+        ts_recovery ^= unpack("!L", media[4:8])[0]
+        for i, b in enumerate(media[12:]):
+            payload_recovery[i] ^= b
+        mask |= 1 << (14 - offset)
+
+    header = bytearray(12)
+    header[0] = 0x80  # V=2, P=0, X=0, CC=0
+    header[1] = payload_type & 0x7F
+    header[2:4] = pack("!H", sequence_number)
+    header[4:8] = pack("!L", timestamp)
+    header[8:12] = pack("!L", ssrc)
+
+    fec = bytearray()
+    fec += bytes([recovery[0] & 0x3F, recovery[1]])  # R=0, F=0
+    fec += pack("!H", length_recovery)
+    fec += pack("!L", ts_recovery)
+    fec += bytes([1, 0, 0, 0])  # SSRCCount=1 + reserved
+    fec += pack("!L", protected_ssrc)
+    fec += pack("!H", first_sequence_number)
+    fec += pack("!H", 0x8000 | mask)  # K=1: single mask block
+    return bytes(header) + bytes(fec) + bytes(payload_recovery)

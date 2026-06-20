@@ -24,7 +24,7 @@
 
 
 /**
-* @typedef {Object} WebRTCDemoSignaling
+* @typedef {Object} WebRTCSignaling
 * @property {function} ondebug - Callback fired when a new debug message is set.
 * @property {function} onstatus - Callback fired when a new status message is set.
 * @property {function} onerror - Callback fired when an error occurs.
@@ -33,15 +33,16 @@
 * @property {function} connect - initiate connection to server.
 * @property {function} disconnect - close connection to server.
 */
-export class WebRTCDemoSignaling {
+export class WebRTCSignaling {
     /**
-     * Interface to WebRTC demo signaling server.
-     * Protocol: https://github.com/GStreamer/gstreamer/blob/main/subprojects/gst-examples/webrtc/signaling/Protocol.md
+     * Interface to the WebRTC signaling server.
+     * Protocol reference:
+     *   https://github.com/GStreamer/gstreamer/blob/main/subprojects/gst-examples/webrtc/signaling/Protocol.md
      *
      * @constructor
      * @param {URL} [server]
      *    The URL object of the signaling server to connect to, created with `new URL()`.
-     *    Signaling implementation is here:
+     *    Reference implementation:
      *      https://github.com/GStreamer/gstreamer/tree/main/subprojects/gst-examples/webrtc/signaling
      */
     constructor(server, client_type, client_slot, client_strict_viewer) {

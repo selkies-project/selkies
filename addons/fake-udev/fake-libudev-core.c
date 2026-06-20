@@ -1,10 +1,18 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
 #include "libudev.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <errno.h>
+#include <sys/epoll.h>     // aggregate monitor fd handed to poll()-driven consumers
 #include <sys/eventfd.h>
+#include <sys/inotify.h>   // inotify-backed udev_monitor hotplug
 #include <fnmatch.h>       // For fnmatch if used (like for "js*")
 #include <sys/types.h>     // For dev_t
 #include <sys/sysmacros.h> // For major() and minor()
@@ -18,6 +26,18 @@ static bool g_fake_udev_logging_initialized = false;
 
 // --- Virtual Device Definitions ---
 #define NUM_VIRTUAL_GAMEPADS 4
+
+// Directory watched for the interposer's device sockets, and the read buffer for
+// inotify records (>= one max-length record, so read() never returns EINVAL).
+// selkies writes the sockets to js_socket_path (SELKIES_JS_SOCKET_PATH, default
+// /tmp); the interposer and this watch must agree on that directory.
+#define FAKE_UDEV_SOCKET_DIR_DEFAULT "/tmp"
+#define FAKE_UDEV_INOTIFY_EVBUF_SIZE 4096
+
+static const char *fake_udev_socket_dir(void) {
+    const char *d = getenv("SELKIES_JS_SOCKET_PATH");
+    return (d && d[0]) ? d : FAKE_UDEV_SOCKET_DIR_DEFAULT;
+}
 
 typedef enum {
     VIRTUAL_TYPE_NONE = -1,
@@ -229,6 +249,7 @@ struct udev_device {
     virtual_device_node_type_t node_type;
     struct udev_list_entry *properties_cache;
     bool properties_cached;
+    const char *action; // hotplug action from a monitor ("add"/"remove"); NULL otherwise
 };
 
 struct udev_enumerate {
@@ -244,7 +265,19 @@ struct udev_monitor {
     struct udev *udev_ctx;
     int n_ref;
     char name[64];
+    // Consumer-visible fd (returned by udev_monitor_get_fd): an epoll set over
+    // inotify_fd and evbuf_efd, so it polls readable exactly while
+    // receive_device has an event to yield (real-libudev contract). -1 => hand
+    // out inotify_fd directly.
     int fd;
+    int inotify_fd;            // internal inotify fd, -1 if unavailable
+    int evbuf_efd;             // eventfd armed while evbuf holds an undispensed matching record
+    bool evbuf_efd_armed;      // current arm state of evbuf_efd
+    int watch_wd;              // watch descriptor for FAKE_UDEV_SOCKET_DIR, -1 if none
+    char filter_subsystem[64]; // subsystem match filter ("" == match any)
+    char evbuf[FAKE_UDEV_INOTIFY_EVBUF_SIZE]; // undispensed inotify records
+    size_t evbuf_len;          // valid bytes in evbuf
+    size_t evbuf_off;          // offset of the next record to dispense
 };
 
 struct udev *udev_new(void) {
@@ -1111,6 +1144,27 @@ struct udev_list_entry *udev_enumerate_get_list_entry(struct udev_enumerate *ude
     return udev_enumerate->current_scan_results;
 }
 
+// Maps an interposer socket basename (e.g. "selkies_js0.sock" or
+// "selkies_event1000.sock") back to the virtual gamepad node it represents.
+// Socket basenames are "selkies_<sysname>.sock" for the js and event nodes.
+static bool find_node_by_socket_name(const char *name,
+                                     const virtual_gamepad_definition_t **def_out,
+                                     virtual_device_node_type_t *type_out) {
+    if (!name || !def_out || !type_out) {
+        return false;
+    }
+    initialize_virtual_gamepads_data_if_needed();
+    for (int i = 0; i < NUM_VIRTUAL_GAMEPADS; ++i) {
+        const virtual_gamepad_definition_t *def = &virtual_gamepads[i];
+        char sock[96];
+        snprintf(sock, sizeof(sock), "selkies_%s.sock", def->js_sysname);
+        if (strcmp(name, sock) == 0) { *def_out = def; *type_out = VIRTUAL_TYPE_JS; return true; }
+        snprintf(sock, sizeof(sock), "selkies_%s.sock", def->event_sysname);
+        if (strcmp(name, sock) == 0) { *def_out = def; *type_out = VIRTUAL_TYPE_EVENT; return true; }
+    }
+    return false;
+}
+
 struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev, const char *name) {
     if (!udev) {
         return NULL;
@@ -1125,7 +1179,48 @@ struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev, const char
         return NULL;
     }
     mon->n_ref = 1;
-    mon->fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    mon->watch_wd = -1;
+    mon->filter_subsystem[0] = '\0';
+    mon->evbuf_len = 0;
+    mon->evbuf_off = 0;
+    // Back the monitor with an inotify watch on the socket dir so the interposer's
+    // device-socket create/delete surface as udev add/remove hotplug events.
+    mon->inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (mon->inotify_fd >= 0) {
+        const char *sock_dir = fake_udev_socket_dir();
+        mon->watch_wd = inotify_add_watch(mon->inotify_fd, sock_dir, IN_CREATE | IN_DELETE);
+        if (mon->watch_wd < 0) {
+            FAKE_UDEV_LOG_WARN("inotify_add_watch(%s) failed: %s", sock_dir, strerror(errno));
+        }
+    } else {
+        FAKE_UDEV_LOG_WARN("inotify_init1 failed: %s; hotplug disabled", strerror(errno));
+    }
+    // One inotify read() can drain several coalesced records into evbuf while
+    // receive_device dispenses only one per call, so raw inotify readability
+    // understates pending events. Hand out an epoll fd over the inotify fd plus
+    // an eventfd that is kept armed while undispensed matching records sit in
+    // evbuf; poll()-gated consumers (SDL2) then keep calling receive_device
+    // until the buffer is truly empty.
+    mon->evbuf_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    mon->evbuf_efd_armed = false;
+    mon->fd = epoll_create1(EPOLL_CLOEXEC);
+    if (mon->fd >= 0) {
+        struct epoll_event epev;
+        memset(&epev, 0, sizeof(epev));
+        epev.events = EPOLLIN;
+        if (mon->inotify_fd >= 0) {
+            epev.data.fd = mon->inotify_fd;
+            epoll_ctl(mon->fd, EPOLL_CTL_ADD, mon->inotify_fd, &epev);
+        }
+        if (mon->evbuf_efd >= 0) {
+            epev.data.fd = mon->evbuf_efd;
+            epoll_ctl(mon->fd, EPOLL_CTL_ADD, mon->evbuf_efd, &epev);
+        }
+    } else {
+        // Degraded fallback: hand out the raw inotify fd (buffered-record
+        // readability is then best-effort, as before).
+        FAKE_UDEV_LOG_WARN("epoll_create1 failed: %s", strerror(errno));
+    }
     if (name) {
         strncpy(mon->name, name, sizeof(mon->name) - 1);
         mon->name[sizeof(mon->name) - 1] = '\0';
@@ -1153,6 +1248,12 @@ struct udev_monitor *udev_monitor_unref(struct udev_monitor *udev_monitor) {
         if (udev_monitor->fd >= 0) {
             close(udev_monitor->fd);
         }
+        if (udev_monitor->inotify_fd >= 0) {
+            close(udev_monitor->inotify_fd);
+        }
+        if (udev_monitor->evbuf_efd >= 0) {
+            close(udev_monitor->evbuf_efd);
+        }
         free(udev_monitor);
         return NULL;
     }
@@ -1166,19 +1267,134 @@ int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
 
 int udev_monitor_get_fd(struct udev_monitor *udev_monitor) {
     if (!udev_monitor) return -1;
-    return udev_monitor->fd;
+    if (udev_monitor->fd >= 0) return udev_monitor->fd;
+    return udev_monitor->inotify_fd; // degraded: no epoll set available
+}
+
+// True if any undispensed record in evbuf would be delivered by receive_device.
+// Mirrors the match logic of monitor_dispense_device below.
+static bool evbuf_has_matching_record(const struct udev_monitor *mon) {
+    size_t off = mon->evbuf_off;
+    while (off + sizeof(struct inotify_event) <= mon->evbuf_len) {
+        const struct inotify_event *ev = (const struct inotify_event *)(mon->evbuf + off);
+        size_t rec = sizeof(struct inotify_event) + ev->len;
+        if (off + rec > mon->evbuf_len) {
+            break; // trailing partial record, never dispensed
+        }
+        off += rec;
+        if (!(ev->mask & (IN_CREATE | IN_DELETE)) || ev->len == 0) {
+            continue;
+        }
+        const virtual_gamepad_definition_t *def = NULL;
+        virtual_device_node_type_t type = VIRTUAL_TYPE_NONE;
+        if (!find_node_by_socket_name(ev->name, &def, &type)) {
+            continue;
+        }
+        if (mon->filter_subsystem[0] != '\0') {
+            const char *subsys = (type == VIRTUAL_TYPE_JS) ? def->js_subsystem : def->event_subsystem;
+            if (!subsys || strcmp(subsys, mon->filter_subsystem) != 0) {
+                continue;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+// Keep the consumer-visible fd's readability equal to "receive_device will
+// yield an event": arm the eventfd while evbuf still holds an undispensed
+// matching record, drain it once the buffer is exhausted. Fresh inotify data
+// surfaces through the epoll set on its own.
+static void monitor_sync_readable(struct udev_monitor *mon) {
+    if (mon->evbuf_efd < 0) {
+        return;
+    }
+    bool want_armed = evbuf_has_matching_record(mon);
+    if (want_armed && !mon->evbuf_efd_armed) {
+        if (eventfd_write(mon->evbuf_efd, 1) == 0) {
+            mon->evbuf_efd_armed = true;
+        }
+    } else if (!want_armed && mon->evbuf_efd_armed) {
+        eventfd_t val;
+        if (eventfd_read(mon->evbuf_efd, &val) == 0 || errno == EAGAIN) {
+            mon->evbuf_efd_armed = false;
+        }
+    }
+}
+
+// Dispense one device per call. Records are buffered so any left over after a
+// match survive to the next call; non-matching records are drained in-place.
+static struct udev_device *monitor_dispense_device(struct udev_monitor *udev_monitor) {
+    for (;;) {
+        if (udev_monitor->evbuf_off + sizeof(struct inotify_event) > udev_monitor->evbuf_len) {
+            ssize_t n = read(udev_monitor->inotify_fd, udev_monitor->evbuf, sizeof(udev_monitor->evbuf));
+            if (n <= 0) {
+                return NULL; // EAGAIN (nothing pending) or error/EOF
+            }
+            udev_monitor->evbuf_len = (size_t)n;
+            udev_monitor->evbuf_off = 0;
+            if (udev_monitor->evbuf_off + sizeof(struct inotify_event) > udev_monitor->evbuf_len) {
+                return NULL;
+            }
+        }
+
+        struct inotify_event *ev = (struct inotify_event *)(udev_monitor->evbuf + udev_monitor->evbuf_off);
+        size_t rec = sizeof(struct inotify_event) + ev->len;
+        if (udev_monitor->evbuf_off + rec > udev_monitor->evbuf_len) {
+            udev_monitor->evbuf_off = udev_monitor->evbuf_len; // drop trailing partial, force refill
+            continue;
+        }
+        udev_monitor->evbuf_off += rec;
+
+        const char *action = (ev->mask & IN_CREATE) ? "add" : (ev->mask & IN_DELETE) ? "remove" : NULL;
+        if (!action || ev->len == 0) {
+            continue;
+        }
+
+        const virtual_gamepad_definition_t *def = NULL;
+        virtual_device_node_type_t type = VIRTUAL_TYPE_NONE;
+        if (!find_node_by_socket_name(ev->name, &def, &type)) {
+            continue; // not one of the interposer's device sockets
+        }
+
+        const char *syspath = (type == VIRTUAL_TYPE_JS) ? def->js_syspath : def->event_syspath;
+        struct udev_device *dev = udev_device_new_from_syspath(udev_monitor->udev_ctx, syspath);
+        if (!dev) {
+            continue;
+        }
+        // Honor a subsystem filter if one was set (our nodes are always "input").
+        if (udev_monitor->filter_subsystem[0] != '\0') {
+            const char *subsys = udev_device_get_subsystem(dev);
+            if (!subsys || strcmp(subsys, udev_monitor->filter_subsystem) != 0) {
+                udev_device_unref(dev);
+                continue;
+            }
+        }
+        dev->action = action;
+        FAKE_UDEV_LOG_INFO("hotplug '%s' for socket '%s' -> %s", action, ev->name, syspath);
+        return dev;
+    }
 }
 
 struct udev_device *udev_monitor_receive_device(struct udev_monitor *udev_monitor) {
-    if (!udev_monitor) return NULL;
-    return NULL;
+    if (!udev_monitor || udev_monitor->inotify_fd < 0) {
+        return NULL;
+    }
+    struct udev_device *dev = monitor_dispense_device(udev_monitor);
+    monitor_sync_readable(udev_monitor);
+    return dev;
 }
 
 int udev_monitor_filter_add_match_subsystem_devtype(
         struct udev_monitor *udev_monitor,
         const char *subsystem,
         const char *devtype) {
+    (void)devtype;
     if (!udev_monitor) return -EINVAL;
+    if (subsystem) {
+        strncpy(udev_monitor->filter_subsystem, subsystem, sizeof(udev_monitor->filter_subsystem) - 1);
+        udev_monitor->filter_subsystem[sizeof(udev_monitor->filter_subsystem) - 1] = '\0';
+    }
     return 0;
 }
 
@@ -1205,8 +1421,10 @@ struct udev_list_entry *udev_hwdb_get_properties_list_entry(
 // --- Other udev_device Stubs/Placeholders ---
 const char *udev_device_get_action(struct udev_device *udev_device) {
     const char* syspath = udev_device ? udev_device_get_syspath(udev_device) : "NULL_DEVICE";
-    FAKE_UDEV_LOG_INFO("called for device %p (%s), returning 'add'", (void*)udev_device, syspath);
-    return "add";
+    // Monitor-delivered devices carry their real action; enumerated devices default to "add".
+    const char *action = (udev_device && udev_device->action) ? udev_device->action : "add";
+    FAKE_UDEV_LOG_INFO("called for device %p (%s), returning '%s'", (void*)udev_device, syspath, action);
+    return action;
 }
 
 const char *udev_device_get_devpath(struct udev_device *udev_device) {

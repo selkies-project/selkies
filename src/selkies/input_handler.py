@@ -19,6 +19,7 @@
 
 import ctypes
 import logging
+import shutil
 import struct
 import time
 import asyncio
@@ -30,11 +31,13 @@ import binascii
 import io
 import re
 import json
-from PIL import Image 
+import aiofiles
+import msgpack
+from PIL import Image
 import urllib.parse
 import urllib.request
 from .media_pipeline import RateControlMode
-from .settings import settings
+from .settings import settings, WS_MAX_MESSAGE_BYTES
 try:
     from xkbcommon import xkb
 except ImportError:
@@ -48,25 +51,202 @@ except Exception:
     libxkb = None
 
 try:
-    import pynput
-    import Xlib
-    from Xlib import display
-    from Xlib import X
-    from Xlib import XK
-    from Xlib.ext import xfixes, xtest
+    from . import Xlib
+    from .Xlib import display
+    from .Xlib import X
+    from .Xlib import XK
+    from .Xlib.ext import xfixes, xtest
     X11_LIBS_AVAILABLE = True
 except ImportError:
     X11_LIBS_AVAILABLE = False
-    pynput = None
     Xlib = None
     display = None
     X = None
     XK = None
     xfixes = None
     xtest = None
-import msgpack
-import distro
-import aiofiles
+
+try:
+    from pixelflux import ScreenCapture
+except (ImportError, RuntimeError):
+    ScreenCapture = None
+
+
+class _XTestKeyboard:
+    """Keyboard controller backed by the bundled python-xlib XTEST extension.
+    Injects key events through the already-open self.xdisplay connection; a
+    separate second X-display connection whose blocking sync could spin at
+    100% CPU inside connect() is deliberately avoided."""
+
+    # Spare keycodes past the base layout, bound on demand to keysyms the layout
+    # lacks (Unicode, exotic symbols) so they inject in-process via XTEST instead of
+    # forking xdotool. Round-robin recycled; the reverse of TigerVNC/x0vncserver's
+    # XkbAddKeyKeysym, done through core ChangeKeyboardMapping.
+    _OVERLAY_SLOTS = 16
+
+    def __init__(self, xdisplay):
+        self._d = xdisplay
+        # XK_Shift_L; may be 0 on an exotic keymap (then capitals just skip shift).
+        self._shift_kc = xdisplay.keysym_to_keycode(0xffe1)
+        # XK_Shift_R: a client-held Shift may be down on either keycode.
+        self._shift_r_kc = xdisplay.keysym_to_keycode(0xffe2)
+        # AltGr, to reach glyphs bound above the Shift level (e.g. '@' on an Italian
+        # or German keymap): prefer ISO_Level3_Shift, fall back to Mode_switch.
+        self._altgr_kc = (xdisplay.keysym_to_keycode(0xfe03)
+                          or xdisplay.keysym_to_keycode(0xff7e))
+        # keysym -> the modifier keycodes press() synthesized for it. release() undoes
+        # only these, so a modifier the client is physically holding (injected via the
+        # XTEST fast path) is never force-released here.
+        self._synth_mods = {}
+        # Dynamic-overlay state (lazy): spare keycodes, keysym->keycode bindings,
+        # and the keycode used at PRESS so release replays it (never re-resolves,
+        # matching neko's XKeyEntryGet — the layout may shift mid-keystroke).
+        self._spare_keycodes = None
+        self._overlay = {}          # keysym -> keycode
+        self._overlay_order = []    # round-robin recycle order
+        self._pressed_kc = {}       # keysym -> keycode injected at press
+
+    def _find_spare_keycodes(self):
+        """Keycodes whose every level is NoSymbol — free to repurpose."""
+        info = self._d.display.info
+        lo, hi = info.min_keycode, info.max_keycode
+        mapping = self._d.get_keyboard_mapping(lo, hi - lo + 1)
+        spares = []
+        for i, syms in enumerate(mapping):
+            if all(s == 0 for s in syms):
+                spares.append(lo + i)
+            if len(spares) >= self._OVERLAY_SLOTS:
+                break
+        return spares
+
+    def _overlay_keycode(self, keysym):
+        """Bind an unmapped keysym to a spare keycode (recycling the oldest) and
+        return it, or None if no spare keycode exists."""
+        if keysym in self._overlay:
+            return self._overlay[keysym]
+        if self._spare_keycodes is None:
+            self._spare_keycodes = self._find_spare_keycodes()
+        if not self._spare_keycodes:
+            return None
+        if len(self._overlay) >= len(self._spare_keycodes):
+            oldest = self._overlay_order.pop(0)
+            kc = self._overlay.pop(oldest)
+        else:
+            kc = self._spare_keycodes[len(self._overlay)]
+        # Assign the keysym at levels 0 and 1 so an accidental Shift can't change it.
+        self._d.change_keyboard_mapping(kc, [[keysym, keysym]])
+        self._d.sync()
+        self._overlay[keysym] = kc
+        self._overlay_order.append(keysym)
+        return kc
+
+    def _resolve(self, keysym):
+        """Return (keycode, modifier_keycodes) to inject this keysym. The modifiers are
+        the Shift / AltGr keycodes whose held state selects the keymap level the keysym
+        sits at, so a glyph bound above the Shift level (e.g. AltGr '@') types correctly
+        instead of falling through to its level-0 glyph."""
+        d = self._d
+        kc = d.keysym_to_keycode(keysym)
+        if not kc:
+            # Not in the layout: map it to a spare keycode in-process (no xdotool
+            # fork). Overlay keysyms sit at level 0, so they never need modifiers.
+            kc = self._overlay_keycode(keysym)
+            if not kc:
+                # No spare keycode: raise so the caller falls back to xdotool.
+                raise ValueError("no keycode for keysym %r" % (keysym,))
+            return kc, ()
+        # Lowest column carrying this glyph: 0 base, 1 Shift, 2 AltGr, 3 Shift+AltGr.
+        level = next((lvl for lvl in range(4)
+                      if d.keycode_to_keysym(kc, lvl) == keysym), 0)
+        mods = []
+        if level & 1 and self._shift_kc:
+            mods.append(self._shift_kc)
+        if level & 2 and self._altgr_kc:
+            mods.append(self._altgr_kc)
+        return kc, tuple(mods)
+
+    def _shift_down(self):
+        # Logical Shift state: one round trip on the already-open display,
+        # queried only for shifted keysyms.
+        bits = self._d.query_keymap()
+        return any(kc and bits[kc // 8] & (1 << (kc % 8))
+                   for kc in (self._shift_kc, self._shift_r_kc))
+
+    def _mod_down(self, kc):
+        # Is this modifier keycode already held (by the client, via the fast path)?
+        # Shift may be held on either Shift_L or Shift_R.
+        if not kc:
+            return False
+        if kc == self._shift_kc:
+            return self._shift_down()
+        bits = self._d.query_keymap()
+        return bool(bits[kc // 8] & (1 << (kc % 8)))
+
+    def press(self, keysym):
+        kc, mods = self._resolve(keysym)
+        # Synthesize only modifiers not already held; release only those on release().
+        synth = [m for m in mods if not self._mod_down(m)]
+        for m in synth:
+            xtest.fake_input(self._d, Xlib.X.KeyPress, m)
+        if synth:
+            self._synth_mods[keysym] = synth
+        xtest.fake_input(self._d, Xlib.X.KeyPress, kc)
+        self._pressed_kc[keysym] = kc  # replay this exact keycode on release
+        self._d.flush()
+
+    def release(self, keysym):
+        # Replay the press-time keycode; only re-resolve if the press wasn't tracked
+        # (the layout may have changed mid-keystroke, orphaning a re-resolve).
+        kc = self._pressed_kc.pop(keysym, None)
+        if kc is None:
+            kc, _ = self._resolve(keysym)
+        xtest.fake_input(self._d, Xlib.X.KeyRelease, kc)
+        for m in reversed(self._synth_mods.pop(keysym, ())):
+            xtest.fake_input(self._d, Xlib.X.KeyRelease, m)
+        self._d.flush()
+
+
+class _XTestMouse:
+    """Mouse controller backed by the bundled python-xlib XTEST extension."""
+
+    def __init__(self, xdisplay):
+        self._d = xdisplay
+
+    @property
+    def position(self):
+        p = self._d.screen().root.query_pointer()
+        return (p.root_x, p.root_y)
+
+    @position.setter
+    def position(self, xy):
+        x, y = xy
+        xtest.fake_input(self._d, Xlib.X.MotionNotify, detail=False,
+                         root=Xlib.X.NONE, x=int(x), y=int(y))
+        self._d.flush()
+
+    def scroll(self, dx, dy):
+        d = self._d
+        # X core pointer scroll buttons: 4=up, 5=down, 6=left, 7=right. Sign
+        # convention matches the callers (positive dy = up, positive dx = right),
+        # so the end-to-end wheel direction is unchanged from the prior Controller.
+        def _clicks(btn, n):
+            for _ in range(int(abs(n))):
+                xtest.fake_input(d, Xlib.X.ButtonPress, btn)
+                xtest.fake_input(d, Xlib.X.ButtonRelease, btn)
+        if dy:
+            _clicks(4 if dy > 0 else 5, dy)
+        if dx:
+            _clicks(7 if dx > 0 else 6, dx)
+        d.flush()
+
+    def press(self, button):
+        xtest.fake_input(self._d, Xlib.X.ButtonPress, int(button))
+        self._d.flush()
+
+    def release(self, button):
+        xtest.fake_input(self._d, Xlib.X.ButtonRelease, int(button))
+        self._d.flush()
+
 
 logger_webrtc_input = logging.getLogger("webrtc_input")
 logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
@@ -146,8 +326,9 @@ INTERPOSER_MAX_AXES = 64
 CONTROLLER_NAME_MAX_LEN = 255 
 C_INTERPOSER_STRUCT_SIZE = 1360
 
-# Max clipboard chunk size
-CLIPBOARD_CHUNK_SIZE = 750 * 1024 
+# Raw bytes per multipart message: fill the shared WebSocket frame ceiling, with
+# margin for the verb prefix and base64 expansion (limit/4*3 of the payload budget).
+CLIPBOARD_CHUNK_SIZE = ((WS_MAX_MESSAGE_BYTES - 4096) * 3) // 4 
 
 # For mouse input to send fake back and forward events
 KEYSYM_ALT_L = 0xFFE9     # Left Alt keysym
@@ -416,7 +597,7 @@ class SelkiesGamepad:
     def __init__(self, js_interposer_socket_path, evdev_interposer_socket_path, loop=None):
         self.js_sock_path = js_interposer_socket_path
         self.evdev_sock_path = evdev_interposer_socket_path
-        self.loop = loop or asyncio.get_event_loop()
+        self.loop = loop or asyncio.get_running_loop()
         
         self.mapper = None # Set by set_config
         self.config_payload_cache = None # Cache for js_config_t
@@ -426,7 +607,11 @@ class SelkiesGamepad:
         self.js_clients = {} # {writer: {'arch_bits': bits}}
         self.evdev_clients = {} # {writer: {'arch_bits': bits}}
         
-        self.events_queue = asyncio.Queue()
+        # Bounded so a single stalled gamepad client (slow writer.drain) can't let
+        # this queue grow without limit and wedge event delivery for every client.
+        # On overflow we drop the OLDEST event (see send_event) — for a gamepad the
+        # freshest axis/button state matters, stale samples are worthless.
+        self.events_queue = asyncio.Queue(maxsize=4096)
         self.running = False
         self._event_processor_task = None
 
@@ -464,6 +649,7 @@ class SelkiesGamepad:
         Creates the configuration payload (js_config_t) to be sent to the C interposer.
         Ensures the payload is exactly C_INTERPOSER_STRUCT_SIZE (1360 bytes).
         """
+        struct_fmt = base_struct_fmt = "undefined"
         try:
             name_str = controller_config.get("name", f"Selkies Virtual JS{js_index}")
             name_bytes_utf8 = name_str.encode('utf-8')
@@ -587,8 +773,8 @@ class SelkiesGamepad:
             return payload
 
         except struct.error as e:
-            # Ensure struct_fmt is defined for the error message if an error occurs before its assignment
-            current_struct_fmt = struct_fmt if 'struct_fmt' in locals() else (base_struct_fmt if 'base_struct_fmt' in locals() else "undefined")
+            # Report the most specific format string reached before the failure.
+            current_struct_fmt = struct_fmt if struct_fmt != "undefined" else base_struct_fmt
             logging.error(f"Error packing joystick config for js{js_index} with format '{current_struct_fmt}': {e}")
             config_to_log = controller_config if 'controller_config' in locals() else {}
             logging.error(f"Controller config was: {config_to_log}")
@@ -650,8 +836,7 @@ class SelkiesGamepad:
             if not writer.is_closing():
                 logger_selkies_gamepad.info(f"{log_prefix} Explicitly closing writer in finally block.")
                 writer.close()
-                try: await writer.wait_closed() 
-                except AttributeError: pass # wait_closed might not exist on all stream types or states
+                await writer.wait_closed()
             logger_selkies_gamepad.info(f"{log_prefix} Handler finished.")
 
     async def _run_single_server(self, interposer_socket_path, is_evdev_socket):
@@ -710,7 +895,26 @@ class SelkiesGamepad:
         event_package = self.mapper.get_mapped_events(client_event_idx, client_value, is_button_event)
         if event_package:
             logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: Queuing event: {event_package}")
-            self.events_queue.put_nowait(event_package)
+            try:
+                self.events_queue.put_nowait(event_package)
+            except asyncio.QueueFull:
+                # Drop the oldest queued event to make room for this newer one, so a
+                # stalled client draining slowly can't back-pressure into unbounded
+                # growth. The shutdown sentinel (None) is re-enqueued if evicted.
+                try:
+                    dropped = self.events_queue.get_nowait()
+                    self.events_queue.task_done()
+                    if dropped is None:
+                        self.events_queue.put_nowait(None)
+                        return
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    self.events_queue.put_nowait(event_package)
+                except asyncio.QueueFull:
+                    logger_selkies_gamepad.warning(
+                        f"Gamepad {self.js_sock_path}: event queue full; dropping event."
+                    )
 
     async def _process_event_queue(self):
         logger_selkies_gamepad.info(f"Gamepad {self.js_sock_path}: Event processor started.")
@@ -768,14 +972,12 @@ class SelkiesGamepad:
 
         if self.js_server:
             self.js_server.close()
-            try: await self.js_server.wait_closed()
-            except AttributeError: pass
+            await self.js_server.wait_closed()
             self.js_server = None
             logger_selkies_gamepad.info(f"JS interposer server {self.js_sock_path} closed.")
         if self.evdev_server:
             self.evdev_server.close()
-            try: await self.evdev_server.wait_closed()
-            except AttributeError: pass
+            await self.evdev_server.wait_closed()
             self.evdev_server = None
             logger_selkies_gamepad.info(f"EVDEV interposer server {self.evdev_sock_path} closed.")
 
@@ -807,7 +1009,7 @@ class SelkiesGamepad:
                 except OSError as e:
                     logger_selkies_gamepad.warning(f"Could not remove socket file {sock_path} on close: {e}")
         
-        logger_selkies_gamepad.info(f"Gamepad services fully closed.")
+        logger_selkies_gamepad.info("Gamepad services fully closed.")
 
 
 # --- WebRTCInput Class ---
@@ -816,7 +1018,7 @@ class WebRTCInputError(Exception): pass
 class WebRTCInput:
     def __init__(
         self,
-        gst_webrtc_app,
+        rtc_app,
         uinput_mouse_socket_path="",
         js_socket_path_prefix="/tmp", 
         enable_clipboard="",
@@ -842,22 +1044,33 @@ class WebRTCInput:
         self.active_modifiers = set()
         self.atomically_typed_keys = set()
         self.translated_keys = set() # Track translated keysyms
-        self.ACTION_MODIFIER_KEYSYMS = {65507, 65508, 65513, 65514, 65511, 65512}
+        self.ACTION_MODIFIER_KEYSYMS = {65507, 65508, 65513, 65514, 65511, 65512,
+                                        65515, 65516, 65517, 65518}
         self.MODIFIER_KEYSYMS = {
             65505, 65506,  # Shift_L, Shift_R
             65507, 65508,  # Control_L, Control_R
             65513, 65514,  # Alt_L, Alt_R
             65027,        # ISO_Level3_Shift (AltGr)
-            65511, 65512,  # Meta_L, Meta_R / Super_L, Super_R
+            65511, 65512,  # Meta_L, Meta_R
+            # The client maps the Meta/Windows key to Super, not Meta, so Super
+            # (and Hyper) must be treated as modifiers too — otherwise they get
+            # armed for auto-repeat and misrouted as ordinary keys.
+            65515, 65516,  # Super_L, Super_R
+            65517, 65518,  # Hyper_L, Hyper_R
         }
-        self.gst_webrtc_app = gst_webrtc_app
-        self.loop = asyncio.get_event_loop()
+        self.rtc_app = rtc_app
+        self.loop = asyncio.get_running_loop()
         self.js_socket_path_prefix = js_socket_path_prefix
         self.num_gamepads = 4 
         self.gamepad_instances = {}
         self.client_gamepad_associations = {} 
 
         self.clipboard_running = False
+        # Serializes update_binary_clipboard_setting so its cancel+reassign of the
+        # monitor task is atomic (two rapid toggles can't interleave at the await).
+        self._binary_clipboard_lock = asyncio.Lock()
+        # Singleton guard: only one start_clipboard poll loop may run at a time.
+        self._clipboard_monitor_active = False
         self.uinput_mouse_socket_path = uinput_mouse_socket_path
         self.uinput_mouse_socket = None
         self.enable_clipboard = enable_clipboard
@@ -867,6 +1080,10 @@ class WebRTCInput:
         self.cursor_scale = cursor_scale
         self.cursor_size = cursor_size
         self.cursor_debug = cursor_debug
+        # An explicit cursor_size raises the remote-cursor capture cap so the
+        # requested size survives the transport instead of being resized down.
+        if isinstance(cursor_size, int) and cursor_size > 0:
+            max_cursor_size = max(max_cursor_size, cursor_size)
         self.max_cursor_size = max_cursor_size
         self.system_dpi = 96.0
         self.cursor_size_cap = max_cursor_size
@@ -917,8 +1134,9 @@ class WebRTCInput:
         self.use_clipboard_fallback = False
         self.clipboard_paused = False
         # Debounce REQUEST_CLIPBOARD (Ctrl/Cmd+C): coalesce bursts so we don't spawn
-        # an xclip/wl-paste read per keypress (fork storm).
-        self._last_clipboard_request_ts = 0.0
+        # an xclip/wl-paste read per keypress (fork storm). Keyed per requesting
+        # connection so one client's copy can't suppress another client's read.
+        self._last_clipboard_request_ts = {}  # conn key -> last request (monotonic)
         self._clipboard_request_debounce = 0.25  # seconds
         self.clipboard_injection_lock = asyncio.Lock()
         self.keyboard_queue = asyncio.Queue()
@@ -937,17 +1155,32 @@ class WebRTCInput:
         self.key_stale_window = 2.0       # release a key unseen for this long
         self.key_sweep_interval = 0.1
         self.key_sweep_task = None
+        # Server-side key auto-repeat (X11 only). XTEST/xdotool
+        # synthetic presses do NOT trigger the X server's native auto-repeat, so a held
+        # key would emit a single character. We re-emit held repeatable keys here at the
+        # configured rate. Disabled on Wayland: the focused app repeats held
+        # virtual-keyboard keys itself via wl_keyboard repeat_info, so a server-side
+        # repeat would double it.
+        self.key_repeat_enabled = not self.is_wayland
+        self.key_repeat_delay = 0.5        # seconds a key must stay held before repeating
+        self.key_repeat_interval = 0.04    # seconds between repeats (~25 Hz)
+        self.key_repeat_tick = 0.02        # repeat-loop poll period
+        # Pause repeat when the held key's last heartbeat is older than this (stalled
+        # stream / hidden tab). Keep >~3x the client's 100ms heartbeat.
+        self.key_repeat_heartbeat_grace = 0.3
+        self.key_repeat_state = {}         # keysym -> monotonic time of next due repeat
+        self.key_repeat_task = None
         self.on_update_rate_control_mode = lambda mode: logger_webrtc_input.warning("unhandled on_update_rate_control_mode")
         self.on_update_crf = lambda value: logger_webrtc_input.warning("unhandled on_update_crf")
 
         if self.is_wayland:
-            import shutil
             if shutil.which("kwin_wayland"):
                 self.use_clipboard_fallback = True
                 logger_webrtc_input.info("kwin_wayland detected: enabling Clipboard-Input fallback for Unicode.")
 
             try:
-                from pixelflux import ScreenCapture
+                if ScreenCapture is None:
+                    raise RuntimeError("pixelflux is not installed")
                 self.wayland_input = ScreenCapture()
                 logger_webrtc_input.info("Wayland input injection initialized.")
                 
@@ -1008,8 +1241,8 @@ class WebRTCInput:
         await self.send_clipboard_data(data, mime_type)
     def _on_cursor_change(self, data): self.send_cursor_data(data)
     async def send_clipboard_data(self, data, mime_type="text/plain"):
-        if self.gst_webrtc_app.mode != "websockets":
-            self.gst_webrtc_app.send_clipboard_data(data, mime_type)
+        if self.rtc_app.mode != "websockets":
+            self.rtc_app.send_clipboard_data(data, mime_type)
             return
         try:
             is_text = mime_type == "text/plain"
@@ -1021,34 +1254,67 @@ class WebRTCInput:
                     message = f"clipboard,{encoded_data}"
                 else:
                     message = f"clipboard_binary,{mime_type},{encoded_data}"
-                self.gst_webrtc_app.send_ws_message(message)
+                self.rtc_app.send_ws_message(message)
             else:
                 logger_webrtc_input.info(f"Sending large clipboard data ({mime_type}, {total_size} bytes) in multiple parts.")
                 start_message = f"clipboard_start,{mime_type},{total_size}"
-                self.gst_webrtc_app.send_ws_message(start_message)
+                self.rtc_app.send_ws_message(start_message)
                 offset = 0
                 while offset < total_size:
                     chunk = data_bytes[offset:offset + CLIPBOARD_CHUNK_SIZE]
                     encoded_chunk = base64.b64encode(chunk).decode('ascii')
                     data_message = f"clipboard_data,{encoded_chunk}"
-                    self.gst_webrtc_app.send_ws_message(data_message)
+                    self.rtc_app.send_ws_message(data_message)
                     offset += len(chunk)
                     await asyncio.sleep(0)
-                self.gst_webrtc_app.send_ws_message("clipboard_finish")
+                self.rtc_app.send_ws_message("clipboard_finish")
                 logger_webrtc_input.info("Finished sending multi-part clipboard data.")
         except Exception as e:
             logger_webrtc_input.error(f"Failed to send clipboard data: {e}", exc_info=True)
     def send_cursor_data(self, data):
-        if self.gst_webrtc_app.mode == "websockets": self.gst_webrtc_app.send_ws_cursor_data(data)
-        else: self.gst_webrtc_app.send_cursor_data(data)
+        if self.rtc_app.mode == "websockets": self.rtc_app.send_ws_cursor_data(data)
+        else: self.rtc_app.send_cursor_data(data)
 
-    def __keyboard_connect(self): self.keyboard = pynput.keyboard.Controller()
+    def __keyboard_connect(self): self.keyboard = _XTestKeyboard(self.xdisplay) if self.xdisplay else None
+
+    async def _load_server_autorepeat_rate(self):
+        """Best-effort: adopt the X server's configured autorepeat delay/rate for our
+        synthetic server-side repeat, so a held key feels native. python-xlib in some
+        builds lacks the XKB controls API, so read it once at connect from `xset q`
+        (one-time, not per-event). Any failure or out-of-range value keeps the sane
+        defaults set in __init__."""
+        if self.is_wayland:
+            return
+        try:
+            process = await subprocess.create_subprocess_exec(
+                "xset", "q", stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            out, _err = await self._communicate_or_kill(process, 0.5, "xset q autorepeat")
+            if process.returncode != 0 or not out:
+                return
+            text = out.decode("utf-8", "replace") if isinstance(out, (bytes, bytearray)) else str(out)
+            m = re.search(r"auto repeat delay:\s*(\d+)\s*repeat rate:\s*(\d+)", text)
+            if not m:
+                return
+            delay_ms = int(m.group(1))
+            rate_hz = int(m.group(2))
+            # Sanity-clamp: reject nonsense (e.g. 0) that would busy-repeat or never repeat.
+            if 100 <= delay_ms <= 2000:
+                self.key_repeat_delay = delay_ms / 1000.0
+            if 1 <= rate_hz <= 100:
+                self.key_repeat_interval = 1.0 / rate_hz
+            logger_webrtc_input.info(
+                f"Server autorepeat: delay {self.key_repeat_delay:.3f}s, "
+                f"interval {self.key_repeat_interval:.3f}s."
+            )
+        except Exception as e:
+            logger_webrtc_input.debug(f"Could not read server autorepeat rate (using defaults): {e}")
     def __mouse_connect(self):
         if self.uinput_mouse_socket_path:
             logger_webrtc_input.info(f"Connecting to uinput mouse socket: {self.uinput_mouse_socket_path}")
             self.uinput_mouse_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        if not self.is_wayland and pynput:
-            self.mouse = pynput.mouse.Controller()
+        if not self.is_wayland and self.xdisplay:
+            self.mouse = _XTestMouse(self.xdisplay)
     def __mouse_disconnect(self):
         if self.mouse: del self.mouse; self.mouse = None
     def __mouse_emit(self, *args, **kwargs):
@@ -1137,7 +1403,9 @@ class WebRTCInput:
                 logger_webrtc_input.warning(f"Could not determine system DPI, using default 96. Error: {e}")
         if not self.is_wayland and X11_LIBS_AVAILABLE:
             self.__keyboard_connect()
-        if self.xdisplay: await self.reset_keyboard()
+        if self.xdisplay:
+            await self._load_server_autorepeat_rate()
+            await self.reset_keyboard()
         self.__mouse_connect()
         
         # Initialize persistent gamepad instances
@@ -1147,6 +1415,8 @@ class WebRTCInput:
             self.keyboard_worker_task = asyncio.create_task(self._keyboard_worker())
         if self.key_sweep_task is None:
             self.key_sweep_task = asyncio.create_task(self._key_stale_sweep())
+        if self.key_repeat_enabled and self.key_repeat_task is None:
+            self.key_repeat_task = asyncio.create_task(self._key_repeat_loop())
 
     async def _initialize_persistent_gamepads(self):
         logger_webrtc_input.info(f"Initializing {self.num_gamepads} persistent gamepad instances...")
@@ -1197,8 +1467,12 @@ class WebRTCInput:
         if self.key_sweep_task:
             self.key_sweep_task.cancel()
             self.key_sweep_task = None
+        if self.key_repeat_task:
+            self.key_repeat_task.cancel()
+            self.key_repeat_task = None
         self.pressed_keys.clear()
         self.reaped_atomic_keys.clear()
+        self.key_repeat_state.clear()
         # Drop any half-received multipart clipboard so a new connection can't inherit it.
         self._reset_multipart_clipboard()
 
@@ -1220,6 +1494,7 @@ class WebRTCInput:
                         continue
                     was_atomic = keysym in self.atomically_typed_keys
                     self.pressed_keys.pop(keysym, None)
+                    self.key_repeat_state.pop(keysym, None)
                     logger_webrtc_input.warning(f"Auto-releasing key {keysym} (heartbeat lost).")
                     # An atomically-typed key was never physically held on X11.
                     if was_atomic and not self.is_wayland:
@@ -1240,20 +1515,108 @@ class WebRTCInput:
                         else:
                             # X11 injection isn't queue-serialized: defer the modifier/atomic
                             # state discard until after the release so a concurrent kd still
-                            # sees correct active_modifiers. If a fresh kd re-added this keysym
-                            # during the await, the key is live again -> re-inject the press so
-                            # our release is healed rather than left a spurious lone key-up.
-                            before_release = self.pressed_keys.get(keysym)  # expected None (popped above)
+                            # sees correct active_modifiers. The keysym was popped above, so a
+                            # non-None entry here means a concurrent kd re-pressed it. That kd
+                            # already injected its own keydown, so on any re-press we MUST NOT
+                            # re-inject a down (would double-press); we just abandon our release.
+                            if self.pressed_keys.get(keysym) is not None:
+                                # kd raced us before the keyup: skip both injections; the kd
+                                # owns the key (and its modifier/atomic state) now.
+                                continue
                             await self.send_x11_keypress(keysym, down=False)
-                            repressed = self.pressed_keys.get(keysym)
-                            if (repressed is not None and repressed != before_release
-                                    and time.monotonic() - repressed <= self.key_stale_window):
-                                await self.send_x11_keypress(keysym, down=True)
-                            else:
-                                self.active_modifiers.discard(keysym)
-                                self.atomically_typed_keys.discard(keysym)
+                            if self.pressed_keys.get(keysym) is not None:
+                                # kd raced us during the keyup await: it already re-pressed
+                                # the key, so abandon the heal (no down) and leave its
+                                # modifier/atomic state intact for the live press.
+                                continue
+                            self.active_modifiers.discard(keysym)
+                            self.atomically_typed_keys.discard(keysym)
                     except Exception as e:
                         logger_webrtc_input.warning(f"Failed to auto-release key {keysym}: {e}")
+        except asyncio.CancelledError:
+            pass
+
+    async def _key_repeat_loop(self):
+        """X11 server-side key auto-repeat for held keys.
+
+        XTEST/xdotool synthetic presses don't trigger the X server's native
+        auto-repeat, so without this a held key types a single character. We re-emit the
+        most-recently-pressed still-held repeatable key at key_repeat_interval after an
+        initial key_repeat_delay -- exactly like a physical keyboard, where only the last
+        key pressed repeats and releasing it resumes the previously-held one. Modifiers
+        and atomically-typed (single-shot) keys are never armed, so the repeated key
+        carries whatever modifiers are currently held (Shift+Arrow selection,
+        Ctrl+Backspace word-delete, Ctrl+Z, etc. all repeat like native -- no special
+        shortcut suppression). Repeats are KeyPress-only (no synthetic KeyRelease),
+        matching X11 detectable auto-repeat, so state-based games keep the key held with
+        no movement stutter and ignore the extra presses. Wayland is excluded (the
+        focused app repeats held virtual-keyboard keys itself via wl_keyboard
+        repeat_info, so a server-side repeat would double it)."""
+        try:
+            while True:
+                await asyncio.sleep(self.key_repeat_tick)
+                if not self.key_repeat_state:
+                    continue
+                # Drop keys released/reaped since arming (mirrors the stale-sweep race
+                # guard, so we never inject a down after the key-up).
+                for k in [k for k in self.key_repeat_state if k not in self.pressed_keys]:
+                    self.key_repeat_state.pop(k, None)
+                if not self.key_repeat_state:
+                    continue
+                # Only the newest still-held key repeats: key_repeat_state is
+                # insertion-ordered and arming moves a key to the end, so the last entry
+                # is the most recent. Releasing it lets the previous key resume next tick.
+                keysym = next(reversed(self.key_repeat_state))
+                now = time.monotonic()
+                if now < self.key_repeat_state[keysym]:
+                    continue
+                # Heartbeats stopped (stalled stream or hidden tab): pause repeat until
+                # they resume. The key stays held, bounding run-on to ~grace instead of
+                # the whole stale window.
+                last_seen = self.pressed_keys.get(keysym)
+                if last_seen is None or (now - last_seen) > self.key_repeat_heartbeat_grace:
+                    continue
+                try:
+                    if keysym in self.atomically_typed_keys:
+                        # This key was typed once atomically (digit/punctuation) rather
+                        # than as a physical KeyPress. Repeat it in-process via XTEST at
+                        # the right shift level instead of re-forking `xdotool type` every
+                        # tick. A self-contained press+release (not a bare KeyPress) is
+                        # used because the 'ku' path injects no key-up for atomic keys, so
+                        # a lone press would leave the key stuck down. Fall back to the
+                        # co,end path when the keysym has no keycode in the layout or sits
+                        # only on an AltGr level.
+                        injected = False
+                        if self.keyboard is not None:
+                            try:
+                                # Repeat via the XTEST shim, which resolves the keymap
+                                # level and synthesizes Shift/AltGr (and overlay-binds
+                                # unmapped keysyms). A self-contained press+release since
+                                # the 'ku' path injects no key-up for atomic keys.
+                                self.keyboard.press(keysym)
+                                self.keyboard.release(keysym)
+                                injected = True
+                            except Exception as e:
+                                logger_webrtc_input.debug(
+                                    f"XTEST atomic repeat failed for keysym {keysym}; falling back: {e}"
+                                )
+                        if not injected:
+                            unicode_codepoint = (keysym & 0x00FFFFFF
+                                                 if (keysym & 0xFF000000) == 0x01000000 else keysym)
+                            char_to_type = chr(unicode_codepoint)
+                            await self.on_message(f"co,end,{char_to_type}")
+                    else:
+                        await self.send_x11_keypress(keysym, down=True)
+                except Exception as e:
+                    logger_webrtc_input.warning(f"Key auto-repeat failed for {keysym}: {e}")
+                    self.key_repeat_state.pop(keysym, None)
+                    continue
+                # A 'ku' during the await released the key: stop repeating it (the extra
+                # down we just sent is healed by the real key-up / stale-sweep).
+                if keysym in self.pressed_keys:
+                    self.key_repeat_state[keysym] = time.monotonic() + self.key_repeat_interval
+                else:
+                    self.key_repeat_state.pop(keysym, None)
         except asyncio.CancelledError:
             pass
 
@@ -1261,7 +1624,10 @@ class WebRTCInput:
         if self.is_wayland:
             if self.wayland_input:
                 # Release common modifiers
-                modifiers = [65507, 65505, 65513, 65508, 65506, 65027, 65511, 65512] # Ctrl, Shift, Alt, Meta
+                # Ctrl, Shift, Alt, AltGr, Meta, Super, Hyper (the client maps the
+                # Meta/Windows key to Super, so Super must be released here too).
+                modifiers = [65507, 65505, 65513, 65508, 65506, 65027,
+                             65511, 65512, 65515, 65516, 65517, 65518]
                 # Prefer pixelflux's keysym-native release (single source of truth,
                 # mirrors the inject_keysym preference in send_x11_keypress); fall
                 # back to the private wayland_scancode_map + inject_key on older
@@ -1277,6 +1643,23 @@ class WebRTCInput:
                                 self.wayland_input.inject_key(scancode, 0)
                     except Exception:
                         pass
+            # Release any in-flight translated (Cyrillic) keys before clearing the
+            # map, else the injected QWERTY key stays down after reset. The original
+            # keysym down=False routes through send_x11_keypress's translation.
+            for k in list(self.translated_keys):
+                try: await self.send_x11_keypress(k, down=False)
+                except Exception: pass
+            # Release every still-held key (not just modifiers/hotkeys): a held
+            # non-modifier key (e.g. 'w' in a game) would otherwise stay pressed
+            # in the compositor forever once pressed_keys is cleared below, since
+            # the stale-sweep is the only other releaser and it never runs after
+            # the clear. Atomically-typed (single-shot) keys were never physically
+            # held, so skip them.
+            for keysym in list(self.pressed_keys):
+                if keysym in self.atomically_typed_keys:
+                    continue
+                try: await self.send_x11_keypress(keysym, down=False)
+                except Exception as e: logger_webrtc_input.warning(f"Error releasing held key {keysym}: {e}")
             # Clear server-side key state so a reset can't leave stuck-modifier desync.
             self.active_modifiers.clear()
             self.active_shortcut_modifiers.clear()
@@ -1294,9 +1677,29 @@ class WebRTCInput:
         logger_webrtc_input.info("Resetting keyboard modifiers.")
         lctrl, lshift, lalt, rctrl, rshift, ralt = 65507, 65505, 65513, 65508, 65506, 65027
         lmeta, rmeta, keyf, keyF, keym, keyM, escape = 65511, 65512, 102, 70, 109, 77, 65307
-        for k in [lctrl, lshift, lalt, rctrl, rshift, ralt, lmeta, rmeta, keyf, keyF, keym, keyM, escape]:
+        # Super/Hyper included: the client maps the Meta/Windows key to Super.
+        lsuper, rsuper, lhyper, rhyper = 65515, 65516, 65517, 65518
+        for k in [lctrl, lshift, lalt, rctrl, rshift, ralt, lmeta, rmeta,
+                  lsuper, rsuper, lhyper, rhyper, keyf, keyF, keym, keyM, escape]:
             try: await self.send_x11_keypress(k, down=False)
             except Exception as e: logger_webrtc_input.warning(f"Error resetting key {k}: {e}")
+        # Release every still-held key, not just the modifier/hotkey list above: a
+        # held non-modifier key (e.g. 'w' in a game) would otherwise stay pressed in
+        # the X server forever once pressed_keys is cleared below (the stale-sweep,
+        # the only other releaser, never runs after the clear). Atomically-typed
+        # (single-shot, non-alpha) keys were never physically held on X11, so skip
+        # them to avoid a spurious keyup.
+        for keysym in list(self.pressed_keys):
+            if keysym in self.atomically_typed_keys:
+                continue
+            try: await self.send_x11_keypress(keysym, down=False)
+            except Exception as e: logger_webrtc_input.warning(f"Error releasing held key {keysym}: {e}")
+        # Release any in-flight translated (Cyrillic) keys before clearing the map,
+        # else the injected QWERTY key stays physically down after reset. Passing the
+        # original keysym down=False makes send_x11_keypress emit the translated keyup.
+        for k in list(self.translated_keys):
+            try: await self.send_x11_keypress(k, down=False)
+            except Exception as e: logger_webrtc_input.warning(f"Error releasing translated key {k}: {e}")
         # Clear server-side key state (after the release loop consumes it) to avoid stuck-modifier desync.
         self.active_modifiers.clear()
         self.active_shortcut_modifiers.clear()
@@ -1306,6 +1709,7 @@ class WebRTCInput:
         # auto-release a key the reset just cleared (mirrors disconnect()).
         self.pressed_keys.clear()
         self.reaped_atomic_keys.clear()
+        self.key_repeat_state.clear()
 
     def send_mouse(self, action, data):
         if action == MOUSE_POSITION:
@@ -1317,7 +1721,9 @@ class WebRTCInput:
                 self.__mouse_emit(UINPUT_REL_Y, y)
             elif self.xdisplay:
                 xtest.fake_input(self.xdisplay, Xlib.X.MotionNotify, detail=True, root=Xlib.X.NONE, x=x, y=y)
-                self.xdisplay.sync()
+                # flush() (send, no round-trip) suffices — XTEST needs no reply; sync()
+                # would add a blocking server round-trip on every mouse move.
+                self.xdisplay.flush()
         elif action == MOUSE_SCROLL_UP:
             if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_WHEEL, 1)
             elif self.mouse: self.mouse.scroll(0, -1)
@@ -1329,14 +1735,14 @@ class WebRTCInput:
         elif action == MOUSE_SCROLL_RIGHT:
             if self.mouse: self.mouse.scroll(1, 0)
         elif action == MOUSE_BUTTON: 
-            btn_map_key = "uinput" if self.uinput_mouse_socket_path else "pynput"
-            btn_uinput_or_pynput = MOUSE_BUTTON_MAP[data[1]][btn_map_key]
-            if data[0] == MOUSE_BUTTON_PRESS: 
-                if self.uinput_mouse_socket_path: self.__mouse_emit(btn_uinput_or_pynput, 1)
-                elif self.mouse: self.mouse.press(btn_uinput_or_pynput)
-            else: 
-                if self.uinput_mouse_socket_path: self.__mouse_emit(btn_uinput_or_pynput, 0)
-                elif self.mouse: self.mouse.release(btn_uinput_or_pynput)
+            btn_map_key = "uinput" if self.uinput_mouse_socket_path else "x11"
+            btn_uinput_or_x11 = MOUSE_BUTTON_MAP[data[1]][btn_map_key]
+            if data[0] == MOUSE_BUTTON_PRESS:
+                if self.uinput_mouse_socket_path: self.__mouse_emit(btn_uinput_or_x11, 1)
+                elif self.mouse: self.mouse.press(btn_uinput_or_x11)
+            else:
+                if self.uinput_mouse_socket_path: self.__mouse_emit(btn_uinput_or_x11, 0)
+                elif self.mouse: self.mouse.release(btn_uinput_or_x11)
 
     async def send_x11_keypress(self, keysym, down=True):
         if down:
@@ -1351,11 +1757,10 @@ class WebRTCInput:
         if self.is_wayland and self.wayland_input:
             # Wayland keymap contract: selkies sends keysyms; pixelflux owns the keymap.
             # Prefer inject_keysym (resolves keysym->keycode and the +8 evdev->X11 offset
-            # internally) over the legacy scancode_map path. Unicode-codepoint requests
-            # (0x01000000 range, Euro 0x20AC) aren't physical keysyms, so route them to
-            # the wtype/clipboard fallback instead.
-            is_unicode_request = ((keysym & 0xFF000000) == 0x01000000) or keysym == 0x20AC
-            if hasattr(self.wayland_input, 'inject_keysym') and not is_unicode_request:
+            # internally; keysyms absent from the layout — Unicode codepoints, Euro,
+            # symbols — are bound on demand to dynamic overlay keycodes) over the legacy
+            # scancode_map path.
+            if hasattr(self.wayland_input, 'inject_keysym'):
                 try:
                     # Pass the keysym directly; pixelflux maps it (keymap + offset +
                     # shift). No private keymap lookup or wayland_shift_required_keys
@@ -1409,21 +1814,31 @@ class WebRTCInput:
         is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
         action = "keydown" if down else "keyup"
         command = None
-        use_pynput_for_printable = False
+        use_keyboard_for_printable = False
+        # Whether this keysym may be injected via in-process XTEST instead of a
+        # per-event xdotool fork. Not eligible for the --clearmodifiers case (XTEST
+        # can't force the base keysym while a modifier is held), so that stays on
+        # xdotool below.
+        allow_xtest = False
         if is_printable:
             unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
             try:
                 char = chr(unicode_codepoint)
                 if char.isalpha():
-                    use_pynput_for_printable = True
+                    use_keyboard_for_printable = True
                 else:
                     xdotool_arg = f"U{unicode_codepoint:04X}"
                     if not self.active_shortcut_modifiers:
-                        command = ["xdotool", action, "--clearmodifiers", xdotool_arg]
+                        # Type via in-process XTEST, which resolves the keymap level and
+                        # synthesizes Shift/AltGr as needed -- no per-character xdotool
+                        # fork (and no silent drop when a fork fails). Falls back to
+                        # xdotool below if the keysym can't be resolved.
+                        use_keyboard_for_printable = True
                     else:
                         command = ["xdotool", action, xdotool_arg]
+                        allow_xtest = True
             except ValueError:
-                use_pynput_for_printable = True
+                use_keyboard_for_printable = True
 
         else:
             map_entry = X11_KEYSYM_MAP.get(keysym)
@@ -1431,6 +1846,7 @@ class WebRTCInput:
                 xdotool_arg = map_entry.get('xkey_name')
                 if xdotool_arg:
                     command = ["xdotool", action, xdotool_arg]
+                    allow_xtest = True
                     if xdotool_arg in self.SHORTCUT_MODIFIER_XKEY_NAMES:
                         if down:
                             self.active_shortcut_modifiers.add(xdotool_arg)
@@ -1438,6 +1854,26 @@ class WebRTCInput:
                             self.active_shortcut_modifiers.discard(xdotool_arg)
 
         if command:
+            # Fast path: for keysyms that resolve to a keycode in the current keymap,
+            # inject directly through the already-open display via XTEST. This avoids a
+            # ~15ms xdotool subprocess fork on every shortcut/arrow/function key. Falls
+            # through to the xdotool subprocess below when there is no keycode (e.g. a
+            # keysym absent from the current layout that xdotool can still synthesize).
+            if allow_xtest and xtest is not None and self.xdisplay is not None:
+                try:
+                    keycode = self.xdisplay.keysym_to_keycode(keysym)
+                    if keycode:
+                        xtest.fake_input(
+                            self.xdisplay,
+                            X.KeyPress if down else X.KeyRelease,
+                            keycode,
+                        )
+                        self.xdisplay.flush()
+                        return
+                except Exception as e:
+                    logger_webrtc_input.debug(
+                        f"XTEST inject failed for keysym {keysym}; falling back to xdotool: {e}"
+                    )
             try:
                 process = await subprocess.create_subprocess_exec(
                     *command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -1448,19 +1884,43 @@ class WebRTCInput:
             except Exception:
                 pass
 
-        if use_pynput_for_printable or not command:
+        if use_keyboard_for_printable or not command:
             try:
                 if not self.keyboard:
                     await self._xdotool_fallback(keysym, down)
                     return
-                
-                pynput_key = pynput.keyboard.KeyCode.from_vk(keysym)
+
+                # Inject the printable keysym through the bundled Xlib XTEST
+                # keyboard shim; on an unmapped keysym it raises and we fall
+                # back to xdotool below.
                 if down:
-                    self.keyboard.press(pynput_key)
+                    self.keyboard.press(keysym)
                 else:
-                    self.keyboard.release(pynput_key)
+                    self.keyboard.release(keysym)
             except Exception:
                 await self._xdotool_fallback(keysym, down)
+
+    def _type_text_xtest(self, text):
+        """Type a string in-process via the XTEST shim: each char as a press+release
+        of its keysym (mapped -> shift-synthesized; unmapped -> spare-keycode
+        overlay). Returns True on full success, False (having typed nothing) if the
+        shim is unavailable or any char can't be resolved, so the caller can fall
+        back to xdotool without double-typing."""
+        if not self.keyboard or not text:
+            return False
+        # Pre-resolve every char so a mid-string failure doesn't type a partial line.
+        keysyms = []
+        for ch in text:
+            cp = ord(ch)
+            keysyms.append(cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp))
+        try:
+            for ks in keysyms:
+                self.keyboard.press(ks)
+                self.keyboard.release(ks)
+            return True
+        except Exception as e:
+            logger_webrtc_input.debug(f"in-process type failed ({e}); falling back to xdotool")
+            return False
 
     async def _xdotool_fallback(self, keysym_number, down=True):
         if self.is_wayland:
@@ -1530,6 +1990,7 @@ class WebRTCInput:
 
         xdotool_key_arg = None
         char_for_type_cmd_fallback = None
+        keysym_name_from_xlib = None
 
         if (keysym_number & 0xFF000000) == 0x01000000:
             unicode_codepoint = keysym_number & 0x00FFFFFF
@@ -1574,7 +2035,6 @@ class WebRTCInput:
 
         action = "keydown" if down else "keyup"
         command_key = ["xdotool", action, xdotool_key_arg]
-        fallback_succeeded = False
 
         try:
             process_key = await subprocess.create_subprocess_exec(
@@ -1583,11 +2043,9 @@ class WebRTCInput:
                 stderr=subprocess.PIPE
             )
             stdout_key, stderr_key = await self._communicate_or_kill(process_key, 1.0, "xdotool keydown")
-            if process_key.returncode == 0 and not (stderr_key and (b"No such key name" in stderr_key or b"Error:" in stderr_key.lower())):
-                fallback_succeeded = True
-            else:
+            if process_key.returncode != 0 or (stderr_key and (b"No such key name" in stderr_key or b"Error:" in stderr_key.lower())):
                 char_to_type = char_for_type_cmd_fallback
-                if not char_to_type and 'keysym_name_from_xlib' in locals() and keysym_name_from_xlib and len(keysym_name_from_xlib) == 1:
+                if not char_to_type and keysym_name_from_xlib and len(keysym_name_from_xlib) == 1:
                     char_to_type = keysym_name_from_xlib
                 
                 if down and char_to_type and (0x20 <= ord(char_to_type) <= 0x7E or ord(char_to_type) >= 0xA0) and char_to_type.isprintable():
@@ -1599,8 +2057,6 @@ class WebRTCInput:
                             stderr=subprocess.PIPE
                         )
                         await self._communicate_or_kill(process_type, 1.0, "xdotool type")
-                        if process_type.returncode == 0:
-                            fallback_succeeded = True
                     except (asyncio.TimeoutError, FileNotFoundError, Exception):
                         pass
         except (FileNotFoundError, asyncio.TimeoutError, Exception):
@@ -1817,22 +2273,28 @@ class WebRTCInput:
             self.button_mask = button_mask
 
         if not relative and self.xdisplay:
-            self.xdisplay.sync()
+            # flush() (send, no round-trip) suffices for the injected events; sync()
+            # would add a blocking server round-trip per mouse event.
+            self.xdisplay.flush()
     async def update_binary_clipboard_setting(self, enabled: bool):
         """Asynchronously updates the binary clipboard setting and restarts the monitor if it's running."""
-        new_setting_str = "true" if enabled else "false"
-        if self.enable_binary_clipboard == new_setting_str:
-            return
-        logger_webrtc_input.info(f"Binary clipboard setting changing to: {enabled}. Restarting monitor.")
-        self.enable_binary_clipboard = new_setting_str
-        if self.clipboard_monitor_task and not self.clipboard_monitor_task.done():
-            self.stop_clipboard()  # Signal the loop to exit
-            self.clipboard_monitor_task.cancel()
-            try:
-                await self.clipboard_monitor_task
-            except asyncio.CancelledError:
-                pass
-            self.clipboard_monitor_task = asyncio.create_task(self.start_clipboard())
+        # Hold the lock across the whole check+cancel+reassign: the await on task
+        # cancellation is a suspension point, so without serialization two rapid
+        # differing toggles can both pass the early-return and spawn duplicate monitors.
+        async with self._binary_clipboard_lock:
+            new_setting_str = "true" if enabled else "false"
+            if self.enable_binary_clipboard == new_setting_str:
+                return
+            logger_webrtc_input.info(f"Binary clipboard setting changing to: {enabled}. Restarting monitor.")
+            self.enable_binary_clipboard = new_setting_str
+            if self.clipboard_monitor_task and not self.clipboard_monitor_task.done():
+                self.stop_clipboard()  # Signal the loop to exit
+                self.clipboard_monitor_task.cancel()
+                try:
+                    await self.clipboard_monitor_task
+                except asyncio.CancelledError:
+                    pass
+                self.clipboard_monitor_task = asyncio.create_task(self.start_clipboard())
     def _get_wl_env(self):
         env = os.environ.copy()
         env["WAYLAND_DISPLAY"] = f"wayland-{self.wayland_socket_index}"
@@ -1895,9 +2357,9 @@ class WebRTCInput:
             raise
 
     def _clipboard_has_consumers(self):
-        if getattr(self.gst_webrtc_app, "mode", None) != "websockets":
+        if getattr(self.rtc_app, "mode", None) != "websockets":
             return True
-        server = self.data_server_instance or getattr(self.gst_webrtc_app, "data_streaming_server", None)
+        server = self.data_server_instance or getattr(self.rtc_app, "data_streaming_server", None)
         return bool(server and getattr(server, "clients", None))
 
     async def read_clipboard(self, use_binary=False):
@@ -2065,42 +2527,51 @@ class WebRTCInput:
     async def start_clipboard(self):
         if self.enable_clipboard not in ["true", "out"]:
             logger_webrtc_input.info("Skipping outbound clipboard service."); return
-        
+
+        # Singleton guard: if a monitor loop is already polling the X11 clipboard,
+        # don't start a second concurrent poller (e.g. a startup task plus a
+        # toggle-triggered restart both racing into this coroutine).
+        if self._clipboard_monitor_active:
+            logger_webrtc_input.info("Clipboard monitor already running; not starting a second instance.")
+            return
+        self._clipboard_monitor_active = True
+
         logger_webrtc_input.info(f"Clipboard monitor running (binary mode: {self.enable_binary_clipboard in ['true', 'out']})")
         self.clipboard_running = True
         last_data_bytes = None
-        while self.clipboard_running:
-            try:
-                if not self._clipboard_has_consumers():
-                    last_data_bytes = None
+        try:
+            while self.clipboard_running:
+                try:
+                    if not self._clipboard_has_consumers():
+                        last_data_bytes = None
+                        await asyncio.sleep(0.5)
+                        continue
+
+                    if getattr(self, 'clipboard_paused', False):
+                        await asyncio.sleep(0.1)
+                        continue
+
+                    use_binary = self.enable_binary_clipboard in ["true", "out"]
+                    curr_data, curr_mime = await self.read_clipboard(use_binary=use_binary)
+                    if curr_data is None:
+                        curr_data_bytes = None
+                    else:
+                        curr_data_bytes = curr_data.encode('utf-8') if isinstance(curr_data, str) else curr_data
+                    if curr_data_bytes is not None and curr_data_bytes != last_data_bytes:
+                        logger_webrtc_input.info(f"Clipboard changed. Sending content ({curr_mime})")
+                        await self.on_clipboard_read(curr_data, curr_mime)
+                        last_data_bytes = curr_data_bytes
                     await asyncio.sleep(0.5)
-                    continue
-
-                if getattr(self, 'clipboard_paused', False):
-                    await asyncio.sleep(0.1)
-                    continue
-
-                use_binary = self.enable_binary_clipboard in ["true", "out"]
-                curr_data, curr_mime = await self.read_clipboard(use_binary=use_binary)
-                if curr_data is None:
-                    curr_data_bytes = None
-                else:
-                    curr_data_bytes = curr_data.encode('utf-8') if isinstance(curr_data, str) else curr_data
-                if curr_data_bytes is not None and curr_data_bytes != last_data_bytes:
-                    log_data = curr_data if isinstance(curr_data, str) else f"<{len(curr_data)} bytes>"
-                    logger_webrtc_input.info(f"Clipboard changed. Sending content ({curr_mime})")
-                    await self.on_clipboard_read(curr_data, curr_mime)
-                    last_data_bytes = curr_data_bytes
-                await asyncio.sleep(0.5)
-            except asyncio.CancelledError:
-                logger_webrtc_input.info("Clipboard monitor task cancelled.")
-                break
-            except Exception as e:
-                logger_webrtc_input.error(f"Error in clipboard monitor loop: {e}", exc_info=True)
-                await asyncio.sleep(2)
-        
-        self.clipboard_running = False
-        logger_webrtc_input.info("Clipboard monitor stopped")
+                except asyncio.CancelledError:
+                    logger_webrtc_input.info("Clipboard monitor task cancelled.")
+                    break
+                except Exception as e:
+                    logger_webrtc_input.error(f"Error in clipboard monitor loop: {e}", exc_info=True)
+                    await asyncio.sleep(2)
+        finally:
+            self.clipboard_running = False
+            self._clipboard_monitor_active = False
+            logger_webrtc_input.info("Clipboard monitor stopped")
 
     def stop_clipboard(self): self.clipboard_running = False; logger_webrtc_input.info("Stopping clipboard monitor")
     
@@ -2129,21 +2600,24 @@ class WebRTCInput:
         logger_webrtc_input.info("watching for cursor changes")
         try:
             cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
-            cursor_data = self.cursor_to_msg(cursor_image)
+            # The X fetch must stay on this thread (python-xlib connections are not
+            # thread-safe and the loop also injects input on this display), but the
+            # PIL resize + PNG encode is pure CPU: keep it off the event loop.
+            cursor_data = await asyncio.to_thread(self.cursor_to_msg, cursor_image)
             self.on_cursor_change(cursor_data)
         except Exception as e:
             logger_webrtc_input.warning("exception from fetching initial cursor image: %s", e)
-            
+
         while self.cursors_running:
             if self.xdisplay.pending_events() == 0:
                 await asyncio.sleep(0.02)
                 continue
-            
+
             event = self.xdisplay.next_event()
             if (event.type, 0) == self.xdisplay.extension_event.DisplayCursorNotify:
                 try:
                     cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
-                    cursor_data = self.cursor_to_msg(cursor_image)
+                    cursor_data = await asyncio.to_thread(self.cursor_to_msg, cursor_image)
                     self.on_cursor_change(cursor_data)
                 except Exception as e:
                     logger_webrtc_input.warning(
@@ -2202,11 +2676,9 @@ class WebRTCInput:
             scale_factor = self.cursor_size_cap / max_dim
             new_width = int(cropped_im.width * scale_factor)
             new_height = int(cropped_im.height * scale_factor)
-            try:
-                resampling_filter = Image.Resampling.LANCZOS
-            except AttributeError:
-                resampling_filter = Image.LANCZOS
-            cropped_im = cropped_im.resize((new_width, new_height), resample=resampling_filter)
+            cropped_im = cropped_im.resize(
+                (new_width, new_height), resample=Image.Resampling.LANCZOS
+            )
             new_hotx = int(new_hotx * scale_factor)
             new_hoty = int(new_hoty * scale_factor)
         with io.BytesIO() as f:
@@ -2233,6 +2705,26 @@ class WebRTCInput:
             if unicode_buffer:
                 combined_text = "".join(unicode_buffer)
                 unicode_buffer.clear()
+
+                if self.wayland_input is not None and hasattr(self.wayland_input, 'inject_keysym'):
+                    # Native path: pixelflux binds keysyms absent from the layout to
+                    # dynamic overlay keycodes, so no external typing tool is needed.
+                    ok = True
+                    for ch in combined_text:
+                        cp = ord(ch)
+                        sym = cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp)
+                        try:
+                            self.wayland_input.inject_keysym(sym, 1)
+                            self.wayland_input.inject_keysym(sym, 0)
+                        except Exception as e:
+                            logger_webrtc_input.warning(
+                                f"overlay inject failed for U+{cp:04X}; "
+                                f"falling back for the rest: {e}"
+                            )
+                            ok = False
+                            break
+                    if ok:
+                        return
 
                 if getattr(self, 'use_clipboard_fallback', False):
                     await self._inject_unicode_via_clipboard(combined_text)
@@ -2334,16 +2826,16 @@ class WebRTCInput:
         self.multipart_clipboard_total_size = 0
         self.multipart_clipboard_mime_type = "text/plain"
 
-    async def on_message(self, msg: str, display_id='primary'):
+    async def on_message(self, msg: str, display_id='primary', conn_id=None):
         # A malformed client message must not tear down the transport connection.
         try:
-            await self._dispatch_message(msg, display_id)
+            await self._dispatch_message(msg, display_id, conn_id)
         except (IndexError, ValueError) as e:
             logger_webrtc_input.warning(f"Malformed client message {msg[:64]!r}: {e}")
         except Exception as e:
             logger_webrtc_input.error(f"Error handling client message {msg[:64]!r}: {e}", exc_info=True)
 
-    async def _dispatch_message(self, msg: str, display_id='primary'):
+    async def _dispatch_message(self, msg: str, display_id='primary', conn_id=None):
         toks = msg.split(",")
         msg_type = toks[0]
 
@@ -2384,9 +2876,21 @@ class WebRTCInput:
                         await self.send_x11_keypress(keysym, down=True)
                 else:
                     await self.send_x11_keypress(keysym, down=True)
+                # Arm X11 server-side auto-repeat for this held key. Only the
+                # newest held key repeats, so move it to the end of the insertion-ordered
+                # map (pop+insert). Modifiers never repeat. Atomically-typed keys
+                # (digits/punctuation typed once via co,end) ARE armed: real keyboards
+                # repeat these, and _key_repeat_loop re-dispatches the same atomic type
+                # action for them rather than a raw X11 KeyPress.
+                if (self.key_repeat_enabled and keysym not in self.MODIFIER_KEYSYMS):
+                    self.key_repeat_state.pop(keysym, None)
+                    self.key_repeat_state[keysym] = time.monotonic() + self.key_repeat_delay
+                else:
+                    self.key_repeat_state.pop(keysym, None)
         elif msg_type == "ku":
             keysym = int(toks[1])
             self.pressed_keys.pop(keysym, None)
+            self.key_repeat_state.pop(keysym, None)
             if self.is_wayland:
                 self.keyboard_queue.put_nowait(("ku", keysym))
             else:
@@ -2412,14 +2916,19 @@ class WebRTCInput:
             # Heartbeat for held keys: refresh timestamps only (no injection),
             # so it costs nothing but keeps the stale-sweep from releasing them.
             now = time.monotonic()
-            for tok in toks[1:]:
+            # Cap the fan-out at the tracked-key limit: refreshing more keys than we
+            # can track is meaningless and a client could otherwise pack one frame
+            # with tens of thousands of tokens (unbounded int()+dict work, DoS).
+            for tok in toks[1:1 + self.max_pressed_keys]:
                 try:
                     keysym = int(tok)
                 except ValueError:
                     continue
                 # Atomically-typed keys (X11) were never physically held; do not
                 # let an ongoing heartbeat pin their lingering pressed_keys entry
-                # past the stale window — let the sweep reap it.
+                # past the stale window — let the sweep reap it. Safe because atomic
+                # (non-alpha printable) keys are single-shot: typed once via co,end on
+                # kd and never held, so they have no real heartbeat to preserve.
                 if keysym in self.atomically_typed_keys:
                     continue
                 if keysym in self.pressed_keys:
@@ -2447,7 +2956,12 @@ class WebRTCInput:
                 await self.on_audio_encoder_bit_rate(bitrate)
             except Exception as e:
                 logger_webrtc_input.error(f"Error audio bitrate change: {e}")
-        elif msg_type == "js": 
+        elif msg_type == "js":
+            # Deployment policy: when the gamepad add-on is disabled, drop every gamepad
+            # message (connect/disconnect/button/axis) server-side so a client can't
+            # inject controller input regardless of its own UI state.
+            if not settings.gamepad_enabled[0]:
+                return
             cmd = toks[1]
             gamepad_idx = int(toks[2])
 
@@ -2591,11 +3105,21 @@ class WebRTCInput:
             # now and push it via the usual on_clipboard_read path (no new wire format).
             if self.enable_clipboard in ["true", "out"]:
                 now = time.monotonic()
+                # Per-connection debounce: one client's copy must not suppress another's
+                # read. Fall back to display_id when no per-connection id is supplied.
+                clip_key = conn_id if conn_id is not None else display_id
+                # Evict entries older than the debounce window so the dict can't grow
+                # unbounded across reconnecting connections.
+                if len(self._last_clipboard_request_ts) > 64:
+                    self._last_clipboard_request_ts = {
+                        k: ts for k, ts in self._last_clipboard_request_ts.items()
+                        if now - ts < self._clipboard_request_debounce
+                    }
                 # Debounce bursts: one read/fork per copy keystroke would be a fork storm.
-                if now - self._last_clipboard_request_ts < self._clipboard_request_debounce:
+                if now - self._last_clipboard_request_ts.get(clip_key, 0.0) < self._clipboard_request_debounce:
                     logger_webrtc_input.debug("Debouncing REQUEST_CLIPBOARD (too frequent).")
                 else:
-                    self._last_clipboard_request_ts = now
+                    self._last_clipboard_request_ts[clip_key] = now
                     use_binary = self.enable_binary_clipboard in ["true", "out"]
                     async def _send_requested_clipboard():
                         # Run read_clipboard as a task so a slow read can't stall the
@@ -2700,6 +3224,11 @@ class WebRTCInput:
                 text_to_type = msg[7:]
                 if self.is_wayland:
                     self.keyboard_queue.put_nowait(("co_end", text_to_type))
+                elif self._type_text_xtest(text_to_type):
+                    # Injected in-process via XTEST (mapped chars with shift synthesis,
+                    # unmapped Unicode via the spare-keycode overlay) — no per-char
+                    # xdotool fork. Falls through to xdotool below only if that fails.
+                    pass
                 else:
                     cmd = ["xdotool", "type", text_to_type]
                     process = await subprocess.create_subprocess_exec(
@@ -2923,17 +3452,13 @@ UINPUT_REL_X = (EV_REL, 0x00) # REL_X
 UINPUT_REL_Y = (EV_REL, 0x01) # REL_Y
 UINPUT_REL_WHEEL = (EV_REL, 0x08) # REL_WHEEL
 
-pynput_left = None
-pynput_middle = None
-pynput_right = None
-
-if pynput is not None:
-    pynput_left = pynput.mouse.Button.left
-    pynput_middle = pynput.mouse.Button.middle
-    pynput_right = pynput.mouse.Button.right
+# X core pointer button numbers used by XTEST fake_input (1=left, 2=middle, 3=right).
+XBUTTON_LEFT = 1
+XBUTTON_MIDDLE = 2
+XBUTTON_RIGHT = 3
 
 MOUSE_BUTTON_MAP = {
-    MOUSE_BUTTON_LEFT_ID: {"uinput": UINPUT_BTN_LEFT, "pynput": pynput_left},
-    MOUSE_BUTTON_MIDDLE_ID: {"uinput": UINPUT_BTN_MIDDLE, "pynput": pynput_middle},
-    MOUSE_BUTTON_RIGHT_ID: {"uinput": UINPUT_BTN_RIGHT, "pynput": pynput_right},
+    MOUSE_BUTTON_LEFT_ID: {"uinput": UINPUT_BTN_LEFT, "x11": XBUTTON_LEFT},
+    MOUSE_BUTTON_MIDDLE_ID: {"uinput": UINPUT_BTN_MIDDLE, "x11": XBUTTON_MIDDLE},
+    MOUSE_BUTTON_RIGHT_ID: {"uinput": UINPUT_BTN_RIGHT, "x11": XBUTTON_RIGHT},
 }
