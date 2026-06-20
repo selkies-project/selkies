@@ -21,11 +21,19 @@
 
 import logging
 import asyncio
+import gzip
+import inspect
 import re
 import json
 import base64
 import urllib.parse
 
+try:
+    import pcmflux
+except (ImportError, RuntimeError):
+    pcmflux = None
+
+from .settings import settings as app_settings
 from .webrtc import (
     RTCPeerConnection,
     RTCIceCandidate,
@@ -84,13 +92,25 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
-def get_adjusted_chunk_size() -> int:
-    """Returns adjusted chunk size.
+def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
+    """Raw-byte chunk size for base64 payloads over the data channel.
 
-    Base64 encoded data is higher in size compared to its input
-    as it uses 4 chars per 3 bytes.
+    Sized from the smallest max-message-size the connected peers negotiated
+    (RFC 8841 a=max-message-size), less an envelope margin, times 3/4 for the
+    base64 expansion; the historical ~48 KB floor is kept as the no-information
+    fallback and a 1 MiB message ceiling bounds per-message buffering.
     """
-    return (CLIPBOARD_CHUNK_SIZE * 3) // 4
+    limit = None
+    for peer in (peers or {}).values():
+        channel = peer.get("data_channel")
+        sctp = getattr(channel, "transport", None)
+        nego = getattr(sctp, "remote_max_message_size", 0)
+        if nego:
+            limit = nego if limit is None else min(limit, nego)
+    if not limit:
+        return (CLIPBOARD_CHUNK_SIZE * 3) // 4
+    usable = min(limit, 1024 * 1024) - 512
+    return max((CLIPBOARD_CHUNK_SIZE * 3) // 4, (usable * 3) // 4)
 
 class ClientType(str, Enum):
     CONTROLLER = "controller"
@@ -100,14 +120,19 @@ class RTCAppError(Exception):
     pass
 
 class PipelineBridge:
-    """A bridge to asynchronously pass data between Media and the RTC pipeline"""
-    def __init__(self):
+    """A bridge to asynchronously pass data between Media and the RTC pipeline.
+
+    maxsize selects the buffering policy: depth 1 is latest-wins (video wants
+    the freshest frame), a deeper bound acts as a short drop-oldest FIFO (audio
+    wants continuity so a brief consumer stall doesn't silently drop samples).
+    """
+    def __init__(self, maxsize: int = 1):
         self._lock = asyncio.Lock()
-        self._queue = asyncio.Queue(maxsize=1)
+        self._queue = asyncio.Queue(maxsize=maxsize)
 
     async def set_data(self, data: Any):
-        # If the queue is already full, it means the consumer is lagging so
-        # remove the old item to make space for the new one.
+        # If the queue is already full, the consumer is lagging so drop the
+        # oldest queued item to make space for the new one.
         async with self._lock:
             if self._queue.full():
                 self._queue.get_nowait()
@@ -142,8 +167,8 @@ class RTCApp:
         self,
         async_event_loop: asyncio.AbstractEventLoop,
         encoder: str,
-        stun_servers: List[str] = None,
-        turn_servers: List[str] = None
+        stun_servers: Optional[List[str]] = None,
+        turn_servers: Optional[List[str]] = None
     ):
         self.peer_connections: Dict[str, Any] = {}
         self.aux_data_channel = None
@@ -157,12 +182,16 @@ class RTCApp:
         self.video_pipeline_bridge = None
         self.media_relay = None
         self.media_pipeline: Optional[MediaPipeline] = None
+        # Active WebRTC mic decoders (pcmflux AudioPlayback), stopped on teardown.
+        self._mic_states = []
 
         # Data channel events
         self.on_data_open = lambda: logger.warning('unhandled on_data_open')
         self.on_data_close = lambda: logger.warning('unhandled on_data_close')
         self.on_data_error = lambda: logger.warning('unhandled on_data_error')
         self.on_data_message = lambda msg: logger.warning('unhandled on_data_message')
+        # Peer advertised gzip support on the input channel (re-negotiated per peer).
+        self._gz_tx = False
         self.on_data_msg_bytes = lambda data: logger.warning('unhandled on_data_msg_bytes')
 
         # WebRTC ICE and SDP events
@@ -192,9 +221,8 @@ class RTCApp:
             )
             return
 
-        sdp = RTCSessionDescription(sdp=sdp, type=sdp_type)
-        if isinstance(sdp, RTCSessionDescription):
-            await peer_conn.setRemoteDescription(sdp)
+        desc = RTCSessionDescription(sdp=sdp, type=sdp_type)
+        await peer_conn.setRemoteDescription(desc)
 
     async def set_ice(self, ice: Dict, client_peer_id: str):
         """Adds ice candidate received from signaling server"""
@@ -238,8 +266,8 @@ class RTCApp:
             return
 
         is_text = mime_type == "text/plain"
-        data_bytes: bytes = data.encode() if is_text and isinstance(data, str) else data
-        clipboard_chunk_size = get_adjusted_chunk_size()
+        data_bytes: bytes = data.encode() if isinstance(data, str) else data
+        clipboard_chunk_size = get_adjusted_chunk_size(self.peer_connections)
         if len(data_bytes) <= clipboard_chunk_size:
             b64data = base64.b64encode(data_bytes).decode('utf-8')
             self.__send_data_channel_message(
@@ -373,7 +401,13 @@ class RTCApp:
             return
 
         msg = {"type": msg_type, "data": data}
-        data_channel.send(json.dumps(msg))
+        payload = json.dumps(msg)
+        # Large payloads (cursor PNGs, settings, clipboard, stats) compress well;
+        # small ones aren't worth the CPU or the risk to input latency.
+        if self._gz_tx and len(payload) >= 512:
+            data_channel.send(gzip.compress(payload.encode("utf-8"), 6))
+        else:
+            data_channel.send(payload)
 
     def send_media_data_over_channel(self, msg_type, data):
         self.__send_data_channel_message(msg_type, data)
@@ -399,17 +433,108 @@ class RTCApp:
             elif 'sps-pps-idr-in-keyframe=1' not in sdp_text:
                 logger.warning("injecting modified sps-pps-idr-in-keyframe to SDP")
                 sdp_text = re.sub(r'sps-pps-idr-in-keyframe=\d+', r'sps-pps-idr-in-keyframe=1', sdp_text)
+            if ("h264" in self.encoder or "x264" in self.encoder) and app_settings.video_fullcolor[0]:
+                # Full-colour is a 4:4:4 bitstream: advertise the High 4:4:4 profile so a
+                # decoder isn't handed a 4:2:0 baseline profile-level-id that can't match
+                # what it receives. 4:2:0 keeps 42e01f (the Firefox negotiation trick).
+                sdp_text = re.sub(r'profile-level-id=[0-9A-Fa-f]{6}',
+                                  'profile-level-id=f4001f', sdp_text)
         if "opus/" in sdp_text.lower():
-            # OPUS_FRAME: Add ptime explicitly to SDP offer
-            sdp_text = re.sub(r'([^-]sprop-[^\r\n]+)', r'\1\r\na=ptime:10', sdp_text)
+            # OPUS_FRAME: Advertise the REAL Opus frame duration as ptime in the offer
+            # (pcmflux emits audio_frame_duration_ms frames; the client's answer keys
+            # its minptime munge off this value).
+            frame_ms = float(getattr(app_settings, 'audio_frame_duration_ms', '10') or 10)
+            # Advertise ptime in whole milliseconds (a 2.5 ms Opus frame rounds to 3) for
+            # browser SDP parsers; the client derives minptime from it and pcmflux keeps
+            # the real 2.5 ms frame.
+            ptime = int(frame_ms + 0.5)
+            sdp_text = re.sub(r'([^-]sprop-[^\r\n]+)', r'\1\r\na=ptime:' + str(ptime), sdp_text)
+
+        # Raise the SDP bandwidth ceiling so the browser's REMB doesn't throttle a
+        # high-bitrate desktop stream (b=AS is a cap hint, not a target; generous is
+        # safe). x-google-max-bitrate mirrors it on the Chrome receive side. Both are
+        # scoped to the m=video section so they survive future codec/aiortc changes.
+        sdp_text = self._munge_video_bandwidth(sdp_text)
 
         return sdp_text
+
+    def _munge_video_bandwidth(self, sdp_text: str) -> str:
+        XGOOGLE = "x-google-max-bitrate=300000;x-google-min-bitrate=0"
+        lines = sdp_text.split("\r\n")
+        out: List[str] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            if not line.startswith("m=video"):
+                out.append(line)
+                i += 1
+                continue
+
+            # Gather this video m-section (up to the next m= line or EOF).
+            section = [line]
+            i += 1
+            while i < n and not lines[i].startswith("m="):
+                section.append(lines[i])
+                i += 1
+
+            # Per-section b=AS: only insert when absent within THIS video block
+            # (the previous global guard skipped insertion if any b=AS existed
+            # anywhere in the offer). RFC4566 allows the media section to omit
+            # its own c= (inheriting the session-level c=); fall back to right
+            # after the m=video line when no per-media c= is present.
+            if not any(s.startswith("b=AS:") for s in section):
+                c_idx = next(
+                    (idx for idx, s in enumerate(section) if s.startswith("c=")),
+                    None,
+                )
+                insert_at = (c_idx + 1) if c_idx is not None else 1
+                section.insert(insert_at, "b=AS:300000")
+
+            # Inject the x-google ceiling per video codec fmtp, keyed on the
+            # video rtpmap payload types (not just packetization-mode), so
+            # VP8/VP9 get it too. RTX is excluded.
+            video_pts = []
+            for s in section:
+                m = re.match(r'a=rtpmap:(\d+)\s+(\S+)', s)
+                if m and not m.group(2).lower().startswith("rtx/"):
+                    video_pts.append(m.group(1))
+
+            for pt in video_pts:
+                fmtp_idx = next(
+                    (idx for idx, s in enumerate(section)
+                     if s.startswith("a=fmtp:{} ".format(pt))),
+                    None,
+                )
+                if fmtp_idx is not None:
+                    if "x-google-max-bitrate" not in section[fmtp_idx]:
+                        section[fmtp_idx] = re.sub(
+                            r'^(a=fmtp:{} )'.format(pt),
+                            r'\g<1>' + XGOOGLE + ';',
+                            section[fmtp_idx],
+                        )
+                else:
+                    # No fmtp for this codec (e.g. VP8/VP9 with no parameters):
+                    # add one carrying just the x-google hints.
+                    rtpmap_idx = next(
+                        (idx for idx, s in enumerate(section)
+                         if s.startswith("a=rtpmap:{} ".format(pt))),
+                        None,
+                    )
+                    if rtpmap_idx is not None:
+                        section.insert(rtpmap_idx + 1, "a=fmtp:{} {}".format(pt, XGOOGLE))
+
+            out.extend(section)
+
+        return "\r\n".join(out)
 
     async def consume_data(self, buf, pts, kind):
         if kind == "video":
             if buf:
                 try:
-                    packet = av.Packet(bytes(buf))
+                    # av.Packet accepts a buffer-protocol object zero-copy and
+                    # keeps it as the owning ref, avoiding a per-frame copy.
+                    packet = av.Packet(buf)
                     RTP_VIDEO_CLOCK_RATE = 90000
                     packet.time_base = Fraction(1, RTP_VIDEO_CLOCK_RATE)
                     if pts is not None:
@@ -422,7 +547,8 @@ class RTCApp:
         elif kind == "audio":
             if buf:
                 try:
-                    packet = av.Packet(bytes(buf))
+                    # Zero-copy: av.Packet takes the buffer directly as owner.
+                    packet = av.Packet(buf)
                     packet.time_base = Fraction(1, 48000)
                     if pts is not None:
                         packet.pts = pts
@@ -432,12 +558,21 @@ class RTCApp:
                     logger.error(f"error processing audio sample: {e}")
 
     def update_rtc_config(self, stun_servers: List[str], turn_servers: List[str]):
-        """Updates the RTC configuration with new STUN and TURN servers."""
+        """Updates the STUN/TURN servers used for every NEW peer connection.
 
-        # TODO: aiortc can't change ICE servers on a live peer connection (needs a new one).
+        get_rtc_config() reads these at peer-creation time, so a refresh (typically
+        rotated TURN REST credentials) takes effect for every subsequent connection.
+        Live sessions deliberately keep their established ICE: their TURN allocations
+        stay valid, and forcing an ICE restart on refresh would drop working streams.
+        """
+        changed = (stun_servers, turn_servers) != (self.stun_servers, self.turn_servers)
         self.stun_servers = stun_servers
         self.turn_servers = turn_servers
-        logger.warning("aiortc doesn't support ICE servers updation yet")
+        if changed:
+            logger.info(
+                "RTC ICE servers updated; applies to new connections "
+                "(established sessions keep their current ICE)."
+            )
 
     def format_turn_servers(self, turn_servers: List[str]):
         """
@@ -536,11 +671,92 @@ class RTCApp:
         if not rtx_codec:
             raise ValueError(f"RTX codec for {forced_codec_mime} not found")
 
-        transceiver = next(t for t in pc.getTransceivers() if t.sender == sender)
-        logger.debug(f"Forcing codec preferences to: {[*chosen_codec, rtx_codec]}")
-        transceiver.setCodecPreferences([*chosen_codec, rtx_codec])
+        # FlexFEC rides along when the receiver supports it (Chrome family); a
+        # receiver without it simply answers without the codec and the sender
+        # emits no repair stream.
+        flexfec_codec = next(
+            (
+                codec
+                for codec in capabilities.codecs
+                if codec.mimeType.lower() == f"{kind}/flexfec-03"
+            ),
+            None,
+        )
+        preferences = [*chosen_codec, rtx_codec]
+        if flexfec_codec is not None:
+            preferences.append(flexfec_codec)
 
-    def on_datachannel(self, channel: RTCDataChannel, client_peer_id: str = None):
+        transceiver = next(t for t in pc.getTransceivers() if t.sender == sender)
+        logger.debug(f"Forcing codec preferences to: {preferences}")
+        transceiver.setCodecPreferences(preferences)
+
+    async def _drain_channel_queue(self, queue: asyncio.Queue, handler, label: str):
+        """Single consumer that dispatches queued messages strictly in order.
+
+        Running one awaited handler at a time is what guarantees ordering: if
+        each message spawned its own task, handlers that await mid-dispatch
+        could complete out of order (e.g. a key-up finishing before its
+        key-down, sticking the key).
+        """
+        while True:
+            msg = await queue.get()
+            try:
+                result = handler(msg)
+                if inspect.isawaitable(result):
+                    await result
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("Error handling message on channel %s: %s", label, e)
+
+    def _serialize_channel(self, channel: RTCDataChannel, handler, max_queue: int = 512):
+        """Wire a channel's messages through a bounded per-channel queue drained
+        by a single consumer task, so dispatch stays in arrival order.
+
+        The message handler only enqueues (drop+log on overflow); the consumer
+        is cancelled when the channel closes. handler is called late-bound so
+        reassigning the target callback still takes effect.
+        """
+        queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue)
+
+        def _enqueue(msg):
+            try:
+                queue.put_nowait(msg)
+            except asyncio.QueueFull:
+                logger.warning("Data channel %s input queue full, dropping message", channel.label)
+
+        consumer = self.async_event_loop.create_task(
+            self._drain_channel_queue(queue, handler, channel.label)
+        )
+        channel.on("message", _enqueue)
+        channel.on("close", lambda: consumer.cancel())
+        return consumer
+
+    def _on_input_channel_message(self, msg, channel=None):
+        """Decompress gzip'd payloads and intercept the compression handshake before
+        the input dispatcher (the late-bound on_data_message) sees the message."""
+        if isinstance(msg, (bytes, bytearray)) and bytes(msg[:2]) == b"\x1f\x8b":
+            try:
+                msg = gzip.decompress(msg).decode("utf-8")
+            except Exception:
+                logger.warning("Dropping undecodable compressed data channel message")
+                return
+        if msg == "_gz,1":
+            # The peer can gunzip: echo the capability so it compresses its own large
+            # sends, and compress outbound payloads when this is the controller's
+            # channel (the only one __send_data_channel_message targets).
+            if channel is not None:
+                _, ctrl_channel = self.get_data_channel()
+                if channel is ctrl_channel:
+                    self._gz_tx = True
+                try:
+                    channel.send("_gz,1")
+                except Exception as e:
+                    logger.warning("Failed to ack compression handshake: %s", e)
+            return
+        return self.on_data_message(msg)
+
+    def on_datachannel(self, channel: RTCDataChannel, client_peer_id: Optional[str] = None):
         """Handles incoming auxiliary data channel.
 
         Arguments:
@@ -551,7 +767,12 @@ class RTCApp:
         self.aux_data_channel = channel
         self.aux_data_channel.on("close", lambda: logger.info("Auxiliary data channel closed"))
         self.aux_data_channel.on("error", lambda e: logger.error("Auxiliary data channel error: %s", e))
-        self.aux_data_channel.on("message", lambda data: asyncio.run_coroutine_threadsafe(self.on_data_msg_bytes(data), loop=self.async_event_loop))
+        consumer = self._serialize_channel(self.aux_data_channel, lambda data: self.on_data_msg_bytes(data))
+        # Track per-peer so connection teardown can stop the consumer even if
+        # the channel never emits 'close'.
+        peer_obj = self.peer_connections.get(client_peer_id) if client_peer_id else None
+        if peer_obj is not None:
+            peer_obj.setdefault("channel_consumers", []).append(consumer)
 
     async def on_peer_connection_established(self, client_peer_id: str, client_type: ClientType):
         if client_type == ClientType.CONTROLLER:
@@ -570,6 +791,7 @@ class RTCApp:
         """Handle connection state changes for a peer connection.
         """
         peer_conn = None
+        peer_obj = None
         if client_peer_id:
             peer_obj = self.peer_connections.get(client_peer_id, None)
             if peer_obj:
@@ -595,6 +817,10 @@ class RTCApp:
             removed = None
             if self.peer_connections.get(client_peer_id) is peer_obj:
                 removed = self.peer_connections.pop(client_peer_id, None)
+            # This peer is done either way; its never-established channels emit
+            # no 'close', so stop their consumers here.
+            await self._cancel_channel_consumers(peer_obj)
+            await self._stop_mic_playbacks()
             if removed is not None and removed.get('client_type') == ClientType.CONTROLLER:
                 self.media_relay = None
                 self.aux_data_channel = None
@@ -623,7 +849,9 @@ class RTCApp:
             self.video_pipeline_bridge = PipelineBridge()
             self.video_media = VideoMedia(self.video_pipeline_bridge)
 
-            self.audio_pipeline_bridge = PipelineBridge()
+            # Audio uses a small drop-oldest FIFO so a brief sender stall keeps
+            # continuity instead of dropping a packet on every overtake.
+            self.audio_pipeline_bridge = PipelineBridge(maxsize=8)
             self.audio_media = AudioMedia(self.audio_pipeline_bridge)
             logger.info("Media relay and pipeline bridges created for controller client")
 
@@ -637,46 +865,163 @@ class RTCApp:
         rtp_video_sender.on("pli", lambda cid=client_peer_id, ct=client_type: self.on_pli(cid, ct))
         peer_connection.addTrack(self.media_relay.subscribe(self.audio_media))
 
+        # Microphone: one recvonly audio transceiver inside the SAME bundled SDP (no second
+        # negotiation) so the browser can send its mic on demand. Received audio is decoded
+        # and written into the virtual mic sink. Gated on the audio + microphone settings;
+        # the m-line sits inactive until the client attaches a mic track.
+        if bool(app_settings.audio_enabled[0]) and bool(app_settings.microphone_enabled[0]):
+            self._setup_mic_receiver(peer_connection)
+
         # Primary data channel
         data_channel = peer_connection.createDataChannel("input", ordered=True, maxRetransmits=0)
+        # New controller channel: compression support is re-negotiated per peer.
+        self._gz_tx = False
 
-        # Assign event handlers for the input data channel
+        # Assign event handlers for the input data channel. Messages are
+        # serialized through a single per-channel consumer so input events
+        # (e.g. key down/up) are dispatched strictly in arrival order.
         data_channel.on("open", self.on_data_open)
-        data_channel.on("message", lambda msg: asyncio.run_coroutine_threadsafe(self.on_data_message(msg), loop=self.async_event_loop))
+        input_consumer = self._serialize_channel(
+            data_channel, lambda msg, ch=data_channel: self._on_input_channel_message(msg, ch)
+        )
 
         # A dynamic secondary data channel intended for file data transmission
         peer_connection.on("datachannel", lambda ch, cid=client_peer_id: self.on_datachannel(ch, cid))
         peer_connection.on("connectionstatechange", lambda cid=client_peer_id: asyncio.run_coroutine_threadsafe(self.on_connectionstatechange(cid), loop=self.async_event_loop))
 
-        preferred_codec = self.get_mime_by_encoder(self.encoder)
-        if preferred_codec is None:
-            raise RTCAppError(f"Encoder {self.encoder} is not supported")
-        self.force_codec(peer_connection, rtp_video_sender, preferred_codec)
+        try:
+            preferred_codec = self.get_mime_by_encoder(self.encoder)
+            if preferred_codec is None:
+                raise RTCAppError(f"Encoder {self.encoder} is not supported")
+            self.force_codec(peer_connection, rtp_video_sender, preferred_codec)
 
-        await peer_connection.setLocalDescription(await peer_connection.createOffer())
-        offer = peer_connection.localDescription
+            await peer_connection.setLocalDescription(await peer_connection.createOffer())
+            offer = peer_connection.localDescription
 
-        sdp = offer.sdp
-        sdp = self.munge_sdp(sdp)
-        await self.on_sdp('offer', sdp, client_peer_id)
+            sdp = offer.sdp
+            sdp = self.munge_sdp(sdp)
+            await self.on_sdp('offer', sdp, client_peer_id)
+        except BaseException:
+            # Failure before registration: no teardown path could ever reach
+            # this consumer, so it must be stopped here.
+            input_consumer.cancel()
+            raise
 
         self.peer_connections[client_peer_id] = {
             "peer_conn": peer_connection,
             "data_channel": data_channel,
-            "client_type": client_type
+            "client_type": client_type,
+            # A channel that never reaches SCTP-established never emits 'close',
+            # so its consumer must also be cancellable from teardown paths.
+            "channel_consumers": [input_consumer],
         }
+
+    def _setup_mic_receiver(self, peer_connection):
+        """Add a recvonly mic transceiver in the bundled session and route its encoded
+        Opus straight into pcmflux -- no aiortc/Python Opus decode. RED (UDP loss
+        resilience) is gated by audio_redundancy: when on, the shared caps offer it and
+        pcmflux de-frames + loss-recovers each RED payload off the GIL before decoding;
+        when off, the m-line is restricted to plain Opus."""
+        mic_tx = peer_connection.addTransceiver("audio", direction="recvonly")
+        if not bool(app_settings.audio_redundancy[0]):
+            try:
+                caps = RTCRtpSender.getCapabilities("audio")
+                opus_only = [c for c in caps.codecs if c.mimeType.lower() == "audio/opus"]
+                if opus_only:
+                    mic_tx.setCodecPreferences(opus_only)
+            except Exception as e:
+                logger.info(f"mic opus-only preference not applied: {e}")
+
+        loop = self.async_event_loop
+        state = {"pb": None, "starting": False}
+        self._mic_states.append(state)
+
+        def sink(codec, frame):
+            data = bytes(getattr(frame, "data", b"") or b"")
+            if not data:
+                return
+            pb = state["pb"]
+            if pb is None:
+                # First packet: open the pcmflux playback off the loop, dropping until ready.
+                if not state["starting"]:
+                    state["starting"] = True
+
+                    async def _start():
+                        try:
+                            if pcmflux is None:
+                                raise RuntimeError("pcmflux is not installed")
+                            pb2 = pcmflux.AudioPlayback()
+                            ps = pcmflux.AudioPlaybackSettings()
+                            ps.device_name = b"input"
+                            ps.sample_rate = 24000
+                            ps.channels = 1
+                            ps.latency_ms = 40
+                            await asyncio.to_thread(pb2.start, ps)
+                            state["pb"] = pb2
+                        except Exception as e:
+                            logger.error(f"WebRTC mic playback start failed: {e}")
+                            state["starting"] = False
+
+                    loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_start()))
+                return
+            try:
+                if getattr(codec, "name", "").lower() == "red":
+                    # RED (audio_redundancy on): pcmflux de-frames + loss-recovers + decodes,
+                    # all off the GIL. The RTP timestamp anchors the redundant blocks' offsets.
+                    pb.write_red(data, int(getattr(frame, "timestamp", 0) or 0))
+                else:
+                    # Plain Opus (RED off): decode directly -- no de-framing, dedup, or alloc.
+                    pb.write(data)
+            except Exception:
+                pass
+
+        mic_tx.receiver._encoded_audio_sink = sink
+
+    async def _stop_mic_playbacks(self):
+        states, self._mic_states = self._mic_states, []
+        for st in states:
+            pb = st.get("pb")
+            st["pb"] = None
+            if pb is not None:
+                try:
+                    await asyncio.to_thread(pb.stop)
+                except Exception:
+                    pass
 
     def get_mime_by_encoder(self, encoder: str) -> Optional[str]:
         """Returns respective mime type by encoder name"""
 
-        # TODO: aiortc only supports a limited set of codecs for now
+        # Every pipeline encoder emits H.264. Offering another MIME here would
+        # negotiate a codec the stream cannot honor, so new entries may only be
+        # added together with a real pixelflux encoder; the vendored webrtc stack
+        # retains its VP8 RTP support for that future.
         encoder_mime_map = {
-            "x264enc"  : "video/H264",
-            "nvh264enc": "video/H264",
-            "vp8enc"   : "video/VP8",
-            # "av1enc"   : "video/AV1"
+            "h264enc"     : "video/H264",
+            "openh264enc" : "video/H264",
         }
-        return encoder_mime_map.get(encoder)
+        mime = encoder_mime_map.get(encoder)
+        if mime is None:
+            # An unmapped encoder (e.g. a stale persisted client setting) must never
+            # take the transport down; fall back to the always-vendored H.264 path
+            # and flag it.
+            logger.error(
+                f"No MIME mapping for encoder {encoder}; falling back to video/H264"
+            )
+            mime = "video/H264"
+        return mime
+
+    async def _cancel_channel_consumers(self, peer_obj: Dict[str, Any]):
+        """Cancel and await a peer's data channel queue consumers.
+
+        A channel that never reached SCTP-established never emits 'close', so
+        its consumer is only reachable from here; cancelling one the 'close'
+        event already stopped is a no-op.
+        """
+        consumers = peer_obj.get("channel_consumers") or []
+        for consumer in consumers:
+            consumer.cancel()
+        if consumers:
+            await asyncio.gather(*consumers, return_exceptions=True)
 
     async def _stop_rtc_pipeline(self, client_peer_id: str):
         """Stops the WebRTC pipeline and closes the peer connection."""
@@ -692,6 +1037,7 @@ class RTCApp:
             peer_conn = peer_obj.get("peer_conn")
             if peer_conn is not None:
                 await peer_conn.close()
+            await self._cancel_channel_consumers(peer_obj)
             try:
                 del self.peer_connections[client_peer_id]
             except KeyError:

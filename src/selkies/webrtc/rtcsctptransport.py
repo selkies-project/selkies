@@ -658,6 +658,7 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             raise InvalidStateError
 
         super().__init__()
+        self.remote_max_message_size = 65536
         self._association_state = self.State.CLOSED
         self.__log_debug: Callable[..., None] = lambda *args: None
         self.__started = False
@@ -726,7 +727,7 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         self._data_channel_queue: DataChannelQueue = deque()
         self._data_channels: dict[int, RTCDataChannel] = {}
 
-        # FIXME: this is only used by RTCPeerConnection
+        # Owned and driven by RTCPeerConnection's BUNDLE bookkeeping.
         self._bundled = False
         self.mid: Optional[str] = None
 
@@ -771,7 +772,9 @@ class RTCSctpTransport(AsyncIOEventEmitter):
 
         :rtype: RTCSctpCapabilities
         """
-        return RTCSctpCapabilities(maxMessageSize=65536)
+        # 256 KiB: larger DataChannel messages (clipboard/file) with less chunking;
+        # emitted as a=max-message-size and matches the browser default ceiling.
+        return RTCSctpCapabilities(maxMessageSize=262144)
 
     def setTransport(self, transport: RTCDtlsTransport) -> None:
         self.__transport = transport
@@ -784,6 +787,10 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             self.__started = True
             self.__state = "connecting"
             self._remote_port = remotePort
+            # The peer's a=max-message-size bounds what we may send in one message;
+            # absent from the SDP, RFC 8841's 64 KiB default applies.
+            if remoteCaps.maxMessageSize > 0:
+                self.remote_max_message_size = remoteCaps.maxMessageSize
 
             # configure logging
             if logger.isEnabledFor(logging.DEBUG):
@@ -1217,6 +1224,9 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         loss = False
         if chunk.gaps:
             seen = set()
+            # A malformed SACK whose gap ranges are all empty must not leave the
+            # highest-seen TSN undefined; the cumulative TSN is the neutral floor.
+            highest_seen_tsn = chunk.cumulative_tsn
             for gap in chunk.gaps:
                 for pos in range(gap[0], gap[1] + 1):
                     highest_seen_tsn = (chunk.cumulative_tsn + pos) % SCTP_TSN_MODULO
@@ -1367,7 +1377,7 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             chunk.protocol = pp_id
             chunk.user_data = user_data[pos : pos + USERDATA_MAX_LENGTH]
 
-            # FIXME: dynamically added attributes, mypy can't handle them
+            # Per-chunk bookkeeping attached dynamically (not part of the Chunk type);
             # initialize counters
             chunk._abandoned = False
             chunk._acked = False
@@ -1414,6 +1424,8 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             if isinstance(param, cls):
                 param_type = k
                 break
+        else:
+            raise ValueError(f"Unsupported reconfig parameter type: {type(param)!r}")
         chunk.params.append((param_type, bytes(param)))
 
         self.__log_debug(">> %s", param)

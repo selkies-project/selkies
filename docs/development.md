@@ -6,7 +6,7 @@
 
 This project was meant to be built upon community contributions from people without any prior media networking experience.
 
-[GStreamer](https://gstreamer.freedesktop.org) is much easier to develop without prior experience on multimedia application development, and this project is a perfect starting point for anyone who wants to get started.
+The project is built almost entirely in Python, with the performance-critical media paths isolated in small, self-contained Rust extensions (`pixelflux` and `pcmflux`). This keeps the orchestration code approachable even without prior experience in multimedia application development, making this project a perfect starting point for anyone who wants to get started.
 
 Please return your developments with a [Pull Request](https://github.com/selkies-project/selkies/pulls) if you made modifications to the code or added new features, especially if you use this project commercially (as per MPL-2.0 license obligations). We will be happy to help or consult if you are stuck.
 
@@ -14,25 +14,25 @@ Please return your developments with a [Pull Request](https://github.com/selkies
 
 Our license prevents proprietary entities from engulfing our code without providing anything back, unlike the Apache License, but does not impede any larger proprietary work embedding our code, unlike the GNU GPL/LGPL/AGPL. Either way, we strongly encourage proprietary entities to provide back your developments in terms of pull requests directly into our code repository.
 
-As the relatively permissive license compared to similar projects is for the benefit of the community, non-profit or profit, please do not take advantage of it. If improvements are not merged into this code repository, it will ultimately lead to the project becoming unsustainable. We need your help to continue maintaining performance and quality, as well as staying competent compared to proprietary applications. We want commercial research and development to thrive together with Selkies-GStreamer.
+As the relatively permissive license compared to similar projects is for the benefit of the community, non-profit or profit, please do not take advantage of it. If improvements are not merged into this code repository, it will ultimately lead to the project becoming unsustainable. We need your help to continue maintaining performance and quality, as well as staying competent compared to proprietary applications. We want commercial research and development to thrive together with Selkies.
 
 ## Contributions
 
 Please join our [Discord](https://discord.gg/wDNGDeSW5F) server, then start out with the [Issues](https://github.com/selkies-project/selkies/issues) to see if new enhancements that you can make or things that you want solved have been already raised.
 
-**No programming experience:** You can still be a tester or a community helper/moderator at [Discord](https://discord.gg/wDNGDeSW5F)! Do you see anything that feels uncomfortable compared to other projects? Raise an issue and suggest various improvements including to the documentation. Have you used OBS, FFmpeg, or any other live streaming/video editing software before? You can suggest optimized parameters for the video encoders from your experiences. You can experiment with various encoder parameters which are exposed in a very accessible way under [gstwebrtc_app.py](https://github.com/selkies-project/selkies/tree/main/src/selkies/gstwebrtc_app.py). You can add or modify properties exposed under the comment `ADD_ENCODER:` for each encoder, improving streaming performance.
+**No programming experience:** You can still be a tester or a community helper/moderator at [Discord](https://discord.gg/wDNGDeSW5F)! Do you see anything that feels uncomfortable compared to other projects? Raise an issue and suggest various improvements including to the documentation. Have you used OBS, FFmpeg, or any other live streaming/video editing software before? You can suggest optimized parameters for the video encoders from your experiences. You can experiment with various encoder and streaming parameters, which are exposed in a very accessible way in [`settings.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/settings.py) (the roughly 120 command-line and environment settings) and applied in [`media_pipeline.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/media_pipeline.py), improving streaming performance.
 
 **Some Python or HTML/JavaScript frontend experience:** Our codebase and web interface always has room for improvement. Consider helping out on various issues or cleaning up the code otherwise.
 
-**Linux X11/Wayland/Container/Conda experience:** Please report issues with the capture interface and provide improvements for our reference containers. If you have the capacity to maintain conda-forge feedstocks, please add yourself as a maintainer and contribute new feedstocks. A protocol and interface can never be great without a great environment it runs in. If you want to bring Selkies-GStreamer to MacOSX or Windows, check our issues!
+**Linux X11/Wayland/Container/Conda experience:** Please report issues with the capture interface and provide improvements for our reference containers. If you have the capacity to maintain conda-forge feedstocks, please add yourself as a maintainer and contribute new feedstocks. A protocol and interface can never be great without a great environment it runs in. If you want to bring Selkies to MacOSX or Windows, check our issues!
 
-**C/Rust experience:** Selkies-GStreamer abstracts various media encoding and network capabilities behind GStreamer. We need you to fix bugs and implement new required elements in GStreamer or any other upstream dependencies. This will not only benefit Selkies-GStreamer but also help millions of other GStreamer users.
+**C/Rust experience:** Selkies delegates its media encoding to the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) Rust extensions, and its opt-in WebRTC transport to a vendored fork of `aiortc`. We need you to fix bugs and implement new capabilities in these components or any other upstream dependencies. This will not only benefit Selkies but also help the broader communities around those projects.
 
-**Any type of multimedia networking experience:** While relevant experience is not necessary to contribute, we still feel great to have you as our companions. Please consider stepping up as a maintainer in addition to contributing! Development for commercial purposes are always fine as well as (our weak copyleft) license terms are complied with. Shape Selkies-GStreamer so that it fits your project as a first-class citizen, while keeping it accessible to many other people.
+**Any type of multimedia networking experience:** While relevant experience is not necessary to contribute, we still feel great to have you as our companions. Please consider stepping up as a maintainer in addition to contributing! Development for commercial purposes are always fine as well as (our weak copyleft) license terms are complied with. Shape Selkies so that it fits your project as a first-class citizen, while keeping it accessible to many other people.
 
 **WebRTC developers or Chromium/Firefox/Safari multimedia contributors:** We always need you, but you are generally very busy people. Even so, you can always provide directions on topics, ideas, specifications, or technologies that we have missed, so that other people including us can implement them. In many occasions, a single paragraph from experts are equal to hundreds of hours of work.
 
-**Funding to improve this project:** If you want new features or improvements but if you are not a developer or lack enough time, please consider offering bounties by contacting us. If you want new features that currently are not yet available with [GStreamer](https://gstreamer.freedesktop.org), we must fund the small pool of full-time GStreamer developers capable of implementing new features to bring them into Selkies-GStreamer as well. Such issues are tagged as requiring upstream development. Even for features or improvements that are ready to be implemented, crowdfunding bounties motivate developers to solve them faster.
+**Funding to improve this project:** If you want new features or improvements but if you are not a developer or lack enough time, please consider offering bounties by contacting us. If you want new features that require upstream work in our dependencies (such as `pixelflux`, `pcmflux`, or `aiortc`), we may need to fund developers capable of implementing them so they can be brought into Selkies as well. Such issues are tagged as requiring upstream development. Even for features or improvements that are ready to be implemented, crowdfunding bounties motivate developers to solve them faster.
 
 Regardless of your experience level, there is always something that you could help. Our code structure enables you to focus on parts of the code that you know best without necessarily understanding the rest.
 
@@ -92,15 +92,7 @@ This section is a knowledge base for code contributions and development.
 
 - **Our [Documentation](README.md) and [Issues](https://github.com/selkies-project/selkies/issues)/[Pull Requests](https://github.com/selkies-project/selkies/pulls)** (including closed Issues/Pull Requests) and <https://github.com/m1k1o/neko/issues/371>
 
-- GStreamer Repository (sources of truth are below, other repositories such as `gst-plugins-base` have been relocated to the below):
-
-<https://gitlab.freedesktop.org/gstreamer/gstreamer>
-
-<https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs>
-
-<https://gitlab.freedesktop.org/gstreamer/meson-ports>
-
-- GStreamer Documentation (`gst-inspect-1.0 module` tends to be much more accurate than this): <https://gstreamer.freedesktop.org/documentation/>
+- Upstream projects behind the current media stack: [`aiortc`](https://github.com/aiortc/aiortc) (the WebRTC transport is a vendored fork), `pixelflux` (screen capture with H.264/JPEG encoding), and `pcmflux` (PulseAudio capture with Opus encoding)
 
 - WebRTC for the Curious: <https://webrtcforthecurious.com>
 
@@ -114,7 +106,7 @@ This section is a knowledge base for code contributions and development.
 
 **If you want to change the `Dockerfile`, you are recommended to use the original container as a base container and only replace the `entrypoint.sh` and `supervisord.conf` files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu24.04` for the [Example Container](component.md#example-container) or `24.04-20210101010101` for the desktop containers) to preserve a specific container build.**
 
-Start with the below sample `Dockerfile` example and place your modified `entrypoint.sh` and `supervisord.conf` files within the same empty directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies-gstreamer/gst-py-example:main-ubuntu${DISTRIB_RELEASE}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
+Start with the below sample `Dockerfile` example and place your modified `entrypoint.sh` and `supervisord.conf` files within the same empty directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/gst-py-example:main-ubuntu${DISTRIB_RELEASE}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
 
 ```dockerfile
 ARG DISTRIB_RELEASE=24.04
@@ -135,8 +127,8 @@ SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
 # Copy scripts and configurations used to start the container with `--chown=1000:1000`
 #COPY --chown=1000:1000 entrypoint.sh /etc/entrypoint.sh
 #RUN chmod -f 755 /etc/entrypoint.sh
-#COPY --chown=1000:1000 selkies-gstreamer-entrypoint.sh /etc/selkies-gstreamer-entrypoint.sh
-#RUN chmod -f 755 /etc/selkies-gstreamer-entrypoint.sh
+#COPY --chown=1000:1000 selkies-entrypoint.sh /etc/selkies-entrypoint.sh
+#RUN chmod -f 755 /etc/selkies-entrypoint.sh
 #COPY --chown=1000:1000 kasmvnc-entrypoint.sh /etc/kasmvnc-entrypoint.sh
 #RUN chmod -f 755 /etc/kasmvnc-entrypoint.sh
 #COPY --chown=1000:1000 supervisord.conf /etc/supervisord.conf
@@ -156,7 +148,7 @@ ENV USER=ubuntu
 ENV HOME=/home/ubuntu
 WORKDIR /home/ubuntu
 
-EXPOSE 8080
+EXPOSE 8081
 
 ENTRYPOINT ["/usr/bin/supervisord"]
 ```
@@ -165,9 +157,9 @@ ENTRYPOINT ["/usr/bin/supervisord"]
 
 The [`docker-nvidia-glx-desktop`](https://github.com/selkies-project/docker-nvidia-glx-desktop)/[`docker-nvidia-egl-desktop`](https://github.com/selkies-project/docker-nvidia-egl-desktop) desktop container repositories (referenced as Desktop Containers here), and the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) share various components between each other:
 
-`LICENSE`, `supervisord.conf`, `kasmvnc-entrypoint.sh`, and `selkies-gstreamer-entrypoint.sh` are always identical in both Desktop Containers (copy and paste between each container). As these components are also very similar to the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), **you need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and at least two Pull Requests for both Desktop Containers.**
+`LICENSE`, `supervisord.conf`, `kasmvnc-entrypoint.sh`, and `selkies-entrypoint.sh` are always identical in both Desktop Containers (copy and paste between each container). As these components are also very similar to the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), **you need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and at least two Pull Requests for both Desktop Containers.**
 
-The `Dockerfile` is always identical below and above the lines that say `Anything above/below this line should always be kept the same...` in both Desktop Containers. This component is not shared with the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and installation procedures for Selkies-GStreamer should be updated to the desktop containers on every release, so **you need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and at least two Pull Requests for both Desktop Containers.**
+The `Dockerfile` is always identical below and above the lines that say `Anything above/below this line should always be kept the same...` in both Desktop Containers. This component is not shared with the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and installation procedures for Selkies should be updated to the desktop containers on every release, so **you need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and at least two Pull Requests for both Desktop Containers.**
 
 The `entrypoint.sh` components are always identical from the start until the line containing `export PULSE_SERVER=..."` in both Desktop Containers. The script for installing NVIDIA userspace driver components are always identical except for the outermost `if` condition. Other script sections require manual assessment when updating, so **you need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in both Desktop Containers and the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example).**
 
@@ -191,23 +183,9 @@ The `entrypoint.sh` components are always identical from the start until the lin
 
 - **Write or edit code in relevant files and reference them so that the code style is kept consistent.** For instance, many handler methods that start with `on_` are initially unset, then set and referenced in other components or classes during initialization. If you are implementing a new capability on certain methods or handlers that use methods starting with `on_` frequently, you have to create new `on_` methods as well to handle your capability. This assists with keeping the code highly readable, and putting methods or functions in the wrong files will harm the consistency of the code style. **If you are starting to feel that the location you are writing code in does not blend properly into adjacent code, you are probably writing it in the wrong place!**
 
-- For example, assume that we are writing a new component that receives WebRTC Metrics from the web interface and writes them into multiple CSV files in the host ([#141](https://github.com/selkies-project/selkies/pull/141)). Because the WebRTC RTCDataChannel interface is used, receiving the metrics will be handled in [`webrtc_input.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/webrtc_input.py). But this does not mean that everything should be implemented in this file. Instead, they should be [implemented in the `Metrics` class](https://github.com/selkies-project/selkies/pull/141/commits/abae13645fdf0082f27041c59a14e1c030cf3763) of [`metrics.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/metrics.py), and be initialized in [`__main__.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/__main__.py). This way, relevant code stays in appropriate files and is initialized only when the capabilities are needed.
+- For example, assume that we are writing a new component that receives WebRTC Metrics from the web interface and writes them into multiple CSV files in the host ([#141](https://github.com/selkies-project/selkies/pull/141)). Because a data-channel (WebRTC) or WebSocket message carries the metrics, receiving them is handled in [`input_handler.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/input_handler.py). But this does not mean that everything should be implemented in this file. Instead, they should be implemented in the `Metrics` class of [`webrtc_utils.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/webrtc_utils.py), and be initialized in [`webrtc_mode.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/webrtc_mode.py). This way, relevant code stays in appropriate files and is initialized only when the capabilities are needed.
 
-- Some code components have `CAPITALIZED_COMMENT:` comment sections such as `ADD_ENCODER:` or `OPUS_FRAME:`. These sections indicate that locations with the `CAPITALIZED_COMMENT:` must be edited or added simultaneously.
-
-## GStreamer Development Guide
-
-**Read [GStreamer Components](component.md#gstreamer-components) together with this guide.**
-
-GStreamer is based on GLib, which is an object-oriented programming interface on top of C (or C++/Rust). Therefore, many GStreamer objects inherit from other base objects, and object properties (configurations) are inherited from parent objects as well. Therefore, many object properties tend to be missing in the [Documentation Page](https://gstreamer.freedesktop.org/documentation/plugins_doc.html).
-
-**NOTE: an easy and accurate way to identify GStreamer object properties is to use `gst-inspect-1.0 element_to_look`.** This will show all properties, including those inherited from parent objects.
-
-Otherwise, any [GStreamer](https://gstreamer.freedesktop.org) plugin [Documentation Page](https://gstreamer.freedesktop.org/documentation/plugins_doc.html) is supposed to have a **Hierarchy** section. As all GStreamer objects are defined as **classes** used with object-oriented programming, all properties that you see in parent classes are also properties that you may use for your own classes and plugins that inherit from the parent classes.
-
-Therefore, all contributors implementing or modifying code relevant to GStreamer must also carefully check parent classes as well when configuring [Properties](https://gstreamer.freedesktop.org/documentation/plugin-development/basics/args.html) or [Capabilities](https://gstreamer.freedesktop.org/documentation/gstreamer/gstcaps.html).
-
-Please also note that objects based on GstBin (most notably `webrtcbin` and `rtpbin`) may embed multiple sub-objects into a single object.
+- Some code components have `CAPITALIZED_COMMENT:` comment sections such as `OPUS_FRAME:`. These sections indicate that locations with the `CAPITALIZED_COMMENT:` must be edited or added simultaneously.
 
 # Maintainer Documentation
 

@@ -30,11 +30,10 @@ RUN \
   export SELKIES_MODE="${SELKIES_MODE:-webrtc}" &&\
   export SELKIES_UPLOAD_DIR="${SELKIES_UPLOAD_DIR:-/home/ubuntu/Desktop}" &&\
   npm run build && \
-  mkdir -p dist/src dist/nginx dist/assets && \
+  mkdir -p dist/src dist/assets && \
   cp ../selkies-web-core/dist/selkies-core.js dist/src/ && \
   cp ../selkies-web-core/dist/clipboard-worker* dist/assets && \
   cp ../universal-touch-gamepad/universalTouchGamepad.js dist/src/ && \
-  cp ../selkies-web-core/nginx/* dist/nginx/ && \
   cp -r ../selkies-web-core/dist/jsdb dist/ && \
   mkdir -p /usr/share/nginx/html && \
   cp -ar dist/* /usr/share/nginx/html/;

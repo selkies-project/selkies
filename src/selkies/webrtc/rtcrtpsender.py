@@ -56,8 +56,10 @@ from .rtcrtpparameters import (
 )
 from .rtp import (
     RTCP_PSFB_APP,
+    RTCP_PSFB_FIR,
     RTCP_PSFB_PLI,
     RTCP_RTPFB_NACK,
+    RTCP_RTPFB_TWCC,
     RTP_HISTORY_SIZE,
     AnyRtcpPacket,
     RtcpByePacket,
@@ -71,6 +73,7 @@ from .rtp import (
     RtpPacket,
     unpack_remb_fci,
     wrap_rtx,
+    build_flexfec_03,
 )
 from .stats import (
     RTCOutboundRtpStreamStats,
@@ -132,7 +135,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self.__cname: Optional[str] = None
         self._ssrc = random32()
         self._rtx_ssrc = random32()
-        # FIXME: how should this be initialised?
+        self._fec_ssrc = random32()
+        # Fresh UUID per sender: the msid stream identifier when the caller
+        # supplies no MediaStream grouping.
         self._stream_id = str(uuid.uuid4())
         self._enabled = True
         self.__encoder: Optional[Encoder] = None
@@ -149,6 +154,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self.__rtcp_task: Optional[asyncio.Future[None]] = None
         self.__rtx_payload_type: Optional[int] = None
         self.__rtx_sequence_number = random_sequence_number()
+        self.__fec_payload_type: Optional[int] = None
+        self.__fec_sequence_number = random_sequence_number()
         self.__started = False
         self.__stats = RTCStatsReport()
         self.__transport = transport
@@ -189,7 +196,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         return self.__transport
 
     @classmethod
-    def getCapabilities(self, kind: str) -> RTCRtpCapabilities:
+    def getCapabilities(cls, kind: str) -> RTCRtpCapabilities:
         """
         Returns the most optimistic view of the system's capabilities for
         sending media of the given `kind`.
@@ -258,6 +265,12 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     self.__rtx_payload_type = codec.payloadType
                     break
 
+            # make note of the FlexFEC payload type (negotiated => protect video)
+            for codec in parameters.codecs:
+                if codec.mimeType.lower() == "video/flexfec-03":
+                    self.__fec_payload_type = codec.payloadType
+                    break
+
             self.__rtp_task = asyncio.ensure_future(self._run_rtp(parameters.codecs[0]))
             self.__rtcp_task = asyncio.ensure_future(self._run_rtcp())
             self.__started = True
@@ -308,7 +321,13 @@ class RTCRtpSender(AsyncIOEventEmitter):
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_NACK:
             for seq in packet.lost:
                 await self._retransmit(seq)
+        elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_TWCC:
+            self.transport._twcc_process_feedback(packet.fci)
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_PLI:
+            self._send_keyframe()
+            self._emit_pli_event()
+        elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_FIR:
+            # Full Intra Request (RFC 5104): same recovery as PLI — force a keyframe.
             self._send_keyframe()
             self._emit_pli_event()
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_APP:
@@ -383,6 +402,11 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 )
                 self.__rtx_sequence_number = uint16_add(self.__rtx_sequence_number, 1)
 
+            # A retransmission is a new packet on the wire: give it its own
+            # transport-wide sequence number.
+            packet.extensions.transport_sequence_number = self.transport._twcc_next(
+                len(packet.payload)
+            )
             self.__log_debug("> %s", packet)
             packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
             await self.transport._send_rtp(packet_bytes)
@@ -399,6 +423,12 @@ class RTCRtpSender(AsyncIOEventEmitter):
 
         sequence_number = random_sequence_number()
         timestamp_origin = random32()
+        # Timer-triggered video-timing diagnostics (~5 flagged frames/s, like libwebrtc).
+        last_video_timing = 0.0
+        # FlexFEC group: serialized media packets awaiting one XOR repair packet
+        # (flushed per frame, or every 10 packets within a large frame).
+        fec_group: list[bytes] = []
+        fec_first_seq = 0
         try:
             while True:
                 if not self.__track:
@@ -410,6 +440,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 enc_frame = await self._next_encoded_frame(codec)
                 if enc_frame is None:
                     continue
+                frame_time = time.time()
 
                 timestamp = uint32_add(timestamp_origin, enc_frame.timestamp)
 
@@ -428,11 +459,29 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         clock.current_ntp_time() >> 14
                     ) & 0x00FFFFFF
                     packet.extensions.mid = self.__mid
+                    packet.extensions.transport_sequence_number = (
+                        self.transport._twcc_next(len(payload))
+                    )
                     if enc_frame.audio_level is not None:
                         packet.extensions.audio_level = (False, -enc_frame.audio_level)
                     # https://webrtc.googlesource.com/src/+/main/docs/native-code/rtp-hdrext/playout-delay/README.md
                     # set min and max to 0 to hint the receiver to render frames as soon as possible
-                    packet.extensions.playout_delay = (0, 0) 
+                    packet.extensions.playout_delay = (0, 0)
+                    # video-timing rides the LAST packet of a frame. The encode legs
+                    # happen in the capture library and aren't visible here (0 =
+                    # unknown); packetization-complete and pacer-exit are measured for
+                    # real (frames go straight to the wire, so the two coincide).
+                    if (
+                        packet.marker
+                        and self.__kind == "video"
+                        and frame_time - last_video_timing >= 0.2
+                    ):
+                        last_video_timing = frame_time
+                        delta_ms = min(0xFFFF, max(0, int((time.time() - frame_time) * 1000)))
+                        packet.extensions.video_timing = (
+                            0x01,  # flags: triggered by timer
+                            0, 0, delta_ms, delta_ms, 0, 0,
+                        )
                     # send packet
                     self.__log_debug("> %s", packet)
                     self.__rtp_history[packet.sequence_number % RTP_HISTORY_SIZE] = (
@@ -446,6 +495,26 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     self.__octet_count += len(payload)
                     self.__packet_count += 1
                     sequence_number = uint16_add(sequence_number, 1)
+
+                    if self.__fec_payload_type is not None:
+                        if not fec_group:
+                            fec_first_seq = packet.sequence_number
+                        fec_group.append(packet_bytes)
+                        if packet.marker or len(fec_group) == 10:
+                            fec_bytes = build_flexfec_03(
+                                fec_group,
+                                fec_first_seq,
+                                self._ssrc,
+                                self.__fec_payload_type,
+                                self.__fec_sequence_number,
+                                packet.timestamp,
+                                self._fec_ssrc,
+                            )
+                            self.__fec_sequence_number = uint16_add(
+                                self.__fec_sequence_number, 1
+                            )
+                            fec_group = []
+                            await self.transport._send_rtp(fec_bytes)
         except (asyncio.CancelledError, ConnectionError, MediaStreamError):
             pass
         except Exception:

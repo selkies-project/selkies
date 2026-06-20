@@ -19,25 +19,21 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-import os
 import sys
-import json
-import uuid
 import logging
 import asyncio
 import argparse
-import aiofiles
 
-import aiofiles.os
 from aiohttp import web
 from typing import Any, Dict, List, Optional
 
 from .rtc import RTCApp
 from .media_pipeline import MediaPipeline, MediaPipelinePixel, RateControlMode
+from .webrtc.codecs import configure_multiopus
 from .webrtc_signaling import WebRTCSignalingClient
 from .signaling_server import WebRTCPeerManagement
 from .input_handler import WebRTCInput
-from .display_utils import resize_display, set_dpi, set_cursor_size
+from .display_utils import resize_display, set_dpi, set_cursor_size, parse_gpu_id
 from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
 from .settings import settings, AppSettings, SETTING_DEFINITIONS
 from types import SimpleNamespace
@@ -47,7 +43,14 @@ from .stream_server import BaseStreamingService, CentralizedStreamServer
 logger = logging.getLogger("webrtc")
 logger.setLevel(logging.INFO)
 
-CURSOR_SIZE = 32
+# Cursor base size in points at 96 DPI (DPI changes scale from it): the
+# cursor_size setting (SELKIES_CURSOR_SIZE / XCURSOR_SIZE) when explicit,
+# else the X11 default.
+CURSOR_SIZE = settings.cursor_size if settings.cursor_size > 0 else 32
+# Same switch selkies.py uses (SELKIES_WAYLAND / legacy PIXELFLUX_WAYLAND / --wayland):
+# the input backend must match the capture backend, which gets the choice per
+# capture via the CaptureSettings use_wayland field.
+IS_WAYLAND = bool(settings.wayland[0])
 
 # Default int bounds (mirror selkies.py). Min is not 0: settings without an
 # explicit min may use -1 sentinels that must not be clamped up.
@@ -59,7 +62,7 @@ def get_server_settings() -> dict:
     server_settings_payload = {"settings": {}}
     for setting_def in SETTING_DEFINITIONS:
         name = setting_def["name"]
-        if name in ["port", "dri_node", "debug", "audio_device_name", "watermark_path"]:
+        if name in ["port", "encode_dri", "debug", "audio_device_name", "watermark_path", "recording_socket", "file_manager_path"]:
             continue
         # Never broadcast secrets/credentials (master_token, passwords, TURN
         # secrets, etc.) to clients.
@@ -80,6 +83,12 @@ def get_server_settings() -> dict:
             if "meta" in setting_def and "allowed" in setting_def["meta"]:
                 payload_entry["allowed"] = setting_def["meta"]["allowed"]
         server_settings_payload["settings"][name] = payload_entry
+    # Booleans the client gates its clipboard UI/handlers on, derived from the
+    # single enable_clipboard policy string.
+    clip = settings.enable_clipboard
+    server_settings_payload["settings"]["clipboard_enabled"] = {"value": clip != "false"}
+    server_settings_payload["settings"]["clipboard_in_enabled"] = {"value": clip in ("true", "in")}
+    server_settings_payload["settings"]["clipboard_out_enabled"] = {"value": clip in ("true", "out")}
     return server_settings_payload
 
 
@@ -97,7 +106,6 @@ class WebRTCService(BaseStreamingService):
         self.system_monitor: Optional[SystemMonitor] = None
         self.gpu_monitor: Optional[GPUMonitor] = None
         self.metrics: Optional[Metrics] = None
-        self._json_config_lock = asyncio.Lock()
         self.peer_id = 1
         self.args: Optional[SimpleNamespace] = None
         self.monitoring_utils_used: Dict[str, bool] = {}
@@ -127,17 +135,24 @@ class WebRTCService(BaseStreamingService):
                     )
                 elif stype == "enum":
                     value = getattr(self.settings, name)
-                elif stype == "int" or stype == "str":
+                elif stype in ("int", "float", "str", "list"):
                     value = getattr(self.settings, name)
+                else:
+                    continue
                 setattr(self.args, name, value)
         except Exception as e:
             logger.error(f"Error initializing default settings: {e}", exc_info=True)
 
-        # TODO: Starting webrtc mode with some default resolution which will
-        # be reconfigured upon client connection. Remove this later.
-        asyncio.run_coroutine_threadsafe(
-            resize_display("1920x1080"), asyncio.get_running_loop()
-        )
+        # Initial display size: honor a configured manual resolution; otherwise leave
+        # the display as-is (physical/preset displays stay untouched) — the first
+        # client reconfigures it to its own size anyway.
+        if getattr(self.args, "is_manual_resolution_mode", False):
+            width = int(getattr(self.args, "manual_width", 0) or 0)
+            height = int(getattr(self.args, "manual_height", 0) or 0)
+            if width > 0 and height > 0:
+                asyncio.run_coroutine_threadsafe(
+                    resize_display(f"{width}x{height}"), asyncio.get_running_loop()
+                )
 
     async def initialize_components(self) -> None:
         """Initialize all application components"""
@@ -149,6 +164,11 @@ class WebRTCService(BaseStreamingService):
         # Init signaling client
         self.signaling_client = self.create_signaling_client()
 
+        # Surround (>2ch) is carried as Chromium's multiopus codec; swap the offered
+        # audio codec set before any peer connection builds its capabilities.
+        if int(self.args.audio_channels) > 2:
+            configure_multiopus(int(self.args.audio_channels))
+
         self.media_pipeline = MediaPipelinePixel(
             async_event_loop=asyncio.get_running_loop(),
             encoder_rtc=self.args.encoder_rtc,
@@ -158,7 +178,8 @@ class WebRTCService(BaseStreamingService):
             audio_channels=int(self.args.audio_channels),
             audio_enabled=self.args.audio_enabled,
             audio_device_name=self.args.audio_device_name,
-            crf=int(self.args.h264_crf),
+            crf=int(self.args.video_crf),
+            video_fullcolor=bool(self.args.video_fullcolor),
         )
         if self.args.enable_rate_control:
             self.media_pipeline.rc_mode = RateControlMode(self.args.rate_control_mode)
@@ -180,7 +201,7 @@ class WebRTCService(BaseStreamingService):
 
         # Input handler
         self.input_handler = WebRTCInput(
-            gst_webrtc_app=self.rtc_app,
+            rtc_app=self.rtc_app,
             uinput_mouse_socket_path="",
             js_socket_path_prefix="/tmp",
             enable_clipboard=self.args.enable_clipboard,
@@ -191,13 +212,21 @@ class WebRTCService(BaseStreamingService):
             cursor_size=self.args.cursor_size,
             cursor_scale=1.0,
             cursor_debug=self.args.debug_cursors,
-            upload_dir=self.args.upload_dir,
+            upload_dir=self.args.file_manager_path,
+            is_wayland=IS_WAYLAND,
         )
         self.input_handler.initialize_upload_dir()
 
         # Initialize monitoring instances
         self.system_monitor = SystemMonitor()
-        self.gpu_monitor = GPUMonitor(enabled=self.args.encoder_rtc.startswith("nv"))
+        # Always on: gpu_stats reports nothing when no supported GPU/tool is present.
+        # Keyed to the pipeline's render node so stats describe the encoding GPU.
+        stats_gpu_id = parse_gpu_id(getattr(self.args, "gpu_id", ""))
+        self.gpu_monitor = GPUMonitor(
+            gpu_id=stats_gpu_id if (stats_gpu_id or 0) > 0 else 0,
+            enabled=True,
+            dri_node=getattr(self.args, "encode_dri", "") or "",
+        )
 
         self.create_peer_manager(rtc_config)
 
@@ -243,7 +272,7 @@ class WebRTCService(BaseStreamingService):
             await self.rtc_app.start_rtc_connection(session_peer_id, client_type)
             # Initialize stats location directory
             if self.args.enable_webrtc_statistics:
-                self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
+                await self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
             logger.info(f"started session for client peer id {session_peer_id}")
         except Exception as e:
             logger.error(
@@ -398,60 +427,20 @@ class WebRTCService(BaseStreamingService):
 
     async def handle_video_bitrate_change(self, bitrate: int) -> None:
         """Handle video bitrate change request."""
-        updated = await self.set_json_app_argument("video_bitrate", bitrate)
-        if updated and self.media_pipeline:
+        if self.media_pipeline:
             await self.media_pipeline.set_video_bitrate(bitrate)
 
     async def handle_audio_bitrate_change(self, bitrate: int) -> None:
         """Handle audio bitrate change request."""
-        updated = await self.set_json_app_argument("audio_bitrate", bitrate)
-        if updated and self.media_pipeline:
+        if self.media_pipeline:
             await self.media_pipeline.set_audio_bitrate(bitrate)
 
     async def handle_fps_change(self, fps: int) -> None:
         """Handle FPS change request."""
-        updated = await self.set_json_app_argument("framerate", fps)
-        if updated and self.media_pipeline:
+        if self.media_pipeline:
             await self.media_pipeline.set_framerate(fps)
         else:
             logger.error("Media pipeline not initialized, cannot set framerate")
-
-    async def set_json_app_argument(self, key: str, value: Any) -> bool:
-        """Asynchronously and atomically updates a JSON configuration file."""
-        config_path = self.args.json_config
-        # Create a unique temporary path in the same directory
-        temp_path = os.path.join(
-            os.path.dirname(config_path),
-            f".{os.path.basename(config_path)}.{uuid.uuid4()}.tmp",
-        )
-
-        async with self._json_config_lock:
-            try:
-                config = {}
-                try:
-                    if await aiofiles.os.path.exists(config_path):
-                        async with aiofiles.open(
-                            config_path, "r", encoding="utf-8"
-                        ) as f:
-                            config = json.loads(await f.read())
-                except (FileNotFoundError, json.JSONDecodeError):
-                    pass
-
-                config[key] = value
-
-                # Write to a unique temporary file
-                async with aiofiles.open(temp_path, "w", encoding="utf-8") as f:
-                    await f.write(json.dumps(config, indent=2))
-                # Atomically replace the original file with the new one
-                await aiofiles.os.replace(temp_path, config_path)
-                return True
-
-            except Exception as e:
-                logger.error(f"Error updating json config file '{config_path}': {e}")
-                # Ensure temp file is cleaned up on any error
-                if await aiofiles.os.path.exists(temp_path):
-                    await aiofiles.os.remove(temp_path)
-                return False
 
     async def handle_client_werbtc_stats(
         self, webrtc_stat_type: str, webrtc_stats: str
@@ -550,14 +539,19 @@ class WebRTCService(BaseStreamingService):
             self.metrics.set_gpu_utilization(load * 100)
 
     async def handle_update_settings(self, settings_json: dict) -> None:
-        # TODO: Gradually expand the list of settings that can be updated via this method
+        # Every entry needs server-side backing: a live setter dispatched below, or state
+        # the server reads later (the manual-resolution trio feeds the start-time resize
+        # and resolution policy; the live resize itself rides the `r,` input message).
         settings_allowed_to_update = [
             "rate_control_mode",
-            "h264_crf",
+            "video_crf",
             "video_bitrate",
             "audio_bitrate",
             "framerate",
             "enable_binary_clipboard",
+            "is_manual_resolution_mode",
+            "manual_width",
+            "manual_height",
         ]
 
         def sanitize_value(name: str, client_value: Any) -> Any:
@@ -601,13 +595,14 @@ class WebRTCService(BaseStreamingService):
                         f"Client value for '{name}' ('{client_value}') is not in the allowed list {allowed_values}. Using server default '{server_default}'."
                     )
                     return server_default
-                elif setting_def["type"] == "int":
-                    sanitized = int(client_value)
+                elif setting_def["type"] in ("int", "float"):
+                    sanitized = int(client_value) if setting_def["type"] == "int" else float(client_value)
                     meta = setting_def.get("meta", {})
-                    # Floor uses a negative default, not 0, to preserve -1 sentinels.
-                    min_val = meta.get("min", INT_SETTING_DEFAULT_MIN)
-                    # Cap client integers so they can't request resource-exhausting values.
-                    max_val = meta.get("max", INT_SETTING_DEFAULT_MAX)
+                    # Top-level min/max win over meta so declared bounds aren't loosened
+                    # by the sentinel-safe negative fallback.
+                    min_val = setting_def.get("min", meta.get("min", INT_SETTING_DEFAULT_MIN))
+                    # Cap client numbers so they can't request resource-exhausting values.
+                    max_val = setting_def.get("max", meta.get("max", INT_SETTING_DEFAULT_MAX))
                     clamped = max(min_val, min(sanitized, max_val))
                     if clamped != sanitized:
                         logger.warning(
@@ -651,7 +646,7 @@ class WebRTCService(BaseStreamingService):
                         await self.media_pipeline.update_rate_control_mode(
                             RateControlMode(sanitized_value)
                         )
-                    elif key == "h264_crf":
+                    elif key == "video_crf":
                         await self.media_pipeline.set_crf(sanitized_value)
                     elif key == "video_bitrate" and self.media_pipeline:
                         await self.media_pipeline.set_video_bitrate(sanitized_value)
@@ -680,6 +675,50 @@ class WebRTCService(BaseStreamingService):
             logger.debug("updating STUN/TURN servers in RTC app")
             self.rtc_app.update_rtc_config(stun_servers, turn_servers)
 
+    async def _congestion_control_loop(self) -> None:
+        """GCC-style bitrate adaptation from transport-wide-cc receiver feedback:
+        follow the slowest peer's goodput estimate with headroom, back off
+        multiplicatively on loss, and retarget the encoder within the allowed
+        video_bitrate range. Only CBR mode has a bitrate target to steer."""
+        lo_mbps, hi_mbps = settings.video_bitrate
+        logger.info(
+            f"Congestion control loop started (CBR only, range {lo_mbps}-{hi_mbps} Mbps)."
+        )
+        while True:
+            await asyncio.sleep(1.0)
+            pipeline = self.media_pipeline
+            rtc_app = self.rtc_app
+            if (
+                not pipeline
+                or not rtc_app
+                or getattr(pipeline, "rc_mode", None) != RateControlMode.CBR
+            ):
+                continue
+            goodputs, worst_loss = [], 0.0
+            for peer in rtc_app.peer_connections.values():
+                pc = peer.get("peer_conn")
+                sctp = getattr(pc, "sctp", None)
+                estimate = getattr(getattr(sctp, "transport", None), "twcc_estimate", None)
+                if not estimate:
+                    continue
+                if estimate.get("goodput_bps"):
+                    goodputs.append(estimate["goodput_bps"])
+                worst_loss = max(worst_loss, estimate.get("loss_fraction", 0.0))
+            if not goodputs:
+                continue
+            current = int(pipeline.video_bitrate)
+            if worst_loss > 0.10:
+                target = int(current * 0.7)
+            else:
+                target = int(min(goodputs) * 0.85 / 1_000_000)
+            target = max(int(lo_mbps), min(int(hi_mbps), target))
+            if target != current:
+                logger.info(
+                    f"Congestion control: video bitrate {current} -> {target} Mbps "
+                    f"(goodput {min(goodputs) / 1e6:.1f} Mbps, loss {worst_loss:.1%})"
+                )
+                await pipeline.set_video_bitrate(target)
+
     async def start_components(self) -> None:
         """Start all asynchronous tasks"""
         # Start components
@@ -689,6 +728,15 @@ class WebRTCService(BaseStreamingService):
             self.tasks.append(
                 asyncio.create_task(self.input_handler.start_cursor_monitor())
             )
+
+        # Apply an explicit --cursor-size to the X server at startup (handle_scaling
+        # re-derives it on DPI changes); Wayland gets its size via CaptureSettings.
+        if not IS_WAYLAND and settings.cursor_size > 0:
+            initial_dpi = float(getattr(settings, "scaling_dpi", "96"))
+            await set_cursor_size(max(1, int(round(initial_dpi / 96.0 * CURSOR_SIZE))))
+
+        if self.args.congestion_control:
+            self.tasks.append(asyncio.create_task(self._congestion_control_loop()))
 
         # Metrics HTTP server is now integrated with aiohttp, no separate server needed
 
@@ -885,7 +933,10 @@ class WebRTCService(BaseStreamingService):
                 )
         if self.metrics:
             try:
-                self.metrics.unregister()
+                # unregister() drains the CSV executor via shutdown(wait=True);
+                # run it off the loop thread so the deterministic drain doesn't
+                # block the event loop during teardown.
+                await asyncio.to_thread(self.metrics.unregister)
             except Exception as e:
                 logger.exception(f"Error unregistering metrics: {e}")
 
@@ -936,9 +987,6 @@ class WebRTCService(BaseStreamingService):
         )
         main_router.add_get(f"{api_prefix}/ws", self.rtc_ws_handler)
         main_router.add_get(f"{api_prefix}/turn", self.handle_turn_req)
-        
-        if self.args.enable_metrics_http:
-            main_router.add_get(f"{api_prefix}/metrics", self.handle_metrics)
 
     async def rtc_ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         if self.supervisor.current_mode != self.mode:
@@ -957,8 +1005,3 @@ class WebRTCService(BaseStreamingService):
             return web.json_response({"error": "WebRTC mode is inactive"}, status=409)
         return await self.peer_manager.handle_turn_req(request)
 
-    async def handle_metrics(self, request: web.Request) -> web.Response:
-        """Handle metrics endpoint with mode validation"""
-        if self.supervisor.current_mode != self.mode:
-            return web.json_response({"error": "WebRTC mode is inactive"}, status=409)
-        return await self.metrics.handle_metrics_request(request)

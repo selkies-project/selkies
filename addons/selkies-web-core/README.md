@@ -19,17 +19,19 @@ Before interacting with the client via `postMessage`, it must first connect to t
 ### URL Query Parameters
 
 *   **`token`** — Access token for Token Authentication Mode (see above).
-*   **`offscreen_worker`** — `false` disables the OffscreenCanvas worker rendering path (see *Video Rendering* below). Defaults to `true`, and only takes effect on browsers that lack a video track generator.
+*   **`offscreen_worker`** — `false` disables the worker video sink (see *Video Rendering* below), forcing main-thread rendering. Defaults to `true`, and only takes effect on browsers without a main-thread track generator (i.e. non-Chromium).
 
 ---
 
 ## Video Rendering & Browser Support
 
-The WebSocket client renders decoded H.264 frames through a zero-copy sink wherever the browser provides one, keeping decoded frames off the main thread:
+The WebSocket client renders decoded H.264 frames through a zero-copy `<video>` sink wherever the browser provides a track generator, avoiding the per-frame 2D-canvas draw. Sink priority (standard first):
 
-*   **Chromium:** `MediaStreamTrackGenerator` feeding a `<video>` element.
-*   **Safari / others:** `VideoTrackGenerator` (with a canvas fallback).
-*   **Firefox** (no track generator): decoded `VideoFrame`s are transferred to a Web Worker that composites them on an `OffscreenCanvas`. This path is on by default and can be disabled with `?offscreen_worker=false`.
+*   **`VideoTrackGenerator`** (standard; **Safari 18+**, and Firefox once it ships): the generator is `DedicatedWorker`-only, so the video worker constructs it, transfers its `MediaStreamTrack` back to the page for `<video>.srcObject`, and writes decoded frames to its writable.
+*   **`MediaStreamTrackGenerator`** (Chromium; non-standard, main-thread): feeds a `<video>` element directly.
+*   **OffscreenCanvas worker** (browsers with neither, e.g. current **Firefox**): decoded `VideoFrame`s are transferred to the same worker, which composites them on an `OffscreenCanvas`.
+
+The worker paths are on by default and can be disabled with `?offscreen_worker=false` (forces main-thread rendering).
 
 The H.264 decoder is configured from the profile/level parsed from the stream's actual SPS (on Chromium) rather than a heuristic guess. The client can also ask the server for a fresh keyframe (`REQUEST_KEYFRAME`), e.g. after its decoder is recreated. The server-rendered cursor is automatically restored after a tab is backgrounded and woken (both WebSocket and WebRTC modes).
 
@@ -103,12 +105,12 @@ All messages sent to the client must be JavaScript objects with a `type` propert
         *   `framerate` (Number): Target FPS (e.g., 60).
         *   `rate_control_mode` (String): `'crf'` or `'cbr'`.
         *   `video_bitrate` (Number): Target bitrate in Mbps (used if CBR).
-        *   `h264_crf` (Number): Constant Rate Factor for H.264 (used if CRF).
-        *   `encoder` (String): Video encoder (e.g., `'x264enc'`, `'jpeg'`, `'x264enc-striped'`).
+        *   `video_crf` (Number): Constant Rate Factor for H.264 (used if CRF).
+        *   `encoder` (String): Video encoder (e.g., `'h264enc'`, `'jpeg'`, `'h264enc-striped'`).
         *   `audio_bitrate` (Number): Audio bitrate in bps (e.g., 320000).
         *   `scaling_dpi` (Number): Custom DPI scaling for the remote desktop.
         *   `enable_binary_clipboard` (Boolean): Enables image (binary) copy/pasting. The matching `clipboard_in_enabled` / `clipboard_out_enabled` flags toggle paste-into-session and copy-from-session.
-        *   *Advanced Toggles:* `use_cpu`, `h264_fullcolor`, `h264_streaming_mode`, `jpeg_quality`, `use_paint_over_quality`.
+        *   *Advanced Toggles:* `use_cpu`, `video_fullcolor`, `video_streaming_mode`, `jpeg_quality`, `use_paint_over_quality`.
 *   **`clipboardUpdateFromUI`**
     *   **Payload:** `{ type: 'clipboardUpdateFromUI', text: <string> }`
     *   **Description:** Sends text from the local UI to the remote server's clipboard. *(Ignored in shared mode).*

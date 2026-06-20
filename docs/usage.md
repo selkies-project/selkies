@@ -27,13 +27,13 @@ Clipboard behaviour is controlled by the server options `SELKIES_CLIPBOARD_ENABL
 
 ## Command-Line Options and Environment Variables
 
-Use `selkies-gstreamer --help` for all command-line options, after the source command `. ./gst-env` for compiled GStreamer or the source command `. ./bin/activate` for Conda.
+Use `selkies --help` for all command-line options.
 
-Environment variables for command-line options are available as capitalizations of the options prepended by `SELKIES_` (such as `SELKIES_VIDEO_BITRATE` for `--video_bitrate`).
+Every command-line option has a matching environment variable, formed by capitalizing the option and prepending `SELKIES_` (such as `SELKIES_VIDEO_BITRATE` for `--video-bitrate`). The full list of settings, their flags, environment variables, and defaults is defined in [`src/selkies/settings.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/settings.py).
 
 ## Configuring Encoders, Display Capture, or Transport Protocols
 
-[Components](component.md#gstreamer-components)
+[Components](component.md#encoders)
 
 ## CI/CD Build
 

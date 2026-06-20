@@ -2,7 +2,7 @@
 
 ## Component Structure
 
-Selkies is composed of various mandatory and optional components.
+Selkies is composed of a small number of core components plus several optional addons.
 
 **Refer to [Getting Started](start.md) on how you can get on board.**
 
@@ -20,46 +20,23 @@ When instructed to install [binfmt](https://github.com/tonistiigi/binfmt), use t
 docker run --rm --privileged tonistiigi/binfmt:latest --install all
 ```
 
-### Mandatory Components
+### Core Components
 
-There are currently three mandatory components in Selkies.
+At runtime, Selkies is a **single Python application** — the `selkies` wheel. Unlike earlier releases, there is no separate GStreamer build and no separate web-interface package: the HTML5 web client is bundled into the wheel, and screen/audio capture and encoding are provided by the `pixelflux` and `pcmflux` extensions, which are installed automatically as dependencies of the wheel.
 
-All mandatory components are available for download from the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
+All release components are available for download from the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
 
 For the most recent unreleased commit, download from the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions) `Build & publish all images` Build Artifacts (under `Artifacts (Produced during runtime)`) for each commit from the `main` branch. Build Artifacts can also be downloaded using the [GitHub CLI](https://cli.github.com) command [`gh run download`](https://cli.github.com/manual/gh_run_download).
 
-#### Conda Toolchain
-
-Our [reference portable distribution toolchain](https://github.com/selkies-project/selkies/tree/main/addons/conda) is compiled with the distribution-neutral [Conda](https://conda-forge.org) build toolchain, distributing all three mandatory components as well as portable versions of most dependencies in a tarball.
-
-Pre-built `x86_64` portable distributions for **any Linux distribution with `glibc ≥ 2.17`** (CentOS 7 or newer) are available with the name **`selkies-gstreamer-portable-v${SELKIES_VERSION}_amd64.tar.gz`** for download in the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
-
-**Instructions from [Quick Start](start.md#quick-start) still apply below.**
-
-For the most recent unreleased commit, download from the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions) `Build & publish all images` **`conda_linux-amd64`** Build Artifact (under `Artifacts (Produced during runtime)`) for each commit from the `main` branch.
-
-Alternatively, copy the pre-built `x86_64` portable distribution build from the container image (use your own directory other than `/opt`, change `main` with `latest` for the latest stable release):
-
-```bash
-docker create --platform="linux/amd64" --name conda ghcr.io/selkies-project/selkies-gstreamer/conda:main
-docker cp conda:/opt/selkies-gstreamer-conda.tar.gz /tmp/selkies-gstreamer-conda.tar.gz
-docker rm conda
-cd ~ && tar -xzf /tmp/selkies-gstreamer-conda.tar.gz && rm -f /tmp/selkies-gstreamer-conda.tar.gz
-# Run Selkies-GStreamer portable distribution
-/opt/selkies-gstreamer/selkies-gstreamer-run --addr=0.0.0.0 --port=8080 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=x264enc --enable_resize=false
-```
-
-Otherwise (for different system architectures), you can build your own portable distribution (currently tested with `aarch64` and `ppc64le`).
-
 #### Python Application
 
-The term `host` or `server` refers to the [Python Components](https://github.com/selkies-project/selkies/tree/main/src/selkies) across this documentation.
+The term `host` or `server` refers to the [Python components](https://github.com/selkies-project/selkies/tree/main/src/selkies) across this documentation.
 
-The [Python Components](https://github.com/selkies-project/selkies/tree/main/src/selkies) are responsible for the host server backend, capturing and encoding the host screen and audio, receiving input signals and communicating other data (including the clipboard) between the client and the host, and establishing the WebRTC (with RTP underneath) connection to the client.
+The Python components are responsible for the host server backend: capturing and encoding the host screen (via `pixelflux`) and audio (via `pcmflux`), injecting keyboard/mouse/gamepad input into the X11 display (via a vendored `python-xlib` using XTEST/XFixes), receiving input signals and communicating other data (including the clipboard) between the client and the host, serving the HTML5 web client, and — only in WebRTC mode — establishing the WebRTC connection to the client. Everything is served by a single [`aiohttp`](https://docs.aiohttp.org) server on a **single port (default `8081`)**.
 
-Host screen video and audio are transported using the WebRTC `MediaStream` interface, and other data are transported using the WebRTC `DataChannel` interface.
+In the default WebSocket mode, encoded screen frames, audio, input, and other data are multiplexed over WebSocket connections to a WebCodecs-based web client. In the opt-in WebRTC mode (`--mode=webrtc`), host screen video and audio are transported using the WebRTC `MediaStream` interface (through a vendored fork of [`aiortc`](https://github.com/aiortc/aiortc) under `src/selkies/webrtc/`), and other data are transported using the WebRTC `DataChannel` interface.
 
-The architecture-independent components are available with the name **`selkies-${SELKIES_VERSION}-py3-none-any.whl`** for download in the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
+The architecture-independent wheel is available with the name **`selkies-${SELKIES_VERSION}-py3-none-any.whl`** for download in the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
 
 **Instructions from [Advanced Install](start.md#advanced-install) still apply below.**
 
@@ -68,92 +45,54 @@ For the most recent unreleased commit, download from the [GitHub Actions Workflo
 Alternatively, copy the Python Wheel file from the build container image (DO NOT change the platform in non-`x86_64` architectures, install [binfmt](https://github.com/tonistiigi/binfmt) instead, and change `main` with `latest` for the latest stable release):
 
 ```bash
-docker create --platform="linux/amd64" --name selkies-py ghcr.io/selkies-project/selkies-gstreamer/py-build:main
-docker cp selkies-py:/opt/pypi/dist/selkies_gstreamer-0.0.0.dev0-py3-none-any.whl /tmp/selkies_gstreamer-0.0.0.dev0-py3-none-any.whl
+docker create --platform="linux/amd64" --name selkies-py ghcr.io/selkies-project/selkies/py-build:main
+docker cp selkies-py:/opt/pypi/dist/selkies-0.0.0.dev0-py3-none-any.whl /tmp/selkies-0.0.0.dev0-py3-none-any.whl
 docker rm selkies-py
-sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall /tmp/selkies_gstreamer-0.0.0.dev0-py3-none-any.whl
-rm -f /tmp/selkies_gstreamer-0.0.0.dev0-py3-none-any.whl
-# Run Selkies-GStreamer Python executable after all components are installed
-selkies-gstreamer --addr=0.0.0.0 --port=8080 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=x264enc --enable_resize=false
+sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall /tmp/selkies-0.0.0.dev0-py3-none-any.whl
+rm -f /tmp/selkies-0.0.0.dev0-py3-none-any.whl
+# Run the Selkies Python executable after all components are installed
+selkies --addr=0.0.0.0 --port=8081 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=h264enc --enable_resize=false
 ```
 
 One other alternative way to install the Python application components from the most recent unreleased commit:
 
 ```bash
 git clone https://github.com/selkies-project/selkies.git
-cd selkies-gstreamer
+cd selkies
 sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall .
-# Run Selkies-GStreamer Python executable after all components are installed
-selkies-gstreamer --addr=0.0.0.0 --port=8080 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=x264enc --enable_resize=false
+# Run the Selkies Python executable after all components are installed
+selkies --addr=0.0.0.0 --port=8081 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=h264enc --enable_resize=false
 ```
 
-#### Web Application
+Installing the wheel also installs the `selkies` and `selkies-resize` console commands.
 
-The term `client` refers to the [Web Components](https://github.com/selkies-project/selkies/tree/main/addons/gst-web) across this documentation.
+#### Web Client
 
-The [Web Components](https://github.com/selkies-project/selkies/tree/main/addons/gst-web) are responsible the web browser interface that you see when you use Selkies-GStreamer.
+The term `client` refers to the [web components](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core) across this documentation.
 
-They receive and display the received screen and audio within the web browser, detect input signal and other data (including the clipboard) from the user, then send them to the host server backend.
+The web client is a WebCodecs-based HTML5 application (with the core `selkies-core.js`, the WebSocket transport core `selkies-ws-core.js`, the WebRTC transport core `selkies-wr-core.js`, and the input library `lib/input.js`). It is responsible for the web browser interface that you see when you use Selkies.
 
-They also handle remote cursors with the Pointer Lock API that allows you to correctly control interactive applications and games, and also modify the SDP (responsible for negotiating the stream between the host and the client) so that hidden web browser features can be utilized.
+It decodes the incoming H.264 or JPEG stream using the browser [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) API with a low-latency zero-copy rendering path, plays Opus audio, and detects keyboard, mouse, gamepad, and clipboard input from the user, then sends them to the host server backend. It also handles remote cursors with the Pointer Lock API so that you can correctly control interactive applications and games.
 
-WebRTC enables web browser clients to decode the stream using GPU hardware acceleration, as well as GPU-accelerated stream encoding from the host.
+The web client source lives at [`addons/selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core) and is built and bundled into the Python wheel automatically (installed at `src/selkies/selkies_web`), so **there is no separate web package to download or install**. To serve your own copy of the web files, point `--web_root=` (or the `SELKIES_WEB_ROOT` environment variable) at a directory containing an `index.html`. Note that you should change `manifest.json` and `cacheName` in `sw.js` to rebrand the web interface to a different name.
 
-The architecture-independent components are available with the name **`selkies-gstreamer-web_v${SELKIES_VERSION}.tar.gz`** for download in the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
+#### Media Capture and Encoding (`pixelflux` and `pcmflux`)
 
-**Instructions from [Advanced Install](start.md#advanced-install) still apply below.**
+Screen capture and video encoding are performed by [`pixelflux`](https://pypi.org/project/pixelflux/), a Rust (PyO3) extension. It encodes H.264 with hardware NVENC (NVIDIA) or VA-API (Intel/AMD) when a supported GPU is available, and otherwise falls back to software H.264 (`x264` or the BSD-licensed OpenH264), or encodes Motion JPEG. H.265 and AV1 in the capture path are planned but not yet implemented.
 
-For the most recent unreleased commit, download from the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions) `Build & publish all images` **`gst-web_linux-amd64`** Build Artifact (under `Artifacts (Produced during runtime)`) for each commit from the `main` branch.
+Audio capture and encoding are performed by [`pcmflux`](https://pypi.org/project/pcmflux/), a companion Rust (PyO3) extension that captures from PulseAudio (or PipeWire-Pulse) and encodes to Opus.
 
-Alternatively, install the web interface components to the container image (DO NOT change the platform in non-`x86_64` architectures, install [binfmt](https://github.com/tonistiigi/binfmt) instead, and change `main` with `latest` for the latest stable release):
-
-```bash
-docker create --platform="linux/amd64" --name gst-web ghcr.io/selkies-project/selkies-gstreamer/gst-web:main
-sudo docker cp gst-web:/usr/share/nginx/html /opt/gst-web
-docker rm gst-web
-```
-
-One other alternative way to install the web interface components from the most recent unreleased commit (replace `INSTALL_DIR=/opt/gst-web` with your own directory):
-
-```bash
-git clone https://github.com/selkies-project/selkies.git
-cd selkies-gstreamer/addons/gst-web
-sudo INSTALL_DIR=/opt/gst-web ./install.sh
-```
-
-#### GStreamer
-
-[GStreamer](https://gstreamer.freedesktop.org) "is a library for constructing graphs of media-handling components. The applications it supports range from simple Ogg/Vorbis playback, audio/video streaming to complex audio (mixing) and video (non-linear editing) processing." GStreamer is likely inside your smart TV, car infotainment system, or the digital street signage or surveillance camera near you, as well as many media players and video editing software.
-
-GStreamer is responsible for the actual heavy lifting of Selkies-GStreamer, starting from capturing and encoding the host screen and audio to transporting the stream and other data between the host and the client web browser using WebRTC. GStreamer can be installed from your Linux distribution (but the required newest version may not be available), be [built for your distribution](https://github.com/selkies-project/selkies/tree/main/addons/gstreamer), or be compiled and distributed in portable form with [Conda](https://github.com/selkies-project/selkies/tree/main/addons/conda).
-
-Check [GStreamer Components](#gstreamer-components) for more details.
-
-Pre-built `x86_64` GStreamer components for Ubuntu are available with the name (fill in the OS version `DISTRIB_RELEASE` such as `24.04`, `22.04`) **`gstreamer-selkies_gpl_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_amd64.tar.gz`** for download in the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
-
-For the most recent unreleased commit, download from the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions) `Build & publish all images` **`gstreamer-ubuntu${DISTRIB_RELEASE}_linux-amd64`** Build Artifact (under `Artifacts (Produced during runtime)`) for each commit from the `main` branch.
-
-**Instructions from [Advanced Install](start.md#advanced-install) still apply below.**
-
-Alternatively, copy the pre-built `x86_64` GStreamer build from the container image and move it to `/opt/gstreamer` or your directory of choice (change `main` with `latest` for the latest stable release):
-
-```bash
-docker create --platform="linux/amd64" --name gstreamer ghcr.io/selkies-project/selkies-gstreamer/gstreamer:main-ubuntu${DISTRIB_RELEASE}
-sudo docker cp gstreamer:/opt/gstreamer /opt/gstreamer
-docker rm gstreamer
-# Initialize the pre-built GStreamer environment for Selkies-GStreamer to use
-. /opt/gstreamer/gst-env
-```
-
-Otherwise (for different operating system distributions or system architectures), you can build your own GStreamer version as long as it is the latest possible stable version.
+Both are pulled in automatically as dependencies of the `selkies` wheel, so you normally do not install them separately.
 
 ### Optional Components
 
-These components are not required for Selkies-GStreamer, but may be required in specific cases of deployments or preferences. These sections are recommended to be nonetheless, read carefully.
+These components are not required for the base Selkies runtime, but may be needed for specific deployments or preferences. These sections are nonetheless recommended to be read carefully.
 
 #### Joystick Interposer
 
-The [Joystick Interposer](https://github.com/selkies-project/selkies/tree/main/addons/js-interposer) is a special library that allows the usage of joysticks or gamepads inside unprivileged containers (most of the occasions with shared Kubernetes clusters or HPC clusters), where host kernel devices required for creating a joystick interface are not available. It uses a `LD_PRELOAD` hack to intercept `uinput` input commands from joysticks or gamepads into Selkies-GStreamer (much like how [VirtualGL](https://github.com/VirtualGL/virtualgl) intercepts OpenGL commands).
+The [Joystick Interposer](https://github.com/selkies-project/selkies/tree/main/addons/js-interposer) is a special library that allows the usage of joysticks or gamepads inside unprivileged containers (most of the occasions with shared Kubernetes clusters or HPC clusters), where host kernel devices required for creating a joystick interface are not available. It uses an `LD_PRELOAD` hack to intercept application calls that open a Linux joystick/gamepad device and pass data through a unix domain socket, translating gamepad events from Selkies into joystick/gamepad events without requiring access to `/dev/input/js0` or kernel modules such as `uinput` (much like how [VirtualGL](https://github.com/VirtualGL/virtualgl) intercepts OpenGL commands).
+
+> **Note:** the `LD_PRELOAD` used here (and in [fake-udev](#fake-udev)) is a deliberate, legitimate interposition technique for redirecting device access in unprivileged environments. It is unrelated to — and distinct from — the process-global `LD_PRELOAD` anti-pattern that `pixelflux`'s multi-GPU NVENC support specifically avoids when selecting a GPU for hardware encoding.
 
 Pre-built `x86_64` and `aarch64` joystick interposer components for Ubuntu are available with the name (fill in the OS version `DISTRIB_RELEASE` such as `24.04`, `22.04`, Ubuntu-style architecture `ARCH` such as `amd64` and `arm64`) **`selkies-js-interposer_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_${ARCH}.tar.gz`** or **`selkies-js-interposer_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_${ARCH}.deb`** for download in the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
 
@@ -164,7 +103,7 @@ For the most recent unreleased commit, download from the [GitHub Actions Workflo
 Alternatively, copy and install the pre-built Joystick Interposer build (change `--platform=` to `linux/arm64` for `aarch64`, and change `main` with `latest` and `0.0.0` to the release version for the latest stable release):
 
 ```bash
-docker create --platform="linux/amd64" --name js-interposer ghcr.io/selkies-project/selkies-gstreamer/js-interposer:main-ubuntu${DISTRIB_RELEASE}
+docker create --platform="linux/amd64" --name js-interposer ghcr.io/selkies-project/selkies/js-interposer:main-ubuntu${DISTRIB_RELEASE}
 docker cp js-interposer:/opt/selkies-js-interposer_0.0.0.deb /tmp/selkies-js-interposer.deb
 docker rm js-interposer
 sudo apt-get update && sudo apt-get install --no-install-recommends --allow-downgrades -y /tmp/selkies-js-interposer.deb
@@ -174,7 +113,7 @@ rm -f /tmp/selkies-js-interposer.deb
 To retrieve the `.tar.gz` tarball instead of the `.deb` installer:
 
 ```bash
-docker create --platform="linux/amd64" --name js-interposer ghcr.io/selkies-project/selkies-gstreamer/js-interposer:main-ubuntu${DISTRIB_RELEASE}
+docker create --platform="linux/amd64" --name js-interposer ghcr.io/selkies-project/selkies/js-interposer:main-ubuntu${DISTRIB_RELEASE}
 docker cp js-interposer:/opt/selkies-js-interposer_0.0.0.tar.gz /tmp/selkies-js-interposer_0.0.0.tar.gz
 docker rm js-interposer
 ```
@@ -213,35 +152,47 @@ Check the following links for explanations of similar, but different attempts, f
 
 <https://github.com/games-on-whales/wolf/tree/stable/src/fake-udev>
 
+#### fake-udev
+
+The [fake-udev](https://github.com/selkies-project/selkies/tree/main/addons/fake-udev) addon provides a fake `libudev` shared library (`libudev.so.1`) designed to be used with `LD_PRELOAD`. It intercepts `libudev` calls and simulates the presence of a fixed set of virtual gamepads, so that applications which discover input devices through `libudev` (for example, via `udev_enumerate_scan_devices`) find the Selkies virtual gamepads even in containerized environments where a full udev daemon is not available. It complements the [Joystick Interposer](#joystick-interposer) and, like it, uses `LD_PRELOAD` by design.
+
+#### Universal Touch Gamepad
+
+The [Universal Touch Gamepad](https://github.com/selkies-project/selkies/tree/main/addons/universal-touch-gamepad) is a JavaScript library that adds a customizable on-screen touch gamepad overlay to the web interface. It intercepts `navigator.getGamepads()` to inject a virtual gamepad, making touch devices compatible with applications and games that expect the browser Gamepad API.
+
+#### Selkies Dashboard
+
+The [Selkies Dashboard](https://github.com/selkies-project/selkies/tree/main/addons/selkies-dashboard) and the modern TypeScript variant [Selkies Dashboard (Wish)](https://github.com/selkies-project/selkies/tree/main/addons/selkies-dashboard-wish) are reference React dashboards that demonstrate how to build and brand your own sidebar/control UI on top of `selkies-core` using `window` messaging. They are provided as examples/starting points, not as a required component.
+
 #### Example Container
 
-The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies-GStreamer quickly. The bare minimum Xfce4 desktop environment is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
+The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum Xfce4 desktop environment is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
 
 Read the [Development](development.md) section for customizing this container for your own usage.
 
-Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8080** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **change `DISTRIB_RELEASE` to `24.04`, `22.04`, or `20.04`, and replace `main` to `latest` for the latest stable release**):
+Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8081** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **change `DISTRIB_RELEASE` to `24.04`, `22.04`, or `20.04`, and replace `main` to `latest` for the latest stable release**):
 
 ```bash
-docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8080:8080 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies-gstreamer/gst-py-example:main-ubuntu${DISTRIB_RELEASE}
+docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8081:8081 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/gst-py-example:main-ubuntu${DISTRIB_RELEASE}
 ```
 
 Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs.
 
-Port 3478 and 65532-65535 (change the ports accordingly) are the ports for the internal TURN server needed to route WebRTC through restrictive networks. When deploying multiple containers, these ports must be changed (together with the environment variables `TURN_MIN_PORT`/`TURN_MAX_PORT` with at least two ports in the range plus the environment variable`SELKIES_TURN_PORT`) and cannot be used by any other host process or container.
+Port 3478 and 65532-65535 (change the ports accordingly) are the ports for the internal TURN server, which is **only needed when using the opt-in WebRTC transport (`--mode=webrtc`)** to route WebRTC through restrictive networks. With the default WebSocket transport, you only need to expose the single web port (`8081`). When deploying multiple containers, the TURN ports must be changed (together with the environment variables `TURN_MIN_PORT`/`TURN_MAX_PORT` with at least two ports in the range plus the environment variable `SELKIES_TURN_PORT`) and cannot be used by any other host process or container.
 
 If UDP cannot be used, at the cost of higher latency and lower performance, omit the ports containing `/udp` and use the environment variable `-e SELKIES_TURN_PROTOCOL=tcp`.
 
-All these ports must be exposed to the internet if you need access over the internet. If you need use TURN within a local network, add `-e SELKIES_TURN_HOST={YOUR_INTERNAL_IP}` with `{YOUR_INTERNAL_IP}` to the internal hostname or IP of the local network. IPv6 addresses must be enclosed with square brackets such as `[::1]`.
+All these ports must be exposed to the internet if you need WebRTC access over the internet. If you need to use TURN within a local network, add `-e SELKIES_TURN_HOST={YOUR_INTERNAL_IP}` with `{YOUR_INTERNAL_IP}` set to the internal hostname or IP of the local network. IPv6 addresses must be enclosed with square brackets such as `[::1]`.
 
-Otherwise, to enable host networking, add `--network=host` to the Docker® command to enable host networking and work around this requirement if your server is not behind a firewall. Note that running multiple desktop containers in one host under this configuration may be problematic and is not recommended. You must also pass new environment variables such as `-e DISPLAY=:22`, `-e NGINX_PORT=8082`, `-e SELKIES_PORT=8083`, and `-e SELKIES_METRICS_HTTP_PORT=9083` into the container, all not overlapping with any other X11 server or container in the same host. Access the container using the specified `NGINX_PORT`.
+Otherwise, to enable host networking, add `--network=host` to the Docker® command to work around this requirement if your server is not behind a firewall. Note that running multiple desktop containers in one host under this configuration may be problematic and is not recommended. You must also pass new environment variables such as `-e DISPLAY=:22` and `-e SELKIES_PORT=8082` into the container, all not overlapping with any other X11 server or container in the same host. Selkies serves everything on this single port; access the container using the specified `SELKIES_PORT`.
 
-If you are behind a reverse proxy or can only expose one HTTP port, you will need to use an external STUN/TURN server capable of `srflx` or `relay` type ICE connections if you use this in a container WITHOUT host networking.
+If you are behind a reverse proxy or can only expose one HTTP port and you use WebRTC mode, you will need to use an external STUN/TURN server capable of `srflx` or `relay` type ICE connections if you use this in a container WITHOUT host networking.
 
-**Follow the instructions from [coTURN](#coturn) and [WebRTC and Firewall Issues](firewall.md) in order to make the container work using an external TURN server.**
+**Follow the instructions from [coTURN](#coturn) and [WebRTC and Firewall Issues](firewall.md) in order to make the container work using an external TURN server (WebRTC mode only).**
 
 #### coTURN
 
-> Check the [WebRTC and Firewall Issues: coTURN](firewall.md#coturn) section for installing and running coTURN on self-hosted standalone machines, cloud instances, or virtual machines.
+> Check the [WebRTC and Firewall Issues: coTURN](firewall.md#coturn) section for installing and running coTURN on self-hosted standalone machines, cloud instances, or virtual machines. STUN/TURN is only relevant to the opt-in WebRTC transport.
 >
 > [Pion TURN](https://github.com/pion/turn)'s `turn-server-simple` executable or [eturnal](https://eturnal.net) are recommended alternative TURN server implementations that support Windows as well as Linux or MacOS. [STUNner](https://github.com/l7mp/stunner) is a Kubernetes native STUN and TURN deployment if Helm is possible to be used.
 
@@ -250,7 +201,7 @@ The [coTURN Container](https://github.com/selkies-project/selkies/tree/main/addo
 Run the Docker®/Podman container built from the [`coTURN Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/coturn/Dockerfile) (**replace `main` to `latest` for the latest stable release**):
 
 ```bash
-docker run --name coturn -it -d --rm -e TURN_SHARED_SECRET=n0TaRealCoTURNAuthSecretThatIsSixtyFourLengthsLongPlaceholdPlace -e TURN_REALM=example.com -e TURN_PORT=3478 -e TURN_MIN_PORT=65500 -e TURN_MAX_PORT=65535 -p 3478:3478 -p 3478:3478/udp -p 65500-65535:65500-65535 -p 65500-65535:65500-65535/udp ghcr.io/selkies-project/selkies-gstreamer/coturn:main
+docker run --name coturn -it -d --rm -e TURN_SHARED_SECRET=n0TaRealCoTURNAuthSecretThatIsSixtyFourLengthsLongPlaceholdPlace -e TURN_REALM=example.com -e TURN_PORT=3478 -e TURN_MIN_PORT=65500 -e TURN_MAX_PORT=65535 -p 3478:3478 -p 3478:3478/udp -p 65500-65535:65500-65535 -p 65500-65535:65500-65535/udp ghcr.io/selkies-project/selkies/coturn:main
 ```
 
 **The relay ports and the listening port must all be open to the internet.**
@@ -265,19 +216,19 @@ Consult the [WebRTC and Firewall Issues: TURN Server Authentication Methods](fir
 
 #### TURN-REST
 
-**The below is an advanced concept likely required for multi-user environments.**
+**The below is an advanced concept likely required for multi-user WebRTC-mode environments.**
 
 A TURN server is required with WebRTC when both the host and the client are under Symmetric NAT or are each under Port Restricted Cone NAT and Symmetric NAT.
 
-In easier words, if both the host and client are behind restrictive firewalls, the web interface and signaling connection (delivered using HTTP(S) and WebSocket) are delivered and established, but the video and audio stream (delivered using WebRTC) does not establish. In this case, the TURN server relays the WebRTC stream so that the host and client can send the video and audio stream, as well as other data.
+In easier words, if both the host and client are behind restrictive firewalls, the web interface and signaling connection (delivered using HTTP(S) and WebSocket) are delivered and established, but the WebRTC video and audio stream does not establish. In this case, the TURN server relays the WebRTC stream so that the host and client can send the video and audio stream, as well as other data.
 
 ![TURN-REST.svg](assets/TURN-REST.svg)
 
-The recommended multi-user TURN server authentication mechanism is the [time-limited short-term credential/TURN REST API mechanism](https://datatracker.ietf.org/doc/html/draft-uberti-behave-turn-rest-00), where there is a single [shared secret](https://github.com/coturn/coturn/blob/master/README.turnserver) that is never exposed externally (only the TURN-REST Container and the coTURN TURN server know), but instead authenticates WebRTC clients (which are Selkies-GStreamer hosts and clients) based on generated credentials which are valid for only a short time (typically 24 hours).
+The recommended multi-user TURN server authentication mechanism is the [time-limited short-term credential/TURN REST API mechanism](https://datatracker.ietf.org/doc/html/draft-uberti-behave-turn-rest-00), where there is a single [shared secret](https://github.com/coturn/coturn/blob/master/README.turnserver) that is never exposed externally (only the TURN-REST Container and the coTURN TURN server know), but instead authenticates WebRTC clients (which are Selkies hosts and clients) based on generated credentials which are valid for only a short time (typically 24 hours).
 
-The [TURN-REST Container](https://github.com/selkies-project/selkies/tree/main/addons/turn-rest) is an easy way to distribute short-term TURN server authentication credentials and the information of the TURN server based on the REST API to many Selkies-GStreamer host instances, particularly when behind a local area network (LAN), which may or may not have restricted firewalls.
+The [TURN-REST Container](https://github.com/selkies-project/selkies/tree/main/addons/turn-rest) is an easy way to distribute short-term TURN server authentication credentials and the information of the TURN server based on the REST API to many Selkies host instances, particularly when behind a local area network (LAN), which may or may not have restricted firewalls.
 
-Using the `selkies-gstreamer --turn_rest_uri=` option or `SELKIES_TURN_REST_URI` environment variable, the Selkies-GStreamer host periodically queries a URI such as `https://turn-rest.myinfrastructure.io/myturnrest` or `http://192.168.0.10/myturnrest`.
+Using the `selkies --turn_rest_uri=` option or `SELKIES_TURN_REST_URI` environment variable, the Selkies host periodically queries a URI such as `https://turn-rest.myinfrastructure.io/myturnrest` or `http://192.168.0.10/myturnrest`.
 
 This URI is ideally behind a local area network (LAN) inaccessible from the outside and only accessible to the Python hosts inside the LAN, or alternatively behind authentication using any web server or reverse proxy, if accessible from the outside. This information is periodically sent to the web client (that is also preferably behind authentication with HTTP Basic Authentication or a web server/reverse proxy) through HTTP(S), thus the TURN server information and credentials being propagated to both the Python host and the web client without exposing the TURN server information outside.
 
@@ -290,89 +241,74 @@ The TURN-REST Container (or similarly, Kubernetes Pod) should be triggered with 
 Run the Docker®/Podman container built from the [`TURN-REST Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/turn-rest/Dockerfile) (replace `main` to `latest` for the latest stable release**):
 
 ```bash
-docker run --name turn-rest -it -d --rm -e TURN_SHARED_SECRET=n0TaRealCoTURNAuthSecretThatIsSixtyFourLengthsLongPlaceholdPlace -e TURN_HOST=turn.myinfrastructure.io -e TURN_PORT=3478 -e TURN_PROTOCOL=udp -e TURN_TLS=false -p 8008:8008 ghcr.io/selkies-project/selkies-gstreamer/turn-rest:main
+docker run --name turn-rest -it -d --rm -e TURN_SHARED_SECRET=n0TaRealCoTURNAuthSecretThatIsSixtyFourLengthsLongPlaceholdPlace -e TURN_HOST=turn.myinfrastructure.io -e TURN_PORT=3478 -e TURN_PROTOCOL=udp -e TURN_TLS=false -p 8008:8008 ghcr.io/selkies-project/selkies/turn-rest:main
 ```
 
-From Selkies-GStreamer, it is sufficient to use the `selkies-gstreamer --turn_rest_uri=` option or `export SELKIES_TURN_REST_URI=` environment variable, pointing to the HTTP(S) URI to the TURN REST API server.
+From Selkies, it is sufficient to use the `selkies --turn_rest_uri=` option or `export SELKIES_TURN_REST_URI=` environment variable, pointing to the HTTP(S) URI to the TURN REST API server.
 
 Consult the [WebRTC and Firewall Issues: TURN Server Authentication Methods](firewall.md#turn-server-authentication-methods) section for more information on TURN authentication methods.
 
-#### coTURN-Web
+### Legacy Components
 
-The [coTURN-Web Container](https://github.com/selkies-project/selkies/tree/main/addons/coturn-web) is a legacy component meant to provide similar capabilities to the [TURN-REST Container](https://github.com/selkies-project/selkies/tree/main/addons/turn-rest) for the Google Kubernetes Engine, mostly old remnants from the Google era. This component may be phased out as well as the [`infra/gce`](https://github.com/selkies-project/selkies/tree/main/infra/gce) and [`infra/gke`](https://github.com/selkies-project/selkies/tree/main/infra/gke) components and `cloudbuild.yml` configurations in favor of platform-agnostic Kubernetes configurations. Contributions are welcome.
+The following components are kept in the repository for now but are **not used by the current runtime**. They are remnants of the previous GStreamer-based architecture and may be phased out.
 
-## GStreamer Components
+- [`addons/gstreamer`](https://github.com/selkies-project/selkies/tree/main/addons/gstreamer): the old standalone GStreamer build. The GStreamer runtime has been fully removed from Selkies; this component is no longer required to run the project.
+- [`addons/conda`](https://github.com/selkies-project/selkies/tree/main/addons/conda): the old Conda-based portable distribution toolchain that packaged GStreamer and its dependencies into a tarball. Selkies is now installed as a standard Python wheel, so this is no longer part of the install path.
 
-**Read [GStreamer Development Guide](development.md#gstreamer-development-guide) together with this part.**
+Contributions to remove or repurpose these components are welcome.
 
-Below are GStreamer components that are implemented and therefore used with Selkies-GStreamer. Some include environment variables or command-line options which may be used select one type of component, and others are chosen automatically based on the operating system or configuration. This section is to be continuously updated.
+## Encoders and Interfaces
+
+This section lists the encoders and interfaces that are actually implemented in the current runtime. The set of available video encoders depends on the transport mode.
 
 ### Encoders
 
-This table specifies the currently implemented video encoders and their corresponding codecs, which may be set using the environment variable `SELKIES_ENCODER` or the command-line option `--encoder=`.
+Video is encoded by the `pixelflux` extension.
 
-**Encoders marked as "Recommended": Tested on Chromium where the encoder adds no perceptible delay or frame drops from the host encoder even with a high (> 16 Mbps) bitrate with an actively moving screen.** Note that broadband internet through 5 GHz Wi-Fi or wired ethernet are strongly recommended.
+**WebSocket mode (default)** — select with the `SELKIES_ENCODER` environment variable or the `--encoder=` command-line option:
 
-**As Selkies-GStreamer uses new GStreamer components from the latest stable GStreamer versions, GStreamer ≥ 1.22 is the current strict requirement. No support will be provided for older versions, but you can [build your own latest GStreamer version](#gstreamer) in older distributions or use the [portable Conda distribution](#conda-toolchain).**
+| Encoder (`--encoder=`) | Codec | Acceleration | Notes |
+|---|---|---|---|
+| `h264enc` (default) | H.264 AVC | NVIDIA NVENC / Intel & AMD VA-API, software `x264` fallback | Uses hardware encoding when a supported GPU is available; add `--use-cpu=true` to force software |
+| `h264enc-striped` | H.264 AVC | Software (`x264`) | Striped/parallel software H.264 |
+| `openh264enc` | H.264 AVC | Software (OpenH264) | BSD-licensed software H.264 |
+| `jpeg` | Motion JPEG | Software | Maximum-compatibility fallback |
 
-| Plugin (set `SELKIES_ENCODER` or `--encoder=` to) | Codec | Acceleration | Operating Systems | Browsers | Main Dependencies | Notes |
-|---|---|---|---|---|---|---|
-| [`nvh264enc`](https://gstreamer.freedesktop.org/documentation/nvcodec/nvh264enc.html) | H.264 AVC | NVIDIA GPU | All | All Major | NVRTC, `libnvidia-encode` | **Recommended**, [Requires NVENC - Encoding H.264 (AVCHD)](https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new) |
-| [`vah264enc`](https://gstreamer.freedesktop.org/documentation/va/vah264enc.html) | H.264 AVC | AMD, Intel GPU | All | All Major | VA-API Driver, `libva` | Requires supported GPU |
-| [`x264enc`](https://gstreamer.freedesktop.org/documentation/x264/index.html) | H.264 AVC | Software | All | All Major | `x264` | **Recommended** |
-| [`openh264enc`](https://gstreamer.freedesktop.org/documentation/openh264/openh264enc.html) | H.264 AVC | Software | All | All Major | `openh264` | N/A |
-| [`nvh265enc`](https://gstreamer.freedesktop.org/documentation/nvcodec/nvh265enc.html) | H.265 HEVC | NVIDIA GPU | All | Safari ≥ 17.9 | NVRTC, `libnvidia-encode` | [Requires NVENC - Encoding H.265 (HEVC)](https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new) |
-| [`vah265enc`](https://gstreamer.freedesktop.org/documentation/va/vah265enc.html) | H.265 HEVC | AMD, Intel GPU | All | Safari ≥ 17.9 | VA-API Driver, `libva` | Unstable, Requires supported GPU |
-| [`x265enc`](https://gstreamer.freedesktop.org/documentation/x265/index.html) | H.265 HEVC | Software | All | Safari ≥ 17.9 | `x265` | Unstable |
-| [`vp8enc`](https://gstreamer.freedesktop.org/documentation/vpx/vp8enc.html) | VP8 | Software | All | All Major | `libvpx` | **Recommended under 2K resolution but not with constrained network** |
-| [`vavp9enc`](https://gstreamer.freedesktop.org/documentation/va/vavp9enc.html) | VP9 | AMD, Intel GPU | All | All Major | VA-API Driver, `libva` | Unstable, Requires supported GPU and GStreamer ≥ 1.25 |
-| [`vp9enc`](https://gstreamer.freedesktop.org/documentation/vpx/vp9enc.html) | VP9 | Software | All | All Major | `libvpx` | **Recommended but not with constrained network** |
-| [`nvav1enc`](https://gstreamer.freedesktop.org/documentation/nvcodec/nvav1enc.html) | AV1 | NVIDIA GPU | All | Chromium-based, Safari | NVRTC, `libnvidia-encode`, [`gst-plugins-rs`](https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs) | Unstable, [Requires NVENC - Encoding AV1](https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new) and GStreamer ≥ 1.25 |
-| [`vaav1enc`](https://gstreamer.freedesktop.org/documentation/va/vaav1enc.html) | AV1 | AMD, Intel GPU | All | Chromium-based, Safari | VA-API Driver, `libva`, [`gst-plugins-rs`](https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs) | Unstable, Requires supported GPU and GStreamer ≥ 1.24 |
-| [`svtav1enc`](https://gstreamer.freedesktop.org/documentation/svtav1/svtav1enc.html) | AV1 | Software | All | Chromium-based, Safari | `svt-av1` ≥ 1.1, [`gst-plugins-rs`](https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs) | NOT WORKING, Conda or Ubuntu ≥ 24.04 |
-| [`av1enc`](https://gstreamer.freedesktop.org/documentation/aom/av1enc.html) | AV1 | Software | All | Chromium-based, Safari | `aom`, [`gst-plugins-rs`](https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs) | Unstable, Conda or Ubuntu ≥ 22.04 |
-| [`rav1enc`](https://gstreamer.freedesktop.org/documentation/rav1e/index.html) | AV1 | Software | All | Chromium-based, Safari | [`gst-plugins-rs`](https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs) | Unstable |
+**WebRTC mode (`--mode=webrtc`)** — select with the `SELKIES_ENCODER_RTC` environment variable or the `--encoder-rtc=` command-line option:
 
-### Video Color Converters
+| Encoder (`--encoder-rtc=`) | Codec | Acceleration | Browsers |
+|---|---|---|---|
+| `h264enc` (default) | H.264 AVC | Hardware-first (NVENC/VA-API), else software x264, via `pixelflux` | All major |
+| `openh264enc` | H.264 AVC | Software (Cisco OpenH264) | All major |
 
-This table specifies the currently implemented video frame converters used to convert the YUV formats from `BGRx` to `I420` or `NV12`, which are automatically decided based on the encoder support.
+Additional codecs (H.265/HEVC, AV1, VP8/VP9) are planned for `pixelflux` in the mid-term
+future; the vendored WebRTC stack already carries the RTP-side code for them.
 
-| Plugin | Encoders | Acceleration | Operating Systems | Main Dependencies | Notes |
-|---|---|---|---|---|---|
-| [`cudaconvert`](https://gstreamer.freedesktop.org/documentation/nvcodec/cudaconvert.html) | `nvh264enc`, `nvh265enc`, `nvav1enc` | NVIDIA GPU | All | NVRTC | N/A |
-| [`vapostproc`](https://gstreamer.freedesktop.org/documentation/va/vapostproc.html) | `vah264enc`, `vah265enc`, `vavp9enc`, `vaav1enc` | AMD, Intel GPU | All | VA-API Driver, `libva` | N/A |
-| [`videoconvert`](https://gstreamer.freedesktop.org/documentation/videoconvertscale/videoconvert.html) | `x264enc`, `openh264enc`, `x265enc`, `vp8enc`, `vp9enc`, `svtav1enc`, `av1enc`, `rav1enc` | Software | All | N/A | N/A |
+### Display Capture
 
-### Display Capture Interfaces
+| Interface | Device Selector | Input Injection | Operating Systems | Notes |
+|---|---|---|---|---|
+| X.Org / X11 (via `pixelflux`) | `DISPLAY` environment | vendored [`python-xlib`](https://github.com/python-xlib/python-xlib) (XTEST/XFixes), under `src/selkies/Xlib/` | Linux | Wayland, Mac, and Windows support are planned |
 
-This table specifies the currently supported display interfaces and how each plugin selects each video device.
+### Audio Encoder
 
-| Plugin | Device Selector | Display Interfaces | Input Interfaces | Operating Systems | Main Dependencies | Notes |
-|---|---|---|---|---|---|---|
-| [`ximagesrc`](https://gstreamer.freedesktop.org/documentation/ximagesrc/index.html) | `DISPLAY` environment | X.Org / X11 | [`Xlib`](https://github.com/python-xlib/python-xlib) w/ [`pynput`](https://github.com/moses-palmer/pynput) | Linux | Various | N/A |
+Opus is currently the only adequate full-band audio codec supported in web browsers by specification.
 
-### Audio Encoders
+| Encoder | Codec | Operating Systems | Browsers | Notes |
+|---|---|---|---|---|
+| `pcmflux` | Opus | Linux | All major | Bitrate via `--audio-bitrate`; Opus RED (RFC 2198) redundancy via `--audio-redundancy` |
 
-This table specifies the currently implemented audio encoders and their corresponding codecs.
+### Audio Capture
 
-Opus is currently the only adequate full-band WebRTC audio media codec supported in web browsers by specification.
+| Interface | Device Selector | Operating Systems | Notes |
+|---|---|---|---|
+| PulseAudio or PipeWire-Pulse (via `pcmflux`) | `PULSE_SERVER` or `PULSE_RUNTIME_PATH` environment, `--audio-device-name` | Linux | Default capture device is `output.monitor` |
 
-| Plugin | Codec | Operating Systems | Browsers | Main Dependencies | Notes |
-|---|---|---|---|---|---|
-| [`opusenc`](https://gstreamer.freedesktop.org/documentation/opus/opusenc.html) | Opus | All | All Major | `libopus` | N/A |
+### Transport Protocols
 
-### Audio Capture Interfaces
+| Transport | Selected with | Ports | Notes |
+|---|---|---|---|
+| WebSockets (default) | `--mode=websockets` | single TCP port (default `8081`) | WebCodecs-based client decode; no STUN/TURN required |
+| WebRTC (opt-in) | `--mode=webrtc` | signaling over the same port; media over UDP (or TCP) with ICE | Uses a vendored [`aiortc`](https://github.com/aiortc/aiortc) fork; may need STUN/TURN, see [WebRTC and Firewall Issues](firewall.md) |
 
-This table specifies the currently supported audio interfaces and how each plugin selects each audio device.
-
-| Plugin | Device Selector | Audio Interfaces | Operating Systems | Main Dependencies | Notes |
-|---|---|---|---|---|---|
-| [`pulsesrc`](https://gstreamer.freedesktop.org/documentation/pulseaudio/pulsesrc.html) | `PULSE_SERVER` or `PULSE_RUNTIME_PATH` environment | PulseAudio or PipeWire-Pulse | Linux | `libpulse` | N/A |
-
-### Stream Transport Protocols
-
-This table specifies the currently supported transport protocol components.
-
-| Plugin | Protocols | Operating Systems | Browsers | Main Dependencies | Notes |
-|---|---|---|---|---|---|
-| [`webrtcbin`](https://gstreamer.freedesktop.org/documentation/webrtc/index.html) | [WebRTC](https://webrtc.org) | All | All Major | Various | N/A |
+Use `--enable_dual_mode=true` to let the client switch between the WebSocket and WebRTC transports from the UI.

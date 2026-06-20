@@ -1149,10 +1149,19 @@ export class Input {
         this.listeners_context = [];
         this._queue = new Queue();
         this._allowTrackpadScrolling = true;
-        this._allowThreshold = true;
+        // Treat wheel input as a discrete mouse wheel until the detector proves it a
+        // trackpad, so the very first events (before 4 samples are collected) are
+        // accumulated rather than dropped by the trackpad throttle.
+        this._allowThreshold = false;
         this._smallestDeltaY = 10000;
+        this._smallestLineDeltaY = 10000;
         this._wheelThreshold = 100;
         this._scrollMagnitude = 10;
+        // Running fractional-notch accumulator for the vertical wheel: a fast discrete
+        // wheel must never collapse to the throttle rate, so we sum normalized notches
+        // and carry the sub-notch remainder forward instead of discarding events.
+        this._wheelAccumY = 0;
+        this._wheelDirY = null;
         this.cursorScaleFactor = null;
         this._cursorBase64Data = null;
 
@@ -1392,17 +1401,34 @@ export class Input {
         if (!this._isSynth) {
             for (const code in this._keyDownList) {
                 const keysym = this._keyDownList[code];
-                if ((code === 'ControlLeft' || code === 'ControlRight') && !event.ctrlKey) {
+                // Heal a stuck modifier by keying off the STORED KEYSYM, not the
+                // physical code. An xkb remap (e.g. ctrl:swap_lalt_lctl) can leave a
+                // physical Alt code holding Control_L; matching on the code would then
+                // release Control on a plain (altKey=false) keydown and break Ctrl+key.
+                // Only release when the modifier's own browser flag has actually cleared.
+                if ((keysym === KeyTable.XK_Control_L || keysym === KeyTable.XK_Control_R) && !event.ctrlKey) {
                     this._sendKeyEvent(keysym, code, false);
-                }
-                if ((code === 'MetaLeft' || code === 'MetaRight') && !event.metaKey) {
+                } else if ((keysym === KeyTable.XK_Alt_L || keysym === KeyTable.XK_Alt_R) && !event.altKey) {
                     this._sendKeyEvent(keysym, code, false);
-                }
-                if ((code === 'AltLeft' || code === 'AltRight') && !event.altKey) {
+                } else if ((keysym === KeyTable.XK_ISO_Level3_Shift || keysym === KeyTable.XK_Mode_switch) && !event.getModifierState('AltGraph')) {
                     this._sendKeyEvent(keysym, code, false);
-                }
-                if ((code === 'ShiftLeft' || code === 'ShiftRight') && !event.shiftKey) {
+                } else if ((keysym === KeyTable.XK_Shift_L || keysym === KeyTable.XK_Shift_R) && !event.shiftKey) {
                     this._sendKeyEvent(keysym, code, false);
+                } else if (keysym === KeyTable.XK_Super_L || keysym === KeyTable.XK_Super_R ||
+                            keysym === KeyTable.XK_Meta_L || keysym === KeyTable.XK_Meta_R) {
+                    // The macOS Option remap stores the physical Option key (AltLeft/
+                    // AltRight) as Meta_L/R, but Option drives altKey/AltGraph — not
+                    // metaKey. Heal those off the flag the physical key actually drives
+                    // so a still-held Option isn't force-released; genuine Command/Meta/
+                    // Super stay gated on metaKey.
+                    if ((keysym === KeyTable.XK_Meta_L || keysym === KeyTable.XK_Meta_R) &&
+                        (code === 'AltLeft' || code === 'AltRight')) {
+                        if (!event.altKey && !event.getModifierState('AltGraph')) {
+                            this._sendKeyEvent(keysym, code, false);
+                        }
+                    } else if (!event.metaKey) {
+                        this._sendKeyEvent(keysym, code, false);
+                    }
                 }
             }
         }
@@ -1579,18 +1605,18 @@ export class Input {
             diff_start++;
         }
 
+        // Synthetic composition chars: use momentary kd/ku (like _handleTextInput) to
+        // skip per-character heartbeat churn from _sendKeyEvent.
         const backspaces = oldValue.length - diff_start;
         for (let i = 0; i < backspaces; i++) {
-            this._sendKeyEvent(KeyTable.XK_BackSpace, "Backspace", true);
-            this._sendKeyEvent(KeyTable.XK_BackSpace, "Backspace", false);
+            this._sendMomentaryKey(KeyTable.XK_BackSpace);
         }
 
         const newChars = newValue.substring(diff_start);
         for (let i = 0; i < newChars.length; i++) {
             const keysym = Keysyms.lookup(newChars.charCodeAt(i));
             if (keysym) {
-                this._sendKeyEvent(keysym, 'Unidentified', true);
-                this._sendKeyEvent(keysym, 'Unidentified', false);
+                this._sendMomentaryKey(keysym);
             }
         }
 
@@ -1722,35 +1748,9 @@ export class Input {
             this.y = Math.round(movementY_logical * dpr_for_input_coords);
 
         } else if (event.type === 'mousemove' || event.type === 'pointermove') {
-             if ((window.is_manual_resolution_mode || this.isSharedMode) && canvas) {
-                const canvasRect = canvas.getBoundingClientRect(); // CSS logical size
-                if (canvasRect.width > 0 && canvasRect.height > 0 && canvas.width > 0 && canvas.height > 0) {
-                    const mouseX_on_canvas_logical_css = event.clientX - canvasRect.left;
-                    const mouseY_on_canvas_logical_css = event.clientY - canvasRect.top;
-                    const scaleX = canvas.width / canvasRect.width;
-                    const scaleY = canvas.height / canvasRect.height;
-                    let coordX = mouseX_on_canvas_logical_css * scaleX;
-                    let coordY = mouseY_on_canvas_logical_css * scaleY;
-                    this.x = Math.max(0, Math.min(canvas.width, Math.round(coordX)));
-                    this.y = Math.max(0, Math.min(canvas.height, Math.round(coordY)));
-                } else {
-                    this.x = 0; this.y = 0;
-                }
-            } else if (window.isManualResolutionMode && videoEle) {
-                // TODO: the below code is redundant, can be made genric to canvas and video element
-                const vidoeRect = videoEle.getBoundingClientRect();
-                if (vidoeRect.width > 0 && vidoeRect.height > 0 && videoEle.width > 0 && videoEle.height > 0) {
-                    const mouseX_on_video = event.clientX - vidoeRect.left;
-                    const mouseY_on_video = event.clientY - vidoeRect.top;
-                    const scaleX = videoEle.width / vidoeRect.width;
-                    const scaleY = videoEle.height / vidoeRect.height;
-                    let serverX = mouseX_on_video * scaleX;
-                    let serverY = mouseY_on_video * scaleY;
-                    this.x = Math.max(0, Math.min(videoEle.width, Math.round(serverX))); // Assign scaled absolute to this.x
-                    this.y = Math.max(0, Math.min(videoEle.height, Math.round(serverY))); // Assign scaled absolute to this.y
-                } else {
-                    this.x = 0; this.y = 0; // Fallback
-                }
+            if (this._applySinkCoordinates(event.clientX, event.clientY, canvas, videoEle)) {
+                // Absolute coords mapped against the active sink (ws-core canvas or
+                // wr-core <video>); this.x/this.y were set by the helper.
             } else { // Auto resolution mode (non-manual)
                 if (!this.m) {
                     this._windowMath();
@@ -1773,8 +1773,57 @@ export class Input {
                 this.buttonMask &= ~mask;
             }
         }
-        var toks = [ mtype, this.x, this.y, this.buttonMask, 0 ];
-        this.send(toks.join(","));
+        if (event.type === 'mousemove' || event.type === 'pointermove') {
+            // Coalesce high-frequency motion: a 1000 Hz mouse would otherwise emit
+            // ~1000 tiny WS messages/s, congesting the uplink and the server's input
+            // loop. At most one motion send per animation frame; the local cursor
+            // still tracks every event.
+            this._queueCoalescedMouseMove(mtype, this.x, this.y, this.buttonMask);
+        } else {
+            // Button / non-move event: flush pending motion first so ordering
+            // (move-then-click, accumulated relative deltas) is preserved.
+            this._flushCoalescedMouseMove();
+            this.send([ mtype, this.x, this.y, this.buttonMask, 0 ].join(","));
+        }
+    }
+
+    _queueCoalescedMouseMove(mtype, x, y, buttonMask) {
+        if (mtype === "m2") {
+            // Relative mode: deltas must be summed, never dropped.
+            if (this._pendingMove && this._pendingMove.mtype === "m2") {
+                this._pendingMove.x += x;
+                this._pendingMove.y += y;
+                this._pendingMove.buttonMask = buttonMask;
+            } else {
+                this._flushCoalescedMouseMove();
+                this._pendingMove = { mtype: "m2", x: x, y: y, buttonMask: buttonMask };
+            }
+        } else {
+            // Absolute mode: only the latest position matters.
+            if (this._pendingMove && this._pendingMove.mtype !== "m") {
+                this._flushCoalescedMouseMove();
+            }
+            this._pendingMove = { mtype: "m", x: x, y: y, buttonMask: buttonMask };
+        }
+        if (!this._moveFlushScheduled) {
+            this._moveFlushScheduled = true;
+            const raf = window.requestAnimationFrame
+                ? window.requestAnimationFrame.bind(window)
+                : (cb) => setTimeout(cb, 16);
+            raf(() => {
+                this._moveFlushScheduled = false;
+                this._flushCoalescedMouseMove();
+            });
+        }
+    }
+
+    _flushCoalescedMouseMove() {
+        const m = this._pendingMove;
+        if (!m) return;
+        this._pendingMove = null;
+        // An accumulated relative move of (0,0) carries no information.
+        if (m.mtype === "m2" && m.x === 0 && m.y === 0) return;
+        this.send([ m.mtype, m.x, m.y, m.buttonMask, 0 ].join(","));
     }
 
     _handlePointerDown(event) {
@@ -1937,6 +1986,31 @@ export class Input {
         }
     }
 
+    // Map a client-space point to sink-buffer absolute coordinates when a fixed-size sink
+    // is active: the ws-core canvas (manual resolution / shared mode) or the wr-core
+    // <video> (manual resolution; each core has its own flag). One shared implementation:
+    // backing-store size over the CSS rect, clamped. Returns false when no sink applies
+    // (auto resolution) so callers run their DPR-scaled window math instead.
+    _applySinkCoordinates(clientX, clientY, canvas, videoEle) {
+        const sink = ((window.is_manual_resolution_mode || this.isSharedMode) && canvas)
+            ? canvas
+            : (window.isManualResolutionMode && videoEle) ? videoEle : null;
+        if (!sink) {
+            return false;
+        }
+        const rect = sink.getBoundingClientRect(); // CSS logical size
+        if (rect.width > 0 && rect.height > 0 && sink.width > 0 && sink.height > 0) {
+            const scaleX = sink.width / rect.width; // buffer / CSS
+            const scaleY = sink.height / rect.height;
+            this.x = Math.max(0, Math.min(sink.width, Math.round((clientX - rect.left) * scaleX)));
+            this.y = Math.max(0, Math.min(sink.height, Math.round((clientY - rect.top) * scaleY)));
+        } else {
+            this.x = 0;
+            this.y = 0;
+        }
+        return true;
+    }
+
     _calculateTouchCoordinates(touchPoint) {
         this._updateCursorPosition(touchPoint.clientX, touchPoint.clientY);
         this._latestMouseX = touchPoint.clientX;
@@ -1944,24 +2018,10 @@ export class Input {
         const client_dpr = window.devicePixelRatio || 1; // Actual client DPR
         const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || window.isManualResolutionMode || this.isSharedMode) ? 1 : client_dpr;
         let canvas = document.getElementById('videoCanvas');
+        let videoEle = document.getElementById('stream');
 
-        if ((window.is_manual_resolution_mode || this.isSharedMode) && canvas) {
-            const canvasRect = canvas.getBoundingClientRect(); // CSS logical size
-            if (canvasRect.width > 0 && canvasRect.height > 0 && canvas.width > 0 && canvas.height > 0) {
-                const touchX_on_canvas_logical_css = touchPoint.clientX - canvasRect.left;
-                const touchY_on_canvas_logical_css = touchPoint.clientY - canvasRect.top;
-
-                const scaleX = canvas.width / canvasRect.width; // buffer / CSS
-                const scaleY = canvas.height / canvasRect.height; // buffer / CSS
-
-                let coordX = touchX_on_canvas_logical_css * scaleX;
-                let coordY = touchY_on_canvas_logical_css * scaleY;
-
-                this.x = Math.max(0, Math.min(canvas.width, Math.round(coordX)));
-                this.y = Math.max(0, Math.min(canvas.height, Math.round(coordY)));
-            } else {
-                this.x = 0; this.y = 0;
-            }
+        if (this._applySinkCoordinates(touchPoint.clientX, touchPoint.clientY, canvas, videoEle)) {
+            // Sink-mapped absolute coords (covers wr-core manual mode on touch too).
         } else { // Auto resolution mode (non-manual)
             if (!this.m) this._windowMath();
             if (this.m) {
@@ -1977,6 +2037,9 @@ export class Input {
     }
 
     _sendMouseState() {
+        // Touch/trackpad paths call this for button changes: flush pending motion
+        // first so ordering is preserved.
+        this._flushCoalescedMouseMove();
         const mtype = (document.pointerLockElement === this.element || this.mouseRelative) ? "m2" : "m";
         const toks = [ mtype, this.x, this.y, this.buttonMask, 0 ];
         this.send(toks.join(","));
@@ -2287,10 +2350,14 @@ export class Input {
         const mask = 1 << button;
 
         // Pulse (press+release), not a held bit: the server scrolls on each 0->1
-        // edge, so a held bit would coalesce rapid wheel events. Build both halves
-        // from buttonMask so a held Back/Forward (shared bits 3/4) isn't released.
+        // edge, so a held bit would coalesce rapid wheel events. Bits 3/4 are shared
+        // with the physical Back/Forward buttons, so if one is held the scroll bit is
+        // already set and OR-ing it produces no edge. Force the scroll bit CLEAR in a
+        // baseline first, then set it for the rising edge, then restore the held mask.
+        const cleared = this.buttonMask & ~mask;
         const mtype = "m2";
-        this.send([ mtype, 0, 0, this.buttonMask | mask, magnitude ].join(","));
+        this.send([ mtype, 0, 0, cleared, magnitude ].join(","));
+        this.send([ mtype, 0, 0, cleared | mask, magnitude ].join(","));
         this.send([ mtype, 0, 0, this.buttonMask, magnitude ].join(","));
     }
 
@@ -2299,55 +2366,109 @@ export class Input {
         const button = (direction === 'left') ? 6 : 7;
         const mask = 1 << button;
 
-        // Same pulse strategy as _triggerMouseWheel (release half restores the mask
-        // so a held button on a shared bit isn't released).
+        // Pulse (press+release) for the 0->1 edge. Bits 6/7 are scroll-only (not
+        // shared with any physical mouse button, which only sets 1 << event.button),
+        // so OR-ing always yields an edge and the release just restores the mask.
         const mtype = "m2";
         this.send([ mtype, 0, 0, this.buttonMask | mask, magnitude ].join(","));
         this.send([ mtype, 0, 0, this.buttonMask, magnitude ].join(","));
     }
 
-    _dropThreshold() {
-        var count = 0;
-        var val1 = this._queue.dequeue();
+    _isDiscreteWheel() {
+        // Drain the queued vertical pixel deltas and decide wheel-vs-trackpad. A real
+        // mouse wheel emits deltas that are clean integer multiples of a base notch
+        // quantum (uniform notches, or 2x/3x on a fast spin); a trackpad emits finely
+        // varying deltas that share no clean quantum. Matching multiples-of-quantum
+        // (not exact equality) keeps fast, varying-magnitude spins classified as wheel.
+        var vals = [];
         while (!this._queue.isEmpty()) {
-            var valNext = this._queue.dequeue();
-            if (valNext >= 80 && val1 == valNext) { count++; }
-            val1 = valNext;
+            var v = this._queue.dequeue();
+            if (v > 0) { vals.push(v); }
         }
-        return count >= 2;
+        if (vals.length < 2) { return true; }
+        var quantum = Math.min.apply(null, vals);
+        // A wheel notch is a large pixel jump; small pixel deltas are a trackpad.
+        if (quantum < 80) { return false; }
+        for (var i = 0; i < vals.length; i++) {
+            var ratio = vals[i] / quantum;
+            if (Math.abs(ratio - Math.round(ratio)) > 0.15) { return false; }
+        }
+        return true;
     }
 
     _mouseWheelWrapper(event) {
-        var deltaY = Math.trunc(Math.abs(event.deltaY));
-        if (this._queue.size() < 4) { this._queue.enqueue(deltaY); }
-        if (this._queue.size() == 4) {
-            if (this._dropThreshold()) {
-                this._allowThreshold = false; this._smallestDeltaY = 10000;
-            } else {
-                this._allowThreshold = true;
-            }
-        }
-        if (this._allowThreshold && this._allowTrackpadScrolling) {
-            this._allowTrackpadScrolling = false;
+        // Line- and page-mode wheel events are always a discrete mouse wheel
+        // (trackpads report pixel deltas), so bypass the trackpad detector and
+        // accumulate them directly — never dropping a notch.
+        if (event.deltaMode !== 0) {
             this._mouseWheel(event);
-            setTimeout(() => this._allowTrackpadScrolling = true, this._wheelThreshold);
-        } else if (!this._allowThreshold) {
+            event.preventDefault();
+            return;
+        }
+        var deltaY = Math.trunc(Math.abs(event.deltaY));
+        if (deltaY !== 0 && this._queue.size() < 4) { this._queue.enqueue(deltaY); }
+        if (this._queue.size() == 4) {
+            this._allowThreshold = !this._isDiscreteWheel();
+        }
+        if (this._allowThreshold) {
+            // Trackpad-classified: rate-limit emission to smooth it, but never drop a
+            // delta. A high-resolution wheel misclassified as a trackpad still scrolls
+            // its full distance because throttled ticks accumulate and flush at window end.
+            if (this._allowTrackpadScrolling) {
+                this._allowTrackpadScrolling = false;
+                this._mouseWheel(event);
+                setTimeout(() => { this._allowTrackpadScrolling = true; this._emitWheelY(); }, this._wheelThreshold);
+            } else {
+                this._accumulateWheelY(event);
+            }
+        } else {
+            // Discrete mouse wheel (or not yet classified): accumulate + emit every event
+            // so a fast spin is never collapsed to the throttle rate.
             this._mouseWheel(event);
         }
         event.preventDefault();
     }
 
-    _mouseWheel(event) {
-        if (event.deltaY !== 0) {
-            const direction = (event.deltaY < 0) ? 'up' : 'down';
-            let deltaY = Math.abs(Math.trunc(event.deltaY));
-            if (deltaY < this._smallestDeltaY && deltaY !== 0) {
-                this._smallestDeltaY = deltaY;
-            }
-            const verticalMagnitude = Math.max(1, Math.floor(deltaY / this._smallestDeltaY));
-            const magnitude = Math.min(verticalMagnitude, this._scrollMagnitude);
-            this._triggerMouseWheel(direction, magnitude);
+    // Normalize a wheel delta to a fractional count of physical notches, learning the
+    // per-notch quantum per deltaMode (smallest observed jump) so mice, high-DPI mice,
+    // and line-mode (Firefox) wheels all resolve to ~1 notch per detent.
+    _wheelNotches(deltaY, deltaMode) {
+        const magnitude = Math.abs(Math.trunc(deltaY));
+        if (magnitude === 0) { return 0; }
+        if (deltaMode === 1) { // DOM_DELTA_LINE
+            if (magnitude < this._smallestLineDeltaY) { this._smallestLineDeltaY = magnitude; }
+            return magnitude / this._smallestLineDeltaY;
         }
+        if (deltaMode === 2) { // DOM_DELTA_PAGE: at least one full notch per page
+            return Math.max(1, magnitude);
+        }
+        // DOM_DELTA_PIXEL
+        if (magnitude < this._smallestDeltaY) { this._smallestDeltaY = magnitude; }
+        return magnitude / this._smallestDeltaY;
+    }
+
+    // Accumulate one event's vertical delta into the fractional-notch carry (no emit).
+    _accumulateWheelY(event) {
+        if (event.deltaY === 0) { return; }
+        const direction = (event.deltaY < 0) ? 'up' : 'down';
+        // Reset the accumulator on a direction change so a leftover remainder cannot
+        // swallow the first notch of the new direction.
+        if (direction !== this._wheelDirY) { this._wheelAccumY = 0; this._wheelDirY = direction; }
+        this._wheelAccumY += this._wheelNotches(event.deltaY, event.deltaMode);
+    }
+
+    // Drain whole accumulated notches into scroll pulses, carrying the remainder forward.
+    _emitWheelY() {
+        const pulses = Math.floor(this._wheelAccumY);
+        if (pulses >= 1) {
+            this._wheelAccumY -= pulses;
+            this._triggerMouseWheel(this._wheelDirY, Math.min(pulses, this._scrollMagnitude));
+        }
+    }
+
+    _mouseWheel(event) {
+        this._accumulateWheelY(event);
+        this._emitWheelY();
         if (event.deltaX !== 0) {
             const direction = (event.deltaX < 0) ? 'left' : 'right';
             const horizontalMagnitude = Math.max(1, Math.round(Math.abs(event.deltaX) / 100));
@@ -2544,6 +2665,9 @@ export class Input {
         this.listeners_context.push(addListener(window, 'blur', this.resetKeyboard, this));
         this.listeners_context.push(addListener(document, 'visibilitychange', this._onVisibilityChange, this));
         this.listeners_context.push(addListener(window, 'pagehide', this.resetKeyboard, this));
+        // Page Lifecycle freeze: a backgrounded tab may be frozen (heartbeats stop), so
+        // release held keys first to avoid one sticking down server-side.
+        this.listeners_context.push(addListener(document, 'freeze', this.resetKeyboard, this));
         this.listeners_context.push(addListener(this.keyboardInputAssist, 'input', this._handleMobileInput, this));
         this.listeners_context.push(addListener(document, 'mousedown', this._handleOutsideClick, this, true));
         this.listeners_context.push(addListener(document, 'touchstart', this._handleOutsideClick, this, true));
@@ -2639,9 +2763,7 @@ export class Input {
         if (document.fullscreenElement && 'keyboard' in navigator && (navigator.keyboard && 'lock' in navigator.keyboard)) {
             const keys = [ "AltLeft", "AltRight", "Tab", "Escape", "MetaLeft", "MetaRight", "ContextMenu" ];
             navigator.keyboard.lock(keys).then(() => {
-                // console.log('Keyboard lock active.');
             }).catch(err => {
-                // console.warn('Keyboard lock failed:', err);
             });
         }
     }

@@ -26,7 +26,7 @@
 
 import { Input } from "./input";
 /**
- * @typedef {Object} WebRTCDemo
+ * @typedef {Object} WebRTCClient
  * @property {function} ondebug - Callback fired when new debug message is set.
  * @property {function} onstatus - Callback fired when new status message is set.
  * @property {function} onerror - Callback fired when new error message is set.
@@ -40,19 +40,19 @@ import { Input } from "./input";
  * @property {boolean} forceTurn - Force use of TURN server.
  * @property {fucntion} sendDataChannelMessage - Send a message to the peer though the data channel.
  */
-export class WebRTCDemo {
+export class WebRTCClient {
 	/**
-	 * Interface to WebRTC demo.
+	 * Interface to the WebRTC client.
 	 *
 	 * @constructor
-	 * @param {WebRTCDemoSignaling} [signaling]
-	 *    Instance of WebRTCDemoSignaling used to communicate with signaling server.
+	 * @param {WebRTCSignaling} [signaling]
+	 *    Instance of WebRTCSignaling used to communicate with the signaling server.
 	 * @param {Element} [element]
 	 *    Element to attach stream to.
 	 */
 	constructor(signaling, element, peer_id) {
 		/**
-		 * @type {WebRTCDemoSignaling}
+		 * @type {WebRTCSignaling}
 		 */
 		this.signaling = signaling;
 
@@ -91,6 +91,10 @@ export class WebRTCDemo {
 		 * @type {RTCPeerConnection}
 		 */
 		this.peerConnection = null;
+		// Microphone uplink: the sendonly audio transceiver the server reserved for the
+		// mic, and the active getUserMedia stream (null until the user enables the mic).
+		this._micTransceiver = null;
+		this._micStream = null;
 
 		/**
 		 * @type {function}
@@ -175,6 +179,11 @@ export class WebRTCDemo {
 		 * @type {RTCDataChannel}
 		 */
 		this._send_channel = null;
+		// Gzip on the input channel: enabled per-direction after a "_gz,1" handshake.
+		// Queues keep message ORDER intact around async (de)compression.
+		this._gzTx = false;
+		this._sendQueue = Promise.resolve();
+		this._recvQueue = Promise.resolve();
 
 		/**
 		 * @type {RTCDataChannel}
@@ -287,6 +296,7 @@ export class WebRTCDemo {
 		console.log("Received remote SDP", sdp);
 		this.peerConnection.setRemoteDescription(sdp).then(() => {
 			this._setDebug("received SDP offer, creating answer");
+			this._prepareMicTransceiver(sdp.sdp);
 			this.peerConnection.createAnswer()
 			.then((local_sdp) => {
 				// Set sps-pps-idr-in-keyframe=1
@@ -308,13 +318,17 @@ export class WebRTCDemo {
 							local_sdp.sdp = local_sdp.sdp.replace('useinbandfec=', 'stereo=1;useinbandfec=');
 						}
 					}
-					// OPUS_FRAME: Override SDP to reduce packet size to 10 ms
-					if (!(/[^-]minptime=10[^\d]/gm.test(local_sdp.sdp)) && (/[^-]useinbandfec=/gm.test(local_sdp.sdp))) {
-						console.log("Overriding WebRTC SDP to allow low-latency audio packet");
+					// OPUS_FRAME: Accept the server's actual Opus frame duration. The offer
+					// carries it as a=ptime (from the audio_frame_duration_ms setting);
+					// minptime below 10 must be munged in or browsers stick to >=10 ms.
+					const ptimeMatch = sdp.sdp.match(/^a=ptime:(\d+)/m);
+					const minptime = Math.max(3, Math.min(10, ptimeMatch ? parseInt(ptimeMatch[1], 10) : 10));
+					if (!(new RegExp('[^-]minptime=' + minptime + '[^\\d]', 'gm').test(local_sdp.sdp)) && (/[^-]useinbandfec=/gm.test(local_sdp.sdp))) {
+						console.log("Overriding WebRTC SDP to allow low-latency audio packet (minptime=" + minptime + ")");
 						if (/[^-]minptime=\d+/gm.test(local_sdp.sdp)) {
-							local_sdp.sdp = local_sdp.sdp.replace(/minptime=\d+/gm, 'minptime=10');
+							local_sdp.sdp = local_sdp.sdp.replace(/minptime=\d+/gm, 'minptime=' + minptime);
 						} else {
-							local_sdp.sdp = local_sdp.sdp.replace('useinbandfec=', 'minptime=10;useinbandfec=');
+							local_sdp.sdp = local_sdp.sdp.replace('useinbandfec=', 'minptime=' + minptime + ';useinbandfec=');
 						}
 					}
 				}
@@ -329,6 +343,63 @@ export class WebRTCDemo {
 		}).catch((e) => {
 			this._setError('Error setting remote description: ' + e);
 		});
+	}
+
+	/**
+	 * Reserve the mic uplink: find the audio m-line the server offered recvonly (it wants
+	 * our mic) and mark our matching transceiver sendonly, so a track can be attached
+	 * later on user toggle via replaceTrack without renegotiation.
+	 */
+	_prepareMicTransceiver(remoteSdp) {
+		this._micTransceiver = null;
+		if (!remoteSdp || !this.peerConnection) return;
+		let micMid = null, curMid = null, curKind = null, curRecvonly = false;
+		for (const line of remoteSdp.split(/\r?\n/)) {
+			if (line.startsWith('m=')) {
+				if (curKind === 'audio' && curRecvonly && curMid !== null) { micMid = curMid; break; }
+				curKind = line.slice(2).split(' ')[0];
+				curMid = null; curRecvonly = false;
+			} else if (line.startsWith('a=mid:')) {
+				curMid = line.slice(6).trim();
+			} else if (line.trim() === 'a=recvonly') {
+				curRecvonly = true;
+			}
+		}
+		if (micMid === null && curKind === 'audio' && curRecvonly) micMid = curMid;
+		if (micMid === null) return;
+		const tx = this.peerConnection.getTransceivers().find((t) => t.mid === micMid);
+		if (tx) {
+			this._micTransceiver = tx;
+			try { tx.direction = 'sendonly'; } catch (e) {}
+		}
+	}
+
+	/**
+	 * Enable/disable the microphone: attach a getUserMedia track to the reserved sendonly
+	 * transceiver (the browser encodes Opus over RTP), or detach and stop it.
+	 */
+	async setMicrophone(enabled) {
+		if (enabled) {
+			if (this._micStream) return true;
+			if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+			this._micStream = await navigator.mediaDevices.getUserMedia({
+				audio: { channelCount: 1, sampleRate: 24000, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+				video: false
+			});
+			const track = this._micStream.getAudioTracks()[0];
+			if (this._micTransceiver && this._micTransceiver.sender && track) {
+				await this._micTransceiver.sender.replaceTrack(track);
+			}
+			return true;
+		}
+		if (this._micTransceiver && this._micTransceiver.sender) {
+			try { await this._micTransceiver.sender.replaceTrack(null); } catch (e) {}
+		}
+		if (this._micStream) {
+			this._micStream.getTracks().forEach((t) => t.stop());
+			this._micStream = null;
+		}
+		return true;
 	}
 
 	/**
@@ -365,8 +436,12 @@ export class WebRTCDemo {
 
 		// Bind the data channel event handlers.
 		this._send_channel = event.channel;
+		this._send_channel.binaryType = 'arraybuffer';
 		this._send_channel.onmessage = this._onPeerDataChannelMessage.bind(this);
 		this._send_channel.onopen = () => {
+			if (typeof CompressionStream !== 'undefined') {
+				this._send_channel.send('_gz,1');
+			}
 			if (this.ondatachannelopen !== null)
 				this.ondatachannelopen();
 		};
@@ -385,20 +460,43 @@ export class WebRTCDemo {
 	 * @param {MessageEvent} event
 	 */
 	_onPeerDataChannelMessage(event) {
+		if (event.data instanceof ArrayBuffer) {
+			const head = new Uint8Array(event.data, 0, Math.min(2, event.data.byteLength));
+			if (head[0] === 0x1f && head[1] === 0x8b) {
+				// Gzip'd payload: decompress asynchronously; the queue keeps later
+				// plain messages from overtaking it.
+				this._recvQueue = this._recvQueue.then(async () => {
+					const text = await new Response(new Blob([event.data]).stream()
+						.pipeThrough(new DecompressionStream('gzip'))).text();
+					this._dispatchDataChannelMessage(text);
+				}).catch((e) => this._setError("failed to decompress data channel message: " + e));
+				return;
+			}
+			this._setError("unexpected binary data channel message");
+			return;
+		}
+		if (event.data === '_gz,1') {
+			this._gzTx = true;
+			return;
+		}
+		this._recvQueue = this._recvQueue.then(() => this._dispatchDataChannelMessage(event.data));
+	}
+
+	_dispatchDataChannelMessage(data) {
 		// Attempt to parse message as JSON
 		var msg;
 		try {
-			msg = JSON.parse(event.data);
+			msg = JSON.parse(data);
 		} catch (e) {
 			if (e instanceof SyntaxError) {
-				this._setError("error parsing data channel message as JSON: " + event.data);
+				this._setError("error parsing data channel message as JSON: " + data);
 			} else {
-				this._setError("failed to parse data channel message: " + event.data);
+				this._setError("failed to parse data channel message: " + data);
 			}
 			return;
 		}
 
-		this._setDebug("data channel message: " + event.data);
+		this._setDebug("data channel message: " + data);
 
 		if (msg.type === 'pipeline') {
 			this._setStatus(msg.data.status);
@@ -490,10 +588,32 @@ export class WebRTCDemo {
 	 * @param {String} message
 	 */
 	sendDataChannelMessage(message) {
-		if (this._send_channel !== null && this._send_channel.readyState === 'open') {
-			this._send_channel.send(message);
-		} else {
+		if (this._send_channel === null || this._send_channel.readyState !== 'open') {
 			this._setError("attempt to send data channel message before channel was open.");
+			return;
+		}
+		// No compression negotiated: send synchronously, byte-identical to the
+		// pre-gzip path (zero added latency on the input hot path).
+		if (!this._gzTx) {
+			this._send_channel.send(message);
+			return;
+		}
+		// Order-preserving queue: large strings gzip asynchronously and later small
+		// (uncompressed) sends must not overtake them.
+		if (typeof message === 'string' && message.length >= 512) {
+			this._sendQueue = this._sendQueue.then(async () => {
+				const buf = await new Response(new Blob([message]).stream()
+					.pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+				if (this._send_channel && this._send_channel.readyState === 'open') {
+					this._send_channel.send(buf);
+				}
+			}).catch(() => {});
+		} else {
+			this._sendQueue = this._sendQueue.then(() => {
+				if (this._send_channel && this._send_channel.readyState === 'open') {
+					this._send_channel.send(message);
+				}
+			}).catch(() => {});
 		}
 	}
 
@@ -679,6 +799,13 @@ export class WebRTCDemo {
 				codecName: "NA", // from incoming-rtp => codec
 				jitterBufferDelay: 0, // from incoming-rtp.jitterBufferDelay
 				jitterBufferEmittedCount: 0, // from incoming-rtp.jitterBufferEmittedCount
+				// NetEQ concealment counters — the RED before/after acceptance metric. Chrome
+				// reports opus+red under codecName 'opus', so RED presence is confirmed via
+				// SDP/packet size, not codecName.
+				concealedSamples: 0, // from incoming-rtp
+				concealmentEvents: 0, // from incoming-rtp
+				totalSamplesReceived: 0, // from incoming-rtp
+				packetsDiscarded: 0, // from incoming-rtp
 			},
 
 			// DataChannel stats
@@ -768,6 +895,11 @@ export class WebRTCDemo {
 					connectionDetails.audio.bytesReceived = audioRTP.bytesReceived;
 					connectionDetails.audio.packetsReceived = audioRTP.packetsReceived;
 					connectionDetails.audio.packetsLost = audioRTP.packetsLost;
+					// NetEQ concealment counters (undefined on browsers that don't expose them).
+					if (audioRTP.concealedSamples !== undefined) connectionDetails.audio.concealedSamples = audioRTP.concealedSamples;
+					if (audioRTP.concealmentEvents !== undefined) connectionDetails.audio.concealmentEvents = audioRTP.concealmentEvents;
+					if (audioRTP.totalSamplesReceived !== undefined) connectionDetails.audio.totalSamplesReceived = audioRTP.totalSamplesReceived;
+					if (audioRTP.packetsDiscarded !== undefined) connectionDetails.audio.packetsDiscarded = audioRTP.packetsDiscarded;
 
 					// Extract audio codec from found codecs.
 					var codec = reports.codecs[audioRTP.codecId];

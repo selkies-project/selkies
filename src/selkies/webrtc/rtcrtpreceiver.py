@@ -303,6 +303,10 @@ class RTCRtpReceiver:
         self.__active_ssrc: dict[int, datetime.datetime] = {}
         self.__codecs: dict[int, RTCRtpCodecParameters] = {}
         self.__decoder_queue: queue.Queue = queue.Queue()
+        # Optional encoded-frame sink (mic uplink): when set, complete encoded audio
+        # frames are handed here instead of the Python decoder, so pcmflux is the only
+        # audio decoder in the system.
+        self._encoded_audio_sink = None
         self.__decoder_thread: Optional[threading.Thread] = None
         self.__kind = kind
         if kind == "audio":
@@ -352,7 +356,7 @@ class RTCRtpReceiver:
         return self.__transport
 
     @classmethod
-    def getCapabilities(self, kind: str) -> Optional[RTCRtpCapabilities]:
+    def getCapabilities(cls, kind: str) -> Optional[RTCRtpCapabilities]:
         """
         Returns the most optimistic view of the system's capabilities for
         receiving media of the given `kind`.
@@ -566,12 +570,17 @@ class RTCRtpReceiver:
         if pli_flag:
             await self._send_rtcp_pli(packet.ssrc)
 
-        # if we have a complete encoded frame, decode it
-        if encoded_frame is not None and self.__decoder_thread:
+        # if we have a complete encoded frame, hand it off
+        if encoded_frame is not None:
             encoded_frame.timestamp = self.__timestamp_mapper.map(
                 encoded_frame.timestamp
             )
-            self.__decoder_queue.put((codec, encoded_frame))
+            if self._encoded_audio_sink is not None:
+                # Forward the encoded payload (bare Opus, or RED to de-frame downstream)
+                # rather than decoding it in Python.
+                self._encoded_audio_sink(codec, encoded_frame)
+            elif self.__decoder_thread:
+                self.__decoder_queue.put((codec, encoded_frame))
 
     async def _run_rtcp(self) -> None:
         self.__log_debug("- RTCP started")
