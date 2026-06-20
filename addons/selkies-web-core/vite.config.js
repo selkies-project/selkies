@@ -6,8 +6,8 @@ import ViteRestart from 'vite-plugin-restart'
 export default defineConfig({
   base: '',
   server: {
-    host: '0.0.0.0',
-    allowedHosts: true,
+    host: '127.0.0.1',
+    allowedHosts: ['localhost', '127.0.0.1'],
   },
   plugins: [
     envCompatible(),
