@@ -181,7 +181,8 @@ class CentralizedStreamServer:
                 last_mtime,
                 new_mtime,
             )
-            last_mtime = new_mtime
+            # last_mtime advances only once the new site is up (below), so a
+            # failed reload is retried on the next poll.
 
             # Build the new SSL context *before* tearing down the old site so that
             # a bad certificate never takes the server offline.
@@ -216,6 +217,7 @@ class CentralizedStreamServer:
                 await new_site.start()
                 current_site = new_site
                 self.site = new_site
+                last_mtime = new_mtime
                 logger.info(
                     "New TCPSite started with reloaded certificates on %s:%s",
                     self.settings.addr,
@@ -223,9 +225,26 @@ class CentralizedStreamServer:
                 )
             except Exception as exc:
                 logger.critical(
-                    "Failed to start new TCPSite: %s. HTTPS server may be down!",
+                    "Failed to start new TCPSite: %s. HTTPS server may be down; "
+                    "will retry on the next certificate poll.",
                     exc,
                 )
+
+    @staticmethod
+    def _check_master_token(auth_header, master_token) -> bool:
+        """Constant-time check of a `Bearer <master_token>` Authorization header.
+
+        Compares as UTF-8 bytes so non-ASCII input cannot raise from
+        hmac.compare_digest, and is timing-safe (no short-circuit on the secret).
+        """
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return False
+        parts = auth_header.split()
+        if len(parts) < 2:
+            return False
+        return hmac.compare_digest(
+            parts[1].encode("utf-8"), str(master_token).encode("utf-8")
+        )
 
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
@@ -236,18 +255,24 @@ class CentralizedStreamServer:
         supervisor = request.app["supervisor"]
         mode = supervisor.current_mode
         auth_header = request.headers.get("Authorization")
-        token_path = request.path.endswith("/tokens")
+        path = request.path
+        token_path = path.endswith("/tokens")
         if (
             mode == self.STREAMING_MODE_WEBSOCKETS
             and settings.master_token
             and token_path
         ):
-            if (
-                not auth_header
-                or not auth_header.startswith("Bearer ")
-                or len(auth_header.split()) < 2
-                or auth_header.split()[1] != settings.master_token
-            ):
+            if not self._check_master_token(auth_header, settings.master_token):
+                return web.Response(status=401, text="Unauthorized")
+            return await handler(request)
+
+        # The state-changing /switch endpoint requires the master token when
+        # Basic Auth is disabled. /status stays open: it only reports the
+        # active mode, and the dashboard probes it without credentials at
+        # page load to pick the right client core.
+        is_control_path = path.endswith("/switch")
+        if settings.master_token and not settings.enable_basic_auth[0] and is_control_path:
+            if not self._check_master_token(auth_header, settings.master_token):
                 return web.Response(status=401, text="Unauthorized")
             return await handler(request)
 
@@ -268,9 +293,13 @@ class CentralizedStreamServer:
             if ":" not in auth_decoded:
                 return web.Response(status=401, text="Invalid Credentials")
             username, password = auth_decoded.split(":", 1)
+            # Compare as UTF-8 bytes so non-ASCII credentials don't raise from
+            # hmac.compare_digest (which rejects non-ASCII str operands).
             is_valid = hmac.compare_digest(
-                username, settings.basic_auth_user
-            ) and hmac.compare_digest(password, settings.basic_auth_password)
+                username.encode("utf-8"), str(settings.basic_auth_user).encode("utf-8")
+            ) and hmac.compare_digest(
+                password.encode("utf-8"), str(settings.basic_auth_password).encode("utf-8")
+            )
             if not is_valid:
                 logger.warning(
                     f"Invalid credentials provided for user: {settings.basic_auth_user}"
@@ -286,8 +315,20 @@ class CentralizedStreamServer:
 
         # Update basic auth credentials to Sealskin provided ones
         if custom_user and password:
+            logger.info(
+                "Overriding Basic Auth credentials from CUSTOM_USER/PASSWORD environment variables."
+            )
             setattr(self.settings, "basic_auth_user", custom_user)
             setattr(self.settings, "basic_auth_password", password)
+
+        try:
+            if self.settings.enable_basic_auth[0] and self.settings.basic_auth_password == "mypasswd":
+                logger.warning(
+                    "Basic Auth is enabled with the well-known default password 'mypasswd'. "
+                    "Set a strong password via --basic_auth_password, SELKIES_BASIC_AUTH_PASSWORD, or the PASSWORD env var."
+                )
+        except Exception:
+            pass
 
     async def switch_to_mode(self, mode_name: str):
         """
@@ -304,8 +345,23 @@ class CentralizedStreamServer:
             await self._stop_service()
             logger.info(f"Starting service: {mode_name}")
             service = self.services[mode_name]
-            self.active_task = asyncio.create_task(service.start())
+            task = asyncio.create_task(service.start())
+            self.active_task = task
             self.current_mode = mode_name
+
+            # Clear the stale mode if the service dies unexpectedly, and retrieve
+            # the exception so asyncio doesn't log it as never-retrieved.
+            def _on_service_done(finished: asyncio.Task, mode=mode_name):
+                if finished.cancelled():
+                    return
+                exc = finished.exception()
+                if exc is not None:
+                    logger.error(f"Service '{mode}' terminated unexpectedly: {exc!r}")
+                    if self.active_task is finished:
+                        self.current_mode = None
+                        self.active_task = None
+
+            task.add_done_callback(_on_service_done)
 
     async def _stop_service(self):
         if not self.current_mode:
@@ -315,7 +371,10 @@ class CentralizedStreamServer:
         await self.services[self.current_mode].stop()
         if self.active_task:
             try:
-                await asyncio.wait_for(self.active_task, timeout=5)
+                # Give the service's own teardown room to finish (it can include
+                # several ~2s gamepad-close waits) before forcing a cancel that
+                # would interrupt cleanup mid-way and leak resources.
+                await asyncio.wait_for(self.active_task, timeout=15)
             except asyncio.TimeoutError:
                 logger.warning(
                     f"Timeout while stopping '{self.current_mode}'. Cancelling task."
@@ -327,6 +386,11 @@ class CentralizedStreamServer:
                     logger.info(
                         f"Task cancelled after timeout for '{self.current_mode}'."
                     )
+                except Exception as e:
+                    logger.warning(f"Service task raised during forced stop: {e!r}")
+        # Clear stale references so a stopped/dead mode is never reported active.
+        self.current_mode = None
+        self.active_task = None
 
     def _get_status(self):
         return {
@@ -342,9 +406,11 @@ class CentralizedStreamServer:
                 status=403,
             )
 
-        data = await request.json()
-        target_mode = data.get("mode")
         try:
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise ValueError("Request body must be a JSON object")
+            target_mode = data.get("mode")
             await self.switch_to_mode(target_mode)
             return web.json_response({"status": "success", "mode": target_mode})
         except Exception as e:
@@ -441,11 +507,16 @@ class CentralizedStreamServer:
         try:
             with os.scandir(full_path) as it:
                 for entry in it:
-                    stats = entry.stat()
-                    mtime = datetime.fromtimestamp(stats.st_mtime).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                    is_dir = entry.is_dir()
+                    try:
+                        stats = entry.stat()
+                        mtime = datetime.fromtimestamp(stats.st_mtime).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+                        is_dir = entry.is_dir()
+                    except OSError as e:
+                        # Entries can vanish or be unstat-able (broken symlinks, races).
+                        logger.warning(f"Skipping unreadable directory entry {entry.name!r}: {e}")
+                        continue
                     items.append(
                         {
                             "name": entry.name + ("/" if is_dir else ""),

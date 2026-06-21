@@ -7,13 +7,13 @@ mkdir -p "${PKG_DIR}/DEBIAN"
 
 DEST_DIR="${PKG_DIR}/usr/lib/$(gcc -print-multiarch | sed -e 's/i.*86/i386/')"
 mkdir -p "${DEST_DIR}"
-gcc -shared -fPIC -o selkies_joystick_interposer.so joystick_interposer.c -ldl
+gcc -shared -fPIC -o selkies_joystick_interposer.so joystick_interposer.c -ldl -pthread
 cp -f selkies_joystick_interposer.so "${DEST_DIR}/selkies_joystick_interposer.so"
 
 if [ "$(dpkg --print-architecture)" = "amd64" ]; then
   DEST_DIR="${PKG_DIR}/usr/lib/$(gcc -m32 -print-multiarch | sed -e 's/i.*86/i386/')"
   mkdir -p "${DEST_DIR}"
-  gcc -m32 -shared -fPIC -o selkies_joystick_interposer_x86.so joystick_interposer.c -ldl
+  gcc -m32 -shared -fPIC -o selkies_joystick_interposer_x86.so joystick_interposer.c -ldl -pthread
   cp -f selkies_joystick_interposer_x86.so "${DEST_DIR}/selkies_joystick_interposer.so"
 fi
 
