@@ -377,7 +377,7 @@ export function Settings() {
         if (s_use_browser_cursors) {
             const final = s_use_browser_cursors.locked ? s_use_browser_cursors.value : getStoredBool("use_browser_cursors");
             setUseBrowserCursors(final);
-            localStorage.setItem(getPrefixedKey("use_browser_cursors"), String(final));
+            // Core persists this itself; no localStorage.setItem needed here.
         }
 
         // Rate control mode
@@ -485,7 +485,7 @@ export function Settings() {
     const handleScaleLocallyToggle = () => {
         const newState = !scaleLocally;
         setScaleLocally(newState);
-        localStorage.setItem(getPrefixedKey('scaleLocallyManual'), newState.toString());
+        // Core persists scaleLocallyManual via setBoolParam; no localStorage save needed.
         window.postMessage({ type: 'setScaleLocally', value: newState }, window.location.origin);
     };
 
@@ -493,7 +493,7 @@ export function Settings() {
     const handleHidpiToggle = () => {
         const newHidpiState = !hidpiEnabled;
         setHidpiEnabled(newHidpiState);
-        localStorage.setItem(getPrefixedKey('use_css_scaling'), (!newHidpiState).toString());
+        // Core persists use_css_scaling via setBoolParam; no localStorage save needed.
         window.postMessage(
             { type: 'setUseCssScaling', value: !newHidpiState },
             window.location.origin
@@ -613,17 +613,17 @@ export function Settings() {
     const handleAntiAliasingToggle = () => {
         const newState = !antiAliasing;
         setAntiAliasing(newState);
-        localStorage.setItem(getPrefixedKey('antiAliasingEnabled'), newState.toString());
+        // Core persists antiAliasingEnabled via setBoolParam; no localStorage save needed.
         window.postMessage(
             { type: 'setAntiAliasing', value: newState },
             window.location.origin
         );
     };
-
     const handleUseBrowserCursorsToggle = () => {
         const newState = !useBrowserCursors;
         setUseBrowserCursors(newState);
-        localStorage.setItem(getPrefixedKey('useBrowserCursors'), newState.toString());
+        // The core (selkies-ws-core.js) persists this via setBoolParam on its end.
+        // Dashboard just posts the message; no localStorage save needed here.
         window.postMessage(
             { type: 'setUseBrowserCursors', value: newState },
             window.location.origin
