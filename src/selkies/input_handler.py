@@ -1228,7 +1228,9 @@ class WebRTCInput:
                 self.__mouse_emit(UINPUT_REL_Y, y)
             elif self.xdisplay:
                 xtest.fake_input(self.xdisplay, Xlib.X.MotionNotify, detail=True, root=Xlib.X.NONE, x=x, y=y)
-                self.xdisplay.sync()
+                # flush() sends the queued event without the blocking round-trip
+                # that sync() would wait for; input is delivered in order regardless.
+                self.xdisplay.flush()
         elif action == MOUSE_SCROLL_UP:
             if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_WHEEL, 1)
             elif self.mouse: self.mouse.scroll(0, -1)
@@ -1703,7 +1705,9 @@ class WebRTCInput:
             self.button_mask = button_mask
 
         if not relative and self.xdisplay:
-            self.xdisplay.sync()
+            # flush() (not sync()) avoids a blocking X round-trip per absolute
+            # move; on the pynput path self.xdisplay usually has nothing pending.
+            self.xdisplay.flush()
     async def update_binary_clipboard_setting(self, enabled: bool):
         """Asynchronously updates the binary clipboard setting and restarts the monitor if it's running."""
         new_setting_str = "true" if enabled else "false"
