@@ -1727,8 +1727,58 @@ export class Input {
                 this.buttonMask &= ~mask;
             }
         }
-        var toks = [ mtype, this.x, this.y, this.buttonMask, 0 ];
-        this.send(toks.join(","));
+        if (event.type === 'mousemove' || event.type === 'pointermove') {
+            // Coalesce high-frequency motion. A 1000 Hz mouse would otherwise emit
+            // ~1000 tiny WS messages/sec, congesting the uplink (felt as input lag
+            // over the internet) and starving the server's single-threaded
+            // input/video loop. Batch to at most one send per animation frame.
+            this._queueCoalescedMouseMove(mtype, this.x, this.y, this.buttonMask);
+        } else {
+            // Button / non-move event: flush any pending motion first so ordering
+            // (move-then-click, and accumulated relative deltas) is preserved, then
+            // send this event immediately.
+            this._flushCoalescedMouseMove();
+            this.send([ mtype, this.x, this.y, this.buttonMask, 0 ].join(","));
+        }
+    }
+
+    _queueCoalescedMouseMove(mtype, x, y, buttonMask) {
+        if (mtype === "m2") {
+            // Relative mode: deltas must be summed, never dropped.
+            if (this._pendingMove && this._pendingMove.mtype === "m2") {
+                this._pendingMove.x += x;
+                this._pendingMove.y += y;
+                this._pendingMove.buttonMask = buttonMask;
+            } else {
+                this._flushCoalescedMouseMove();
+                this._pendingMove = { mtype: "m2", x: x, y: y, buttonMask: buttonMask };
+            }
+        } else {
+            // Absolute mode: only the latest position matters.
+            if (this._pendingMove && this._pendingMove.mtype !== "m") {
+                this._flushCoalescedMouseMove();
+            }
+            this._pendingMove = { mtype: "m", x: x, y: y, buttonMask: buttonMask };
+        }
+        if (!this._moveFlushScheduled) {
+            this._moveFlushScheduled = true;
+            const raf = window.requestAnimationFrame
+                ? window.requestAnimationFrame.bind(window)
+                : (cb) => setTimeout(cb, 16);
+            raf(() => {
+                this._moveFlushScheduled = false;
+                this._flushCoalescedMouseMove();
+            });
+        }
+    }
+
+    _flushCoalescedMouseMove() {
+        const m = this._pendingMove;
+        if (!m) return;
+        this._pendingMove = null;
+        // An accumulated relative move of (0,0) carries no information.
+        if (m.mtype === "m2" && m.x === 0 && m.y === 0) return;
+        this.send([ m.mtype, m.x, m.y, m.buttonMask, 0 ].join(","));
     }
 
     _handlePointerDown(event) {
