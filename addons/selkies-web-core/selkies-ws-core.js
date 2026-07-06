@@ -148,6 +148,10 @@ if (authToken) {
 let sharedClientState = 'idle'; // Possible states: 'idle', 'ready', 'error'
 let isSharedMode = detectedSharedModeType !== null;
 let sharedClientHasReceivedKeyframe = false;
+// Paint one decoded frame per rAF tick but allow this many to remain queued as a
+// cushion that absorbs frame-arrival jitter at ~60fps. Anything beyond is dropped, so
+// latency stays bounded to at most this many frames (~16ms each).
+const MAX_QUEUED_VIDEO_FRAMES = 1;
 
 if (isSharedMode) {
   console.log(`Client is running in ${detectedSharedModeType} mode.`);
@@ -2500,6 +2504,15 @@ function initWebsockets() {
         if ( (isSharedMode && sharedClientState === 'ready') || (!isSharedMode && isVideoPipelineActive) ) {
            const bufferLimit = 0;
            if (videoFrameBuffer.length > bufferLimit) {
+                // The painter runs once per rAF (~60/s) and would otherwise drain a
+                // backlog one frame per tick, so any burst that pushes the buffer to
+                // depth N stays N frames behind forever. Drop everything beyond a small
+                // cushion so latency stays bounded, then paint the oldest of what remains
+                // (the cushion smooths arrival jitter; excess frames are skipped).
+                while (videoFrameBuffer.length > MAX_QUEUED_VIDEO_FRAMES + 1) {
+                    const staleFrame = videoFrameBuffer.shift();
+                    try { staleFrame?.close(); } catch (e) { /* already closed */ }
+                }
                 const frameToPaint = videoFrameBuffer.shift();
                 if (frameToPaint) {
                     if (canvas.width > 0 && canvas.height > 0) {
