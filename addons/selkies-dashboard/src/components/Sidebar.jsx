@@ -523,7 +523,10 @@ function AppsModal({ isOpen, onClose, t }) {
 
 const getStorageAppName = () => {
   if (typeof window === 'undefined') return '';
-  const urlForKey = window.location.href.split('#')[0];
+  // Exclude the query string so the per-session ?token=... doesn't create a new
+  // localStorage namespace on every connect (that leak eventually exhausts the origin
+  // quota and blanks the iframe). Must match the core's derivation in selkies-ws-core.js.
+  const urlForKey = window.location.origin + window.location.pathname;
   return urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
 };
 const storageAppName = getStorageAppName();

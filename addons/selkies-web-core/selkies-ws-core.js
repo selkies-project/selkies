@@ -159,9 +159,42 @@ window.onload = () => {
   'use strict';
 };
 
-// Set storage key based on URL
-const urlForKey = window.location.href.split('#')[0];
+// Storage key namespace. Must NOT include the query string: the portal hands out a
+// fresh ?token=... every session, so keying on the full URL leaked a whole new set of
+// localStorage entries on each connect and eventually exhausted the origin quota
+// (QuotaExceededError during init -> blank/grey iframe). Use origin + pathname so the
+// namespace is stable across sessions (and settings actually persist now).
+const urlForKey = window.location.origin + window.location.pathname;
 const storageAppName = urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
+
+// Guarded write: a full or unavailable store degrades to a warning instead of
+// throwing QuotaExceededError into the caller.
+const safeSetItem = (key, value) => {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch (e) {
+    console.warn(`Selkies: could not persist '${key}' to localStorage:`, e);
+  }
+};
+
+// One-time cleanup of keys written by the old token-scoped scheme. Those keys were
+// prefixed by the full URL, so they start with this stable base followed by the query
+// string ('?...'); current keys use '<base>_<setting>'. Removing items never hits the
+// quota, so this also recovers browsers whose store is already full.
+try {
+  const legacyPrefix = storageAppName + '?';
+  const staleKeys = [];
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const k = window.localStorage.key(i);
+    if (k && k.startsWith(legacyPrefix)) staleKeys.push(k);
+  }
+  staleKeys.forEach((k) => window.localStorage.removeItem(k));
+  if (staleKeys.length) {
+    console.log(`Selkies: removed ${staleKeys.length} stale token-scoped localStorage keys.`);
+  }
+} catch (e) {
+  console.warn('Selkies: localStorage cleanup failed:', e);
+}
 
 // Set page title
 document.title = 'Selkies';
@@ -242,7 +275,7 @@ const setIntParam = (key, value) => {
   if (value === null || value === undefined) {
     window.localStorage.removeItem(finalKey);
   } else {
-    window.localStorage.setItem(finalKey, value.toString());
+    safeSetItem(finalKey, value.toString());
   }
 };
 const getBoolParam = (key, default_value) => {
@@ -266,7 +299,7 @@ const setBoolParam = (key, value) => {
   if (value === null || value === undefined) {
     window.localStorage.removeItem(finalKey);
   } else {
-    window.localStorage.setItem(finalKey, value.toString());
+    safeSetItem(finalKey, value.toString());
   }
 };
 const getStringParam = (key, default_value) => {
@@ -287,7 +320,7 @@ const setStringParam = (key, value) => {
   if (value === null || value === undefined) {
     window.localStorage.removeItem(finalKey);
   } else {
-    window.localStorage.setItem(finalKey, value.toString());
+    safeSetItem(finalKey, value.toString());
   }
 };
 function sanitizeAndStoreSettings(serverSettings) {
@@ -4512,10 +4545,10 @@ function initiateFallback(error, context) {
         const crashKey = `${storageAppName}_crash_count`;
         let crashCount = parseInt(window.localStorage.getItem(crashKey) || '0');
         crashCount++;
-        window.localStorage.setItem(crashKey, crashCount.toString());
+        safeSetItem(crashKey, crashCount.toString());
         if (crashCount >= 3) {
             setStringParam('encoder', 'jpeg');
-            window.localStorage.setItem(crashKey, '0');
+            safeSetItem(crashKey, '0');
         } else {
             setStringParam('encoder', 'x264enc');
         }

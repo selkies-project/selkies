@@ -10,10 +10,19 @@ import websockets from "./selkies-ws-core";
 const STREAM_MODE_WEBRTC = "webrtc";
 const STREAM_MODE_WEBSOCKETS = "websockets";
 
-// Set storage key based on URL
-const urlForKey = window.location.href.split('#')[0];
+// Storage key namespace: origin + pathname only, NOT the full URL. The query string
+// carries a per-session token, so keying on href leaks a new localStorage namespace
+// every session and eventually exhausts the quota. Must match selkies-ws-core.js.
+const urlForKey = window.location.origin + window.location.pathname;
 const storageAppName = urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
 const getPrefixedKey = (key) => {return `${storageAppName}_${key}`}
+const safeSetItem = (key, value) => {
+    try {
+        localStorage.setItem(key, value);
+    } catch (e) {
+        console.warn(`Selkies: could not persist '${key}' to localStorage:`, e);
+    }
+};
 
 let mode = null;
 
@@ -31,7 +40,7 @@ function handleMessage(event) {
     let message = event.data;
     if (message.mode !== undefined && message.type === "mode") {
         console.log(`Switching streaming mode to: ${message.mode}`);
-        localStorage.setItem(getPrefixedKey('stream_mode'), message.mode);
+        safeSetItem(getPrefixedKey('stream_mode'), message.mode);
 
         // wait for a few seconds to let the server switch modes
         setTimeout(() => {
@@ -42,7 +51,7 @@ function handleMessage(event) {
 }
 
 function switchStreamingMode(newMode) {
-    localStorage.setItem(getPrefixedKey('stream_mode'), newMode);
+    safeSetItem(getPrefixedKey('stream_mode'), newMode);
     switch (newMode) {
         case STREAM_MODE_WEBRTC:
             mode = webrtc();

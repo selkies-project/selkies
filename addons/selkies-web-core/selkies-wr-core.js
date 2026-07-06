@@ -336,9 +336,21 @@ export default function webrtc() {
 	const isSharedMode = detectedSharedModeType !== null;
 	const isStrictViewer = detectedSharedModeType === "shared";
 
-	// Set storage key based on URL
-	const urlForKey = window.location.href.split('#')[0];
+	// Storage key namespace: origin + pathname only, NOT the full URL, so a per-session
+	// token in the query string can't leak a new localStorage namespace each session.
+	// Must match selkies-ws-core.js / selkies-core.js.
+	const urlForKey = window.location.origin + window.location.pathname;
 	const storageAppName = urlForKey.replace(/[^a-zA-Z0-9.-_]/g, '_');
+
+	// Guarded write: a full or unavailable store degrades to a warning instead of
+	// throwing QuotaExceededError into the caller.
+	const safeSetItem = (key, value) => {
+		try {
+			window.localStorage.setItem(key, value);
+		} catch (e) {
+			console.warn(`Selkies: could not persist '${key}' to localStorage:`, e);
+		}
+	};
 
 	const getIntParam = (key, default_value) => {
 		const prefixedKey = `${storageAppName}_${key}`;
@@ -350,7 +362,7 @@ export default function webrtc() {
 		if (value === null || value === undefined) {
 				window.localStorage.removeItem(prefixedKey);
 		} else {
-				window.localStorage.setItem(prefixedKey, value.toString());
+				safeSetItem(prefixedKey, value.toString());
 		}
 	};
 	const getBoolParam = (key, default_value) => {
@@ -366,7 +378,7 @@ export default function webrtc() {
 		if (value === null || value === undefined) {
 				window.localStorage.removeItem(prefixedKey);
 		} else {
-				window.localStorage.setItem(prefixedKey, value.toString());
+				safeSetItem(prefixedKey, value.toString());
 		}
 	};
 	const getStringParam = (key, default_value) => {
@@ -379,7 +391,7 @@ export default function webrtc() {
 		if (value === null || value === undefined) {
 				window.localStorage.removeItem(prefixedKey);
 		} else {
-				window.localStorage.setItem(prefixedKey, value.toString());
+				safeSetItem(prefixedKey, value.toString());
 		}
 	};
 
