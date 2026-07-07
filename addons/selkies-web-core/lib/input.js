@@ -1998,17 +1998,48 @@ export class Input {
         if (!sink) {
             return false;
         }
-        const rect = sink.getBoundingClientRect(); // CSS logical size
+        // ws-core hides #videoCanvas (display: none) whenever frames are being
+        // presented on the <video>/worker sink, mirroring the canvas box onto
+        // that sink unchanged — so a zero-size measurement means "hidden right
+        // now", not "geometry changed". Measure the visible mirror instead,
+        // falling back to the last valid rect (resize handlers re-show the
+        // canvas, so a real geometry change is re-measured on the next event).
+        let rect = sink.getBoundingClientRect(); // CSS logical size
+        if (!(rect.width > 0 && rect.height > 0)) {
+            // Cache the mirror lookups (this runs per pointer event while the
+            // canvas is hidden); re-query if a cached node left the DOM
+            // (deactivateVideoWorker replaces the worker canvas).
+            if (!this._sinkMirrors) {
+                this._sinkMirrors = {};
+            }
+            for (const mirrorId of ['videoStream', 'videoWorkerCanvas']) {
+                let mirror = this._sinkMirrors[mirrorId];
+                if (!mirror || !mirror.isConnected) {
+                    mirror = document.getElementById(mirrorId);
+                    this._sinkMirrors[mirrorId] = mirror;
+                }
+                if (!mirror) continue;
+                const mirrorRect = mirror.getBoundingClientRect();
+                if (mirrorRect.width > 0 && mirrorRect.height > 0) {
+                    rect = mirrorRect;
+                    break;
+                }
+            }
+        }
+        if (!(rect.width > 0 && rect.height > 0) && this._lastSinkRect) {
+            rect = this._lastSinkRect;
+        }
         if (rect.width > 0 && rect.height > 0 && sink.width > 0 && sink.height > 0) {
+            this._lastSinkRect = rect;
             const scaleX = sink.width / rect.width; // buffer / CSS
             const scaleY = sink.height / rect.height;
             this.x = Math.max(0, Math.min(sink.width, Math.round((clientX - rect.left) * scaleX)));
             this.y = Math.max(0, Math.min(sink.height, Math.round((clientY - rect.top) * scaleY)));
-        } else {
-            this.x = 0;
-            this.y = 0;
+            return true;
         }
-        return true;
+        // Never measured: fall back to the windowMath path instead of
+        // claiming success with (0, 0).
+        return false;
     }
 
     _calculateTouchCoordinates(touchPoint) {
