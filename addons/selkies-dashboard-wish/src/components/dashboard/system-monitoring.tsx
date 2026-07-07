@@ -12,6 +12,7 @@ import {
 	ChevronDown,
 	ChevronUp
 } from "lucide-react";
+import { getPrefixedKey } from "@/utils";
 
 // Declare global window properties
 declare global {
@@ -37,6 +38,9 @@ declare global {
 			bandwidth_mbps?: number;
 			latency_ms?: number;
 		};
+		// Set by the dashboard around a transport switch so the active core
+		// suppresses the expected "Server disconnected" alert from the old peer.
+		__selkiesModeSwitching?: boolean;
 	}
 }
 
@@ -114,7 +118,7 @@ function RadialGauge({ metric, size }: RadialGaugeProps) {
 	);
 }
 
-const STATS_READ_INTERVAL_MS = 100;
+const STATS_READ_INTERVAL_MS = 500;
 const MAX_AUDIO_BUFFER = 10;
 const MAX_BANDWIDTH_MBPS = 1000;
 const MAX_LATENCY_MS = 1000;
@@ -133,6 +137,22 @@ export function SystemMonitoring() {
 	const [gpuMemTotal, setGpuMemTotal] = useState<number | null>(null);
 	const [bandwidthMbps, setBandwidthMbps] = useState(0);
 	const [latencyMs, setLatencyMs] = useState(0);
+	const [isWebrtc, setIsWebrtc] = useState(() =>
+		localStorage.getItem(getPrefixedKey('stream_mode')) === 'webrtc'
+	);
+
+	// Track live streaming-mode switches (the loader reloads shortly after,
+	// but reflect the change immediately).
+	useEffect(() => {
+		const handleMessage = (event: MessageEvent) => {
+			if (event.origin !== window.location.origin) return;
+			if (event.data?.type === 'mode') {
+				setIsWebrtc(event.data.mode === 'webrtc');
+			}
+		};
+		window.addEventListener('message', handleMessage);
+		return () => window.removeEventListener('message', handleMessage);
+	}, []);
 
 	// Read stats periodically
 	useEffect(() => {
@@ -210,6 +230,9 @@ export function SystemMonitoring() {
 	const hasSysMemData = window.system_stats?.mem_used !== undefined && window.system_stats?.mem_total !== undefined && sysMemUsed !== null && sysMemTotal !== null;
 	const hasGpuMemData = window.gpu_stats?.mem_used !== undefined || window.gpu_stats?.memory_used !== undefined || window.gpu_stats?.used_gpu_memory_bytes !== undefined || gpuMemUsed !== null;
 	const hasFpsData = true;
+	// Audio buffer: the websockets worklet frame count, or in WebRTC a proxy from the
+	// RTCInboundRtpStreamStats de-jitter depth. Video bitrate is omitted — it duplicates
+	// the Bandwidth stat.
 	const hasAudioData = true;
 	const hasBandwidthData = true;
 	const hasLatencyData = true;

@@ -79,7 +79,7 @@ class MediaPipeline(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def set_video_bitrate(self, bitrate: int):
+    async def set_video_bitrate(self, bitrate: float):
         pass
 
     @abstractmethod
@@ -105,7 +105,7 @@ class MediaPipelinePixel(MediaPipeline):
         async_event_loop: asyncio.AbstractEventLoop,
         encoder_rtc: str,
         framerate: int = 30,
-        video_bitrate: int = 8,
+        video_bitrate: float = 8,
         audio_bitrate: int = 128000,
         width: int = 1920,
         height: int = 1080,
@@ -115,6 +115,11 @@ class MediaPipelinePixel(MediaPipeline):
         crf: int = 23,
         rc_mode: RateControlMode = RateControlMode.CBR,
         video_fullcolor: bool = False,
+        use_cpu: bool = False,
+        video_streaming_mode: bool = True,
+        use_paint_over_quality: bool = True,
+        video_paintover_crf: int = 18,
+        video_paintover_burst_frames: int = 5,
     ):
         self.async_event_loop = async_event_loop
         self.audio_channels = audio_channels
@@ -124,6 +129,16 @@ class MediaPipelinePixel(MediaPipeline):
         self.rc_mode = rc_mode
         self.video_crf = crf
         self.video_fullcolor = video_fullcolor
+        # Force software x264 for h264enc (openh264enc is always software). WS
+        # honors this too; a change is structural, so it restarts capture.
+        self.use_cpu = use_cpu
+        # Turbo (stream every frame vs damage-gated) and the paint-over quality knobs —
+        # the same pixelflux tunables the WS path exposes. Streaming mode and paint-over
+        # apply live (update_tunables); only fullcolor is structural.
+        self.video_streaming_mode = video_streaming_mode
+        self.use_paint_over_quality = use_paint_over_quality
+        self.video_paintover_crf = video_paintover_crf
+        self.video_paintover_burst_frames = video_paintover_burst_frames
         self.audio_bitrate = audio_bitrate
         self.last_resize_success = True
         self.width = width
@@ -216,10 +231,80 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.info(f"Error updating CRF {e}", exc_info=True)
 
-    async def set_video_bitrate(self, bitrate: int):
+    async def set_use_cpu(self, use_cpu: bool):
+        """Switch h264enc between software x264 and hardware encoding.
+
+        Unlike CRF/bitrate this is structural (a different encoder instance), so
+        it restarts the capture instead of going through the live update path.
+        """
+        if self.use_cpu == use_cpu:
+            return
+        self.use_cpu = use_cpu
+        if not self._is_screen_capturing or self.capture_module is None:
+            return  # applied on the next start_screen_capture()
+        logger.info(f"use_cpu -> {use_cpu}; restarting screen capture")
+        await self.restart_screen_capture()
+
+    async def _apply_tunables_live(self, what: str):
+        """Push current capture settings to the running module with no restart."""
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
+        try:
+            self.capture_module.update_tunables(self.generate_capture_settings())
+            logger.info(f"Updated {what} live")
+        except Exception as e:
+            logger.info(f"Error updating {what}: {e}", exc_info=True)
+
+    async def set_video_fullcolor(self, fullcolor: bool):
+        """Toggle 4:4:4 color. Structural (pixel format), so restart capture (WS parity)."""
+        if self.video_fullcolor == fullcolor:
+            return
+        self.video_fullcolor = fullcolor
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
+        logger.info(f"video_fullcolor -> {fullcolor}; restarting screen capture")
+        await self.restart_screen_capture()
+
+    async def set_encoder_rtc(self, encoder_rtc: str):
+        """Switch the WebRTC video encoder (h264enc <-> openh264enc). Structural (a
+        different encoder instance), so restart capture — same as use_cpu (WS parity)."""
+        if self.encoder_rtc == encoder_rtc:
+            return
+        self.encoder_rtc = encoder_rtc
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
+        logger.info(f"encoder_rtc -> {encoder_rtc}; restarting screen capture")
+        await self.restart_screen_capture()
+
+    async def set_video_streaming_mode(self, enabled: bool):
+        """Toggle Turbo (stream every frame vs damage-gated). Live tunable."""
+        if self.video_streaming_mode == enabled:
+            return
+        self.video_streaming_mode = enabled
+        await self._apply_tunables_live(f"streaming mode -> {enabled}")
+
+    async def set_use_paint_over_quality(self, enabled: bool):
+        if self.use_paint_over_quality == enabled:
+            return
+        self.use_paint_over_quality = enabled
+        await self._apply_tunables_live(f"paint-over -> {enabled}")
+
+    async def set_video_paintover_crf(self, crf: int):
+        if self.video_paintover_crf == crf:
+            return
+        self.video_paintover_crf = crf
+        await self._apply_tunables_live(f"paint-over CRF -> {crf}")
+
+    async def set_video_paintover_burst_frames(self, frames: int):
+        if self.video_paintover_burst_frames == frames:
+            return
+        self.video_paintover_burst_frames = frames
+        await self._apply_tunables_live(f"paint-over burst -> {frames}")
+
+    async def set_video_bitrate(self, bitrate: float):
         """Set video encoder target bitrate.
 
-        :bitrate: bitrate in mbps
+        :bitrate: bitrate in mbps (fractions allowed for sub-Mbps targets)
         """
         if not self._is_screen_capturing or self.capture_module is None:
             return
@@ -233,7 +318,7 @@ class MediaPipelinePixel(MediaPipeline):
 
         try:
             # Non-blocking in pixelflux (atomic store / channel send).
-            self.capture_module.update_video_bitrate(bitrate * 1000)
+            self.capture_module.update_video_bitrate(int(round(bitrate * 1000)))
             logger.info(
                 f"Updated video bitrate: {self.video_bitrate}Mbps -> {bitrate}Mbps"
             )
@@ -286,7 +371,7 @@ class MediaPipelinePixel(MediaPipeline):
         try:
             # Non-blocking in pixelflux (atomic flag / channel send).
             self.capture_module.request_idr_frame()
-            logger.info("IDR frame requested successfully")
+            logger.debug("IDR frame requested successfully")
         except Exception as e:
             logger.error(f"Error requesting IDR frame: {e}", exc_info=True)
 
@@ -308,18 +393,26 @@ class MediaPipelinePixel(MediaPipeline):
         cs.omit_stripe_headers = self._omit_stripe_headers
 
         if self.encoder_rtc in ["h264enc", "openh264enc"]:
-            cs.video_streaming_mode = True
+            cs.video_streaming_mode = self.video_streaming_mode
             cs.video_fullframe = True
             cs.video_crf = self.video_crf
             # 4:4:4 rides the same policy as the WS path: NVENC/x264 honor it,
             # VAAPI falls back to software x264, OpenH264 surfaces 4:2:0-only.
             cs.video_fullcolor = self.video_fullcolor
+            # Paint-over quality (static-scene refinement); applied live like CRF.
+            cs.use_paint_over_quality = self.use_paint_over_quality
+            cs.video_paintover_crf = self.video_paintover_crf
+            cs.video_paintover_burst_frames = self.video_paintover_burst_frames
             # Setting video_cbr_mode to True will make the encoder ignore the crf value
             cs.video_cbr_mode = self.rc_mode == RateControlMode.CBR
-            cs.video_bitrate_kbps = self.video_bitrate * 1000  # Convert Mbps to kbps
+            cs.video_bitrate_kbps = int(round(float(self.video_bitrate) * 1000))  # Convert Mbps to kbps
             if self.encoder_rtc == "openh264enc":
                 cs.use_cpu = True
                 cs.use_openh264 = True
+            elif self.use_cpu:
+                # Honor use_cpu for h264enc too (parity with the WS path): force
+                # software x264 instead of selecting a hardware encoder node.
+                cs.use_cpu = True
             else:
                 # h264enc is hardware-first like the WS path — pixelflux picks NVENC
                 # or VA-API when present and falls back to software x264 otherwise.
@@ -484,7 +577,11 @@ class MediaPipelinePixel(MediaPipeline):
             # ptime requirement, so shorter Opus frames flow through unchanged.
             frame_ms = float(getattr(app_settings, 'audio_frame_duration_ms', '20') or 20)
             capture_settings.frame_duration_ms = frame_ms
-            capture_settings.use_vbr = False
+            # VBR (matches the WebSocket path): opus_bitrate is the target average
+            # the encoder varies around by content complexity — better quality per
+            # bit than CBR. RTP carries variable Opus payloads fine and browsers
+            # decode VBR natively (no cbr=1 in the offer fmtp to contradict).
+            capture_settings.use_vbr = True
             capture_settings.use_silence_gate = False
             capture_settings.latency_ms = int(min(10, frame_ms))
             capture_settings.debug_logging = False

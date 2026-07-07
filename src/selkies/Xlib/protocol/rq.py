@@ -26,7 +26,6 @@ import struct
 from array import array
 
 # Python 2/3 compatibility.
-from six import PY3, binary_type, byte2int, indexbytes, iterbytes
 
 # Xlib modules
 from .. import X
@@ -36,12 +35,8 @@ from ..support import lock
 def decode_string(bs):
     return bs.decode('latin1')
 
-if PY3:
-    def encode_array(a):
-        return a.tobytes()
-else:
-    def encode_array(a):
-        return a.tostring()
+def encode_array(a):
+    return a.tobytes()
 
 
 class BadDataError(Exception): pass
@@ -456,7 +451,7 @@ class String16(ValueField):
     def pack_value(self, val):
         """Convert 8-byte string into 16-byte list"""
         if isinstance(val, bytes):
-            val = list(iterbytes(val))
+            val = list(val)
 
         slen = len(val)
 
@@ -676,7 +671,7 @@ class PropertyData(ValueField):
         if fmt not in (8, 16, 32):
             raise BadDataError('Invalid property data format {0}'.format(fmt))
 
-        if isinstance(val, binary_type):
+        if isinstance(val, bytes):
             size = fmt // 8
             vlen = len(val)
             if vlen % size:
@@ -859,10 +854,10 @@ class EventField(ValueField):
     def parse_binary_value(self, data, display, length, format):
         from . import event
 
-        estruct = display.event_classes.get(byte2int(data) & 0x7f, event.AnyEvent)
+        estruct = display.event_classes.get(data[0] & 0x7f, event.AnyEvent)
         if type(estruct) == dict:
             # this etype refers to a set of sub-events with individual subcodes
-            estruct = estruct[indexbytes(data, 1)]
+            estruct = estruct[data[1]]
 
         return estruct(display = display, binarydata = data[:32]), data[32:]
 
@@ -910,7 +905,7 @@ class StrClass(object):
         return (chr(len(val)) + val).encode()
 
     def parse_binary(self, data, display):
-        slen = byte2int(data) + 1
+        slen = data[0] + 1
         return decode_string(data[1:slen]), data[slen:]
 
 Str = StrClass()
@@ -1262,12 +1257,12 @@ class TextElements8(ValueField):
                 break
 
             # font change
-            if byte2int(data) == 255:
+            if data[0] == 255:
                 values.append(struct.unpack('>L', bytes(data[1:5]))[0])
                 data = data[5:]
 
             # skip null strings
-            elif byte2int(data) == 0 and indexbytes(data, 1) == 0:
+            elif data[0] == 0 and data[1] == 0:
                 data = data[2:]
 
             # string with delta

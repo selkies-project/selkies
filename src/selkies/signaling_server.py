@@ -29,6 +29,9 @@ class Peer:
     client_type: Optional[str]
     client_slot: Optional[int]
     client_strict_viewer: Optional[bool]
+    # Secure-mode session token; matched against active_mk_token to grant a viewer
+    # read-write collaboration (mirrors the WS mk-token path).
+    client_token: Optional[str] = None
     peer_status: Optional[str] = None
 
 
@@ -71,10 +74,14 @@ class WebRTCPeerManagement:
         self.enable_player4: bool = options.enable_player4
         self.lock: asyncio.Lock = asyncio.Lock()
 
-        # RTC config (str or dict), served verbatim to clients from world-writable
-        # /tmp by default: ownership/permission-checked like webrtc_utils.try_json_file().
-        self.rtc_config: Optional[Any] = None
-        if os.path.exists(options.rtc_config_file):
+        # RTC config served to clients from /api/turn. PRIMARY source: the config the
+        # server itself resolved via get_rtc_configuration() (REST / Cloudflare / JSON
+        # file / legacy / HMAC / built-in default), passed in as options.rtc_config and
+        # kept fresh by the RTC monitors via set_rtc_config(). This guarantees the client
+        # negotiates with the SAME ICE servers as the server. Fall back to reading the
+        # local rtc_config_file only when no resolved config was supplied.
+        self.rtc_config: Optional[Any] = getattr(options, "rtc_config", None)
+        if not self.rtc_config and os.path.exists(options.rtc_config_file):
             logger.info("parsing rtc_config_file: {}".format(options.rtc_config_file))
             if _is_trusted_config_file(options.rtc_config_file):
                 self.rtc_config = self.read_file(options.rtc_config_file)
@@ -84,7 +91,6 @@ class WebRTCPeerManagement:
                         options.rtc_config_file
                     )
                 )
-
         # Validate TURN arguments
         if self.turn_shared_secret:
             if not (self.turn_host and self.turn_port):
@@ -457,7 +463,13 @@ class WebRTCPeerManagement:
                         )
                     )
                     # Notify callee. callee is always server
-                    await wsc.send_str("SESSION_START {} {}".format(uid, client_type))
+                    session_start = "SESSION_START {} {}".format(uid, client_type)
+                    # Relay the caller's secure-mode token (space-free) as an extra field
+                    # so the server side can grant read-write collaboration to a matching
+                    # viewer; omitted when absent to avoid a trailing empty token.
+                    if peer.client_token:
+                        session_start += " " + peer.client_token
+                    await wsc.send_str(session_start)
                     # Register session
                     peer.peer_status = peer_status = "session"
                     callee_peer.peer_status = "session"
@@ -538,6 +550,7 @@ class WebRTCPeerManagement:
         client_type = None
         client_slot = None
         client_strict_viewer = None
+        client_token = None
         # Partner notifications for evicted dead peers: collected under the lock but
         # flushed after release so a slow partner socket can't stall other handshakes.
         dead_peer_notifications: List[Callable[[], Awaitable[Any]]] = []
@@ -553,6 +566,7 @@ class WebRTCPeerManagement:
                         client_type = json_metadata.get("client_type")
                         client_slot = json_metadata.get("client_slot")
                         client_strict_viewer = json_metadata.get("client_strict_viewer")
+                        client_token = json_metadata.get("client_token")
                     except json.JSONDecodeError:
                         await ws.close(code=1002, message=b"invalid protocol")
                         raise Exception("Invalid JSON metadata from {!r}".format(raddr))
@@ -759,6 +773,7 @@ class WebRTCPeerManagement:
                     client_type=client_type,
                     client_slot=client_slot,
                     client_strict_viewer=client_strict_viewer,
+                    client_token=client_token,
                 )
                 result = (puid, peer_type, client_type, client_slot, client_strict_viewer)
         finally:
@@ -839,40 +854,19 @@ class WebRTCPeerManagement:
             web.Response with RTC/TURN configuration JSON
         """
         path = request.path
-        request_headers = request.headers
 
-        if self.turn_shared_secret:
-            # Get username from auth header.
-            username = request_headers.get(self.turn_auth_header_name, "")
-            if not username:
-                logger.warning(
-                    f"HTTP GET {path} - missing auth header: {self.turn_auth_header_name}. "
-                    "Generating credential with an empty username"
-                )
-
-            logger.info("Generating HMAC credential for user: {}".format(username))
-            rtc_config = generate_rtc_config(
-                self.turn_host,
-                self.turn_port,
-                self.turn_shared_secret,
-                username,
-                self.turn_protocol,
-                self.turn_tls,
-                self.stun_host,
-                self.stun_port,
-            )
-            return web.Response(
-                status=200,
-                body=rtc_config.encode("utf-8"),
-                content_type="application/json",
-            )
-        elif self.rtc_config:
+        # ONE source of truth: serve the exact config the server resolved via
+        # get_rtc_configuration() (REST / Cloudflare / JSON file / legacy / HMAC /
+        # built-in default), kept current by the RTC monitors -- so the client always
+        # negotiates with the SAME ICE servers the server uses. No separate per-request
+        # credential path: the resolved config is the single path. (Its HMAC username,
+        # when that method is active, is minted with a generic default in
+        # generate_rtc_config() so it is never a bare '<expiry>:'.)
+        if self.rtc_config:
             data = self.rtc_config
             if isinstance(data, str):
                 data = data.encode("utf-8")
             return web.Response(status=200, body=data, content_type="application/json")
-        else:
-            logger.warning(
-                "HTTP GET {} 404 NOT FOUND - Missing RTC config".format(path)
-            )
-            return web.Response(status=404, text="404 NOT FOUND")
+
+        logger.warning("HTTP GET {} 404 NOT FOUND - Missing RTC config".format(path))
+        return web.Response(status=404, text="404 NOT FOUND")

@@ -5,17 +5,25 @@
 import argparse
 import os
 import logging
-import socket
+import re
 from typing import Any, Dict, List
 
-# The x264enc / x264enc-striped encoder options were renamed to h264enc / h264enc-striped;
-# map the old values so existing configs (env/CLI) keep resolving to the same encoder.
 # Settings precedence: CLI flag > SELKIES_<NAME> env > fallback env_var(s) > 'default'.
 # Names derive from 'name': my_setting -> --my-setting / SELKIES_MY_SETTING.
 # Special syntax:
 #   - List/enum (e.g. SELKIES_ENCODER="jpeg,h264enc"): first item is default,
-#     full list is the allowed options; a single value locks the choice.
-#   - Bool "true|locked": the |locked suffix forbids the client changing it.
+#     full list is the allowed options; a single value locks the choice. Invalid
+#     items are dropped; an entirely-invalid override keeps the full built-in
+#     menu and default.
+#   - Bool (case-insensitive): "true"/"1" = on, anything else = off; a
+#     "|locked" suffix (e.g. "true|locked") forbids the client changing it.
+#   - Range: "8-165" restricts the allowed span (initial value = built-in
+#     default, clamped in); a bare value "60" keeps the built-in span and makes
+#     it the initial value, widening the span if it falls outside (so legacy
+#     fixed-value configs still resolve); "60,8-165" sets initial + span in one
+#     value; a degenerate span "60-60" locks the setting.
+#   - An override set to "" means "use the built-in default"; list types keep
+#     their explicit ""/"none" = disable semantics.
 
 # One WebSocket message ceiling for BOTH directions: enforced on receive
 # (aiohttp max_msg_size) and advertised to clients so multipart chunk sizing
@@ -88,27 +96,30 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "range",
         "default": "8-165",
         "meta": {"default_value": 60},
-        "help": 'Allowed framerate range (e.g., "8-165") or a fixed value (e.g., "60").',
+        "help": 'Framerate: allowed range (e.g., "8-165"), initial value (e.g., "60"), or both ("60,8-165"); "60-60" locks.',
     },
     {
         "name": "video_crf",
         "type": "range",
         "default": "5-50",
         "meta": {"default_value": 25},
-        "help": 'Allowed video CRF (constant quality) range (e.g., "5-50") or a fixed value.',
+        "help": 'Video CRF (constant quality): allowed range (e.g., "5-50"), initial value (e.g., "25"), or both ("25,5-50"); "25-25" locks.',
     },
     {
         "name": "video_bitrate",
         "type": "range",
-        "default": "1-100",
+        "default": "0.1-100",
         "meta": {"default_value": 8},
-        "help": 'Default video-bitrate aka CBR, in Megabits per second (Mbps), allowed range (e.g., "1-100") or a fixed value (e.g., "8" for 8 Mbps)',
+        "help": 'Video bitrate aka CBR, in Megabits per second (Mbps): allowed range (e.g., "0.1-100"), initial value (e.g., "8" for 8 Mbps, "0.25" for 250 Kbps), or both ("8,0.1-100"); "8-8" locks.',
     },
     {
         "name": "rate_control_mode",
         "type": "enum",
         "default": "crf",
-        "meta": {"allowed": ["crf", "cbr"]},
+        # CBR listed first purely for dropdown order; the default stays "crf" and
+        # allowed[0] is never used as a fallback for this setting (clients only
+        # ever send crf/cbr, both valid), so ordering is display-only here.
+        "meta": {"allowed": ["cbr", "crf"]},
         "help": "Rate control mode for the H.264 encoders (crf = constant quality/QP, cbr = constant bitrate). Honored for every H.264 encoder when enable_rate_control is true (the default).",
     },
     {
@@ -152,8 +163,14 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "audio_bitrate",
         "type": "enum",
-        "default": "320000",
-        "meta": {"allowed": ["64000", "128000", "192000", "256000", "320000"]},
+        "default": "128000",
+        # Curated dropdown stops for the web UI; 510000 is libopus's hard maximum
+        # (not 512k). value_range lets the SERVER (env/CLI) accept any Opus bitrate
+        # in 6000-510000 bps verbatim, while the UI keeps offering only the stops.
+        "meta": {
+            "allowed": ["32000", "48000", "64000", "96000", "128000", "192000", "256000", "320000", "384000", "510000"],
+            "value_range": [6000, 510000],
+        },
         "help": "The default audio bitrate.",
     },
     {
@@ -390,7 +407,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "enable_dual_mode",
         "type": "bool",
-        "default": False,
+        "default": True,
         "help": "Enable switching Streaming modes from UI",
     },
     {
@@ -483,7 +500,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "range",
         "default": "1-100",
         "meta": {"default_value": 40},
-        "help": 'Allowed JPEG quality range (e.g., "1-100") or a fixed value.',
+        "help": 'JPEG quality: allowed range (e.g., "1-100"), initial value (e.g., "40"), or both ("40,1-100"); "40-40" locks.',
     },
     {
         "name": "video_fullcolor",
@@ -494,8 +511,8 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "video_streaming_mode",
         "type": "bool",
-        "default": False,
-        "help": "Enable H.264 streaming mode for pixelflux encoders.",
+        "default": True,
+        "help": "Enable H.264 streaming mode (Turbo: encode every frame like a traditional video encoder) for pixelflux encoders.",
     },
     {
         "name": "use_cpu",
@@ -514,21 +531,21 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "range",
         "default": "1-100",
         "meta": {"default_value": 90},
-        "help": "Allowed JPEG paint-over quality range or a fixed value.",
+        "help": 'JPEG paint-over quality: allowed range, initial value, or both ("90,1-100"); "90-90" locks.',
     },
     {
         "name": "video_paintover_crf",
         "type": "range",
         "default": "5-50",
         "meta": {"default_value": 18},
-        "help": "Allowed H.264 paint-over CRF range or a fixed value.",
+        "help": 'H.264 paint-over CRF: allowed range, initial value, or both ("18,5-50"); "18-18" locks.',
     },
     {
         "name": "video_paintover_burst_frames",
         "type": "range",
         "default": "1-30",
         "meta": {"default_value": 5},
-        "help": "Allowed H.264 paint-over burst frames range or a fixed value.",
+        "help": 'H.264 paint-over burst frames: allowed range, initial value, or both ("5,1-30"); "5-5" locks.',
     },
     {
         "name": "second_screen",
@@ -624,7 +641,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "turn_rest_username",
         "type": "str",
         "default": "",
-        "help": "Username sent to the TURN REST API service (x-auth-user header); the service embeds it in the HMAC credential. Empty (default) sends the system hostname.",
+        "help": "Username sent to the TURN REST API service (x-auth-user header); the service embeds it in the HMAC credential. Empty (default) uses the generic 'selkies'.",
     },
     {
         "name": "turn_rest_username_auth_header",
@@ -778,7 +795,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "enable_resize",
         "type": "bool",
-        "default": False,
+        "default": True,
         "help": "Enable dynamic resizing to match browser size",
     },
     {
@@ -850,6 +867,13 @@ SENSITIVE_SETTING_NAMES = frozenset({
 for _setting_def in SETTING_DEFINITIONS:
     if _setting_def["name"] in SENSITIVE_SETTING_NAMES:
         _setting_def["sensitive"] = True
+
+
+def _range_number(text):
+    """A range-setting number: int when integral, float otherwise (so
+    sub-unit values like a 0.25 Mbps bitrate are representable)."""
+    value = float(text)
+    return int(value) if value.is_integer() else value
 
 
 class AppSettings:
@@ -930,13 +954,27 @@ class AppSettings:
                     )
                 )
             )
+            # An override set to the empty string means "use the built-in
+            # default": it lets images neutralize envs baked into a base layer
+            # (ENV SELKIES_FOO=) without guessing each default here. list-type
+            # settings keep their explicit ""/none = disable semantics.
+            if (
+                is_override
+                and stype != "list"
+                and str(raw_value).strip() == ""
+            ):
+                is_override = False
+                overrides[name] = False
+                raw_value = setting["default"]
             processed_value = None
             try:
                 if stype == "bool":
-                    val_str = str(raw_value).lower()
-                    is_locked = "|locked" in val_str
-                    base_val_str = val_str.split("|")[0]
-                    bool_value = base_val_str in ["true", "1"]
+                    parts = [
+                        part.strip()
+                        for part in str(raw_value).strip().lower().split("|")
+                    ]
+                    is_locked = "locked" in parts[1:]
+                    bool_value = parts[0] in ["true", "1"]
                     processed_value = (bool_value, is_locked)
                 elif stype in ["enum", "list"]:
                     if is_override:
@@ -944,19 +982,44 @@ class AppSettings:
                         raw_value_str = str(raw_value)
                         if stype == "list" and raw_value_str.strip().lower() in ("", "none"):
                             # Disable list-type settings if set to "" or "none"
-                            valid_items = []
+                            setting["meta"]["allowed"] = []
+                            processed_value = []
                         else:
                             user_items = [item.strip() for item in raw_value_str.split(',') if item.strip()]
                             valid_items = [item for item in user_items if item in master_list]
-                            if not valid_items:
-                                logging.warning(f"Invalid value(s) '{raw_value_str}' for {name}. Using system default.")
+                            # A numeric enum may declare meta.value_range: an admin-set
+                            # single value inside that span is taken verbatim as the
+                            # server value while the curated `allowed` stops are kept for
+                            # the web UI (the server accepts more than the UI offers).
+                            vr = setting.get("meta", {}).get("value_range")
+                            in_range_value = None
+                            if not valid_items and stype == "enum" and vr and len(user_items) == 1:
+                                try:
+                                    n = float(user_items[0])
+                                    if vr[0] <= n <= vr[1]:
+                                        in_range_value = user_items[0]
+                                except ValueError:
+                                    pass
+                            if in_range_value is not None:
+                                processed_value = in_range_value  # allowed stays the curated stops
+                            elif valid_items:
+                                setting["meta"]["allowed"] = valid_items
+                                processed_value = valid_items[0] if stype == "enum" else valid_items
+                            else:
+                                # Entirely-invalid override (e.g. a stale env
+                                # baked into a container image): no restriction —
+                                # full allowed list, built-in default.
+                                if user_items:
+                                    logging.warning(
+                                        f"Invalid value(s) '{raw_value_str}' for {name}; "
+                                        f"keeping the full allowed set with the system default."
+                                    )
                                 default_str = str(setting["default"])
-                                valid_items = [item.strip() for item in default_str.split(',') if item.strip() and item.strip() in master_list]
-                        setting["meta"]["allowed"] = valid_items
-                        if stype == "enum":
-                            processed_value = valid_items[0] if valid_items else setting["default"]
-                        else:  # list
-                            processed_value = valid_items
+                                default_items = [item.strip() for item in default_str.split(',') if item.strip() and item.strip() in master_list]
+                                if stype == "enum":
+                                    processed_value = default_items[0] if default_items else setting["default"]
+                                else:
+                                    processed_value = default_items
                     else:
                         if stype == "enum":
                             processed_value = setting["default"]
@@ -985,29 +1048,68 @@ class AppSettings:
                 elif stype == "str":
                     processed_value = str(raw_value)
                 elif stype == "range":
-                    val_str = str(raw_value)
-                    if "-" in val_str:
-                        min_val, max_val = map(int, val_str.split("-", 1))
-                        processed_value = (min_val, max_val)
-                    else:
-                        locked_val = int(val_str)
-                        processed_value = (locked_val, locked_val)
-                    # Clamp the meta default into the range; sort first so an inverted
-                    # range ("100-1") can't push it past the ceiling.
-                    meta = setting.get("meta")
-                    if meta is not None and "default_value" in meta:
-                        range_min, range_max = processed_value
-                        lo, hi = sorted((range_min, range_max))
-                        meta["default_value"] = max(
-                            lo, min(meta["default_value"], hi)
+                    # "min-max" sets the allowed span; a bare value sets the
+                    # initial value on the built-in span, widening it when it
+                    # falls outside (fixed-value configs must stay valid).
+                    # "60,8-165" sets both; a degenerate span ("60-60") locks.
+                    tokens = [
+                        token.strip()
+                        for token in str(raw_value).split(",")
+                        if token.strip()
+                    ]
+                    span = None
+                    initial = None
+                    for token in tokens:
+                        span_match = re.fullmatch(
+                            r"(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)", token
                         )
+                        if span_match:
+                            span = (
+                                _range_number(span_match.group(1)),
+                                _range_number(span_match.group(2)),
+                            )
+                        else:
+                            initial = _range_number(token)
+                    if span is None and initial is None:
+                        raise ValueError("no span or value given")
+                    meta = setting.get("meta")
+                    if span is None:
+                        def_lo, def_hi = sorted(
+                            _range_number(part)
+                            for part in str(setting["default"]).split("-", 1)
+                        )
+                        processed_value = (
+                            min(def_lo, initial),
+                            max(def_hi, initial),
+                        )
+                        if meta is not None:
+                            meta["default_value"] = initial
+                    else:
+                        # Normalize an inverted span ("100-1").
+                        lo, hi = sorted(span)
+                        processed_value = (lo, hi)
+                        if meta is not None and initial is not None:
+                            clamped = max(lo, min(initial, hi))
+                            if clamped != initial:
+                                logging.warning(
+                                    f"Setting '{name}' initial value {initial} "
+                                    f"outside span {lo}-{hi}, clamped to {clamped}"
+                                )
+                            meta["default_value"] = clamped
+                        elif meta is not None and "default_value" in meta:
+                            meta["default_value"] = max(
+                                lo, min(meta["default_value"], hi)
+                            )
             except (ValueError, TypeError, IndexError) as e:
                 logging.error(
                     f"Could not parse setting '{name}' with value '{raw_value}'. Using default. Error: {e}"
                 )
                 processed_value = setting["default"]
                 if stype == "range":
-                    min_val, max_val = map(int, str(processed_value).split("-", 1))
+                    min_val, max_val = (
+                        _range_number(part)
+                        for part in str(processed_value).split("-", 1)
+                    )
                     processed_value = (min_val, max_val)
             processed[name] = processed_value
         width_overridden = overrides.get("manual_width", False)
@@ -1031,9 +1133,31 @@ class AppSettings:
                 logging.info("Manual height not set or invalid, defaulting to 768.")
         for name, value in processed.items():
             setattr(self, name, value)
+        # Which settings were explicitly given (CLI/env), for default
+        # resolution that depends on other settings (e.g. rate control).
+        self._overridden = overrides
+
+    # Rate-control default per encoder: the striped software encoder and jpeg
+    # are quality-driven (CRF), the single-slice software encoders target a
+    # bandwidth (CBR). An explicit rate_control_mode override wins; encoders
+    # not listed keep the built-in default.
+    ENCODER_RC_DEFAULTS = {
+        "h264enc": "cbr",
+        "openh264enc": "cbr",
+        "h264enc-striped": "crf",
+        "jpeg": "crf",
+    }
 
     def _post_process_settings(self):
         """Additional processing of config data after initial parsing."""
+        if not self._overridden.get("rate_control_mode"):
+            active_encoder = (
+                self.encoder if self.mode == "websockets" else self.encoder_rtc
+            )
+            self.rate_control_mode = self.ENCODER_RC_DEFAULTS.get(
+                active_encoder, self.rate_control_mode
+            )
+
         audio_enabled = self.audio_enabled[0]
         if not audio_enabled and self.microphone_enabled[0]:
             logging.warning(
@@ -1051,10 +1175,11 @@ class AppSettings:
             mode = "true"
         self.enable_clipboard = mode
 
-        # The TURN REST username identifies this host to the service; empty
-        # resolves to the machine hostname.
+        # Username embedded in the TURN credential (the REST service's x-auth-user and
+        # the HMAC credential alike). A generic default keeps it stable and non-empty
+        # ('<expiry>:selkies') instead of a bare '<expiry>:' or a volatile pod hostname.
         if not self.turn_rest_username:
-            self.turn_rest_username = socket.gethostname()
+            self.turn_rest_username = "selkies"
 
 settings = AppSettings(SETTING_DEFINITIONS)
 

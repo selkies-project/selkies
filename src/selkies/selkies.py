@@ -48,6 +48,10 @@ RTT_SMOOTHING_SAMPLES = 20
 # RFC 2198 RED redundancy depth (distance=2) for the shared Opus audio stream.
 AUDIO_RED_DISTANCE = 2
 SENT_FRAME_TIMESTAMP_HISTORY_SIZE = 1000
+# A resuming (unpausing) viewer bypasses the 30s START_VIDEO throttle, but not
+# faster than this: each resume forces an IDR resync, so rapid STOP/START must
+# not be usable to spam keyframes. Well below a human tab-switch cadence.
+VIEWER_RESUME_MIN_INTERVAL_S = 1.0
 TARGET_FRAMERATE = 60
 
 UINPUT_MOUSE_SOCKET = ""
@@ -56,7 +60,7 @@ ENABLE_CLIPBOARD = True
 ENABLE_BINARY_CLIPBOARD = False
 ENABLE_CURSORS = True
 DEBUG_CURSORS = False
-ENABLE_RESIZE = True
+ENABLE_RESIZE = bool(settings.enable_resize[0])
 AUDIO_CHANNELS_DEFAULT = 2
 AUDIO_BITRATE_DEFAULT = 320000
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "openh264enc"]
@@ -543,8 +547,27 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
     return True
 
 
-async def generate_xrandr_gtf_modeline(res_wh_str):
-    """Generates an xrandr modeline string using cvt or gtf."""
+# A modeline is fully determined by (resolution, refresh) — the timings change
+# with the refresh rate, so resolution alone does not identify a mode. Successful
+# results are memoized on that pair so a size/refresh computed once never
+# re-spawns the cvt/gtf subprocess, including when the X mode was later dropped
+# and has to be re-created on a subsequent reconfigure.
+_MODELINE_CACHE: dict = {}
+
+
+async def generate_xrandr_gtf_modeline(res_wh_str, refresh_hz=60):
+    """Generates an xrandr modeline string using cvt or gtf.
+
+    refresh_hz defaults to 60 (the display mode selkies has always requested);
+    it is threaded through — and is part of the cache key — so that if the mode
+    is ever generated at another rate, both the timings and the memoization stay
+    correct rather than returning a stale 60 Hz modeline for the same size.
+    """
+    cache_key = (res_wh_str, refresh_hz)
+    cached = _MODELINE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    refresh_str = str(refresh_hz)
     tool_name = "cvt"
     try:
         try:
@@ -553,7 +576,7 @@ async def generate_xrandr_gtf_modeline(res_wh_str):
             raise Exception(
                 f"Invalid resolution format for modeline generation: {res_wh_str}"
             )
-        cmd = ["cvt", w_str, h_str, "60"]
+        cmd = ["cvt", w_str, h_str, refresh_str]
         try:
             process = await subprocess.create_subprocess_exec(
                 *cmd,
@@ -568,7 +591,7 @@ async def generate_xrandr_gtf_modeline(res_wh_str):
             logger_app_resize.warning(
                 "cvt command failed or not found, trying gtf."
             )
-            cmd = ["gtf", w_str, h_str, "60"]
+            cmd = ["gtf", w_str, h_str, refresh_str]
             tool_name = "gtf"
             process = await subprocess.create_subprocess_exec(
                 *cmd,
@@ -588,7 +611,9 @@ async def generate_xrandr_gtf_modeline(res_wh_str):
         raise Exception(
             f"Could not parse modeline from {tool_name} output: {modeline_output}"
         )
-    return match.group(1).strip(), match.group(2)
+    result = (match.group(1).strip(), match.group(2))
+    _MODELINE_CACHE[cache_key] = result
+    return result
 
 # AUTO_GPU render-node detection lives in pixelflux (the device library owns
 # hardware detection); selkies forwards only explicit --render-dri/--encode-dri paths.
@@ -1059,6 +1084,12 @@ class DataStreamingServer(BaseStreamingService):
         # Frame-based backpressure settings
         self.last_start_video_request_times = {}
         self.last_viewer_keyframe_request_times = {}
+        # Shared clients that sent STOP_VIDEO (hidden tab): excluded from the
+        # primary VIDEO broadcast until their next START_VIDEO, while capture —
+        # and their control/cursor/audio — keep running. Holds any paused shared
+        # client (viewer or collaborator), not viewers alone. Discarded on
+        # disconnect in the ws handler's cleanup and cleared on shutdown.
+        self.video_paused_clients = set()
         self.allowed_desync_ms = BACKPRESSURE_ALLOWED_DESYNC_MS
         self.latency_threshold_for_adjustment_ms = BACKPRESSURE_LATENCY_THRESHOLD_MS
         self.backpressure_check_interval_s = BACKPRESSURE_CHECK_INTERVAL_S
@@ -1324,6 +1355,12 @@ class DataStreamingServer(BaseStreamingService):
         if desired == self._active_audio_red_distance:
             return
         if not self.is_pcmflux_capturing:
+            return
+        # During teardown the last client leaving drops RED to 0, but the app is already
+        # gone and the disconnect path stops the pipeline itself. Skip the pointless
+        # stop+restart here so it doesn't fail with a spurious "self.app not available"
+        # ERROR; a genuine gate change with clients still present keeps self.app set.
+        if not self.app:
             return
         data_logger.info(
             f"Audio RED gate changed ({self._active_audio_red_distance} -> {desired}); "
@@ -1720,6 +1757,14 @@ class DataStreamingServer(BaseStreamingService):
             v = settings_data.get(k)
             return int(v) if v is not None else None
 
+        def get_number(k):
+            # int when integral, float otherwise (sub-Mbps bitrates).
+            v = settings_data.get(k)
+            if v is None:
+                return None
+            value = float(v)
+            return int(value) if value.is_integer() else value
+
         def get_bool(k):
             v = settings_data.get(k)
             return str(v).lower() == "true" if v is not None else None
@@ -1761,7 +1806,7 @@ class DataStreamingServer(BaseStreamingService):
         parsed["displayId"] = get_str("displayId") or "primary"
         parsed["displayPosition"] = get_str("displayPosition")
         parsed["rate_control_mode"] = get_str("rate_control_mode")
-        parsed["video_bitrate"] = get_int("video_bitrate")
+        parsed["video_bitrate"] = get_number("video_bitrate")
         parsed["force_aligned_resolution"] = get_bool("force_aligned_resolution")
         # Client advertises Opus+RED de-RED capability for the WS audio path.
         parsed["audioRedundancy"] = get_bool("audioRedundancy")
@@ -1802,8 +1847,13 @@ class DataStreamingServer(BaseStreamingService):
             try:
                 if setting_def['type'] == 'range':
                     min_val, max_val = server_limit
-                    sanitized = max(min_val, min(int(client_value), max_val))
-                    if sanitized != int(client_value):
+                    # Fractional values are legal (sub-Mbps bitrates); keep
+                    # integral values as ints.
+                    numeric = float(client_value)
+                    if numeric.is_integer():
+                        numeric = int(numeric)
+                    sanitized = max(min_val, min(numeric, max_val))
+                    if sanitized != numeric:
                         data_logger.warning(f"Client value for '{name}' ({client_value}) was clamped to {sanitized} (server range: {min_val}-{max_val}).")
                     return sanitized
                 elif setting_def['type'] == 'enum':
@@ -2004,7 +2054,7 @@ class DataStreamingServer(BaseStreamingService):
                                 'x': 0, 'y': 0,
                             }
                             module.update_framerate(float(display_state.get('framerate') or self.app.framerate))
-                            module.update_video_bitrate(int(display_state.get('video_bitrate') or 0) * 1000)
+                            module.update_video_bitrate(int(round(float(display_state.get('video_bitrate') or 0) * 1000)))
                             module.update_tunables(self._get_capture_settings(
                                 display_id, layout['w'], layout['h'], layout['x'], layout['y']
                             ))
@@ -2141,7 +2191,7 @@ class DataStreamingServer(BaseStreamingService):
         server_settings_payload = {"type": "server_settings", "settings": {}}
         for setting_def in SETTING_DEFINITIONS:
             name = setting_def['name']
-            if name in ['port', 'encode_dri', 'debug', 'audio_device_name', 'watermark_path', 'recording_socket', 'file_manager_path', 'run_after_connect', 'run_after_disconnect']:
+            if name in ['port', 'addr', 'web_root', 'encode_dri', 'debug', 'audio_device_name', 'watermark_path', 'recording_socket', 'file_manager_path', 'run_after_connect', 'run_after_disconnect']:
                 continue
             # Never broadcast secrets/credentials (master_token, passwords, TURN
             # secrets, etc.) to clients.
@@ -2153,6 +2203,12 @@ class DataStreamingServer(BaseStreamingService):
                 payload_entry = {'value': bool_val, 'locked': is_locked}
             else:
                 payload_entry = {'value': value}
+
+            # Whether this value came from an explicit CLI/env choice (vs the
+            # built-in default). The client uses it to decide if a conditional
+            # default (e.g. HiDPI-off when a manual resolution is set) should
+            # apply or defer to the operator's explicit setting.
+            payload_entry['overridden'] = bool(settings._overridden.get(name, False))
 
             if setting_def['type'] == 'range':
                 payload_entry['min'], payload_entry['max'] = value
@@ -2621,10 +2677,17 @@ class DataStreamingServer(BaseStreamingService):
                         allowed_viewer_prefixes = [
                             "SETTINGS,",
                             "START_VIDEO",
+                            # A viewer must be able to pause its own video feed
+                            # on tab hide (the client sends this); without it the
+                            # broadcast-pause below can never trigger for viewers.
+                            "STOP_VIDEO",
                             "REQUEST_KEYFRAME",
                             "js,",
                         ]
-                        if active_mk_token and perms.get("token") == active_mk_token:
+                        # Read-write collaboration (a token-authenticated viewer drives
+                        # keyboard/mouse/clipboard) is gated by enable_collab: when off,
+                        # the viewer stays read-only even with a valid mk token.
+                        if settings.enable_collab[0] and active_mk_token and perms.get("token") == active_mk_token:
                             allowed_viewer_prefixes.extend(["kd", "ku", "kh", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr", "REQUEST_CLIPBOARD"])
                         if not any(message.startswith(prefix) for prefix in allowed_viewer_prefixes):
                             data_logger.warning(f"DENIED unauthorized message from viewer {remote_address}: {message[:100]}...")
@@ -2956,14 +3019,39 @@ class DataStreamingServer(BaseStreamingService):
                             data_logger.warning(f"Malformed CLIENT_FRAME_ACK from {raddr}: {message}")
 
                     elif message == "START_VIDEO":
+                        # Resuming from pause (tab visible again) un-pauses ANY
+                        was_paused = websocket in self.video_paused_clients
                         perms = client_permissions.get(websocket)
                         if perms and perms.get("role") == "viewer":
-                            now = time.time()
-                            last_req_time = self.last_start_video_request_times.get(websocket, 0)
-                            if now - last_req_time < 30.0:
-                                data_logger.warning(f"Throttled START_VIDEO request from viewer {remote_address}. Ignoring.")
-                                continue
-                            self.last_start_video_request_times[websocket] = now
+                            # monotonic (not wall-clock) so an NTP/clock jump
+                            # can't wedge the resume floor or the 30s throttle.
+                            now = time.monotonic()
+                            if was_paused:
+                                # Resume bypasses the 30s redundant-request
+                                # throttle (a real state change), but keeps a short
+                                # floor: each resume forces an IDR resync, so rapid
+                                # STOP/START must not spam keyframes. A throttled
+                                # rapid resume stays paused this cycle (not rejoined
+                                # below) and retries after the floor.
+                                last_req_time = self.last_start_video_request_times.get(websocket, 0)
+                                if now - last_req_time < VIEWER_RESUME_MIN_INTERVAL_S:
+                                    data_logger.warning(f"Throttled rapid resume from viewer {remote_address}. Ignoring.")
+                                    continue
+                                self.last_start_video_request_times[websocket] = now
+                            else:
+                                last_req_time = self.last_start_video_request_times.get(websocket, 0)
+                                if now - last_req_time < 30.0:
+                                    data_logger.warning(f"Throttled START_VIDEO request from viewer {remote_address}. Ignoring.")
+                                    continue
+                                self.last_start_video_request_times[websocket] = now
+
+                        # Un-pause AFTER the throttle decision, so a throttled rapid
+                        # resume stays paused (no rejoin, no resync). Role-agnostic:
+                        # a non-viewer collaborator that paused must also rejoin, or
+                        # it stays out of the broadcast forever.
+                        if was_paused:
+                            self.video_paused_clients.discard(websocket)
+                            data_logger.info(f"START_VIDEO from resuming client ({remote_address}): rejoining its video feed.")
 
                         if client_display_id and client_display_id in self.display_clients:
                             data_logger.info(f"Received START_VIDEO for '{client_display_id}'. Starting its stream.")
@@ -3035,8 +3123,21 @@ class DataStreamingServer(BaseStreamingService):
                         if client_display_id and client_display_id in self.display_clients:
                             data_logger.info(f"Received STOP_VIDEO for '{client_display_id}'. Stopping stream.")
                             self.display_clients[client_display_id]['video_active'] = False
-                            
                             await self._stop_capture_for_display(client_display_id)
+                            try:
+                                await websocket.send_str("VIDEO_STOPPED")
+                            except (ConnectionResetError, OSError, RuntimeError):
+                                pass
+                        else:
+                            # A shared client pausing (the web client sends
+                            # STOP_VIDEO on tab hide): drop just this socket from
+                            # the primary video broadcast. Capture keeps running
+                            # for everyone else, and the socket stays connected for
+                            # control, cursor, and audio. Previously this was a
+                            # silent no-op and hidden shared clients kept receiving
+                            # the full video bitrate.
+                            self.video_paused_clients.add(websocket)
+                            data_logger.info(f"STOP_VIDEO from shared client ({remote_address}): pausing its video feed.")
                             try:
                                 await websocket.send_str("VIDEO_STOPPED")
                             except (ConnectionResetError, OSError, RuntimeError):
@@ -3302,6 +3403,7 @@ class DataStreamingServer(BaseStreamingService):
         finally:
             self.last_start_video_request_times.pop(websocket, None)
             self.last_viewer_keyframe_request_times.pop(websocket, None)
+            self.video_paused_clients.discard(websocket)
             client_permissions.pop(websocket, None)
             data_logger.info(f"Cleaning up Data WS handler for {raddr} (Display ID: {client_display_id})...")
 
@@ -3776,6 +3878,9 @@ class DataStreamingServer(BaseStreamingService):
             if total_mode_str not in available_resolutions:
                 data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
                 try:
+                    # generate_xrandr_gtf_modeline memoizes on (size, refresh), so a
+                    # repeat here skips the cvt/gtf subprocess; the X mode itself may
+                    # have been dropped, so still (re)issue newmode/addmode.
                     _, modeline_params = await generate_xrandr_gtf_modeline(total_mode_str)
                     await self._run_command(["xrandr", "--newmode", total_mode_str] + modeline_params.split(), "create new mode")
                     await self._run_command(["xrandr", "--addmode", screen_name, total_mode_str], "add new mode")
@@ -3807,7 +3912,17 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.warning(f"Live re-target failed for '{did}' ({e}); restarting it.")
                         keep_ids.discard(did)
                         await self._stop_capture_for_display(did)
-            await self._run_command(["xrandr", "--fb", total_mode_str, "--output", screen_name, "--mode", total_mode_str], "set framebuffer")
+            # Skip the framebuffer/mode-set when the screen is already at the
+            # target size. A real xrandr mode change is the dominant cost of a
+            # reconfigure — it reprograms the CRTC and forces every client to
+            # repaint — so on a same-size reconnect/reload it is pure churn.
+            # (If a live re-target grew the framebuffer just above, curr_res no
+            # longer equals the target, so this correctly still runs to shrink.)
+            curr_norm = (curr_res or "").lower().replace(" ", "")
+            if curr_norm == total_mode_str:
+                data_logger.info(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
+            else:
+                await self._run_command(["xrandr", "--fb", total_mode_str, "--output", screen_name, "--mode", total_mode_str], "set framebuffer")
             data_logger.info("Defining logical monitors for the window manager...")
             for display_id, layout in layouts.items():
                 geometry = f"{layout['w']}/0x{layout['h']}/0+{layout['x']}+{layout['y']}"
@@ -3889,7 +4004,12 @@ class DataStreamingServer(BaseStreamingService):
                         for did, client_info in self.display_clients.items()
                         if did != 'primary' and client_info.get('ws')
                     }
-                    primary_viewers = self.clients - secondary_websockets
+                    # Hidden-tab clients (STOP_VIDEO) are excluded from the VIDEO
+                    # broadcast only; they stay connected for control/cursor/audio
+                    # and rejoin on START_VIDEO with a reset + IDR. (The audio
+                    # sender deliberately does NOT subtract this set.)
+                    primary_viewers = (self.clients - secondary_websockets
+                                       - self.video_paused_clients)
 
                     if not primary_viewers:
                         queue.task_done()
@@ -4157,10 +4277,10 @@ class DataStreamingServer(BaseStreamingService):
             cs.video_streaming_mode = display_state.get('video_streaming_mode', self._initial_video_streaming_mode)
             cs.video_fullframe = (encoder in ("h264enc", "openh264enc"))
             cs.use_openh264 = (encoder == "openh264enc")
-            rc_mode = display_state.get('rate_control_mode', 'crf')
+            rc_mode = display_state.get('rate_control_mode', settings.rate_control_mode)
             cs.video_cbr_mode = (rc_mode == 'cbr')
             video_bitrate = display_state.get('video_bitrate', self._initial_video_bitrate)
-            cs.video_bitrate_kbps = video_bitrate * 1000  # Convert Mbps to kbps
+            cs.video_bitrate_kbps = int(round(float(video_bitrate) * 1000))  # Convert Mbps to kbps
             # 0 = infinite GOP (on-demand keyframes only).
             cs.keyframe_interval_s = float(getattr(settings, 'keyframe_interval', 0) or 0)
             # CBR QP clamp (0 = encoder default).
@@ -4266,6 +4386,7 @@ class DataStreamingServer(BaseStreamingService):
         # Clear websockets connections FIRST so nothing re-enters
         # reconfigure_displays while the tasks below are torn down.
         self.clients.clear()
+        self.video_paused_clients.clear()
         self._report_client_presence()
         self.display_clients.clear()
 
@@ -4311,8 +4432,12 @@ class DataStreamingServer(BaseStreamingService):
         self.shutdown_event.set()
 
     def register_routes(self, api_prefix: str, main_router: web.UrlDispatcher):
-        main_router.add_get(f'{api_prefix}/websockets{{slash:/?}}', self.data_ws_handler)
-        main_router.add_post(f'{api_prefix}/tokens', self.handle_tokens)
+        # Data-plane WebSocket under /api so ONE nginx `location /api` (with the
+        # WebSocket upgrade) fronts every dynamic path — control endpoints, this
+        # data socket, and the WebRTC signaling socket alike. Nothing the browser
+        # needs is proxied outside /api anymore.
+        main_router.add_get(f'{api_prefix}/api/websockets{{slash:/?}}', self.data_ws_handler)
+        main_router.add_post(f'{api_prefix}/api/tokens', self.handle_tokens)
 
     async def handle_tokens(self, request: web.Request):
         if self.supervisor.current_mode != self.mode:

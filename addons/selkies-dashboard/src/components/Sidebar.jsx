@@ -7,6 +7,7 @@
 // src/components/Sidebar.jsx
 import { useState, useEffect, useCallback, useRef } from "react";
 import { displayLabel } from "../../../selkies-web-core/lib/util.js";
+import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import { getTranslator } from "../translations";
 import yaml from "js-yaml";
@@ -32,10 +33,11 @@ const encoderOptions = [
   "jpeg",
 ];
 
+// WebRTC encoders — must match the server's encoder_rtc allowed list (pixelflux emits
+// H.264 only; hardware-first h264enc + software openh264enc).
 const encoderOptionsWR = [
   "h264enc",
-  "nvh264enc",
-  "vp8enc",
+  "openh264enc",
 ]
 
 const rateControlOptions = ["cbr", "crf"];
@@ -66,6 +68,14 @@ const dpiScalingOptions = [
   { label: "300%", value: 288 },
 ];
 const DEFAULT_SCALING_DPI = 96;
+// scaling_dpi DEFAULT synced to the local display scaling (devicePixelRatio) so the remote
+// desktop's fonts/UI match the local environment; an explicit slider value diverges (wins).
+// Same formula as the core (selkies-wr-core autoDeriveDpi). Independent of the resolution.
+const deriveDpiFromDpr = () => {
+  const dpr = window.devicePixelRatio || 1;
+  const target = Math.round(dpr * 4) * 24;
+  return (dpr > 1 && [120, 144, 168, 192, 216, 240, 288].includes(target)) ? target : DEFAULT_SCALING_DPI;
+};
 
 const STATS_READ_INTERVAL_MS = 500;
 const MAX_AUDIO_BUFFER = 10;
@@ -94,13 +104,21 @@ const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
 
 const STREAM_MODE_WEBRTC = "webrtc";
 const STREAM_MODE_WEBSOCKETS = "websockets";
-const STREAMING_MODES= [STREAM_MODE_WEBRTC, STREAM_MODE_WEBSOCKETS]
+const STREAMING_MODES= [STREAM_MODE_WEBSOCKETS, STREAM_MODE_WEBRTC]
 const DEFAULT_STREAM_MODE = STREAM_MODE_WEBSOCKETS;
 const DEFAULT_WEBRTC_ENCODER = "h264enc";
-const DEFAULT_AUDIO_BITRATE = 128000;  // in bps
+const DEFAULT_AUDIO_BITRATE = 128000;  // in bps (global default, matches server + wish)
+// Opus target bitrate stops mirroring the server's audio_bitrate allowed enum
+// (settings.py); the fallback list before serverSettings arrives. 510k is
+// libopus's hard maximum.
+const audioBitrateOptions = [32000, 48000, 64000, 96000, 128000, 192000, 256000, 320000, 384000, 510000];
 const DEFAULT_VIDEO_BITRATE = 8;   // in mbps
 const RATE_CONTROL_CBR = "cbr";
 const RATE_CONTROL_CRF = "crf";
+
+// Sub-Mbps CBR stops for constrained links, ahead of the whole-Mbps range.
+const SUB_MBPS_BITRATE_STEPS = [0.1, 0.25, 0.5, 0.75];
+
 
 function formatBytes(bytes, decimals = 2, rawDict) {
   const zeroBytesText = rawDict?.zeroBytes || "0 Bytes";
@@ -547,6 +565,20 @@ const getPrefixedKey = (key) => {
   return prefixedKey;
 };
 
+const readStored = (key) => localStorage.getItem(getPrefixedKey(key));
+
+// Drives a conditional setting: lazy init + re-resolve whenever the server
+// settings or any dependency in `deps` changes (server-sync AND encoder/manual-
+// resolution re-derivation, uniformly). The resolver honors explicit choices,
+// so a re-resolve never clobbers a pinned value. Returns [value, setValue].
+function useConditionalSetting(spec, serverSettings, ctx, deps) {
+  const compute = () => resolveSpec(spec, serverSettings, ctx, readStored);
+  const [value, setValue] = useState(compute);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { setValue(compute()); }, deps);
+  return [value, setValue];
+}
+
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
   const [isToggleVisible, setIsToggleVisible] = useState(true);
@@ -637,6 +669,7 @@ function Sidebar() {
     newRenderable.paint_over_jpeg_quality = isRenderable('paint_over_jpeg_quality');
     newRenderable.video_crf = isRenderable('video_crf');
     newRenderable.videoPaintoverCRF = isRenderable('video_paintover_crf');
+    newRenderable.videoPaintoverBurstFrames = isRenderable('video_paintover_burst_frames');
     newRenderable.usePaintOverQuality = isRenderable('use_paint_over_quality');
     newRenderable.videoStreamingMode = isRenderable('video_streaming_mode');
     newRenderable.videoFullColor = isRenderable('video_fullcolor');
@@ -850,7 +883,9 @@ function Sidebar() {
     }
     const s_video_bitrate = serverSettings.video_bitrate;
     if (s_video_bitrate) {
-      const stored = getStoredInt("video_bitrate");
+      // Fractional Mbps (sub-Mbps stops) must not be truncated here — the init
+      // uses parseFloat, so this merge effect must too.
+      const stored = parseFloat(localStorage.getItem(getPrefixedKey("video_bitrate")));
       const final = !isNaN(stored)
         ? Math.max(s_video_bitrate.min, Math.min(s_video_bitrate.max, stored))
         : s_video_bitrate.default;
@@ -902,6 +937,14 @@ function Sidebar() {
         : s_video_paintover_crf.default;
       setVideoPaintoverCRF(final);
     }
+    const s_video_paintover_burst = serverSettings.video_paintover_burst_frames;
+    if (s_video_paintover_burst) {
+      const stored = getStoredInt("video_paintover_burst_frames");
+      const final = !isNaN(stored)
+        ? Math.max(s_video_paintover_burst.min, Math.min(s_video_paintover_burst.max, stored))
+        : s_video_paintover_burst.default;
+      setVideoPaintoverBurstFrames(final);
+    }
     const s_use_paint_over_quality = serverSettings.use_paint_over_quality;
     if (s_use_paint_over_quality) {
       const final = s_use_paint_over_quality.locked ? s_use_paint_over_quality.value : getStoredBool("use_paint_over_quality", s_use_paint_over_quality.value);
@@ -925,7 +968,10 @@ function Sidebar() {
     const s_scaling_dpi = serverSettings.scaling_dpi;
     if (s_scaling_dpi) {
       const stored = getStoredInt("scaling_dpi");
-      const final = s_scaling_dpi.allowed.includes(String(stored)) ? stored : parseInt(s_scaling_dpi.value, 10);
+      // Precedence: explicit client (stored) > explicit server (overridden) > local-scaling
+      // default. A non-overridden server value is the built-in 96, which the default replaces.
+      const final = s_scaling_dpi.allowed.includes(String(stored)) ? stored
+        : (s_scaling_dpi.overridden ? parseInt(s_scaling_dpi.value, 10) : deriveDpiFromDpr());
       setSelectedDpi(final);
     }
     const s_enable_binary_clipboard = serverSettings.enable_binary_clipboard;
@@ -938,12 +984,8 @@ function Sidebar() {
       const final = s_use_browser_cursors.locked ? s_use_browser_cursors.value : getStoredBool("use_browser_cursors", s_use_browser_cursors.value);
       setUseBrowserCursors(final);
     }
-    const s_rate_control_mode = serverSettings.rate_control_mode;
-    if (s_rate_control_mode) {
-      const stored = localStorage.getItem(getPrefixedKey("rate_control_mode"));
-      const final = s_rate_control_mode.allowed.includes(stored) ? stored : s_rate_control_mode.value;
-      setRateControlMode(final);
-    }
+    // HiDPI and rate control are conditional settings handled by their
+    // useConditionalSetting hooks (init + sync + dependency re-derivation).
     const s_ui_title = serverSettings.ui_title;
     if (s_ui_title) {
         setUiTitle(s_ui_title.value);
@@ -951,13 +993,6 @@ function Sidebar() {
     const s_ui_show_logo = serverSettings.ui_show_logo;
     if (s_ui_show_logo) {
         setUiShowLogo(s_ui_show_logo.value);
-    }
-    const s_use_css_scaling = serverSettings.use_css_scaling;
-    if (s_use_css_scaling) {
-      const authoritativeValue = localStorage.getItem(getPrefixedKey("use_css_scaling")) === 'true';
-      if (hidpiEnabled === authoritativeValue) {
-        setHidpiEnabled(!authoritativeValue);
-      }
     }
     const s_force_aligned_resolution = serverSettings.force_aligned_resolution;
     if (s_force_aligned_resolution) {
@@ -1024,7 +1059,8 @@ function Sidebar() {
     parseInt(localStorage.getItem(getPrefixedKey("audio_bitrate")), 10) || DEFAULT_AUDIO_BITRATE
   );
   const [videoBitrate, setVideoBitrate] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10) || DEFAULT_VIDEO_BITRATE
+    // Fractional Mbps values are legal (sub-Mbps stops).
+    parseFloat(localStorage.getItem(getPrefixedKey("video_bitrate"))) || DEFAULT_VIDEO_BITRATE
   );
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
   const [encoder, setEncoder] = useState(
@@ -1041,6 +1077,9 @@ function Sidebar() {
   const [videoPaintoverCRF, setVideoPaintoverCRF] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("video_paintover_crf")), 10) ||
       DEFAULT_H264_PAINTOVER_CRF
+  );
+  const [videoPaintoverBurstFrames, setVideoPaintoverBurstFrames] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("video_paintover_burst_frames")), 10) || 5
   );
   const [usePaintOverQuality, setUsePaintOverQuality] = useState(() => {
     const saved = localStorage.getItem(getPrefixedKey("use_paint_over_quality"));
@@ -1064,7 +1103,8 @@ function Sidebar() {
     localStorage.getItem(getPrefixedKey("video_streaming_mode")) === "true"
   );
   const [selectedDpi, setSelectedDpi] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")), 10) || DEFAULT_SCALING_DPI
+    // Explicit stored value diverges (wins); otherwise default to the local display scaling.
+    parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")), 10) || deriveDpiFromDpr()
   );
   const [manual_width, setManualWidth] = useState(localStorage.getItem(getPrefixedKey("manual_width")) || "");
   const [manual_height, setManualHeight] = useState(localStorage.getItem(getPrefixedKey("manual_height")) || "");
@@ -1072,10 +1112,23 @@ function Sidebar() {
     const saved = localStorage.getItem(getPrefixedKey("scaleLocallyManual"));
     return saved !== null ? saved === "true" : DEFAULT_SCALE_LOCALLY;
   });
-  const [hidpiEnabled, setHidpiEnabled] = useState(() => {
-    const saved = localStorage.getItem(getPrefixedKey("use_css_scaling"));
-    return saved !== "true";
-  });
+  // State the conditional settings read; rebuilt each render so the hooks
+  // below re-resolve against current values when their deps change.
+  const conditionalCtx = {
+    manualActive: !!readStored("manual_width") || serverSettings?.is_manual_resolution_mode?.value === true,
+    activeEncoder: (streamMode === STREAM_MODE_WEBRTC)
+      ? (readStored("encoder_rtc") || encoderRTC)
+      : (readStored("encoder") || encoder),
+    allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
+  };
+  // Each conditional setting: one hook call over a shared spec. The hook owns
+  // init + server-sync; client-driven changes (explicit toggle, or a dependency
+  // like the encoder/resolution) flow through writeConditional below, which
+  // sets state, persists, and propagates uniformly.
+  const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
+    HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [rateControlMode, setRateControlMode] = useConditionalSetting(
+    RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [forceAlignedResolution, setForceAlignedResolution] = useState(() => {
     const saved = localStorage.getItem(getPrefixedKey("force_aligned_resolution"));
     return saved !== null ? saved === "true" : false;
@@ -1092,11 +1145,6 @@ function Sidebar() {
     const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
     return saved !== null ? saved === 'true' : DEFAULT_ENABLE_BINARY_CLIPBOARD;
   });
-  const [rateControlMode, setRateControlMode] = useState(() => {
-    const saved = localStorage.getItem(getPrefixedKey("rate_control_mode"));
-    return saved !== null ? saved : "";
-  });
-  const [videoBitrateMbps, setVideoBitrateMbps] = useState(0);
   const [presetValue, setPresetValue] = useState("");
   const [clientFps, setClientFps] = useState(0);
   const [audioBuffer, setAudioBuffer] = useState(0);
@@ -1155,6 +1203,9 @@ function Sidebar() {
     initialRight: 0,
   });
   const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
+  // Audio-bitrate choices from the server's allowed enum (fallback to the local
+  // list before serverSettings); the slider below indexes into this.
+  const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v) => parseInt(v, 10))) || audioBitrateOptions;
 
   useEffect(() => {
     // Default encoder options; might be replaced with server sent options later
@@ -1173,6 +1224,22 @@ function Sidebar() {
     }, DEBOUNCE_DELAY),
     []
   );
+
+  // Uniform write path for conditional settings: optimistic setState, optional
+  // persist (explicit choices pin; derived ones don't), and propagate via the
+  // spec. `io` routes the two push channels; the specs decide which to use.
+  const conditionalIo = {
+    postSetting: (obj) => debouncedPostSetting(obj),
+    postToCore: (obj) => window.postMessage(obj, window.location.origin),
+  };
+  const writeConditional = (spec, uiValue, setValue, opts = {}) => {
+    setValue(uiValue);
+    if (opts.persist) {
+      localStorage.setItem(getPrefixedKey(spec.storageKey),
+        spec.serialize ? spec.serialize(uiValue) : String(uiValue));
+    }
+    spec.propagate(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
+  };
 
   const handleDpiScalingChange = (event) => {
     const newDpi = parseInt(event.target.value, 10);
@@ -1413,12 +1480,29 @@ function Sidebar() {
   };
   const handleEncoderChange = (event) => {
     const selectedEncoder = event.target.value;
+    // Persist the choice immediately so conditionalCtx.activeEncoder (read from
+    // localStorage) doesn't lag behind during the post debounce and let a
+    // serverSettings sync re-derive rate control off the stale encoder.
     if (streamMode === STREAM_MODE_WEBRTC) {
       setEncoderRTC(selectedEncoder);
+      localStorage.setItem(getPrefixedKey("encoder_rtc"), selectedEncoder);
+      // WebRTC uses encoder_rtc; the server switches the pipeline encoder on this.
+      debouncedPostSetting({ encoder_rtc: selectedEncoder });
     } else {
       setEncoder(selectedEncoder);
+      localStorage.setItem(getPrefixedKey("encoder"), selectedEncoder);
+      debouncedPostSetting({ encoder: selectedEncoder });
+    }
+    // Rate control follows the encoder unless pinned (explicit client/server
+    // choice). A derived change is not persisted, so it keeps following.
+    if (!isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readStored)) {
+      const rcResolved = resolveSpec(
+        RATE_CONTROL_SPEC, serverSettings,
+        { ...conditionalCtx, activeEncoder: selectedEncoder }, readStored);
+      if (rcResolved !== rateControlMode) {
+        writeConditional(RATE_CONTROL_SPEC, rcResolved, setRateControlMode, { persist: false });
       }
-    debouncedPostSetting({ encoder: selectedEncoder });
+    }
   };
   const handleFramerateChange = (event) => {
     const selectedFramerate = parseInt(event.target.value, 10);
@@ -1426,13 +1510,15 @@ function Sidebar() {
     debouncedPostSetting({ framerate: selectedFramerate });
   };
   const handleVideoBitrateChange = (event) => {
-    const selectedVideoBitrate = parseInt(event.target.value, 10);
+    // Index into the stops list (which mixes sub-Mbps and whole Mbps values).
+    const index = parseInt(event.target.value, 10);
+    const selectedVideoBitrate = videoBitrateOptions[index];
+    if (selectedVideoBitrate === undefined) return;
     setVideoBitrate(selectedVideoBitrate)
     debouncedPostSetting({ video_bitrate: selectedVideoBitrate})
   };
-  const handleAudioBitrateChange = (event) => {
+  const handleAudioBitrateChange = (selectedAudioBitrate) => {
     // Fall back to default on a non-numeric value so we never push NaN.
-    let selectedAudioBitrate = parseInt(event.target.value, 10);
     if (Number.isNaN(selectedAudioBitrate)) selectedAudioBitrate = DEFAULT_AUDIO_BITRATE;
     setAudioBitrate(selectedAudioBitrate)
     debouncedPostSetting({ audio_bitrate: selectedAudioBitrate})
@@ -1457,6 +1543,11 @@ function Sidebar() {
     setVideoPaintoverCRF(selectedCRF);
     debouncedPostSetting({ video_paintover_crf: selectedCRF });
   };
+  const handleH264PaintoverBurstChange = (event) => {
+    const selectedFrames = parseInt(event.target.value, 10);
+    setVideoPaintoverBurstFrames(selectedFrames);
+    debouncedPostSetting({ video_paintover_burst_frames: selectedFrames });
+  };
   const handleH264FullColorToggle = () => {
     const newFullColorState = !videoFullColor;
     setVideoFullColor(newFullColorState);
@@ -1478,9 +1569,8 @@ function Sidebar() {
     debouncedPostSetting({ video_streaming_mode: newStreamingModeState });
   };
   const handleRateControlChange = (event) => {
-    const selectedRateControl = event.target.value;
-    setRateControlMode(selectedRateControl);
-    debouncedPostSetting({ rate_control_mode: selectedRateControl });
+    // Explicit choice: pin it (persist) so encoder changes stop overriding.
+    writeConditional(RATE_CONTROL_SPEC, event.target.value, setRateControlMode, { persist: true });
   };
   const handleAudioInputChange = (event) => {
     const deviceId = event.target.value;
@@ -1511,10 +1601,13 @@ function Sidebar() {
           evenHeight = roundDownToEven(height);
         setManualWidth(evenWidth.toString());
         setManualHeight(evenHeight.toString());
+        localStorage.setItem(getPrefixedKey("manual_width"), evenWidth.toString());
+        localStorage.setItem(getPrefixedKey("manual_height"), evenHeight.toString());
         window.postMessage(
           { type: "setManualResolution", width: evenWidth, height: evenHeight },
           window.location.origin
         );
+        deriveHidpiForResolution(true);
       } else
         console.error(
           "Dashboard: Error parsing selected resolution preset:",
@@ -1525,10 +1618,12 @@ function Sidebar() {
   const handleManualWidthChange = (event) => {
     setManualWidth(event.target.value);
     setPresetValue("");
+    localStorage.setItem(getPrefixedKey("manual_width"), event.target.value);
   };
   const handleManualHeightChange = (event) => {
     setManualHeight(event.target.value);
     setPresetValue("");
+    localStorage.setItem(getPrefixedKey("manual_height"), event.target.value);
   };
   const handleScaleLocallyToggle = () => {
     const newState = !scaleLocally;
@@ -1538,13 +1633,17 @@ function Sidebar() {
       window.location.origin
     );
   };
+  // An explicit toggle pins the choice; the core persists useCssScaling when it
+  // applies the message.
   const handleHidpiToggle = () => {
-    const newHidpiState = !hidpiEnabled;
-    setHidpiEnabled(newHidpiState);
-    window.postMessage(
-      { type: "setUseCssScaling", value: !newHidpiState },
-      window.location.origin
-    );
+    writeConditional(HIDPI_SPEC, !hidpiEnabled, setHidpiEnabled, { persist: true });
+  };
+  // Manual/preset resolutions pair with CSS scaling: HiDPI off when one is set,
+  // on when reset — a derived write (not pinned), through the uniform path. A
+  // server lock always wins, so skip then.
+  const deriveHidpiForResolution = (manual) => {
+    if (serverSettings?.use_css_scaling?.locked) return;
+    writeConditional(HIDPI_SPEC, !manual, setHidpiEnabled, { persist: false });
   };
   const handleForceAlignedResolutionToggle = () => {
     const newState = !forceAlignedResolution;
@@ -1585,19 +1684,25 @@ function Sidebar() {
     setManualWidth(evenWidth.toString());
     setManualHeight(evenHeight.toString());
     setPresetValue("");
+    localStorage.setItem(getPrefixedKey("manual_width"), evenWidth.toString());
+    localStorage.setItem(getPrefixedKey("manual_height"), evenHeight.toString());
     window.postMessage(
       { type: "setManualResolution", width: evenWidth, height: evenHeight },
       window.location.origin
     );
+    deriveHidpiForResolution(true);
   };
   const handleResetResolution = () => {
     setManualWidth("");
     setManualHeight("");
     setPresetValue("");
+    localStorage.removeItem(getPrefixedKey("manual_width"));
+    localStorage.removeItem(getPrefixedKey("manual_height"));
     window.postMessage(
       { type: "resetResolutionToWindow" },
       window.location.origin
     );
+    deriveHidpiForResolution(false);
   };
   const handleVideoToggle = () =>
     window.postMessage(
@@ -1672,6 +1777,10 @@ function Sidebar() {
   const handleStreamModeChange = async (event) => {
     const newMode = event.target.value;
     console.log("Change of stream mode requested:", newMode);
+    // Mark the switch before asking the server to swap transports: /api/switch tears
+    // down the old peer (WS close code 4000) before it responds, so the flag must be
+    // set first or the active core surfaces a spurious "Server disconnected" alert.
+    window.__selkiesModeSwitching = true;
     try {
       // /switch is gated on the master token (Bearer) when set, or Basic creds via
       // same-origin. With Basic Auth off, the Bearer is required but the dashboard
@@ -1682,7 +1791,7 @@ function Sidebar() {
         let storedToken = null;
         try { storedToken = sessionStorage.getItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ }
         if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;
-        return fetch(`${getRoutePrefix()}/switch`, {
+        return fetch(`${getRoutePrefix()}/api/switch`, {
           method: "POST",
           headers,
           credentials: "same-origin",
@@ -1712,6 +1821,9 @@ function Sidebar() {
         window.location.origin
       );
     } catch (error) {
+        // The switch failed, so no reload follows; clear the flag or a real
+        // disconnect afterwards would be silently suppressed.
+        window.__selkiesModeSwitching = false;
         console.error("Error switching stream mode:", error);
     }
   }
@@ -1804,8 +1916,6 @@ function Sidebar() {
           return t("sections.stats.tooltipBandwidth", { value: bandwidthMbps.toFixed(2) }, `Bandwidth: ${bandwidthMbps.toFixed(2)} Mbps`);
         case "latency":
           return t("sections.stats.tooltipLatency", { value: latencyMs.toFixed(1) }, `Latency: ${latencyMs.toFixed(1)} ms`);
-        case "videobitrate":
-          return t("sections.stats.tooltipVideoBitrate", { value: videoBitrateMbps }, `Video Bitrate: ${videoBitrateMbps} Mbps`);
         default:
           return "";
       }
@@ -1821,7 +1931,6 @@ function Sidebar() {
       gpuMemTotal,
       clientFps,
       audioBuffer,
-      videoBitrateMbps,
     ]
   );
 
@@ -1887,8 +1996,6 @@ function Sidebar() {
       const netStats = window.network_stats;
       setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
       setLatencyMs(netStats?.latency_ms ?? 0);
-      const vb = window.video_bitrate;
-      setVideoBitrateMbps(vb || 0);
     };
     const intervalId = setInterval(readStats, STATS_READ_INTERVAL_MS);
     return () => clearInterval(intervalId);
@@ -2137,12 +2244,6 @@ function Sidebar() {
     gaugeRadius,
     gaugeCircumference
   );
-  const videoBitrateGaugePercent = Math.min(100, (videoBitrateMbps / videoBitrate) * 100);
-  const videoBitrateOffset = calculateGaugeOffset(
-    videoBitrateGaugePercent,
-    gaugeRadius,
-    gaugeCircumference
-  );
   const translatedCommonResolutions = commonResolutionValues.map(
     (value, index) => ({
       value: value,
@@ -2166,6 +2267,22 @@ function Sidebar() {
   const showH264Options = H264_ENCODERS.includes(activeEncoder);
   const showJpegOptions = encoder === 'jpeg';
   const showPaintOverQualityToggle = showH264Options || showJpegOptions;
+
+  // CBR stops: sub-Mbps steps for constrained links, then whole Mbps.
+  const videoBitrateOptions = (() => {
+    const min = serverSettings?.video_bitrate?.min ?? 0.1;
+    const max = serverSettings?.video_bitrate?.max ?? 100;
+    const stops = SUB_MBPS_BITRATE_STEPS.filter((v) => v >= min && v <= max);
+    for (let v = Math.max(1, Math.ceil(min)); v <= Math.floor(max); v++) stops.push(v);
+    return stops.length ? stops : [min];
+  })();
+  const bitrateSliderIndex = (() => {
+    const exact = videoBitrateOptions.indexOf(videoBitrate);
+    if (exact >= 0) return exact;
+    const above = videoBitrateOptions.findIndex((v) => v >= videoBitrate);
+    return above >= 0 ? above : videoBitrateOptions.length - 1;
+  })();
+  const formatBitrate = (v) => (v < 1 ? `${Math.round(v * 1000)} Kbps` : `${v} Mbps`);
   if (serverSettings && serverSettings.ui_show_sidebar?.value === false) {
     return null;
   }
@@ -2439,7 +2556,7 @@ function Sidebar() {
             </div>
             {sectionsOpen.settings && (
                 <div className="sidebar-section-content" id="settings-content">
-                  {(renderableSettings.enableDualMode ?? false) && !isViewerRole && (
+                  {((renderableSettings.enableDualMode ?? window.__SELKIES_DUAL_MODE__) ?? false) && !isViewerRole && (
                     <div className="dev-setting-item">
                       {" "}
                       <label htmlFor="streamModeSelect">
@@ -2539,20 +2656,20 @@ function Sidebar() {
                   <div className="dev-setting-item">
                     <label htmlFor="videoBitrateSlider">
                       {t("sections.video.bitrateLabel", {
-                        bitrate: videoBitrate,
+                        bitrate: formatBitrate(videoBitrate),
                       })}
                     </label>
                     <input
                       type="range"
                       id="videoBitrateSlider"
-                      min={serverSettings?.video_bitrate?.min || 1}
-                      max={serverSettings?.video_bitrate?.max || 100}
+                      min={0}
+                      max={videoBitrateOptions.length - 1}
                       step="1"
-                      value={videoBitrate}
+                      value={bitrateSliderIndex}
                       onChange={handleVideoBitrateChange}
                       disabled={!serverSettings || serverSettings.video_bitrate?.min === serverSettings.video_bitrate?.max}
                     />
-                  </div>  
+                  </div>
                 )}
                 {!isWebrtc && showJpegOptions && (
                   <>
@@ -2572,25 +2689,6 @@ function Sidebar() {
                           value={jpeg_quality}
                           onChange={handleJpegQualityChange}
                           disabled={!serverSettings || serverSettings.jpeg_quality?.min === serverSettings.jpeg_quality?.max}
-                        />
-                      </div>
-                    )}
-                    {(renderableSettings.paint_over_jpeg_quality ?? true) && (
-                      <div className="dev-setting-item">
-                        <label htmlFor="paintOverJpegQualitySlider">
-                          {t("sections.video.paintOverJpegQualityLabel", {
-                            paintOverJpegQuality: paint_over_jpeg_quality,
-                          })}
-                        </label>
-                        <input
-                          type="range"
-                          id="paintOverJpegQualitySlider"
-                          min={serverSettings?.paint_over_jpeg_quality?.min || 1}
-                          max={serverSettings?.paint_over_jpeg_quality?.max || 100}
-                          step="1"
-                          value={paint_over_jpeg_quality}
-                          onChange={handlePaintOverJpegQualityChange}
-                          disabled={!serverSettings || serverSettings.paint_over_jpeg_quality?.min === serverSettings.paint_over_jpeg_quality?.max}
                         />
                       </div>
                     )}
@@ -2614,7 +2712,25 @@ function Sidebar() {
                     />
                   </div>
                 )}
-                {!isWebrtc && showCRF && (renderableSettings.videoPaintoverCRF ?? true) && (
+                {/* The toggle precedes the paint-over settings it gates. */}
+                {showPaintOverQualityToggle && (renderableSettings.usePaintOverQuality ?? true) && (
+                  <div className="dev-setting-item toggle-item">
+                    <label htmlFor="usePaintOverQualityToggle">
+                      {t("sections.video.usePaintOverQualityLabel", "Use Paint-Over Quality")}
+                    </label>
+                    <button
+                      id="usePaintOverQualityToggle"
+                      className={`toggle-button-sidebar ${usePaintOverQuality ? "active" : ""}`}
+                      onClick={handleUsePaintOverQualityToggle}
+                      aria-pressed={usePaintOverQuality}
+                      disabled={!serverSettings || serverSettings.use_paint_over_quality?.locked}
+                      title={t(usePaintOverQuality ? "buttons.usePaintOverQualityDisableTitle" : "buttons.usePaintOverQualityEnableTitle")}
+                    >
+                      <span className="toggle-button-sidebar-knob"></span>
+                    </button>
+                  </div>
+                )}
+                {showCRF && usePaintOverQuality && (renderableSettings.videoPaintoverCRF ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="videoPaintoverCRFSlider">
                       {t("sections.video.paintoverCrfLabel", { crf: videoPaintoverCRF })}
@@ -2632,24 +2748,43 @@ function Sidebar() {
                     />
                   </div>
                 )}
-                {!isWebrtc && showPaintOverQualityToggle && (renderableSettings.usePaintOverQuality ?? true) && (
-                  <div className="dev-setting-item toggle-item">
-                    <label htmlFor="usePaintOverQualityToggle">
-                      {t("sections.video.usePaintOverQualityLabel", "Use Paint-Over Quality")}
+                {showH264Options && usePaintOverQuality && (renderableSettings.videoPaintoverBurstFrames ?? true) && (
+                  <div className="dev-setting-item">
+                    <label htmlFor="videoPaintoverBurstSlider">
+                      {t("sections.video.paintoverBurstLabel", { frames: videoPaintoverBurstFrames }, `Paint-over Burst Frames: ${videoPaintoverBurstFrames}`)}
                     </label>
-                    <button
-                      id="usePaintOverQualityToggle"
-                      className={`toggle-button-sidebar ${usePaintOverQuality ? "active" : ""}`}
-                      onClick={handleUsePaintOverQualityToggle}
-                      aria-pressed={usePaintOverQuality}
-                      disabled={!serverSettings || serverSettings.use_paint_over_quality?.locked}
-                      title={t(usePaintOverQuality ? "buttons.usePaintOverQualityDisableTitle" : "buttons.usePaintOverQualityEnableTitle")}
-                    >
-                      <span className="toggle-button-sidebar-knob"></span>
-                    </button>
+                    <input
+                      type="range"
+                      id="videoPaintoverBurstSlider"
+                      min={serverSettings?.video_paintover_burst_frames?.min || 1}
+                      max={serverSettings?.video_paintover_burst_frames?.max || 30}
+                      step="1"
+                      value={videoPaintoverBurstFrames}
+                      onChange={handleH264PaintoverBurstChange}
+                      disabled={!serverSettings || serverSettings.video_paintover_burst_frames?.min === serverSettings.video_paintover_burst_frames?.max}
+                    />
                   </div>
                 )}
-                {!isWebrtc && showH264Options && (renderableSettings.videoStreamingMode ?? true) && (
+                {!isWebrtc && showJpegOptions && usePaintOverQuality && (renderableSettings.paint_over_jpeg_quality ?? true) && (
+                  <div className="dev-setting-item">
+                    <label htmlFor="paintOverJpegQualitySlider">
+                      {t("sections.video.paintOverJpegQualityLabel", {
+                        paintOverJpegQuality: paint_over_jpeg_quality,
+                      })}
+                    </label>
+                    <input
+                      type="range"
+                      id="paintOverJpegQualitySlider"
+                      min={serverSettings?.paint_over_jpeg_quality?.min || 1}
+                      max={serverSettings?.paint_over_jpeg_quality?.max || 100}
+                      step="1"
+                      value={paint_over_jpeg_quality}
+                      onChange={handlePaintOverJpegQualityChange}
+                      disabled={!serverSettings || serverSettings.paint_over_jpeg_quality?.min === serverSettings.paint_over_jpeg_quality?.max}
+                    />
+                  </div>
+                )}
+                {showH264Options && (renderableSettings.videoStreamingMode ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label 
                       htmlFor="videoStreamingModeToggle"
@@ -2669,7 +2804,7 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {!isWebrtc && showH264Options && (renderableSettings.videoFullColor ?? true) && (
+                {showH264Options && (renderableSettings.videoFullColor ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="videoFullColorToggle">
                       {t("sections.video.fullColorLabel")}
@@ -2686,7 +2821,7 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {!isWebrtc && showH264Options && (renderableSettings.use_cpu ?? true) && (
+                {showH264Options && (!isWebrtc || activeEncoder === 'h264enc') && (renderableSettings.use_cpu ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="useCpuToggle">
                       {t("sections.video.useCpuLabel", "CPU Encoding")}
@@ -3003,7 +3138,7 @@ function Sidebar() {
                         </select>
                       </div>
                     )}
-                    {isWebrtc && isOutputSelectionSupported && renderableSettings.audio_bitrate && (
+                    {(renderableSettings.audio_bitrate ?? true) && (
                       <div className="dev-setting-item">
                         <label htmlFor="audioBitrateSlider">
                           {t("sections.audio.bitrateLabel", {
@@ -3013,12 +3148,12 @@ function Sidebar() {
                         <input
                           type="range"
                           id="audioBitrateSlider"
-                          min={serverSettings?.audio_bitrate?.allowed?.[0] || 64000}
-                          max={serverSettings?.audio_bitrate?.allowed?.[serverSettings.audio_bitrate.allowed.length - 1] || 320000}
-                          step="64000"
-                          value={audioBitrate}
-                          onChange={handleAudioBitrateChange}
-                          disabled={!serverSettings || serverSettings.audio_bitrate?.allowed?.length <= 1}
+                          min={0}
+                          max={audioBitrateChoices.length - 1}
+                          step={1}
+                          value={Math.max(0, audioBitrateChoices.indexOf(audioBitrate))}
+                          onChange={(e) => handleAudioBitrateChange(audioBitrateChoices[parseInt(e.target.value, 10)])}
+                          disabled={!serverSettings || (serverSettings.audio_bitrate?.allowed?.length ?? 0) <= 1}
                         />
                       </div>
                     )}
@@ -3301,56 +3436,7 @@ function Sidebar() {
                           {t("sections.stats.fpsLabel")}
                         </div>
                       </div>
-                      {isWebrtc && (<div
-                        className="gauge-container"
-                        onMouseEnter={(e) => handleMouseEnter(e, "videobitrate")}
-                        onMouseLeave={handleMouseLeave}
-                      >
-                        <svg
-                          width={gaugeSize}
-                          height={gaugeSize}
-                          viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                        >
-                          <circle
-                            stroke="var(--item-border)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter}
-                          />
-                          <circle
-                            stroke="var(--sidebar-header-color)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter}
-                            transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                            style={{
-                              strokeDasharray: gaugeCircumference,
-                              strokeDashoffset: videoBitrateOffset,
-                              transition: "stroke-dashoffset 0.3s ease-in-out",
-                              strokeLinecap: "round",
-                            }}
-                          />
-                          <text
-                            x={gaugeCenter}
-                            y={gaugeCenter}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            fontSize={`${gaugeSize / 5}px`}
-                            fill="var(--sidebar-text)"
-                            fontWeight="bold"
-                          >
-                            {videoBitrateMbps}
-                          </text>
-                        </svg>
-                        <div className="gauge-label">
-                          {t("sections.stats.videoBitrateLabel", "Video Bitrate")}
-                        </div>
-                      </div>)}
-                      {!isWebrtc && (<div
+                      {(<div
                         className="gauge-container"
                         onMouseEnter={(e) => handleMouseEnter(e, "audio")}
                         onMouseLeave={handleMouseLeave}

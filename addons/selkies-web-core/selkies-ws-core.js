@@ -280,6 +280,9 @@ if (authToken) {
     }
 }
 let sharedClientState = 'idle'; // Possible states: 'idle', 'ready', 'error'
+// Whether this shared viewer has paused its own video feed on tab-hide (the
+// server drops just this socket from the broadcast; control/cursor/audio stay).
+let sharedVideoPaused = false;
 let isSharedMode = detectedSharedModeType !== null;
 // Whether the server will accept/execute 'cmd,' messages (mirrors the server's
 // command_enabled setting). Default true so behavior is unchanged against older
@@ -381,6 +384,17 @@ const getIntParam = (key, default_value) => {
   }
   const value = window.localStorage.getItem(finalKey);
   return (value === null || value === undefined) ? default_value : parseInt(value);
+};
+// Fraction-preserving variant for values with sub-unit steps (Mbps bitrate).
+const getFloatParam = (key, default_value) => {
+  const prefixedKey = `${storageAppName}_${key}`;
+  let finalKey = prefixedKey;
+  if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
+    finalKey = `${prefixedKey}_${displayId}`;
+  }
+  const value = window.localStorage.getItem(finalKey);
+  const parsed = parseFloat(value);
+  return (value === null || value === undefined || isNaN(parsed)) ? default_value : parsed;
 };
 const setIntParam = (key, value) => {
   const prefixedKey = `${storageAppName}_${key}`;
@@ -537,7 +551,7 @@ isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
 useCssScaling = getBoolParam('useCssScaling', false);
 trackpadMode = getBoolParam('trackpadMode', false);
 rateControlMode = getStringParam('rate_control_mode', rateControlMode);
-videoBitrate = getIntParam('video_bitrate', videoBitrate);
+videoBitrate = getFloatParam('video_bitrate', videoBitrate);
 if (getStringParam('scaling_dpi', null) === null) {
   const dpr = window.devicePixelRatio || 1;
   const target = Math.round(dpr * 4) * 24;
@@ -595,7 +609,10 @@ const enableClipboard = () => {
 
 const updateStatusDisplay = () => {
   if (statusDisplayElement) {
-    statusDisplayElement.textContent = loadingText || status;
+    // Sentence-case the status word for display (internal `status` stays lower-case for
+    // comparisons): 'connecting' -> 'Connecting'. loadingText, if set, is shown as-is-cased.
+    const _statusText = loadingText || status;
+    statusDisplayElement.textContent = _statusText ? _statusText.charAt(0).toUpperCase() + _statusText.slice(1) : _statusText;
   }
 };
 
@@ -1282,7 +1299,7 @@ function getCurrentSettingsPayload() {
         ['scaling_dpi', () => getIntParam('scaling_dpi', 96)],
         ['enable_binary_clipboard', () => getBoolParam('enable_binary_clipboard', false)],
         ['rate_control_mode', () => getStringParam('rate_control_mode', 'crf')],
-        ['video_bitrate', () => getIntParam('video_bitrate', 8)],
+        ['video_bitrate', () => getFloatParam('video_bitrate', 8)],
         ['force_aligned_resolution', () => getBoolParam('force_aligned_resolution', false)],
     ];
     for (const [key, read] of storedEntries) {
@@ -1364,6 +1381,36 @@ function sendResolutionToServer(width, height) {
   }
 }
 
+// A canvas-style writer (applyManualCanvasStyle / resetCanvasStyle) re-shows the
+// canvas and rewrites its box on every resize. The present paths re-hide it and
+// re-mirror the box onto the active video sink — but only when frames flow: on a
+// static remote, a resize would otherwise leave the stale canvas (last painted
+// during warm-up) covering the live sink until the next decoded frame. When a
+// sink has proven it renders, sync it and re-hide the canvas immediately instead
+// of waiting for that frame. Covers all three sinks: main-thread MSTG and worker
+// VideoTrackGenerator (Safari/Firefox) both drive <video>; the OffscreenCanvas
+// worker drives videoWorkerCanvas. Warm-up (nothing rendered yet) is unchanged.
+function syncSinkToCanvasStyle() {
+  if (!canvas) return;
+  let target = null, rendered = false, isMstg = false;
+  if (mstgActive && videoElement) {
+    target = videoElement;
+    rendered = mstgRendered;
+    isMstg = true;
+  } else if (videoWorkerActive) {
+    target = (videoWorkerMode === 'vtg') ? videoElement : videoWorkerCanvas;
+    rendered = videoWorkerRendered;
+  }
+  if (!target) return;
+  const geom = canvas.style.cssText;   // capture while the canvas is visible
+  target.style.cssText = geom;
+  target.style.display = 'block';
+  target.style.objectFit = 'fill';
+  if (isMstg) mstgLastGeom = geom; else videoWorkerLastGeom = geom;
+  canvasGeomDirty = false;
+  if (rendered) canvas.style.display = 'none';
+}
+
 function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
   if (!canvas || !canvas.parentElement) {
     console.error("Cannot apply manual canvas style: Canvas or parent container not found.");
@@ -1434,6 +1481,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
   }
   canvas.style.display = 'block';
   updateCanvasImageRendering();
+  syncSinkToCanvasStyle();
 
   const overlayInputEl = document.getElementById('overlayInput');
   if (overlayInputEl) {
@@ -1514,6 +1562,7 @@ function resetCanvasStyle(streamWidth, streamHeight) {
   canvas.style.objectFit = 'fill';
   canvas.style.display = 'block';
   updateCanvasImageRendering();
+  syncSinkToCanvasStyle();
 
   if (window.webrtcInput && typeof window.webrtcInput.resize === 'function') {
       window.webrtcInput.resize();
@@ -1787,8 +1836,11 @@ function clearStartVideoWatchdog() {
 
 function onStartVideoWatchdogTimeout() {
   startVideoWatchdogTimer = null;
-  // Tab hidden again (the visibilitychange path owns state now) or shared mode: stand down.
-  if (document.hidden || isSharedMode) { startVideoWatchdogAttempts = 0; return; }
+  // Tab hidden again (the visibilitychange path owns state now): stand down — a
+  // backgrounded/paused client must not be forced to resend or reconnect. Shared
+  // viewers now use this watchdog too (their resume can be rate-limited by the
+  // server), so it is no longer disabled for shared mode.
+  if (document.hidden) { startVideoWatchdogAttempts = 0; return; }
   // Socket not open: the disconnect/reconnect logic elsewhere handles recovery.
   if (!websocket || websocket.readyState !== WebSocket.OPEN) { startVideoWatchdogAttempts = 0; return; }
   startVideoWatchdogAttempts++;
@@ -2946,11 +2998,9 @@ function handleSettingsMessage(settings) {
   if (settings.scaling_dpi !== undefined) {
     scalingDPI = parseInt(settings.scaling_dpi, 10);
     setIntParam('scaling_dpi', scalingDPI);
+    // DPI rides the SETTINGS payload below (server set_dpi); no separate s, command,
+    // which the WebSocket server does not act on and would only mislog.
     settingsChanged = true;
-    if (websocket && websocket.readyState === WebSocket.OPEN) {
-        console.log(`[websockets] Sending explicit DPI command: s,${scalingDPI}`);
-        websocket.send(`s,${scalingDPI}`);
-    }
   }
   if (settings.enable_binary_clipboard !== undefined) {
     enable_binary_clipboard = !!settings.enable_binary_clipboard;
@@ -2990,7 +3040,7 @@ function handleSettingsMessage(settings) {
     settingsChanged = true;
   }
   if (settings.video_bitrate !== undefined) {
-    videoBitrate = parseInt(settings.video_bitrate, 10);
+    videoBitrate = parseFloat(settings.video_bitrate);
     setIntParam('video_bitrate', videoBitrate);
     settingsChanged = true;
   }
@@ -3006,7 +3056,7 @@ function handleSettingsMessage(settings) {
 
 function fetchLatestRCvalue(newMode) {
   if (newMode === "cbr") {
-    videoBitrate = getIntParam('video_bitrate', videoBitrate);
+    videoBitrate = getFloatParam('video_bitrate', videoBitrate);
   } else if (newMode === "crf") {
     video_crf = getIntParam('video_crf', video_crf);
   }
@@ -3290,9 +3340,39 @@ function initWebsockets() {
     }, true);
   }
 
+  const clearVideoCanvasVisually = () => {
+    if (canvasContext && canvas) {
+      try {
+        canvasContext.setTransform(1, 0, 0, 1, 0, 0);
+        canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+      } catch (e) { console.error("Error clearing canvas on visibility change:", e); }
+    }
+  };
   document.addEventListener('visibilitychange', async () => {
     if (isSharedMode) {
-      console.log("Shared mode: Tab visibility changed, stream control bypassed. Current state:", document.hidden ? "hidden" : "visible");
+      // A shared viewer pauses its OWN video feed on tab-hide: the server drops
+      // just this socket from the broadcast (saving its bitrate) and resumes it
+      // with a reset+IDR on show. Control, cursor, and audio stay live. Only the
+      // video stream is toggled — sharedClientState is left alone (rAF is paused
+      // while hidden anyway, and the resume's PIPELINE_RESETTING re-readies it).
+      if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+      if (document.hidden) {
+        if (!sharedVideoPaused) {
+          sharedVideoPaused = true;
+          try { websocket.send('STOP_VIDEO'); } catch (_) {}
+          clearVideoCanvasVisually();
+          window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
+          console.log("Shared mode: tab hidden, sent STOP_VIDEO to pause this viewer's feed.");
+        }
+      } else if (sharedVideoPaused) {
+        sharedVideoPaused = false;
+        try { websocket.send('START_VIDEO'); } catch (_) {}
+        // The server replies with PIPELINE_RESETTING (re-inits the decoder) + an
+        // IDR; arm the watchdog to recover if the resume request is lost.
+        armStartVideoWatchdog();
+        window.postMessage({ type: 'pipelineStatusUpdate', video: true }, window.location.origin);
+        console.log("Shared mode: tab visible, sent START_VIDEO to resume this viewer's feed.");
+      }
       return;
     }
     if (document.hidden) {
@@ -3867,7 +3947,9 @@ function initWebsockets() {
       }
       websocketEndpointURL.search = wsParams.toString();
   }
-  websocketEndpointURL.pathname += 'websockets';
+  // Data-plane socket lives under /api (parity with the WebRTC signaling socket
+  // and the control endpoints) so a single nginx /api rule proxies everything.
+  websocketEndpointURL.pathname += 'api/websockets';
 
   websocket = new WebSocket(websocketEndpointURL.href);
   websocket.binaryType = 'arraybuffer';
@@ -3961,8 +4043,11 @@ function initWebsockets() {
       const integerSettingKeys = [
         'framerate', 'video_crf', 'audio_bitrate', 'jpeg_quality',
         'paint_over_jpeg_quality', 'video_paintover_crf',
-        'video_paintover_burst_frames', 'scaling_dpi', 'video_bitrate'
+        'video_paintover_burst_frames', 'scaling_dpi'
       ];
+      // video_bitrate (Mbps) allows sub-Mbps fractions (e.g. 0.25 = 250 Kbps);
+      // an integer parse here would truncate it to 0 on a full settings resend.
+      const floatSettingKeys = ['video_bitrate'];
 
       for (const key in localStorage) {
         if (Object.hasOwnProperty.call(localStorage, key) && key.startsWith(settingsPrefix)) {
@@ -3981,6 +4066,9 @@ function initWebsockets() {
             let value = localStorage.getItem(key);
             if (booleanSettingKeys.includes(baseKey)) {
               value = (value === 'true');
+            } else if (floatSettingKeys.includes(baseKey)) {
+              value = parseFloat(value);
+              if (isNaN(value)) continue;
             } else if (integerSettingKeys.includes(baseKey)) {
               value = parseInt(value, 10);
               if (isNaN(value)) continue;
@@ -4458,8 +4546,15 @@ function initWebsockets() {
                      websocket.send('STOP_VIDEO');
                      setTimeout(() => {
                         if (websocket && websocket.readyState === WebSocket.OPEN) {
-                            websocket.send('START_VIDEO');
-                            console.log("Shared mode: Sent START_VIDEO after initial STOP_VIDEO.");
+                            if (document.hidden) {
+                                // Hidden on (re)connect: stay paused (STOP_VIDEO
+                                // above paused the server); next tab-show resumes.
+                                sharedVideoPaused = true;
+                                console.log("Shared mode: hidden on init, leaving video paused.");
+                            } else {
+                                websocket.send('START_VIDEO');
+                                console.log("Shared mode: Sent START_VIDEO after initial STOP_VIDEO.");
+                            }
                         }
                     }, 250);
                 }
@@ -4591,8 +4686,17 @@ function initWebsockets() {
                  websocket.send('STOP_VIDEO');
                  setTimeout(() => {
                     if (websocket && websocket.readyState === WebSocket.OPEN) {
-                        websocket.send('START_VIDEO');
-                        console.log("Shared mode: Sent START_VIDEO after initial STOP_VIDEO.");
+                        if (document.hidden) {
+                            // Connected/loaded while hidden (e.g. reconnect reload
+                            // in a background tab): stay paused — the STOP_VIDEO
+                            // above already paused the server. The next tab-show
+                            // resumes via the visibilitychange handler.
+                            sharedVideoPaused = true;
+                            console.log("Shared mode: hidden on init, leaving video paused.");
+                        } else {
+                            websocket.send('START_VIDEO');
+                            console.log("Shared mode: Sent START_VIDEO after initial STOP_VIDEO.");
+                        }
                     }
                 }, 250);
             }
