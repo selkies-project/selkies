@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="IE=edge">
+    <title>Desktop Files</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        :root {
+            --page-bg: #282c34;
+            --text-color: #abb2bf;
+            --header-color: #61dafb;
+            --border-color: #3a3f47;
+            --table-header-bg: #3a3f47;
+            --table-row-hover-bg: #454b54;
+            --link-color: #61dafb;
+            --link-hover-color: #a4d9f5;
+            --shadow-color: rgba(0, 0, 0, 0.5);
+
+            --container-max-width: 960px;
+            --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            --border-radius: 8px;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: var(--font-family);
+            background-color: var(--page-bg);
+            color: var(--text-color);
+            line-height: 1.6;
+            padding-top: 20px;
+            padding-bottom: 60px;
+        }
+        .page-container {
+            max-width: var(--container-max-width);
+            margin: 0 auto;
+            padding: 0 20px;
+            position: relative;
+        }
+        h1 {
+            color: var(--header-color);
+            font-size: 2em;
+            font-weight: 300;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid var(--border-color);
+            padding-right: 50px;
+        }
+        hr {
+            display: none;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 25px;
+            font-size: 0.95em;
+            border-radius: var(--border-radius);
+            overflow: hidden;
+            box-shadow: 0 4px 10px var(--shadow-color);
+        }
+        thead {
+            background-color: var(--table-header-bg);
+        }
+        th {
+            color: var(--header-color);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85em;
+            letter-spacing: 0.05em;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+        tbody tr {
+            transition: background-color 0.2s ease-in-out;
+        }
+        tbody tr:hover {
+            background-color: var(--table-row-hover-bg);
+        }
+        tbody tr:last-child td {
+            border-bottom: none;
+        }
+        td a {
+            color: var(--link-color);
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            transition: color 0.2s ease-in-out;
+        }
+        td a:hover {
+            color: var(--link-hover-color);
+            text-decoration: underline;
+        }
+        th a {
+            color: var(--link-color);
+            text-decoration: none;
+            transition: color 0.2s ease-in-out;
+        }
+        th a:hover {
+            color: var(--link-hover-color);
+            text-decoration: underline;
+        }
+        th a:visited {
+            color: var(--link-color);
+        }
+        th a:visited:hover {
+            color: var(--link-hover-color);
+        }
+        #reload-page-button {
+            position: absolute;
+            top: 0;
+            right: 0;
+            background-color: transparent;
+            color: var(--text-color);
+            border: none;
+            border-radius: var(--border-radius);
+            padding: 8px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.2s ease-in-out, transform 0.2s ease-in-out;
+            z-index: 10;
+        }
+        #reload-page-button:hover {
+            color: var(--link-hover-color);
+            transform: rotate(45deg);
+        }
+        #reload-page-button svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+        td:nth-child(1) {
+            word-break: break-all;
+        }
+
+        td:nth-child(2), th:nth-child(2) {
+            white-space: nowrap;
+            width: 180px;
+        }
+
+        td:nth-child(3), th:nth-child(3) {
+            text-align: right;
+            white-space: nowrap;
+            width: 100px;
+        }
+        td a::before {
+            display: inline-block;
+            content: '';
+            width: 1.1em;
+            height: 1.1em;
+            margin-right: 0.75em;
+            vertical-align: middle;
+            background-repeat: no-repeat;
+            background-size: contain;
+            background-position: center;
+            flex-shrink: 0;
+        }
+        td a[href="../"]::before {
+            background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>');
+        }
+        td a[href$="/"]:not([href="../"])::before {
+            background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>');
+        }
+        td a:not([href$="/"]):not([href="../"])::before {
+            background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M14 2H6c-1.11 0-2 .9-2 2v16c0 1.1.89 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>');
+        }
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-color);
+            font-size: 0.85em;
+            color: var(--text-color);
+            opacity: 0.7;
+        }
+        footer p {
+            margin: 0;
+        }
+        @media (max-width: 768px) {
+            body {
+                font-size: 14px;
+                padding-top: 10px;
+                padding-bottom: 40px;
+            }
+            .page-container {
+                padding: 0 10px;
+            }
+            h1 {
+                font-size: 1.6em;
+                padding-right: 40px;
+            }
+            #reload-page-button {
+                top: -2px;
+                right: 0px;
+            }
+            #reload-page-button svg {
+                width: 18px;
+                height: 18px;
+            }
+            th, td {
+                padding: 10px 8px;
+            }
+            table {
+                display: block;
+                overflow-x: auto;
+                white-space: nowrap;
+                -webkit-overflow-scrolling: touch;
+            }
+            th, td {
+                white-space: nowrap;
+            }
+            td:nth-child(1) {
+                min-width: 200px;
+            }
+            td:nth-child(2), th:nth-child(2) {
+                min-width: 150px;
+                width: auto;
+            }
+            td:nth-child(3), th:nth-child(3) {
+                min-width: 80px;
+                width: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="page-container">
+        <button id="reload-page-button" title="Reload Page">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+            </svg>
+        </button>
+
+        <h1>

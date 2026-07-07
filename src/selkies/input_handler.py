@@ -1242,7 +1242,7 @@ class WebRTCInput:
     def _on_cursor_change(self, data): self.send_cursor_data(data)
     async def send_clipboard_data(self, data, mime_type="text/plain"):
         if self.rtc_app.mode != "websockets":
-            self.rtc_app.send_clipboard_data(data, mime_type)
+            await self.rtc_app.send_clipboard_data(data, mime_type)
             return
         try:
             is_text = mime_type == "text/plain"
@@ -2942,7 +2942,8 @@ class WebRTCInput:
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
         elif msg_type == "vb":
             try:
-                bitrate = int(toks[1])
+                # Mbps; fractional values carry sub-Mbps targets.
+                bitrate = float(toks[1])
                 if bitrate <= 0:
                     return
                 await self.on_video_encoder_bit_rate(bitrate)

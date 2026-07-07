@@ -24,7 +24,6 @@ import types
 import importlib
 
 # Python 2/3 compatibility.
-from six import create_unbound_method
 
 # Xlib modules
 from . import error
@@ -285,7 +284,8 @@ class Display(object):
                 if hasattr(cls, name):
                     raise AssertionError('attempting to replace %s method: %s' % (class_name, name))
 
-                method = create_unbound_method(function, cls)
+                # Plain functions are unbound methods on Python 3.
+                method = function
 
                 # Maybe should check extension overrides too
                 try:

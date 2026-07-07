@@ -16,7 +16,7 @@ import { getRoutePrefix } from './utils.js';
 // before importing selkies-core.
 async function detectInitialMode() {
   try {
-    const resp = await fetch(`${getRoutePrefix()}/status`, {
+    const resp = await fetch(`${getRoutePrefix()}/api/status`, {
       credentials: 'same-origin',
       signal: AbortSignal.timeout(2000),
     });
@@ -46,6 +46,10 @@ const playerClientModes = ['#player2', '#player3', '#player4'];
   if (!noDashboardModes.includes(currentHash)) {
     const dashboardRootElement = document.createElement('div');
     dashboardRootElement.id = 'dashboard-root';
+    // Keystrokes on dashboard controls (slider arrows, dropdown nav) drive the
+    // UI, not the game: the input core skips events whose target sits under an
+    // allow-native-input ancestor.
+    dashboardRootElement.classList.add('allow-native-input');
     document.body.appendChild(dashboardRootElement);
     const appMountPoint = document.getElementById('root');
     if (appMountPoint) {

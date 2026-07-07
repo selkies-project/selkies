@@ -92,13 +92,20 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
+# Raw bytes per data-channel message when no limit was negotiated: a 64 KiB
+# message (RFC 8841's conservative default) less envelope margin, times 3/4
+# for the base64 expansion. Deliberately NOT derived from CLIPBOARD_CHUNK_SIZE:
+# that constant tracks the 8 MiB WebSocket frame ceiling and would produce
+# multi-megabyte messages no browser's SCTP stack accepts.
+DATA_CHANNEL_FALLBACK_CHUNK_SIZE = ((65536 - 512) * 3) // 4
+
+
 def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
     """Raw-byte chunk size for base64 payloads over the data channel.
 
     Sized from the smallest max-message-size the connected peers negotiated
     (RFC 8841 a=max-message-size), less an envelope margin, times 3/4 for the
-    base64 expansion; the historical ~48 KB floor is kept as the no-information
-    fallback and a 1 MiB message ceiling bounds per-message buffering.
+    base64 expansion; a 1 MiB message ceiling bounds per-message buffering.
     """
     limit = None
     for peer in (peers or {}).values():
@@ -108,9 +115,9 @@ def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
         if nego:
             limit = nego if limit is None else min(limit, nego)
     if not limit:
-        return (CLIPBOARD_CHUNK_SIZE * 3) // 4
+        return DATA_CHANNEL_FALLBACK_CHUNK_SIZE
     usable = min(limit, 1024 * 1024) - 512
-    return max((CLIPBOARD_CHUNK_SIZE * 3) // 4, (usable * 3) // 4)
+    return max(DATA_CHANNEL_FALLBACK_CHUNK_SIZE, (usable * 3) // 4)
 
 class ClientType(str, Enum):
     CONTROLLER = "controller"
@@ -332,11 +339,11 @@ class RTCApp:
         self.__send_data_channel_message(
             "system", {"action": "videoFramerate," + str(framerate)})
 
-    def send_video_bitrate(self, bitrate: int):
+    def send_video_bitrate(self, bitrate: float):
         """Sends the current video bitrate to the data channel"""
         logger.info("sending video bitrate")
         self.__send_data_channel_message(
-            "system", {"action": "video_bitrate,%d" % bitrate})
+            "system", {"action": "video_bitrate," + str(bitrate)})
 
     def send_audio_bitrate(self, bitrate: int):
         """Sends the current audio bitrate to the data channel"""
@@ -407,12 +414,17 @@ class RTCApp:
 
         msg = {"type": msg_type, "data": data}
         payload = json.dumps(msg)
-        # Large payloads (cursor PNGs, settings, clipboard, stats) compress well;
-        # small ones aren't worth the CPU or the risk to input latency.
-        if self._gz_tx and len(payload) >= 512:
-            data_channel.send(gzip.compress(payload.encode("utf-8"), 6))
-        else:
-            data_channel.send(payload)
+        try:
+            # Large payloads (cursor PNGs, settings, clipboard, stats) compress well;
+            # small ones aren't worth the CPU or the risk to input latency.
+            if self._gz_tx and len(payload) >= 512:
+                data_channel.send(gzip.compress(payload.encode("utf-8"), 6))
+            else:
+                data_channel.send(payload)
+        except ValueError as e:
+            # Oversized for the peer's negotiated max-message-size: dropping one
+            # message and logging beats the peer hard-closing the channel.
+            logger.error("dropping oversized data channel message '%s': %s", msg_type, e)
 
     def send_media_data_over_channel(self, msg_type, data):
         self.__send_data_channel_message(msg_type, data)

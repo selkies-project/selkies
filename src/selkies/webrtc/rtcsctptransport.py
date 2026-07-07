@@ -540,8 +540,13 @@ class InboundStream:
     def __init__(self) -> None:
         self.reassembly: list[DataChunk] = []
         self.sequence_number = 0
+        # Bytes currently buffered for reassembly; the transport enforces a
+        # ceiling on this so a peer that ignores flow control cannot grow the
+        # buffer without bound (receive-side max-message-size enforcement).
+        self.buffered_bytes = 0
 
     def add_chunk(self, chunk: DataChunk) -> None:
+        self.buffered_bytes += len(chunk.user_data)
         if not self.reassembly or uint32_gt(chunk.tsn, self.reassembly[-1].tsn):
             self.reassembly.append(chunk)
             return
@@ -611,7 +616,13 @@ class InboundStream:
                 expected_tsn = tsn_plus_one(expected_tsn)
 
         if consumed_tsns:
-            self.reassembly = [c for c in self.reassembly if c.tsn not in consumed_tsns]
+            kept = []
+            for c in self.reassembly:
+                if c.tsn in consumed_tsns:
+                    self.buffered_bytes -= len(c.user_data)
+                else:
+                    kept.append(c)
+            self.reassembly = kept
 
     def prune_chunks(self, tsn: int) -> int:
         """
@@ -627,6 +638,7 @@ class InboundStream:
                 break
 
         self.reassembly = self.reassembly[pos + 1 :]
+        self.buffered_bytes -= size
         return size
 
 
@@ -658,7 +670,16 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             raise InvalidStateError
 
         super().__init__()
-        self.remote_max_message_size = 65536
+        # 256 KiB when the peer doesn't advertise a=max-message-size: Chromium
+        # answers legacy DTLS/SCTP m-lines without the attribute yet receives
+        # up to 256 KiB, and Firefox/WebKit accept more. RFC 8841's 64 KiB
+        # fallback would needlessly cap clipboard/file messages we send.
+        self.remote_max_message_size = 262144
+        # Receive-side ceiling per inbound stream: one message at our
+        # advertised max-message-size plus the full receive window a compliant
+        # peer may have in flight behind a gap. Only a peer that ignores both
+        # our advertised limit and flow control can exceed this.
+        self._max_reassembly_bytes = 262144 + 1024 * 1024
         self._association_state = self.State.CLOSED
         self.__log_debug: Callable[..., None] = lambda *args: None
         self.__started = False
@@ -779,7 +800,9 @@ class RTCSctpTransport(AsyncIOEventEmitter):
     def setTransport(self, transport: RTCDtlsTransport) -> None:
         self.__transport = transport
 
-    async def start(self, remoteCaps: RTCSctpCapabilities, remotePort: int) -> None:
+    async def start(
+        self, remoteCaps: Optional[RTCSctpCapabilities], remotePort: int
+    ) -> None:
         """
         Start the transport.
         """
@@ -787,9 +810,11 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             self.__started = True
             self.__state = "connecting"
             self._remote_port = remotePort
-            # The peer's a=max-message-size bounds what we may send in one message;
-            # absent from the SDP, RFC 8841's 64 KiB default applies.
-            if remoteCaps.maxMessageSize > 0:
+            # The peer's a=max-message-size bounds what we may send in one
+            # message; absent from the SDP (None caps — Chromium answers
+            # legacy DTLS/SCTP m-lines without it), keep the 256 KiB default
+            # every supported browser accepts.
+            if remoteCaps is not None and remoteCaps.maxMessageSize > 0:
                 self.remote_max_message_size = remoteCaps.maxMessageSize
 
             # configure logging
@@ -1147,6 +1172,16 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         # defragment data
         inbound_stream.add_chunk(chunk)
         self._advertised_rwnd -= len(chunk.user_data)
+        if inbound_stream.buffered_bytes > self._max_reassembly_bytes:
+            # The peer ignored our advertised max-message-size and flow
+            # control; abort instead of buffering without bound.
+            logger.warning(
+                "RTCSctpTransport aborting: stream %d reassembly exceeded %d bytes",
+                chunk.stream_id,
+                self._max_reassembly_bytes,
+            )
+            await self.stop()
+            return
         for message in inbound_stream.pop_messages():
             self._advertised_rwnd += len(message[2])
             await self._receive(*message)
@@ -1878,6 +1913,14 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             pp_id, user_data = WEBRTC_BINARY_EMPTY, b"\x00"
         else:
             pp_id, user_data = WEBRTC_BINARY, data
+
+        # Mirror browser RTCDataChannel.send(): refuse messages the peer
+        # declared it cannot receive instead of letting it kill the channel.
+        if len(user_data) > self.remote_max_message_size:
+            raise ValueError(
+                f"Cannot send {len(user_data)} bytes: exceeds the peer's "
+                f"maximum message size of {self.remote_max_message_size} bytes"
+            )
 
         channel._addBufferedAmount(len(user_data))
         self._data_channel_queue.append((channel, pp_id, user_data))

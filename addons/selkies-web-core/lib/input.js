@@ -1262,6 +1262,14 @@ export class Input {
         this.element.style.setProperty('cursor', `url("${cursorDataUrl}") ${this._rawHotspotX} ${this._rawHotspotY}, default`, 'important');
     }
 
+    // Decode the base64 cursor PNG inline rather than fetch()ing a data: URL:
+    // the cursor path is hot and needs no Response machinery (and no request
+    // sink for scanners to misread as SSRF).
+    _cursorBitmapFromBase64(b64) {
+        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        return createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+    }
+
     async updateServerCursor(cursorData) {
         if (!cursorData.curdata ||
             parseInt(cursorData.handle, 10) === 0 ||
@@ -1287,8 +1295,7 @@ export class Input {
             this.cursorDiv.style.display = 'none';
             this._updateBrowserCursor();
         } else {
-            const blob = await (await fetch(`data:image/png;base64,${this._cursorBase64Data}`)).blob();
-            this._cursorImageBitmap = await createImageBitmap(blob);
+            this._cursorImageBitmap = await this._cursorBitmapFromBase64(this._cursorBase64Data);
             this.element.style.setProperty('cursor', 'none', 'important');
             this.cursorDiv.style.display = 'block';
             this._drawAndScaleCursor();
@@ -1740,6 +1747,13 @@ export class Input {
             event.preventDefault();
             return;
         }
+        // Fullscreen must hold pointer lock: re-arm it when a click lands on
+        // the stream after an in-fullscreen Escape unlock. The click itself
+        // still goes to the server.
+        if (down && event.button === 0 &&
+            !(canvas !== null && document.pointerLockElement === canvas)) {
+            this._armPointerLock();
+        }
         if ((this.element != null && document.pointerLockElement === this.element) || (canvas !== null && document.pointerLockElement === canvas)) {
             mtype = "m2";
             let movementX_logical = event.movementX || 0;
@@ -2126,8 +2140,7 @@ export class Input {
         } else {
             this.element.style.setProperty('cursor', 'none', 'important');
             if (this._cursorBase64Data && !this._cursorImageBitmap) {
-                const blob = await (await fetch(`data:image/png;base64,${this._cursorBase64Data}`)).blob();
-                this._cursorImageBitmap = await createImageBitmap(blob);
+                this._cursorImageBitmap = await this._cursorBitmapFromBase64(this._cursorBase64Data);
             }
             if (this._cursorImageBitmap) {
                 this.cursorDiv.style.display = 'block';
@@ -2515,7 +2528,11 @@ export class Input {
     }
 
     _pointerLock() {
-        if (document.pointerLockElement === this.element) {
+        // The lock can land on the ws-core canvas (Ctrl-Shift-Click on it)
+        // instead of the overlay element; both count as "stream locked".
+        const canvas = document.getElementById('videoCanvas');
+        if (document.pointerLockElement === this.element ||
+            (canvas !== null && document.pointerLockElement === canvas)) {
             this.send("p,1");
             this.send("SET_NATIVE_CURSOR_RENDERING,1");
         } else {
@@ -2612,19 +2629,46 @@ export class Input {
         }
     }
 
+    /**
+     * True when the active fullscreen element hosts the stream (the video
+     * container, or the whole document via a dashboard's browser-fullscreen
+     * control) — every such fullscreen must hold pointer lock.
+     */
+    _isStreamFullscreen() {
+        const fsElement = document.fullscreenElement;
+        return fsElement !== null && fsElement.contains(this.element);
+    }
+
+    /**
+     * Acquire pointer lock for the fullscreen stream. Chrome rejects a
+     * request made while the fullscreen transition is still settling
+     * (WrongDocumentError), so retry over a few short intervals.
+     */
+    _armPointerLock(attempt = 0) {
+        if (this.isSharedMode || !this._isStreamFullscreen()) return;
+        if (document.pointerLockElement === this.element) return;
+        this.element.requestPointerLock().catch((err) => {
+            if (attempt < 5) {
+                setTimeout(() => this._armPointerLock(attempt + 1), 60);
+            } else {
+                console.warn("Pointer lock failed on fullscreen:", err);
+            }
+        });
+    }
+
     _onFullscreenChange() {
-        if (document.fullscreenElement === this.element.parentElement) {
-            if (document.pointerLockElement !== this.element) {
-                this.element.requestPointerLock().catch(err => console.warn("Pointer lock failed on fullscreen:", err));
+        if (this._isStreamFullscreen()) {
+            if (!this.isSharedMode) {
+                this._armPointerLock();
+                this.requestKeyboardLock();
             }
-            this.requestKeyboardLock();
-        } else {
-            if (document.pointerLockElement === this.element) {
-                document.exitPointerLock();
-            }
-            this.send("kr");
-            this.resetKeyboard();
+        } else if (document.pointerLockElement === this.element) {
+            document.exitPointerLock();
         }
+        // A fullscreen transition can eat keyups (held Escape on exit, the
+        // Ctrl-Shift-F chord on entry): release everything on both sides.
+        this.send("kr");
+        this.resetKeyboard();
     }
 
     _targetHasClass(target, className) {
@@ -2728,10 +2772,8 @@ export class Input {
         this.listeners_context.push(addListener(window, 'mousemove', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(window, 'mouseup', this._mouseButtonMovement, this));
 
-        if (document.fullscreenElement === this.element.parentElement) {
-             if (document.pointerLockElement !== this.element) {
-                this.element.requestPointerLock().catch(()=>{});
-             }
+        if (this._isStreamFullscreen()) {
+             this._armPointerLock();
              this.requestKeyboardLock();
         } else if (document.pointerLockElement === this.element) {
              this._pointerLock();
@@ -2773,7 +2815,9 @@ export class Input {
      * Sends WebRTC app command to hide the remote pointer when exiting pointer lock.
      */
     _exitPointerLock() {
-        if (document.pointerLockElement === this.element) {
+        const canvas = document.getElementById('videoCanvas');
+        if (document.pointerLockElement === this.element ||
+            (canvas !== null && document.pointerLockElement === canvas)) {
             document.exitPointerLock();
             // hide the pointer.
             this.send("p,0");
@@ -2782,11 +2826,20 @@ export class Input {
     }
 
     enterFullscreen() {
-        if (this.element.parentElement && document.fullscreenElement === null) {
-            this.element.parentElement.requestFullscreen()
+        // Fullscreen the whole document, not just the stream container: the
+        // dashboard overlay is a body-level sibling of the container, so
+        // container fullscreen would hide the menu/settings/toggle entirely.
+        // Whole-document keeps them reachable and doesn't change pointer lock
+        // or keyboard-lock (long-press-Escape) behavior, which are independent
+        // of the fullscreened element.
+        // A lock requested before the transition would be cancelled by it; the
+        // fullscreenchange handler arms it once fullscreen lands (still inside
+        // the gesture's transient-activation window).
+        if (document.fullscreenElement === null) {
+            document.documentElement.requestFullscreen()
                 .catch(err => console.error("Fullscreen request failed:", err));
-        } else if (document.fullscreenElement !== null && document.pointerLockElement !== this.element) {
-             this.element.requestPointerLock().catch(()=>{});
+        } else {
+            this._armPointerLock();
         }
     }
 

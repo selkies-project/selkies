@@ -79,7 +79,7 @@ class MediaPipeline(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def set_video_bitrate(self, bitrate: int):
+    async def set_video_bitrate(self, bitrate: float):
         pass
 
     @abstractmethod
@@ -105,7 +105,7 @@ class MediaPipelinePixel(MediaPipeline):
         async_event_loop: asyncio.AbstractEventLoop,
         encoder_rtc: str,
         framerate: int = 30,
-        video_bitrate: int = 8,
+        video_bitrate: float = 8,
         audio_bitrate: int = 128000,
         width: int = 1920,
         height: int = 1080,
@@ -216,10 +216,10 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.info(f"Error updating CRF {e}", exc_info=True)
 
-    async def set_video_bitrate(self, bitrate: int):
+    async def set_video_bitrate(self, bitrate: float):
         """Set video encoder target bitrate.
 
-        :bitrate: bitrate in mbps
+        :bitrate: bitrate in mbps (fractions allowed for sub-Mbps targets)
         """
         if not self._is_screen_capturing or self.capture_module is None:
             return
@@ -233,7 +233,7 @@ class MediaPipelinePixel(MediaPipeline):
 
         try:
             # Non-blocking in pixelflux (atomic store / channel send).
-            self.capture_module.update_video_bitrate(bitrate * 1000)
+            self.capture_module.update_video_bitrate(int(round(bitrate * 1000)))
             logger.info(
                 f"Updated video bitrate: {self.video_bitrate}Mbps -> {bitrate}Mbps"
             )
@@ -316,7 +316,7 @@ class MediaPipelinePixel(MediaPipeline):
             cs.video_fullcolor = self.video_fullcolor
             # Setting video_cbr_mode to True will make the encoder ignore the crf value
             cs.video_cbr_mode = self.rc_mode == RateControlMode.CBR
-            cs.video_bitrate_kbps = self.video_bitrate * 1000  # Convert Mbps to kbps
+            cs.video_bitrate_kbps = int(round(float(self.video_bitrate) * 1000))  # Convert Mbps to kbps
             if self.encoder_rtc == "openh264enc":
                 cs.use_cpu = True
                 cs.use_openh264 = True

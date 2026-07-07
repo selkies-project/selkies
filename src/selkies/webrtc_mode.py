@@ -62,7 +62,7 @@ def get_server_settings() -> dict:
     server_settings_payload = {"settings": {}}
     for setting_def in SETTING_DEFINITIONS:
         name = setting_def["name"]
-        if name in ["port", "encode_dri", "debug", "audio_device_name", "watermark_path", "recording_socket", "file_manager_path", "run_after_connect", "run_after_disconnect"]:
+        if name in ["port", "addr", "web_root", "encode_dri", "debug", "audio_device_name", "watermark_path", "recording_socket", "file_manager_path", "run_after_connect", "run_after_disconnect"]:
             continue
         # Never broadcast secrets/credentials (master_token, passwords, TURN
         # secrets, etc.) to clients.
@@ -74,6 +74,12 @@ def get_server_settings() -> dict:
             payload_entry = {"value": bool_val, "locked": is_locked}
         else:
             payload_entry = {"value": value}
+
+        # Whether this value came from an explicit CLI/env choice (vs the
+        # built-in default). The client uses it to decide if a conditional
+        # default (e.g. HiDPI-off when a manual resolution is set) should
+        # apply or defer to the operator's explicit setting.
+        payload_entry["overridden"] = bool(settings._overridden.get(name, False))
 
         if setting_def["type"] == "range":
             payload_entry["min"], payload_entry["max"] = value
@@ -173,7 +179,9 @@ class WebRTCService(BaseStreamingService):
             async_event_loop=asyncio.get_running_loop(),
             encoder_rtc=self.args.encoder_rtc,
             framerate=int(self.args.framerate),
-            video_bitrate=int(self.args.video_bitrate),
+            # Mbps; fractional for sub-Mbps targets (kbps conversion happens
+            # at the capture-settings boundary).
+            video_bitrate=float(self.args.video_bitrate),
             audio_bitrate=int(self.args.audio_bitrate),
             audio_channels=int(self.args.audio_channels),
             audio_enabled=self.args.audio_enabled,
@@ -424,7 +432,7 @@ class WebRTCService(BaseStreamingService):
         except Exception as e:
             logger.warning(f"Failed to send current cursor to client: {e}")
 
-    async def handle_video_bitrate_change(self, bitrate: int) -> None:
+    async def handle_video_bitrate_change(self, bitrate: float) -> None:
         """Handle video bitrate change request."""
         if self.media_pipeline:
             await self.media_pipeline.set_video_bitrate(bitrate)
@@ -586,8 +594,13 @@ class WebRTCService(BaseStreamingService):
             try:
                 if setting_def["type"] == "range":
                     min_val, max_val = server_limit
-                    sanitized = max(min_val, min(int(client_value), max_val))
-                    if sanitized != int(client_value):
+                    # Fractional values are legal (sub-Mbps bitrates); keep
+                    # integral values as ints. Mirrors the websockets twin.
+                    numeric = float(client_value)
+                    if numeric.is_integer():
+                        numeric = int(numeric)
+                    sanitized = max(min_val, min(numeric, max_val))
+                    if sanitized != numeric:
                         logger.warning(
                             f"Client value for '{name}' ({client_value}) was clamped to {sanitized} (server range: {min_val}-{max_val})."
                         )
@@ -715,15 +728,18 @@ class WebRTCService(BaseStreamingService):
                 worst_loss = max(worst_loss, estimate.get("loss_fraction", 0.0))
             if not goodputs:
                 continue
-            current = int(pipeline.video_bitrate)
+            current = float(pipeline.video_bitrate)
             if worst_loss > 0.10:
-                target = int(current * 0.7)
+                target = current * 0.7
             else:
-                target = int(min(goodputs) * 0.85 / 1_000_000)
-            target = max(int(lo_mbps), min(int(hi_mbps), target))
-            if target != current:
+                target = min(goodputs) * 0.85 / 1_000_000
+            # Clamp to the allowed range and steer at kbps precision (what
+            # set_video_bitrate applies). Float math throughout so a sub-Mbps CBR
+            # target or a sub-Mbps range cap isn't truncated to 0 Mbps.
+            target = round(max(lo_mbps, min(hi_mbps, target)), 3)
+            if target != round(current, 3):
                 logger.info(
-                    f"Congestion control: video bitrate {current} -> {target} Mbps "
+                    f"Congestion control: video bitrate {current:g} -> {target:g} Mbps "
                     f"(goodput {min(goodputs) / 1e6:.1f} Mbps, loss {worst_loss:.1%})"
                 )
                 await pipeline.set_video_bitrate(target)

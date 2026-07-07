@@ -643,18 +643,18 @@ class CentralizedStreamServer:
             else ""
         )
         # Health/liveness endpoints stay open so k8s/LB probes reach them without credentials.
-        if path in (f"{api_prefix}/status", f"{api_prefix}/health"):
+        if path in (f"{api_prefix}/api/status", f"{api_prefix}/api/health"):
             return await handler(request)
-        token_path = path == f"{api_prefix}/tokens"
+        token_path = path == f"{api_prefix}/api/tokens"
         # Gate /tokens on the master token whenever set, independent of streaming mode.
         if settings.master_token and token_path:
             if not self._check_master_token(auth_header, settings.master_token):
                 return web.Response(status=401, text="Unauthorized")
             return await handler(request)
 
-        # /switch (when master_token set): accept a Bearer master token, else fall
+        # /api/switch (when master_token set): accept a Bearer master token, else fall
         # through to the Basic check if Basic Auth is on, else 401.
-        is_control_path = path == f"{api_prefix}/switch"
+        is_control_path = path == f"{api_prefix}/api/switch"
         if settings.master_token and is_control_path:
             if self._check_master_token(auth_header, settings.master_token):
                 return await handler(request)
@@ -994,15 +994,17 @@ class CentralizedStreamServer:
         if api_prefix:
             logger.info(f"Prepending api prefix: {api_prefix!r} to router handlers")
 
+        # All control-plane endpoints live under /api so a fronting proxy can
+        # route them — present and future — with a single rule.
         routes = [
-            web.get(f"{api_prefix}/status", self.handle_status),
-            web.get(f"{api_prefix}/health", self.handle_health),
-            web.post(f"{api_prefix}/switch", self.handle_switch),
+            web.get(f"{api_prefix}/api/status", self.handle_status),
+            web.get(f"{api_prefix}/api/health", self.handle_health),
+            web.post(f"{api_prefix}/api/switch", self.handle_switch),
         ]
         # The Prometheus registry is process-global, so one mode-agnostic
         # endpoint serves both streaming modes.
         if self.settings.enable_metrics_http[0]:
-            routes.append(web.get(f"{api_prefix}/metrics", self.handle_metrics))
+            routes.append(web.get(f"{api_prefix}/api/metrics", self.handle_metrics))
         self.app.add_routes(routes)
 
         # Register service routes
