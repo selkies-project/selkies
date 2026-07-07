@@ -1720,6 +1720,14 @@ class DataStreamingServer(BaseStreamingService):
             v = settings_data.get(k)
             return int(v) if v is not None else None
 
+        def get_number(k):
+            # int when integral, float otherwise (sub-Mbps bitrates).
+            v = settings_data.get(k)
+            if v is None:
+                return None
+            value = float(v)
+            return int(value) if value.is_integer() else value
+
         def get_bool(k):
             v = settings_data.get(k)
             return str(v).lower() == "true" if v is not None else None
@@ -1761,7 +1769,7 @@ class DataStreamingServer(BaseStreamingService):
         parsed["displayId"] = get_str("displayId") or "primary"
         parsed["displayPosition"] = get_str("displayPosition")
         parsed["rate_control_mode"] = get_str("rate_control_mode")
-        parsed["video_bitrate"] = get_int("video_bitrate")
+        parsed["video_bitrate"] = get_number("video_bitrate")
         parsed["force_aligned_resolution"] = get_bool("force_aligned_resolution")
         # Client advertises Opus+RED de-RED capability for the WS audio path.
         parsed["audioRedundancy"] = get_bool("audioRedundancy")
@@ -1802,8 +1810,13 @@ class DataStreamingServer(BaseStreamingService):
             try:
                 if setting_def['type'] == 'range':
                     min_val, max_val = server_limit
-                    sanitized = max(min_val, min(int(client_value), max_val))
-                    if sanitized != int(client_value):
+                    # Fractional values are legal (sub-Mbps bitrates); keep
+                    # integral values as ints.
+                    numeric = float(client_value)
+                    if numeric.is_integer():
+                        numeric = int(numeric)
+                    sanitized = max(min_val, min(numeric, max_val))
+                    if sanitized != numeric:
                         data_logger.warning(f"Client value for '{name}' ({client_value}) was clamped to {sanitized} (server range: {min_val}-{max_val}).")
                     return sanitized
                 elif setting_def['type'] == 'enum':
@@ -2004,7 +2017,7 @@ class DataStreamingServer(BaseStreamingService):
                                 'x': 0, 'y': 0,
                             }
                             module.update_framerate(float(display_state.get('framerate') or self.app.framerate))
-                            module.update_video_bitrate(int(display_state.get('video_bitrate') or 0) * 1000)
+                            module.update_video_bitrate(int(round(float(display_state.get('video_bitrate') or 0) * 1000)))
                             module.update_tunables(self._get_capture_settings(
                                 display_id, layout['w'], layout['h'], layout['x'], layout['y']
                             ))
@@ -2141,7 +2154,7 @@ class DataStreamingServer(BaseStreamingService):
         server_settings_payload = {"type": "server_settings", "settings": {}}
         for setting_def in SETTING_DEFINITIONS:
             name = setting_def['name']
-            if name in ['port', 'encode_dri', 'debug', 'audio_device_name', 'watermark_path', 'recording_socket', 'file_manager_path', 'run_after_connect', 'run_after_disconnect']:
+            if name in ['port', 'addr', 'web_root', 'encode_dri', 'debug', 'audio_device_name', 'watermark_path', 'recording_socket', 'file_manager_path', 'run_after_connect', 'run_after_disconnect']:
                 continue
             # Never broadcast secrets/credentials (master_token, passwords, TURN
             # secrets, etc.) to clients.
@@ -2153,6 +2166,12 @@ class DataStreamingServer(BaseStreamingService):
                 payload_entry = {'value': bool_val, 'locked': is_locked}
             else:
                 payload_entry = {'value': value}
+
+            # Whether this value came from an explicit CLI/env choice (vs the
+            # built-in default). The client uses it to decide if a conditional
+            # default (e.g. HiDPI-off when a manual resolution is set) should
+            # apply or defer to the operator's explicit setting.
+            payload_entry['overridden'] = bool(settings._overridden.get(name, False))
 
             if setting_def['type'] == 'range':
                 payload_entry['min'], payload_entry['max'] = value
@@ -4157,10 +4176,10 @@ class DataStreamingServer(BaseStreamingService):
             cs.video_streaming_mode = display_state.get('video_streaming_mode', self._initial_video_streaming_mode)
             cs.video_fullframe = (encoder in ("h264enc", "openh264enc"))
             cs.use_openh264 = (encoder == "openh264enc")
-            rc_mode = display_state.get('rate_control_mode', 'crf')
+            rc_mode = display_state.get('rate_control_mode', settings.rate_control_mode)
             cs.video_cbr_mode = (rc_mode == 'cbr')
             video_bitrate = display_state.get('video_bitrate', self._initial_video_bitrate)
-            cs.video_bitrate_kbps = video_bitrate * 1000  # Convert Mbps to kbps
+            cs.video_bitrate_kbps = int(round(float(video_bitrate) * 1000))  # Convert Mbps to kbps
             # 0 = infinite GOP (on-demand keyframes only).
             cs.keyframe_interval_s = float(getattr(settings, 'keyframe_interval', 0) or 0)
             # CBR QP clamp (0 = encoder default).
@@ -4312,7 +4331,7 @@ class DataStreamingServer(BaseStreamingService):
 
     def register_routes(self, api_prefix: str, main_router: web.UrlDispatcher):
         main_router.add_get(f'{api_prefix}/websockets{{slash:/?}}', self.data_ws_handler)
-        main_router.add_post(f'{api_prefix}/tokens', self.handle_tokens)
+        main_router.add_post(f'{api_prefix}/api/tokens', self.handle_tokens)
 
     async def handle_tokens(self, request: web.Request):
         if self.supervisor.current_mode != self.mode:

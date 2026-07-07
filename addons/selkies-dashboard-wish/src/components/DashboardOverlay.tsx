@@ -9,6 +9,7 @@ import ReactDOM from 'react-dom';
 import { TopMenu } from './dashboard/top-menu';
 import { Gamepad } from './dashboard/gamepad';
 import { TooltipProvider } from './ui/tooltip';
+import { isSecondaryDisplay } from '../utils';
 import '../styles/Overlay.css';
 
 interface DashboardOverlayProps {
@@ -21,6 +22,7 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
   const [isVideoActive, setIsVideoActive] = useState<boolean>(true);
   const [isAudioActive, setIsAudioActive] = useState<boolean>(true);
   const [isMicrophoneActive, setIsMicrophoneActive] = useState<boolean>(false);
+  const [isViewer, setIsViewer] = useState<boolean>(false);
 
   // Add message event listener for status updates
   React.useEffect(() => {
@@ -32,6 +34,9 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
           if (message.video !== undefined) setIsVideoActive(message.video);
           if (message.audio !== undefined) setIsAudioActive(message.audio);
           if (message.microphone !== undefined) setIsMicrophoneActive(message.microphone);
+        } else if (message.type === 'clientRoleUpdate') {
+          // Read-only viewers get no control UI.
+          setIsViewer(message.role === 'viewer');
         } else if (message.type === 'sidebarButtonStatusUpdate') {
           if (message.video !== undefined) setIsVideoActive(message.video);
           if (message.audio !== undefined) setIsAudioActive(message.audio);
@@ -76,7 +81,8 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
       if (event.ctrlKey && event.shiftKey && event.key === "F") {
         event.preventDefault();
         if (!document.fullscreenElement) {
-          document.documentElement.requestFullscreen();
+          // The core fullscreens the stream container (pointer-lock aware).
+          window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
         }
       }
 
@@ -84,21 +90,6 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
         event.preventDefault();
         setShowStats((prev) => !prev);
       }
-
-      let escapeTimer: NodeJS.Timeout;
-      if (event.key === "Escape") {
-        escapeTimer = setTimeout(() => {
-          if (document.fullscreenElement) {
-            document.documentElement.requestFullscreen();
-          }
-        }, 500);
-      }
-
-      return () => {
-        if (escapeTimer) {
-          clearTimeout(escapeTimer);
-        }
-      };
     };
 
     window.addEventListener("keydown", handleKeyDown);
@@ -113,8 +104,8 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
     <TooltipProvider>
       <div className="h-screen w-screen">
         {/* Top Menu as primary navigation */}
-        {showStats && (
-          <TopMenu 
+        {showStats && !isViewer && (
+          <TopMenu
             isVideoActive={isVideoActive}
             isAudioActive={isAudioActive}
             isMicrophoneActive={isMicrophoneActive}
@@ -127,8 +118,8 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
           />
         )}
         
-        {/* Gamepad component */}
-        {isGamepadEnabled && (
+        {/* Gamepad component (input is owned by the primary display) */}
+        {isGamepadEnabled && !isSecondaryDisplay && (
           <Gamepad isGamepadEnabled={isGamepadEnabled} onGamepadToggle={setIsGamepadEnabled} />
         )}
       </div>

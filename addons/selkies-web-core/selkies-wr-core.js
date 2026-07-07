@@ -28,7 +28,9 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import ClipboardWorker from './clipboard-worker.js?worker'
+// Inline (base64 blob) so the worker travels inside selkies-core.js itself —
+// no separate hashed file to place next to whichever chunk references it.
+import ClipboardWorker from './clipboard-worker.js?worker&inline'
 
 // Base64 so paths survive the ',' and ':' delimiters in FILE_UPLOAD messages.
 function b64Path(p) {
@@ -334,6 +336,12 @@ export default function webrtc() {
 	let clientRole = null;
 	let clientSlot = null;
 
+	// Render/input preferences shared with the websockets core (same
+	// localStorage keys, same dashboard messages).
+	let antiAliasingEnabled = true;
+	let trackpadMode = false;
+	let useBrowserCursors = false;
+
 	let enable_binary_clipboard = false;
 	let multipartClipboard = {
 		chunks: [],
@@ -398,6 +406,13 @@ export default function webrtc() {
 		const prefixedKey = `${storageAppName}_${key}`;
 		const value = window.localStorage.getItem(prefixedKey);
 		return (value === null || value === undefined) ? default_value : parseInt(value);
+	};
+	// Fraction-preserving variant for values with sub-unit steps (Mbps bitrate).
+	const getFloatParam = (key, default_value) => {
+		const prefixedKey = `${storageAppName}_${key}`;
+		const value = window.localStorage.getItem(prefixedKey);
+		const parsed = parseFloat(value);
+		return (value === null || value === undefined || isNaN(parsed)) ? default_value : parsed;
 	};
 	const setIntParam = (key, value) => {
 		const prefixedKey = `${storageAppName}_${key}`;
@@ -521,6 +536,14 @@ export default function webrtc() {
 	function updateVideoImageRendering(){
 		if (!videoElement) return;
 
+		if (!antiAliasingEnabled) {
+			// Same contract as the websockets core: anti-aliasing off forces
+			// sharp pixels regardless of scaling.
+			if (videoElement.style.imageRendering !== 'pixelated') {
+				videoElement.style.imageRendering = 'pixelated';
+			}
+			return;
+		}
 		const dpr = window.devicePixelRatio || 1;
 		const isOneToOne = !useCssScaling || (useCssScaling && dpr <= 1);
 		if (isOneToOne) {
@@ -970,6 +993,54 @@ export default function webrtc() {
 					applyOutputDevice();
 				}
 				break;
+			case 'requestFullscreen':
+				// Parity with the websockets core: fullscreen the stream container
+				// (pointer-lock aware) rather than the whole document.
+				if (input) {
+					input.enterFullscreen();
+				} else if (document.fullscreenElement === null) {
+					document.documentElement.requestFullscreen().catch(() => {});
+				}
+				break;
+			case 'setSynth':
+				if (input && typeof input.setSynth === 'function') {
+					input.setSynth(message.value);
+				}
+				break;
+			case 'setAntiAliasing':
+				if (typeof message.value === 'boolean') {
+					antiAliasingEnabled = message.value;
+					setBoolParam('antiAliasingEnabled', antiAliasingEnabled);
+					updateVideoImageRendering();
+				} else {
+					console.warn("Invalid value received for setAntiAliasing:", message.value);
+				}
+				break;
+			case 'setUseBrowserCursors':
+				if (typeof message.value === 'boolean') {
+					useBrowserCursors = message.value;
+					setBoolParam('use_browser_cursors', useBrowserCursors);
+					if (input && typeof input.setUseBrowserCursors === 'function') {
+						input.setUseBrowserCursors(useBrowserCursors);
+					}
+				} else {
+					console.warn("Invalid value received for setUseBrowserCursors:", message.value);
+				}
+				break;
+			case 'touchinput:trackpad':
+				if (input && typeof input.setTrackpadMode === 'function') {
+					trackpadMode = true;
+					setBoolParam('trackpadMode', true);
+					input.setTrackpadMode(true);
+				}
+				break;
+			case 'touchinput:touch':
+				if (input && typeof input.setTrackpadMode === 'function') {
+					trackpadMode = false;
+					setBoolParam('trackpadMode', false);
+					input.setTrackpadMode(false);
+				}
+				break;
 			default:
 				break;
 		}
@@ -977,7 +1048,7 @@ export default function webrtc() {
 
 	function handleSettingsMessage(settings) {
 		if (settings.video_bitrate !== undefined) {
-			videoBitRate = parseInt(settings.video_bitrate);
+			videoBitRate = parseFloat(settings.video_bitrate);
 			webrtc.sendDataChannelMessage(`vb,${videoBitRate}`);
 			setIntParam('video_bitrate', videoBitRate);
 		}
@@ -1861,7 +1932,7 @@ export default function webrtc() {
 			turnSwitch = getBoolParam('turn_switch', false);
 			resizeRemote = getBoolParam('resize_remote', resizeRemote);
 			scaleLocal = getBoolParam('scaleLocallyManual', !resizeRemote);
-			videoBitRate = getIntParam('video_bitrate', videoBitRate);
+			videoBitRate = getFloatParam('video_bitrate', videoBitRate);
 			videoFramerate = getIntParam('framerate', videoFramerate);
 			audioBitRate = getIntParam('audio_bitrate', audioBitRate);
 			window.isManualResolutionMode = getBoolParam('is_manual_resolution_mode', false);
@@ -1877,6 +1948,9 @@ export default function webrtc() {
 			clipboard_in_enabled = getBoolParam('clipboard_in_enabled', clipboard_in_enabled);
 			clipboard_out_enabled = getBoolParam('clipboard_out_enabled', clipboard_out_enabled);
 			crf = getIntParam('video_crf', crf);
+			antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
+			trackpadMode = getBoolParam('trackpadMode', false);
+			useBrowserCursors = getBoolParam('use_browser_cursors', false);
 
 			if (!isSharedMode) {
 				// listen for dashboard messages (Dashboard -> core client)
@@ -1901,6 +1975,15 @@ export default function webrtc() {
 				webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
+			// Same global handle the websockets core exposes.
+			window.webrtcInput = input;
+
+			// Apply persisted input preferences and announce state to the
+			// dashboard (parity with the websockets core).
+			if (trackpadMode) input.setTrackpadMode(true);
+			if (useBrowserCursors) input.setUseBrowserCursors(true);
+			window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
+			window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 
 			setupKeyBoardAssisstant();
 
@@ -2046,14 +2129,17 @@ export default function webrtc() {
 
 					if (isText) {
 						resolveServerClipboard(content, null, 'text/plain');
-						// Local write is gated per-direction (server->client = out).
+						// Parity with the websockets core: the dashboard UI gets the
+						// text regardless; the local clipboard write is gated
+						// per-direction (server->client = out) and best-effort — an
+						// unfocused tab must not hide the update from the UI.
+						window.postMessage({
+							type: 'clipboardContentUpdate',
+							text: content,
+						}, window.location.origin);
 						if (clipboard_out_enabled) {
 							navigator.clipboard.writeText(content)
 								.then(() => {
-									window.postMessage({
-										type: 'clipboardContentUpdate',
-										text: content,
-									}, window.location.origin);
 									console.log('Successfully wrote text from server to local clipboard.');
 								})
 								.catch(err => {

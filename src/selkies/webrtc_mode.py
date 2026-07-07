@@ -62,7 +62,7 @@ def get_server_settings() -> dict:
     server_settings_payload = {"settings": {}}
     for setting_def in SETTING_DEFINITIONS:
         name = setting_def["name"]
-        if name in ["port", "encode_dri", "debug", "audio_device_name", "watermark_path", "recording_socket", "file_manager_path", "run_after_connect", "run_after_disconnect"]:
+        if name in ["port", "addr", "web_root", "encode_dri", "debug", "audio_device_name", "watermark_path", "recording_socket", "file_manager_path", "run_after_connect", "run_after_disconnect"]:
             continue
         # Never broadcast secrets/credentials (master_token, passwords, TURN
         # secrets, etc.) to clients.
@@ -74,6 +74,12 @@ def get_server_settings() -> dict:
             payload_entry = {"value": bool_val, "locked": is_locked}
         else:
             payload_entry = {"value": value}
+
+        # Whether this value came from an explicit CLI/env choice (vs the
+        # built-in default). The client uses it to decide if a conditional
+        # default (e.g. HiDPI-off when a manual resolution is set) should
+        # apply or defer to the operator's explicit setting.
+        payload_entry["overridden"] = bool(settings._overridden.get(name, False))
 
         if setting_def["type"] == "range":
             payload_entry["min"], payload_entry["max"] = value
@@ -173,7 +179,9 @@ class WebRTCService(BaseStreamingService):
             async_event_loop=asyncio.get_running_loop(),
             encoder_rtc=self.args.encoder_rtc,
             framerate=int(self.args.framerate),
-            video_bitrate=int(self.args.video_bitrate),
+            # Mbps; fractional for sub-Mbps targets (kbps conversion happens
+            # at the capture-settings boundary).
+            video_bitrate=float(self.args.video_bitrate),
             audio_bitrate=int(self.args.audio_bitrate),
             audio_channels=int(self.args.audio_channels),
             audio_enabled=self.args.audio_enabled,

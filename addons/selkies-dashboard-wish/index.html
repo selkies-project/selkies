@@ -6,12 +6,24 @@
 -->
 
 <html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="apple-touch-icon" href="icon.png">
+    <link rel="manifest" href="manifest.json" crossorigin="use-credentials">
+    <link rel="icon" type="image/png" href="icon.png" />
+  </head>
   <body>
     <div id="app"></div>
     <div id="root"></div>
     <div id="touch-gamepad-host"></div>
-    <script vite-ignore src="/src/universalTouchGamepad.js"></script>
-    <script vite-ignore type="module" src="/src/selkies-core.js"></script>
-    <script type="module" src="/src/main.jsx"></script>
+    <!-- Defer the runtime-served core so main.jsx can probe /status for the
+         active mode first, regardless of script execution order. -->
+    <script>window.__SELKIES_DEFER_INITIALIZATION = true;</script>
+    <script vite-ignore src="src/universalTouchGamepad.js"></script>
+    <script vite-ignore type="module" src="src/selkies-core.js"></script>
+    <script type="module" src="src/main.jsx"></script>
   </body>
 </html>

@@ -12,10 +12,13 @@ import {
 	ChevronDown,
 	ChevronUp
 } from "lucide-react";
+import { getPrefixedKey } from "@/utils";
 
 // Declare global window properties
 declare global {
 	interface Window {
+		// The webrtc core publishes this from getStats as a fixed-point string.
+		video_bitrate?: number | string;
 		system_stats?: {
 			cpu_percent?: number;
 			mem_used?: number;
@@ -114,7 +117,7 @@ function RadialGauge({ metric, size }: RadialGaugeProps) {
 	);
 }
 
-const STATS_READ_INTERVAL_MS = 100;
+const STATS_READ_INTERVAL_MS = 500;
 const MAX_AUDIO_BUFFER = 10;
 const MAX_BANDWIDTH_MBPS = 1000;
 const MAX_LATENCY_MS = 1000;
@@ -133,6 +136,23 @@ export function SystemMonitoring() {
 	const [gpuMemTotal, setGpuMemTotal] = useState<number | null>(null);
 	const [bandwidthMbps, setBandwidthMbps] = useState(0);
 	const [latencyMs, setLatencyMs] = useState(0);
+	const [videoBitrateMbps, setVideoBitrateMbps] = useState(0);
+	const [isWebrtc, setIsWebrtc] = useState(() =>
+		localStorage.getItem(getPrefixedKey('stream_mode')) === 'webrtc'
+	);
+
+	// Track live streaming-mode switches (the loader reloads shortly after,
+	// but reflect the change immediately).
+	useEffect(() => {
+		const handleMessage = (event: MessageEvent) => {
+			if (event.origin !== window.location.origin) return;
+			if (event.data?.type === 'mode') {
+				setIsWebrtc(event.data.mode === 'webrtc');
+			}
+		};
+		window.addEventListener('message', handleMessage);
+		return () => window.removeEventListener('message', handleMessage);
+	}, []);
 
 	// Read stats periodically
 	useEffect(() => {
@@ -160,6 +180,7 @@ export function SystemMonitoring() {
 			const netStats = window.network_stats;
 			setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
 			setLatencyMs(netStats?.latency_ms ?? 0);
+			setVideoBitrateMbps(parseFloat(String(window.video_bitrate)) || 0);
 		};
 		const intervalId = setInterval(readStats, STATS_READ_INTERVAL_MS);
 		return () => clearInterval(intervalId);
@@ -210,9 +231,12 @@ export function SystemMonitoring() {
 	const hasSysMemData = window.system_stats?.mem_used !== undefined && window.system_stats?.mem_total !== undefined && sysMemUsed !== null && sysMemTotal !== null;
 	const hasGpuMemData = window.gpu_stats?.mem_used !== undefined || window.gpu_stats?.memory_used !== undefined || window.gpu_stats?.used_gpu_memory_bytes !== undefined || gpuMemUsed !== null;
 	const hasFpsData = true;
-	const hasAudioData = true;
+	// The audio-buffer gauge comes from the websockets audio pipeline; the
+	// WebRTC core exposes the getStats video bitrate instead.
+	const hasAudioData = !isWebrtc;
 	const hasBandwidthData = true;
 	const hasLatencyData = true;
+	const hasVideoBitrateData = isWebrtc;
 
 	// Create metrics array for recharts - only include metrics that have data
 	const allMetrics = [
@@ -257,6 +281,13 @@ export function SystemMonitoring() {
 			max: MAX_AUDIO_BUFFER,
 			fill: "hsl(230, 100%, 60%)",
 			hasData: hasAudioData
+		},
+		{
+			name: "Video Bitrate",
+			current: Math.round(videoBitrateMbps * 100) / 100,
+			max: 50,
+			fill: "hsl(280, 100%, 60%)",
+			hasData: hasVideoBitrateData
 		},
 		{
 			name: "Bandwidth",
@@ -375,6 +406,15 @@ export function SystemMonitoring() {
 										<div className={`w-2 h-2 rounded-full ${status.color.replace('text-', 'bg-')}`} />
 									);
 								})()}
+							</div>
+						</div>
+					)}
+
+					{hasVideoBitrateData && (
+						<div className="flex justify-between items-center py-1">
+							<span className="text-sm text-muted-foreground">Video Bitrate</span>
+							<div className="flex items-center gap-2">
+								<span className="text-sm font-medium text-card-foreground">{Math.round(videoBitrateMbps * 100) / 100} Mbps</span>
 							</div>
 						</div>
 					)}

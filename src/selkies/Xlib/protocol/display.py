@@ -30,7 +30,6 @@ import struct
 import sys
 
 # Python 2/3 compatibility.
-from six import PY3, byte2int, indexbytes
 
 # Xlib modules
 from .. import error
@@ -42,37 +41,26 @@ from ..support import lock, connect
 from . import rq
 from . import event
 
-if PY3:
+class bytesview(object):
 
-    class bytesview(object):
-
-        def __init__(self, data, offset=0, size=None):
-            if size is None:
-                size = len(data)-offset
-            if isinstance(data, bytes):
-                view = memoryview(data)
-            elif isinstance(data, bytesview):
-                view = data.view
-            else:
-                raise TypeError('unsupported type: {}'.format(type(data)))
-            self.view = view[offset:offset+size]
-
-        def __len__(self):
-            return len(self.view)
-
-        def __getitem__(self, key):
-            if isinstance(key, slice):
-                return bytes(self.view[key])
-            return self.view[key]
-
-else:
-
-    def bytesview(data, offset=0, size=None):
-        if not isinstance(data, (bytes, buffer)):
-            raise TypeError('unsupported type: {}'.format(type(data)))
+    def __init__(self, data, offset=0, size=None):
         if size is None:
             size = len(data)-offset
-        return buffer(data, offset, size)
+        if isinstance(data, bytes):
+            view = memoryview(data)
+        elif isinstance(data, bytesview):
+            view = data.view
+        else:
+            raise TypeError('unsupported type: {}'.format(type(data)))
+        self.view = view[offset:offset+size]
+
+    def __len__(self):
+        return len(self.view)
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return bytes(self.view[key])
+        return self.view[key]
 
 
 class Display(object):
@@ -693,7 +681,7 @@ class Display(object):
         while True:
             if self.data_recv:
                 # Check the first byte to find out what kind of response it is
-                rtype = byte2int(self.data_recv)
+                rtype = self.data_recv[0]
 
             # Are we're waiting for additional data for the current packet?
             if self.recv_packet_len:
@@ -732,7 +720,7 @@ class Display(object):
 
     def parse_error_response(self, request):
         # Code is second byte
-        code = indexbytes(self.data_recv, 1)
+        code = self.data_recv[1]
 
         # Fetch error class
         estruct = self.error_classes.get(code, error.XError)

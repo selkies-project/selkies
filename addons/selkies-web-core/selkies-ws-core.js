@@ -382,6 +382,17 @@ const getIntParam = (key, default_value) => {
   const value = window.localStorage.getItem(finalKey);
   return (value === null || value === undefined) ? default_value : parseInt(value);
 };
+// Fraction-preserving variant for values with sub-unit steps (Mbps bitrate).
+const getFloatParam = (key, default_value) => {
+  const prefixedKey = `${storageAppName}_${key}`;
+  let finalKey = prefixedKey;
+  if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
+    finalKey = `${prefixedKey}_${displayId}`;
+  }
+  const value = window.localStorage.getItem(finalKey);
+  const parsed = parseFloat(value);
+  return (value === null || value === undefined || isNaN(parsed)) ? default_value : parsed;
+};
 const setIntParam = (key, value) => {
   const prefixedKey = `${storageAppName}_${key}`;
   let finalKey = prefixedKey;
@@ -537,7 +548,7 @@ isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
 useCssScaling = getBoolParam('useCssScaling', false);
 trackpadMode = getBoolParam('trackpadMode', false);
 rateControlMode = getStringParam('rate_control_mode', rateControlMode);
-videoBitrate = getIntParam('video_bitrate', videoBitrate);
+videoBitrate = getFloatParam('video_bitrate', videoBitrate);
 if (getStringParam('scaling_dpi', null) === null) {
   const dpr = window.devicePixelRatio || 1;
   const target = Math.round(dpr * 4) * 24;
@@ -1282,7 +1293,7 @@ function getCurrentSettingsPayload() {
         ['scaling_dpi', () => getIntParam('scaling_dpi', 96)],
         ['enable_binary_clipboard', () => getBoolParam('enable_binary_clipboard', false)],
         ['rate_control_mode', () => getStringParam('rate_control_mode', 'crf')],
-        ['video_bitrate', () => getIntParam('video_bitrate', 8)],
+        ['video_bitrate', () => getFloatParam('video_bitrate', 8)],
         ['force_aligned_resolution', () => getBoolParam('force_aligned_resolution', false)],
     ];
     for (const [key, read] of storedEntries) {
@@ -2990,7 +3001,7 @@ function handleSettingsMessage(settings) {
     settingsChanged = true;
   }
   if (settings.video_bitrate !== undefined) {
-    videoBitrate = parseInt(settings.video_bitrate, 10);
+    videoBitrate = parseFloat(settings.video_bitrate);
     setIntParam('video_bitrate', videoBitrate);
     settingsChanged = true;
   }
@@ -3006,7 +3017,7 @@ function handleSettingsMessage(settings) {
 
 function fetchLatestRCvalue(newMode) {
   if (newMode === "cbr") {
-    videoBitrate = getIntParam('video_bitrate', videoBitrate);
+    videoBitrate = getFloatParam('video_bitrate', videoBitrate);
   } else if (newMode === "crf") {
     video_crf = getIntParam('video_crf', video_crf);
   }
