@@ -112,6 +112,15 @@ let videoFrameWriter = null;
 let videoTrack = null;
 let mstgActive = false;
 let mstgLastGeom = null;
+// Handoff gate: only hide the main canvas once the takeover sink has provably
+// rendered a frame (requestVideoFrameCallback for a <video>, a one-time
+// 'presented' message for the worker's OffscreenCanvas). Hiding it on the first
+// write instead flashes black — the first track frame can arrive before the
+// <video> starts rendering, and the worker draws its first frame asynchronously.
+// sinkRevealGen invalidates stale rVFC callbacks across deactivate/re-activate.
+let mstgRendered = false;
+let videoWorkerRendered = false;
+let sinkRevealGen = 0;
 // Set true by the canvas-style writers (applyManualCanvasStyle / resetCanvasStyle /
 // updateCanvasImageRendering); the present paths re-mirror the canvas box onto the
 // <video>/worker canvas only when it's set, instead of reading+serializing cssText every frame.
@@ -653,7 +662,7 @@ const VIDEO_WORKER_SRC = `
 // DECODES them here, so decode and present stay off the main thread and no decoded frame ever
 // crosses the thread boundary. A main-thread-decoded frame transferred in (m.frame) is still
 // supported as a fallback during decoder warm-up.
-let mode = null, oc = null, ctx = null, writer = null, closed = false;
+let mode = null, oc = null, ctx = null, writer = null, closed = false, presented = false;
 let dec = null, decKey = false, decNeedKey = false;
 const OVERLOAD_QUEUE = 24;   // decode backlog (frames) that triggers a keyframe resync
 const ack = () => self.postMessage({ ack: true });
@@ -670,6 +679,9 @@ function present(f) {
     if (ctx) {
       if (oc.width !== f.displayWidth || oc.height !== f.displayHeight) { oc.width = f.displayWidth; oc.height = f.displayHeight; }
       ctx.drawImage(f, 0, 0);
+      // Tell the page the OffscreenCanvas has real content so it can hide the
+      // main canvas (hiding it before this point flashes black).
+      if (!presented) { presented = true; self.postMessage({ type: 'presented' }); }
     }
   } finally { f.close(); }
 }
@@ -777,13 +789,27 @@ function presentFrameToVideo(frame) {
   if (!mstgActive) {
     mstgActive = true;
     mstgLastGeom = null; // force the box to be re-mirrored onto <video> below
-    if (videoElement) { videoElement.style.display = 'block'; videoElement.style.objectFit = 'fill'; }
+    mstgRendered = false;
+    if (videoElement) {
+      videoElement.style.display = 'block';
+      videoElement.style.objectFit = 'fill';
+      if (typeof videoElement.requestVideoFrameCallback === 'function') {
+        const gen = ++sinkRevealGen;
+        videoElement.requestVideoFrameCallback(() => {
+          if (gen !== sinkRevealGen || !mstgActive) return;
+          mstgRendered = true;
+          if (canvas) canvas.style.display = 'none';
+        });
+      } else {
+        mstgRendered = true;   // can't observe rendering: keep the old behavior
+      }
+    }
   }
   // Resize handlers (resetCanvasStyle/applyManualCanvasStyle) re-show the canvas
   // with a fresh transform, so re-hide it every frame and re-mirror its box onto
   // the <video> whenever that geometry changes.
   if (canvas && videoElement) {
-    if (canvas.style.display !== 'none') canvas.style.display = 'none';
+    if (mstgRendered && canvas.style.display !== 'none') canvas.style.display = 'none';
     // Re-mirror only when the canvas style changed (canvasGeomDirty) or on the first present
     // after activation (mstgLastGeom === null) -- avoids serializing cssText every frame.
     if (canvasGeomDirty || mstgLastGeom === null) {
@@ -793,6 +819,12 @@ function presentFrameToVideo(frame) {
       videoElement.style.objectFit = 'fill';
       canvasGeomDirty = false;
     }
+  }
+  // Until the <video> has rendered, also paint the frame on the canvas: a fresh
+  // connection has nothing on the canvas yet, so hiding it (or showing an empty
+  // <video>) would leave black until the sink's first rendered frame.
+  if (!mstgRendered && canvas && canvasContext && canvas.width > 0 && canvas.height > 0) {
+    try { canvasContext.drawImage(frame, 0, 0); } catch (e) {}
   }
   // Drop a frame if the sink can't keep up, to keep latency low.
   if (videoFrameWriter.desiredSize !== null && videoFrameWriter.desiredSize <= 0) {
@@ -824,6 +856,11 @@ function ensureVideoWorker() {
       if (!m) return;
       if (m.ack) { if (videoWorkerInFlight > 0) videoWorkerInFlight--; return; }
       if (m.type === 'error') { deactivateVideoWorker(); return; }   // VTG writable errored
+      if (m.type === 'presented') {                                  // worker canvas has real content now
+        videoWorkerRendered = true;
+        if (videoWorkerActive && canvas) canvas.style.display = 'none';
+        return;
+      }
       if (m.type === 'needKeyframe') { requestKeyframe(); return; }  // worker decoder needs a fresh keyframe
       if (m.type === 'decoderError') {
         // Worker-side decode failed: stop routing chunks to it and fall back to main-thread
@@ -869,6 +906,7 @@ function deactivateVideoWorker() {
   const wasTransferred = videoWorkerCanvasTransferred;
   videoWorkerActive = false; videoWorkerReady = false; videoWorkerMode = null;
   videoWorkerInFlight = 0; videoWorkerCanvasTransferred = false;
+  videoWorkerRendered = false; sinkRevealGen++;
   // Forget the worker decoder config so a freshly recreated worker gets (re)configured.
   workerDecoderCodec = null; workerDecoderW = 0; workerDecoderH = 0;
   if (videoWorker) { try { videoWorker.terminate(); } catch (_) {} videoWorker = null; }
@@ -899,10 +937,24 @@ function activateWorkerSinkDisplay() {
   if (!target) return false;
   if (!videoWorkerActive) {
     videoWorkerActive = true; videoWorkerLastGeom = null;
+    videoWorkerRendered = false;
     target.style.display = 'block'; target.style.objectFit = 'fill';
+    if (videoWorkerMode === 'vtg') {
+      if (typeof target.requestVideoFrameCallback === 'function') {
+        const gen = ++sinkRevealGen;
+        target.requestVideoFrameCallback(() => {
+          if (gen !== sinkRevealGen || !videoWorkerActive) return;
+          videoWorkerRendered = true;
+          if (canvas) canvas.style.display = 'none';
+        });
+      } else {
+        videoWorkerRendered = true;   // can't observe rendering: keep the old behavior
+      }
+    }
+    // canvas mode: revealed by the worker's one-time 'presented' message
   }
   if (canvas) {
-    if (canvas.style.display !== 'none') canvas.style.display = 'none';
+    if (videoWorkerRendered && canvas.style.display !== 'none') canvas.style.display = 'none';
     // Re-mirror the canvas box onto the active sink only when it changed or on the first
     // present after activation -- avoids serializing cssText every frame.
     if (canvasGeomDirty || videoWorkerLastGeom === null) {
@@ -964,6 +1016,7 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec) {
 function deactivateMstg() {
   if (!mstgActive) return;
   mstgActive = false;
+  mstgRendered = false; sinkRevealGen++;
   if (videoElement) videoElement.style.display = 'none';
   if (canvas) canvas.style.display = '';
   teardownMstgWriter();
