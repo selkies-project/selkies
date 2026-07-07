@@ -570,7 +570,22 @@ class CentralizedStreamServer:
         host = request.headers.get("Host")
         if host:
             try:
-                if urllib.parse.urlsplit(origin).netloc == host:
+                origin_parts = urllib.parse.urlsplit(origin)
+                if origin_parts.netloc == host:
+                    return True
+                # Reverse proxies routinely forward Host without the port (e.g.
+                # nginx's 'proxy_set_header Host $host' — this project's own
+                # bundled nginx config does), while a browser Origin carries any
+                # non-default port. A strict netloc comparison therefore rejects
+                # every same-origin connection reached via an explicit port
+                # (like the standard :6080 mapping). When the forwarded Host has
+                # no port to compare, fall back to comparing hostnames.
+                host_parts = urllib.parse.urlsplit("//" + host)
+                if (
+                    host_parts.port is None
+                    and origin_parts.hostname
+                    and origin_parts.hostname == host_parts.hostname
+                ):
                     return True
             except ValueError:
                 pass
