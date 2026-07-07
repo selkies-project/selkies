@@ -1199,11 +1199,12 @@ class WebRTCInput:
                 logger_webrtc_input.error(f"Failed to initialize Wayland input: {e}")
 
     def _build_wayland_keymap(self):
-        """Builds a reverse mapping from Keysyms to evdev scancodes using xkbcommon.
+        """Builds a reverse mapping from Keysyms to xkb keycodes using xkbcommon.
 
-        xkb reports keycodes in X11 convention (evdev + 8); pixelflux's Wayland
-        inject_key expects evdev (kernel) scancodes and re-adds +8 for smithay,
-        so the stored value is kc - 8.
+        pixelflux's inject_key hands the value straight to the smithay seat keyboard,
+        which resolves it against its xkb keymap (X11 convention, evdev + 8), so the
+        stored value is the xkb keycode kc as-is — the same convention the inject_keysym
+        path injects on.
         """
         if not self.xkb_keymap:
             return
@@ -1227,13 +1228,13 @@ class WebRTCInput:
                 for sym in syms_0:
                     level_0_keys.add(sym)
                     if sym not in self.wayland_scancode_map:
-                        self.wayland_scancode_map[sym] = kc - 8
+                        self.wayland_scancode_map[sym] = kc
 
             syms_1 = self.xkb_keymap.key_get_syms_by_level(kc, 0, 1)
             if syms_1:
                 for sym in syms_1:
                     if sym not in self.wayland_scancode_map:
-                        self.wayland_scancode_map[sym] = kc - 8
+                        self.wayland_scancode_map[sym] = kc
                         if sym not in level_0_keys:
                             self.wayland_shift_required_keys.add(sym)
 
@@ -1242,7 +1243,7 @@ class WebRTCInput:
     def _on_cursor_change(self, data): self.send_cursor_data(data)
     async def send_clipboard_data(self, data, mime_type="text/plain"):
         if self.rtc_app.mode != "websockets":
-            self.rtc_app.send_clipboard_data(data, mime_type)
+            await self.rtc_app.send_clipboard_data(data, mime_type)
             return
         try:
             is_text = mime_type == "text/plain"
@@ -1756,11 +1757,12 @@ class WebRTCInput:
 
         if self.is_wayland and self.wayland_input:
             # Wayland keymap contract: selkies sends keysyms; pixelflux owns the keymap.
-            # Prefer inject_keysym (resolves keysym->keycode and the +8 evdev->X11 offset
-            # internally; keysyms absent from the layout — Unicode codepoints, Euro,
-            # symbols — are bound on demand to dynamic overlay keycodes) over the legacy
-            # scancode_map path.
-            if hasattr(self.wayland_input, 'inject_keysym'):
+            # Prefer inject_keysym for layout-representable keys. Unicode-codepoint requests
+            # (0x01000000 range, Euro 0x20AC) aren't physical keysyms and the overlay-keymap
+            # swap is a non-op outside the English layout, so route them to the wtype/clipboard
+            # fallback below instead.
+            is_unicode_request = ((keysym & 0xFF000000) == 0x01000000) or keysym == 0x20AC
+            if hasattr(self.wayland_input, 'inject_keysym') and not is_unicode_request:
                 try:
                     # Pass the keysym directly; pixelflux maps it (keymap + offset +
                     # shift). No private keymap lookup or wayland_shift_required_keys
@@ -2706,26 +2708,10 @@ class WebRTCInput:
                 combined_text = "".join(unicode_buffer)
                 unicode_buffer.clear()
 
-                if self.wayland_input is not None and hasattr(self.wayland_input, 'inject_keysym'):
-                    # Native path: pixelflux binds keysyms absent from the layout to
-                    # dynamic overlay keycodes, so no external typing tool is needed.
-                    ok = True
-                    for ch in combined_text:
-                        cp = ord(ch)
-                        sym = cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp)
-                        try:
-                            self.wayland_input.inject_keysym(sym, 1)
-                            self.wayland_input.inject_keysym(sym, 0)
-                        except Exception as e:
-                            logger_webrtc_input.warning(
-                                f"overlay inject failed for U+{cp:04X}; "
-                                f"falling back for the rest: {e}"
-                            )
-                            ok = False
-                            break
-                    if ok:
-                        return
-
+                # Buffered text is, by construction, the non-layout-representable keysyms
+                # (Latin-1 accents, Euro, Unicode plane) and IME composition strings. Inject
+                # it as text — clipboard paste under KWin, wtype under wlroots — never through
+                # the keymap, whose overlay swap is a non-op outside the English layout.
                 if getattr(self, 'use_clipboard_fallback', False):
                     await self._inject_unicode_via_clipboard(combined_text)
                 else:
@@ -2942,7 +2928,8 @@ class WebRTCInput:
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
         elif msg_type == "vb":
             try:
-                bitrate = int(toks[1])
+                # Mbps; fractional values carry sub-Mbps targets.
+                bitrate = float(toks[1])
                 if bitrate <= 0:
                     return
                 await self.on_video_encoder_bit_rate(bitrate)
@@ -3161,15 +3148,21 @@ class WebRTCInput:
                     return
             else: 
                 logger_webrtc_input.warning("Rejecting clipboard write: inbound clipboard disabled.")
-        elif msg_type == "r": 
+        elif msg_type == "r":
             res = toks[1]
             if re.fullmatch(r"^\d+x\d+$", res):
-                w, h = [int(i) + int(i)%2 for i in res.split("x")] 
-                await self.on_resize(f"{w}x{h}")
+                w, h = [int(i) + int(i)%2 for i in res.split("x")]
+                # The handler may be an async binding or a sync "disabled" fallback
+                # (enable_resize defaults off) — await only a real coroutine so a
+                # skipped resize logs its warning instead of raising 'await None'.
+                _r = self.on_resize(f"{w}x{h}")
+                if asyncio.iscoroutine(_r): await _r
             else: logger_webrtc_input.warning(f"Rejecting resolution change, invalid: {res}")
-        elif msg_type == "s": 
+        elif msg_type == "s":
             scale = toks[1]
-            if re.fullmatch(r"^\d+(\.\d+)?$", scale): await self.on_scaling_ratio(float(scale))
+            if re.fullmatch(r"^\d+(\.\d+)?$", scale):
+                _s = self.on_scaling_ratio(float(scale))
+                if asyncio.iscoroutine(_s): await _s
             else: logger_webrtc_input.warning(f"Rejecting scaling change, invalid: {scale}")
         elif msg_type == "cmd":
             if not settings.command_enabled[0]:

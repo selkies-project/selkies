@@ -187,7 +187,13 @@ def init_codecs() -> None:
         ]
         dynamic_pt += 2
 
-    add_video_codec("video/VP8")
+    # VP8 is intentionally NOT offered: pixelflux only produces H.264, so
+    # negotiating VP8 would leave the server unable to send the codec the client
+    # picked. The VPX infrastructure is kept dormant for a future re-wire —
+    # webrtc/codecs/vpx.py (Vp8Encoder/Vp8Decoder/vp8_depayload) plus the
+    # get_encoder/get_decoder and depayload() dispatch branches below stay in
+    # place. To re-enable once pixelflux can emit VPX, re-add the offer here
+    # (and add 'vp8enc' to the encoder_rtc allowed list).
     for profile_level_id in ("42001f", "42e01f"):
         add_video_codec(
             "video/H264",

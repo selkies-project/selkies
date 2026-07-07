@@ -113,6 +113,9 @@ def _schedule_rtc_callback(loop: asyncio.AbstractEventLoop, callback, stun_serve
 def generate_rtc_config(turn_host, turn_port, shared_secret, user, protocol='udp', turn_tls=False, stun_host=None, stun_port=None):
     # Use shared secret to generate HMAC credential
 
+    # A generic default keeps the credential username non-empty
+    # ('<expiry>:selkies' rather than a bare '<expiry>:') when none is supplied.
+    user = (user or "").strip() or "selkies"
     # Sanitize user for credential compatibility
     user = user.replace(":", "-")
 
@@ -1339,13 +1342,20 @@ class GPUMonitor:
             return None
 
     async def _monitor_loop(self):
+        # No GPU present: report nothing and stop, mirroring the WebSocket GPU monitor.
+        # CPU load and system memory are surfaced separately by SystemMonitor; the GPU
+        # gauge contract (fractional load, MB memory) cannot carry CPU stats without
+        # mislabeling and unit errors (percent-as-fraction, bytes-as-MB).
         try:
+            if await asyncio.to_thread(self._get_gpu_stats) is None:
+                logger_gpu.info(
+                    f"No GPU with ID {self.gpu_id} found; GPU stats disabled "
+                    "(CPU and system memory are reported by the system monitor)."
+                )
+                return
             while not self.stop_event.is_set():
                 stats = await asyncio.to_thread(self._get_gpu_stats)
-
-                if stats is None:
-                    logger_gpu.warning(f"Could not find GPU with ID {self.gpu_id}. Retrying in {self.period}s...")
-                elif self.on_stats:
+                if stats is not None and self.on_stats:
                     load, mem_total, mem_used = stats
                     await self.on_stats(load, mem_total, mem_used)
                 try:

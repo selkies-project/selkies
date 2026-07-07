@@ -62,7 +62,7 @@ def get_server_settings() -> dict:
     server_settings_payload = {"settings": {}}
     for setting_def in SETTING_DEFINITIONS:
         name = setting_def["name"]
-        if name in ["port", "encode_dri", "debug", "audio_device_name", "watermark_path", "recording_socket", "file_manager_path", "run_after_connect", "run_after_disconnect"]:
+        if name in ["port", "addr", "web_root", "encode_dri", "debug", "audio_device_name", "watermark_path", "recording_socket", "file_manager_path", "run_after_connect", "run_after_disconnect"]:
             continue
         # Never broadcast secrets/credentials (master_token, passwords, TURN
         # secrets, etc.) to clients.
@@ -74,6 +74,12 @@ def get_server_settings() -> dict:
             payload_entry = {"value": bool_val, "locked": is_locked}
         else:
             payload_entry = {"value": value}
+
+        # Whether this value came from an explicit CLI/env choice (vs the
+        # built-in default). The client uses it to decide if a conditional
+        # default (e.g. HiDPI-off when a manual resolution is set) should
+        # apply or defer to the operator's explicit setting.
+        payload_entry["overridden"] = bool(settings._overridden.get(name, False))
 
         if setting_def["type"] == "range":
             payload_entry["min"], payload_entry["max"] = value
@@ -173,13 +179,20 @@ class WebRTCService(BaseStreamingService):
             async_event_loop=asyncio.get_running_loop(),
             encoder_rtc=self.args.encoder_rtc,
             framerate=int(self.args.framerate),
-            video_bitrate=int(self.args.video_bitrate),
+            # Mbps; fractional for sub-Mbps targets (kbps conversion happens
+            # at the capture-settings boundary).
+            video_bitrate=float(self.args.video_bitrate),
             audio_bitrate=int(self.args.audio_bitrate),
             audio_channels=int(self.args.audio_channels),
             audio_enabled=self.args.audio_enabled,
             audio_device_name=self.args.audio_device_name,
             crf=int(self.args.video_crf),
             video_fullcolor=bool(self.args.video_fullcolor),
+            use_cpu=bool(self.args.use_cpu),
+            video_streaming_mode=bool(self.args.video_streaming_mode),
+            use_paint_over_quality=bool(self.args.use_paint_over_quality),
+            video_paintover_crf=int(self.args.video_paintover_crf),
+            video_paintover_burst_frames=int(self.args.video_paintover_burst_frames),
         )
         if self.args.enable_rate_control:
             self.media_pipeline.rc_mode = RateControlMode(self.args.rate_control_mode)
@@ -240,7 +253,7 @@ class WebRTCService(BaseStreamingService):
         username = self.settings.basic_auth_user
         password = self.settings.basic_auth_password
         client = WebRTCSignalingClient(
-            f"{ws_protocol}//127.0.0.1:{self.args.port}{prefix}/ws",
+            f"{ws_protocol}//127.0.0.1:{self.args.port}{prefix}/api/ws",
             enable_https=using_https,
             enable_basic_auth=using_basic_auth,
             basic_auth_user=username,
@@ -263,13 +276,13 @@ class WebRTCService(BaseStreamingService):
             )
 
     async def handle_session_start(
-        self, session_peer_id: str, client_type: str
+        self, session_peer_id: str, client_type: str, client_token: Optional[str] = None
     ) -> None:
         logger.info(
             f"starting session for client peer id: {session_peer_id} of type: {client_type}"
         )
         try:
-            await self.rtc_app.start_rtc_connection(session_peer_id, client_type)
+            await self.rtc_app.start_rtc_connection(session_peer_id, client_type, client_token)
             # Initialize stats location directory
             if self.args.enable_webrtc_statistics:
                 await self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
@@ -377,15 +390,15 @@ class WebRTCService(BaseStreamingService):
         )
         self.input_handler.on_update_crf = self.media_pipeline.set_crf
 
+        # DPI scaling is independent of enable_resize, which gates only dynamic
+        # resolution changes. The WebSocket transport applies scaling through the
+        # SETTINGS payload regardless of the resize gate, so wire scaling here too.
+        self.input_handler.on_scaling_ratio = self.handle_scaling
         if self.args.enable_resize:
             self.input_handler.on_resize = self.on_resize_handler
-            self.input_handler.on_scaling_ratio = self.handle_scaling
         else:
             self.input_handler.on_resize = lambda res: logger.warning(
                 f"remote resizing disabled, skipping resize to {res}"
-            )
-            self.input_handler.on_scaling_ratio = lambda scale: logger.warning(
-                f"remote scaling is disabled, skipping DPI scale change to {str(scale)}"
             )
 
         # Monitoring callbacks
@@ -424,7 +437,7 @@ class WebRTCService(BaseStreamingService):
         except Exception as e:
             logger.warning(f"Failed to send current cursor to client: {e}")
 
-    async def handle_video_bitrate_change(self, bitrate: int) -> None:
+    async def handle_video_bitrate_change(self, bitrate: float) -> None:
         """Handle video bitrate change request."""
         if self.media_pipeline:
             await self.media_pipeline.set_video_bitrate(bitrate)
@@ -449,9 +462,22 @@ class WebRTCService(BaseStreamingService):
 
     async def on_resize_handler(self, res: str) -> None:
         """Handle change of resolution change"""
+        # Only an admin-configured manual-resolution lock (server config) blocks client
+        # resizes, mirroring the WebSocket handler. The client's own manual/auto toggle
+        # lives in self.args and must NOT gate here: in client manual mode the chosen
+        # resolution is delivered through this same resize path.
+        server_is_manual, _ = self.settings.is_manual_resolution_mode
+        if server_is_manual:
+            logger.warning(
+                f"Client attempted to resize to {res} but server is in manual resolution mode. Request ignored."
+            )
+            return
         try:
             w_str, h_str = res.split("x")
             target_w, target_h = int(w_str), int(h_str)
+            # Cap so a client-driven resize cannot reach the X server unbounded.
+            target_w = min(target_w, 7680)
+            target_h = min(target_h, 4320)
 
             # Ensure dimensions are positive
             if target_w <= 0 or target_h <= 0:
@@ -557,10 +583,17 @@ class WebRTCService(BaseStreamingService):
             "video_bitrate",
             "audio_bitrate",
             "framerate",
+            "use_cpu",
             "enable_binary_clipboard",
             "is_manual_resolution_mode",
             "manual_width",
             "manual_height",
+            "encoder_rtc",
+            "video_fullcolor",
+            "video_streaming_mode",
+            "use_paint_over_quality",
+            "video_paintover_crf",
+            "video_paintover_burst_frames",
         ]
 
         def sanitize_value(name: str, client_value: Any) -> Any:
@@ -586,8 +619,13 @@ class WebRTCService(BaseStreamingService):
             try:
                 if setting_def["type"] == "range":
                     min_val, max_val = server_limit
-                    sanitized = max(min_val, min(int(client_value), max_val))
-                    if sanitized != int(client_value):
+                    # Fractional values are legal (sub-Mbps bitrates); keep
+                    # integral values as ints. Mirrors the websockets twin.
+                    numeric = float(client_value)
+                    if numeric.is_integer():
+                        numeric = int(numeric)
+                    sanitized = max(min_val, min(numeric, max_val))
+                    if sanitized != numeric:
                         logger.warning(
                             f"Client value for '{name}' ({client_value}) was clamped to {sanitized} (server range: {min_val}-{max_val})."
                         )
@@ -665,6 +703,20 @@ class WebRTCService(BaseStreamingService):
                         )
                     elif key == "framerate" and self.media_pipeline:
                         await self.media_pipeline.set_framerate(sanitized_value)
+                    elif key == "use_cpu" and self.media_pipeline:
+                        await self.media_pipeline.set_use_cpu(bool(sanitized_value))
+                    elif key == "encoder_rtc" and self.media_pipeline:
+                        await self.media_pipeline.set_encoder_rtc(str(sanitized_value))
+                    elif key == "video_fullcolor" and self.media_pipeline:
+                        await self.media_pipeline.set_video_fullcolor(bool(sanitized_value))
+                    elif key == "video_streaming_mode" and self.media_pipeline:
+                        await self.media_pipeline.set_video_streaming_mode(bool(sanitized_value))
+                    elif key == "use_paint_over_quality" and self.media_pipeline:
+                        await self.media_pipeline.set_use_paint_over_quality(bool(sanitized_value))
+                    elif key == "video_paintover_crf" and self.media_pipeline:
+                        await self.media_pipeline.set_video_paintover_crf(int(sanitized_value))
+                    elif key == "video_paintover_burst_frames" and self.media_pipeline:
+                        await self.media_pipeline.set_video_paintover_burst_frames(int(sanitized_value))
                     elif key == "enable_binary_clipboard":
                         await self.input_handler.update_binary_clipboard_setting(
                             sanitized_value
@@ -715,15 +767,18 @@ class WebRTCService(BaseStreamingService):
                 worst_loss = max(worst_loss, estimate.get("loss_fraction", 0.0))
             if not goodputs:
                 continue
-            current = int(pipeline.video_bitrate)
+            current = float(pipeline.video_bitrate)
             if worst_loss > 0.10:
-                target = int(current * 0.7)
+                target = current * 0.7
             else:
-                target = int(min(goodputs) * 0.85 / 1_000_000)
-            target = max(int(lo_mbps), min(int(hi_mbps), target))
-            if target != current:
+                target = min(goodputs) * 0.85 / 1_000_000
+            # Clamp to the allowed range and steer at kbps precision (what
+            # set_video_bitrate applies). Float math throughout so a sub-Mbps CBR
+            # target or a sub-Mbps range cap isn't truncated to 0 Mbps.
+            target = round(max(lo_mbps, min(hi_mbps, target)), 3)
+            if target != round(current, 3):
                 logger.info(
-                    f"Congestion control: video bitrate {current} -> {target} Mbps "
+                    f"Congestion control: video bitrate {current:g} -> {target:g} Mbps "
                     f"(goodput {min(goodputs) / 1e6:.1f} Mbps, loss {worst_loss:.1%})"
                 )
                 await pipeline.set_video_bitrate(target)
@@ -991,11 +1046,16 @@ class WebRTCService(BaseStreamingService):
         self.shutdown_event.set()
 
     def register_routes(self, api_prefix: str, main_router: web.UrlDispatcher):
+        # All WebRTC endpoints live under /api so the single nginx /api proxy
+        # rule fronts them — the signaling socket included, since that location
+        # forwards WebSocket upgrades. Registering them off /api (as /turn and
+        # /webrtc/signaling) left them unproxied behind the LSIO nginx, which
+        # 404'd /turn and the signaling handshake and froze the dashboard.
         main_router.add_get(
-            f"{api_prefix}/webrtc/signaling{{slash:/?}}", self.rtc_ws_handler
+            f"{api_prefix}/api/webrtc/signaling{{slash:/?}}", self.rtc_ws_handler
         )
-        main_router.add_get(f"{api_prefix}/ws", self.rtc_ws_handler)
-        main_router.add_get(f"{api_prefix}/turn", self.handle_turn_req)
+        main_router.add_get(f"{api_prefix}/api/ws", self.rtc_ws_handler)
+        main_router.add_get(f"{api_prefix}/api/turn", self.handle_turn_req)
 
     async def rtc_ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         if self.supervisor.current_mode != self.mode:

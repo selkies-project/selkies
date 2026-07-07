@@ -91,8 +91,8 @@ class WebRTCSignalingClient:
         self.on_disconnect: Callable[[], Awaitable[None]] = lambda: logger.warning(
             "unhandled on_disconnect callback"
         )
-        self.on_session_start: Callable[[str, str], Awaitable[None]] = (
-            lambda client_peer_id, client_type: logger.warning(
+        self.on_session_start: Callable[[str, str, Optional[str]], Awaitable[None]] = (
+            lambda client_peer_id, client_type, client_token=None: logger.warning(
                 "unhandled on_session_start callback"
             )
         )
@@ -264,10 +264,13 @@ class WebRTCSignalingClient:
 
         elif message.startswith("SESSION_START"):
             toks = message.strip().split(" ")
-            if len(toks) == 3:
-                # peer_id is of format client-<UUID>
-                _, client_peer_id, client_type = toks
-                await self.on_session_start(client_peer_id, client_type)
+            if len(toks) in (3, 4):
+                # peer_id is of format client-<UUID>; an optional 4th field is the
+                # secure-mode collaboration token (present only when supplied).
+                client_peer_id = toks[1]
+                client_type = toks[2]
+                client_token = toks[3] if len(toks) == 4 else None
+                await self.on_session_start(client_peer_id, client_type, client_token)
             else:
                 logger.error(f"invalid SESSION_START message: {message}")
 

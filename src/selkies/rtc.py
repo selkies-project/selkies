@@ -92,13 +92,20 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
+# Raw bytes per data-channel message when no limit was negotiated: a 64 KiB
+# message (RFC 8841's conservative default) less envelope margin, times 3/4
+# for the base64 expansion. Deliberately NOT derived from CLIPBOARD_CHUNK_SIZE:
+# that constant tracks the 8 MiB WebSocket frame ceiling and would produce
+# multi-megabyte messages no browser's SCTP stack accepts.
+DATA_CHANNEL_FALLBACK_CHUNK_SIZE = ((65536 - 512) * 3) // 4
+
+
 def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
     """Raw-byte chunk size for base64 payloads over the data channel.
 
     Sized from the smallest max-message-size the connected peers negotiated
     (RFC 8841 a=max-message-size), less an envelope margin, times 3/4 for the
-    base64 expansion; the historical ~48 KB floor is kept as the no-information
-    fallback and a 1 MiB message ceiling bounds per-message buffering.
+    base64 expansion; a 1 MiB message ceiling bounds per-message buffering.
     """
     limit = None
     for peer in (peers or {}).values():
@@ -108,9 +115,9 @@ def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
         if nego:
             limit = nego if limit is None else min(limit, nego)
     if not limit:
-        return (CLIPBOARD_CHUNK_SIZE * 3) // 4
+        return DATA_CHANNEL_FALLBACK_CHUNK_SIZE
     usable = min(limit, 1024 * 1024) - 512
-    return max((CLIPBOARD_CHUNK_SIZE * 3) // 4, (usable * 3) // 4)
+    return max(DATA_CHANNEL_FALLBACK_CHUNK_SIZE, (usable * 3) // 4)
 
 class ClientType(str, Enum):
     CONTROLLER = "controller"
@@ -332,11 +339,11 @@ class RTCApp:
         self.__send_data_channel_message(
             "system", {"action": "videoFramerate," + str(framerate)})
 
-    def send_video_bitrate(self, bitrate: int):
+    def send_video_bitrate(self, bitrate: float):
         """Sends the current video bitrate to the data channel"""
         logger.info("sending video bitrate")
         self.__send_data_channel_message(
-            "system", {"action": "video_bitrate,%d" % bitrate})
+            "system", {"action": "video_bitrate," + str(bitrate)})
 
     def send_audio_bitrate(self, bitrate: int):
         """Sends the current audio bitrate to the data channel"""
@@ -407,12 +414,17 @@ class RTCApp:
 
         msg = {"type": msg_type, "data": data}
         payload = json.dumps(msg)
-        # Large payloads (cursor PNGs, settings, clipboard, stats) compress well;
-        # small ones aren't worth the CPU or the risk to input latency.
-        if self._gz_tx and len(payload) >= 512:
-            data_channel.send(gzip.compress(payload.encode("utf-8"), 6))
-        else:
-            data_channel.send(payload)
+        try:
+            # Large payloads (cursor PNGs, settings, clipboard, stats) compress well;
+            # small ones aren't worth the CPU or the risk to input latency.
+            if self._gz_tx and len(payload) >= 512:
+                data_channel.send(gzip.compress(payload.encode("utf-8"), 6))
+            else:
+                data_channel.send(payload)
+        except ValueError as e:
+            # Oversized for the peer's negotiated max-message-size: dropping one
+            # message and logging beats the peer hard-closing the channel.
+            logger.error("dropping oversized data channel message '%s': %s", msg_type, e)
 
     def send_media_data_over_channel(self, msg_type, data):
         self.__send_data_channel_message(msg_type, data)
@@ -737,7 +749,24 @@ class RTCApp:
         channel.on("close", lambda: consumer.cancel())
         return consumer
 
-    def _on_input_channel_message(self, msg, channel=None, client_type=None):
+    def _viewer_is_collaborator(self, client_token):
+        """A viewer holding the active mk (mouse+keyboard) token is a read-write
+        collaborator — mirrors the WS mk-token path — but only while enable_collab
+        is on. Fail-safe: any missing piece => not a collaborator (stays read-only)."""
+        if not client_token:
+            return False
+        if not bool(app_settings.enable_collab[0]):
+            return False
+        try:
+            # active_mk_token is a runtime global owned by the WS control plane
+            # (set via the secure-mode /api/tokens endpoint, registered in all
+            # modes); read it dynamically so a re-provision is honored per message.
+            from . import selkies as _sk
+            return _sk.active_mk_token is not None and client_token == _sk.active_mk_token
+        except Exception:
+            return False
+
+    def _on_input_channel_message(self, msg, channel=None, client_type=None, client_token=None):
         """Decompress gzip'd payloads and intercept the compression handshake before
         the input dispatcher (the late-bound on_data_message) sees the message."""
         if isinstance(msg, (bytes, bytearray)) and bytes(msg[:2]) == b"\x1f\x8b":
@@ -760,7 +789,11 @@ class RTCApp:
                     logger.warning("Failed to ack compression handshake: %s", e)
             return
         if client_type == ClientType.VIEWER and isinstance(msg, str):
-            if not msg.startswith(VIEWER_ALLOWED_PREFIXES):
+            # A viewer may only send the allow-listed messages — unless it is an
+            # authenticated read-write collaborator (mk token + enable_collab), which
+            # mirrors the WS path. The collaborator check is only reached for
+            # otherwise-disallowed input, so normal viewer traffic pays nothing.
+            if not msg.startswith(VIEWER_ALLOWED_PREFIXES) and not self._viewer_is_collaborator(client_token):
                 logger.warning("Dropping unauthorized viewer input: %s", msg[:32])
                 return
         return self.on_data_message(msg)
@@ -842,10 +875,10 @@ class RTCApp:
             logger.debug(f"Unhandled peer connection state: {state}", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
 
     def on_pli(self, client_peer_id: str, client_type: str):
-        logger.info("PLI occurred, triggering IDR frame request", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+        logger.debug("PLI occurred, triggering IDR frame request", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         asyncio.run_coroutine_threadsafe(self.request_idr_frame(), self.async_event_loop)
 
-    async def _start_rtc_pipeline(self, client_peer_id: str, c_type: str):
+    async def _start_rtc_pipeline(self, client_peer_id: str, c_type: str, client_token: Optional[str] = None):
         """Starts the WebRTC pipeline and creates the peer connection."""
         # Normalize client_type to ClientType enum
         client_type = ClientType(c_type)
@@ -892,7 +925,7 @@ class RTCApp:
         data_channel.on("open", self.on_data_open)
         input_consumer = self._serialize_channel(
             data_channel,
-            lambda msg, ch=data_channel, ct=client_type: self._on_input_channel_message(msg, ch, ct),
+            lambda msg, ch=data_channel, ct=client_type, tok=client_token: self._on_input_channel_message(msg, ch, ct, tok),
         )
 
         # A dynamic secondary data channel intended for file data transmission
@@ -1062,10 +1095,10 @@ class RTCApp:
         except Exception as e:
             raise RTCAppError(f"Error stopping pipeline: {e}")
 
-    async def start_rtc_connection(self, client_peer_id: str, client_type: str):
+    async def start_rtc_connection(self, client_peer_id: str, client_type: str, client_token: Optional[str] = None):
         try:
             logger.info("Starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
-            await self._start_rtc_pipeline(client_peer_id, client_type)
+            await self._start_rtc_pipeline(client_peer_id, client_type, client_token)
         except Exception as e:
             logger.error(f"Error starting RTC pipeline: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
         else:

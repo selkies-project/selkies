@@ -45,7 +45,7 @@ export class WebRTCSignaling {
      *    Reference implementation:
      *      https://github.com/GStreamer/gstreamer/tree/main/subprojects/gst-examples/webrtc/signaling
      */
-    constructor(server, client_type, client_slot, client_strict_viewer) {
+    constructor(server, client_type, client_slot, client_strict_viewer, client_token) {
         /**
          * @private
          * @type {URL}
@@ -139,6 +139,9 @@ export class WebRTCSignaling {
          * @type {boolean}
          */
         this.client_strict_viewer = client_strict_viewer;
+        // Secure-mode session token; the server matches it against the active
+        // mk (mouse+keyboard) token to grant a viewer read-write collaboration.
+        this.client_token = client_token;
 
         /**
          * @type {function}
@@ -219,6 +222,7 @@ export class WebRTCSignaling {
             'client_type': this.client_type,
             'client_slot': this.client_slot,
             'client_strict_viewer': this.client_strict_viewer,
+            'client_token': this.client_token,
         }
         this._ws_conn.send(`HELLO ${this.peer_type} ${JSON.stringify(meta)}`);
         this._setStatus("Registering with server, peer type: " + this.peer_type + ", client type: " + this.client_type);

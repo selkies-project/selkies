@@ -28,7 +28,9 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import ClipboardWorker from './clipboard-worker.js?worker'
+// Inline (base64 blob) so the worker travels inside selkies-core.js itself —
+// no separate hashed file to place next to whichever chunk references it.
+import ClipboardWorker from './clipboard-worker.js?worker&inline'
 
 // Base64 so paths survive the ',' and ':' delimiters in FILE_UPLOAD messages.
 function b64Path(p) {
@@ -296,6 +298,7 @@ export default function webrtc() {
 	let manualWidth, manualHeight = 0;
 	window.isManualResolutionMode = false;
 	window.fps = 0;
+	window.currentAudioBufferSize = 0;
 	let enableWebrtcStatics = false;
 
 	var videoConnected = "";
@@ -307,6 +310,11 @@ export default function webrtc() {
 	let statsLoopId = null;
 	let metricsLoopId = null;
 	let useCssScaling = false;
+	// scaling_dpi (the desktop-DPI slider, 96 = 100%). INDEPENDENT of resolution / the HiDPI
+	// toggle. Defaults to the local display scaling (devicePixelRatio) so the remote desktop's
+	// fonts/UI match the local environment regardless of the streamed resolution; an explicit
+	// slider value wins.
+	let scalingDPI = 96;
 	// Webrtc mode has video and audio active by default,
 	// and no microphone support yet.
 	let isVideoPipelineActive = true;
@@ -333,6 +341,12 @@ export default function webrtc() {
 	let playerInputTargetIndex = 0;
 	let clientRole = null;
 	let clientSlot = null;
+
+	// Render/input preferences shared with the websockets core (same
+	// localStorage keys, same dashboard messages).
+	let antiAliasingEnabled = true;
+	let trackpadMode = false;
+	let useBrowserCursors = false;
 
 	let enable_binary_clipboard = false;
 	let multipartClipboard = {
@@ -398,6 +412,13 @@ export default function webrtc() {
 		const prefixedKey = `${storageAppName}_${key}`;
 		const value = window.localStorage.getItem(prefixedKey);
 		return (value === null || value === undefined) ? default_value : parseInt(value);
+	};
+	// Fraction-preserving variant for values with sub-unit steps (Mbps bitrate).
+	const getFloatParam = (key, default_value) => {
+		const prefixedKey = `${storageAppName}_${key}`;
+		const value = window.localStorage.getItem(prefixedKey);
+		const parsed = parseFloat(value);
+		return (value === null || value === undefined || isNaN(parsed)) ? default_value : parsed;
 	};
 	const setIntParam = (key, value) => {
 		const prefixedKey = `${storageAppName}_${key}`;
@@ -507,7 +528,9 @@ export default function webrtc() {
 
 	function updateStatusDisplay() {
 		if (statusDisplayElement) {
-			statusDisplayElement.textContent = status;
+			// Sentence-case the status word for display (internal `status` stays lower-case
+			// for comparisons like `status == 'connected'`): 'connecting' -> 'Connecting'.
+			statusDisplayElement.textContent = status ? status.charAt(0).toUpperCase() + status.slice(1) : status;
 			if (status == 'connected') {
 				// clear the status and show the play button
 				statusDisplayElement.classList.add("hidden");
@@ -521,6 +544,14 @@ export default function webrtc() {
 	function updateVideoImageRendering(){
 		if (!videoElement) return;
 
+		if (!antiAliasingEnabled) {
+			// Same contract as the websockets core: anti-aliasing off forces
+			// sharp pixels regardless of scaling.
+			if (videoElement.style.imageRendering !== 'pixelated') {
+				videoElement.style.imageRendering = 'pixelated';
+			}
+			return;
+		}
 		const dpr = window.devicePixelRatio || 1;
 		const isOneToOne = !useCssScaling || (useCssScaling && dpr <= 1);
 		if (isOneToOne) {
@@ -619,14 +650,21 @@ export default function webrtc() {
 		const knownSettings = [
 			'framerate', 'encoder_rtc', 'is_manual_resolution_mode',
 			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
-			'rate_control_mode', 'video_crf'
+			'rate_control_mode', 'video_crf',
+			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality',
+			'video_paintover_crf', 'video_paintover_burst_frames'
 		];
 		const booleanSettingKeys = [
-			'is_manual_resolution_mode', 'enable_binary_clipboard'
+			'is_manual_resolution_mode', 'enable_binary_clipboard',
+			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality'
 		];
 		const integerSettingKeys = [
-			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_bitrate', 'video_crf'
+			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_crf',
+			'video_paintover_crf', 'video_paintover_burst_frames'
 		];
+		// video_bitrate (Mbps) allows sub-Mbps fractions (0.25 = 250 Kbps); an
+		// integer parse would truncate it to 0 on this initial settings send.
+		const floatSettingKeys = ['video_bitrate'];
 
 		for (const key in localStorage) {
 			if (Object.hasOwnProperty.call(localStorage, key) && key.startsWith(settingsPrefix)) {
@@ -636,6 +674,9 @@ export default function webrtc() {
 					let value = localStorage.getItem(key);
 					if (booleanSettingKeys.includes(baseKey)) {
 						value = (value === 'true');
+					} else if (floatSettingKeys.includes(baseKey)) {
+						value = parseFloat(value);
+						if (isNaN(value)) continue;
 					} else if (integerSettingKeys.includes(baseKey)) {
 						value = parseInt(value, 10);
 						if (isNaN(value)) continue;
@@ -733,14 +774,31 @@ export default function webrtc() {
 		console.log(`Resized to window resolution: ${logicalWidth}x${logicalHeight}`);
 	}
 
+	// scaling_dpi synced to the local display scaling (devicePixelRatio), NOT the resolution:
+	// dpr 1.5 -> 144 (150%), 2 -> 192 (200%); 96 (100%) otherwise. Snapped to the DPI presets.
+	function autoDeriveDpi() {
+		const dpr = window.devicePixelRatio || 1;
+		const target = Math.round(dpr * 4) * 24;
+		return (dpr > 1 && [120, 144, 168, 192, 216, 240, 288].includes(target)) ? target : 96;
+	}
+
 	function sendResolutionToServer(width, height) {
 		if (isSharedMode) {
 			console.log("Skipping sending resolution in shared mode.");
 			return;
 		}
-		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
-		const realWidth = roundDownToEven(width * dpr);
-		const realHeight = roundDownToEven(height * dpr);
+		let realWidth, realHeight, dpr;
+		if (window.isManualResolutionMode) {
+			// A manual/preset resolution IS the exact framebuffer; don't multiply by dpr, or a
+			// useCssScaling flip (HiDPI toggle / preset apply) swings it 2x<->1x. Mirrors ws-core.
+			dpr = 1;
+			realWidth = roundDownToEven(width);
+			realHeight = roundDownToEven(height);
+		} else {
+			dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+			realWidth = roundDownToEven(width * dpr);
+			realHeight = roundDownToEven(height * dpr);
+		}
 		const resString = `${realWidth}x${realHeight}`;
 		console.log(`Sending resolution to server: ${resString}, Pixel Ratio Used: ${dpr}, useCssScaling: ${useCssScaling}`);
 		webrtc.sendDataChannelMessage(`r,${resString}`);
@@ -778,6 +836,10 @@ export default function webrtc() {
 			console.log("Skipping loading last session settings in shared mode.");
 			return;
 		}
+		// Sync the remote desktop DPI to the local display scaling on connect (server applies via
+		// handle_scaling -> set_dpi). scaling_dpi is not in the WebRTC settings allow-list, so the
+		// s, path is required. This is the desktop-font sync, unrelated to the resolution.
+		if (webrtc) { try { webrtc.sendDataChannelMessage(`s,${scalingDPI}`); } catch (_) {} }
 		// Preset the video element to last session resolution
 		if (window.isManualResolutionMode && manualWidth && manualHeight) {
 			console.log(`Applying manual resolution: ${manualWidth}x${manualHeight}`);
@@ -970,14 +1032,76 @@ export default function webrtc() {
 					applyOutputDevice();
 				}
 				break;
+			case 'requestFullscreen':
+				// Parity with the websockets core: fullscreen the stream container
+				// (pointer-lock aware) rather than the whole document.
+				if (input) {
+					input.enterFullscreen();
+				} else if (document.fullscreenElement === null) {
+					document.documentElement.requestFullscreen().catch(() => {});
+				}
+				break;
+			case 'setSynth':
+				if (input && typeof input.setSynth === 'function') {
+					input.setSynth(message.value);
+				}
+				break;
+			case 'setAntiAliasing':
+				if (typeof message.value === 'boolean') {
+					antiAliasingEnabled = message.value;
+					setBoolParam('antiAliasingEnabled', antiAliasingEnabled);
+					updateVideoImageRendering();
+				} else {
+					console.warn("Invalid value received for setAntiAliasing:", message.value);
+				}
+				break;
+			case 'setUseBrowserCursors':
+				if (typeof message.value === 'boolean') {
+					useBrowserCursors = message.value;
+					setBoolParam('use_browser_cursors', useBrowserCursors);
+					if (input && typeof input.setUseBrowserCursors === 'function') {
+						input.setUseBrowserCursors(useBrowserCursors);
+					}
+				} else {
+					console.warn("Invalid value received for setUseBrowserCursors:", message.value);
+				}
+				break;
+			case 'touchinput:trackpad':
+				if (input && typeof input.setTrackpadMode === 'function') {
+					trackpadMode = true;
+					setBoolParam('trackpadMode', true);
+					input.setTrackpadMode(true);
+				}
+				break;
+			case 'touchinput:touch':
+				if (input && typeof input.setTrackpadMode === 'function') {
+					trackpadMode = false;
+					setBoolParam('trackpadMode', false);
+					input.setTrackpadMode(false);
+				}
+				break;
 			default:
 				break;
 		}
 	}
 
 	function handleSettingsMessage(settings) {
+		// Turbo/4:4:4/paint-over have no dedicated data-channel opcode; the server applies
+		// them via handle_update_settings, so forward them as a SETTINGS payload (mirrors the
+		// WebSocket SETTINGS path; the dashboard already persisted them to localStorage).
+		const passthrough = {};
+		if (settings.video_fullcolor !== undefined) passthrough.video_fullcolor = !!settings.video_fullcolor;
+		if (settings.video_streaming_mode !== undefined) passthrough.video_streaming_mode = !!settings.video_streaming_mode;
+		if (settings.use_paint_over_quality !== undefined) passthrough.use_paint_over_quality = !!settings.use_paint_over_quality;
+		if (settings.video_paintover_crf !== undefined) passthrough.video_paintover_crf = parseInt(settings.video_paintover_crf, 10);
+		if (settings.video_paintover_burst_frames !== undefined) passthrough.video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames, 10);
+		// Encoder switch (h264enc <-> openh264enc): the server restarts the pipeline on this.
+		if (settings.encoder_rtc !== undefined) passthrough.encoder_rtc = settings.encoder_rtc;
+		if (Object.keys(passthrough).length > 0) {
+			webrtc.sendDataChannelMessage(`SETTINGS,${JSON.stringify(passthrough)}`);
+		}
 		if (settings.video_bitrate !== undefined) {
-			videoBitRate = parseInt(settings.video_bitrate);
+			videoBitRate = parseFloat(settings.video_bitrate);
 			webrtc.sendDataChannelMessage(`vb,${videoBitRate}`);
 			setIntParam('video_bitrate', videoBitRate);
 		}
@@ -991,14 +1115,15 @@ export default function webrtc() {
 			webrtc.sendDataChannelMessage(`ab,${audioBitRate}`);
 			setIntParam('audio_bitrate', audioBitRate);
 		}
-		if (settings.encoder !== undefined) {
-			console.log("Received encoder setting from dashboard:", settings.encoder);
-			encoder = settings.encoder;
-			console.warn("Changing of encoder on the fly is not yet supported");
-			// setIntParam('encoder_rtc', encoder);
+		if (settings.encoder_rtc !== undefined) {
+			// The server restarts the pipeline with the new encoder (forwarded via the
+			// SETTINGS passthrough above); track it locally for the decode path.
+			encoder = settings.encoder_rtc;
+			setStringParam('encoder_rtc', encoder);
+			console.log("Encoder switched to:", encoder);
 		}
-		if (settings.SCALING_DPI !== undefined) {
-			const dpi = parseInt(settings.SCALING_DPI, 10);
+		if (settings.scaling_dpi !== undefined) {
+			const dpi = parseInt(settings.scaling_dpi, 10);
 			webrtc.sendDataChannelMessage(`s,${dpi}`)
 		}
 		if (settings.enable_binary_clipboard !== undefined) {
@@ -1339,6 +1464,12 @@ export default function webrtc() {
 				previousVideoJitterBufferDelay = stats.video.jitterBufferDelay;
 				previousVideoJitterBufferEmittedCount = stats.video.jitterBufferEmittedCount;
 				connectionStat.connectionAudioLatency = parseInt(Math.round(rtt + (1000.0 * (stats.audio.jitterBufferDelay - previousAudioJitterBufferDelay) / (stats.audio.jitterBufferEmittedCount - previousAudioJitterBufferEmittedCount) || 0)));
+				// Audio-buffer proxy so the dashboard's Audio Buffer gauge works in WebRTC too:
+				// the RTCInboundRtpStreamStats de-jitter depth (ms) over the ~20ms Opus frame is
+				// roughly the number of frames buffered ahead of playout (browser-managed audio
+				// has no direct frame count like the websockets worklet).
+				const _audioJitterMs = 1000.0 * (stats.audio.jitterBufferDelay - previousAudioJitterBufferDelay) / (stats.audio.jitterBufferEmittedCount - previousAudioJitterBufferEmittedCount) || 0;
+				window.currentAudioBufferSize = Math.max(0, Math.round(_audioJitterMs / 20));
 				previousAudioJitterBufferDelay = stats.audio.jitterBufferDelay;
 				previousAudioJitterBufferEmittedCount = stats.audio.jitterBufferEmittedCount;
 
@@ -1347,10 +1478,12 @@ export default function webrtc() {
 
 				window.fps = connectionStat.connectionFrameRate;
 				window.network_stats = {
-					"bandwidth_mbps": (parseInt(stats.general.availableReceiveBandwidth) / 1e+6),
+					// Actual received throughput (video Mbps + audio kbps→Mbps), matching the WS
+					// server-side bandwidth stat. availableReceiveBandwidth is only the
+					// congestion-control estimate and reads far below the real rate on a relay.
+					"bandwidth_mbps": (parseFloat(connectionStat.connectionVideoBitrate) || 0) + (parseFloat(connectionStat.connectionAudioBitrate) || 0) / 1000,
 					"latency_ms": connectionStat.connectionLatency,
 				};
-				window.video_bitrate = connectionStat.connectionVideoBitrate;
 				if (enableWebrtcStatics) webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
 			} catch (e) {
 				// webrtc may be null after cleanup; log anything unexpected for observability.
@@ -1861,7 +1994,7 @@ export default function webrtc() {
 			turnSwitch = getBoolParam('turn_switch', false);
 			resizeRemote = getBoolParam('resize_remote', resizeRemote);
 			scaleLocal = getBoolParam('scaleLocallyManual', !resizeRemote);
-			videoBitRate = getIntParam('video_bitrate', videoBitRate);
+			videoBitRate = getFloatParam('video_bitrate', videoBitRate);
 			videoFramerate = getIntParam('framerate', videoFramerate);
 			audioBitRate = getIntParam('audio_bitrate', audioBitRate);
 			window.isManualResolutionMode = getBoolParam('is_manual_resolution_mode', false);
@@ -1872,11 +2005,20 @@ export default function webrtc() {
 			rateControlMode = getStringParam('rate_control_mode', 'cbr');
 			// hiDPI contract: CSS scaling on => DPR 1 everywhere (resolution + input);
 			// off => devicePixelRatio is applied by the resolution senders and input math.
-			useCssScaling = getBoolParam('useCssScaling', true);
+			// Default OFF (ws-core parity, = HIDPI_SPEC fallback) so an auto-resolution HiDPI
+			// client renders a crisp physical-res buffer. scaling_dpi is an INDEPENDENT user
+			// setting (the DPI slider) — the HiDPI toggle does not touch it.
+			useCssScaling = getBoolParam('useCssScaling', false);
+			// scaling_dpi default: sync to the local display scaling so remote fonts match local;
+			// an explicit slider value wins. Independent of resolution (no manual/auto coupling).
+			scalingDPI = (getStringParam('scaling_dpi', null) !== null) ? getIntParam('scaling_dpi', 96) : autoDeriveDpi();
 			enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 			clipboard_in_enabled = getBoolParam('clipboard_in_enabled', clipboard_in_enabled);
 			clipboard_out_enabled = getBoolParam('clipboard_out_enabled', clipboard_out_enabled);
 			crf = getIntParam('video_crf', crf);
+			antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
+			trackpadMode = getBoolParam('trackpadMode', false);
+			useBrowserCursors = getBoolParam('use_browser_cursors', false);
 
 			if (!isSharedMode) {
 				// listen for dashboard messages (Dashboard -> core client)
@@ -1893,14 +2035,26 @@ export default function webrtc() {
 			// WebRTC entrypoint, connect to the signaling server
 			var pathname = getRoutePrefix() + "/";
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
-			var url = new URL(protocol + window.location.host + pathname + appName + "/signaling/");
-			var signaling = new WebRTCSignaling(url, clientRole, clientSlot, isStrictViewer);
+			var url = new URL(protocol + window.location.host + pathname + "api/" + appName + "/signaling/");
+			// Secure-mode token from the page URL (?token=...); the server matches it
+			// against the active mk token to grant a viewer read-write collaboration.
+			var authToken = new URLSearchParams(window.location.search).get('token') || undefined;
+			var signaling = new WebRTCSignaling(url, clientRole, clientSlot, isStrictViewer, authToken);
 			webrtc = new WebRTCClient(signaling, videoElement, 1, isSharedMode);
 			const send = (data) => {
 				if (isSharedMode && isStrictViewer) return;
 				webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
+			// Same global handle the websockets core exposes.
+			window.webrtcInput = input;
+
+			// Apply persisted input preferences and announce state to the
+			// dashboard (parity with the websockets core).
+			if (trackpadMode) input.setTrackpadMode(true);
+			if (useBrowserCursors) input.setUseBrowserCursors(true);
+			window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
+			window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 
 			setupKeyBoardAssisstant();
 
@@ -1928,6 +2082,10 @@ export default function webrtc() {
 			};
 
 			signaling.onshowalert = (msg) => {
+				// Suppress the disconnect alert when it's the result of an intentional
+				// mode switch: the dashboard sets this flag before requesting /api/switch,
+				// which closes the WebRTC peer (code 4000) before the page reloads.
+				if (typeof window !== 'undefined' && window.__selkiesModeSwitching) return;
 				alert("Disconnected: " + msg + " Please try again.");
 			}
 
@@ -2046,14 +2204,17 @@ export default function webrtc() {
 
 					if (isText) {
 						resolveServerClipboard(content, null, 'text/plain');
-						// Local write is gated per-direction (server->client = out).
+						// Parity with the websockets core: the dashboard UI gets the
+						// text regardless; the local clipboard write is gated
+						// per-direction (server->client = out) and best-effort — an
+						// unfocused tab must not hide the update from the UI.
+						window.postMessage({
+							type: 'clipboardContentUpdate',
+							text: content,
+						}, window.location.origin);
 						if (clipboard_out_enabled) {
 							navigator.clipboard.writeText(content)
 								.then(() => {
-									window.postMessage({
-										type: 'clipboardContentUpdate',
-										text: content,
-									}, window.location.origin);
 									console.log('Successfully wrote text from server to local clipboard.');
 								})
 								.catch(err => {
@@ -2182,8 +2343,34 @@ export default function webrtc() {
 				clipboardStatus = 'enabled';
 			}
 
+			// Apply the fetched (or fallback) RTC config and open the connection.
+			// Extracted so a failed TURN fetch still connects: the data channel is
+			// what delivers serverSettings, and without it the dashboard never
+			// renders its controls or the WebSocket/WebRTC toggle — i.e. it freezes.
+			const applyRtcConfigAndConnect = (config) => {
+				// for debugging, force use of relay server.
+				webrtc.forceTurn = turnSwitch;
+
+				// get initial local resolution
+				windowResolution = input.getWindowResolution();
+				signaling.currRes = windowResolution;
+
+				if (scaleLocal === false) {
+						webrtc.element.style.width = windowResolution[0]/window.devicePixelRatio+'px';
+						webrtc.element.style.height = windowResolution[1]/window.devicePixelRatio+'px';
+				}
+
+				if (config.iceServers && config.iceServers.length > 1) {
+						pushCapped(debugEntries, applyTimestamp("using TURN servers: " + config.iceServers[1].urls.join(", ")));
+				} else {
+						pushCapped(debugEntries, applyTimestamp("no TURN servers found."));
+				}
+				webrtc.rtcPeerConfig = config;
+				webrtc.connect();
+			};
+
 			// Fetch RTC configuration containing STUN/TURN servers.
-			fetch(getRoutePrefix() + "/turn")
+			fetch(getRoutePrefix() + "/api/turn")
 				.then(function (response) {
 					if (!response.ok) {
 						throw new Error(`Status: ${response.status}`);
@@ -2191,30 +2378,17 @@ export default function webrtc() {
 					return response.json();
 				})
 				.then((config) => {
-					// for debugging, force use of relay server.
-					webrtc.forceTurn = turnSwitch;
-
-					// get initial local resolution
-					windowResolution = input.getWindowResolution();
-					signaling.currRes = windowResolution;
-
-					if (scaleLocal === false) {
-							webrtc.element.style.width = windowResolution[0]/window.devicePixelRatio+'px';
-							webrtc.element.style.height = windowResolution[1]/window.devicePixelRatio+'px';
-					}
-
-					if (config.iceServers.length > 1) {
-							pushCapped(debugEntries, applyTimestamp("using TURN servers: " + config.iceServers[1].urls.join(", ")));
-					} else {
-							pushCapped(debugEntries, applyTimestamp("no TURN servers found."));
-					}
-					webrtc.rtcPeerConfig = config;
-					webrtc.connect();
+					applyRtcConfigAndConnect(config);
 				})
 				.catch((error) => {
-					status = `Failed to fetch TURN server details. Check the server URL. Error: ${error}`
-					console.error(status);
-					updateStatusDisplay();
+					// A 404 here is expected when no TURN server is configured, and is
+					// NOT fatal. Fall back to an empty ICE config (host/STUN candidates,
+					// which serve LAN/localhost) and still connect, so the data channel —
+					// and therefore serverSettings and the mode toggle — comes up rather
+					// than leaving the dashboard frozen with no way back to WebSockets.
+					pushCapped(debugEntries, applyTimestamp(`TURN config unavailable (${error}); connecting without TURN.`));
+					console.warn(`Failed to fetch TURN server details (${error}); continuing without TURN.`);
+					applyRtcConfigAndConnect({ iceServers: [] });
 				})
 		},
 		cleanup() {

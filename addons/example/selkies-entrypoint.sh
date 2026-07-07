@@ -96,13 +96,13 @@ if [ ! -z "${DEV_MODE+x}" ]; then
     cd $HOME/selkies/addons/selkies-web-core
     npm install
     npm run build
-    echo ${SELKIES_WEB_DIST}/src ../${DEV_MODE}/src/ | xargs -n 1 cp dist/selkies-core.js 
-    mkdir -p ../${DEV_MODE}/dist/assets/
+    # The clipboard worker is inlined into selkies-core.js (?worker&inline),
+    # so the core is a single self-contained file.
+    echo ${SELKIES_WEB_DIST}/src ../${DEV_MODE}/src/ | xargs -n 1 cp dist/selkies-core.js
     sudo nodemon --watch selkies-core.js \
                  --watch selkies-wr-core.js \
                  --watch selkies-ws-core.js --exec "npm run build && \
-                 echo ../${DEV_MODE}/src/ ${SELKIES_WEB_DIST}/src/ | xargs -n 1 cp dist/selkies-core.js && \
-                 cp dist/clipboard-worker* ../${DEV_MODE}/dist/assets/" &
+                 echo ../${DEV_MODE}/src/ ${SELKIES_WEB_DIST}/src/ | xargs -n 1 cp dist/selkies-core.js" &
 
     # Copy touch gamepad
     cp ../universal-touch-gamepad/universalTouchGamepad.js /opt/selkies-web/src/
@@ -113,13 +113,11 @@ if [ ! -z "${DEV_MODE+x}" ]; then
     cd $HOME/selkies/addons/${DEV_MODE}
     npm install
     npm run build
-    cp ../selkies-web-core/dist/clipboard-worker* dist/assets/
+    mkdir -p dist/src /opt/selkies-web/src
     cp -r dist/* /opt/selkies-web/
     sudo nodemon --watch ../${DEV_MODE}/src --exec "npm run build && \
       cp -r ../${DEV_MODE}/dist/* /opt/selkies-web/ && \
-      cp ../selkies-web-core/dist/clipboard-worker* /opt/selkies-web/assets/ && \
-      cp -r ../${DEV_MODE}/dist/* ${SELKIES_WEB_DIST}/ && \
-      cp ../selkies-web-core/dist/clipboard-worker* ${SELKIES_WEB_DIST}/assets/" &
+      cp -r ../${DEV_MODE}/dist/* ${SELKIES_WEB_DIST}/" &
   fi
 
   # Run backend
