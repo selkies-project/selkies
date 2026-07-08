@@ -681,6 +681,37 @@ let dec = null, decKey = false, decNeedKey = false;
 const OVERLOAD_QUEUE = 24;   // decode backlog (frames) that triggers a keyframe resync
 const ack = () => self.postMessage({ ack: true });
 
+// Firefox's canvas drawImage scales the full BACKING surface of a
+// decoder-output VideoFrame (the RGB conversion of the decoded image,
+// alignment padding included) into the frame's nominal box: 1080 rows coded
+// as 1088 render squished with the 8 padding rows visible at the bottom
+// (green when the encoder zero-fills, e.g. h264_vaapi; invisible when it
+// edge-replicates, e.g. x264). Undetectable: the frame's metadata is fully
+// clean (coded == display == visibleRect, no padding reported), and
+// synthetic CPU-backed frames draw correctly, so both a visibleRect check
+// and a behavior probe pass. Gate on the UA and compute the padded backing
+// size ourselves from H.264's 16x16 macroblock alignment.
+// (WorkerNavigator also carries userAgent.)
+const UA_DRAWS_BACKING_SURFACE = typeof navigator !== 'undefined' && /Firefox/i.test(navigator.userAgent || '');
+let loggedFrameGeom = false;
+// Destination size that maps the backing 1:1 onto the canvas (padding lands
+// off-canvas), or null for a plain draw.
+function overscanSize(f) {
+  if (!UA_DRAWS_BACKING_SURFACE) return null;
+  const w = (f.displayWidth + 15) & ~15, h = (f.displayHeight + 15) & ~15;
+  return (w !== f.displayWidth || h !== f.displayHeight) ? { w: w, h: h } : null;
+}
+function logFrameGeomOnce(tag, f) {
+  if (loggedFrameGeom) return;
+  loggedFrameGeom = true;
+  const vr = f.visibleRect;
+  const os = overscanSize(f);
+  console.log(tag + ' frame geom: coded=' + f.codedWidth + 'x' + f.codedHeight +
+    ' display=' + f.displayWidth + 'x' + f.displayHeight +
+    ' visibleRect=' + (vr ? vr.x + ',' + vr.y + ',' + vr.width + 'x' + vr.height : String(vr)) +
+    ' format=' + f.format + ' overscan=' + (os ? os.w + 'x' + os.h : 'none'));
+}
+
 // Present one decoded VideoFrame on the active sink. Consumes/closes the frame.
 function present(f) {
   if (mode === 'vtg' && writer && !closed) {
@@ -692,7 +723,17 @@ function present(f) {
   try {
     if (ctx) {
       if (oc.width !== f.displayWidth || oc.height !== f.displayHeight) { oc.width = f.displayWidth; oc.height = f.displayHeight; }
-      ctx.drawImage(f, 0, 0);
+      // Where drawImage leaks the backing surface (see gate above), overscan
+      // the destination to the computed padded size: the visible image then
+      // maps 1:1 onto the canvas and the alignment padding lands off-canvas.
+      // Other browsers keep the plain draw (it crops to the visible region).
+      logFrameGeomOnce('[video worker]', f);
+      const os = overscanSize(f);
+      if (os) {
+        ctx.drawImage(f, 0, 0, os.w, os.h);
+      } else {
+        ctx.drawImage(f, 0, 0);
+      }
       // Tell the page the OffscreenCanvas has real content so it can hide the
       // main canvas (hiding it before this point flashes black).
       if (!presented) { presented = true; self.postMessage({ type: 'presented' }); }
@@ -750,6 +791,53 @@ self.onmessage = (e) => {
     ack();
   }
 };`;
+
+
+// Firefox's canvas drawImage scales the full BACKING surface of a
+// decoder-output VideoFrame (the RGB conversion of the decoded image,
+// alignment padding included) into the frame's nominal box: 1080 rows coded
+// as 1088 render squished with the 8 padding rows visible at the bottom
+// (green when the encoder zero-fills, e.g. h264_vaapi; invisible when it
+// edge-replicates, e.g. x264). Undetectable: the frame's metadata is fully
+// clean (coded == display == visibleRect, no padding reported), and
+// synthetic CPU-backed frames draw correctly, so both a visibleRect check
+// and a behavior probe pass. Gate on the UA and compute the padded backing
+// size ourselves from H.264's 16x16 macroblock alignment.
+// (Duplicated in VIDEO_WORKER_SRC above; keep the two copies in sync.)
+const UA_DRAWS_BACKING_SURFACE = typeof navigator !== 'undefined' && /Firefox/i.test(navigator.userAgent || '');
+let loggedFrameGeom = false;
+// Destination size that maps the backing 1:1 onto the canvas (padding lands
+// off-canvas), or null for a plain draw.
+function overscanSize(f) {
+  if (!UA_DRAWS_BACKING_SURFACE) return null;
+  const w = (f.displayWidth + 15) & ~15, h = (f.displayHeight + 15) & ~15;
+  return (w !== f.displayWidth || h !== f.displayHeight) ? { w: w, h: h } : null;
+}
+function logFrameGeomOnce(tag, f) {
+  if (loggedFrameGeom) return;
+  loggedFrameGeom = true;
+  const vr = f.visibleRect;
+  const os = overscanSize(f);
+  console.log(tag + ' frame geom: coded=' + f.codedWidth + 'x' + f.codedHeight +
+    ' display=' + f.displayWidth + 'x' + f.displayHeight +
+    ' visibleRect=' + (vr ? vr.x + ',' + vr.y + ',' + vr.width + 'x' + vr.height : String(vr)) +
+    ' format=' + f.format + ' overscan=' + (os ? os.w + 'x' + os.h : 'none'));
+}
+
+// Draw a decoded VideoFrame without the encoder's alignment padding. Where
+// drawImage leaks the backing surface (see gate above), overscan the
+// destination to the computed padded size: the visible image maps 1:1 onto
+// the canvas and the padding rows fall past the canvas edge and are clipped.
+// Other browsers keep the plain draw (it crops to the visible region).
+function drawFrameCropped(ctx2d, frame) {
+  logFrameGeomOnce('[video]', frame);
+  const os = overscanSize(frame);
+  if (os) {
+    ctx2d.drawImage(frame, 0, 0, os.w, os.h);
+  } else {
+    ctx2d.drawImage(frame, 0, 0);
+  }
+}
 
 // Main-thread Chromium generator. VideoTrackGenerator is worker-only and is handled by the
 // video worker, not here.
@@ -838,7 +926,7 @@ function presentFrameToVideo(frame) {
   // connection has nothing on the canvas yet, so hiding it (or showing an empty
   // <video>) would leave black until the sink's first rendered frame.
   if (!mstgRendered && canvas && canvasContext && canvas.width > 0 && canvas.height > 0) {
-    try { canvasContext.drawImage(frame, 0, 0); } catch (e) {}
+    try { drawFrameCropped(canvasContext, frame); } catch (e) {}
   }
   // Drop a frame if the sink can't keep up, to keep latency low.
   if (videoFrameWriter.desiredSize !== null && videoFrameWriter.desiredSize <= 0) {
@@ -1851,7 +1939,7 @@ function handleDecodedVncStripeFrame(yPos, frame) {
       // handed to the worker sink (VideoTrackGenerator <video>, or OffscreenCanvas)
     } else {
       if (canvas && canvasContext && canvas.width > 0 && canvas.height > 0) {
-        canvasContext.drawImage(frame, 0, 0);
+        drawFrameCropped(canvasContext, frame);
       }
       try { frame.close(); } catch (e) {}
     }
@@ -3512,7 +3600,7 @@ function initWebsockets() {
           // handed to the worker sink (VideoTrackGenerator <video>, or OffscreenCanvas)
         } else {
           if (canvas.width > 0 && canvas.height > 0) {
-            canvasContext.drawImage(frame, 0, 0);
+            drawFrameCropped(canvasContext, frame);
           }
           try { frame.close(); } catch (e) {}
         }
@@ -3620,7 +3708,7 @@ function initWebsockets() {
                         // frame handed to the worker sink (VideoTrackGenerator <video>, or OffscreenCanvas)
                     } else {
                         if (canvas.width > 0 && canvas.height > 0) {
-                            canvasContext.drawImage(frameToPaint, 0, 0);
+                            drawFrameCropped(canvasContext, frameToPaint);
                         }
                         frameToPaint.close();
                     }
