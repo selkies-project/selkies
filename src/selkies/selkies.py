@@ -46,7 +46,6 @@ PCMFLUX_AVAILABLE = False
 import asyncio
 import argparse
 import base64
-import ctypes
 import json
 import pathlib
 import re
@@ -68,10 +67,11 @@ from signal import SIGINT, signal
 from .settings import settings_ws as settings, FINAL_SETTING_DEFINITIONS_WEBSOCKETS as SETTING_DEFINITIONS
 
 try:
-    from pcmflux import AudioCapture, AudioCaptureSettings, AudioChunkCallback
+    from pcmflux import AudioCapture, AudioCaptureSettings
     PCMFLUX_AVAILABLE = True
     data_logger.info("pcmflux library found. Audio capture is available.")
-except ImportError:
+except (ImportError, RuntimeError):
+    AudioCapture = AudioCaptureSettings = None
     PCMFLUX_AVAILABLE = False
     data_logger.warning("pcmflux library not found. Audio capture is unavailable.")
 
@@ -87,11 +87,12 @@ except ImportError:
     )
 
 try:
-    from pixelflux import CaptureSettings, ScreenCapture, StripeCallback
+    from pixelflux import CaptureSettings, ScreenCapture
 
     X11_CAPTURE_AVAILABLE = True
     data_logger.info("pixelflux library found. Striped encoding modes available.")
-except ImportError:
+except (ImportError, RuntimeError):
+    ScreenCapture = CaptureSettings = None
     X11_CAPTURE_AVAILABLE = False
     data_logger.warning(
         "pixelflux library not found. Striped encoding modes unavailable."
@@ -962,20 +963,19 @@ class DataStreamingServer:
         data_logger.info(f"Broadcasting display config update: {message_str}")
         websockets.broadcast(self.clients, message_str)
 
-    def _pcmflux_audio_callback(self, result_ptr, user_data):
+    def _pcmflux_audio_callback(self, frame):
         """
-        C-style callback passed to pcmflux, called from its capture thread.
+        Callback passed to pcmflux, called from its capture thread.
         """
-        if self.is_pcmflux_capturing and result_ptr and self.pcmflux_audio_queue is not None:
-            result = result_ptr.contents
-            if result.data and result.size > 0:
-                data_bytes = bytes(ctypes.cast(
-                    result.data, ctypes.POINTER(ctypes.c_ubyte * result.size)
-                ).contents)
-
-                if self.pcmflux_capture_loop and not self.pcmflux_capture_loop.is_closed():
-                    asyncio.run_coroutine_threadsafe(
-                        self.pcmflux_audio_queue.put(data_bytes), self.pcmflux_capture_loop)
+        if self.is_pcmflux_capturing and frame is not None and self.pcmflux_audio_queue is not None:
+            try:
+                if len(frame) > 0:
+                    data_bytes = memoryview(frame)
+                    if self.pcmflux_capture_loop and not self.pcmflux_capture_loop.is_closed():
+                        asyncio.run_coroutine_threadsafe(
+                            self.pcmflux_audio_queue.put(data_bytes), self.pcmflux_capture_loop)
+            except Exception as e:
+                data_logger.warning(f"Error in audio capture callback: {e}")
     
     async def _pcmflux_send_audio_chunks(self):
         """
@@ -997,7 +997,7 @@ class DataStreamingServer:
                     self.pcmflux_audio_queue.task_done()
                     continue
                 
-                message_to_send = b'\x01\x00' + opus_bytes
+                message_to_send = bytes(opus_bytes)
                 self._bytes_sent_in_interval += len(message_to_send) * len(primary_viewers)
                 websockets.broadcast(primary_viewers, message_to_send)
 
@@ -1039,17 +1039,17 @@ class DataStreamingServer:
             capture_settings.use_silence_gate = False
             capture_settings.latency_ms = 10
             capture_settings.debug_logging = self.cli_args.debug[0]
+            capture_settings.omit_audio_header = False
             self.pcmflux_settings = capture_settings
 
             data_logger.info(f"pcmflux settings: device='{self.audio_device_name}', "
                              f"bitrate={capture_settings.opus_bitrate}, channels={capture_settings.channels}")
 
-            self.pcmflux_callback = AudioChunkCallback(self._pcmflux_audio_callback)
             self.pcmflux_module = AudioCapture()
             self.pcmflux_audio_queue = asyncio.Queue()
 
             await self.pcmflux_capture_loop.run_in_executor(
-                None, self.pcmflux_module.start_capture, self.pcmflux_settings, self.pcmflux_callback
+                None, self.pcmflux_module.start_capture, self.pcmflux_settings, self._pcmflux_audio_callback
             )
 
             self.is_pcmflux_capturing = True
@@ -1060,7 +1060,7 @@ class DataStreamingServer:
             return True
         except Exception as e:
             data_logger.error(f"Failed to start pcmflux audio pipeline: {e}", exc_info=True)
-            await self._stop_pcmflux_pipeline() # Attempt cleanup on failure
+            await self._stop_pcmflux_pipeline()
             return False
 
     async def _stop_pcmflux_pipeline(self):
@@ -1068,7 +1068,7 @@ class DataStreamingServer:
             return True
         
         data_logger.info("Stopping pcmflux audio pipeline...")
-        self.is_pcmflux_capturing = False # Prevent new items from being queued
+        self.is_pcmflux_capturing = False
 
         if self.pcmflux_send_task:
             self.pcmflux_send_task.cancel()
@@ -3093,43 +3093,60 @@ class DataStreamingServer:
         Starts a capture instance by creating the required CaptureSettings
         object and providing a callback with the correct signature.
         """
-        if display_id in self.capture_instances:
-            data_logger.warning(f"Capture instance for '{display_id}' already exists. Skipping start.")
-            return
+        if not X11_CAPTURE_AVAILABLE:
+            raise SelkiesAppError(
+                "Cannot start capture: the pixelflux library failed to import "
+                "(see the startup warning for the underlying error)."
+            )
+        existing = self.capture_instances.get(display_id)
+        if existing is not None:
+            module = existing.get('module')
+            alive = True
+            if module is not None:
+                try:
+                    alive = bool(module.is_capturing)
+                except Exception:
+                    alive = True
+            if alive:
+                if module is not None:
+                    try:
+                        module.request_idr_frame()
+                    except Exception:
+                        pass
+                data_logger.info(f"Capture instance for '{display_id}' already running; requested IDR.")
+                return True
+            data_logger.warning(f"Capture instance for '{display_id}' is stale; rebuilding.")
+            await self._stop_capture_for_display(display_id)
 
         data_logger.info(
             f"Preparing to start capture for display='{display_id}': "
             f"Res={width}x{height}, Offset={x_offset}x{y_offset}"
         )
 
+        sender_task = None
         try:
             settings = self._get_capture_settings(display_id, width, height, x_offset, y_offset)
-            display_state = self.display_clients.get(display_id, {})
-            encoder_for_this_capture = display_state.get('encoder', self.app.encoder)
 
-            def queue_data_for_display(result_ptr, user_data):
-                if not result_ptr:
+            def queue_data_for_display(frame):
+                if frame is None:
                     return
                 try:
-                    result = result_ptr.contents
-                    if result.size > 0:
-                        data_bytes = bytes(result.data[:result.size])
-                        if encoder_for_this_capture == "jpeg":
-                            final_data_to_queue = b"\x03\x00" + data_bytes
-                        else:
-                            final_data_to_queue = data_bytes
-                        
-                        queue = self.video_chunk_queues.get(display_id)
-                        if queue:
-                            item_to_queue = {'data': final_data_to_queue, 'frame_id': result.frame_id}
-                            
-                            def do_put():
-                                try:
-                                    queue.put_nowait(item_to_queue)
-                                except asyncio.QueueFull:
-                                    pass
-                            
-                            self.capture_loop.call_soon_threadsafe(do_put)
+                    if not len(frame):
+                        return
+                    queue = self.video_chunk_queues.get(display_id)
+                    if not queue:
+                        return
+                    data_bytes = memoryview(frame)
+                    item_to_queue = {'data': data_bytes, 'owner': frame,
+                                     'frame_id': frame.frame_id & 0xFFFF}
+
+                    def do_put():
+                        try:
+                            queue.put_nowait(item_to_queue)
+                        except asyncio.QueueFull:
+                            pass
+
+                    self.capture_loop.call_soon_threadsafe(do_put)
 
                 except Exception as e:
                     data_logger.error(f"Error in capture callback for {display_id}: {e}", exc_info=False)
@@ -3159,20 +3176,18 @@ class DataStreamingServer:
             queue_size = getattr(self, 'BACKPRESSURE_QUEUE_SIZE', 120)
             self.video_chunk_queues[display_id] = asyncio.Queue(maxsize=queue_size)
             sender_task = asyncio.create_task(self._video_chunk_sender(display_id))
-            
+
             capture_module = ScreenCapture()
 
             if IS_WAYLAND:
-                if hasattr(capture_module, 'set_cursor_callback'):
-                    capture_module.set_cursor_callback(wayland_cursor_handler)
-                    data_logger.info(f"Registered Wayland cursor callback for '{display_id}'")
-                    wayland_cursor_handler("surface", b"", 0, 0)
+                capture_module.set_cursor_callback(wayland_cursor_handler)
+                data_logger.info(f"Registered Wayland cursor callback for '{display_id}'")
 
             await self.capture_loop.run_in_executor(
                 None,
                 capture_module.start_capture,
                 settings,
-                StripeCallback(queue_data_for_display)
+                queue_data_for_display
             )
 
             self.capture_instances[display_id] = {
@@ -3185,7 +3200,7 @@ class DataStreamingServer:
             data_logger.error(f"Failed to start capture for '{display_id}': {e}", exc_info=True)
             if display_id in self.video_chunk_queues:
                 del self.video_chunk_queues[display_id]
-            if 'sender_task' in locals() and not sender_task.done():
+            if sender_task is not None and not sender_task.done():
                 sender_task.cancel()
 
     def _get_capture_settings(self, display_id, width, height, x, y):
@@ -3204,41 +3219,52 @@ class DataStreamingServer:
         cs.target_fps = float(display_state.get('framerate', self.app.framerate))
         cs.capture_cursor = self.capture_cursor
         cs.debug_logging = self.cli_args.debug[0]
-        
+        cs.use_wayland = IS_WAYLAND
+        cs.omit_stripe_headers = False
+        cs.deferred_free = True
+
         encoder = display_state.get('encoder', self.app.encoder)
         if encoder == "jpeg":
             cs.output_mode = 0
             cs.jpeg_quality = display_state.get('jpeg_quality', self._initial_jpeg_quality)
             cs.paint_over_jpeg_quality = display_state.get('paint_over_jpeg_quality', self._initial_paint_over_jpeg_quality)
-        else: # H.264 modes
+        else:
             cs.output_mode = 1
-            cs.h264_crf = display_state.get('h264_crf', self._initial_h264_crf)
-            cs.h264_paintover_crf = display_state.get('h264_paintover_crf', self._initial_h264_paintover_crf)
-            cs.h264_paintover_burst_frames = display_state.get('h264_paintover_burst_frames', self._initial_h264_paintover_burst_frames)
-            cs.h264_fullcolor = display_state.get('h264_fullcolor', self._initial_h264_fullcolor)
-            cs.h264_streaming_mode = display_state.get('h264_streaming_mode', self._initial_h264_streaming_mode)
-            cs.h264_fullframe = (encoder == "x264enc")
+            cs.video_crf = display_state.get('h264_crf', self._initial_h264_crf)
+            cs.video_paintover_crf = display_state.get('h264_paintover_crf', self._initial_h264_paintover_crf)
+            cs.video_paintover_burst_frames = display_state.get('h264_paintover_burst_frames', self._initial_h264_paintover_burst_frames)
+            cs.video_fullcolor = display_state.get('h264_fullcolor', self._initial_h264_fullcolor)
+            cs.video_streaming_mode = display_state.get('h264_streaming_mode', self._initial_h264_streaming_mode)
+            cs.video_fullframe = display_state.get('video_fullframe', (encoder in ("x264enc", "h264enc", "openh264enc")))
             rc_mode = display_state.get('rate_control_mode', 'crf')
-            cs.h264_cbr_mode = (rc_mode == 'cbr')
+            cs.video_cbr_mode = (rc_mode == 'cbr')
             video_bitrate = display_state.get('video_bitrate', self._initial_video_bitrate)
-            cs.h264_bitrate_kbps = video_bitrate * 1000  # Convert Mbps to kbps
+            cs.video_bitrate_kbps = video_bitrate * 1000
+            cs.use_openh264 = (encoder == "openh264enc")
+            if self.cli_args.dri_node:
+                cs.encode_node_index = parse_dri_node_to_index(self.cli_args.dri_node)
+            else:
+                cs.encode_node_index = -1
+            if self.app.encoder == "openh264enc":
+                cs.use_cpu = True
+            if hasattr(cs, 'encode_node_path') and self.cli_args.dri_node:
+                cs.encode_node_path = self.cli_args.dri_node.encode('utf-8')
 
         cs.use_paint_over_quality = display_state.get('use_paint_over_quality', self._initial_use_paint_over_quality)
         cs.paint_over_trigger_frames = 15
         cs.damage_block_threshold = 10
         cs.damage_block_duration = 20
-        cs.use_cpu = display_state.get('use_cpu', self._initial_use_cpu)
-        
-        if self.cli_args.dri_node:
-            cs.vaapi_render_node_index = parse_dri_node_to_index(self.cli_args.dri_node)
-        else:
-            cs.vaapi_render_node_index = -1
+        if not cs.use_openh264:
+            cs.use_cpu = display_state.get('use_cpu', self._initial_use_cpu)
+
+        cs.cursor_size = self.cursor_size
+        cs.recording_socket = ""
 
         watermark_path_str = self.cli_args.watermark_path
         if watermark_path_str and os.path.exists(watermark_path_str):
             cs.watermark_path = watermark_path_str.encode('utf-8')
             cs.watermark_location_enum = self.cli_args.watermark_location
-        
+
         return cs
 
 async def _collect_system_stats_ws(shared_data, interval_seconds=1):

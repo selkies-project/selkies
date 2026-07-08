@@ -475,14 +475,11 @@ const getDynamicH264Codec = (width, height, is444, fps) => {
   if (!isChromium) {
     return 'avc1.42E01E';
   }
-  const pixelsPerSecond = width * height * fps;
-  const profile = is444 ? 'F400' : '7A00';
+  const effFps = (typeof fps === 'number' && fps > 0) ? fps : 60;
+  const pixelsPerSecond = width * height * effFps;
+  const profile = is444 ? 'F400' : '6400';
   let level;
-  if (pixelsPerSecond <= 1920 * 1080 * 60) {
-    level = '2A';
-  } else if (pixelsPerSecond <= 3840 * 2160 * 30) {
-    level = '33';
-  } else if (pixelsPerSecond <= 3840 * 2160 * 60) {
+  if (pixelsPerSecond <= 3840 * 2160 * 60) {
     level = '34';
   } else if (pixelsPerSecond <= 7680 * 4320 * 30) {
     level = '3C';
@@ -2215,13 +2212,12 @@ document.addEventListener('DOMContentLoaded', () => {
       output: handleDecodedFrame,
       error: (e) => initiateFallback(e, 'main_decoder'),
     });
-    const dynamicCodec = getDynamicH264Codec(actualCodedWidth, actualCodedHeight, h264_fullcolor);
+    const dynamicCodec = getDynamicH264Codec(actualCodedWidth, actualCodedHeight, h264_fullcolor, framerate);
     const decoderConfig = {
       codec: dynamicCodec,
       codedWidth: actualCodedWidth,
       codedHeight: actualCodedHeight,
-      optimizeForLatency: true, 
-      hardwareAcceleration: "prefer-software"
+      optimizeForLatency: true
     };
     try {
       const support = await VideoDecoder.isConfigSupported(decoderConfig);
@@ -3111,13 +3107,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     output: handleDecodedVncStripeFrame.bind(null, vncStripeYStart, vncFrameID),
                     error: (e) => initiateFallback(e, `stripe_decoder_Y=${vncStripeYStart}`)
                 });
-                const dynamicCodec = getDynamicH264Codec(stripeWidth, stripeHeight, h264_fullcolor);
+                const dynamicCodec = getDynamicH264Codec(stripeWidth, stripeHeight, h264_fullcolor, framerate);
                 const decoderConfig = {
                     codec: dynamicCodec,
                     codedWidth: stripeWidth,
                     codedHeight: stripeHeight,
-                    optimizeForLatency: true,
-                    hardwareAcceleration: "prefer-software"
+                    optimizeForLatency: true
                 };
                 vncStripeDecoders[vncStripeYStart] = {
                     decoder: newStripeDecoder,

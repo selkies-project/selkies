@@ -21,12 +21,20 @@
 
 import asyncio
 import logging
-import ctypes
+import time
 from enum import Enum
 from abc import ABCMeta, abstractmethod
+from typing import Callable, Awaitable
 
-from pixelflux import CaptureSettings, ScreenCapture, StripeCallback
-from pcmflux import AudioCapture, AudioCaptureSettings, AudioChunkCallback
+try:
+    from pixelflux import CaptureSettings, ScreenCapture
+except (ImportError, RuntimeError):
+    CaptureSettings = ScreenCapture = None
+
+try:
+    from pcmflux import AudioCapture, AudioCaptureSettings
+except (ImportError, RuntimeError):
+    AudioCapture = AudioCaptureSettings = None
 
 logger = logging.getLogger("media_pipeline")
 logger.setLevel(logging.INFO)
@@ -110,7 +118,7 @@ class MediaPipelinePixel(MediaPipeline):
         self.audio_enabled = audio_enabled
         self.audio_device_name = audio_device_name
         self.capture_cursor = False
-        self.produce_data = lambda buf, pts, kind: logger.warning('unhandled produce_data')
+        self.produce_data: Callable[[bytes, int, str], Awaitable[None]] = lambda buf, pts, kind: logger.warning('unhandled produce_data')
         self.send_data_channel_message = lambda msg: logger.warning('unhandled send_data_channel_message')
 
         self.capture_module = None
@@ -119,6 +127,8 @@ class MediaPipelinePixel(MediaPipeline):
         self._is_pcmflux_capturing = False
         self._running = False
         self.async_lock = asyncio.Lock()
+        self._video_pts_anchor = None
+        self._last_video_pts = -1
 
     async def set_pointer_visible(self, visible: bool):
         """To enable capturing the cursor from pixeflux.
@@ -259,45 +269,54 @@ class MediaPipelinePixel(MediaPipeline):
         cs.capture_cursor = self.capture_cursor
         cs.output_mode = 1
         cs.auto_adjust_screen_capture_size = True
+        cs.omit_stripe_headers = True
 
-        if self.encoder_rtc in ["nvh264enc", "x264enc"]:
-            cs.h264_streaming_mode = True
-            cs.h264_fullframe = True
-            cs.h264_crf = self.h264_crf
-            # Setting h264_cbr_mode to True will make the encoder ignore the crf value
-            cs.h264_cbr_mode = self.rc_mode == RateControlMode.CBR
-            cs.h264_bitrate_kbps = self.video_bitrate * 1000  # Convert Mbps to kbps
-            cs.vaapi_render_node_index = -1
-            if self.encoder_rtc == "x264enc":
-                cs.use_cpu = True        
+        if self.encoder_rtc in ["h264enc", "openh264enc", "nvh264enc", "x264enc"]:
+            cs.video_streaming_mode = True
+            cs.video_fullframe = True
+            cs.video_crf = self.h264_crf
+            cs.video_cbr_mode = self.rc_mode == RateControlMode.CBR
+            cs.video_bitrate_kbps = self.video_bitrate * 1000
+            if self.encoder_rtc == "openh264enc":
+                cs.use_cpu = True
+                cs.use_openh264 = True
+            elif self.use_cpu:
+                cs.use_cpu = True
         return cs
+
+    def _screen_capture_callback(self, frame):
+        try:
+            if len(frame) > 0:
+                data_bytes = memoryview(frame)
+                now = time.monotonic()
+                if self._video_pts_anchor is None:
+                    self._video_pts_anchor = now
+                pts = int((now - self._video_pts_anchor) * 90000)
+                if pts <= self._last_video_pts:
+                    pts = self._last_video_pts + 1
+                self._last_video_pts = pts
+                asyncio.run_coroutine_threadsafe(
+                    self.produce_data(data_bytes, pts, "video"),
+                    self.async_event_loop,
+                )
+        except Exception as e:
+            logger.error(f"Error in capture callback: {e}", exc_info=False)
 
     async def start_screen_capture(self):
         if self._is_screen_capturing:
             return
 
-        settings = self.generate_capture_settings()
-        def screen_capture_callback(result_ptr, _):
-            if not result_ptr:
-                return
-            try:
-                result = result_ptr.contents
-                if result.size > 0:
-                    data_bytes = bytes(result.data[10:result.size])
-                    if not hasattr(result, "frame_id"):
-                        logger.error(f"frame_id from callback is empty: {result.frame_id}")
-                    else:
-                        # Generate pts from frame_id
-                        pts_step = 90000 // self.framerate
-                        pts = result.frame_id * pts_step
-                        asyncio.run_coroutine_threadsafe(self.produce_data(data_bytes, pts, "video"), self.async_event_loop)
+        if ScreenCapture is None or CaptureSettings is None:
+            raise MediaPipelineError(
+                "pixelflux is unavailable (missing or ABI/version-skewed wheel); "
+                "cannot start screen capture"
+            )
 
-            except Exception as e:
-                logger.error(f"Error in capture callback: {e}", exc_info=False)
+        settings = self.generate_capture_settings()
 
         try:
             self.capture_module = ScreenCapture()
-            await self.async_event_loop.run_in_executor(None, self.capture_module.start_capture, settings, screen_capture_callback)
+            await self.async_event_loop.run_in_executor(None, self.capture_module.start_capture, settings, self._screen_capture_callback)
             self._is_screen_capturing = True
             logger.info("Started screen capture module")
         except Exception as e:
@@ -310,7 +329,7 @@ class MediaPipelinePixel(MediaPipeline):
         if not self._is_screen_capturing or self.capture_module is None:
             return
         try:
-            await self.async_event_loop.run_in_executor(None, self.capture_module.stop_capture)
+            await asyncio.to_thread(self.capture_module.stop_capture)
             self.capture_module = None
             self._is_screen_capturing = False
             logger.info("Stopped screen capture module")
@@ -320,19 +339,27 @@ class MediaPipelinePixel(MediaPipeline):
             self._is_screen_capturing = False
 
     async def restart_screen_capture(self):
-        if not self._is_screen_capturing:
-            return
-
         async with self.async_lock:
+            if not self._is_screen_capturing:
+                return
             try:
-                await self.stop_screen_capture()
-                await self.start_screen_capture()
-                logger.info("Screen capture restarted successfully")
+                settings = self.generate_capture_settings()
+                await self.async_event_loop.run_in_executor(
+                    None, self.capture_module.start_capture, settings, self._screen_capture_callback
+                )
+                logger.info("Screen capture reconfigured")
             except Exception as e:
                 logger.error(f"Error restarting screen capture: {e}")
 
     async def _start_audio_pipeline(self):
         if self._is_pcmflux_capturing:
+            return
+
+        if AudioCapture is None or AudioCaptureSettings is None:
+            logger.error(
+                "pcmflux is unavailable (missing or ABI/version-skewed wheel); "
+                "skipping audio capture"
+            )
             return
 
         logger.info("Starting pcmflux audio pipeline...")
@@ -344,7 +371,7 @@ class MediaPipelinePixel(MediaPipeline):
             capture_settings.channels = self.audio_channels
             capture_settings.opus_bitrate = int(self.audio_bitrate)
             capture_settings.frame_duration_ms = 20
-            capture_settings.use_vbr = False
+            capture_settings.use_vbr = True
             capture_settings.use_silence_gate = False
             capture_settings.latency_ms = 10
             capture_settings.debug_logging = False
@@ -353,23 +380,23 @@ class MediaPipelinePixel(MediaPipeline):
             logger.info(f"pcmflux settings: device='{self.audio_device_name}', "
                         f"bitrate={capture_settings.opus_bitrate}, channels={capture_settings.channels}")
 
-            def audio_capture_callback(result_ptr, user_data):
-                if not result_ptr:
-                    return
+            def audio_capture_callback(frame):
                 try:
-                    result = result_ptr.contents
-                    if result.data and result.size > 0:
-                        data_bytes = bytes(ctypes.cast(
-                            result.data, ctypes.POINTER(ctypes.c_ubyte * result.size)
-                        ).contents)
-
-                        asyncio.run_coroutine_threadsafe(self.produce_data(data_bytes, result.pts, "audio"), self.async_event_loop)
+                    if len(frame) > 0:
+                        data_bytes = memoryview(frame)
+                        asyncio.run_coroutine_threadsafe(
+                            self.produce_data(data_bytes, frame.pts, "audio"),
+                            self.async_event_loop,
+                        )
                 except Exception as e:
                     logger.info(f"Error audio capture callback: {e}")
 
-            pcmflux_callback = AudioChunkCallback(audio_capture_callback)
             self.pcmflux_module = AudioCapture()
-            await self.async_event_loop.run_in_executor(None, self.pcmflux_module.start_capture, pcmflux_settings, pcmflux_callback)
+            await asyncio.to_thread(
+                self.pcmflux_module.start_capture,
+                pcmflux_settings,
+                audio_capture_callback,
+            )
             self._is_pcmflux_capturing = True
             logger.info("pcmflux audio capture started successfully.")
         except Exception as e:
@@ -385,7 +412,7 @@ class MediaPipelinePixel(MediaPipeline):
         self._is_pcmflux_capturing = False
         if self.pcmflux_module:
             try:
-                await self.async_event_loop.run_in_executor(None, self.pcmflux_module.stop_capture)
+                await asyncio.to_thread(self.pcmflux_module.stop_capture)
             except Exception as e:
                 logger.error(f"Error during pcmflux stop_capture: {e}")
             finally:
