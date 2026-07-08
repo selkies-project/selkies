@@ -1059,6 +1059,11 @@ class DataStreamingServer(BaseStreamingService):
         # Frame-based backpressure settings
         self.last_start_video_request_times = {}
         self.last_viewer_keyframe_request_times = {}
+        # Shared viewers that sent STOP_VIDEO (hidden tab): excluded from the
+        # primary video broadcast until their next START_VIDEO, while the
+        # capture — and their control/cursor/audio — keep running. Sockets are
+        # discarded on disconnect in the ws handler's cleanup.
+        self.video_paused_viewers = set()
         self.allowed_desync_ms = BACKPRESSURE_ALLOWED_DESYNC_MS
         self.latency_threshold_for_adjustment_ms = BACKPRESSURE_LATENCY_THRESHOLD_MS
         self.backpressure_check_interval_s = BACKPRESSURE_CHECK_INTERVAL_S
@@ -2978,11 +2983,22 @@ class DataStreamingServer(BaseStreamingService):
                         perms = client_permissions.get(websocket)
                         if perms and perms.get("role") == "viewer":
                             now = time.time()
-                            last_req_time = self.last_start_video_request_times.get(websocket, 0)
-                            if now - last_req_time < 30.0:
-                                data_logger.warning(f"Throttled START_VIDEO request from viewer {remote_address}. Ignoring.")
-                                continue
-                            self.last_start_video_request_times[websocket] = now
+                            if websocket in self.video_paused_viewers:
+                                # A paused viewer resuming (tab visible again) is a
+                                # real state change, not spam: it must rejoin the
+                                # broadcast set and get a decode entry point, so it
+                                # bypasses the redundant-request throttle below —
+                                # but still arms it, so a resume can't be used to
+                                # spam resets any faster than pause/resume cycles.
+                                self.video_paused_viewers.discard(websocket)
+                                data_logger.info(f"START_VIDEO from paused viewer ({remote_address}): resuming its video feed.")
+                                self.last_start_video_request_times[websocket] = now
+                            else:
+                                last_req_time = self.last_start_video_request_times.get(websocket, 0)
+                                if now - last_req_time < 30.0:
+                                    data_logger.warning(f"Throttled START_VIDEO request from viewer {remote_address}. Ignoring.")
+                                    continue
+                                self.last_start_video_request_times[websocket] = now
 
                         if client_display_id and client_display_id in self.display_clients:
                             data_logger.info(f"Received START_VIDEO for '{client_display_id}'. Starting its stream.")
@@ -3054,8 +3070,21 @@ class DataStreamingServer(BaseStreamingService):
                         if client_display_id and client_display_id in self.display_clients:
                             data_logger.info(f"Received STOP_VIDEO for '{client_display_id}'. Stopping stream.")
                             self.display_clients[client_display_id]['video_active'] = False
-                            
+
                             await self._stop_capture_for_display(client_display_id)
+                            try:
+                                await websocket.send_str("VIDEO_STOPPED")
+                            except (ConnectionResetError, OSError, RuntimeError):
+                                pass
+                        else:
+                            # Shared viewer pausing (the client sends STOP_VIDEO on
+                            # tab hide): drop just this socket from the primary video
+                            # broadcast. The capture keeps running for everyone else,
+                            # and the socket stays connected for control/cursor/audio.
+                            # Previously this was a silent no-op and hidden viewers
+                            # kept receiving the full video bitrate.
+                            self.video_paused_viewers.add(websocket)
+                            data_logger.info(f"STOP_VIDEO from shared client ({remote_address}): pausing its video feed.")
                             try:
                                 await websocket.send_str("VIDEO_STOPPED")
                             except (ConnectionResetError, OSError, RuntimeError):
@@ -3321,6 +3350,7 @@ class DataStreamingServer(BaseStreamingService):
         finally:
             self.last_start_video_request_times.pop(websocket, None)
             self.last_viewer_keyframe_request_times.pop(websocket, None)
+            self.video_paused_viewers.discard(websocket)
             client_permissions.pop(websocket, None)
             data_logger.info(f"Cleaning up Data WS handler for {raddr} (Display ID: {client_display_id})...")
 
@@ -3908,7 +3938,11 @@ class DataStreamingServer(BaseStreamingService):
                         for did, client_info in self.display_clients.items()
                         if did != 'primary' and client_info.get('ws')
                     }
-                    primary_viewers = self.clients - secondary_websockets
+                    # Hidden-tab viewers (STOP_VIDEO) are excluded here; they stay
+                    # connected for control/cursor/audio and rejoin the set on
+                    # START_VIDEO with a reset + IDR.
+                    primary_viewers = (self.clients - secondary_websockets
+                                       - self.video_paused_viewers)
 
                     if not primary_viewers:
                         queue.task_done()
@@ -4285,6 +4319,7 @@ class DataStreamingServer(BaseStreamingService):
         # Clear websockets connections FIRST so nothing re-enters
         # reconfigure_displays while the tasks below are torn down.
         self.clients.clear()
+        self.video_paused_viewers.clear()
         self._report_client_presence()
         self.display_clients.clear()
 

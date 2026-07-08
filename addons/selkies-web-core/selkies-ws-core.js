@@ -3303,7 +3303,15 @@ function initWebsockets() {
 
   document.addEventListener('visibilitychange', async () => {
     if (isSharedMode) {
-      console.log("Shared mode: Tab visibility changed, stream control bypassed. Current state:", document.hidden ? "hidden" : "visible");
+      // A shared viewer can't stop the pipeline, but the server can pause
+      // just THIS socket's video broadcast: report tab visibility so a
+      // hidden viewer stops costing stream bandwidth. On return the server
+      // answers START_VIDEO with the same reset + IDR a freshly joining
+      // viewer gets, so the picture resumes on the next keyframe.
+      if (websocket && websocket.readyState === WebSocket.OPEN) {
+        websocket.send(document.hidden ? 'STOP_VIDEO' : 'START_VIDEO');
+        console.log(`Shared mode: tab ${document.hidden ? 'hidden, requested video pause' : 'visible, requested video resume'}.`);
+      }
       return;
     }
     if (document.hidden) {
