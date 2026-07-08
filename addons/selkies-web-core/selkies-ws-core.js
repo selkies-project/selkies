@@ -1378,6 +1378,34 @@ function sendResolutionToServer(width, height) {
   }
 }
 
+// A canvas-style writer (applyManualCanvasStyle / resetCanvasStyle) re-shows
+// the canvas (display:block) and rewrites its box. The present paths re-hide
+// it and re-mirror the box onto the active video sink — but only when frames
+// are flowing: on a static remote, a window resize would otherwise leave the
+// stale canvas (last painted during sink warm-up) covering the live sink
+// until the next decoded frame. When a sink has proven it renders, sync it
+// and re-hide the canvas immediately instead of waiting for that frame.
+function syncSinkToCanvasStyle() {
+  if (!canvas) return;
+  let target = null, rendered = false, isMstg = false;
+  if (mstgActive && videoElement) {
+    target = videoElement;
+    rendered = mstgRendered;
+    isMstg = true;
+  } else if (videoWorkerActive) {
+    target = (videoWorkerMode === 'vtg') ? videoElement : videoWorkerCanvas;
+    rendered = videoWorkerRendered;
+  }
+  if (!target) return;
+  const geom = canvas.style.cssText;   // capture while the canvas is visible
+  target.style.cssText = geom;
+  target.style.display = 'block';
+  target.style.objectFit = 'fill';
+  if (isMstg) mstgLastGeom = geom; else videoWorkerLastGeom = geom;
+  canvasGeomDirty = false;
+  if (rendered) canvas.style.display = 'none';
+}
+
 function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
   if (!canvas || !canvas.parentElement) {
     console.error("Cannot apply manual canvas style: Canvas or parent container not found.");
@@ -1448,6 +1476,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
   }
   canvas.style.display = 'block';
   updateCanvasImageRendering();
+  syncSinkToCanvasStyle();
 
   const overlayInputEl = document.getElementById('overlayInput');
   if (overlayInputEl) {
@@ -1528,6 +1557,7 @@ function resetCanvasStyle(streamWidth, streamHeight) {
   canvas.style.objectFit = 'fill';
   canvas.style.display = 'block';
   updateCanvasImageRendering();
+  syncSinkToCanvasStyle();
 
   if (window.webrtcInput && typeof window.webrtcInput.resize === 'function') {
       window.webrtcInput.resize();
