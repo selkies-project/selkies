@@ -680,6 +680,12 @@ SETTING_DEFINITIONS = [
         "help": "Directory to write the Selkies Joystick Interposer communication sockets to, default: /tmp, results in socket files: /tmp/selkies_js{0-3}.sock",
     },
     {
+        "name": "enable_uinput_bridge",
+        "type": "bool",
+        "default": False,
+        "help": "Optionally mirror gamepad events to a real kernel uinput device (Xbox-like) for Steam/Proton and remote-desktop browsers; requires /dev/uinput and python-evdev; LD_PRELOAD interposer remains the default path",
+    },
+    {
         "name": "gpu_id",
         "type": "str",
         "default": "0",

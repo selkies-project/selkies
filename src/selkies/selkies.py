@@ -1059,6 +1059,7 @@ class DataStreamingServer(BaseStreamingService):
             data_server_instance=self,
             is_wayland=IS_WAYLAND,
             wayland_socket_index=settings.wayland_socket_index,
+            enable_uinput_bridge=bool(settings.enable_uinput_bridge[0]),
         )
 
         self.input_handler.on_clipboard_read = self.app.send_ws_clipboard_data

@@ -441,7 +441,7 @@ class GamepadMapper:
         return None
 
 class SelkiesGamepad:
-    def __init__(self, js_interposer_socket_path, evdev_interposer_socket_path, loop=None):
+    def __init__(self, js_interposer_socket_path, evdev_interposer_socket_path, loop=None, enable_uinput_bridge=False):
         self.js_sock_path = js_interposer_socket_path
         self.evdev_sock_path = evdev_interposer_socket_path
         self.loop = loop or asyncio.get_event_loop()
@@ -457,6 +457,12 @@ class SelkiesGamepad:
         self.events_queue = asyncio.Queue()
         self.running = False
         self._event_processor_task = None
+
+        # Optional kernel uinput device for Steam / browsers that need a real
+        # /dev/input/event* node. Off by default; LD_PRELOAD remains primary.
+        self.enable_uinput_bridge = enable_uinput_bridge
+        self.uinput_device = None
+        self._uinput_name = "Selkies Controller"
 
     def set_config(self, client_input_name, client_num_btns, client_num_axes):
         self.mapper = GamepadMapper(STANDARD_XPAD_CONFIG, client_input_name, client_num_btns, client_num_axes)
@@ -481,11 +487,81 @@ class SelkiesGamepad:
         }
         
         self.config_payload_cache = self._make_interposer_config_payload(js_idx, payload_controller_config)
+        self._uinput_name = STANDARD_XPAD_CONFIG.get("name", client_input_name or "Selkies Controller")
         
         logger_selkies_gamepad.info(
             f"Gamepad configured. JS socket: {self.js_sock_path}, EVDEV socket: {self.evdev_sock_path}. "
             f"Using fixed config: {STANDARD_XPAD_CONFIG['name']}"
         )
+        if self.enable_uinput_bridge:
+            self._ensure_uinput_device()
+
+    def _ensure_uinput_device(self):
+        """Create a persistent kernel Xbox-like pad via python-evdev uinput."""
+        if self.uinput_device is not None:
+            return
+        try:
+            from evdev import AbsInfo, UInput, ecodes as e
+        except ImportError:
+            logger_selkies_gamepad.error(
+                "SELKIES_ENABLE_UINPUT_BRIDGE is set but python-evdev is not installed. "
+                "Install with: pip install evdev"
+            )
+            return
+        if not os.path.exists("/dev/uinput"):
+            logger_selkies_gamepad.error(
+                "SELKIES_ENABLE_UINPUT_BRIDGE is set but /dev/uinput is missing."
+            )
+            return
+        try:
+            stick = AbsInfo(value=0, min=ABS_MIN_VAL, max=ABS_MAX_VAL, fuzz=16, flat=128, resolution=0)
+            hat = AbsInfo(value=0, min=-1, max=1, fuzz=0, flat=0, resolution=0)
+            btn_codes = list(STANDARD_XPAD_CONFIG["btn_map"])
+            axis_codes = list(STANDARD_XPAD_CONFIG["axes_map"])
+            hat_axes = {e.ABS_HAT0X, e.ABS_HAT0Y}
+            caps = {
+                e.EV_KEY: btn_codes,
+                e.EV_ABS: [
+                    (code, hat if code in hat_axes else stick) for code in axis_codes
+                ],
+            }
+            vendor = STANDARD_XPAD_CONFIG.get("vendor_id", 0x045E)
+            product = STANDARD_XPAD_CONFIG.get("product_id", 0x028E)
+            version = STANDARD_XPAD_CONFIG.get("version", 0x0114)
+            self.uinput_device = UInput(
+                caps,
+                name=(self._uinput_name or "Selkies Controller")[:80],
+                vendor=vendor,
+                product=product,
+                version=version,
+                bustype=0x03,
+            )
+            try:
+                os.chmod(self.uinput_device.device.path, 0o666)
+            except OSError:
+                pass
+            logger_selkies_gamepad.info(
+                f"Created optional uinput device {self.uinput_device.device.path} "
+                f"for {self.js_sock_path}"
+            )
+        except Exception as exc:
+            logger_selkies_gamepad.error(
+                f"Failed to create uinput device for {self.js_sock_path}: {exc}",
+                exc_info=True,
+            )
+            self.uinput_device = None
+
+    def _emit_uinput(self, evdev_template):
+        if self.uinput_device is None or not evdev_template:
+            return
+        try:
+            ev_type, ev_code, ev_value = evdev_template
+            self.uinput_device.write(ev_type, ev_code, int(ev_value))
+            self.uinput_device.syn()
+        except Exception as exc:
+            logger_selkies_gamepad.warning(
+                f"uinput write failed for {self.js_sock_path}: {exc}"
+            )
 
     def _make_interposer_config_payload(self, js_index: int, controller_config: dict) -> bytes:
         """
@@ -780,6 +856,8 @@ class SelkiesGamepad:
                             except (ConnectionResetError, BrokenPipeError): pass 
                             except Exception as e: 
                                 logger_selkies_gamepad.error(f"Error sending to EVDEV client #{i}: {e}", exc_info=True)
+                    # Optional kernel uinput mirror (Steam / remote browsers)
+                    self._emit_uinput(evdev_template)
                 
                 self.events_queue.task_done()
             except asyncio.CancelledError:
@@ -834,6 +912,14 @@ class SelkiesGamepad:
                     logger_selkies_gamepad.info(f"Removed socket file: {sock_path}")
                 except OSError as e:
                     logger_selkies_gamepad.warning(f"Could not remove socket file {sock_path} on close: {e}")
+
+        if self.uinput_device is not None:
+            try:
+                self.uinput_device.close()
+                logger_selkies_gamepad.info(f"Closed optional uinput device for {self.js_sock_path}")
+            except Exception as e:
+                logger_selkies_gamepad.warning(f"Error closing uinput device: {e}")
+            self.uinput_device = None
         
         logger_selkies_gamepad.info(f"Gamepad services fully closed.")
 
@@ -858,8 +944,10 @@ class WebRTCInput:
         upload_dir=None,
         is_wayland=False,
         wayland_socket_index=0,
+        enable_uinput_bridge=False,
     ):
         self.wayland_socket_index = wayland_socket_index
+        self.enable_uinput_bridge = enable_uinput_bridge
         self.active_shortcut_modifiers = set()
         self.SHORTCUT_MODIFIER_XKEY_NAMES = {
             'Control_L', 'Control_R', 
@@ -1167,7 +1255,12 @@ class WebRTCInput:
             js_ip_sock_path = os.path.join(self.js_socket_path_prefix, f"selkies_js{i}.sock")
             evdev_ip_sock_path = os.path.join(self.js_socket_path_prefix, f"selkies_event{1000+i}.sock") 
             
-            gamepad = SelkiesGamepad(js_ip_sock_path, evdev_ip_sock_path, self.loop)
+            gamepad = SelkiesGamepad(
+                js_ip_sock_path,
+                evdev_ip_sock_path,
+                self.loop,
+                enable_uinput_bridge=self.enable_uinput_bridge,
+            )
             
             # Use standardized name and capabilities from STANDARD_XPAD_CONFIG
             gamepad_name_for_interposer = STANDARD_XPAD_CONFIG.get("name", f"Selkies Virtual Gamepad {i}")
@@ -2295,11 +2388,18 @@ class WebRTCInput:
             # Get the persistent gamepad instance. It should always exist after connect().
             target_gamepad_instance = self.gamepad_instances.get(gamepad_idx)
             if not target_gamepad_instance:
-                logger_webrtc_input.error(
-                    f"CRITICAL: No persistent SelkiesGamepad instance found for index {gamepad_idx} in on_message. "
-                    f"Gamepad system may not be initialized correctly."
+                logger_webrtc_input.warning(
+                    f"No persistent SelkiesGamepad instance for index {gamepad_idx}; "
+                    f"attempting to recreate."
                 )
-                return
+                await self._initialize_persistent_gamepads()
+                target_gamepad_instance = self.gamepad_instances.get(gamepad_idx)
+                if not target_gamepad_instance:
+                    logger_webrtc_input.error(
+                        f"CRITICAL: No persistent SelkiesGamepad instance found for index {gamepad_idx} in on_message. "
+                        f"Gamepad system may not be initialized correctly."
+                    )
+                    return
 
             if cmd == "c": 
                 try: client_name_decoded = base64.b64decode(toks[3]).decode('latin-1', 'ignore')[:255]
@@ -2314,13 +2414,27 @@ class WebRTCInput:
             elif cmd == "b": 
                 button_num = int(toks[3])
                 button_val = float(toks[4])
-                # Send event to the persistent target_gamepad_instance
+                # Ensure association exists when client sends buttons without a fresh js,c
+                # (common after WebRTC reconnect while the pad stays physically connected).
+                if gamepad_idx not in self.client_gamepad_associations:
+                    await self.__gamepad_connect(
+                        gamepad_idx,
+                        f"ClientGamepad{gamepad_idx}",
+                        len(STANDARD_XPAD_CONFIG["btn_map"]),
+                        len(STANDARD_XPAD_CONFIG["axes_map"]),
+                    )
                 target_gamepad_instance.send_event(button_num, button_val, is_button_event=True)
 
             elif cmd == "a": 
                 axis_num = int(toks[3])
                 axis_val = float(toks[4])
-                # Send event to the persistent target_gamepad_instance
+                if gamepad_idx not in self.client_gamepad_associations:
+                    await self.__gamepad_connect(
+                        gamepad_idx,
+                        f"ClientGamepad{gamepad_idx}",
+                        len(STANDARD_XPAD_CONFIG["btn_map"]),
+                        len(STANDARD_XPAD_CONFIG["axes_map"]),
+                    )
                 target_gamepad_instance.send_event(axis_num, axis_val, is_button_event=False)
             
             else: logger_webrtc_input.warning(f"Unhandled joystick command for slot {gamepad_idx}: js {cmd}")
