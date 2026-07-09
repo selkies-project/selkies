@@ -201,6 +201,21 @@ You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root pat
 
 Check the [Joystick Interposer README.md](https://github.com/selkies-project/selkies/tree/main/addons/js-interposer/README.md) documentation for usage instruction and compiling information on other platforms.
 
+##### Optional: kernel uinput bridge (Steam / Proton / remote browsers)
+
+The LD_PRELOAD interposer does not create a real `/dev/input/event*` device. Applications that enumerate kernel gamepads (Steam, Proton, browsers inside the remote desktop such as [html5gamepad.com](https://html5gamepad.com/)) may therefore not see the pad.
+
+When `/dev/uinput` is available, you can optionally mirror events to a real Xbox-like controller:
+
+```bash
+pip install evdev
+export SELKIES_ENABLE_UINPUT_BRIDGE=true
+```
+
+Then restart Selkies, connect the web client over **HTTPS** (or `localhost`), press a button on the local pad, and fully quit/restart Steam so it picks up the hot-plugged device. See [addons/uinput-bridge/README.md](https://github.com/selkies-project/selkies/tree/main/addons/uinput-bridge).
+
+This path is **off by default** and does not replace the Joystick Interposer.
+
 Check the following links for explanations of similar, but different attempts, for reference:
 
 <https://github.com/Steam-Headless/dumb-udev>

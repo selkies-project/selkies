@@ -2480,6 +2480,15 @@ export class Input {
         this.listeners.push(addListener(window, 'gamepaddisconnected', this._gamepadDisconnect, this));
         this.listeners.push(addListener(window, 'message', this._handleVisibilityMessage, this));
 
+        // Re-sync pads already present in navigator.getGamepads(). Browsers often
+        // skip gamepadconnected after a page/WebRTC reconnect until another plug event.
+        this._syncExistingGamepads();
+        if (this._gamepadSyncInterval) {
+            clearInterval(this._gamepadSyncInterval);
+        }
+        this._gamepadSyncInterval = setInterval(() => {
+            this._syncExistingGamepads();
+        }, 2000);
 
         this.listeners.push(addListener(window, 'orientationchange', () => {
             setTimeout(() => this._windowMath(), 200);
@@ -2495,6 +2504,23 @@ export class Input {
             this.listeners.push(addListener(this.element, 'touchmove', preventDefaultHandler, this));
             this.listeners.push(addListener(this.element, 'touchcancel', preventDefaultHandler, this));
         }    
+    }
+
+    /**
+     * Send js,c for pads already present so the server re-associates after reconnect.
+     */
+    _syncExistingGamepads() {
+        if (typeof navigator.getGamepads !== 'function') {
+            return;
+        }
+        const gamepads = navigator.getGamepads();
+        for (let i = 0; i < gamepads.length; i++) {
+            const gp = gamepads[i];
+            if (!gp) {
+                continue;
+            }
+            this._gamepadConnected({ gamepad: gp });
+        }
     }
 
     attach_context() {
@@ -2556,6 +2582,10 @@ export class Input {
     detach() {
         removeListeners(this.listeners);
         this.listeners = [];
+        if (this._gamepadSyncInterval) {
+            clearInterval(this._gamepadSyncInterval);
+            this._gamepadSyncInterval = null;
+        }
         if (this.gamepadManager) {
             this.gamepadManager.destroy();
             this.gamepadManager = null;

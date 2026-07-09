@@ -174,6 +174,11 @@ class WebRTCService(BaseStreamingService):
         self.rtc_app.media_pipeline = self.media_pipeline
 
         # Input handler
+        enable_uinput_bridge = bool(
+            getattr(self.args, "enable_uinput_bridge", False)
+            or str(os.environ.get("SELKIES_ENABLE_UINPUT_BRIDGE", "")).lower()
+            in ("1", "true", "yes")
+        )
         self.input_handler = WebRTCInput(
             gst_webrtc_app=self.rtc_app,
             uinput_mouse_socket_path="",
@@ -187,6 +192,7 @@ class WebRTCService(BaseStreamingService):
             cursor_scale=1.0,
             cursor_debug=self.args.debug_cursors,
             upload_dir=self.args.upload_dir,
+            enable_uinput_bridge=enable_uinput_bridge,
         )
         self.input_handler.initialize_upload_dir()
 

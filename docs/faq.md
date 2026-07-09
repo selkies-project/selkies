@@ -59,6 +59,26 @@ This is very likely a web browser constraint that is applied because you are usi
 
 </details>
 
+## The gamepad shows connected in Selkies but Steam / html5gamepad.com does not see it.
+
+<details markdown>
+  <summary>Open Answer</summary>
+
+The browser Gamepad API only works in a [secure context](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API) (HTTPS or `localhost`). Open the Selkies UI over HTTPS, wait for the stream, then press a button on the pad.
+
+Selkies forwards pads through the [Joystick Interposer](component.md#joystick-interposer) (`LD_PRELOAD`) by default. That does **not** create a real kernel `/dev/input` device, so Steam, Proton, and browsers inside the remote desktop often cannot enumerate the controller.
+
+If you have `/dev/uinput` access, enable the optional bridge:
+
+```bash
+pip install evdev
+export SELKIES_ENABLE_UINPUT_BRIDGE=true
+```
+
+Restart Selkies, reconnect the pad, then **fully quit and restart Steam**. Details: [addons/uinput-bridge](https://github.com/selkies-project/selkies/tree/main/addons/uinput-bridge).
+
+</details>
+
 ## The web interface refuses to start up in the terminal after rebooting my computer or restarting my desktop in a standalone instance.
 
 <details markdown>
