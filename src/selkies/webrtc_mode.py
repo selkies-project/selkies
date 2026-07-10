@@ -46,6 +46,7 @@ from types import SimpleNamespace
 from .webrtc_utils import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor
 
 CURSOR_SIZE = 32
+IS_WAYLAND = os.environ.get("PIXELFLUX_WAYLAND", "false").lower() == "true"
 
 def get_server_settings() -> dict:
     server_settings_payload = {"settings": {}}
@@ -704,6 +705,24 @@ async def wr_entrypoint():
     """Main entry point for WebRTC application.
     Ideally called by StreamSupervisor class.
     """
+    if IS_WAYLAND:
+        try:
+            from pixelflux import ensure_wayland_display
+            _dim = lambda name: int(os.environ.get(name) or 0) if str(os.environ.get(name) or "").isdigit() else 0
+            _cursor_size = os.environ.get("SELKIES_CURSOR_SIZE") or os.environ.get("XCURSOR_SIZE") or str(CURSOR_SIZE)
+            _render_node_str = os.environ.get("SELKIES_RENDER_DRI") or os.environ.get("DRINODE") or ""
+            _auto_gpu = os.environ.get("SELKIES_AUTO_GPU") or os.environ.get("AUTO_GPU") or "true"
+            ensure_wayland_display(
+                width=_dim("SELKIES_MANUAL_WIDTH"),
+                height=_dim("SELKIES_MANUAL_HEIGHT"),
+                render_node=_render_node_str,
+                auto_gpu=_auto_gpu,
+                cursor_size=int(_cursor_size) if _cursor_size.isdigit() else -1,
+            )
+            logger.info("Wayland display initialized via ensure_wayland_display.")
+        except ImportError:
+            logger.warning("Wayland display requested (PIXELFLUX_WAYLAND=true) but pixelflux library is not available.")
+
     app = WebRTCApp()
     await app.run()
 

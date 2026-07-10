@@ -87,12 +87,12 @@ except ImportError:
     )
 
 try:
-    from pixelflux import CaptureSettings, ScreenCapture
+    from pixelflux import CaptureSettings, ScreenCapture, ensure_wayland_display
 
     X11_CAPTURE_AVAILABLE = True
     data_logger.info("pixelflux library found. Striped encoding modes available.")
 except (ImportError, RuntimeError):
-    ScreenCapture = CaptureSettings = None
+    ScreenCapture = CaptureSettings = ensure_wayland_display = None
     X11_CAPTURE_AVAILABLE = False
     data_logger.warning(
         "pixelflux library not found. Striped encoding modes unavailable."
@@ -3241,7 +3241,10 @@ class DataStreamingServer:
             video_bitrate = display_state.get('video_bitrate', self._initial_video_bitrate)
             cs.video_bitrate_kbps = video_bitrate * 1000
             cs.use_openh264 = (encoder == "openh264enc")
-            if self.cli_args.dri_node:
+            _auto_gpu = os.environ.get("SELKIES_AUTO_GPU") or os.environ.get("AUTO_GPU") or ""
+            if _auto_gpu and _auto_gpu.lower() not in ("false", "0", "no", "off"):
+                cs.encode_node_index = -2
+            elif self.cli_args.dri_node:
                 cs.encode_node_index = parse_dri_node_to_index(self.cli_args.dri_node)
             else:
                 cs.encode_node_index = -1
@@ -3564,6 +3567,23 @@ async def ws_entrypoint():
     logger.info(
         f"Initial Encoder: {initial_encoder}, Framerate: {TARGET_FRAMERATE}"
     )
+
+    if IS_WAYLAND:
+        if ensure_wayland_display is not None:
+            _dim = lambda name: int(os.environ.get(name) or 0) if str(os.environ.get(name) or "").isdigit() else 0
+            _cursor_size = os.environ.get("SELKIES_CURSOR_SIZE") or os.environ.get("XCURSOR_SIZE") or str(CURSOR_SIZE)
+            _render_node_str = os.environ.get("SELKIES_RENDER_DRI") or os.environ.get("DRINODE") or ""
+            _auto_gpu = os.environ.get("SELKIES_AUTO_GPU") or os.environ.get("AUTO_GPU") or "true"
+            ensure_wayland_display(
+                width=_dim("SELKIES_MANUAL_WIDTH"),
+                height=_dim("SELKIES_MANUAL_HEIGHT"),
+                render_node=_render_node_str,
+                auto_gpu=_auto_gpu,
+                cursor_size=int(_cursor_size) if _cursor_size.isdigit() else -1,
+            )
+            data_logger.info("Wayland display initialized via ensure_wayland_display.")
+        else:
+            data_logger.warning("Wayland display requested (IS_WAYLAND=True) but pixelflux library is not available.")
 
     event_loop = asyncio.get_running_loop()
 
