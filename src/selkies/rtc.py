@@ -27,6 +27,7 @@ import re
 import json
 import base64
 import urllib.parse
+import aiohttp
 
 try:
     import pcmflux
@@ -56,9 +57,6 @@ from typing import List, Any, Dict, Optional, Union
 from .webrtc.contrib.media import MediaRelay
 from enum import Enum
 from .media_pipeline import MediaPipeline
-
-# leave some room for metadata in the data channel message
-CLIPBOARD_CHUNK_SIZE = 65535 - 150
 
 logger = logging.getLogger("rtc")
 logger.setLevel(logging.INFO)
@@ -94,9 +92,8 @@ logger.addHandler(handler)
 
 # Raw bytes per data-channel message when no limit was negotiated: a 64 KiB
 # message (RFC 8841's conservative default) less envelope margin, times 3/4
-# for the base64 expansion. Deliberately NOT derived from CLIPBOARD_CHUNK_SIZE:
-# that constant tracks the 8 MiB WebSocket frame ceiling and would produce
-# multi-megabyte messages no browser's SCTP stack accepts.
+# for the base64 expansion. Deliberately NOT the WebSocket chunk size (8 MiB
+# frames), which no browser's SCTP stack accepts.
 DATA_CHANNEL_FALLBACK_CHUNK_SIZE = ((65536 - 512) * 3) // 4
 
 
@@ -450,10 +447,13 @@ class RTCApp:
             elif 'sps-pps-idr-in-keyframe=1' not in sdp_text:
                 logger.warning("injecting modified sps-pps-idr-in-keyframe to SDP")
                 sdp_text = re.sub(r'sps-pps-idr-in-keyframe=\d+', r'sps-pps-idr-in-keyframe=1', sdp_text)
-            if ("h264" in self.encoder or "x264" in self.encoder) and app_settings.video_fullcolor[0]:
+            if ("h264" in self.encoder or "x264" in self.encoder) \
+                    and "openh264" not in self.encoder and app_settings.video_fullcolor[0]:
                 # Full-colour is a 4:4:4 bitstream: advertise the High 4:4:4 profile so a
                 # decoder isn't handed a 4:2:0 baseline profile-level-id that can't match
                 # what it receives. 4:2:0 keeps 42e01f (the Firefox negotiation trick).
+                # OpenH264 is excluded: it always emits limited-range 4:2:0, and a 4:4:4
+                # profile makes decoders misread its color range (visibly darker output).
                 sdp_text = re.sub(r'profile-level-id=[0-9A-Fa-f]{6}',
                                   'profile-level-id=f4001f', sdp_text)
         if "opus/" in sdp_text.lower():
@@ -908,14 +908,18 @@ class RTCApp:
         peer_connection.addTrack(self.media_relay.subscribe(self.audio_media))
 
         # Microphone: one recvonly audio transceiver inside the SAME bundled SDP (no second
-        # negotiation) so the browser can send its mic on demand. Received audio is decoded
-        # and written into the virtual mic sink. Gated on the audio + microphone settings;
-        # the m-line sits inactive until the client attaches a mic track.
-        if bool(app_settings.audio_enabled[0]) and bool(app_settings.microphone_enabled[0]):
+        # negotiation) so the browser can send its mic on demand. The m-line sits inactive
+        # until the client attaches a mic track, so it is negotiated whenever audio is on:
+        # microphone_enabled only picks the client-side default (off), and a runtime enable
+        # must not require a renegotiation the stack doesn't do. A LOCKED-off microphone
+        # setting still withholds the m-line entirely.
+        mic_on, mic_locked = app_settings.microphone_enabled
+        if bool(app_settings.audio_enabled[0]) and (mic_on or not mic_locked):
             self._setup_mic_receiver(peer_connection)
 
-        # Primary data channel
-        data_channel = peer_connection.createDataChannel("input", ordered=True, maxRetransmits=0)
+        # Primary data channel, fully reliable + ordered: input, clipboard, and
+        # upload control all ride it, and none of them tolerate loss.
+        data_channel = peer_connection.createDataChannel("input", ordered=True)
         # New controller channel: compression support is re-negotiated per peer.
         self._gz_tx = False
 
@@ -1088,6 +1092,14 @@ class RTCApp:
 
             if peer_obj.get('client_type') == ClientType.CONTROLLER:
                 logger.info("Controller peer disconnected, cleaning up media relay and bridges")
+                if self.media_relay is not None:
+                    # Reap the relay's __run_track workers: they only exit when the
+                    # SOURCE track errors, so dropping the reference alone leaks
+                    # them pending in recv() ("Task was destroyed but it is pending!").
+                    try:
+                        await self.media_relay.stop()
+                    except Exception as e_relay:
+                        logger.warning(f"Media relay teardown error (continuing): {e_relay}")
                 self.media_relay = None
                 self.aux_data_channel = None
                 self.video_pipeline_bridge = None
@@ -1099,10 +1111,26 @@ class RTCApp:
         try:
             logger.info("Starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._start_rtc_pipeline(client_peer_id, client_type, client_token)
+        except (aiohttp.ClientConnectionResetError, ConnectionResetError) as e:
+            # The peer's signaling socket died mid-handshake (refresh/eviction race):
+            # routine churn, not a server fault — one line, no traceback.
+            logger.info(f"Peer went away during RTC setup: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+            await self._cleanup_failed_start(client_peer_id)
         except Exception as e:
             logger.error(f"Error starting RTC pipeline: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
+            await self._cleanup_failed_start(client_peer_id)
         else:
             logger.info("RTC pipeline started successfully", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+
+    async def _cleanup_failed_start(self, client_peer_id: str):
+        """Close the half-built peer connection of a failed pipeline start NOW.
+        Waiting for the signaling session-end (which may never come if the peer's
+        socket was already gone) leaves live ICE gatherers whose STUN retries
+        fire into torn-down transports."""
+        try:
+            await self._stop_rtc_pipeline(client_peer_id)
+        except Exception as e:
+            logger.debug(f"Failed-start cleanup for {client_peer_id}: {e}")
 
     async def stop_rtc_connection(self, client_peer_id: str, client_type: str):
         """Stop a specific peer connection by ID."""

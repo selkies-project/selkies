@@ -17,7 +17,7 @@ export function Clipboard() {
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
 	const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
 		const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
-		return saved !== null ? saved === 'true' : false;
+		return saved !== null ? saved === 'true' : true;
 	});
 	const fileInputRef = useRef<HTMLInputElement>(null);
 

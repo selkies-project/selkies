@@ -102,6 +102,7 @@ const en = {
             useNativeCursorStylesEnableTitle: "Use CSS cursor rendering (Replace system cursors)",
             useNativeCursorStylesDisableTitle: "Use canvas cursor rendering (Paint to canvas)",
             addScreenTitle: "Add a second screen",
+            addScreenWebrtcTitle: "Additional screens require WebSockets mode",
             addScreenButton: "Add Screen +",
             forceAlignedResolutionLabel: "Force Aligned Resolution",
             forceAlignedResolutionDetails: "Forces the display resolution to be a multiple of 16 pixels",
@@ -121,7 +122,7 @@ const en = {
             tooltipSysMem: "System Memory: {used} / {total}",
             tooltipGpuMem: "GPU Memory: {used} / {total}",
             tooltipFps: "Client FPS: {value}",
-            tooltipAudio: "Audio Buffers: {value}",
+            tooltipAudioLevel: "Audio level: {value}%",
             tooltipMemoryNA: "N/A",
             bandwidthLabel: "Bandwidth",
             tooltipBandwidth: "Bandwidth: {value}mbps",
@@ -157,6 +158,13 @@ const en = {
           title: "Apps",
           openButtonTitle: "Manage Apps",
           openButton: "Manage Apps"
+        },
+        shortcuts: {
+            title: "Shortcuts",
+            fullscreen: "Toggle fullscreen",
+            openMenu: "Open or close the dashboard",
+            toggleGamepad: "Toggle the virtual gamepad",
+            pointerLock: "Lock the pointer to the stream",
         },
         sharing: {
             title: "Sharing"
@@ -221,6 +229,7 @@ const es = {
     fullscreenTitle: "Entrar en Pantalla Completa",
     gamingModeTitle: "Modo Juego",
     trackpadModeTitle: "Modo Trackpad",
+    streamingModeTitle: "Modo Streaming",
     buttons: {
         videoStreamEnableTitle: "Activar Stream de Vídeo",
         videoStreamDisableTitle: "Desactivar Stream de Vídeo",
@@ -258,7 +267,9 @@ const es = {
             jpegQualityLabel: "Calidad Base: {jpegQuality}",
             paintOverJpegQualityLabel: "Calidad de Sobrepintado: {paintOverJpegQuality}",
             paintoverCrfLabel: "CRF de Mejora de Estáticos ({crf}):",
+            paintoverBurstLabel: "Fotogramas de Ráfaga de Mejora de Estáticos ({frames}):",
             usePaintOverQualityLabel: "Usar Mejora de Estáticos",
+            rateControlLabel: "Modo de Control de Tasa del Codificador",
         },
         audio: {
              title: "Configuración de Audio",
@@ -298,6 +309,7 @@ const es = {
              useNativeCursorStylesEnableTitle: "Usar renderizado de cursor CSS (Reemplaza los cursores del sistema)",
              useNativeCursorStylesDisableTitle: "Usar renderizado de cursor en lienzo (Pintar en el lienzo)",
              addScreenTitle: "Añadir una segunda pantalla",
+             addScreenWebrtcTitle: "Las pantallas adicionales requieren el modo WebSockets",
              addScreenButton: "Añadir Pantalla +",
              forceAlignedResolutionLabel: "Forzar resolución alineada",
              forceAlignedResolutionDetails: "Fuerza la resolución de pantalla para que sea un múltiplo de 16 píxeles",
@@ -317,12 +329,14 @@ const es = {
              tooltipSysMem: "Memoria del Sistema: {used} / {total}",
              tooltipGpuMem: "Memoria GPU: {used} / {total}",
              tooltipFps: "FPS del Cliente: {value}",
-             tooltipAudio: "Búferes de Audio: {value}",
+             tooltipAudioLevel: "Nivel de audio: {value}%",
              tooltipMemoryNA: "N/D",
              bandwidthLabel: "Ancho de Banda",
              tooltipBandwidth: "Ancho de Banda: {value}mbps",
              latencyLabel: "Latencia",
              tooltipLatency: "Latencia de Ida y Vuelta: {value}ms",
+             videoBitrateLabel: "Tasa de Bits de Video",
+             tooltipVideoBitrate: "Tasa de Bits de Video: {value}mbps",
         },
         clipboard: {
              title: "Portapapeles",
@@ -351,6 +365,13 @@ const es = {
           title: "Aplicaciones",
           openButtonTitle: "Gestionar Aplicaciones",
           openButton: "Gestionar Aplicaciones"
+        },
+        shortcuts: {
+            title: "Atajos",
+            fullscreen: "Alternar pantalla completa",
+            openMenu: "Abrir o cerrar el panel",
+            toggleGamepad: "Alternar el gamepad virtual",
+            pointerLock: "Bloquear el puntero en la transmisión",
         },
         sharing: {
             title: "Compartir"
@@ -415,6 +436,7 @@ const zh = {
     fullscreenTitle: "进入全屏",
     gamingModeTitle: "游戏模式",
     trackpadModeTitle: "触控板模式",
+    streamingModeTitle: "串流模式",
     buttons: {
         videoStreamEnableTitle: "启用视频流",
         videoStreamDisableTitle: "禁用视频流",
@@ -452,7 +474,9 @@ const zh = {
             jpegQualityLabel: "基础质量: {jpegQuality}",
             paintOverJpegQualityLabel: "覆盖图质量: {paintOverJpegQuality}",
             paintoverCrfLabel: "静态区域优化 CRF ({crf}):",
+            paintoverBurstLabel: "静态区域优化连发帧数 ({frames}):",
             usePaintOverQualityLabel: "使用静态区域优化",
+            rateControlLabel: "编码器码率控制模式",
         },
         audio: {
             title: "音频设置",
@@ -492,6 +516,7 @@ const zh = {
             useNativeCursorStylesEnableTitle: "使用 CSS 光标渲染 (替换系统光标)",
             useNativeCursorStylesDisableTitle: "使用画布光标渲染 (绘制到画布)",
             addScreenTitle: "添加第二个屏幕",
+            addScreenWebrtcTitle: "附加屏幕需要 WebSockets 模式",
             addScreenButton: "添加屏幕 +",
             forceAlignedResolutionLabel: "强制对齐分辨率",
             forceAlignedResolutionDetails: "强制显示分辨率为 16 像素的倍数",
@@ -511,12 +536,14 @@ const zh = {
             tooltipSysMem: "系统内存: {used} / {total}",
             tooltipGpuMem: "GPU 内存: {used} / {total}",
             tooltipFps: "客户端 FPS: {value}",
-            tooltipAudio: "音频缓冲区: {value}",
+            tooltipAudioLevel: "音频电平：{value}%",
             tooltipMemoryNA: "不可用",
             bandwidthLabel: "带宽",
             tooltipBandwidth: "带宽: {value}mbps",
             latencyLabel: "延迟",
             tooltipLatency: "往返延迟: {value}ms",
+            videoBitrateLabel: "视频码率",
+            tooltipVideoBitrate: "视频码率: {value}mbps",
         },
         clipboard: {
             title: "剪贴板",
@@ -545,6 +572,13 @@ const zh = {
           title: "应用程序",
           openButtonTitle: "管理应用程序",
           openButton: "管理应用程序"
+        },
+        shortcuts: {
+            title: "快捷键",
+            fullscreen: "切换全屏",
+            openMenu: "打开或关闭仪表板",
+            toggleGamepad: "切换虚拟手柄",
+            pointerLock: "将指针锁定到串流",
         },
         sharing: {
             title: "共享"
@@ -609,6 +643,7 @@ const hi = {
     fullscreenTitle: "फुलस्क्रीन दर्ज करें",
     gamingModeTitle: "गेमिंग मोड",
     trackpadModeTitle: "ट्रैकपैड मोड",
+    streamingModeTitle: "स्ट्रीमिंग मोड",
     buttons: {
         videoStreamEnableTitle: "वीडियो स्ट्रीम सक्षम करें",
         videoStreamDisableTitle: "वीडियो स्ट्रीम अक्षम करें",
@@ -646,7 +681,9 @@ const hi = {
             jpegQualityLabel: "आधार गुणवत्ता: {jpegQuality}",
             paintOverJpegQualityLabel: "पेंटओवर गुणवत्ता: {paintOverJpegQuality}",
             paintoverCrfLabel: "स्थिर छवि सुधार CRF ({crf}):",
+            paintoverBurstLabel: "स्थिर छवि सुधार बर्स्ट फ़्रेम ({frames}):",
             usePaintOverQualityLabel: "स्थिर छवि सुधार का उपयोग करें",
+            rateControlLabel: "एन्कोडर दर नियंत्रण मोड",
         },
         audio: {
             title: "ऑडियो सेटिंग्स",
@@ -686,6 +723,7 @@ const hi = {
             useNativeCursorStylesEnableTitle: "CSS कर्सर रेंडरिंग का उपयोग करें (सिस्टम कर्सर बदलें)",
             useNativeCursorStylesDisableTitle: "कैनवास कर्सर रेंडरिंग का उपयोग करें (कैनवास पर पेंट करें)",
             addScreenTitle: "एक दूसरी स्क्रीन जोड़ें",
+            addScreenWebrtcTitle: "अतिरिक्त स्क्रीन के लिए WebSockets मोड आवश्यक है",
             addScreenButton: "स्क्रीन जोड़ें +",
             forceAlignedResolutionLabel: "संरेखित रिज़ॉल्यूशन बाध्य करें",
             forceAlignedResolutionDetails: "डिस्प्ले रिज़ॉल्यूशन को 16 पिक्सल का गुणज होने के लिए बाध्य करता है",
@@ -705,12 +743,14 @@ const hi = {
             tooltipSysMem: "सिस्टम मेमोरी: {used} / {total}",
             tooltipGpuMem: "GPU मेमोरी: {used} / {total}",
             tooltipFps: "क्लाइंट FPS: {value}",
-            tooltipAudio: "ऑडियो बफ़र्स: {value}",
+            tooltipAudioLevel: "ऑडियो स्तर: {value}%",
             tooltipMemoryNA: "लागू नहीं",
             bandwidthLabel: "बैंडविड्थ",
             tooltipBandwidth: "बैंडविड्थ: {value}mbps",
             latencyLabel: "विलंबता",
             tooltipLatency: "राउंड ट्रिप विलंबता: {value}ms",
+            videoBitrateLabel: "वीडियो बिटरेट",
+            tooltipVideoBitrate: "वीडियो बिटरेट: {value}mbps",
         },
         clipboard: {
             title: "क्लिपबोर्ड",
@@ -739,6 +779,13 @@ const hi = {
           title: "ऐप्स",
           openButtonTitle: "ऐप्स प्रबंधित करें",
           openButton: "ऐप्स प्रबंधित करें"
+        },
+        shortcuts: {
+            title: "शॉर्टकट",
+            fullscreen: "फ़ुल स्क्रीन टॉगल करें",
+            openMenu: "डैशबोर्ड खोलें या बंद करें",
+            toggleGamepad: "वर्चुअल गेमपैड टॉगल करें",
+            pointerLock: "पॉइंटर को स्ट्रीम पर लॉक करें",
         },
         sharing: {
             title: "साझा करना"
@@ -803,6 +850,7 @@ const pt = {
     fullscreenTitle: "Entrar em Tela Cheia",
     gamingModeTitle: "Modo de Jogo",
     trackpadModeTitle: "Modo Trackpad",
+    streamingModeTitle: "Modo Streaming",
     buttons: {
         videoStreamEnableTitle: "Ativar Stream de Vídeo",
         videoStreamDisableTitle: "Desativar Stream de Vídeo",
@@ -840,7 +888,9 @@ const pt = {
             jpegQualityLabel: "Qualidade Base: {jpegQuality}",
             paintOverJpegQualityLabel: "Qualidade de Sobreposição: {paintOverJpegQuality}",
             paintoverCrfLabel: "CRF de Melhoria de Estáticos ({crf}):",
+            paintoverBurstLabel: "Quadros de Rajada de Melhoria de Estáticos ({frames}):",
             usePaintOverQualityLabel: "Usar Melhoria de Estáticos",
+            rateControlLabel: "Modo de Controle de Taxa do Codificador",
         },
         audio: {
             title: "Configurações de Áudio",
@@ -880,6 +930,7 @@ const pt = {
             useNativeCursorStylesEnableTitle: "Usar renderização de cursor CSS (Substituir cursores do sistema)",
             useNativeCursorStylesDisableTitle: "Usar renderização de cursor em canvas (Pintar no canvas)",
             addScreenTitle: "Adicionar uma segunda tela",
+            addScreenWebrtcTitle: "Telas adicionais exigem o modo WebSockets",
             addScreenButton: "Adicionar Tela +",
             forceAlignedResolutionLabel: "Forçar Resolução Alinhada",
             forceAlignedResolutionDetails: "Força a resolução da tela a ser um múltiplo de 16 pixels",
@@ -899,12 +950,14 @@ const pt = {
             tooltipSysMem: "Memória do Sistema: {used} / {total}",
             tooltipGpuMem: "Memória da GPU: {used} / {total}",
             tooltipFps: "FPS do Cliente: {value}",
-            tooltipAudio: "Buffers de Áudio: {value}",
+            tooltipAudioLevel: "Nível de áudio: {value}%",
             tooltipMemoryNA: "N/D",
             bandwidthLabel: "Largura de Banda",
             tooltipBandwidth: "Largura de Banda: {value}mbps",
             latencyLabel: "Latência",
             tooltipLatency: "Latência de Ida e Volta: {value}ms",
+            videoBitrateLabel: "Taxa de Bits de Vídeo",
+            tooltipVideoBitrate: "Taxa de Bits de Vídeo: {value}mbps",
         },
         clipboard: {
             title: "Área de Transferência",
@@ -933,6 +986,13 @@ const pt = {
           title: "Aplicativos",
           openButtonTitle: "Gerenciar Aplicativos",
           openButton: "Gerenciar Aplicativos"
+        },
+        shortcuts: {
+            title: "Atalhos",
+            fullscreen: "Alternar tela cheia",
+            openMenu: "Abrir ou fechar o painel",
+            toggleGamepad: "Alternar o gamepad virtual",
+            pointerLock: "Bloquear o ponteiro na transmissão",
         },
         sharing: {
             title: "Compartilhamento"
@@ -997,6 +1057,7 @@ const fr = {
     fullscreenTitle: "Passer en plein écran",
     gamingModeTitle: "Mode Jeu",
     trackpadModeTitle: "Mode Trackpad",
+    streamingModeTitle: "Mode Streaming",
     buttons: {
         videoStreamEnableTitle: "Activer le flux vidéo",
         videoStreamDisableTitle: "Désactiver le flux vidéo",
@@ -1034,7 +1095,9 @@ const fr = {
             jpegQualityLabel: "Qualité de base : {jpegQuality}",
             paintOverJpegQualityLabel: "Qualité de la surimpression : {paintOverJpegQuality}",
             paintoverCrfLabel: "CRF du raffinage statique ({crf}):",
+            paintoverBurstLabel: "Images en rafale du raffinage statique ({frames}):",
             usePaintOverQualityLabel: "Utiliser le raffinage statique",
+            rateControlLabel: "Mode de contrôle du débit de l'encodeur",
         },
         audio: {
             title: "Paramètres audio",
@@ -1074,6 +1137,7 @@ const fr = {
             useNativeCursorStylesEnableTitle: "Utiliser le rendu des curseurs CSS (Remplacer les curseurs système)",
             useNativeCursorStylesDisableTitle: "Utiliser le rendu des curseurs sur canevas (Dessiner sur le canevas)",
             addScreenTitle: "Ajouter un deuxième écran",
+            addScreenWebrtcTitle: "Les écrans supplémentaires nécessitent le mode WebSockets",
             addScreenButton: "Ajouter un écran +",
             forceAlignedResolutionLabel: "Forcer la résolution alignée",
             forceAlignedResolutionDetails: "Force la résolution d'affichage à être un multiple de 16 pixels",
@@ -1093,12 +1157,14 @@ const fr = {
             tooltipSysMem: "Mémoire système : {used} / {total}",
             tooltipGpuMem: "Mémoire GPU : {used} / {total}",
             tooltipFps: "FPS Client : {value}",
-            tooltipAudio: "Tampons audio : {value}",
+            tooltipAudioLevel: "Niveau audio : {value}%",
             tooltipMemoryNA: "N/D",
             bandwidthLabel: "Bande Passante",
             tooltipBandwidth: "Bande Passante : {value}mbps",
             latencyLabel: "Latence",
             tooltipLatency: "Latence Aller-Retour : {value}ms",
+            videoBitrateLabel: "Débit vidéo",
+            tooltipVideoBitrate: "Débit vidéo : {value}mbps",
         },
         clipboard: {
             title: "Presse-papiers",
@@ -1127,6 +1193,13 @@ const fr = {
           title: "Applications",
           openButtonTitle: "Gérer les applications",
           openButton: "Gérer les applications"
+        },
+        shortcuts: {
+            title: "Raccourcis",
+            fullscreen: "Basculer en plein écran",
+            openMenu: "Ouvrir ou fermer le tableau de bord",
+            toggleGamepad: "Basculer la manette virtuelle",
+            pointerLock: "Verrouiller le pointeur sur le flux",
         },
         sharing: {
             title: "Partage"
@@ -1191,6 +1264,7 @@ const ru = {
     fullscreenTitle: "Войти в полноэкранный режим",
     gamingModeTitle: "Игровой режим",
     trackpadModeTitle: "Режим трекпада",
+    streamingModeTitle: "Режим стриминга",
     buttons: {
         videoStreamEnableTitle: "Включить видеопоток",
         videoStreamDisableTitle: "Отключить видеопоток",
@@ -1228,7 +1302,9 @@ const ru = {
             jpegQualityLabel: "Базовое качество: {jpegQuality}",
             paintOverJpegQualityLabel: "Качество дорисовки: {paintOverJpegQuality}",
             paintoverCrfLabel: "CRF улучшения статики ({crf}):",
+            paintoverBurstLabel: "Кадры серии улучшения статики ({frames}):",
             usePaintOverQualityLabel: "Использовать улучшение статики",
+            rateControlLabel: "Режим управления битрейтом кодировщика",
         },
         audio: {
             title: "Настройки аудио",
@@ -1268,6 +1344,7 @@ const ru = {
             useNativeCursorStylesEnableTitle: "Использовать рендеринг курсора CSS (Заменяет системные курсоры)",
             useNativeCursorStylesDisableTitle: "Использовать отрисовку курсора на холсте (Рисовать на холсте)",
             addScreenTitle: "Добавить второй экран",
+            addScreenWebrtcTitle: "Для дополнительных экранов требуется режим WebSockets",
             addScreenButton: "Добавить экран +",
             forceAlignedResolutionLabel: "Принудительное выравнивание разрешения",
             forceAlignedResolutionDetails: "Принудительно делает разрешение экрана кратным 16 пикселям",
@@ -1287,12 +1364,14 @@ const ru = {
             tooltipSysMem: "Системная память: {used} / {total}",
             tooltipGpuMem: "Память ГП: {used} / {total}",
             tooltipFps: "FPS клиента: {value}",
-            tooltipAudio: "Аудиобуферы: {value}",
+            tooltipAudioLevel: "Уровень звука: {value}%",
             tooltipMemoryNA: "Н/Д",
             bandwidthLabel: "Пропускная способность",
             tooltipBandwidth: "Пропускная способность: {value}mbps",
             latencyLabel: "Задержка",
             tooltipLatency: "Задержка приема-передачи: {value}ms",
+            videoBitrateLabel: "Битрейт видео",
+            tooltipVideoBitrate: "Битрейт видео: {value}mbps",
         },
         clipboard: {
             title: "Буфер обмена",
@@ -1321,6 +1400,13 @@ const ru = {
           title: "Приложения",
           openButtonTitle: "Управление приложениями",
           openButton: "Управление приложениями"
+        },
+        shortcuts: {
+            title: "Горячие клавиши",
+            fullscreen: "Переключить полноэкранный режим",
+            openMenu: "Открыть или закрыть панель",
+            toggleGamepad: "Переключить виртуальный геймпад",
+            pointerLock: "Зафиксировать указатель в потоке",
         },
         sharing: {
             title: "Общий доступ"
@@ -1385,6 +1471,7 @@ const de = {
     fullscreenTitle: "Vollbildmodus aktivieren",
     gamingModeTitle: "Gaming-Modus",
     trackpadModeTitle: "Trackpad-Modus",
+    streamingModeTitle: "Streaming-Modus",
     buttons: {
         videoStreamEnableTitle: "Videostream aktivieren",
         videoStreamDisableTitle: "Videostream deaktivieren",
@@ -1422,7 +1509,9 @@ const de = {
             jpegQualityLabel: "Basisqualität: {jpegQuality}",
             paintOverJpegQualityLabel: "Übermalungsqualität: {paintOverJpegQuality}",
             paintoverCrfLabel: "CRF für Bildverbesserung ({crf}):",
+            paintoverBurstLabel: "Burst-Frames der Bildverbesserung ({frames}):",
             usePaintOverQualityLabel: "Statische Bildverbesserung nutzen",
+            rateControlLabel: "Ratensteuerungsmodus des Encoders",
         },
         audio: {
             title: "Audioeinstellungen",
@@ -1462,6 +1551,7 @@ const de = {
             useNativeCursorStylesEnableTitle: "CSS-Cursor-Rendering verwenden (Systemcursor ersetzen)",
             useNativeCursorStylesDisableTitle: "Canvas-Cursor-Rendering verwenden (Auf Canvas zeichnen)",
             addScreenTitle: "Einen zweiten Bildschirm hinzufügen",
+            addScreenWebrtcTitle: "Zusätzliche Bildschirme erfordern den WebSockets-Modus",
             addScreenButton: "Bildschirm hinzufügen +",
             forceAlignedResolutionLabel: "Ausgerichtete Auflösung erzwingen",
             forceAlignedResolutionDetails: "Erzwingt, dass die Bildschirmauflösung ein Vielfaches von 16 Pixeln ist",
@@ -1481,12 +1571,14 @@ const de = {
             tooltipSysMem: "Systemspeicher: {used} / {total}",
             tooltipGpuMem: "GPU-Speicher: {used} / {total}",
             tooltipFps: "Client FPS: {value}",
-            tooltipAudio: "Audio-Puffer: {value}",
+            tooltipAudioLevel: "Audiopegel: {value}%",
             tooltipMemoryNA: "N/V",
             bandwidthLabel: "Bandbreite",
             tooltipBandwidth: "Bandbreite: {value}mbps",
             latencyLabel: "Latenz",
             tooltipLatency: "Round-Trip-Latenz: {value}ms",
+            videoBitrateLabel: "Video-Bitrate",
+            tooltipVideoBitrate: "Video-Bitrate: {value}mbps",
         },
         clipboard: {
             title: "Zwischenablage",
@@ -1515,6 +1607,13 @@ const de = {
           title: "Anwendungen",
           openButtonTitle: "Anwendungen verwalten",
           openButton: "Anwendungen verwalten"
+        },
+        shortcuts: {
+            title: "Tastenkürzel",
+            fullscreen: "Vollbild umschalten",
+            openMenu: "Dashboard öffnen oder schließen",
+            toggleGamepad: "Virtuelles Gamepad umschalten",
+            pointerLock: "Zeiger im Stream sperren",
         },
         sharing: {
             title: "Teilen"
@@ -1579,6 +1678,7 @@ const tr = {
     fullscreenTitle: "Tam Ekrana Gir",
     gamingModeTitle: "Oyun Modu",
     trackpadModeTitle: "Dokunmatik Yüzey Modu",
+    streamingModeTitle: "Yayın Modu",
     buttons: {
         videoStreamEnableTitle: "Video Akışını Etkinleştir",
         videoStreamDisableTitle: "Video Akışını Devre Dışı Bırak",
@@ -1616,7 +1716,9 @@ const tr = {
             jpegQualityLabel: "Temel Kalite: {jpegQuality}",
             paintOverJpegQualityLabel: "Üzerine Boyama Kalitesi: {paintOverJpegQuality}",
             paintoverCrfLabel: "Statik İyileştirme CRF ({crf}):",
+            paintoverBurstLabel: "Statik İyileştirme Seri Kare Sayısı ({frames}):",
             usePaintOverQualityLabel: "Statik İyileştirme Kullan",
+            rateControlLabel: "Kodlayıcı Hız Kontrol Modu",
         },
         audio: {
             title: "Ses Ayarları",
@@ -1656,6 +1758,7 @@ const tr = {
             useNativeCursorStylesEnableTitle: "CSS imleç işlemeyi kullan (Sistem imleçlerini değiştir)",
             useNativeCursorStylesDisableTitle: "Kanvas imleç işlemeyi kullan (Kanvasa çiz)",
             addScreenTitle: "İkinci bir ekran ekle",
+            addScreenWebrtcTitle: "Ek ekranlar WebSockets modu gerektirir",
             addScreenButton: "Ekran Ekle +",
             forceAlignedResolutionLabel: "Hizalanmış Çözünürlüğü Zorla",
             forceAlignedResolutionDetails: "Ekran çözünürlüğünün 16 pikselin katı olmasını zorlar",
@@ -1675,12 +1778,14 @@ const tr = {
             tooltipSysMem: "Sistem Belleği: {used} / {total}",
             tooltipGpuMem: "GPU Belleği: {used} / {total}",
             tooltipFps: "İstemci FPS: {value}",
-            tooltipAudio: "Ses Tamponları: {value}",
+            tooltipAudioLevel: "Ses seviyesi: {value}%",
             tooltipMemoryNA: "N/A",
             bandwidthLabel: "Bant Genişliği",
             tooltipBandwidth: "Bant Genişliği: {value}mbps",
             latencyLabel: "Gecikme",
             tooltipLatency: "Gidiş-Dönüş Gecikmesi: {value}ms",
+            videoBitrateLabel: "Video Bit Hızı",
+            tooltipVideoBitrate: "Video Bit Hızı: {value}mbps",
         },
         clipboard: {
             title: "Pano",
@@ -1709,6 +1814,13 @@ const tr = {
           title: "Uygulamalar",
           openButtonTitle: "Uygulamaları Yönet",
           openButton: "Uygulamaları Yönet"
+        },
+        shortcuts: {
+            title: "Kısayollar",
+            fullscreen: "Tam ekranı aç/kapat",
+            openMenu: "Paneli aç veya kapat",
+            toggleGamepad: "Sanal oyun kolunu aç/kapat",
+            pointerLock: "İşaretçiyi yayına kilitle",
         },
         sharing: {
             title: "Paylaşım"
@@ -1773,6 +1885,7 @@ const it = {
     fullscreenTitle: "Entra in Schermo Intero",
     gamingModeTitle: "Modalità Gioco",
     trackpadModeTitle: "Modalità Trackpad",
+    streamingModeTitle: "Modalità Streaming",
     buttons: {
         videoStreamEnableTitle: "Abilita Stream Video",
         videoStreamDisableTitle: "Disabilita Stream Video",
@@ -1810,7 +1923,9 @@ const it = {
             jpegQualityLabel: "Qualità di Base: {jpegQuality}",
             paintOverJpegQualityLabel: "Qualità Sovrapposizione: {paintOverJpegQuality}",
             paintoverCrfLabel: "CRF Miglioramento Statico ({crf}):",
+            paintoverBurstLabel: "Fotogrammi Burst Miglioramento Statico ({frames}):",
             usePaintOverQualityLabel: "Usa Miglioramento Statico",
+            rateControlLabel: "Modalità Controllo Bitrate dell'Encoder",
         },
         audio: {
             title: "Impostazioni Audio",
@@ -1850,6 +1965,7 @@ const it = {
             useNativeCursorStylesEnableTitle: "Usa rendering del cursore CSS (Sostituisce i cursori di sistema)",
             useNativeCursorStylesDisableTitle: "Usa rendering del cursore su canvas (Disegna su canvas)",
             addScreenTitle: "Aggiungi un secondo schermo",
+            addScreenWebrtcTitle: "Gli schermi aggiuntivi richiedono la modalità WebSockets",
             addScreenButton: "Aggiungi Schermo +",
             forceAlignedResolutionLabel: "Forza risoluzione allineata",
             forceAlignedResolutionDetails: "Forza la risoluzione dello schermo a essere un multiplo di 16 pixel",
@@ -1869,12 +1985,14 @@ const it = {
             tooltipSysMem: "Memoria di Sistema: {used} / {total}",
             tooltipGpuMem: "Memoria GPU: {used} / {total}",
             tooltipFps: "FPS Client: {value}",
-            tooltipAudio: "Buffer Audio: {value}",
+            tooltipAudioLevel: "Livello audio: {value}%",
             tooltipMemoryNA: "N/D",
             bandwidthLabel: "Larghezza di Banda",
             tooltipBandwidth: "Larghezza di Banda: {value}mbps",
             latencyLabel: "Latenza",
             tooltipLatency: "Latenza di Andata e Ritorno: {value}ms",
+            videoBitrateLabel: "Bitrate Video",
+            tooltipVideoBitrate: "Bitrate Video: {value}mbps",
         },
         clipboard: {
             title: "Appunti",
@@ -1903,6 +2021,13 @@ const it = {
           title: "Applicazioni",
           openButtonTitle: "Gestisci Applicazioni",
           openButton: "Gestisci Applicazioni"
+        },
+        shortcuts: {
+            title: "Scorciatoie",
+            fullscreen: "Attiva/disattiva schermo intero",
+            openMenu: "Apri o chiudi la dashboard",
+            toggleGamepad: "Attiva/disattiva il gamepad virtuale",
+            pointerLock: "Blocca il puntatore sullo stream",
         },
         sharing: {
             title: "Condivisione"
@@ -1967,6 +2092,7 @@ const nl = {
     fullscreenTitle: "Volledig scherm openen",
     gamingModeTitle: "Gaming Modus",
     trackpadModeTitle: "Trackpad-modus",
+    streamingModeTitle: "Streamingmodus",
     buttons: {
         videoStreamEnableTitle: "Videostream inschakelen",
         videoStreamDisableTitle: "Videostream uitschakelen",
@@ -2004,7 +2130,9 @@ const nl = {
             jpegQualityLabel: "Basiskwaliteit: {jpegQuality}",
             paintOverJpegQualityLabel: "Overschilderkwaliteit: {paintOverJpegQuality}",
             paintoverCrfLabel: "Statische Verbetering CRF ({crf}):",
+            paintoverBurstLabel: "Statische Verbetering Burst-frames ({frames}):",
             usePaintOverQualityLabel: "Gebruik Statische Verbetering",
+            rateControlLabel: "Encoder Rate Control-modus",
         },
         audio: {
             title: "Audio-instellingen",
@@ -2044,6 +2172,7 @@ const nl = {
             useNativeCursorStylesEnableTitle: "CSS-cursorweergave gebruiken (Vervangt systeemcursors)",
             useNativeCursorStylesDisableTitle: "Canvas-cursorweergave gebruiken (Tekenen op canvas)",
             addScreenTitle: "Een tweede scherm toevoegen",
+            addScreenWebrtcTitle: "Extra schermen vereisen de WebSockets-modus",
             addScreenButton: "Scherm toevoegen +",
             forceAlignedResolutionLabel: "Uitgelijnde resolutie afdwingen",
             forceAlignedResolutionDetails: "Dwingt de beeldschermresolutie af om een veelvoud van 16 pixels te zijn",
@@ -2063,12 +2192,14 @@ const nl = {
             tooltipSysMem: "Systeemgeheugen: {used} / {total}",
             tooltipGpuMem: "GPU Geheugen: {used} / {total}",
             tooltipFps: "Client FPS: {value}",
-            tooltipAudio: "Audio Buffers: {value}",
+            tooltipAudioLevel: "Audioniveau: {value}%",
             tooltipMemoryNA: "N.v.t.",
             bandwidthLabel: "Bandbreedte",
             tooltipBandwidth: "Bandbreedte: {value}mbps",
             latencyLabel: "Latentie",
             tooltipLatency: "Round-trip Latentie: {value}ms",
+            videoBitrateLabel: "Videobitrate",
+            tooltipVideoBitrate: "Videobitrate: {value}mbps",
         },
         clipboard: {
             title: "Klembord",
@@ -2097,6 +2228,13 @@ const nl = {
           title: "Applicaties",
           openButtonTitle: "Applicaties beheren",
           openButton: "Applicaties beheren"
+        },
+        shortcuts: {
+            title: "Sneltoetsen",
+            fullscreen: "Volledig scherm wisselen",
+            openMenu: "Dashboard openen of sluiten",
+            toggleGamepad: "Virtuele gamepad in-/uitschakelen",
+            pointerLock: "Aanwijzer vergrendelen op de stream",
         },
         sharing: {
             title: "Delen"
@@ -2161,6 +2299,7 @@ const ar = {
     fullscreenTitle: "الدخول في وضع ملء الشاشة",
     gamingModeTitle: "وضع الألعاب",
     trackpadModeTitle: "وضع لوحة اللمس",
+    streamingModeTitle: "وضع البث",
     buttons: {
         videoStreamEnableTitle: "تمكين بث الفيديو",
         videoStreamDisableTitle: "تعطيل بث الفيديو",
@@ -2198,7 +2337,9 @@ const ar = {
             jpegQualityLabel: "الجودة الأساسية: {jpegQuality}",
             paintOverJpegQualityLabel: "جودة الرسم فوق الصورة: {paintOverJpegQuality}",
             paintoverCrfLabel: "CRF تحسين الصورة الثابتة ({crf}):",
+            paintoverBurstLabel: "إطارات دفعة تحسين الصورة الثابتة ({frames}):",
             usePaintOverQualityLabel: "استخدام تحسين الصورة الثابتة",
+            rateControlLabel: "وضع التحكم في معدل المُرمِّز",
         },
         audio: {
             title: "إعدادات الصوت",
@@ -2238,6 +2379,7 @@ const ar = {
             useNativeCursorStylesEnableTitle: "استخدام عرض مؤشر CSS (استبدال مؤشرات النظام)",
             useNativeCursorStylesDisableTitle: "استخدام عرض مؤشر اللوحة (الرسم على اللوحة)",
             addScreenTitle: "إضافة شاشة ثانية",
+            addScreenWebrtcTitle: "تتطلب الشاشات الإضافية وضع WebSockets",
             addScreenButton: "إضافة شاشة +",
             forceAlignedResolutionLabel: "فرض محاذاة الدقة",
             forceAlignedResolutionDetails: "يفرض أن تكون دقة العرض من مضاعفات 16 بكسل",
@@ -2257,12 +2399,14 @@ const ar = {
             tooltipSysMem: "ذاكرة النظام: {used} / {total}",
             tooltipGpuMem: "ذاكرة GPU: {used} / {total}",
             tooltipFps: "FPS العميل: {value}",
-            tooltipAudio: "مخازن الصوت المؤقتة: {value}",
+            tooltipAudioLevel: "مستوى الصوت: {value}%",
             tooltipMemoryNA: "غير متاح",
             bandwidthLabel: "عرض النطاق",
             tooltipBandwidth: "عرض النطاق: {value}mbps",
             latencyLabel: "الكمون",
             tooltipLatency: "كمون الرحلة ذهابًا وإيابًا: {value}ms",
+            videoBitrateLabel: "معدل بت الفيديو",
+            tooltipVideoBitrate: "معدل بت الفيديو: {value}mbps",
         },
         clipboard: {
             title: "الحافظة",
@@ -2291,6 +2435,13 @@ const ar = {
           title: "التطبيقات",
           openButtonTitle: "إدارة التطبيقات",
           openButton: "إدارة التطبيقات"
+        },
+        shortcuts: {
+            title: "الاختصارات",
+            fullscreen: "تبديل ملء الشاشة",
+            openMenu: "فتح لوحة التحكم أو إغلاقها",
+            toggleGamepad: "تبديل ذراع التحكم الافتراضي",
+            pointerLock: "قفل المؤشر على البث",
         },
         sharing: {
             title: "المشاركة"
@@ -2355,6 +2506,7 @@ const ko = {
     fullscreenTitle: "전체 화면 시작",
     gamingModeTitle: "게임 모드",
     trackpadModeTitle: "트랙패드 모드",
+    streamingModeTitle: "스트리밍 모드",
     buttons: {
         videoStreamEnableTitle: "비디오 스트림 활성화",
         videoStreamDisableTitle: "비디오 스트림 비활성화",
@@ -2392,7 +2544,9 @@ const ko = {
             jpegQualityLabel: "기본 품질: {jpegQuality}",
             paintOverJpegQualityLabel: "덧칠 품질: {paintOverJpegQuality}",
             paintoverCrfLabel: "정적 영역 개선 CRF ({crf}):",
+            paintoverBurstLabel: "정적 영역 개선 버스트 프레임 ({frames}):",
             usePaintOverQualityLabel: "정적 영역 개선 사용",
+            rateControlLabel: "인코더 레이트 컨트롤 모드",
         },
         audio: {
             title: "오디오 설정",
@@ -2432,6 +2586,7 @@ const ko = {
             useNativeCursorStylesEnableTitle: "CSS 커서 렌더링 사용 (시스템 커서 대체)",
             useNativeCursorStylesDisableTitle: "캔버스 커서 렌더링 사용 (캔버스에 그리기)",
             addScreenTitle: "두 번째 화면 추가",
+            addScreenWebrtcTitle: "추가 화면은 WebSockets 모드가 필요합니다",
             addScreenButton: "화면 추가 +",
             forceAlignedResolutionLabel: "정렬된 해상도 강제 적용",
             forceAlignedResolutionDetails: "디스플레이 해상도를 16픽셀의 배수로 강제 지정합니다",
@@ -2451,12 +2606,14 @@ const ko = {
             tooltipSysMem: "시스템 메모리: {used} / {total}",
             tooltipGpuMem: "GPU 메모리: {used} / {total}",
             tooltipFps: "클라이언트 FPS: {value}",
-            tooltipAudio: "오디오 버퍼: {value}",
+            tooltipAudioLevel: "오디오 레벨: {value}%",
             tooltipMemoryNA: "해당 없음",
             bandwidthLabel: "대역폭",
             tooltipBandwidth: "대역폭: {value}mbps",
             latencyLabel: "지연 시간",
             tooltipLatency: "왕복 지연 시간: {value}ms",
+            videoBitrateLabel: "비디오 비트레이트",
+            tooltipVideoBitrate: "비디오 비트레이트: {value}mbps",
         },
         clipboard: {
             title: "클립보드",
@@ -2485,6 +2642,13 @@ const ko = {
           title: "앱",
           openButtonTitle: "앱 관리",
           openButton: "앱 관리"
+        },
+        shortcuts: {
+            title: "단축키",
+            fullscreen: "전체 화면 전환",
+            openMenu: "대시보드 열기 또는 닫기",
+            toggleGamepad: "가상 게임패드 전환",
+            pointerLock: "포인터를 스트림에 고정",
         },
         sharing: {
             title: "공유"
@@ -2549,6 +2713,7 @@ const ja = {
     fullscreenTitle: "フルスクリーンに入る",
     gamingModeTitle: "ゲームモード",
     trackpadModeTitle: "トラックパッドモード",
+    streamingModeTitle: "ストリーミングモード",
     buttons: {
         videoStreamEnableTitle: "ビデオストリームを有効にする",
         videoStreamDisableTitle: "ビデオストリームを無効にする",
@@ -2586,7 +2751,9 @@ const ja = {
             jpegQualityLabel: "基本品質: {jpegQuality}",
             paintOverJpegQualityLabel: "ペイントオーバー品質: {paintOverJpegQuality}",
             paintoverCrfLabel: "静止領域補正 CRF ({crf}):",
+            paintoverBurstLabel: "静止領域補正バーストフレーム ({frames}):",
             usePaintOverQualityLabel: "静止領域の補正を使用",
+            rateControlLabel: "エンコーダーレート制御モード",
         },
         audio: {
             title: "オーディオ設定",
@@ -2626,6 +2793,7 @@ const ja = {
             useNativeCursorStylesEnableTitle: "CSS カーソルレンダリングを使用 (システムカーソルを置換)",
             useNativeCursorStylesDisableTitle: "キャンバスカーソルレンダリングを使用 (キャンバスに描画)",
             addScreenTitle: "2番目の画面を追加",
+            addScreenWebrtcTitle: "追加画面にはWebSocketsモードが必要です",
             addScreenButton: "画面を追加 +",
             forceAlignedResolutionLabel: "整列された解像度を強制",
             forceAlignedResolutionDetails: "ディスプレイの解像度を16ピクセルの倍数に強制します",
@@ -2645,12 +2813,14 @@ const ja = {
             tooltipSysMem: "システムメモリ: {used} / {total}",
             tooltipGpuMem: "GPU メモリ: {used} / {total}",
             tooltipFps: "クライアント FPS: {value}",
-            tooltipAudio: "オーディオバッファ: {value}",
+            tooltipAudioLevel: "音声レベル: {value}%",
             tooltipMemoryNA: "N/A",
             bandwidthLabel: "帯域幅",
             tooltipBandwidth: "帯域幅: {value}mbps",
             latencyLabel: "遅延",
             tooltipLatency: "ラウンドトリップ遅延: {value}ms",
+            videoBitrateLabel: "ビデオビットレート",
+            tooltipVideoBitrate: "ビデオビットレート: {value}mbps",
         },
         clipboard: {
             title: "クリップボード",
@@ -2679,6 +2849,13 @@ const ja = {
           title: "アプリ",
           openButtonTitle: "アプリを管理",
           openButton: "アプリを管理"
+        },
+        shortcuts: {
+            title: "ショートカット",
+            fullscreen: "全画面表示の切り替え",
+            openMenu: "ダッシュボードを開く/閉じる",
+            toggleGamepad: "仮想ゲームパッドを切り替え",
+            pointerLock: "ポインターをストリームにロック",
         },
         sharing: {
             title: "共有"
@@ -2743,6 +2920,7 @@ const vi = {
     fullscreenTitle: "Vào Toàn màn hình",
     gamingModeTitle: "Chế độ Chơi game",
     trackpadModeTitle: "Chế độ Bàn di chuột",
+    streamingModeTitle: "Chế độ Truyền phát",
     buttons: {
         videoStreamEnableTitle: "Bật Luồng Video",
         videoStreamDisableTitle: "Tắt Luồng Video",
@@ -2780,7 +2958,9 @@ const vi = {
             jpegQualityLabel: "Chất lượng Cơ bản: {jpegQuality}",
             paintOverJpegQualityLabel: "Chất lượng Vẽ đè: {paintOverJpegQuality}",
             paintoverCrfLabel: "CRF Cải thiện vùng tĩnh ({crf}):",
+            paintoverBurstLabel: "Số khung hình liên tiếp Cải thiện vùng tĩnh ({frames}):",
             usePaintOverQualityLabel: "Sử dụng Cải thiện vùng tĩnh",
+            rateControlLabel: "Chế độ điều khiển tốc độ bộ mã hóa",
         },
         audio: {
             title: "Cài đặt Âm thanh",
@@ -2820,6 +3000,7 @@ const vi = {
             useNativeCursorStylesEnableTitle: "Sử dụng kết xuất con trỏ CSS (Thay thế con trỏ hệ thống)",
             useNativeCursorStylesDisableTitle: "Sử dụng kết xuất con trỏ canvas (Vẽ lên canvas)",
             addScreenTitle: "Thêm màn hình thứ hai",
+            addScreenWebrtcTitle: "Màn hình bổ sung yêu cầu chế độ WebSockets",
             addScreenButton: "Thêm Màn hình +",
             forceAlignedResolutionLabel: "Bắt buộc độ phân giải căn chỉnh",
             forceAlignedResolutionDetails: "Bắt buộc độ phân giải màn hình phải là bội số của 16 pixel",
@@ -2839,12 +3020,14 @@ const vi = {
             tooltipSysMem: "Bộ nhớ Hệ thống: {used} / {total}",
             tooltipGpuMem: "Bộ nhớ GPU: {used} / {total}",
             tooltipFps: "FPS Máy khách: {value}",
-            tooltipAudio: "Bộ đệm Âm thanh: {value}",
+            tooltipAudioLevel: "Mức âm thanh: {value}%",
             tooltipMemoryNA: "Không có",
             bandwidthLabel: "Băng thông",
             tooltipBandwidth: "Băng thông: {value}mbps",
             latencyLabel: "Độ trễ",
             tooltipLatency: "Độ trễ trọn vòng: {value}ms",
+            videoBitrateLabel: "Tốc độ bit video",
+            tooltipVideoBitrate: "Tốc độ bit video: {value}mbps",
         },
         clipboard: {
             title: "Bộ nhớ tạm",
@@ -2873,6 +3056,13 @@ const vi = {
           title: "Ứng dụng",
           openButtonTitle: "Quản lý Ứng dụng",
           openButton: "Quản lý Ứng dụng"
+        },
+        shortcuts: {
+            title: "Phím tắt",
+            fullscreen: "Chuyển đổi toàn màn hình",
+            openMenu: "Mở hoặc đóng bảng điều khiển",
+            toggleGamepad: "Bật/tắt tay cầm ảo",
+            pointerLock: "Khóa con trỏ vào luồng",
         },
         sharing: {
             title: "Chia sẻ"
@@ -2937,6 +3127,7 @@ const th = {
     fullscreenTitle: "เข้าสู่โหมดเต็มหน้าจอ",
     gamingModeTitle: "โหมดเกมมิ่ง",
     trackpadModeTitle: "โหมดแทร็คแพด",
+    streamingModeTitle: "โหมดสตรีมมิ่ง",
     buttons: {
         videoStreamEnableTitle: "เปิดใช้งานสตรีมวิดีโอ",
         videoStreamDisableTitle: "ปิดใช้งานสตรีมวิดีโอ",
@@ -2974,7 +3165,9 @@ const th = {
             jpegQualityLabel: "คุณภาพพื้นฐาน: {jpegQuality}",
             paintOverJpegQualityLabel: "คุณภาพการวาดทับ: {paintOverJpegQuality}",
             paintoverCrfLabel: "CRF การปรับปรุงพื้นที่นิ่ง ({crf}):",
+            paintoverBurstLabel: "เฟรมต่อเนื่องของการปรับปรุงพื้นที่นิ่ง ({frames}):",
             usePaintOverQualityLabel: "ใช้การปรับปรุงพื้นที่นิ่ง",
+            rateControlLabel: "โหมดควบคุมอัตราบิตของตัวเข้ารหัส",
         },
         audio: {
             title: "การตั้งค่าเสียง",
@@ -3014,6 +3207,7 @@ const th = {
             useNativeCursorStylesEnableTitle: "ใช้การแสดงผลเคอร์เซอร์แบบ CSS (แทนที่เคอร์เซอร์ของระบบ)",
             useNativeCursorStylesDisableTitle: "ใช้การแสดงผลเคอร์เซอร์บนแคนวาส (วาดลงบนแคนวาส)",
             addScreenTitle: "เพิ่มหน้าจอที่สอง",
+            addScreenWebrtcTitle: "หน้าจอเพิ่มเติมต้องใช้โหมด WebSockets",
             addScreenButton: "เพิ่มหน้าจอ +",
             forceAlignedResolutionLabel: "บังคับความละเอียดที่จัดตำแหน่ง",
             forceAlignedResolutionDetails: "บังคับให้ความละเอียดของจอแสดงผลเป็นผลคูณของ 16 พิกเซล",
@@ -3033,12 +3227,14 @@ const th = {
             tooltipSysMem: "หน่วยความจำระบบ: {used} / {total}",
             tooltipGpuMem: "หน่วยความจำ GPU: {used} / {total}",
             tooltipFps: "FPS ไคลเอ็นต์: {value}",
-            tooltipAudio: "บัฟเฟอร์เสียง: {value}",
+            tooltipAudioLevel: "ระดับเสียง: {value}%",
             tooltipMemoryNA: "ไม่มีข้อมูล",
             bandwidthLabel: "แบนด์วิดท์",
             tooltipBandwidth: "แบนด์วิดท์: {value}mbps",
             latencyLabel: "ความหน่วง",
             tooltipLatency: "ความหน่วงไป-กลับ: {value}ms",
+            videoBitrateLabel: "บิตเรตวิดีโอ",
+            tooltipVideoBitrate: "บิตเรตวิดีโอ: {value}mbps",
         },
         clipboard: {
             title: "คลิปบอร์ด",
@@ -3067,6 +3263,13 @@ const th = {
           title: "แอป",
           openButtonTitle: "จัดการแอป",
           openButton: "จัดการแอป"
+        },
+        shortcuts: {
+            title: "ทางลัด",
+            fullscreen: "สลับเต็มหน้าจอ",
+            openMenu: "เปิดหรือปิดแดชบอร์ด",
+            toggleGamepad: "สลับเกมแพดเสมือน",
+            pointerLock: "ล็อกตัวชี้กับสตรีม",
         },
         sharing: {
             title: "การแชร์"
@@ -3131,6 +3334,7 @@ const fil = {
     fullscreenTitle: "Pumasok sa Fullscreen",
     gamingModeTitle: "Gaming Mode",
     trackpadModeTitle: "Modo ng Trackpad",
+    streamingModeTitle: "Modo ng Streaming",
     buttons: {
         videoStreamEnableTitle: "Paganahin ang Video Stream",
         videoStreamDisableTitle: "Huwag paganahin ang Video Stream",
@@ -3168,7 +3372,9 @@ const fil = {
             jpegQualityLabel: "Batayang Kalidad: {jpegQuality}",
             paintOverJpegQualityLabel: "Kalidad ng Paintover: {paintOverJpegQuality}",
             paintoverCrfLabel: "CRF sa Paglilinis ng Static ({crf}):",
+            paintoverBurstLabel: "Burst Frames sa Paglilinis ng Static ({frames}):",
             usePaintOverQualityLabel: "Gamitin ang Paglilinis ng Static",
+            rateControlLabel: "Rate Control Mode ng Encoder",
         },
         audio: {
             title: "Mga Setting ng Audio",
@@ -3208,6 +3414,7 @@ const fil = {
             useNativeCursorStylesEnableTitle: "Gamitin ang pag-render ng CSS cursor (Palitan ang mga cursor ng system)",
             useNativeCursorStylesDisableTitle: "Gamitin ang pag-render ng canvas cursor (Iguhit sa canvas)",
             addScreenTitle: "Magdagdag ng pangalawang screen",
+            addScreenWebrtcTitle: "Ang karagdagang mga screen ay nangangailangan ng WebSockets mode",
             addScreenButton: "Magdagdag ng Screen +",
             forceAlignedResolutionLabel: "Ipilit ang Nakahanay na Resolusyon",
             forceAlignedResolutionDetails: "Ipinipilit na ang resolusyon ng display ay maging multiple ng 16 pixels",
@@ -3227,12 +3434,14 @@ const fil = {
             tooltipSysMem: "Memorya ng System: {used} / {total}",
             tooltipGpuMem: "Memorya ng GPU: {used} / {total}",
             tooltipFps: "Client FPS: {value}",
-            tooltipAudio: "Mga Audio Buffer: {value}",
+            tooltipAudioLevel: "Antas ng audio: {value}%",
             tooltipMemoryNA: "N/A",
             bandwidthLabel: "Bandwidth",
             tooltipBandwidth: "Bandwidth: {value}mbps",
             latencyLabel: "Latency",
             tooltipLatency: "Round Trip Latency: {value}ms",
+            videoBitrateLabel: "Bitrate ng Video",
+            tooltipVideoBitrate: "Bitrate ng Video: {value}mbps",
         },
         clipboard: {
             title: "Clipboard",
@@ -3261,6 +3470,13 @@ const fil = {
           title: "Mga App",
           openButtonTitle: "Pamahalaan ang mga App",
           openButton: "Pamahalaan ang mga App"
+        },
+        shortcuts: {
+            title: "Mga shortcut",
+            fullscreen: "I-toggle ang fullscreen",
+            openMenu: "Buksan o isara ang dashboard",
+            toggleGamepad: "I-toggle ang virtual na gamepad",
+            pointerLock: "I-lock ang pointer sa stream",
         },
         sharing: {
             title: "Pagbabahagi"
@@ -3325,6 +3541,7 @@ const da = {
     fullscreenTitle: "Start Fuldskærm",
     gamingModeTitle: "Spiltilstand",
     trackpadModeTitle: "Trackpad-tilstand",
+    streamingModeTitle: "Streaming-tilstand",
     buttons: {
         videoStreamEnableTitle: "Aktiver videostream",
         videoStreamDisableTitle: "Deaktiver videostream",
@@ -3362,7 +3579,9 @@ const da = {
             jpegQualityLabel: "Grundkvalitet: {jpegQuality}",
             paintOverJpegQualityLabel: "Overmalingskvalitet: {paintOverJpegQuality}",
             paintoverCrfLabel: "Statisk Forbedring CRF ({crf}):",
+            paintoverBurstLabel: "Statisk Forbedring Burst-billeder ({frames}):",
             usePaintOverQualityLabel: "Brug Statisk Forbedring",
+            rateControlLabel: "Encoderens hastighedskontroltilstand",
         },
         audio: {
             title: "Lydindstillinger",
@@ -3402,6 +3621,7 @@ const da = {
             useNativeCursorStylesEnableTitle: "Brug CSS-markørgengivelse (Erstatter systemmarkører)",
             useNativeCursorStylesDisableTitle: "Brug lærredsmarkørgengivelse (Tegn på lærred)",
             addScreenTitle: "Tilføj en anden skærm",
+            addScreenWebrtcTitle: "Ekstra skærme kræver WebSockets-tilstand",
             addScreenButton: "Tilføj Skærm +",
             forceAlignedResolutionLabel: "Gennemtving justeret opløsning",
             forceAlignedResolutionDetails: "Gennemtvinger skærmopløsningen til at være et multiplum af 16 pixels",
@@ -3421,12 +3641,14 @@ const da = {
             tooltipSysMem: "Systemhukommelse: {used} / {total}",
             tooltipGpuMem: "GPU-hukommelse: {used} / {total}",
             tooltipFps: "Klient FPS: {value}",
-            tooltipAudio: "Lydbuffere: {value}",
+            tooltipAudioLevel: "Lydniveau: {value}%",
             tooltipMemoryNA: "Utilgængelig",
             bandwidthLabel: "Båndbredde",
             tooltipBandwidth: "Båndbredde: {value}mbps",
             latencyLabel: "Forsinkelse",
             tooltipLatency: "Tur-retur forsinkelse: {value}ms",
+            videoBitrateLabel: "Videobitrate",
+            tooltipVideoBitrate: "Videobitrate: {value}mbps",
         },
         clipboard: {
             title: "Udklipsholder",
@@ -3455,6 +3677,13 @@ const da = {
           title: "Apps",
           openButtonTitle: "Administrer Apps",
           openButton: "Administrer Apps"
+        },
+        shortcuts: {
+            title: "Genveje",
+            fullscreen: "Skift fuldskærm",
+            openMenu: "Åbn eller luk dashboardet",
+            toggleGamepad: "Slå den virtuelle gamepad til/fra",
+            pointerLock: "Lås markøren til streamen",
         },
         sharing: {
             title: "Deling"

@@ -11,6 +11,9 @@ import App from './App.jsx';
 import PlayerGamepadButton from './components/PlayerGamepadButton.jsx';
 import './index.css';
 import { getRoutePrefix } from './utils.js';
+// Bundled straight from the addon it lives in, so a fresh checkout builds
+// without a vendored copy in src/.
+import "../../universal-touch-gamepad/universalTouchGamepad.js";
 
 // Probe the server for the currently active streaming mode
 // before importing selkies-core.

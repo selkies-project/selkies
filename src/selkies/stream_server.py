@@ -379,6 +379,22 @@ class CentralizedStreamServer:
         self._clients_present = False
         self._client_hook_tasks = set()
 
+        # Wayland deployments: bring the compositor socket up now, before any capture
+        # or session app starts, so early-launched apps find WAYLAND_DISPLAY. All
+        # configuration flows from settings; pixelflux reads no Selkies env.
+        if bool(self.settings.wayland[0]):
+            try:
+                from pixelflux import ensure_wayland_display
+                ensure_wayland_display(
+                    width=int(self.settings.manual_width or 0),
+                    height=int(self.settings.manual_height or 0),
+                    render_node=self.settings.render_dri or "",
+                    auto_gpu=str(self.settings.auto_gpu or ""),
+                    cursor_size=int(self.settings.cursor_size),
+                )
+            except ImportError:
+                logger.warning("pixelflux unavailable; Wayland display not initialized.")
+
         # Constants
         self.STREAMING_MODE_WEBRTC = "webrtc"
         self.STREAMING_MODE_WEBSOCKETS = "websockets"

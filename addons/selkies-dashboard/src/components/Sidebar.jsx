@@ -78,7 +78,6 @@ const deriveDpiFromDpr = () => {
 };
 
 const STATS_READ_INTERVAL_MS = 500;
-const MAX_AUDIO_BUFFER = 10;
 const DEFAULT_FRAMERATE = 60;
 const DEFAULT_JPEG_QUALITY = 60;
 const DEFAULT_PAINT_OVER_JPEG_QUALITY = 90;
@@ -89,7 +88,7 @@ const DEFAULT_VIDEO_BUFFER_SIZE = 0;
 const DEFAULT_ENCODER = encoderOptions[0];
 const DEFAULT_VIDEO_CRF = 25;
 const DEFAULT_SCALE_LOCALLY = true;
-const DEFAULT_ENABLE_BINARY_CLIPBOARD = false;
+const DEFAULT_ENABLE_BINARY_CLIPBOARD = true;
 const REPO_BASE_URL =
   "https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/";
 const METADATA_URL = `${REPO_BASE_URL}metadata.yml`;
@@ -307,6 +306,40 @@ const SelkiesLogo = ({ width = 30, height = 30, className, t, ...props }) => (
 );
 
 const INSTALLED_APPS_STORAGE_KEY = "prootInstalledApps";
+
+// Audio level (RMS, 0..1) for the WebRTC stream's audio track via a dashboard-owned
+// AnalyserNode (never routed to a destination, so playback is unaffected). The
+// websockets worklet path exposes window.currentAudioLevel instead.
+function readStreamAudioLevel(meterRef) {
+  const el = document.getElementById("stream");
+  const ms = el && el.srcObject;
+  if (!ms || typeof ms.getAudioTracks !== "function" || ms.getAudioTracks().length === 0) {
+    return null;
+  }
+  let m = meterRef.current;
+  if (!m || m.stream !== ms) {
+    try {
+      if (m && m.ctx) m.ctx.close();
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      ctx.createMediaStreamSource(ms).connect(analyser);
+      m = { ctx, analyser, data: new Uint8Array(analyser.fftSize), stream: ms };
+      meterRef.current = m;
+    } catch {
+      return null;
+    }
+  }
+  m.analyser.getByteTimeDomainData(m.data);
+  let sum = 0;
+  for (let i = 0; i < m.data.length; i++) {
+    const v = (m.data[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / m.data.length);
+}
+
 function AppsModal({ isOpen, onClose, t }) {
   const [appData, setAppData] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -597,6 +630,15 @@ function Sidebar() {
   useEffect(() => {
     window.postMessage({ type: 'sidebarVisibilityChanged', isOpen: isOpen }, window.location.origin);
   }, [isOpen]);
+  // Entering fullscreen (button, Ctrl+Shift+F, or browser UI) folds the dashboard so
+  // pointer lock isn't fighting an open sidebar.
+  useEffect(() => {
+    const foldOnFullscreen = () => {
+      if (document.fullscreenElement) setIsOpen(false);
+    };
+    document.addEventListener("fullscreenchange", foldOnFullscreen);
+    return () => document.removeEventListener("fullscreenchange", foldOnFullscreen);
+  }, []);
   const [currentDeviceDpi, setCurrentDeviceDpi] = useState(null);
   const [isMobile, setIsMobile] = useState(false);
   const [isTrackpadModeActive, setIsTrackpadModeActive] = useState(false);
@@ -655,6 +697,7 @@ function Sidebar() {
     newRenderable.apps = s.ui_sidebar_show_apps?.value ?? true;
     newRenderable.sharing = s.ui_sidebar_show_sharing?.value ?? true;
     newRenderable.gamepads = s.ui_sidebar_show_gamepads?.value ?? true;
+    newRenderable.shortcuts = s.ui_sidebar_show_shortcuts?.value ?? true;
     newRenderable.fullscreen = s.ui_sidebar_show_fullscreen?.value ?? true;
     newRenderable.gamingMode = s.ui_sidebar_show_gaming_mode?.value ?? true;
     newRenderable.trackpad = s.ui_sidebar_show_trackpad?.value ?? true;
@@ -973,6 +1016,16 @@ function Sidebar() {
       const final = s_scaling_dpi.allowed.includes(String(stored)) ? stored
         : (s_scaling_dpi.overridden ? parseInt(s_scaling_dpi.value, 10) : deriveDpiFromDpr());
       setSelectedDpi(final);
+      // A derived default only exists on this side of the wire: without a post
+      // the server keeps its built-in DPI and the slider is just a label. Send
+      // it when nothing explicit governs scaling — no client-stored value, no
+      // server override, no manual resolution — and the server isn't there yet.
+      const manualActive = !!localStorage.getItem(getPrefixedKey("manual_width"))
+        || serverSettings?.is_manual_resolution_mode?.value === true;
+      if (!s_scaling_dpi.allowed.includes(String(stored)) && !s_scaling_dpi.overridden
+          && !manualActive && final !== parseInt(s_scaling_dpi.value, 10)) {
+        debouncedPostSetting({ scaling_dpi: final });
+      }
     }
     const s_enable_binary_clipboard = serverSettings.enable_binary_clipboard;
     if (s_enable_binary_clipboard) {
@@ -1147,7 +1200,8 @@ function Sidebar() {
   });
   const [presetValue, setPresetValue] = useState("");
   const [clientFps, setClientFps] = useState(0);
-  const [audioBuffer, setAudioBuffer] = useState(0);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const audioMeterRef = useRef(null);
   const [bandwidthMbps, setBandwidthMbps] = useState(0);
   const [latencyMs, setLatencyMs] = useState(0);
   const [cpuPercent, setCpuPercent] = useState(0);
@@ -1187,6 +1241,7 @@ function Sidebar() {
     files: false,
     apps: false,
     sharing: false,
+    shortcuts: false,
   });
   const [notifications, setNotifications] = useState([]);
   const notificationTimeouts = useRef({});
@@ -1244,6 +1299,9 @@ function Sidebar() {
   const handleDpiScalingChange = (event) => {
     const newDpi = parseInt(event.target.value, 10);
     setSelectedDpi(newDpi);
+    // Persist: an explicit slider choice pins the value across reloads and
+    // stops the startup derived-default post (parity with the wish dashboard).
+    localStorage.setItem(getPrefixedKey("scaling_dpi"), newDpi.toString());
     debouncedPostSetting({ scaling_dpi: newDpi });
   };
 
@@ -1911,7 +1969,7 @@ function Sidebar() {
         case "fps":
           return t("sections.stats.tooltipFps", { value: clientFps });
         case "audio":
-          return t("sections.stats.tooltipAudio", { value: audioBuffer });
+          return t("sections.stats.tooltipAudioLevel", { value: audioLevel });
         case "bandwidth":
           return t("sections.stats.tooltipBandwidth", { value: bandwidthMbps.toFixed(2) }, `Bandwidth: ${bandwidthMbps.toFixed(2)} Mbps`);
         case "latency":
@@ -1930,7 +1988,7 @@ function Sidebar() {
       gpuMemUsed,
       gpuMemTotal,
       clientFps,
-      audioBuffer,
+      audioLevel,
     ]
   );
 
@@ -1992,7 +2050,14 @@ function Sidebar() {
         gu !== null && gt !== null && gt > 0 ? (gu / gt) * 100 : 0
       );
       setClientFps(window.fps ?? 0);
-      setAudioBuffer(window.currentAudioBufferSize ?? 0);
+      // The websockets worklet exports a FINAL 0-100 level (RMS ×141, full-scale
+      // sine = 100); the analyser fallback (WebRTC) returns raw RMS 0..1 — apply
+      // the same ×141 mapping so both transports read on one scale.
+      const coreLevel = window.currentAudioLevel;
+      const level = typeof coreLevel === "number"
+        ? coreLevel
+        : (readStreamAudioLevel(audioMeterRef) ?? 0) * 141;
+      setAudioLevel(Math.min(100, Math.round(level)));
       const netStats = window.network_stats;
       setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
       setLatencyMs(netStats?.latency_ms ?? 0);
@@ -2014,6 +2079,12 @@ function Sidebar() {
         } else if (message.type === 'clientRoleUpdate') {
           setIsViewerRole(message.role === 'viewer');
           if (message.role === 'viewer') setIsToggleVisible(false);
+        } else if (message.type === "toggleDashboard") {
+          // Core-owned Ctrl+Shift+M chord.
+          setIsOpen((prev) => !prev);
+        } else if (message.type === "toggleTouchGamepad") {
+          // Core-owned Ctrl+Shift+G chord.
+          handleToggleTouchGamepad();
         } else if (message.type === "gamepadControl") {
           if (message.enabled !== undefined)
             setIsGamepadEnabled(message.enabled);
@@ -2182,6 +2253,7 @@ function Sidebar() {
     hasReceivedGamepadData,
     scheduleNotificationRemoval,
     removeNotification,
+    handleToggleTouchGamepad,
     t,
     dynamicEncoderOptions,
     isOpen,
@@ -2221,18 +2293,17 @@ function Sidebar() {
     gaugeRadius,
     gaugeCircumference
   );
-  const audioBufferPercent = Math.min(
-    100,
-    (audioBuffer / MAX_AUDIO_BUFFER) * 100
-  );
-  const audioBufferOffset = calculateGaugeOffset(
-    audioBufferPercent,
+  const audioLevelOffset = calculateGaugeOffset(
+    audioLevel,
     gaugeRadius,
     gaugeCircumference
   );
-  const MAX_BANDWIDTH_MBPS = 1000;
+  // The gauge reads full at the traffic the session is CONFIGURED to use
+  // (video target + audio), not an arbitrary link speed — at 8 Mbps configured,
+  // 8 Mbps of traffic is a full circle.
+  const maxBandwidthMbps = Math.max(0.1, videoBitrate + audioBitrate / 1_000_000);
   const MAX_LATENCY_MS = 1000;
-  const bandwidthPercent = Math.min(100, (bandwidthMbps / MAX_BANDWIDTH_MBPS) * 100);
+  const bandwidthPercent = Math.min(100, (bandwidthMbps / maxBandwidthMbps) * 100);
   const bandwidthOffset = calculateGaugeOffset(
     bandwidthPercent,
     gaugeRadius,
@@ -2821,7 +2892,9 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {showH264Options && (!isWebrtc || activeEncoder === 'h264enc') && (renderableSettings.use_cpu ?? true) && (
+                {/* use_cpu only changes behavior for full-frame h264enc (HW vs x264);
+                    the server forces it true for jpeg/striped/openh264 in both transports. */}
+                {activeEncoder === 'h264enc' && (renderableSettings.use_cpu ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="useCpuToggle">
                       {t("sections.video.useCpuLabel", "CPU Encoding")}
@@ -2878,7 +2951,10 @@ function Sidebar() {
                         className="resolution-button toggle-button"
                         onClick={handleAddScreenClick}
                         style={{ marginBottom: "10px" }}
-                        title={t("sections.screen.addScreenTitle", "Add a second screen")}
+                        disabled={isWebrtc}
+                        title={isWebrtc
+                          ? t("sections.screen.addScreenWebrtcTitle", "Additional screens require WebSockets mode")
+                          : t("sections.screen.addScreenTitle", "Add a second screen")}
                       >
                         {t("sections.screen.addScreenButton", "Add Screen +")}
                       </button>
@@ -3463,7 +3539,7 @@ function Sidebar() {
                             transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
                             style={{
                               strokeDasharray: gaugeCircumference,
-                              strokeDashoffset: audioBufferOffset,
+                              strokeDashoffset: audioLevelOffset,
                               transition: "stroke-dashoffset 0.3s ease-in-out",
                               strokeLinecap: "round",
                             }} />
@@ -3476,7 +3552,7 @@ function Sidebar() {
                             fill="var(--sidebar-text)"
                             fontWeight="bold"
                           >
-                            {audioBuffer}
+                            {audioLevel}
                           </text>
                         </svg>
                         <div className="gauge-label">
@@ -3879,6 +3955,64 @@ function Sidebar() {
                         )}
                       </>
                     )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {(renderableSettings.shortcuts ?? true) && (
+              <div className="sidebar-section">
+                <div
+                  className="sidebar-section-header"
+                  onClick={() => toggleSection("shortcuts")}
+                  role="button"
+                  aria-expanded={sectionsOpen.shortcuts}
+                  aria-controls="shortcuts-content"
+                  tabIndex="0"
+                  onKeyDown={(e) =>
+                    (e.key === "Enter" || e.key === " ") &&
+                    toggleSection("shortcuts")
+                  }
+                >
+                  <h3>{t("sections.shortcuts.title", "Shortcuts")}</h3>
+                  <span className="section-toggle-icon">
+                    {sectionsOpen.shortcuts ? <CaretUpIcon /> : <CaretDownIcon />}
+                  </span>
+                </div>
+                {sectionsOpen.shortcuts && (
+                  <div className="sidebar-section-content" id="shortcuts-content">
+                    {[
+                      { combo: "Ctrl + Shift + F", label: t("sections.shortcuts.fullscreen", "Toggle fullscreen") },
+                      { combo: "Ctrl + Shift + M", label: t("sections.shortcuts.openMenu", "Open or close the dashboard") },
+                      { combo: "Ctrl + Shift + G", label: t("sections.shortcuts.toggleGamepad", "Toggle the virtual gamepad") },
+                      { combo: "Ctrl + Shift + Left click", label: t("sections.shortcuts.pointerLock", "Lock the pointer to the stream") },
+                    ].map((sc) => (
+                      <div
+                        key={sc.combo}
+                        className="shortcut-item"
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          alignItems: "center",
+                          gap: "2px",
+                          padding: "6px 0",
+                          textAlign: "center",
+                        }}
+                      >
+                        <kbd
+                          style={{
+                            fontFamily: "monospace",
+                            whiteSpace: "nowrap",
+                            padding: "2px 6px",
+                            borderRadius: "4px",
+                            border: "1px solid var(--item-border)",
+                          }}
+                        >
+                          {sc.combo}
+                        </kbd>
+                        <span>{sc.label}</span>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

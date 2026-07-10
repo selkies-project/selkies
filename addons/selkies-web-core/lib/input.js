@@ -1101,6 +1101,28 @@ const KeyboardUtil = {
             return Keysyms.lookup(codepoint);
         }
         return null;
+    },
+
+    // Resolve a keysym from the PHYSICAL key code. Used when the IME swallows the
+    // logical key (keyCode 229 / key 'Process') but the event is really a shortcut
+    // chord: shortcuts match on the base (level-0) keysym, so letters map lowercase.
+    getKeysymFromCode: function(code) {
+        if (!code) return null;
+        if (/^Key[A-Z]$/.test(code)) {
+            return Keysyms.lookup(code.charCodeAt(3) + 32); // 'KeyA' -> 'a'
+        }
+        if (/^Digit[0-9]$/.test(code)) {
+            return Keysyms.lookup(code.charCodeAt(5));
+        }
+        const punct = {
+            'Minus': 0x2d, 'Equal': 0x3d, 'BracketLeft': 0x5b, 'BracketRight': 0x5d,
+            'Backslash': 0x5c, 'Semicolon': 0x3b, 'Quote': 0x27, 'Backquote': 0x60,
+            'Comma': 0x2c, 'Period': 0x2e, 'Slash': 0x2f, 'Space': 0x20,
+        };
+        if (code in punct) {
+            return Keysyms.lookup(punct[code]);
+        }
+        return null;
     }
 };
 
@@ -1143,6 +1165,7 @@ export class Input {
         this.y = 0;
         this.onmenuhotkey = null;
         this.onfullscreenhotkey = this.enterFullscreen;
+        this.ongamepadhotkey = null;
         this.ongamepadconnected = null;
         this.ongamepaddisconnected = null;
         this.listeners = [];
@@ -1364,6 +1387,18 @@ export class Input {
         this.send("ku," + keysym);
     }
 
+    _focusCompositionHost() {
+        const el = this.element;
+        if (!el || typeof el.focus !== 'function') return;
+        const active = document.activeElement;
+        // Never steal focus from a real form field (dashboard inputs, chat boxes).
+        if (active && active !== document.body && active !== el &&
+            (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+            return;
+        }
+        try { el.focus({ preventScroll: true }); } catch (e) { /* detached element */ }
+    }
+
     resetKeyboard() {
         this._stopKeyHeartbeat();
         // Cancel the pending Windows-AltGr timer so it can't fire after a reset and
@@ -1401,6 +1436,17 @@ export class Input {
             return;
         }
         if (this.isComposing || event.isComposing || event.keyCode === 229) {
+            // A modifier chord while the IME is idle is a real shortcut the IME will
+            // not compose (e.g. Ctrl+A with a CJK layout active): the browser still
+            // reports keyCode 229 / key 'Process', so resolve the physical code and
+            // send it momentarily (Ctrl/Alt/Meta are already held server-side).
+            if ((event.ctrlKey || event.altKey || event.metaKey) &&
+                !this.isComposing && !event.isComposing) {
+                const chordKeysym = KeyboardUtil.getKeysymFromCode(event.code);
+                if (chordKeysym) {
+                    this._sendMomentaryKey(chordKeysym);
+                }
+            }
             _stopEvent(event);
             return;
         }
@@ -1450,6 +1496,13 @@ export class Input {
         if (event.code === 'KeyF' && event.ctrlKey && event.shiftKey) {
             if (document.fullscreenElement === null && this.onfullscreenhotkey !== null) {
                 this.onfullscreenhotkey();
+                _stopEvent(event);
+                return;
+            }
+        }
+        if (event.code === 'KeyG' && event.ctrlKey && event.shiftKey) {
+            if (this.ongamepadhotkey != null) {
+                this.ongamepadhotkey();
                 _stopEvent(event);
                 return;
             }
@@ -1649,15 +1702,33 @@ export class Input {
             this._updateCompositionText("");
             this.isComposing = false;
             this.compositionString = "";
+            this._clearCompositionHostSoon();
             return;
         }
         this._updateCompositionText(event.data);
         this.isComposing = false;
         this.compositionString = "";
+        this._clearCompositionHostSoon();
+    }
+
+    _clearCompositionHostSoon() {
+        // Committed IME text accumulates in the overlay <input> forever; some IMEs
+        // reconvert against that stale surrounding text and corrupt later syllables.
+        // Clear once the IME is fully idle (never synchronously mid-composition —
+        // mutating the value then aborts the active composition).
+        setTimeout(() => {
+            const el = this.element;
+            if (!this.isComposing && el && el.tagName === 'INPUT' && el.value) {
+                el.value = '';
+            }
+        }, 0);
     }
 
     _handleTextInput(event) {
         if (!event.data) return;
+        // A chord (Ctrl/Alt/Meta held) is sent by the keydown path; the browser's
+        // text echo of it must not ALSO type the letter.
+        if (this._chordModifierHeld()) return;
 
         const text = event.data;
         for (let i = 0; i < text.length; i++) {
@@ -1670,6 +1741,20 @@ export class Input {
                 this.send("ku," + keysym);
             }
         }
+        this._clearCompositionHostSoon();
+    }
+
+    _chordModifierHeld() {
+        for (const code in this._keyDownList) {
+            const ks = this._keyDownList[code];
+            if (ks === KeyTable.XK_Control_L || ks === KeyTable.XK_Control_R ||
+                ks === KeyTable.XK_Alt_L || ks === KeyTable.XK_Alt_R ||
+                ks === KeyTable.XK_Super_L || ks === KeyTable.XK_Super_R ||
+                ks === KeyTable.XK_Meta_L || ks === KeyTable.XK_Meta_R) {
+                return true;
+            }
+        }
+        return false;
     }
 
     _handleMobileInput(event) {
@@ -1727,6 +1812,9 @@ export class Input {
         const client_dpr = window.devicePixelRatio || 1;
         const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || window.isManualResolutionMode || this.isSharedMode) ? 1 : client_dpr;
         const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
+        if (down && event.target === this.element && document.activeElement !== this.element) {
+            this._focusCompositionHost();
+        }
         var mtype = "m";
         let canvas = document.getElementById('videoCanvas');
         let videoEle = document.getElementById("stream");
@@ -2698,6 +2786,17 @@ export class Input {
     }
 
     attach() {
+        // One live instance per page: reconnect paths construct a fresh Input without
+        // detaching the old one, whose window/document listeners and 16 ms gamepad
+        // poller would otherwise keep firing alongside this one (every event doubled).
+        if (Input._attachedInstance && Input._attachedInstance !== this) {
+            try { Input._attachedInstance.detach(); } catch (e) { /* already torn down */ }
+        }
+        Input._attachedInstance = this;
+        // The overlay input hosts IME composition, which browsers only run on the
+        // FOCUSED editable element. Take focus at attach (covers page load/refresh
+        // with a CJK layout already active) unless the user is in another field.
+        this._focusCompositionHost();
         this.listeners.push(addListener(this.element, 'resize', this._windowMath, this));
         this.listeners.push(addListener(document, 'pointerlockchange', this._pointerLock, this));
         this.listeners.push(addListener(document, 'fullscreenchange', this._onFullscreenChange, this));
@@ -2780,9 +2879,31 @@ export class Input {
         }
         this._windowMath();
         this.inputAttached = true;
+        this._resyncGamepads();
+    }
+
+    // gamepadconnected fires only on physical connect (or first press): a re-attach
+    // after a mode switch / reconnect must adopt pads the browser already exposes,
+    // or the pad stays dead until it is re-plugged.
+    _resyncGamepads() {
+        let pads = [];
+        try {
+            pads = navigator.getGamepads ? Array.from(navigator.getGamepads()) : [];
+        } catch (e) {
+            return;
+        }
+        for (const pad of pads) {
+            if (pad && pad.connected) {
+                this._gamepadConnected({ gamepad: pad });
+                break; // one manager polls all pads; the connect message is per-slot
+            }
+        }
     }
 
     detach() {
+        if (Input._attachedInstance === this) {
+            Input._attachedInstance = null;
+        }
         removeListeners(this.listeners);
         this.listeners = [];
         if (this.gamepadManager) {

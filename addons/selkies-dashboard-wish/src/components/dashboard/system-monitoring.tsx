@@ -7,12 +7,12 @@
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PolarAngleAxis, RadialBar, RadialBarChart } from "recharts";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
 	ChevronDown,
 	ChevronUp
 } from "lucide-react";
-import { getPrefixedKey } from "@/utils";
+import { getLastServerSettings, getPrefixedKey } from "@/utils";
 
 // Declare global window properties
 declare global {
@@ -119,14 +119,65 @@ function RadialGauge({ metric, size }: RadialGaugeProps) {
 }
 
 const STATS_READ_INTERVAL_MS = 500;
-const MAX_AUDIO_BUFFER = 10;
-const MAX_BANDWIDTH_MBPS = 1000;
+// Audio level (RMS, 0..1) for the WebRTC stream's audio track via a dashboard-owned
+// AnalyserNode (never routed to a destination, so playback is unaffected). The
+// websockets worklet path exposes window.currentAudioLevel instead.
+type AudioMeter = { ctx: AudioContext; analyser: AnalyserNode; data: Uint8Array<ArrayBuffer>; stream: MediaStream };
+function readStreamAudioLevel(meterRef: { current: AudioMeter | null }): number | null {
+	const el = document.getElementById("stream") as HTMLVideoElement | null;
+	const ms = el && (el.srcObject as MediaStream | null);
+	if (!ms || typeof ms.getAudioTracks !== "function" || ms.getAudioTracks().length === 0) {
+		return null;
+	}
+	let m = meterRef.current;
+	if (!m || m.stream !== ms) {
+		try {
+			if (m && m.ctx) m.ctx.close();
+			const ctx = new AudioContext();
+			const analyser = ctx.createAnalyser();
+			analyser.fftSize = 512;
+			ctx.createMediaStreamSource(ms).connect(analyser);
+			m = { ctx, analyser, data: new Uint8Array(analyser.fftSize), stream: ms };
+			meterRef.current = m;
+		} catch {
+			return null;
+		}
+	}
+	m.analyser.getByteTimeDomainData(m.data);
+	let sum = 0;
+	for (let i = 0; i < m.data.length; i++) {
+		const v = (m.data[i] - 128) / 128;
+		sum += v * v;
+	}
+	return Math.sqrt(sum / m.data.length);
+}
+
 const MAX_LATENCY_MS = 1000;
+const DEFAULT_VIDEO_BITRATE_MBPS = 8;
+const DEFAULT_AUDIO_BITRATE_BPS = 128000;
+
+// The bandwidth gauge reads full at the traffic the session is CONFIGURED to
+// use (video target + audio), not an arbitrary link speed — at 8 Mbps
+// configured, 8 Mbps of traffic is a full circle. Explicit client choice
+// (localStorage) wins over the server's configured value.
+function configuredMaxBandwidthMbps(): number {
+	const settings = getLastServerSettings();
+	const storedVideo = parseFloat(localStorage.getItem(getPrefixedKey('video_bitrate')) ?? '');
+	const serverVideo = parseFloat(settings?.video_bitrate?.value);
+	const videoMbps = !isNaN(storedVideo) ? storedVideo
+		: (!isNaN(serverVideo) ? serverVideo : DEFAULT_VIDEO_BITRATE_MBPS);
+	const storedAudio = parseInt(localStorage.getItem(getPrefixedKey('audio_bitrate')) ?? '', 10);
+	const serverAudio = parseInt(settings?.audio_bitrate?.value, 10);
+	const audioBps = !isNaN(storedAudio) ? storedAudio
+		: (!isNaN(serverAudio) ? serverAudio : DEFAULT_AUDIO_BITRATE_BPS);
+	return Math.max(0.1, videoMbps + audioBps / 1_000_000);
+}
 
 export function SystemMonitoring() {
 	const [isDetailedView, setIsDetailedView] = useState(false);
 	const [clientFps, setClientFps] = useState(0);
-	const [audioBuffer, setAudioBuffer] = useState(0);
+	const [audioLevel, setAudioLevel] = useState(0);
+	const audioMeterRef = useRef<AudioMeter | null>(null);
 	const [cpuPercent, setCpuPercent] = useState(0);
 	const [gpuPercent, setGpuPercent] = useState(0);
 	const [sysMemPercent, setSysMemPercent] = useState(0);
@@ -136,6 +187,7 @@ export function SystemMonitoring() {
 	const [gpuMemUsed, setGpuMemUsed] = useState<number | null>(null);
 	const [gpuMemTotal, setGpuMemTotal] = useState<number | null>(null);
 	const [bandwidthMbps, setBandwidthMbps] = useState(0);
+	const [maxBandwidthMbps, setMaxBandwidthMbps] = useState(configuredMaxBandwidthMbps);
 	const [latencyMs, setLatencyMs] = useState(0);
 	const [isWebrtc, setIsWebrtc] = useState(() =>
 		localStorage.getItem(getPrefixedKey('stream_mode')) === 'webrtc'
@@ -175,10 +227,18 @@ export function SystemMonitoring() {
 			setGpuMemPercent((gpuMemUsed !== null && gpuMemTotal !== null && gpuMemTotal > 0) ? (gpuMemUsed / gpuMemTotal) * 100 : 0);
 
 			setClientFps(window.fps ?? 0);
-			setAudioBuffer(window.currentAudioBufferSize ?? 0);
+			// The websockets worklet exports a FINAL 0-100 level (RMS ×141, full-scale
+			// sine = 100); the analyser fallback (WebRTC) returns raw RMS 0..1 — apply
+			// the same ×141 mapping so both transports read on one scale.
+			const coreLevel = (window as unknown as { currentAudioLevel?: number }).currentAudioLevel;
+			const level = typeof coreLevel === "number"
+				? coreLevel
+				: (readStreamAudioLevel(audioMeterRef) ?? 0) * 141;
+			setAudioLevel(Math.min(100, Math.round(level)));
 
 			const netStats = window.network_stats;
 			setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
+			setMaxBandwidthMbps(configuredMaxBandwidthMbps());
 			setLatencyMs(netStats?.latency_ms ?? 0);
 		};
 		const intervalId = setInterval(readStats, STATS_READ_INTERVAL_MS);
@@ -209,10 +269,9 @@ export function SystemMonitoring() {
 				if (value <= 100) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
 				return { status: 'high', color: 'text-red-500', bg: 'bg-red-500/10' };
 
-			case 'audio': // For audio buffer
-				if (value <= 3) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
-				if (value <= 6) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
-				return { status: 'high', color: 'text-red-500', bg: 'bg-red-500/10' };
+			case 'audio': // Output level (0-100%): activity indicator, not a pressure gauge
+				if (value >= 95) return { status: 'clipping', color: 'text-red-500', bg: 'bg-red-500/10' };
+				return { status: 'ok', color: 'text-green-500', bg: 'bg-green-500/10' };
 
 			case 'bandwidth': // For bandwidth (Mbps)
 				if (value >= 50) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
@@ -276,15 +335,15 @@ export function SystemMonitoring() {
 		},
 		{
 			name: "Audio",
-			current: audioBuffer,
-			max: MAX_AUDIO_BUFFER,
+			current: audioLevel,
+			max: 100,
 			fill: "hsl(230, 100%, 60%)",
 			hasData: hasAudioData
 		},
 		{
 			name: "Bandwidth",
 			current: Math.round(bandwidthMbps * 100) / 100,
-			max: MAX_BANDWIDTH_MBPS,
+			max: maxBandwidthMbps,
 			fill: "hsl(200, 100%, 60%)",
 			hasData: hasBandwidthData
 		},
@@ -404,11 +463,11 @@ export function SystemMonitoring() {
 
 					{hasAudioData && (
 						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">Audio Buffer</span>
+							<span className="text-sm text-muted-foreground">Audio level</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{audioBuffer}/{MAX_AUDIO_BUFFER}</span>
+								<span className="text-sm font-medium text-card-foreground">{audioLevel}%</span>
 								{(() => {
-									const status = getPerformanceStatus(audioBuffer, 'audio');
+									const status = getPerformanceStatus(audioLevel, 'audio');
 									return (
 										<div className={`w-2 h-2 rounded-full ${status.color.replace('text-', 'bg-')}`} />
 									);

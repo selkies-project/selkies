@@ -49,7 +49,7 @@ import { SystemMonitoring } from "@/components/dashboard/system-monitoring";
 import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
-import { computeRenderableSettings, getLastServerSettings, isSecondaryDisplay } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, isSecondaryDisplay } from "@/utils";
 
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
 
@@ -151,6 +151,18 @@ export function TopMenu({
   React.useEffect(() => {
     window.postMessage({ type: 'sidebarVisibilityChanged', isOpen: !!activePanel }, window.location.origin);
   }, [activePanel]);
+
+  // Entering fullscreen (button, Ctrl+Shift+F, or browser UI) folds the dashboard so
+  // pointer lock isn't fighting an open panel.
+  React.useEffect(() => {
+    const foldOnFullscreen = () => {
+      if (document.fullscreenElement) {
+        setActivePanel(null);
+      }
+    };
+    document.addEventListener("fullscreenchange", foldOnFullscreen);
+    return () => document.removeEventListener("fullscreenchange", foldOnFullscreen);
+  }, []);
 
   // --- Update UI Title and Logo from Server Settings ---
   React.useEffect(() => {
@@ -797,10 +809,17 @@ export function TopMenu({
                   </>
                 )}
 
-                {/* Second Screen Support */}
+                {/* Second Screen Support (no WebRTC multi-display pipeline: a second
+                    controller would evict the primary in a takeover loop) */}
                 {!isSecondaryDisplay && (
                   <>
-                    <MenubarItem onClick={handleAddScreenClick}>
+                    <MenubarItem
+                      onClick={handleAddScreenClick}
+                      disabled={localStorage.getItem(getPrefixedKey("stream_mode")) === "webrtc"}
+                      title={localStorage.getItem(getPrefixedKey("stream_mode")) === "webrtc"
+                        ? "Additional screens require WebSockets mode"
+                        : undefined}
+                    >
                       <ScreenShare className="h-4 w-4 mr-2" />
                       <span className="flex-1">Add Second Screen</span>
                     </MenubarItem>

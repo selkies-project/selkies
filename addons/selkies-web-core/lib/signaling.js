@@ -71,6 +71,14 @@ export class WebRTCSignaling {
         this.onstatus = null;
 
         /**
+         * Fired instead of the built-in page reload after repeated connect
+         * failures; the app may inspect the endpoint before reloading.
+         * @event
+         * @type {function}
+         */
+        this.onfatalretry = null;
+
+        /**
          * @event
          * @type {function}
          */
@@ -108,6 +116,20 @@ export class WebRTCSignaling {
          * @type {number}
          */
         this.retry_count = 0;
+
+        /**
+         * Pending retry timer; a failed handshake fires both 'error' and 'close',
+         * and both funnel into one scheduled retry.
+         * @private
+         */
+        this._retry_timer = null;
+
+        /**
+         * Set by disconnect() so a locally requested close is not treated as a
+         * server-side drop needing recovery.
+         * @private
+         */
+        this._intentional_close = false;
 
         /**
          * @type {Array<number>}
@@ -236,17 +258,31 @@ export class WebRTCSignaling {
      * @private
      * @event
      */
+    _scheduleRetry() {
+        if (this._retry_timer) return;
+        this.retry_count++;
+        this._retry_timer = setTimeout(() => {
+            this._retry_timer = null;
+            if (this.retry_count > 3) {
+                // Repeated connect failures (e.g. credentials expired and the WS
+                // upgrade now 401s): reload so the browser re-runs HTTP auth.
+                // onfatalretry lets the app probe the endpoint first (e.g. detect
+                // a server-side transport mode change) before reloading.
+                if (this.onfatalretry !== null) {
+                    this.onfatalretry();
+                } else {
+                    window.location.reload();
+                }
+            } else {
+                this.connect();
+            }
+        }, 3000);
+    }
+
     _onServerError() {
         this._setStatus("Connection error, retry in 3 seconds.");
-        this.retry_count++;
         if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
-            setTimeout(() => {
-                if (this.retry_count > 3) {
-                    window.location.reload();
-                } else {
-                    this.connect();
-                }
-            }, 3000);
+            this._scheduleRetry();
         }
     }
 
@@ -324,20 +360,35 @@ export class WebRTCSignaling {
      * @event
      */
     _onServerClose(event) {
-        if (this.state !== 'connecting') {
+        if (this.state === 'connecting') {
+            // Handshake never completed (e.g. the upgrade was rejected with 401).
+            // Recover here: the paired 'error' event is not guaranteed to observe
+            // readyState CLOSED, so this close may be the only recovery signal.
             this.state = 'disconnected';
-            this._setError("Server closed connection.");
-            if (this.ondisconnect !== null) {
-                if (event.code === 1000 || event.code === 1001) {
-                    this.ondisconnect(false);
-                } else if (event.code === 4000) {
-                    if (this.onshowalert !== null) this.onshowalert(event.reason);
-                } 
-                else {
-                    // abnormal closure, try to reconnect
-                    console.log("Reconnecting due to abnormal connection closure.");
-                    this.ondisconnect(true);
+            this._scheduleRetry();
+            return;
+        }
+        this.state = 'disconnected';
+        this._setError("Server closed connection.");
+        const intentional = this._intentional_close;
+        this._intentional_close = false;
+        if (this.ondisconnect !== null) {
+            if (event.code === 4000) {
+                if (this.onshowalert !== null) this.onshowalert(event.reason);
+            } else if (event.code === 4001) {
+                // Superseded: another live connection took this session over. Auto-
+                // reconnecting would evict the new holder and the two pages would
+                // take the slot from each other forever — stay down, tell the user.
+                if (this.onshowalert !== null) {
+                    this.onshowalert(event.reason || 'Session superseded by a new connection. Reload to take over.');
                 }
+            } else if ((event.code === 1000 || event.code === 1001) && intentional) {
+                this.ondisconnect(false);
+            } else {
+                // Server-initiated close, clean or not: recover like the websockets
+                // transport (reconnect; repeated failures reload for re-auth).
+                console.log("Reconnecting due to server-side connection closure.");
+                this.ondisconnect(true);
             }
         }
     }
@@ -365,6 +416,7 @@ export class WebRTCSignaling {
      * Triggers onServerClose event.
      */
     disconnect() {
+        this._intentional_close = true;
         this._ws_conn.close();
     }
 

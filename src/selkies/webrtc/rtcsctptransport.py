@@ -574,31 +574,26 @@ class InboundStream:
                 continue
             if start_pos is None:
                 ordered = not (chunk.flags & SCTP_DATA_UNORDERED)
-                # Prevent HoL blocking wedge. Skip middle/last fragments
-                # of broken messages to allow unordered messages to process.
                 if not (chunk.flags & SCTP_DATA_FIRST_FRAG):
+                    if ordered:
+                        # Head-of-line fragment whose FIRST is still in flight:
+                        # WAIT for the retransmit. Skipping here permanently
+                        # loses ordered messages under burst reordering.
+                        break
                     pos += 1
                     continue
                 if ordered and uint16_gt(chunk.stream_seq, self.sequence_number):
-                    pos += 1
-                    continue
+                    # A future ordered message; its predecessor must deliver first.
+                    break
                 expected_tsn = chunk.tsn
                 start_pos = pos
             else:
-                # Edge case: if we encounter a first fragment in the middle of reassembly
-                if chunk.flags & SCTP_DATA_FIRST_FRAG:
-                    # Abandon the previous broken reassembly and start fresh
-                    start_pos = pos
-                    expected_tsn = chunk.tsn
-                    ordered = not (chunk.flags & SCTP_DATA_UNORDERED)
-                    if ordered and uint16_gt(chunk.stream_seq, self.sequence_number):
-                        start_pos = None
-                        pos += 1
-                        continue
-                elif chunk.tsn != expected_tsn:
-                    # Gap detected in the middle of reassembly
+                if chunk.tsn != expected_tsn:
+                    # Gap inside the message being reassembled.
+                    if ordered:
+                        break  # the missing TSN is guaranteed to arrive; wait
                     start_pos = None
-                    continue
+                    continue  # unordered: rescan this position as a fresh head
 
             if chunk.flags & SCTP_DATA_LAST_FRAG:
                 message_chunks = []
@@ -675,11 +670,12 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         # up to 256 KiB, and Firefox/WebKit accept more. RFC 8841's 64 KiB
         # fallback would needlessly cap clipboard/file messages we send.
         self.remote_max_message_size = 262144
-        # Receive-side ceiling per inbound stream: one message at our
-        # advertised max-message-size plus the full receive window a compliant
-        # peer may have in flight behind a gap. Only a peer that ignores both
-        # our advertised limit and flow control can exceed this.
-        self._max_reassembly_bytes = 262144 + 1024 * 1024
+        # Receive-side ceiling per inbound stream: a memory-safety backstop, not
+        # per-message policing. Under burst loss an ORDERED stream legitimately
+        # buffers several completed messages behind one head-of-line gap while
+        # retransmits fill it, so the bound must be generous; only a peer that
+        # ignores both our advertised limit and flow control can reach it.
+        self._max_reassembly_bytes = 16 * 1024 * 1024
         self._association_state = self.State.CLOSED
         self.__log_debug: Callable[..., None] = lambda *args: None
         self.__started = False
@@ -699,7 +695,12 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         self._remote_verification_tag = 0
 
         # inbound
-        self._advertised_rwnd = 1024 * 1024
+        # 4 MiB (was aiortc's 1 MiB): browser->server bulk transfers (uploads)
+        # are window-capped at rwnd/RTT once past slow start, so 1 MiB throttled
+        # any high-RTT path (TURN relays especially) to a crawl. The cost is a
+        # larger worst-case reassembly buffer per association, bounded below by
+        # the same flow control that always applied.
+        self._advertised_rwnd = 4 * 1024 * 1024
         self._inbound_streams: dict[int, InboundStream] = {}
         self._inbound_streams_count = 0
         self._inbound_streams_max = MAX_STREAMS

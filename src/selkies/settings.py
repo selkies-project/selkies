@@ -63,7 +63,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "microphone_enabled",
         "type": "bool",
-        "default": True,
+        "default": False,
         "help": "Enable client-to-server microphone forwarding.",
     },
     {
@@ -231,13 +231,13 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "enable_binary_clipboard",
         "type": "bool",
-        "default": False,
+        "default": True,
         "help": "Allow binary data (e.g., images) on the clipboard.",
     },
     {
         "name": "use_browser_cursors",
         "type": "bool",
-        "default": False,
+        "default": True,
         "help": "Use browser CSS cursors instead of rendering to canvas.",
     },
     {
@@ -1182,6 +1182,50 @@ class AppSettings:
             self.turn_rest_username = "selkies"
 
 settings = AppSettings(SETTING_DEFINITIONS)
+
+# Settings never broadcast to clients: server-local paths and lifecycle hooks.
+CLIENT_PAYLOAD_EXCLUDED = [
+    'port', 'addr', 'web_root', 'encode_dri', 'debug', 'audio_device_name',
+    'watermark_path', 'recording_socket', 'file_manager_path',
+    'run_after_connect', 'run_after_disconnect',
+]
+
+
+def build_client_settings_payload():
+    """Client-facing settings snapshot shared by both transports: skips
+    server-local/sensitive entries, carries locked/overridden flags plus
+    enum/range metadata, and derives the clipboard gate booleans."""
+    out = {}
+    for setting_def in SETTING_DEFINITIONS:
+        name = setting_def['name']
+        if name in CLIENT_PAYLOAD_EXCLUDED or setting_def.get('sensitive'):
+            continue
+        value = getattr(settings, name)
+        if setting_def['type'] == 'bool':
+            bool_val, is_locked = value
+            payload_entry = {'value': bool_val, 'locked': is_locked}
+        else:
+            payload_entry = {'value': value}
+        # Whether this value came from an explicit CLI/env choice (vs the
+        # built-in default). The client uses it to decide if a conditional
+        # default (e.g. HiDPI-off when a manual resolution is set) should
+        # apply or defer to the operator's explicit setting.
+        payload_entry['overridden'] = bool(settings._overridden.get(name, False))
+        if setting_def['type'] == 'range':
+            payload_entry['min'], payload_entry['max'] = value
+            if 'meta' in setting_def and 'default_value' in setting_def['meta']:
+                payload_entry['default'] = setting_def['meta']['default_value']
+        elif setting_def['type'] in ('enum', 'list'):
+            if 'meta' in setting_def and 'allowed' in setting_def['meta']:
+                payload_entry['allowed'] = setting_def['meta']['allowed']
+        out[name] = payload_entry
+    # Booleans the client gates its clipboard UI/handlers on, derived from
+    # the single enable_clipboard policy string.
+    clip = settings.enable_clipboard
+    out['clipboard_enabled'] = {'value': clip != 'false'}
+    out['clipboard_in_enabled'] = {'value': clip in ('true', 'in')}
+    out['clipboard_out_enabled'] = {'value': clip in ('true', 'out')}
+    return out
 
 if settings.debug[0]:
     logging.getLogger().setLevel(logging.DEBUG)

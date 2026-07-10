@@ -50,6 +50,10 @@ class WebRTCPeerManagement:
         # Called with True/False as browser (client-type) peers come and go;
         # the server's own signaling peer does not count.
         self.on_client_presence: Optional[Callable[[bool], None]] = None
+        # Recent newest-wins takeovers per identity key: two LIVE pages that both
+        # auto-reconnect would otherwise trade the session forever (each eviction
+        # closes the other mid-handshake). See _eviction_storm.
+        self._eviction_times: Dict[Any, List[float]] = {}
 
         # Options
         self.keepalive_timeout: int = options.keepalive_timeout
@@ -527,6 +531,23 @@ class WebRTCPeerManagement:
         """
         return [1] + [i for i in range(2, 5) if getattr(self, f"enable_player{i}")]
 
+    _EVICTION_STORM_WINDOW_S = 5.0
+    _EVICTION_STORM_LIMIT = 3
+
+    def _eviction_storm(self, key: Any) -> bool:
+        """True when the identity `key` (slot/controller) has been taken over
+        LIMIT+ times inside the window: two live auto-reconnecting pages are
+        trading the session (each takeover closes the other mid-handshake).
+        Rejecting the newest claimant breaks the loop and keeps the current
+        holder stable; a lone refresh (one takeover per reload) never trips this."""
+        now = asyncio.get_event_loop().time()
+        times = [t for t in self._eviction_times.get(key, ()) if now - t < self._EVICTION_STORM_WINDOW_S]
+        self._eviction_times[key] = times
+        return len(times) >= self._EVICTION_STORM_LIMIT
+
+    def _record_eviction(self, key: Any) -> None:
+        self._eviction_times.setdefault(key, []).append(asyncio.get_event_loop().time())
+
     async def hello_peer(
         self, ws: WebSocketResponse, raddr: str
     ) -> Tuple[str, str, Optional[str], Optional[int], Optional[bool]]:
@@ -554,6 +575,22 @@ class WebRTCPeerManagement:
         # Partner notifications for evicted dead peers: collected under the lock but
         # flushed after release so a slow partner socket can't stall other handshakes.
         dead_peer_notifications: List[Callable[[], Awaitable[Any]]] = []
+
+        def evict_peer_locked(pid, peer, reason: bytes, storm_key=None):
+            """Evict a peer regardless of liveness: a live holder is superseded
+            (closed) like websockets mode does for a reconnecting display; a dead
+            one is just reaped. Socket I/O is deferred until the lock is released.
+            Only live supersedes count toward the takeover-storm window — reaping
+            an already-dead holder is routine reconnect housekeeping."""
+            peer_ws = getattr(peer, "ws", None)
+            if peer_ws is not None and not peer_ws.closed:
+                if storm_key is not None:
+                    self._record_eviction(storm_key)
+                dead_peer_notifications.append(
+                    lambda ws_old=peer_ws, r=reason: ws_old.close(code=4001, message=r)
+                )
+            dead_peer_notifications.extend(self._evict_dead_peer_locked(pid))
+
         result = None
         try:
             async with self.lock:
@@ -609,31 +646,26 @@ class WebRTCPeerManagement:
                             for pid, peer in self.peers.items()
                             if hasattr(peer, "peer_type") and peer.peer_type == "client"
                         ]
-                        # Evict dead holders (closed socket not yet reaped) so a
-                        # reconnect isn't blocked by a stale peer; reject only when
-                        # a live client already occupies the single slot.
-                        live_client = False
-                        for pid, peer in existing_clients:
-                            if getattr(peer, "ws", None) is not None and not peer.ws.closed:
-                                live_client = True
-                                continue
-                            dead_peer_notifications.extend(
-                                self._evict_dead_peer_locked(pid)
-                            )
-                            logger.info(
-                                "Evicting dead client {!r} for non-sharing reconnect from {!r}".format(
-                                    pid, raddr
-                                )
-                            )
-                        if live_client:
-                            logger.info("peer: {}".format(self.peers))
+                        # The newest connection wins (parity with websockets mode,
+                        # where a new display connection supersedes the old one): a
+                        # refresh must never be blocked by its own not-yet-reaped
+                        # predecessor. Dead holders are reaped; a live one is closed.
+                        if existing_clients and self._eviction_storm(("client",)):
                             await ws.close(
                                 code=4000,
-                                message=b"Multiple connections not allowed in non-sharing mode.",
+                                message=b"Session takeover loop detected; another page holds this session.",
                             )
                             raise Exception(
-                                "Multiple connections not allowed in non-sharing mode; connection from {!r}".format(
-                                    raddr
+                                "Rejecting client from {!r}: takeover storm".format(raddr)
+                            )
+                        for pid, peer in existing_clients:
+                            evict_peer_locked(
+                                pid, peer, b"Superseded by a new connection.",
+                                storm_key=("client",),
+                            )
+                            logger.info(
+                                "Evicting client {!r} for non-sharing reconnect from {!r}".format(
+                                    pid, raddr
                                 )
                             )
                     else:
@@ -652,31 +684,29 @@ class WebRTCPeerManagement:
                                 for pid, peer in self.peers.items()
                                 if getattr(peer, "client_slot", None) == client_slot
                             ]
-                            # Evict dead holders (closed socket not yet reaped) so a
-                            # reconnect into the same slot isn't blocked.
-                            live_collision = False
-                            for pid, peer in colliding:
-                                if getattr(peer, "ws", None) is not None and not peer.ws.closed:
-                                    live_collision = True
-                                    continue
-                                # Detach the dead holder from shared state now (frees
-                                # the slot); defer its partner socket I/O until unlocked.
-                                dead_peer_notifications.extend(
-                                    self._evict_dead_peer_locked(pid)
-                                )
-                                logger.info(
-                                    "Evicting dead peer {!r} holding slot {!r} for reconnect from {!r}".format(
-                                        pid, client_slot, raddr
-                                    )
-                                )
-                            if live_collision:
+                            # The newest claimant wins the slot (parity with
+                            # websockets mode): reap dead holders, supersede live
+                            # ones — a page refresh reconnects before its old socket
+                            # is reaped and must not bounce off itself.
+                            if colliding and self._eviction_storm(("slot", client_slot)):
                                 await ws.close(
                                     code=4000,
-                                    message=b"Player slot already in use.",
+                                    message=b"Player slot takeover loop detected; another page holds this slot.",
                                 )
                                 raise Exception(
-                                    "Player slot {!r} already in use; connection from {!r}".format(
+                                    "Rejecting slot {!r} claim from {!r}: takeover storm".format(
                                         client_slot, raddr
+                                    )
+                                )
+                            for pid, peer in colliding:
+                                evict_peer_locked(
+                                    pid, peer,
+                                    b"Superseded by a new connection for this player slot.",
+                                    storm_key=("slot", client_slot),
+                                )
+                                logger.info(
+                                    "Evicting peer {!r} holding slot {!r} for reconnect from {!r}".format(
+                                        pid, client_slot, raddr
                                     )
                                 )
 
@@ -703,29 +733,28 @@ class WebRTCPeerManagement:
                     peer_controller = controller_entry[1] if controller_entry else None
                     if client_type == "controller":
                         if peer_controller is not None:
-                            # Evict a dead controller (closed socket not yet reaped)
-                            # so a controller reconnect isn't blocked by a stale peer.
-                            # _evict_dead_peer_locked keeps the server alive (sends
-                            # SESSION_END rather than closing the server socket).
-                            assert controller_entry is not None
-                            ctrl_pid, ctrl_peer = controller_entry
-                            ctrl_ws = getattr(ctrl_peer, "ws", None)
-                            if ctrl_ws is not None and not ctrl_ws.closed:
+                            # The newest controller wins (parity with websockets
+                            # mode, which kills the old primary client when a new
+                            # one connects). _evict_dead_peer_locked keeps the
+                            # server alive (SESSION_END, not a server-socket close).
+                            if self._eviction_storm(("controller",)):
                                 await ws.close(
                                     code=4000,
-                                    message=b"Duplicate controller. A client of type 'controller' already exists.",
+                                    message=b"Session takeover loop detected; another page holds this session.",
                                 )
                                 raise Exception(
-                                    "Duplicate controllers not allowed; connection from {!r}".format(
-                                        raddr
-                                    )
+                                    "Rejecting controller from {!r}: takeover storm".format(raddr)
                                 )
-                            dead_peer_notifications.extend(
-                                self._evict_dead_peer_locked(ctrl_pid)
+                            assert controller_entry is not None
+                            ctrl_pid, ctrl_peer = controller_entry
+                            evict_peer_locked(
+                                ctrl_pid, ctrl_peer,
+                                b"Superseded by a new controller connection.",
+                                storm_key=("controller",),
                             )
                             peer_controller = None
                             logger.info(
-                                "Evicting dead controller {!r} for reconnect from {!r}".format(
+                                "Evicting controller {!r} for reconnect from {!r}".format(
                                     ctrl_pid, raddr
                                 )
                             )

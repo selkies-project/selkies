@@ -10,6 +10,10 @@ import {
 import {
   Input
 } from './lib/input.js';
+import {
+  createClipboardSync,
+  writeImageToLocalClipboard
+} from './lib/clipboard-sync.js';
 
 // Parse an audio frame body into the ordered Opus frames to decode, using RED redundancy
 // to recover frames the sender dropped under backpressure (pcmflux's delivery ring and the
@@ -221,20 +225,16 @@ function b64Path(p) {
 // One id per multipart clipboard transfer.
 let clipboardTransferCounter = 0;
 // Resources for clipboard
-let enable_binary_clipboard = false;
-// Latest text the server pushed; written to the local clipboard on the Ctrl/Cmd+C
-// gesture for Safari/Firefox, which reject writes from the message handler. Kept
-// as a fallback for when a freshly-requested copy times out (see below).
-let lastServerClipboardText = '';
-// Non-Chromium Ctrl/Cmd+C: REQUEST_CLIPBOARD, write a Promise into the ClipboardItem,
-// and settle it from the next incoming clipboard message (fresh, not stale cache).
-// Each entry: { resolve, mime }.
-let pendingClipboardRequests = [];
-// Last MIME type the server pushed (text/plain or an image/* type), so a binary
-// copy advertises the correct type in the ClipboardItem.
-let lastServerClipboardMime = 'text/plain';
-// For binary copies: the most recent server image blob, returned by the copy Promise.
-let lastServerClipboardBlob = null;
+let enable_binary_clipboard = true;
+// Server-clipboard cache + change-only sync + Ctrl/Cmd+C request queue
+// (see lib/clipboard-sync.js). The send hook late-binds `websocket`.
+const clipboardSync = createClipboardSync({
+    sendRequest: () => {
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
+            websocket.send('REQUEST_CLIPBOARD');
+        }
+    }
+});
 let multipartClipboard = {
     data: [],
     mimeType: '',
@@ -1836,10 +1836,9 @@ function clearStartVideoWatchdog() {
 
 function onStartVideoWatchdogTimeout() {
   startVideoWatchdogTimer = null;
-  // Tab hidden again (the visibilitychange path owns state now): stand down — a
-  // backgrounded/paused client must not be forced to resend or reconnect. Shared
-  // viewers now use this watchdog too (their resume can be rate-limited by the
-  // server), so it is no longer disabled for shared mode.
+  // Tab hidden again (the visibilitychange path owns that state): stand down — a
+  // backgrounded/paused client must not be forced to resend or reconnect. Applies
+  // to shared viewers as well (their resume can be rate-limited by the server).
   if (document.hidden) { startVideoWatchdogAttempts = 0; return; }
   // Socket not open: the disconnect/reconnect logic elsewhere handles recovery.
   if (!websocket || websocket.readyState !== WebSocket.OPEN) { startVideoWatchdogAttempts = 0; return; }
@@ -2124,6 +2123,16 @@ const initializeInput = () => {
 
   const initialSlot = clientSlot;
   inputInstance = new Input(overlayInput, sendInputFunction, isSharedMode, playerInputTargetIndex, useCssScaling, initialSlot);
+
+  // Unified dashboard hotkeys: the core owns the chords (and stops them reaching
+  // the server); dashboards react to these messages. Fullscreen (Ctrl+Shift+F)
+  // is handled inside Input directly.
+  inputInstance.onmenuhotkey = () => {
+    window.postMessage({ type: 'toggleDashboard' }, window.location.origin);
+  };
+  inputInstance.ongamepadhotkey = () => {
+    window.postMessage({ type: 'toggleTouchGamepad' }, window.location.origin);
+  };
 
   inputInstance.getWindowResolution = () => {
     const videoContainer = document.querySelector('.video-container');
@@ -2769,85 +2778,14 @@ function receiveMessage(event) {
   }
 }
 
-// Settle pending REQUEST_CLIPBOARD promises with fresh server data: text -> string,
-// binary -> Blob (text Blob if none). Called from the clipboard message handlers.
-// NOTE: the wire protocol carries no request id, so any incoming server-clipboard
-// message settles the oldest pending Ctrl/Cmd+C request; an unrelated server push
-// arriving between request and response could settle it with the wrong content. The
-// ~2s timeout + cache bound the impact; true correlation would need a server echo.
-function resolveServerClipboard(text, blob, mime) {
-    if (typeof text === 'string') { lastServerClipboardText = text; }
-    if (blob) { lastServerClipboardBlob = blob; }
-    if (mime) { lastServerClipboardMime = mime; }
-    if (pendingClipboardRequests.length === 0) return;
-    const reqs = pendingClipboardRequests;
-    pendingClipboardRequests = [];
-    for (const req of reqs) {
-        if (req.settled) continue;
-        try {
-            // One-behind guard: the server reads its X clipboard the instant
-            // REQUEST_CLIPBOARD arrives, which on a Ctrl/Cmd+C races AHEAD of the
-            // app writing the new selection, so the first reply is the PRE-copy
-            // value. Hold the request open until an incoming value DIFFERS from
-            // what was cached when the request was made, then settle with the
-            // fresh value. The bounded timeout is the floor if nothing ever differs.
-            if (req.wantBinary) {
-                if (blob && blob !== req.baselineBlob) {
-                    req.resolve(blob);
-                } else {
-                    pendingClipboardRequests.push(req);
-                }
-            } else {
-                if (typeof text === 'string' && text !== req.baselineText) {
-                    req.resolve(text);
-                } else {
-                    pendingClipboardRequests.push(req);
-                }
-            }
-        } catch (_) { /* ignore */ }
-    }
-}
-
-// Ask the server for its current clipboard and return a Promise that resolves when
-// the next server clipboard message arrives. Falls back to the cached value after
-// ~1s so a non-responsive server can't hang the ClipboardItem promise (and the
-// browser's transient-activation window) indefinitely.
-function requestServerClipboard(wantBinary) {
-    if (websocket && websocket.readyState === WebSocket.OPEN) {
-        try { websocket.send('REQUEST_CLIPBOARD'); } catch (_) {}
-    }
-    return new Promise((resolve) => {
-        // Snapshot the currently-cached server clipboard: replies matching it are
-        // treated as the stale pre-copy read and skipped until a fresh value lands.
-        const req = { wantBinary: !!wantBinary, resolve, settled: false,
-            baselineText: lastServerClipboardText, baselineBlob: lastServerClipboardBlob };
-        const done = (val) => {
-            if (req.settled) return;
-            req.settled = true;
-            const idx = pendingClipboardRequests.indexOf(req);
-            if (idx !== -1) pendingClipboardRequests.splice(idx, 1);
-            resolve(val);
-        };
-        req.resolve = done;
-        pendingClipboardRequests.push(req);
-        // 2s (was 1s): give a slow server time to answer the first Ctrl/Cmd+C of a
-        // session, when the cache is still empty, before falling back to it.
-        setTimeout(() => {
-            if (wantBinary) {
-                done(lastServerClipboardBlob || new Blob([lastServerClipboardText || ''], { type: 'text/plain' }));
-            } else {
-                done(lastServerClipboardText || '');
-            }
-        }, 2000);
-    });
-}
-
 async function sendClipboardData(data, mimeType = 'text/plain') {
     if (!window.clipboard_enabled || !clipboard_in_enabled) return;
     if (!websocket || websocket.readyState !== WebSocket.OPEN) {
         console.warn('Cannot send clipboard data: WebSocket is not open.');
         return;
     }
+    // Change-only sync: skip content the session already carries in either direction.
+    if (!clipboardSync.shouldSend(data, mimeType)) return;
     const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
     let dataBytes;
     if (isBinary) {
@@ -2879,6 +2817,12 @@ async function sendClipboardData(data, mimeType = 'text/plain') {
             websocket.send(`cbs,${tid},${mimeType},${totalSize}`);
         }
         for (let offset = 0; offset < totalSize; offset += CLIPBOARD_CHUNK_SIZE) {
+            // Backpressure: an unthrottled multi-MB clipboard burst starves uploads
+            // and input sharing the same socket.
+            while (websocket.bufferedAmount > 4 * 1024 * 1024) {
+                await new Promise(resolve => setTimeout(resolve, 50));
+                if (websocket.readyState !== WebSocket.OPEN) return;
+            }
             const chunk = dataBytes.subarray(offset, offset + CLIPBOARD_CHUNK_SIZE);
             let binaryString = '';
             for (let i = 0; i < chunk.length; i++) {
@@ -2931,6 +2875,14 @@ function handleSettingsMessage(settings) {
         cleanupVideoBuffer();
         cleanupJpegStripeQueue();
         clearDecodedStripesQueue();
+        // The decoders above were just torn down; if the server's restart IDR
+        // beat this reset over the wire, nothing else would ever produce a new
+        // one on a static screen — ask for one once the restart settles.
+        setTimeout(() => {
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                try { websocket.send('REQUEST_KEYFRAME'); } catch (e) { /* reconnect path covers it */ }
+            }
+        }, 1500);
     }
   }
   if (settings.video_crf !== undefined) {
@@ -3171,48 +3123,62 @@ function initWebsockets() {
     window.location.pathname.lastIndexOf('/') + 1
   );
 
+  // Settles when the in-flight local-clipboard read+send completes; null when idle.
+  let clipboardSendInFlight = null;
+
   async function readLocalClipboardAndSend() {
     if (isSharedMode || !window.clipboard_enabled || !clipboard_in_enabled) return;
 
-    if (!enable_binary_clipboard) {
-      navigator.clipboard
-        .readText()
-        .then((text) => {
+    // Tracked so a paste chord arriving mid read/transfer can be held until the
+    // clipboard content has fully departed (see the capture-phase hold below).
+    const work = (async () => {
+      if (!enable_binary_clipboard) {
+        try {
+          const text = await navigator.clipboard.readText();
           if (!text) return;
-          sendClipboardData(text);
+          await sendClipboardData(text);
           console.log("Sent clipboard text via sendClipboardData");
-        })
-        .catch((err) => {
+        } catch (err) {
           if (err.name !== 'NotFoundError' && !err.message.includes('not focused')) {
-             console.warn(`Could not read text clipboard: ${err.name} - ${err.message}`);
+            console.warn(`Could not read text clipboard: ${err.name} - ${err.message}`);
           }
-        });
-    } else {
-      try {
-        const clipboardItems = await navigator.clipboard.read();
-        if (!clipboardItems || clipboardItems.length === 0) {
-          return;
         }
-        const clipboardItem = clipboardItems[0];
-        const imageType = clipboardItem.types.find(type => type.startsWith('image/'));
+      } else {
+        try {
+          const clipboardItems = await navigator.clipboard.read();
+          if (!clipboardItems || clipboardItems.length === 0) {
+            return;
+          }
+          const clipboardItem = clipboardItems[0];
+          const imageType = clipboardItem.types.find(type => type.startsWith('image/'));
 
-        if (imageType) {
-          const blob = await clipboardItem.getType(imageType);
-          const arrayBuffer = await blob.arrayBuffer();
-          sendClipboardData(arrayBuffer, imageType);
-          console.log(`Sent binary clipboard via sendClipboardData: ${imageType}, size: ${blob.size} bytes`);
-        } else if (clipboardItem.types.includes('text/plain')) {
-          const blob = await clipboardItem.getType('text/plain');
-          const text = await blob.text();
-          if (!text) return;
-          sendClipboardData(text);
-          console.log("Sent clipboard text (from binary-enabled path) via sendClipboardData");
-        }
-      } catch (err) {
-        if (err.name !== 'NotFoundError' && !err.message.includes('not focused')) {
-          console.warn(`Could not read clipboard using advanced API: ${err.name} - ${err.message}`);
+          if (imageType) {
+            const blob = await clipboardItem.getType(imageType);
+            const arrayBuffer = await blob.arrayBuffer();
+            await sendClipboardData(arrayBuffer, imageType);
+            console.log(`Sent binary clipboard via sendClipboardData: ${imageType}, size: ${blob.size} bytes`);
+          } else if (clipboardItem.types.includes('text/plain')) {
+            const blob = await clipboardItem.getType('text/plain');
+            const text = await blob.text();
+            if (!text) return;
+            await sendClipboardData(text);
+            console.log("Sent clipboard text (from binary-enabled path) via sendClipboardData");
+          }
+        } catch (err) {
+          if (err.name !== 'NotFoundError' && !err.message.includes('not focused')) {
+            console.warn(`Could not read clipboard using advanced API: ${err.name} - ${err.message}`);
+          }
         }
       }
+    })();
+    let settle;
+    const tracker = new Promise((resolve) => { settle = resolve; });
+    clipboardSendInFlight = tracker;
+    try {
+      await work;
+    } finally {
+      settle();
+      if (clipboardSendInFlight === tracker) clipboardSendInFlight = null;
     }
   }
 
@@ -3223,36 +3189,51 @@ function initWebsockets() {
     window.addEventListener('focus', () => { readLocalClipboardAndSend(); });
   }
 
-  // Fallback for browsers that reject navigator.clipboard.write (older Firefox/Safari):
-  // execCommand('copy') from a hidden textarea. A last resort, since awaiting the
-  // promise first can outlive the Ctrl/Cmd+C transient activation.
-  async function execCommandCopyFallback(textPromise) {
-    let text = '';
-    try { text = await textPromise; } catch (_) { text = lastServerClipboardText || ''; }
-    if (typeof text !== 'string') text = lastServerClipboardText || '';
-    // Don't clobber the user's local clipboard with empty content (slow/empty server
-    // response on the first copy of a session).
-    if (!text) return;
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    ta.style.position = 'fixed';
-    ta.style.top = '-9999px';
-    ta.style.left = '-9999px';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    try {
-      ta.focus();
-      ta.select();
-      ta.setSelectionRange(0, ta.value.length);
-      const ok = document.execCommand('copy');
-      if (!ok) console.warn('execCommand("copy") fallback returned false.');
-    } catch (err) {
-      console.warn(`execCommand("copy") fallback threw: ${err && err.name} - ${err && err.message}`);
-    } finally {
-      document.body.removeChild(ta);
+  // Paste-ordering hold: a Ctrl/Cmd+V arriving while the local clipboard is still
+  // being read/sent (focus-read or multipart transfer in flight) would depart the
+  // ordered channel BEFORE the clipboard content and paste the previous value on
+  // the server. Registered before input attaches (both capture on window), so this
+  // runs first: it swallows the chord's key events, waits for the send to flush
+  // (bounded), then replays them in order for the input stack.
+  const heldPasteEvents = [];
+  let heldPasteReplayPending = false;
+  function replayHeldPasteEvents() {
+    heldPasteReplayPending = false;
+    for (const ev of heldPasteEvents.splice(0)) {
+      try {
+        const replay = new KeyboardEvent(ev.type, ev);
+        Object.defineProperty(replay, '__selkiesClipReplay', { value: true });
+        window.dispatchEvent(replay);
+      } catch (_) { /* never break the key stream */ }
     }
   }
+  const PASTE_MOD_CODES = ['ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'];
+  function holdPasteWhileClipboardInFlight(ev) {
+    if (ev.__selkiesClipReplay) return;
+    // While a replay is queued, the chord's modifier keyups must be held too —
+    // a Ctrl keyup overtaking the replayed V would break the chord server-side
+    // (V would arrive unmodified and type a literal 'v').
+    const modHold = heldPasteReplayPending && ev.type === 'keyup' && PASTE_MOD_CODES.includes(ev.code);
+    if (ev.code !== 'KeyV' && !modHold) return;
+    const chord = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
+    // Hold a paste chord while a send is in flight; also hold ANY KeyV event
+    // while a replay is queued (its keyup must not overtake the held keydown,
+    // even if Ctrl was already released).
+    const hold = modHold || (ev.code === 'KeyV' && ((chord && clipboardSendInFlight) || heldPasteReplayPending));
+    if (!hold) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    heldPasteEvents.push(ev);
+    if (!heldPasteReplayPending) {
+      heldPasteReplayPending = true;
+      Promise.race([
+        clipboardSendInFlight || Promise.resolve(),
+        new Promise((r) => setTimeout(r, 2000)),
+      ]).then(replayHeldPasteEvents, replayHeldPasteEvents);
+    }
+  }
+  window.addEventListener('keydown', holdPasteWhileClipboardInFlight, true);
+  window.addEventListener('keyup', holdPasteWhileClipboardInFlight, true);
 
   // Safari/Firefox reject navigator.clipboard from the focus/message handlers
   // (no transient activation), so for those browsers mirror the sync onto the
@@ -3278,13 +3259,13 @@ function initWebsockets() {
       // navigator.clipboard.readText() would re-raise the prompt and send twice.
       if (key === 'c' && clipboard_out_enabled) {
         // Advertise text/plain ONLY: a Ctrl/Cmd+C can't synchronously know whether the
-        // server's CURRENT clipboard is an image, and a stale lastServerClipboardMime
-        // would build a malformed ClipboardItem (image entry holding text). Server images
+        // server's CURRENT clipboard is an image, and a stale cached MIME type would
+        // build a malformed ClipboardItem (image entry holding text). Server images
         // are delivered by the push handler instead.
-        const textPromise = requestServerClipboard(false);
+        const textPromise = clipboardSync.request(false);
         const items = {
           'text/plain': textPromise.then((t) =>
-            new Blob([typeof t === 'string' ? t : (lastServerClipboardText || '')], { type: 'text/plain' }))
+            new Blob([typeof t === 'string' ? t : (clipboardSync.lastText || '')], { type: 'text/plain' }))
         };
         let writePromise = null;
         try {
@@ -3292,12 +3273,12 @@ function initWebsockets() {
         } catch (err) {
           // Synchronous throw (e.g. ClipboardItem/clipboard.write unsupported).
           console.warn(`navigator.clipboard.write unavailable on Ctrl+C, using execCommand: ${err && err.name}`);
-          execCommandCopyFallback(textPromise);
+          clipboardSync.copyViaExecCommand(textPromise);
         }
         if (writePromise && writePromise.catch) {
           writePromise.catch((err) => {
             console.warn(`navigator.clipboard.write rejected on Ctrl+C, using execCommand: ${err && err.name} - ${err && err.message}`);
-            execCommandCopyFallback(textPromise);
+            clipboardSync.copyViaExecCommand(textPromise);
           });
         }
       }
@@ -3446,7 +3427,9 @@ function initWebsockets() {
   function handleDecodedFrame(frame) {
     // Frames arriving from the main VideoDecoder: shared mode, plus any full-frame mode that
     // isn't jpeg/h264enc/openh264enc/h264enc-striped (those use the JPEG and per-stripe decoder paths).
-    const isMainDecoderMode = isSharedMode || (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc-striped' && currentEncoderMode !== 'h264enc' && currentEncoderMode !== 'openh264enc');
+    // Only shared full-frame viewing feeds the main VideoDecoder; controllers route
+    // every encoder through the JPEG or per-stripe decoder paths.
+    const isMainDecoderMode = isSharedMode;
 
     if (document.hidden && isMainDecoderMode) {
       frame.close();
@@ -3503,7 +3486,7 @@ function initWebsockets() {
     // are torn down symmetrically; otherwise a worker canvas (Firefox) stays shown
     // covering the real striped/JPEG content after an H.264->JPEG switch or reset.
     if (mstgActive || videoWorkerActive) {
-      const fullFrameMode = isSharedMode || (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc-striped');
+      const fullFrameMode = (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc-striped');
       if (mstgActive && !fullFrameMode) deactivateMstg();
       if (videoWorkerActive && !fullFrameMode) deactivateVideoWorker();
     }
@@ -3554,9 +3537,9 @@ function initWebsockets() {
       if (paintedSomethingThisCycle && !streamStarted) {
         startStream();
       }
-    } else if (!isSharedMode && currentEncoderMode === 'h264enc-striped') {
-      // Striped H.264: composite stripes onto the 2D canvas (a track-generator
-      // <video> can't composite partial-height stripes).
+    } else if (currentEncoderMode === 'h264enc-striped') {
+      // Striped H.264 (controller and shared viewers alike): composite stripes onto
+      // the 2D canvas (a track-generator <video> can't composite partial-height stripes).
       let paintedSomethingThisCycle = false;
       for (const stripeData of decodedStripesQueue) {
         if (canvas.width > 0 && canvas.height > 0) {
@@ -3569,7 +3552,7 @@ function initWebsockets() {
       if (paintedSomethingThisCycle && !streamStarted) {
         startStream();
       }
-    } else if (!isSharedMode && currentEncoderMode === 'jpeg') {
+    } else if (currentEncoderMode === 'jpeg') {
       if (canvasContext && jpegStripeRenderQueue.length > 0) {
         if ((canvas.width === 0 || canvas.height === 0) || (canvas.width === 300 && canvas.height === 150)) {
           const firstStripe = jpegStripeRenderQueue[0];
@@ -3618,7 +3601,7 @@ function initWebsockets() {
           }
         }
       }
-    } else if ( isSharedMode || (!isSharedMode && currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc' && currentEncoderMode !== 'openh264enc' && currentEncoderMode !== 'h264enc-striped') ) {
+    } else if (isSharedMode) {
       if (!document.hidden || (isSharedMode && sharedClientState === 'ready')) {
         if ( (isSharedMode && sharedClientState === 'ready') || (!isSharedMode && isVideoPipelineActive) ) {
            if (videoFrameBuffer.length === 0 && videoPaintedSinceLastTick) {
@@ -3725,6 +3708,9 @@ function initWebsockets() {
                 // packets dropped by the drop-oldest ring when the queue overflows.
                 this.underrunSamples = 0;
                 this.droppedOldest = 0;
+                // Output RMS accumulator (channel 0), reported with each stats reply.
+                this._levelAcc = 0;
+                this._levelCount = 0;
 
                 this.port.onmessage = (event) => {
                     if (event.data.audioData) {
@@ -3736,12 +3722,16 @@ function initWebsockets() {
                         this.audioBufferQueue.push(pcmData);
                     } else if (event.data.type === 'getBufferSize') {
                         const bufferMillis = this.audioBufferQueue.reduce((total, buf) => total + (buf.length / this.channels / sampleRate) * 1000, 0);
+                        const level = this._levelCount > 0 ? Math.sqrt(this._levelAcc / this._levelCount) : 0;
+                        this._levelAcc = 0;
+                        this._levelCount = 0;
                         this.port.postMessage({
                             type: 'audioBufferSize',
                             size: this.audioBufferQueue.length,
                             durationMs: bufferMillis,
                             underrunSamples: this.underrunSamples,
-                            droppedOldest: this.droppedOldest
+                            droppedOldest: this.droppedOldest,
+                            level: level
                         });
                     }
                 };
@@ -3786,6 +3776,9 @@ function initWebsockets() {
                     for (let c = 0; c < chans; c++) {
                         output[c][sampleIndex] = offset < data.length ? data[offset++] : output[0][sampleIndex];
                     }
+                    const s0 = output[0][sampleIndex];
+                    this._levelAcc += s0 * s0;
+                    this._levelCount++;
                 }
 
                 this.currentDataOffset = offset;
@@ -3831,6 +3824,10 @@ function initWebsockets() {
             }
             if (event.data.droppedOldest !== undefined) {
               window.currentAudioWorkletDropped = event.data.droppedOldest;
+            }
+            if (event.data.level !== undefined) {
+              // Output RMS as a 0-100 level for the dashboards' audio meter.
+              window.currentAudioLevel = Math.min(100, Math.round(event.data.level * 141));
             }
         }
       };
@@ -4011,6 +4008,8 @@ function initWebsockets() {
 
   websocket.onopen = () => {
     console.log('[websockets] Connection opened!');
+    wsEverOpened = true;
+    try { sessionStorage.removeItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
     status = 'connected_waiting_mode';
     loadingText = 'Connection established. Waiting for server mode...';
     updateStatusDisplay();
@@ -4188,74 +4187,14 @@ function initWebsockets() {
       if (arrayBuffer.byteLength < 1) return;
       const dataTypeByte = dataView.getUint8(0);
 
-      // Any video chunk (full H.264, JPEG stripe, or H.264 stripe) proves the pipeline
-      // came back after a visibility-triggered START_VIDEO; stand the watchdog down.
+      // Any video chunk (JPEG stripe or H.264) proves the pipeline came back after
+      // a visibility-triggered START_VIDEO; stand the watchdog down.
       if (startVideoWatchdogTimer !== null &&
-          (dataTypeByte === 0 || dataTypeByte === 0x03 || dataTypeByte === 0x04)) {
+          (dataTypeByte === 0x03 || dataTypeByte === 0x04)) {
         clearStartVideoWatchdog();
       }
 
-      if (dataTypeByte === 0) {
-        const headerLength = isSharedMode ? 2 : 4;
-        if (arrayBuffer.byteLength < headerLength) return;
-
-        const frameTypeFlag = dataView.getUint8(1);
-        if (!isSharedMode) lastReceivedVideoFrameId = dataView.getUint16(2, false);
-        const videoDataArrayBuffer = arrayBuffer.slice(headerLength);
-
-        const canProcessFullH264 =
-          isSharedMode ||
-          (!isSharedMode && isVideoPipelineActive && currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc' && currentEncoderMode !== 'openh264enc' && currentEncoderMode !== 'h264enc-striped');
-
-        if (canProcessFullH264) {
-          if (isSharedMode && !sharedClientHasReceivedKeyframe) {
-            if (frameTypeFlag === 1) {
-              console.log("Shared mode: First keyframe received. Opening the gate for video decoding.");
-              sharedClientHasReceivedKeyframe = true;
-            } else {
-              console.log("Shared mode: Gate is closed. Discarding non-keyframe packet.");
-              requestKeyframe();
-              return;
-            }
-          }
-          if (decoder && decoder.state === 'configured') {
-            const chunkType = frameTypeFlag === 1 ? 'key' : 'delta';
-            if (chunkType === 'delta' && !mainDecoderHasKeyframe) {
-              requestKeyframe();
-              return;
-            }
-            if (chunkType === 'key') {
-              mainDecoderHasKeyframe = true;
-              // Make pixelflux's in-band SPS authoritative (Chromium only): adopt
-              // its profile/level before decoding this keyframe if it differs from
-              // the initial guess. No-op on non-Chromium / parse failure.
-              maybeReconfigureMainDecoderFromSps(new Uint8Array(videoDataArrayBuffer));
-            }
-            const chunk = new EncodedVideoChunk({
-              type: frameTypeFlag === 1 ? 'key' : 'delta',
-              timestamp: performance.now() * 1000,
-              data: videoDataArrayBuffer,
-            });
-            try {
-              decoder.decode(chunk);
-            } catch (e) {
-              initiateFallback(e, 'main_decoder_decode');
-            }
-          } else {
-            if (!isSharedMode && (!decoder || decoder.state === 'closed' || decoder.state === 'unconfigured')) {
-              console.warn(`Main decoder not ready for Full H.264 frame (mode: ${currentEncoderMode}, state: ${decoder ? decoder.state : 'null'}). Attempting init. Frame might be dropped.`);
-              initializeDecoder();
-            } else if (isSharedMode && (!decoder || decoder.state === 'closed' || decoder.state === 'unconfigured')) {
-                 console.error(`Shared mode: Main H.264 decoder not available or not configured when expected. State: ${sharedClientState}. Decoder state: ${decoder ? decoder.state : 'null'}. Entering error state.`);
-                 sharedClientState = 'error';
-            } else {
-              console.warn(`Main decoder exists but not configured (state: ${decoder.state}). Full H.264 frame dropped.`);
-            }
-          }
-        }
-
-
-      } else if (dataTypeByte === 1) {
+      if (dataTypeByte === 1) {
         if (displayId !== 'primary') return;
         
         const audioHeaderLength = 2;
@@ -4301,16 +4240,20 @@ function initWebsockets() {
 
 
       } else if (dataTypeByte === 0x03) {
-        const jpegHeaderLength = isSharedMode ? 4 : 6;
+        // The server broadcasts one framing to every socket: type, u16 frame id,
+        // u16 stripe Y. Shared viewers decode JPEG stripes like a controller; they
+        // only skip the primary-only frame-id bookkeeping.
+        const jpegHeaderLength = 6;
         if (arrayBuffer.byteLength < jpegHeaderLength) return;
 
-        const jpegFrameId = isSharedMode ? 0 : dataView.getUint16(2, false);
+        const jpegFrameId = dataView.getUint16(2, false);
         if (!isSharedMode) lastReceivedVideoFrameId = jpegFrameId;
-        const stripe_y_start = dataView.getUint16(isSharedMode ? 2 : 4, false);
+        const stripe_y_start = dataView.getUint16(4, false);
         const jpegDataBuffer = arrayBuffer.slice(jpegHeaderLength);
 
         const canProcessJpeg =
-          (!isSharedMode && isVideoPipelineActive && currentEncoderMode === 'jpeg');
+          (!isSharedMode && isVideoPipelineActive && currentEncoderMode === 'jpeg') ||
+          (isSharedMode && currentEncoderMode === 'jpeg');
 
         if (canProcessJpeg) {
           if (jpegDataBuffer.byteLength === 0) return;
@@ -4332,7 +4275,12 @@ function initWebsockets() {
         const stripeHeight = dataView.getUint16(8, false);
         const h264Payload = arrayBuffer.slice(EXPECTED_HEADER_LENGTH);
 
-        if (isSharedMode) {
+        // Shared viewers must decode whatever the server encodes: striped messages are
+        // independent per-stripe H.264 streams, so they go through the per-stripe
+        // decoders below exactly like a controller; only genuine full frames may use
+        // the single-decoder sink (feeding stripes to it interleaves 12 different
+        // bitstreams into one decoder and renders nothing).
+        if (isSharedMode && currentEncoderMode !== 'h264enc-striped') {
             if (!sharedClientHasReceivedKeyframe) {
                 if (video_frame_type_byte === 0x01) {
                     console.log("Shared mode: First keyframe received for h264enc fullframe. Opening the gate.");
@@ -4388,7 +4336,8 @@ function initWebsockets() {
         }
 
         const canProcessVncStripe =
-            (!isSharedMode && isVideoPipelineActive && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc' || currentEncoderMode === 'h264enc-striped'));
+            (!isSharedMode && isVideoPipelineActive && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc' || currentEncoderMode === 'h264enc-striped')) ||
+            (isSharedMode && currentEncoderMode === 'h264enc-striped');
 
         if (canProcessVncStripe) {
             if (h264Payload.byteLength === 0) return;
@@ -4928,10 +4877,8 @@ function initWebsockets() {
                         const blob = new Blob(multipartClipboard.data, { type: multipartClipboard.mimeType });
                         if (multipartClipboard.mimeType === 'text/plain') {
                             blob.text().then(text => {
-                                lastServerClipboardText = text;
-                                lastServerClipboardMime = 'text/plain';
-                                // Settle any pending Ctrl/Cmd+C copy promise.
-                                resolveServerClipboard(text, null, 'text/plain');
+                                // Cache + settle any pending Ctrl/Cmd+C copy promise.
+                                clipboardSync.resolveServer(text, null, 'text/plain');
                                 // Local write is gated per-direction (server->client = out).
                                 if (clipboard_out_enabled) {
                                     navigator.clipboard.writeText(text).catch(err => console.error('Could not copy server clipboard text to local: ' + err));
@@ -4940,11 +4887,12 @@ function initWebsockets() {
                             });
                         } else if (clipboard_out_enabled) {
                             // Settle any pending Ctrl/Cmd+C copy promise with the image blob.
-                            resolveServerClipboard(undefined, blob, multipartClipboard.mimeType);
-                            const clipboardItem = new ClipboardItem({ [multipartClipboard.mimeType]: blob });
-                            navigator.clipboard.write([clipboardItem]).then(() => {
-                                console.log(`Successfully wrote multi-part image (${multipartClipboard.mimeType}) from server to local clipboard.`);
-                                const uiText = `Image (${multipartClipboard.mimeType}) received from session and copied to clipboard.`;
+                            clipboardSync.resolveServer(undefined, blob, multipartClipboard.mimeType, multipartClipboard.data);
+                            const mpMime = multipartClipboard.mimeType;
+                            writeImageToLocalClipboard(blob, mpMime).then(() => {
+                                console.log(`Successfully wrote multi-part image (${mpMime}) from server to local clipboard.`);
+                                clipboardSync.captureLocalImageSig();
+                                const uiText = `Image (${mpMime}) received from session and copied to clipboard.`;
                                 window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
                             }).catch(err => {
                                 console.error('Failed to write multi-part image to clipboard:', err);
@@ -4983,10 +4931,10 @@ function initWebsockets() {
                 const blob = new Blob([bytes], { type: mimeType });
                 // Settle any pending Ctrl/Cmd+C copy promise with this fresh
                 // image blob (binary requests resolve to the Blob, text to its text()).
-                resolveServerClipboard(undefined, blob, mimeType);
-                const clipboardItem = new ClipboardItem({ [mimeType]: blob });
-                navigator.clipboard.write([clipboardItem]).then(() => {
+                clipboardSync.resolveServer(undefined, blob, mimeType, bytes);
+                writeImageToLocalClipboard(blob, mimeType).then(() => {
                     console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
+                    clipboardSync.captureLocalImageSig();
                     const uiText = `Image (${mimeType}) received from session and copied to clipboard.`;
                     window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
                 }).catch(err => {
@@ -5005,11 +4953,9 @@ function initWebsockets() {
                 bytes[i] = binaryString.charCodeAt(i);
             }
             const decodedText = new TextDecoder().decode(bytes);
-            lastServerClipboardText = decodedText;
-            lastServerClipboardMime = 'text/plain';
-            // Settle any pending Ctrl/Cmd+C copy promise with this fresh
+            // Cache + settle any pending Ctrl/Cmd+C copy promise with this fresh
             // text (resolves the ClipboardItem created in the keydown handler).
-            resolveServerClipboard(decodedText, null, 'text/plain');
+            clipboardSync.resolveServer(decodedText, null, 'text/plain');
             // Local write is gated per-direction (server->client = out).
             if (clipboard_out_enabled) {
                 navigator.clipboard.writeText(decodedText).catch(err => console.error('Could not copy server clipboard to local: ' + err));
@@ -5180,8 +5126,19 @@ function initWebsockets() {
     } else if (event.code === 4002) {
         console.log("Server closed connection due to permission change. Reconnecting...");
     }
+    // Another live connection took this session over. Auto-reconnecting would evict
+    // the new holder and the two pages would trade the session forever — clean up
+    // below as usual, but stay down and tell the user.
+    const superseded = /superseded/i.test(event.reason || '');
+    if (superseded) {
+        console.warn("Session superseded by a new connection. Auto-reconnect disabled.");
+        if (reconnectIntervalId) clearInterval(reconnectIntervalId);
+        reconnectIntervalId = null;
+    }
     status = 'disconnected';
-    loadingText = 'WebSocket disconnected. Attempting to reconnect...';
+    loadingText = superseded
+      ? 'Session opened elsewhere. Reload this page to take over.'
+      : 'WebSocket disconnected. Attempting to reconnect...';
     updateStatusDisplay();
     if (metricsIntervalId) {
       clearInterval(metricsIntervalId);
@@ -5216,17 +5173,43 @@ function initWebsockets() {
         console.log("Shared mode: WebSocket closed. Resetting shared state to 'idle'.");
         sharedClientState = 'idle';
     }
-    if (!reconnectIntervalId) {
+    if (!superseded && !reconnectIntervalId) {
       reconnectIntervalId = setInterval(() => {
         if (websocket && (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING)) {
           // Pass
         } else {
           console.log("WebSocket disconnected, reloading page to reconnect.");
-          location.reload();
+          reloadPossiblyFlippingMode();
         }
       }, 5000);
     }
   };
+}
+
+let wsEverOpened = false;
+
+// A plain GET on the transport endpoint returns 409 exactly when the server is
+// serving the other transport. If this session never connected, persist the
+// other mode and reload into it (one attempt per connect cycle) so a client
+// whose stored mode disagrees with the server converges instead of loop-reloading.
+async function reloadPossiblyFlippingMode() {
+  let flipGuard = null;
+  try { flipGuard = sessionStorage.getItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
+  if (!wsEverOpened && !flipGuard) {
+    try {
+      // Same path derivation as the data socket itself, so the probe hits the
+      // exact route the connection would.
+      const probeURL = new URL(window.location.href);
+      probeURL.pathname = window.location.pathname.substring(0, window.location.pathname.lastIndexOf('/') + 1) + 'api/websockets';
+      const res = await fetch(probeURL.href, { cache: 'no-store' });
+      if (res.status === 409) {
+        try { sessionStorage.setItem('selkies_mode_flip', '1'); } catch (e) { /* ignore */ }
+        safeSetItem(`${storageAppName}_stream_mode`, 'webrtc');
+        console.warn('[websockets] Server is serving WebRTC (endpoint 409); switching stored mode.');
+      }
+    } catch (e) { /* unreachable server: plain reload below keeps retrying */ }
+  }
+  location.reload();
 }
 
 if (document.readyState === 'loading') {
@@ -5927,16 +5910,6 @@ function performServerInitiatedVideoReset(reason = "unknown") {
     }
   }
 
-  if (!isSharedMode) {
-    if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc' && currentEncoderMode !== 'openh264enc' && currentEncoderMode !== 'h264enc-striped') {
-      console.log("  Ensuring main video decoder is re-initialized after server reset.");
-      if (isVideoPipelineActive) {
-         triggerInitializeDecoder();
-      } else {
-        console.log("  isVideoPipelineActive is false, decoder re-initialization deferred until video is enabled by user.");
-      }
-    }
-  }
 }
 
 let lastKeyframeRequestTime = 0;
@@ -5984,8 +5957,15 @@ function initiateFallback(error, context) {
         if (crashCount >= 3) {
             setStringParam('encoder', 'jpeg');
             safeSetItem(crashKey, '0');
-        } else {
+        } else if (getStringParam('encoder', 'h264enc') !== 'jpeg') {
             setStringParam('encoder', 'h264enc');
+        } else {
+            // Already on the safest encoder: jpeg mode runs no VideoDecoder, so a
+            // decode error here is handover noise (server still streaming H.264
+            // until our settings push lands). Un-escalating to h264enc would loop
+            // the ladder forever on builds whose WebCodecs claims H.264 support
+            // but fails at decode() (isConfigSupported is not trustworthy there).
+            safeSetItem(crashKey, '0');
         }
         setBoolParam('video_fullcolor', false);
         setIntParam('framerate', 60);

@@ -20,6 +20,8 @@ export default ({ mode }) => {
       // Dev-server exposure is opt-in: bind loopback unless SELKIES_VITE_HOST is set.
       host: process.env.SELKIES_VITE_HOST || '127.0.0.1',
       allowedHosts: process.env.SELKIES_VITE_HOST ? true : undefined,
+      // main.jsx imports the touch-gamepad addon from its sibling package.
+      fs: { allow: ['.', '../universal-touch-gamepad'] },
     },
     build: {
       target: 'chrome94'

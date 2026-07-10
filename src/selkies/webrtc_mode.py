@@ -35,12 +35,78 @@ from .signaling_server import WebRTCPeerManagement
 from .input_handler import WebRTCInput
 from .display_utils import resize_display, set_dpi, set_cursor_size, parse_gpu_id
 from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
-from .settings import settings, AppSettings, SETTING_DEFINITIONS
+from .settings import settings, AppSettings, SETTING_DEFINITIONS, build_client_settings_payload
 from types import SimpleNamespace
 from .webrtc_utils import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
 from .stream_server import BaseStreamingService, CentralizedStreamServer
 
 logger = logging.getLogger("webrtc")
+
+
+def _selkies_is_aioice_frame_chain(exc) -> bool:
+    """True when every frame of the exception's traceback that belongs to a
+    package points into aioice (allowing asyncio's own event-loop frames)."""
+    tb = getattr(exc, "__traceback__", None)
+    saw_aioice = False
+    while tb is not None:
+        fname = tb.tb_frame.f_code.co_filename
+        if "aioice" in fname:
+            saw_aioice = True
+        tb = tb.tb_next
+    return saw_aioice
+
+
+class _AsyncioSendNoiseFilter(logging.Filter):
+    """Drop asyncio's bare 'socket.send() raised exception.' warning: it fires
+    per ICMP-unreachable UDP send, which is routine while ICE candidate pairs
+    are probed or torn down, and carries no actionable detail."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage() != "socket.send() raised exception."
+
+
+def _install_webrtc_teardown_noise_filters(loop) -> None:
+    """Demote KNOWN-benign aioice teardown noise; everything else surfaces
+    unchanged. Two mechanisms, both installed once per loop/process:
+
+    - loop exception handler: aioice STUN retry timers fire after their
+      transport was closed (AttributeError on .sendto / the cascaded
+      .call_exception_handler), and TURN send_data tasks that outlive the
+      allocation end in never-retrieved TransactionTimeout. Both are pure
+      teardown races on sessions already gone.
+    - logging filter on the 'asyncio' logger for the bare per-datagram
+      'socket.send() raised exception.' warning.
+    """
+    asyncio_logger = logging.getLogger("asyncio")
+    if not any(isinstance(f, _AsyncioSendNoiseFilter) for f in asyncio_logger.filters):
+        asyncio_logger.addFilter(_AsyncioSendNoiseFilter())
+
+    if getattr(loop, "_selkies_webrtc_noise_filter", False):
+        return
+    loop._selkies_webrtc_noise_filter = True
+    previous = loop.get_exception_handler()
+
+    def handler(l, context):
+        exc = context.get("exception")
+        if exc is not None:
+            if isinstance(exc, AttributeError) and _selkies_is_aioice_frame_chain(exc) and (
+                "'NoneType' object has no attribute 'sendto'" in str(exc)
+                or "'NoneType' object has no attribute 'call_exception_handler'" in str(exc)
+            ):
+                logger.debug(f"aioice teardown race ignored: {exc}")
+                return
+            if exc.__class__.__name__ == "TransactionTimeout" and (
+                _selkies_is_aioice_frame_chain(exc)
+                or "aioice" in str(context.get("future", ""))
+            ):
+                logger.debug("aioice TURN transaction outlived its allocation; ignored.")
+                return
+        if previous is not None:
+            previous(l, context)
+        else:
+            l.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
 logger.setLevel(logging.INFO)
 
 # Cursor base size in points at 96 DPI (DPI changes scale from it): the
@@ -59,43 +125,7 @@ INT_SETTING_DEFAULT_MIN = -1_000_000
 
 
 def get_server_settings() -> dict:
-    server_settings_payload = {"settings": {}}
-    for setting_def in SETTING_DEFINITIONS:
-        name = setting_def["name"]
-        if name in ["port", "addr", "web_root", "encode_dri", "debug", "audio_device_name", "watermark_path", "recording_socket", "file_manager_path", "run_after_connect", "run_after_disconnect"]:
-            continue
-        # Never broadcast secrets/credentials (master_token, passwords, TURN
-        # secrets, etc.) to clients.
-        if setting_def.get("sensitive"):
-            continue
-        value = getattr(settings, name)
-        if setting_def["type"] == "bool":
-            bool_val, is_locked = value
-            payload_entry = {"value": bool_val, "locked": is_locked}
-        else:
-            payload_entry = {"value": value}
-
-        # Whether this value came from an explicit CLI/env choice (vs the
-        # built-in default). The client uses it to decide if a conditional
-        # default (e.g. HiDPI-off when a manual resolution is set) should
-        # apply or defer to the operator's explicit setting.
-        payload_entry["overridden"] = bool(settings._overridden.get(name, False))
-
-        if setting_def["type"] == "range":
-            payload_entry["min"], payload_entry["max"] = value
-            if "meta" in setting_def and "default_value" in setting_def["meta"]:
-                payload_entry["default"] = setting_def["meta"]["default_value"]
-        elif setting_def["type"] in ["enum", "list"]:
-            if "meta" in setting_def and "allowed" in setting_def["meta"]:
-                payload_entry["allowed"] = setting_def["meta"]["allowed"]
-        server_settings_payload["settings"][name] = payload_entry
-    # Booleans the client gates its clipboard UI/handlers on, derived from the
-    # single enable_clipboard policy string.
-    clip = settings.enable_clipboard
-    server_settings_payload["settings"]["clipboard_enabled"] = {"value": clip != "false"}
-    server_settings_payload["settings"]["clipboard_in_enabled"] = {"value": clip in ("true", "in")}
-    server_settings_payload["settings"]["clipboard_out_enabled"] = {"value": clip in ("true", "out")}
-    return server_settings_payload
+    return {"settings": build_client_settings_payload()}
 
 
 class WebRTCService(BaseStreamingService):
@@ -216,7 +246,9 @@ class WebRTCService(BaseStreamingService):
         self.input_handler = WebRTCInput(
             rtc_app=self.rtc_app,
             uinput_mouse_socket_path="",
-            js_socket_path_prefix="/tmp",
+            # Same setting as the websockets service: the interposer sockets are
+            # shared process-wide state, so both transports must agree on the path.
+            js_socket_path_prefix=getattr(self.args, "js_socket_path", "/tmp"),
             enable_clipboard=self.args.enable_clipboard,
             enable_binary_clipboard="true"
             if self.args.enable_binary_clipboard
@@ -365,6 +397,11 @@ class WebRTCService(BaseStreamingService):
         self.input_handler.on_cursor_change = lambda data: (
             self.rtc_app.send_cursor_data(data)
         )
+        # Wayland cursors come from the compositor via the media pipeline; route
+        # them through the same transport callback as the X11 XFixes monitor.
+        self.media_pipeline.on_cursor_data = lambda data: (
+            self.input_handler.on_cursor_change(data)
+        )
         self.input_handler.on_video_encoder_bit_rate = self.handle_video_bitrate_change
         self.input_handler.on_audio_encoder_bit_rate = self.handle_audio_bitrate_change
         self.input_handler.on_mouse_pointer_visible = lambda v: (
@@ -505,6 +542,29 @@ class WebRTCService(BaseStreamingService):
                     self.media_pipeline.last_resize_success = False
                 return
 
+            # Idempotent: clients re-assert their resolution on reconnects and
+            # settings broadcasts; re-applying the current size would churn
+            # RandR (X11) or restart the capture (Wayland) for nothing.
+            if (
+                self.media_pipeline
+                and self.media_pipeline.width == target_w
+                and self.media_pipeline.height == target_h
+                and self.media_pipeline.last_resize_success
+            ):
+                logger.debug(f"Resolution already {target_w}x{target_h}; skipping re-apply.")
+                return
+
+            if IS_WAYLAND:
+                # No X server to resize: the compositor output follows the capture
+                # dimensions, so update them and restart capture (websockets parity).
+                self.media_pipeline.width = target_w
+                self.media_pipeline.height = target_h
+                if self.media_pipeline.is_media_pipeline_running():
+                    await self.media_pipeline.restart_screen_capture()
+                self.media_pipeline.last_resize_success = True
+                logger.info(f"Wayland capture resized to {target_w}x{target_h}")
+                return
+
             success = await resize_display(f"{target_w}x{target_h}")
             if success:
                 logger.info(f"resize_display('{target_w}x{target_h}') reported success")
@@ -527,7 +587,14 @@ class WebRTCService(BaseStreamingService):
                 self.media_pipeline.last_resize_success = False
 
     async def handle_scaling(self, dpi_value: float) -> None:
+        # Idempotent: the dashboard and the core each re-assert their DPI on
+        # settings broadcasts, and every apply churns xrdb + xsettingsd SIGHUP
+        # + cursor themes. Re-applying the current value is a no-op.
+        if getattr(self, "_last_applied_dpi", None) == int(dpi_value):
+            logger.debug(f"DPI already {int(dpi_value)}; skipping re-apply.")
+            return
         if await set_dpi(int(dpi_value)):
+            self._last_applied_dpi = int(dpi_value)
             logger.info(f"Successfully set DPI to {dpi_value}")
         else:
             logger.error(f"Failed to set DPI to {dpi_value}")
@@ -707,6 +774,11 @@ class WebRTCService(BaseStreamingService):
                         await self.media_pipeline.set_use_cpu(bool(sanitized_value))
                     elif key == "encoder_rtc" and self.media_pipeline:
                         await self.media_pipeline.set_encoder_rtc(str(sanitized_value))
+                        # Keep the RTCApp's encoder current: munge_sdp keys its
+                        # profile decisions off it for CONNECTIONS CREATED LATER,
+                        # and the startup snapshot would go stale after a switch.
+                        if self.rtc_app:
+                            self.rtc_app.encoder = str(sanitized_value)
                     elif key == "video_fullcolor" and self.media_pipeline:
                         await self.media_pipeline.set_video_fullcolor(bool(sanitized_value))
                     elif key == "video_streaming_mode" and self.media_pipeline:
@@ -768,14 +840,25 @@ class WebRTCService(BaseStreamingService):
             if not goodputs:
                 continue
             current = float(pipeline.video_bitrate)
+            # The user-selected bitrate is the CEILING: congestion control only
+            # backs off below it and recovers up to it. Clamping to the allowed
+            # RANGE instead let a fast local segment ramp an 8 Mbps session to
+            # 80+ Mbps, saturating the real path (TURN/WAN) with queuing lag and
+            # loss-corrupted frames.
+            ceiling = float(getattr(self.args, "video_bitrate", hi_mbps) or hi_mbps)
+            ceiling = max(lo_mbps, min(hi_mbps, ceiling))
             if worst_loss > 0.10:
                 target = current * 0.7
             else:
-                target = min(goodputs) * 0.85 / 1_000_000
-            # Clamp to the allowed range and steer at kbps precision (what
-            # set_video_bitrate applies). Float math throughout so a sub-Mbps CBR
-            # target or a sub-Mbps range cap isn't truncated to 0 Mbps.
-            target = round(max(lo_mbps, min(hi_mbps, target)), 3)
+                # Damage-gated encoders are application-limited: measured goodput
+                # is merely what was sent (an idle screen reads ~0), NOT link
+                # capacity — so it must never drag the target DOWN. It may lift
+                # the target when it shows real headroom; otherwise recover
+                # multiplicatively toward the user ceiling after a loss backoff.
+                target = min(ceiling, max(current * 1.15, min(goodputs) * 0.85 / 1_000_000))
+            # Steer at kbps precision (what set_video_bitrate applies). Float math
+            # throughout so a sub-Mbps CBR target or range cap isn't truncated to 0.
+            target = round(max(lo_mbps, min(ceiling, target)), 3)
             if target != round(current, 3):
                 logger.info(
                     f"Congestion control: video bitrate {current:g} -> {target:g} Mbps "
@@ -1023,6 +1106,7 @@ class WebRTCService(BaseStreamingService):
     async def run(self) -> None:
         self._shutdown_called = False
         try:
+            _install_webrtc_teardown_noise_filters(asyncio.get_running_loop())
             # Initialize components and setup callbacks
             await self.initialize_components()
             self.setup_callbacks()

@@ -256,11 +256,23 @@ class RTCRtpSender(AsyncIOEventEmitter):
             self.__transport._register_rtp_sender(self, parameters)
             self.__rtp_header_extensions_map.configure(parameters)
 
+            # Send with the first codec that actually has an encoder: auxiliary
+            # entries (rtx, flexfec) can top the negotiated list when the media
+            # codec was filtered out, and starting RTP on them kills the sender.
+            send_codec = None
+            for codec in parameters.codecs:
+                if is_rtx(codec) or codec.mimeType.lower() == "video/flexfec-03":
+                    continue
+                send_codec = codec
+                break
+            if send_codec is None:
+                raise InvalidStateError("No sendable media codec was negotiated")
+
             # make note of RTX payload type
             for codec in parameters.codecs:
                 if (
                     is_rtx(codec)
-                    and codec.parameters["apt"] == parameters.codecs[0].payloadType
+                    and codec.parameters["apt"] == send_codec.payloadType
                 ):
                     self.__rtx_payload_type = codec.payloadType
                     break
@@ -271,7 +283,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     self.__fec_payload_type = codec.payloadType
                     break
 
-            self.__rtp_task = asyncio.ensure_future(self._run_rtp(parameters.codecs[0]))
+            self.__rtp_task = asyncio.ensure_future(self._run_rtp(send_codec))
             self.__rtcp_task = asyncio.ensure_future(self._run_rtcp())
             self.__started = True
 

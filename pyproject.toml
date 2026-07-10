@@ -105,6 +105,9 @@ project_excludes = ["src/selkies/Xlib"]
 python_version = "3.12"
 
 [tool.pyrefly.errors]
+# pixelflux/pcmflux are PyO3 extensions installed at deploy time; their imports
+# are try/except-guarded and have no stubs to resolve here.
+missing-import = false
 missing-attribute = false
 bad-argument-type = false
 unsupported-operation = false

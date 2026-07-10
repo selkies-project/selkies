@@ -644,6 +644,22 @@ class MediaRelay:
             self.__log_debug("Stop proxy %s", id(proxy))
             self.__proxies[track].discard(proxy)
 
+    async def stop(self) -> None:
+        """Cancel and reap every relay worker. __run_track only ends when its
+        SOURCE track raises MediaStreamError; a teardown that merely drops the
+        relay leaves workers pending in recv() forever, surfacing as
+        'Task was destroyed but it is pending!' once they are GC'd."""
+        tasks = list(self.__tasks.values())
+        self.__tasks.clear()
+        self.__proxies.clear()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
     def __log_debug(self, msg: str, *args: object) -> None:
         logger.debug(f"MediaRelay(%s) {msg}", id(self), *args)
 
