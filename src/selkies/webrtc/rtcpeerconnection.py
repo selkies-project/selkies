@@ -181,10 +181,18 @@ def is_codec_compatible(a: RTCRtpCodecParameters, b: RTCRtpCodecParameters) -> b
                 str(c.parameters.get("profile-level-id", "42E01F"))
             )[0]
 
-        try:
-            return packetization(a) == packetization(b) and profile(a) == profile(b)
-        except ValueError:
+        if packetization(a) != packetization(b):
             return False
+        try:
+            return profile(a) == profile(b)
+        except ValueError:
+            # Profiles the parser doesn't model (e.g. High 4:4:4 f4001f used by
+            # full-color streams): the sender payloads the encoder's bitstream
+            # as-is, so byte-equal raw ids are compatible.
+            def raw_id(c: RTCRtpCodecParameters) -> str:
+                return str(c.parameters.get("profile-level-id", "42E01F")).lower()
+
+            return raw_id(a) == raw_id(b)
 
     return True
 
@@ -365,7 +373,11 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         self.__seenMids: set[str] = set()
         self.__sctp: Optional[RTCSctpTransport] = None
         self.__sctp_mline_index: Optional[int] = None
-        self._sctpLegacySdp = True
+        # Offer the standards SCTP SDP (UDP/DTLS/SCTP + a=sctp-port +
+        # a=max-message-size): Chromium ignores a=max-message-size on the legacy
+        # DTLS/SCTP form and caps data channel messages at 64 KiB. Answers still
+        # adapt to whichever form the peer offered.
+        self._sctpLegacySdp = False
         self.__sctpRemotePort: Optional[int] = None
         self.__sctpRemoteCaps: Optional[RTCSctpCapabilities] = None
         self.__stream_id = str(uuid.uuid4())

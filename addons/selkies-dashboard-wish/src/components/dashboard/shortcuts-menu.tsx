@@ -9,11 +9,10 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 
 const shortcuts = [
-	{ label: "Fullscreen", combo: "Ctrl + Shift + F" },
-	{ label: "(Game) Cursor Lock", combo: "Ctrl + Shift + LeftClick" },
-	{ label: "Open Side Menu", combo: "Ctrl + Shift + M" },
-	{ label: "Toggle Gamepad", combo: "Ctrl + Shift + G" },
-	{ label: "Toggle Settings Checkbox", combo: "Ctrl + Shift + X" },
+	{ label: "Toggle fullscreen", combo: "Ctrl + Shift + F" },
+	{ label: "Open or close the dashboard", combo: "Ctrl + Shift + M" },
+	{ label: "Toggle the virtual gamepad", combo: "Ctrl + Shift + G" },
+	{ label: "Lock the pointer to the stream", combo: "Ctrl + Shift + Left click" },
 ];
 
 export function ShortcutsMenu() {
@@ -23,9 +22,9 @@ export function ShortcutsMenu() {
 				<Alert className="mb-3">
 					<AlertTitle>Keyboard Shortcuts</AlertTitle>
 					<AlertDescription>
-						<ul className="space-y-2">
+						<ul className="space-y-3">
 							{shortcuts.map((s, i) => (
-								<li key={i} className="flex items-center gap-2">
+								<li key={i} className="flex flex-col items-center gap-1 text-center">
 									<Badge variant="secondary" className="text-xs px-2 py-0.5 font-mono bg-primary/90 text-primary-foreground">
 										{s.combo}
 									</Badge>

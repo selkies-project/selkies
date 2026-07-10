@@ -25,14 +25,33 @@ from aiohttp import web, WSMsgType
 
 from . import audio_config
 from . import gpu_stats
-from .display_utils import parse_dri_node_to_index, parse_gpu_id
+from .display_utils import (
+    parse_dri_node_to_index,
+    parse_gpu_id,
+    format_wayland_cursor,
+    get_new_res,
+    generate_xrandr_gtf_modeline,
+    ensure_mode,
+    set_dpi,
+    set_cursor_size,
+)
 from .input_handler import WebRTCInput as InputHandler, CLIPBOARD_CHUNK_SIZE
-from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES
+from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, build_client_settings_payload
 from .stream_server import BaseStreamingService
 
 # Constants
 BACKPRESSURE_ALLOWED_DESYNC_MS = 2000
 BACKPRESSURE_LATENCY_THRESHOLD_MS = 50
+# Ceiling on the RTT-based desync forgiveness. RTT is measured through the same
+# send->ack path backpressure bounds, so a growing frame queue inflates the very
+# term that loosens the trigger — unbounded, that feedback loop lets the server
+# run tens of seconds ahead of the client. Real propagation delay worth forgiving
+# is under a second; anything above is self-inflicted queue delay.
+BACKPRESSURE_LATENCY_FORGIVENESS_MAX_MS = 1000
+# Discard ack round-trip samples above this: they measure a stalled/backlogged
+# path (or an id collision), not the link, and one such sample skews the flat
+# smoothing window for its whole lifetime.
+RTT_SAMPLE_SANE_MAX_MS = 10000
 BACKPRESSURE_CHECK_INTERVAL_S = 0.5
 MAX_UINT16_FRAME_ID = 65535
 FRAME_ID_SUSPICIOUS_GAP_THRESHOLD = (
@@ -385,601 +404,6 @@ class SelkiesStreamingApp:
         )
 
 
-def fit_res(w, h, max_w, max_h):
-    if w <= max_w and h <= max_h:
-        return w, h
-    aspect = w / h
-    if w > max_w:
-        w = max_w
-        h = int(w / aspect)
-    if h > max_h:
-        h = max_h
-        w = int(h * aspect)
-    return w - (w % 2), h - (h % 2)
-
-
-async def get_new_res(res_str):
-    if IS_WAYLAND:
-        wl_idx = getattr(settings, 'wayland_socket_index', 0)
-        return res_str, res_str, [res_str], res_str, f"Wayland-{wl_idx}"
-    screen_name = None
-    resolutions = []
-    screen_pat = re.compile(r"(\S+) connected")
-    current_pat = re.compile(r".*current (\d+\s*x\s*\d+).*")
-    res_pat = re.compile(r"^(\d+x\d+)\s+\d+\.\d+.*")
-    curr_res = new_res = max_res_str = res_str
-    try:
-        process = await subprocess.create_subprocess_exec(
-            "xrandr",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT
-        )
-        stdout, _ = await process.communicate()
-        xrandr_output = stdout.decode('utf-8')
-    except (FileNotFoundError, Exception) as e:
-        logger_app_resize.error(f"xrandr command failed: {e}")
-        return curr_res, new_res, resolutions, max_res_str, screen_name
-    current_screen_modes_started = False
-    for line in xrandr_output.splitlines():
-        screen_match = screen_pat.match(line)
-        if screen_match:
-            if screen_name is None:
-                screen_name = screen_match.group(1)
-            current_screen_modes_started = screen_name == screen_match.group(1)
-        if current_screen_modes_started:
-            current_match = current_pat.match(line)
-            if current_match:
-                curr_res = current_match.group(1).replace(" ", "")
-            res_match = res_pat.match(line.strip())
-            if res_match:
-                resolutions.append(res_match.group(1))
-    if not screen_name:
-        logger_app_resize.warning(
-            "Could not determine connected screen from xrandr."
-        )
-        return curr_res, new_res, resolutions, max_res_str, screen_name
-    max_w_limit, max_h_limit = 7680, 4320
-    max_res_str = f"{max_w_limit}x{max_h_limit}"
-    try:
-        w, h = map(int, res_str.split("x"))
-        new_w, new_h = fit_res(w, h, max_w_limit, max_h_limit)
-        new_res = f"{new_w}x{new_h}"
-    except ValueError:
-        logger_app_resize.error(f"Invalid resolution format for fitting: {res_str}")
-    resolutions = sorted(list(set(resolutions)))
-    return curr_res, new_res, resolutions, max_res_str, screen_name
-
-
-async def resize_display(res_str):  # e.g., res_str is "2560x1280"
-    """
-    Resizes the display using xrandr to the specified resolution string.
-    Adds a new mode via cvt/gtf if the requested mode doesn't exist,
-    using res_str (e.g., "2560x1280") as the mode name for xrandr.
-    """
-    if IS_WAYLAND:
-        return True
-    _, _, available_resolutions, _, screen_name = await get_new_res(res_str)
-
-    if not screen_name:
-        logger_app_resize.error(
-            "Cannot resize display via xrandr, no screen identified."
-        )
-        return False
-
-    target_mode_to_set = res_str
-
-    if res_str not in available_resolutions:
-        logger_app_resize.info(
-            f"Mode {res_str} not found in xrandr list. Attempting to add for screen '{screen_name}'."
-        )
-        try:
-            (
-                modeline_name_from_cvt_output,
-                modeline_params,
-            ) = await generate_xrandr_gtf_modeline(res_str)
-        except Exception as e:
-            logger_app_resize.error(
-                f"Failed to generate modeline for {res_str}: {e}"
-            )
-            return False
-
-        cmd_new = ["xrandr", "--newmode", res_str] + modeline_params.split()
-        new_mode_proc = await subprocess.create_subprocess_exec(
-            *cmd_new,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        stdout_new, stderr_new = await new_mode_proc.communicate()
-        if new_mode_proc.returncode != 0:
-            logger_app_resize.error(
-                f"Failed to create new xrandr mode with '{' '.join(cmd_new)}': {stderr_new.decode()}"
-            )
-            return False
-        logger_app_resize.info(f"Successfully ran: {' '.join(cmd_new)}")
-
-        cmd_add = ["xrandr", "--addmode", screen_name, res_str]
-        add_mode_proc = await subprocess.create_subprocess_exec(
-            *cmd_add,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        stdout_add, stderr_add = await add_mode_proc.communicate()
-        if add_mode_proc.returncode != 0:
-            logger_app_resize.error(
-                f"Failed to add mode '{res_str}' to screen '{screen_name}': {stderr_add.decode()}"
-            )
-            # Cleanup commands
-            delmode_proc = await subprocess.create_subprocess_exec(
-                "xrandr", "--delmode", screen_name, res_str,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            await delmode_proc.communicate()
-            
-            rmmode_proc = await subprocess.create_subprocess_exec(
-                "xrandr", "--rmmode", res_str,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            await rmmode_proc.communicate()
-            return False
-        logger_app_resize.info(f"Successfully ran: {' '.join(cmd_add)}")
-
-    logger_app_resize.info(
-        f"Applying xrandr mode '{target_mode_to_set}' for screen '{screen_name}'."
-    )
-    cmd_output = ["xrandr", "--output", screen_name, "--mode", target_mode_to_set]
-    set_mode_proc = await subprocess.create_subprocess_exec(
-        *cmd_output,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    stdout_set, stderr_set = await set_mode_proc.communicate()
-    if set_mode_proc.returncode != 0:
-        logger_app_resize.error(
-            f"Failed to set mode '{target_mode_to_set}' on screen '{screen_name}': {stderr_set.decode()}"
-        )
-        return False
-
-    logger_app_resize.info(
-        f"Successfully applied xrandr mode '{target_mode_to_set}'."
-    )
-    return True
-
-
-# A modeline is fully determined by (resolution, refresh) — the timings change
-# with the refresh rate, so resolution alone does not identify a mode. Successful
-# results are memoized on that pair so a size/refresh computed once never
-# re-spawns the cvt/gtf subprocess, including when the X mode was later dropped
-# and has to be re-created on a subsequent reconfigure.
-_MODELINE_CACHE: dict = {}
-
-
-async def generate_xrandr_gtf_modeline(res_wh_str, refresh_hz=60):
-    """Generates an xrandr modeline string using cvt or gtf.
-
-    refresh_hz defaults to 60 (the display mode selkies has always requested);
-    it is threaded through — and is part of the cache key — so that if the mode
-    is ever generated at another rate, both the timings and the memoization stay
-    correct rather than returning a stale 60 Hz modeline for the same size.
-    """
-    cache_key = (res_wh_str, refresh_hz)
-    cached = _MODELINE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    refresh_str = str(refresh_hz)
-    tool_name = "cvt"
-    try:
-        try:
-            w_str, h_str = res_wh_str.split("x")
-        except ValueError:
-            raise Exception(
-                f"Invalid resolution format for modeline generation: {res_wh_str}"
-            )
-        cmd = ["cvt", w_str, h_str, refresh_str]
-        try:
-            process = await subprocess.create_subprocess_exec(
-                *cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-            if process.returncode != 0:
-                raise Exception(f"cvt failed: {stderr.decode()}")
-            modeline_output = stdout.decode('utf-8')
-        except (FileNotFoundError, Exception):
-            logger_app_resize.warning(
-                "cvt command failed or not found, trying gtf."
-            )
-            cmd = ["gtf", w_str, h_str, refresh_str]
-            tool_name = "gtf"
-            process = await subprocess.create_subprocess_exec(
-                *cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-            if process.returncode != 0:
-                raise Exception(f"gtf failed: {stderr.decode()}")
-            modeline_output = stdout.decode('utf-8')
-    except (FileNotFoundError, Exception) as e:
-        raise Exception(
-            f"Failed to generate modeline using {tool_name} for {res_wh_str}: {e}"
-        ) from e
-    match = re.search(r'Modeline\s+"([^"]+)"\s+(.*)', modeline_output)
-    if not match:
-        raise Exception(
-            f"Could not parse modeline from {tool_name} output: {modeline_output}"
-        )
-    result = (match.group(1).strip(), match.group(2))
-    _MODELINE_CACHE[cache_key] = result
-    return result
-
-# AUTO_GPU render-node detection lives in pixelflux (the device library owns
-# hardware detection); selkies forwards only explicit --render-dri/--encode-dri paths.
-
-async def _run_xrdb(dpi_value, logger):
-    """Helper function to apply DPI via xrdb and xsettingsd."""
-    if not which("xrdb"):
-        logger.debug("xrdb not found. Skipping Xresources DPI setting.")
-        return False
-        
-    xresources_path_str = os.path.expanduser("~/.Xresources")
-    try:    
-        with open(xresources_path_str, "w") as f:
-            f.write(f"Xft.dpi:   {dpi_value}\n")
-        logger.info(f"Wrote 'Xft.dpi:   {dpi_value}' to {xresources_path_str}.")
-
-        cmd_xrdb = ["xrdb", xresources_path_str]
-        process = await subprocess.create_subprocess_exec(
-            *cmd_xrdb,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-        
-        xrdb_success = process.returncode == 0
-        if xrdb_success:
-            logger.info(f"Successfully loaded {xresources_path_str} using xrdb.")
-        else:
-            logger.warning(f"Failed to load {xresources_path_str} using xrdb. RC: {process.returncode}, Error: {stderr.decode().strip()}")
-
-        xsettingsd_config_path = os.path.expanduser("~/.xsettingsd")
-        xsettings_dpi = dpi_value * 1024
-        
-        config_content = (
-            "Xft/Antialias 1\n"
-            "Xft/Hinting 1\n"
-            "Xft/HintStyle \"hintfull\"\n"
-            "Xft/RGBA \"rgb\"\n"
-            f"Xft/DPI {xsettings_dpi}\n"
-        )
-        
-        with open(xsettingsd_config_path, "w") as f:
-            f.write(config_content)
-        logger.info(f"Wrote font and DPI settings to {xsettingsd_config_path}.")
-
-        if not which("pgrep") or not which("kill"):
-            logger.debug("pgrep or kill not found. Skipping xsettingsd reload.")
-        else:
-            pgrep_proc = await subprocess.create_subprocess_exec(
-                "pgrep", "xsettingsd",
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            pgrep_stdout, _ = await pgrep_proc.communicate()
-
-            if pgrep_proc.returncode == 0:
-                pid_output = pgrep_stdout.decode().strip()
-                if pid_output:
-                    pid = pid_output.splitlines()[0]
-                    logger.info(f"Found xsettingsd process with PID: {pid}.")
-                    kill_proc = await subprocess.create_subprocess_exec(
-                        "kill", "-1", pid,
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                    )
-                    _, kill_stderr = await kill_proc.communicate()
-                    if kill_proc.returncode == 0:
-                        logger.info(f"Sent SIGHUP to xsettingsd process {pid} to reload config.")
-                    else:
-                        logger.warning(f"Failed to send SIGHUP to xsettingsd process {pid}. Error: {kill_stderr.decode().strip()}")
-            else:
-                logger.info("xsettingsd process not found. Skipping reload.")
-        
-        return xrdb_success
-
-    except Exception as e:
-        logger.error(f"Error updating or loading DPI settings: {e}")
-        return False
-
-async def _get_xfce_session_env(logger):
-    """
-    Finds the running xfce4-session process and extracts its environment variables.
-    This is necessary to communicate with the correct D-Bus session.
-    """
-    try:
-        proc_pid = await subprocess.create_subprocess_exec(
-            "pgrep", "-o", "-x", "xfce4-session",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        stdout_pid, stderr_pid = await proc_pid.communicate()
-
-        if proc_pid.returncode != 0:
-            logger.debug(f"Could not find running xfce4-session: {stderr_pid.decode().strip()}")
-            return None
-        
-        pid = stdout_pid.decode().strip()
-        
-        env_path = f"/proc/{pid}/environ"
-        if not os.path.exists(env_path):
-            logger.debug(f"Could not read environment for PID {pid}. Path {env_path} does not exist.")
-            return None
-
-        with open(env_path, "r") as f:
-            environ_data = f.read()
-        
-        env = {}
-        for line in environ_data.split('\x00'):
-            if '=' in line:
-                key, value = line.split('=', 1)
-                env[key] = value
-        
-        if "DBUS_SESSION_BUS_ADDRESS" not in env:
-            logger.debug(f"Found xfce4-session (PID {pid}), but DBUS_SESSION_BUS_ADDRESS was not in its environment.")
-            return None
-
-        return env
-
-    except Exception as e:
-        logger.warning(f"Failed to get XFCE session environment, will proceed with default environment: {e}")
-        return None
-
-async def _run_xfconf(dpi_value, logger):
-    """Helper function to apply DPI via xfconf-query for XFCE."""
-    if not which("xfconf-query"):
-        logger.debug("xfconf-query not found. Skipping XFCE DPI setting via xfconf-query.")
-        return False
-
-    session_env = await _get_xfce_session_env(logger)
-    if session_env:
-        logger.info("Found active XFCE session environment. Commands will be executed within this context.")
-    else:
-        logger.warning("Could not obtain XFCE session environment. Falling back to direct execution.")
-
-    async def run_command(cmd, success_msg, failure_msg):
-        try:
-            process = await subprocess.create_subprocess_exec(
-                *cmd,
-                env=session_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            _stdout, stderr = await process.communicate()
-            if process.returncode == 0:
-                logger.info(success_msg)
-                return True
-            else:
-                logger.warning(f"{failure_msg}. RC: {process.returncode}, Error: {stderr.decode().strip()}")
-                return False
-        except Exception as e:
-            logger.error(f"Error running command '{' '.join(cmd)}': {e}")
-            return False
-
-    cmd_dpi = [
-        "xfconf-query", "-c", "xsettings", "-p", "/Xft/DPI",
-        "-s", str(dpi_value), "--create", "-t", "int"
-    ]
-    if not await run_command(
-        cmd_dpi,
-        f"Successfully set XFCE DPI to {dpi_value} using xfconf-query.",
-        "Failed to set XFCE DPI using xfconf-query"
-    ):
-        return False
-
-    cursor_size = int(round(dpi_value / 96 * 32))
-    logger.info(f"Attempting to set cursor size to: {cursor_size} (based on DPI {dpi_value})")
-    cmd_cursor = [
-        "xfconf-query", "-c", "xsettings", "-p", "/Gtk/CursorThemeSize",
-        "-s", str(cursor_size), "--create", "-t", "int"
-    ]
-    if not await run_command(
-        cmd_cursor,
-        f"Successfully set cursor size to {cursor_size}",
-        "Failed to set cursor size using xfconf-query"
-    ):
-        return False
-
-    return True
-
-async def _run_mate_gsettings(dpi_value, logger):
-    """Helper function to apply DPI via gsettings for MATE."""
-    if not which("gsettings"):
-        logger.debug("gsettings not found. Skipping MATE gsettings.")
-        return False
-
-    mate_settings_succeeded_at_least_once = False
-
-    # MATE: org.mate.interface window-scaling-factor
-    try:
-        target_mate_scale_float = float(dpi_value) / 96.0
-        # window-scaling-factor is integer-only: use it for whole scales, else 1
-        # (fractional part handled via font DPI).
-        if target_mate_scale_float == int(target_mate_scale_float):
-            mate_window_scaling_factor = int(target_mate_scale_float)
-        else:
-            mate_window_scaling_factor = 1 
-        
-        mate_window_scaling_factor = max(1, mate_window_scaling_factor) # Ensure it's at least 1
-
-        cmd_gsettings_mate_window_scale = [
-            "gsettings", "set",
-            "org.mate.interface", "window-scaling-factor",
-            str(mate_window_scaling_factor)
-        ]
-        result_mate_window_scale = await subprocess.create_subprocess_exec(
-            *cmd_gsettings_mate_window_scale,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        stdout_mate_window, stderr_mate_window = await result_mate_window_scale.communicate()
-        if result_mate_window_scale.returncode == 0:
-            logger.info(f"Successfully set MATE window-scaling-factor to {mate_window_scaling_factor} (for DPI {dpi_value}) using gsettings.")
-            mate_settings_succeeded_at_least_once = True
-        else:
-            stderr_text = stderr_mate_window.decode().strip()
-            if "No such schema" in stderr_text or "No such key" in stderr_text:
-                logger.debug(f"gsettings: Schema/key 'org.mate.interface window-scaling-factor' not found. Error: {stderr_text}")
-            else:
-                logger.warning(f"Failed to set MATE window-scaling-factor using gsettings. RC: {result_mate_window_scale.returncode}, Error: {stderr_text}")
-    except Exception as e:
-        logger.error(f"Error running gsettings for MATE window-scaling-factor: {e}")
-
-    # MATE: org.mate.font-rendering dpi
-    try:
-        cmd_gsettings_mate_font_dpi = [
-            "gsettings", "set",
-            "org.mate.font-rendering", "dpi",
-            str(dpi_value) # MATE font rendering takes the direct DPI value
-        ]
-        result_mate_font_dpi = await subprocess.create_subprocess_exec(
-            *cmd_gsettings_mate_font_dpi,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        stdout_mate_font, stderr_mate_font = await result_mate_font_dpi.communicate()
-        if result_mate_font_dpi.returncode == 0:
-            logger.info(f"Successfully set MATE font-rendering DPI to {dpi_value} using gsettings.")
-            mate_settings_succeeded_at_least_once = True
-        else:
-            stderr_font_text = stderr_mate_font.decode().strip()
-            if "No such schema" in stderr_font_text or "No such key" in stderr_font_text:
-                logger.debug(f"gsettings: Schema/key 'org.mate.font-rendering dpi' not found. Error: {stderr_font_text}")
-            else:
-                logger.warning(f"Failed to set MATE font-rendering DPI using gsettings. RC: {result_mate_font_dpi.returncode}, Error: {stderr_font_text}")
-    except Exception as e:
-        logger.error(f"Error running gsettings for MATE font-rendering DPI: {e}")
-    
-    return mate_settings_succeeded_at_least_once
-
-
-async def set_dpi(dpi_setting):
-    """
-    Sets the display DPI using DE-specific methods based on a defined detection order.
-    The dpi_setting is expected to be an integer or a string representing an integer.
-    """
-    if IS_WAYLAND:
-        return True
-    try:
-        dpi_value = int(str(dpi_setting))
-        if dpi_value <= 0:
-            logger_app_resize.error(f"Invalid DPI value: {dpi_value}. Must be a positive integer.")
-            return False
-    except ValueError:
-        logger_app_resize.error(f"Invalid DPI format: '{dpi_setting}'. Must be convertible to a positive integer.")
-        return False
-
-    any_method_succeeded = False
-    de_name_for_log = "Unknown" # For logging which DE path was taken
-
-    # DE Detection and Action Order: KDE -> XFCE -> MATE -> i3 -> Openbox
-    if which("startplasma-x11"):
-        de_name_for_log = "KDE"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_app_resize):
-            any_method_succeeded = True
-    
-    elif which("xfce4-session"):
-        de_name_for_log = "XFCE"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying xfconf-query for DPI {dpi_value}.")
-        if await _run_xfconf(dpi_value, logger_app_resize):
-            any_method_succeeded = True
-        # For XFCE, only xfconf-query is used to avoid potential double scaling.
-
-    elif which("mate-session"):
-        de_name_for_log = "MATE"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying MATE gsettings and xrdb for DPI {dpi_value}.")
-        mate_gsettings_success = await _run_mate_gsettings(dpi_value, logger_app_resize)
-        # Also apply xrdb for MATE for wider application compatibility / fallback
-        xrdb_for_mate_success = await _run_xrdb(dpi_value, logger_app_resize)
-        if mate_gsettings_success or xrdb_for_mate_success:
-            any_method_succeeded = True
-
-    elif which("i3"):
-        de_name_for_log = "i3"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_app_resize):
-            any_method_succeeded = True
-            
-    elif which("openbox-session") or which("openbox"): # Check for openbox binary as well
-        de_name_for_log = "Openbox"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_app_resize):
-            any_method_succeeded = True
-            
-    else:
-        de_name_for_log = "Generic/Unknown DE"
-        logger_app_resize.info(f"No specific DE session binary found (KDE, XFCE, MATE, i3, Openbox). Attempting generic xrdb as a fallback for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_app_resize):
-            any_method_succeeded = True
-
-    if not any_method_succeeded:
-        logger_app_resize.warning(f"No DPI setting method succeeded for DPI {dpi_value} (Attempted for: {de_name_for_log}).")
-
-    return any_method_succeeded
-
-async def set_cursor_size(size):
-    if not isinstance(size, int) or size <= 0:
-        logger_app_resize.error(f"Invalid cursor size: {size}")
-        return False
-    if which("xfconf-query"):
-        cmd = [
-            "xfconf-query",
-            "-c",
-            "xsettings",
-            "-p",
-            "/Gtk/CursorThemeSize",
-            "-s",
-            str(size),
-            "--create",
-            "-t",
-            "int",
-        ]
-        process = await subprocess.create_subprocess_exec(
-            *cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        await process.communicate()
-        if process.returncode == 0:
-            return True
-        logger_app_resize.warning("Failed to set XFCE cursor size.")
-    if which("gsettings"):
-        try:
-            cmd_set = [
-                "gsettings",
-                "set",
-                "org.gnome.desktop.interface",
-                "cursor-size",
-                str(size),
-            ]
-            process_set = await subprocess.create_subprocess_exec(
-                *cmd_set,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            await process_set.communicate()
-            if process_set.returncode == 0:
-                logger_app_resize.info(f"Set GNOME cursor-size to {size}")
-                return True
-            logger_app_resize.warning("Failed to set GNOME cursor-size.")
-        except Exception as e:
-            logger_app_resize.warning(
-                f"Error trying to set GNOME cursor size via gsettings: {e}"
-            )
-    logger_app_resize.warning("No supported tool found/worked to set cursor size.")
-    return False
-
-
 class DataStreamingServer(BaseStreamingService):
     """Handles the data WebSocket connection for input, stats, and control messages."""
 
@@ -1004,9 +428,6 @@ class DataStreamingServer(BaseStreamingService):
         self._last_client_acknowledged_frame_id_update_time = 0.0
         self._previous_ack_id_for_stall_check = -1
         self._previous_sent_id_for_stall_check = -1
-        self._sent_frame_timestamps = OrderedDict()
-        self._rtt_samples = deque(maxlen=RTT_SMOOTHING_SAMPLES)
-        self._smoothed_rtt_ms = 0.0
         self._sent_frames_log = deque()
         self.rc_mode = RateControlMode.CRF
         self.config_gate = asyncio.Event()
@@ -1537,6 +958,21 @@ class DataStreamingServer(BaseStreamingService):
         display_state['last_sent_frame_id'] = 0
         display_state['has_sent_any_frame'] = False
         display_state['acknowledged_frame_id'] = -1
+        # Frame numbering restarts at 0, so every artifact keyed by id must go
+        # with it: a stale send stamp matched by a NEW id of the same value
+        # manufactures a giant RTT "sample" that poisons the smoothed estimate
+        # (and with it the backpressure forgiveness and the dashboard latency).
+        sent_ts = display_state.get('sent_timestamps')
+        if sent_ts is not None:
+            sent_ts.clear()
+        rtt_samples = display_state.get('rtt_samples')
+        if rtt_samples is not None:
+            rtt_samples.clear()
+        display_state['smoothed_rtt'] = 0.0
+        # Re-prime the client-fps estimator: its next sample would otherwise
+        # span the reset (old high id vs new low id).
+        display_state.pop('_fps_sample_acked', None)
+        display_state.pop('_fps_sample_time', None)
         
         message = f"PIPELINE_RESETTING {display_id}"
         
@@ -1672,7 +1108,13 @@ class DataStreamingServer(BaseStreamingService):
 
                 frame_desync = wrapped
                 allowed_desync_frames = (self.allowed_desync_ms / 1000.0) * client_fps
-                current_rtt_ms = display_state.get('smoothed_rtt', 0.0)
+                # Forgive propagation delay, capped: the RTT estimate rides the same
+                # queue this loop bounds, so it must never be able to out-grow the
+                # trigger it feeds (queue -> higher RTT -> looser trigger -> queue).
+                current_rtt_ms = min(
+                    display_state.get('smoothed_rtt', 0.0),
+                    BACKPRESSURE_LATENCY_FORGIVENESS_MAX_MS,
+                )
                 latency_adjustment_frames = (current_rtt_ms / 1000.0) * client_fps if current_rtt_ms > self.latency_threshold_for_adjustment_ms else 0
                 effective_desync_frames = frame_desync - latency_adjustment_frames
 
@@ -2171,9 +1613,6 @@ class DataStreamingServer(BaseStreamingService):
         )
         self.capture_loop = self.capture_loop or asyncio.get_running_loop()
         initial_settings_processed = False
-        self._sent_frame_timestamps.clear()
-        self._rtt_samples.clear()
-        self._smoothed_rtt_ms = 0.0
 
         client_display_id = None
 
@@ -2188,47 +1627,15 @@ class DataStreamingServer(BaseStreamingService):
 
         await self.send_current_cursor(websocket, raddr)
 
-        server_settings_payload = {"type": "server_settings", "settings": {}}
-        for setting_def in SETTING_DEFINITIONS:
-            name = setting_def['name']
-            if name in ['port', 'addr', 'web_root', 'encode_dri', 'debug', 'audio_device_name', 'watermark_path', 'recording_socket', 'file_manager_path', 'run_after_connect', 'run_after_disconnect']:
-                continue
-            # Never broadcast secrets/credentials (master_token, passwords, TURN
-            # secrets, etc.) to clients.
-            if setting_def.get('sensitive'):
-                continue
-            value = getattr(settings, name)
-            if setting_def['type'] == 'bool':
-                bool_val, is_locked = value
-                payload_entry = {'value': bool_val, 'locked': is_locked}
-            else:
-                payload_entry = {'value': value}
-
-            # Whether this value came from an explicit CLI/env choice (vs the
-            # built-in default). The client uses it to decide if a conditional
-            # default (e.g. HiDPI-off when a manual resolution is set) should
-            # apply or defer to the operator's explicit setting.
-            payload_entry['overridden'] = bool(settings._overridden.get(name, False))
-
-            if setting_def['type'] == 'range':
-                payload_entry['min'], payload_entry['max'] = value
-                if 'meta' in setting_def and 'default_value' in setting_def['meta']:
-                    payload_entry['default'] = setting_def['meta']['default_value']
-            elif setting_def['type'] in ['enum', 'list']:
-                if 'meta' in setting_def and 'allowed' in setting_def['meta']:
-                    payload_entry['allowed'] = setting_def['meta']['allowed']
-            server_settings_payload["settings"][name] = payload_entry
+        server_settings_payload = {
+            "type": "server_settings",
+            "settings": build_client_settings_payload(),
+        }
         # Transport capacity, not a user setting: lets the client size multipart
         # chunks (clipboard, uploads) to the whole frame.
         server_settings_payload["settings"]["ws_max_message_bytes"] = {
             "value": WS_MAX_MESSAGE_BYTES
         }
-        # Booleans the client gates its clipboard UI/handlers on, derived from
-        # the single enable_clipboard policy string.
-        _clip = settings.enable_clipboard
-        server_settings_payload["settings"]["clipboard_enabled"] = {"value": _clip != "false"}
-        server_settings_payload["settings"]["clipboard_in_enabled"] = {"value": _clip in ("true", "in")}
-        server_settings_payload["settings"]["clipboard_out_enabled"] = {"value": _clip in ("true", "out")}
         try:
             await websocket.send_str(json.dumps(server_settings_payload))
         except (ConnectionResetError, OSError, RuntimeError):
@@ -2342,8 +1749,12 @@ class DataStreamingServer(BaseStreamingService):
                 )
 
             if PULSEAUDIO_AVAILABLE:
-                if not settings.audio_enabled[0] or not settings.microphone_enabled[0]:
-                    data_logger.info("Audio is disabled in settings. Skipping PulseAudio setup.")
+                # microphone_enabled only picks the client-side default (off): the sink
+                # handler idles until mic data arrives, and a runtime enable must not
+                # need a reconnect. A LOCKED-off microphone still skips the setup.
+                _mic_on, _mic_locked = settings.microphone_enabled
+                if not settings.audio_enabled[0] or (not _mic_on and _mic_locked):
+                    data_logger.info("Audio/microphone disabled in settings. Skipping PulseAudio setup.")
                 else:
                     try:
                         data_logger.info("Attempting to establish PulseAudio connection...")
@@ -2426,7 +1837,12 @@ class DataStreamingServer(BaseStreamingService):
                                 ]
                                 active_upload_target_path_conn = None
                     elif msg_type == 0x02:  # Mic data
-                        if mic_error or not settings.audio_enabled[0] or not settings.microphone_enabled[0]:
+                        # Accept mic data unless audio is off or the microphone is
+                        # administratively LOCKED off; an unlocked default-off only
+                        # sets the client toggle, and the client sends data exactly
+                        # when the user turned that toggle on.
+                        if mic_error or not settings.audio_enabled[0] or (
+                                not settings.microphone_enabled[0] and settings.microphone_enabled[1]):
                             if not mic_disabled_sent:
                                 mic_disabled_sent = True
                                 data_logger.info("Microphone is disabled/errored. Sending MICROPHONE_DISABLED to client.")
@@ -2690,7 +2106,14 @@ class DataStreamingServer(BaseStreamingService):
                         if settings.enable_collab[0] and active_mk_token and perms.get("token") == active_mk_token:
                             allowed_viewer_prefixes.extend(["kd", "ku", "kh", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr", "REQUEST_CLIPBOARD"])
                         if not any(message.startswith(prefix) for prefix in allowed_viewer_prefixes):
-                            data_logger.warning(f"DENIED unauthorized message from viewer {remote_address}: {message[:100]}...")
+                            # Every client's input core emits lifecycle messages on its
+                            # own blur/visibility changes (kr = release-all, cr =
+                            # clipboard read-back). A read-only viewer sending them is
+                            # normal operation, not an attack: drop silently — executing
+                            # a viewer's kr would clobber the controller's held
+                            # modifiers, and warning per blur floods the log.
+                            if not message.startswith(("kr", "cr")):
+                                data_logger.warning(f"DENIED unauthorized message from viewer {remote_address}: {message[:100]}...")
                             continue
 
                     if message.startswith("FILE_UPLOAD_START:"):
@@ -2844,6 +2267,11 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.info(f"Viewer client {remote_address} sent initial SETTINGS. Syncing with current stream state.")
                                 if not initial_settings_processed:
                                     initial_settings_processed = True
+
+                                # A viewer joining a controller-less server still needs
+                                # the primary stream running before the IDR below.
+                                if 'primary' not in self.capture_instances:
+                                    await self._ensure_viewer_capture()
 
                                 await self.broadcast_stream_resolution()
 
@@ -3009,7 +2437,11 @@ class DataStreamingServer(BaseStreamingService):
                                 if sent_ts and acked_frame_id in sent_ts:
                                     send_time = sent_ts.pop(acked_frame_id)
                                     rtt_sample_ms = (time.monotonic() - send_time) * 1000.0
-                                    if rtt_sample_ms >= 0:
+                                    # The id space is uint16 and restarts on pipeline
+                                    # resets, so an ack can match a stamp from a much
+                                    # older frame; such a "sample" is id-collision
+                                    # arithmetic, not a round trip.
+                                    if 0 <= rtt_sample_ms <= RTT_SAMPLE_SANE_MAX_MS:
                                         rtt_samples = display_state.get('rtt_samples')
                                         if rtt_samples is not None:
                                             rtt_samples.append(rtt_sample_ms)
@@ -3116,8 +2548,17 @@ class DataStreamingServer(BaseStreamingService):
                                 # Shared clients clear their cursor canvas on tab hide too.
                                 await self.send_current_cursor(websocket, remote_address)
                             else:
-                                data_logger.info(f"START_VIDEO from shared client ({remote_address}) with no active capture. Reconfiguring.")
-                                await self.reconfigure_displays()
+                                data_logger.info(f"START_VIDEO from shared client ({remote_address}) with no active capture. Starting primary capture.")
+                                if await self._ensure_viewer_capture():
+                                    try:
+                                        await websocket.send_str("PIPELINE_RESETTING primary")
+                                    except (ConnectionResetError, OSError, RuntimeError):
+                                        pass
+                                    self._schedule_idr_for_display('primary')
+                                    await self.send_current_cursor(websocket, remote_address)
+                                else:
+                                    # Owner-driven fallback; harmless no-op with zero display clients.
+                                    await self.reconfigure_displays()
 
                     elif message == "STOP_VIDEO":
                         if client_display_id and client_display_id in self.display_clients:
@@ -3133,9 +2574,7 @@ class DataStreamingServer(BaseStreamingService):
                             # STOP_VIDEO on tab hide): drop just this socket from
                             # the primary video broadcast. Capture keeps running
                             # for everyone else, and the socket stays connected for
-                            # control, cursor, and audio. Previously this was a
-                            # silent no-op and hidden shared clients kept receiving
-                            # the full video bitrate.
+                            # control, cursor, and audio.
                             self.video_paused_clients.add(websocket)
                             data_logger.info(f"STOP_VIDEO from shared client ({remote_address}): pausing its video feed.")
                             try:
@@ -3430,6 +2869,12 @@ class DataStreamingServer(BaseStreamingService):
                 await self.reconfigure_displays()
             else:
                 data_logger.info(f"Unregistered client at {raddr} disconnected. No display reconfiguration needed.")
+            # A viewer-started capture has no owning display client, so the
+            # reconfigure above never stops it: stop it when the last consumer
+            # leaves (no-op when a controller's reconfigure already did).
+            if not self.clients and not self.display_clients and 'primary' in self.capture_instances:
+                data_logger.info("Last consumer disconnected; stopping viewer-started primary capture.")
+                await self._stop_capture_for_display('primary')
 
             # Cancel only the per-connection stats sender; the singleton collectors
             # are torn down on last-client disconnect (cancelling here breaks remaining clients).
@@ -3614,7 +3059,17 @@ class DataStreamingServer(BaseStreamingService):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await proc.communicate()
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+                log = data_logger.debug if best_effort else data_logger.error
+                log(f"Timed out ({description}) after 10s; killed.")
+                return False
             if proc.returncode != 0:
                 log = data_logger.debug if best_effort else data_logger.error
                 log(
@@ -3877,17 +3332,18 @@ class DataStreamingServer(BaseStreamingService):
             total_mode_str = f"{total_width}x{total_height}"
             if total_mode_str not in available_resolutions:
                 data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
-                try:
-                    # generate_xrandr_gtf_modeline memoizes on (size, refresh), so a
-                    # repeat here skips the cvt/gtf subprocess; the X mode itself may
-                    # have been dropped, so still (re)issue newmode/addmode.
-                    _, modeline_params = await generate_xrandr_gtf_modeline(total_mode_str)
-                    await self._run_command(["xrandr", "--newmode", total_mode_str] + modeline_params.split(), "create new mode")
-                    await self._run_command(["xrandr", "--addmode", screen_name, total_mode_str], "add new mode")
-                except Exception as e:
-                    data_logger.error(f"FATAL: Could not create extended mode {total_mode_str}: {e}. Aborting.")
-                    await self._signal_all_displays_stopped()
-                    return
+                # Native first: a mode made on display_utils' retained connection
+                # outlives this call, which per-invocation xrandr cannot guarantee
+                # (its mode dies with its own connection on some servers, e.g. Xvfb).
+                if not await ensure_mode(total_mode_str):
+                    try:
+                        _, modeline_params = await generate_xrandr_gtf_modeline(total_mode_str)
+                        await self._run_command(["xrandr", "--newmode", total_mode_str] + modeline_params.split(), "create new mode")
+                        await self._run_command(["xrandr", "--addmode", screen_name, total_mode_str], "add new mode")
+                    except Exception as e:
+                        data_logger.error(f"FATAL: Could not create extended mode {total_mode_str}: {e}. Aborting.")
+                        await self._signal_all_displays_stopped()
+                        return
             if keep_ids:
                 # Re-target live captures while the framebuffer covers BOTH the old and
                 # new regions (grow first, shrink after): a region outside the root
@@ -4073,6 +3529,41 @@ class DataStreamingServer(BaseStreamingService):
         finally:
             data_logger.info(f"Video chunk sender for '{display_id}' finished.")
 
+    async def _ensure_viewer_capture(self):
+        """Start the primary capture for a shared/player viewer when no display-
+        owning client is connected (fresh server, or the controller left): the
+        desktop exists regardless, so a lone viewer must not wait on a controller
+        ("Waiting for stream..." forever). Captures the CURRENT desktop geometry —
+        viewers never resize anything; the next controller's settings re-layout
+        as usual."""
+        if 'primary' in self.capture_instances:
+            return True
+        layout = getattr(self, 'display_layouts', {}).get('primary')
+        if layout:
+            w, h, x, y = layout['w'], layout['h'], layout['x'], layout['y']
+        else:
+            w, h = self.app.display_width, self.app.display_height
+            x = y = 0
+            if not IS_WAYLAND:
+                # On X11 the desktop size is external truth; the app defaults may
+                # not match it. (On Wayland the capture start sizes the output.)
+                try:
+                    curr_res = (await get_new_res(f"{w}x{h}"))[0]
+                    w, h = map(int, curr_res.split('x'))
+                except Exception as e:
+                    data_logger.warning(f"Viewer capture: desktop geometry query failed ({e}); using {w}x{h}.")
+            if hasattr(self, 'display_layouts'):
+                self.display_layouts['primary'] = {'w': w, 'h': h, 'x': x, 'y': y}
+        started = False
+        try:
+            started = bool(await self._start_capture_for_display(
+                'primary', width=w, height=h, x_offset=x, y_offset=y))
+        except Exception as e:
+            data_logger.error(f"Viewer-driven capture start failed: {e}", exc_info=True)
+        if started:
+            await self._start_backpressure_task_if_needed('primary')
+        return started
+
     async def _start_capture_for_display(self, display_id: str, width: int, height: int, x_offset: int, y_offset: int):
         # Serialize against any concurrent start/stop so the capture_instances
         # guard+insert can't race a still-finishing op.
@@ -4163,7 +3654,20 @@ class DataStreamingServer(BaseStreamingService):
                         try:
                             queue.put_nowait(item_to_queue)
                         except asyncio.QueueFull:
-                            pass  # item (and its frame) dropped here -> buffer freed
+                            # Dropping ANY frame breaks the delta reference chain, and
+                            # dropping the newest wedges the stream on stale backlog.
+                            # Drain it, keep the fresh frame, and resync with an IDR
+                            # so the client never renders against lost references.
+                            try:
+                                while True:
+                                    queue.get_nowait()  # dropped item -> buffer freed
+                            except asyncio.QueueEmpty:
+                                pass
+                            try:
+                                queue.put_nowait(item_to_queue)
+                            except asyncio.QueueFull:
+                                pass
+                            self._schedule_idr_for_display(display_id)
 
                     self.capture_loop.call_soon_threadsafe(do_put)
 
@@ -4172,29 +3676,10 @@ class DataStreamingServer(BaseStreamingService):
 
             def wayland_cursor_handler(msg_type, data_bytes, hot_x, hot_y):
                 try:
-                    if msg_type == "hide":
-                        self.app.send_ws_cursor_data({
-                            "curdata": "",
-                            "width": 0, "height": 0,
-                            "hotx": 0, "hoty": 0,
-                            "handle": 0
-                        })
-                    elif not data_bytes:
-                        # Transient extraction failure (e.g. a surface cursor whose
-                        # buffer wasn't readable during a replay): keep the last good
-                        # cursor rather than blanking clients and poisoning the
-                        # last_cursor_sent resend cache.
-                        return
-                    elif msg_type == "png" and data_bytes:
-                        b64_data = base64.b64encode(data_bytes).decode('ascii')
-                        self.app.send_ws_cursor_data({
-                            "curdata": b64_data,
-                            "width": self.cursor_size, 
-                            "height": self.cursor_size,
-                            "hotx": hot_x,
-                            "hoty": hot_y,
-                            "handle": int(time.time() * 1000)
-                        })
+                    payload = format_wayland_cursor(
+                        msg_type, data_bytes, hot_x, hot_y, self.cursor_size)
+                    if payload is not None:
+                        self.app.send_ws_cursor_data(payload)
                 except Exception as e:
                     data_logger.error(f"Error handling wayland cursor: {e}")
 
@@ -4250,7 +3735,12 @@ class DataStreamingServer(BaseStreamingService):
         """Helper to create CaptureSettings for a specific display region."""
         display_state = self.display_clients.get(display_id)
         if not display_state:
-            raise SelkiesAppError(f"Cannot get capture settings for unknown display_id '{display_id}'")
+            if display_id == 'primary':
+                # Viewer-driven capture (no display-owning client connected):
+                # every per-client knob below falls back to its server default.
+                display_state = {}
+            else:
+                raise SelkiesAppError(f"Cannot get capture settings for unknown display_id '{display_id}'")
 
         cs = CaptureSettings()
         cs.capture_width = width
@@ -4554,6 +4044,10 @@ async def _collect_gpu_stats_ws(shared_data, gpu_id=0, interval_seconds=1, dri_n
                     "timestamp": datetime.now().isoformat(),
                     "gpu_id": gpu_id,
                     "load": gpu.load,
+                    # Dashboards read gpu_percent (0..100), same field the WebRTC
+                    # data channel sends; load stays as the 0..1 fraction for
+                    # existing consumers.
+                    "gpu_percent": gpu.load * 100,
                     "memory_total": gpu.memoryTotal * 1024 * 1024,
                     "memory_used": gpu.memoryUsed * 1024 * 1024,
                 }

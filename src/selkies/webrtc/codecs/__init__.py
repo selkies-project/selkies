@@ -194,7 +194,10 @@ def init_codecs() -> None:
     # get_encoder/get_decoder and depayload() dispatch branches below stay in
     # place. To re-enable once pixelflux can emit VPX, re-add the offer here
     # (and add 'vp8enc' to the encoder_rtc allowed list).
-    for profile_level_id in ("42001f", "42e01f"):
+    # f4001f = High 4:4:4 Predictive: offered so a full-color (4:4:4) session
+    # negotiates natively instead of relying on SDP text alone (the sender
+    # payloads pixelflux's bitstream as-is, whatever the profile says).
+    for profile_level_id in ("42001f", "42e01f", "f4001f"):
         add_video_codec(
             "video/H264",
             {

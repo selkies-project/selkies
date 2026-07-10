@@ -27,7 +27,9 @@ export default ({ mode }) => {
     },
     server: {
       host: "0.0.0.0",
-      allowedHosts: ['.trycloudflare.com']
+      allowedHosts: ['.trycloudflare.com'],
+      // main.jsx imports the touch-gamepad addon from its sibling package.
+      fs: { allow: ['.', '../universal-touch-gamepad'] },
     },
     build: {
       target: 'chrome94',

@@ -17,7 +17,7 @@ interface DashboardOverlayProps {
 }
 
 function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElement | null {
-  const [isGamepadEnabled, setIsGamepadEnabled] = useState<boolean>(false);
+  const [isGamepadEnabled, setIsGamepadEnabled] = useState<boolean>(true);
   const [showStats, setShowStats] = useState<boolean>(true);
   const [isVideoActive, setIsVideoActive] = useState<boolean>(true);
   const [isAudioActive, setIsAudioActive] = useState<boolean>(true);
@@ -79,28 +79,21 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
   };
 
   React.useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.ctrlKey && event.shiftKey && event.key === "G") {
-        event.preventDefault();
-        handleGamepadToggle();
-      }
-
-      if (event.ctrlKey && event.shiftKey && event.key === "F") {
-        event.preventDefault();
-        if (!document.fullscreenElement) {
-          // The core fullscreens the stream container (pointer-lock aware).
-          window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
-        }
-      }
-
-      if (event.ctrlKey && event.shiftKey && event.key === "X") {
-        event.preventDefault();
+    // Core-owned chords (Ctrl+Shift+M / Ctrl+Shift+G; fullscreen is handled by
+    // the core itself) arrive as messages — identical wiring in both dashboards.
+    const handleHotkeyMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      const message = event.data;
+      if (!message || typeof message !== "object") return;
+      if (message.type === "toggleDashboard") {
         setShowStats((prev) => !prev);
+      } else if (message.type === "toggleTouchGamepad") {
+        handleGamepadToggle();
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("message", handleHotkeyMessage);
+    return () => window.removeEventListener("message", handleHotkeyMessage);
   }, [handleGamepadToggle]);
 
   if (!container) {

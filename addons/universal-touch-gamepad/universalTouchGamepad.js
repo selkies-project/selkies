@@ -68,7 +68,7 @@
     setRealViewportHeight();
 
     let hostAnchorElement = null;
-    let currentProfileName = 'eightBit';
+    let currentProfileName = 'modern';
     let isGamepadVisible = false;
     let activeTouchControls = [];
     let buttonElementsToTrack = {};

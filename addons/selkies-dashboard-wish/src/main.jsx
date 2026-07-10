@@ -11,6 +11,9 @@ import App from './App.tsx';
 import PlayerGamepadButton from './components/dashboard/PlayerGamepadButton.tsx';
 import './index.css';
 import { getRoutePrefix } from './utils.ts';
+// Bundled straight from the addon it lives in, so a fresh checkout builds
+// without a vendored copy in src/.
+import "../../universal-touch-gamepad/universalTouchGamepad.js";
 
 // Probe the server for the active streaming mode so the runtime-served core
 // (deferred via the inline flag in index.html) initializes into the right

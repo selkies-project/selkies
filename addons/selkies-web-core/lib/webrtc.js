@@ -587,9 +587,35 @@ export class WebRTCClient {
 	 *
 	 * @param {String} message
 	 */
+	/**
+	 * Outbound queue depth of the data channel; bulk senders (clipboard, uploads)
+	 * throttle on this so they can't starve input/stats on the same channel.
+	 */
+	dataChannelBufferedAmount() {
+		return (this._send_channel && this._send_channel.readyState === 'open')
+			? this._send_channel.bufferedAmount : 0;
+	}
+
+	/**
+	 * Await until queued sends (including the async gzip queue) have reached the
+	 * channel AND its buffered amount is below `threshold`. Bulk senders call this
+	 * between chunks; without it a burst overflows the SCTP send buffer and
+	 * Chromium closes the channel with OperationError, killing the session.
+	 */
+	async waitForDataChannelDrain(threshold = 1024 * 1024) {
+		if (this._sendQueue) {
+			try { await this._sendQueue; } catch (e) { /* queued send failed; proceed */ }
+		}
+		while (this._send_channel && this._send_channel.readyState === 'open' &&
+			this._send_channel.bufferedAmount > threshold) {
+			await new Promise((r) => setTimeout(r, 25));
+		}
+	}
+
 	sendDataChannelMessage(message) {
 		if (this._send_channel === null || this._send_channel.readyState !== 'open') {
-			this._setError("attempt to send data channel message before channel was open.");
+			// Expected while (re)connecting: periodic senders fire before the channel
+			// opens. Drop quietly; error spam here masks real failures.
 			return;
 		}
 		// No compression negotiated: send synchronously, byte-identical to the

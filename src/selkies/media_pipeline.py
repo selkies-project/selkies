@@ -29,7 +29,7 @@ from abc import ABCMeta, abstractmethod
 from typing import Callable, Awaitable
 
 from .settings import settings as app_settings
-from .display_utils import parse_dri_node_to_index, parse_gpu_id
+from .display_utils import parse_dri_node_to_index, parse_gpu_id, format_wayland_cursor
 
 # C-API (non-abi3) wheels: a missing/ABI-skewed build raises ImportError or
 # RuntimeError at import. Degrade to None so plain WS mode and module import
@@ -158,6 +158,10 @@ class MediaPipelinePixel(MediaPipeline):
         # Fired after the video stream (re)starts so the transport can resend the
         # cursor (a slept/woken tab clears its cursor canvas). No-op by default.
         self.on_pipeline_started: Callable[[], None] = lambda: None
+        # Wayland cursor updates from the compositor callback, already in the
+        # client cursor-message shape (curdata/width/height/hotx/hoty/handle).
+        # X11 sessions use the XFixes monitor in the input handler instead.
+        self.on_cursor_data: Callable[[dict], None] = lambda data: None
 
         self.capture_module = None
         self.pcmflux_module = None
@@ -169,6 +173,7 @@ class MediaPipelinePixel(MediaPipeline):
         # restarts and fps changes can never rewind pts on a live RTP sender.
         self._video_pts_anchor = None
         self._last_video_pts = -1
+        self._audio_routing_task = None
 
     async def set_pointer_visible(self, visible: bool):
         """To enable capturing the cursor from pixeflux.
@@ -487,6 +492,20 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.error(f"Error in capture callback: {e}", exc_info=False)
 
+    def _wayland_cursor_handler(self, msg_type, data_bytes, hot_x, hot_y):
+        """Compositor cursor events -> client cursor messages (websockets parity).
+        Runs on the compositor thread; delivery hops to the asyncio loop."""
+        try:
+            size = int(getattr(app_settings, "cursor_size", -1) or -1)
+            if size <= 0:
+                size = 24
+            payload = format_wayland_cursor(msg_type, data_bytes, hot_x, hot_y, size)
+            if payload is None:
+                return
+            self.async_event_loop.call_soon_threadsafe(self.on_cursor_data, payload)
+        except Exception as e:
+            logger.error(f"Error handling wayland cursor: {e}")
+
     async def start_screen_capture(self):
         if self._is_screen_capturing:
             return
@@ -502,6 +521,10 @@ class MediaPipelinePixel(MediaPipeline):
 
         try:
             self.capture_module = ScreenCapture()
+            if bool(app_settings.wayland[0]):
+                # The compositor is the only cursor source on Wayland; without this
+                # registration WebRTC sessions have no cursor at all.
+                self.capture_module.set_cursor_callback(self._wayland_cursor_handler)
             await asyncio.to_thread(
                 self.capture_module.start_capture,
                 settings,
@@ -616,7 +639,13 @@ class MediaPipelinePixel(MediaPipeline):
                 audio_capture_callback,
             )
             self._is_pcmflux_capturing = True
-            asyncio.create_task(self._enforce_audio_routing())
+            # Keep a reference: an unreferenced task can be garbage-collected
+            # mid-flight, and a routing failure should be visible in the log.
+            self._audio_routing_task = asyncio.create_task(self._enforce_audio_routing())
+            self._audio_routing_task.add_done_callback(
+                lambda t: (not t.cancelled() and t.exception() is not None)
+                and logger.error(f"Audio routing task failed: {t.exception()}")
+            )
             logger.info("pcmflux audio capture started successfully.")
         except Exception as e:
             logger.error(f"Failed to start pcmflux audio pipeline: {e}", exc_info=True)

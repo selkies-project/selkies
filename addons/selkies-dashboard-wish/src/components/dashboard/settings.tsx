@@ -321,7 +321,10 @@ export function Settings() {
         if (!serverSettings) return;
 
         const getStoredInt = (key: string) => parseInt(localStorage.getItem(getPrefixedKey(key)), 10);
-        const getStoredBool = (key: string) => localStorage.getItem(getPrefixedKey(key)) === 'true';
+        const getStoredBool = (key: string, fallback = false) => {
+            const v = localStorage.getItem(getPrefixedKey(key));
+            return v === null ? fallback : v === 'true';
+        };
 
         // Update encoder options from the mode-appropriate server setting.
         const s_encoder = serverSettings.encoder;
@@ -423,13 +426,13 @@ export function Settings() {
         // Boolean settings
         const s_video_fullcolor = serverSettings.video_fullcolor;
         if (s_video_fullcolor) {
-            const final = s_video_fullcolor.locked ? s_video_fullcolor.value : getStoredBool("video_fullcolor");
+            const final = s_video_fullcolor.locked ? s_video_fullcolor.value : getStoredBool("video_fullcolor", s_video_fullcolor.value);
             setVideoFullColor(final);
         }
 
         const s_video_streaming_mode = serverSettings.video_streaming_mode;
         if (s_video_streaming_mode) {
-            const final = s_video_streaming_mode.locked ? s_video_streaming_mode.value : getStoredBool("video_streaming_mode");
+            const final = s_video_streaming_mode.locked ? s_video_streaming_mode.value : getStoredBool("video_streaming_mode", s_video_streaming_mode.value);
             setVideoStreamingMode(final);
         }
 
@@ -442,7 +445,7 @@ export function Settings() {
 
         const s_use_cpu = serverSettings.use_cpu;
         if (s_use_cpu) {
-            const final = s_use_cpu.locked ? s_use_cpu.value : getStoredBool("use_cpu");
+            const final = s_use_cpu.locked ? s_use_cpu.value : getStoredBool("use_cpu", s_use_cpu.value);
             setUseCpu(final);
         }
 
@@ -454,17 +457,27 @@ export function Settings() {
             const final = s_scaling_dpi.allowed.includes(String(stored)) ? stored
                 : (s_scaling_dpi.overridden ? parseInt(s_scaling_dpi.value, 10) : deriveDpiFromDpr());
             setSelectedDpi(final);
+            // A derived default only exists on this side of the wire: without a post
+            // the server keeps its built-in DPI and the slider is just a label. Send
+            // it when nothing explicit governs scaling — no client-stored value, no
+            // server override, no manual resolution — and the server isn't there yet.
+            const manualActive = !!localStorage.getItem(getPrefixedKey("manual_width"))
+                || serverSettings?.is_manual_resolution_mode?.value === true;
+            if (!s_scaling_dpi.allowed.includes(String(stored)) && !s_scaling_dpi.overridden
+                && !manualActive && final !== parseInt(s_scaling_dpi.value, 10)) {
+                debouncedPostSetting({ scaling_dpi: final });
+            }
         }
 
         // Anti-aliasing and Browser Cursors settings
         const s_use_browser_cursors = serverSettings.use_browser_cursors;
         if (s_use_browser_cursors) {
-            const final = s_use_browser_cursors.locked ? s_use_browser_cursors.value : getStoredBool("use_browser_cursors");
+            const final = s_use_browser_cursors.locked ? s_use_browser_cursors.value : getStoredBool("use_browser_cursors", s_use_browser_cursors.value);
             setUseBrowserCursors(final);
         }
         const s_force_aligned = serverSettings.force_aligned_resolution;
         if (s_force_aligned) {
-            setForceAlignedResolution(s_force_aligned.locked ? s_force_aligned.value : getStoredBool("force_aligned_resolution"));
+            setForceAlignedResolution(s_force_aligned.locked ? s_force_aligned.value : getStoredBool("force_aligned_resolution", s_force_aligned.value));
         }
     }, [serverSettings, streamMode]);
 
@@ -1223,9 +1236,9 @@ export function Settings() {
                             </div>
                         )}
 
-                        {/* No toggle for openh264enc (server forces use_cpu=True). h264enc
-                            takes it in both transports; striped/jpeg are WS-only. */}
-                        {(activeEncoder === 'h264enc' || (!isWebrtc && ['h264enc-striped', 'jpeg'].includes(activeEncoder))) && (renderableSettings.useCpu ?? true) && (
+                        {/* use_cpu only changes behavior for full-frame h264enc (HW vs x264);
+                            the server forces it true for jpeg/striped/openh264 in both transports. */}
+                        {activeEncoder === 'h264enc' && (renderableSettings.useCpu ?? true) && (
                             <div className="flex items-center justify-between">
                                 <div className="space-y-0.5">
                                     <label className="text-sm font-medium">CPU Encoding</label>
