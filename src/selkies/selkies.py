@@ -4,7 +4,6 @@
 import aiofiles
 import asyncio
 import base64
-import concurrent.futures
 import contextlib
 import gzip
 import json
@@ -1653,11 +1652,6 @@ class DataStreamingServer(BaseStreamingService):
         self._last_client_stable_report_time = time.monotonic()
 
         self._backpressure_send_frames_enabled = True
-        active_uploads_by_path_conn = {}
-        active_upload_target_path_conn = None
-        active_upload_declared_size = None
-        active_upload_bytes_written = 0
-        upload_dir_valid = upload_dir_path is not None
         # Per-connection stats sender; the system/gpu/network collectors it reads
         # from are instance-wide singletons created/torn down on self.
         stats_sender_task_ws = None
@@ -1666,10 +1660,6 @@ class DataStreamingServer(BaseStreamingService):
         mic_disabled_sent = False
         mic_error = False
         pa_module_index = None
-        # Single worker so file-upload chunk writes stay ordered while running OFF the
-        # event loop; a slow disk must not stall input handled on this same receive loop.
-        upload_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        loop = asyncio.get_running_loop()
         pulse = None
 
         # Define virtual source details
@@ -1716,7 +1706,7 @@ class DataStreamingServer(BaseStreamingService):
                         )
 
             # System/GPU/network collectors are singletons (per-connection would mean
-            # N psutil/GPUtil polls/sec); they write a shared dict that senders read, not pop.
+            # N psutil/NVML polls/sec); they write a shared dict that senders read, not pop.
             if (
                 self._system_monitor_task_ws is None
                 or self._system_monitor_task_ws.done()
@@ -1788,55 +1778,7 @@ class DataStreamingServer(BaseStreamingService):
                     if not msg.data:
                         continue
                     msg_type, payload = msg.data[0], msg.data[1:]
-                    if msg_type == 0x01:
-                        if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
-                        ):
-                            # Enforce the declared upload size so a client can't stream
-                            # unlimited data (e.g. after declaring size=1) and fill disk.
-                            if (
-                                active_upload_declared_size is not None
-                                and active_upload_bytes_written + len(payload) > active_upload_declared_size
-                            ):
-                                data_logger.error(
-                                    f"Upload to {active_upload_target_path_conn} exceeded its declared size "
-                                    f"({active_upload_declared_size} bytes); aborting."
-                                )
-                                try:
-                                    active_uploads_by_path_conn[active_upload_target_path_conn].close()
-                                    os.remove(active_upload_target_path_conn)
-                                except Exception:
-                                    pass
-                                del active_uploads_by_path_conn[active_upload_target_path_conn]
-                                active_upload_target_path_conn = None
-                                continue
-                            try:
-                                await loop.run_in_executor(
-                                    upload_executor,
-                                    active_uploads_by_path_conn[
-                                        active_upload_target_path_conn
-                                    ].write,
-                                    payload,
-                                )
-                                active_upload_bytes_written += len(payload)
-                            except Exception as e_write:
-                                data_logger.error(
-                                    f"File write error for {active_upload_target_path_conn}: {e_write}"
-                                )
-                                try:
-                                    active_uploads_by_path_conn[
-                                        active_upload_target_path_conn
-                                    ].close()
-                                    os.remove(active_upload_target_path_conn)
-                                except Exception:
-                                    pass
-                                del active_uploads_by_path_conn[
-                                    active_upload_target_path_conn
-                                ]
-                                active_upload_target_path_conn = None
-                    elif msg_type == 0x02:  # Mic data
+                    if msg_type == 0x02:  # Mic data
                         # Accept mic data unless audio is off or the microphone is
                         # administratively LOCKED off; an unlocked default-off only
                         # sets the client toggle, and the client sends data exactly
@@ -2116,140 +2058,7 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.warning(f"DENIED unauthorized message from viewer {remote_address}: {message[:100]}...")
                             continue
 
-                    if message.startswith("FILE_UPLOAD_START:"):
-                        if 'upload' not in settings.file_transfers:
-                            data_logger.warning("Client tried to upload a file, but uploads are disabled by server settings.")
-                            continue
-                        if not upload_dir_valid:
-                            data_logger.error("Upload dir invalid, skipping upload.")
-                            continue
-                        try:
-                            _, b64rel, size_str = message.split(":", 2)
-                            # Path is base64 so it may contain ':' without breaking the wire format.
-                            rel_path_from_client = base64.b64decode(b64rel).decode('utf-8', 'replace')
-                            file_size = int(size_str)
-                            if file_size < 0:
-                                data_logger.error(f"Rejecting upload with invalid negative declared size: {file_size}")
-                                continue
-
-                            sane_rel_path = rel_path_from_client.strip('/\\')
-                            sane_rel_path = os.path.normpath(sane_rel_path)
-
-                            path_components = [comp for comp in sane_rel_path.split(os.sep) if comp and comp != '.']
-
-                            if not path_components or \
-                               sane_rel_path.startswith(os.sep) or \
-                               sane_rel_path.startswith('/') or \
-                               sane_rel_path.startswith('\\') or \
-                               ".." in path_components:
-                                data_logger.error(f"Invalid or malicious relative path from client: '{rel_path_from_client}'. Discarding.")
-                                continue
-
-                            sane_rel_path = os.path.join(*path_components)
-
-                            final_server_path = os.path.join(upload_dir_path, sane_rel_path)
-
-                            real_upload_dir_abs = os.path.realpath(upload_dir_path)
-                            # Resolve symlinks on the parent before the containment check.
-                            intended_parent_dir_abs = os.path.realpath(os.path.dirname(final_server_path))
-
-                            if not _path_is_within(real_upload_dir_abs, intended_parent_dir_abs):
-                                 data_logger.error(f"Path escape attempt detected: '{final_server_path}' (from client: '{rel_path_from_client}') is outside of '{real_upload_dir_abs}'. Discarding.")
-                                 continue
-
-                            target_dir = os.path.dirname(final_server_path)
-
-                            if target_dir and target_dir != real_upload_dir_abs and not os.path.exists(target_dir):
-                                if not _path_is_within(real_upload_dir_abs, os.path.realpath(target_dir)):
-                                    data_logger.error(f"Directory creation escape attempt: '{target_dir}' is outside of '{real_upload_dir_abs}'. Discarding.")
-                                    continue
-                                try:
-                                    os.makedirs(target_dir, exist_ok=True)
-                                    data_logger.info(f"Created directory for upload: {target_dir}")
-                                except OSError as e_mkdir:
-                                    data_logger.error(f"Could not create directory {target_dir} for upload: {e_mkdir}")
-                                    continue
-                            
-                            if (
-                                active_upload_target_path_conn
-                                and active_upload_target_path_conn
-                                in active_uploads_by_path_conn
-                            ):
-                                try:
-                                    active_uploads_by_path_conn[active_upload_target_path_conn].close()
-                                except Exception as e_close_old:
-                                    data_logger.warning(f"Error closing previous upload stream {active_upload_target_path_conn}: {e_close_old}")
-                                del active_uploads_by_path_conn[active_upload_target_path_conn]
-
-                            # O_NOFOLLOW prevents writing through a symlink planted at the
-                            # final path component (the parent was already symlink-resolved).
-                            upload_fd = os.open(final_server_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
-                            active_uploads_by_path_conn[final_server_path] = os.fdopen(upload_fd, "wb")
-                            active_upload_target_path_conn = final_server_path
-                            active_upload_declared_size = file_size
-                            active_upload_bytes_written = 0
-                            data_logger.info(
-                                f"Upload started: {final_server_path} (client rel_path: '{rel_path_from_client}', size: {file_size})"
-                            )
-                        except ValueError:
-                            data_logger.error(
-                                f"Invalid FILE_UPLOAD_START format: {message}"
-                            )
-                        except Exception as e_fup_start:
-                            data_logger.error(
-                                f"FILE_UPLOAD_START processing error: {e_fup_start}", exc_info=True
-                            )
-
-                    elif message.startswith("FILE_UPLOAD_END:"):
-                        if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
-                        ):
-                            # close() flushes the final buffered data; keep that disk
-                            # I/O off the event loop like the chunk writes.
-                            await loop.run_in_executor(
-                                upload_executor,
-                                active_uploads_by_path_conn[
-                                    active_upload_target_path_conn
-                                ].close,
-                            )
-                            data_logger.info(
-                                f"Upload finished: {active_upload_target_path_conn}"
-                            )
-                            del active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ]
-                        active_upload_target_path_conn = None
-
-                    elif message.startswith("FILE_UPLOAD_ERROR:"):
-                        # Decode the base64 path for logging only.
-                        try:
-                            _, b64rel_err, err_reason = message.split(":", 2)
-                            client_err_path = base64.b64decode(b64rel_err).decode('utf-8', 'replace')
-                            data_logger.error(
-                                f"Client reported upload error for '{client_err_path}': {err_reason}"
-                            )
-                        except Exception:
-                            data_logger.error(f"Client reported upload error: {message}")
-                        if (
-                            active_upload_target_path_conn
-                            and active_upload_target_path_conn
-                            in active_uploads_by_path_conn
-                        ):
-                            active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ].close()
-                            try:
-                                os.remove(active_upload_target_path_conn)
-                            except OSError:
-                                pass
-                            del active_uploads_by_path_conn[
-                                active_upload_target_path_conn
-                            ]
-                        active_upload_target_path_conn = None
-
-                    elif message.startswith("SETTINGS,"):
+                    if message.startswith("SETTINGS,"):
                         try:
                             _, payload_str = message.split(",", 1)
                             parsed_settings = self._parse_settings_payload(payload_str)
@@ -2939,45 +2748,6 @@ class DataStreamingServer(BaseStreamingService):
                         f"Error closing PulseAudio connection for {raddr}: {e_pulse_close}"
                     )
 
-            # Drain queued/in-flight executor writes (off the loop) BEFORE touching the
-            # file handle, so a still-running write can't race a close/remove of the
-            # file it is writing to (use-after-close). Mirrors the mic PulseAudio path.
-            _upload_executor = locals().get("upload_executor")
-            if _upload_executor:
-                try:
-                    await loop.run_in_executor(
-                        None, lambda: _upload_executor.shutdown(wait=True)
-                    )
-                except Exception as e_upload_shutdown:
-                    data_logger.error(
-                        f"Error shutting down upload executor for {raddr}: {e_upload_shutdown}"
-                    )
-
-            if (
-                "active_upload_target_path_conn" in locals()
-                and locals()["active_upload_target_path_conn"]
-                and "active_uploads_by_path_conn" in locals()
-                and locals()["active_upload_target_path_conn"]
-                in locals()["active_uploads_by_path_conn"]
-            ):
-                _local_active_path = locals()["active_upload_target_path_conn"]
-                _local_active_uploads = locals()["active_uploads_by_path_conn"]
-                try:
-                    file_handle = _local_active_uploads.pop(_local_active_path, None)
-                    if file_handle:
-                        file_handle.close()
-                    os.remove(_local_active_path)
-                    data_logger.info(
-                        f"Cleaned up incomplete file upload: {_local_active_path} for {raddr}"
-                    )
-                except OSError as e_os_remove:
-                    data_logger.warning(
-                        f"Could not remove incomplete upload file {_local_active_path} for {raddr}: {e_os_remove}"
-                    )
-                except Exception as e_file_cleanup:
-                    data_logger.error(
-                        f"Error cleaning up file upload {_local_active_path} for {raddr}: {e_file_cleanup}"
-                    )
 
             if self.input_handler:
                 try:

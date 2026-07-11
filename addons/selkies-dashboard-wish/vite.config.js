@@ -29,7 +29,7 @@ export default ({ mode }) => {
       host: "0.0.0.0",
       allowedHosts: ['.trycloudflare.com'],
       // main.jsx imports the touch-gamepad addon from its sibling package.
-      fs: { allow: ['.', '../universal-touch-gamepad'] },
+      fs: { allow: ['.', '../universal-touch-gamepad', '../selkies-dashboard'] },
     },
     build: {
       target: 'chrome94',

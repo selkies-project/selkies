@@ -94,3 +94,26 @@ export const RATE_CONTROL_SPEC = {
     fallback: "crf",
     propagate: (mode, _ctx, io) => io.postSetting({ rate_control_mode: mode }),
 };
+
+// Plain boolean settings that carry a server truth (value/overridden/locked) but
+// used to read an ad-hoc hardcoded default, so a locked/overridden operator value
+// never reached the toggle. Routing them through the ladder makes the displayed
+// state track the real applied value. serverKey === storageKey for all of these.
+function boolSpec(key, fallback, propagate) {
+    return { id: key, serverKey: key, storageKey: key, parse: (v) => v === "true", fallback, propagate };
+}
+
+// The core owns use_browser_cursors (it applies + persists on this message), so
+// this spec propagates to the core rather than posting a settings message.
+export const USE_BROWSER_CURSORS_SPEC = boolSpec("use_browser_cursors", false,
+    (value, _ctx, io) => io.postToCore({ type: "setUseBrowserCursors", value }));
+export const VIDEO_FULLCOLOR_SPEC = boolSpec("video_fullcolor", false,
+    (value, _ctx, io) => io.postSetting({ video_fullcolor: value }));
+export const VIDEO_STREAMING_MODE_SPEC = boolSpec("video_streaming_mode", false,
+    (value, _ctx, io) => io.postSetting({ video_streaming_mode: value }));
+export const USE_PAINT_OVER_QUALITY_SPEC = boolSpec("use_paint_over_quality", true,
+    (value, _ctx, io) => io.postSetting({ use_paint_over_quality: value }));
+export const USE_CPU_SPEC = boolSpec("use_cpu", false,
+    (value, _ctx, io) => io.postSetting({ use_cpu: value }));
+export const FORCE_ALIGNED_RESOLUTION_SPEC = boolSpec("force_aligned_resolution", false,
+    (value, _ctx, io) => io.postSetting({ force_aligned_resolution: value }));

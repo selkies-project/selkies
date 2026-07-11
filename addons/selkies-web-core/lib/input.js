@@ -1180,11 +1180,13 @@ export class Input {
         this._smallestLineDeltaY = 10000;
         this._wheelThreshold = 100;
         this._scrollMagnitude = 10;
-        // Running fractional-notch accumulator for the vertical wheel: a fast discrete
+        // Running fractional-notch accumulators, one per wheel axis: a fast discrete
         // wheel must never collapse to the throttle rate, so we sum normalized notches
         // and carry the sub-notch remainder forward instead of discarding events.
         this._wheelAccumY = 0;
         this._wheelDirY = null;
+        this._wheelAccumX = 0;
+        this._wheelDirX = null;
         this.cursorScaleFactor = null;
         this._cursorBase64Data = null;
 
@@ -2549,9 +2551,14 @@ export class Input {
             if (this._allowTrackpadScrolling) {
                 this._allowTrackpadScrolling = false;
                 this._mouseWheel(event);
-                setTimeout(() => { this._allowTrackpadScrolling = true; this._emitWheelY(); }, this._wheelThreshold);
+                setTimeout(() => {
+                    this._allowTrackpadScrolling = true;
+                    this._emitWheelY();
+                    this._emitWheelX();
+                }, this._wheelThreshold);
             } else {
                 this._accumulateWheelY(event);
+                this._accumulateWheelX(event);
             }
         } else {
             // Discrete mouse wheel (or not yet classified): accumulate + emit every event
@@ -2579,6 +2586,15 @@ export class Input {
         return magnitude / this._smallestDeltaY;
     }
 
+    // Horizontal deltas have no learned quantum (trackpads dominate the axis):
+    // pixel mode uses a fixed 100px notch; line/page modes are one notch per unit.
+    _wheelNotchesX(deltaX, deltaMode) {
+        const magnitude = Math.abs(deltaX);
+        if (magnitude === 0) { return 0; }
+        if (deltaMode !== 0) { return magnitude; }
+        return magnitude / 100;
+    }
+
     // Accumulate one event's vertical delta into the fractional-notch carry (no emit).
     _accumulateWheelY(event) {
         if (event.deltaY === 0) { return; }
@@ -2589,24 +2605,43 @@ export class Input {
         this._wheelAccumY += this._wheelNotches(event.deltaY, event.deltaMode);
     }
 
-    // Drain whole accumulated notches into scroll pulses, carrying the remainder forward.
+    _accumulateWheelX(event) {
+        if (event.deltaX === 0) { return; }
+        const direction = (event.deltaX < 0) ? 'left' : 'right';
+        if (direction !== this._wheelDirX) { this._wheelAccumX = 0; this._wheelDirX = direction; }
+        this._wheelAccumX += this._wheelNotchesX(event.deltaX, event.deltaMode);
+    }
+
+    // Drain whole accumulated notches into scroll pulses, carrying the fractional
+    // remainder forward. Emission is chunked to the per-message magnitude bound —
+    // every whole notch is sent, so an oversized flush never discards scroll distance.
     _emitWheelY() {
-        const pulses = Math.floor(this._wheelAccumY);
-        if (pulses >= 1) {
-            this._wheelAccumY -= pulses;
-            this._triggerMouseWheel(this._wheelDirY, Math.min(pulses, this._scrollMagnitude));
+        let pulses = Math.floor(this._wheelAccumY);
+        if (pulses < 1) { return; }
+        this._wheelAccumY -= pulses;
+        while (pulses > 0) {
+            const burst = Math.min(pulses, this._scrollMagnitude);
+            this._triggerMouseWheel(this._wheelDirY, burst);
+            pulses -= burst;
+        }
+    }
+
+    _emitWheelX() {
+        let pulses = Math.floor(this._wheelAccumX);
+        if (pulses < 1) { return; }
+        this._wheelAccumX -= pulses;
+        while (pulses > 0) {
+            const burst = Math.min(pulses, this._scrollMagnitude);
+            this._triggerHorizontalMouseWheel(this._wheelDirX, burst);
+            pulses -= burst;
         }
     }
 
     _mouseWheel(event) {
         this._accumulateWheelY(event);
         this._emitWheelY();
-        if (event.deltaX !== 0) {
-            const direction = (event.deltaX < 0) ? 'left' : 'right';
-            const horizontalMagnitude = Math.max(1, Math.round(Math.abs(event.deltaX) / 100));
-            const magnitude = Math.min(horizontalMagnitude, this._scrollMagnitude);
-            this._triggerHorizontalMouseWheel(direction, magnitude);
-        }
+        this._accumulateWheelX(event);
+        this._emitWheelX();
     }
 
     _contextMenu(event) {

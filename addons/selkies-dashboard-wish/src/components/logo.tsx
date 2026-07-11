@@ -4,6 +4,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+import { t } from "@/i18n";
+
 // Selkies Logo Component
 export const SelkiesLogo = ({ width = 30, height = 30, className = "", ...props }: { width?: number; height?: number; className?: string;[key: string]: any }) => (
   <svg
@@ -13,7 +15,7 @@ export const SelkiesLogo = ({ width = 30, height = 30, className = "", ...props 
     height={height}
     className={className}
     role="img"
-    aria-label="Selkies Logo"
+    aria-label={t('selkiesLogoAlt')}
     {...props}
   >
     <path

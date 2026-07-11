@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
 import yaml from "js-yaml";
+import { t } from "@/i18n";
 
 const REPO_BASE_URL = 'https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/';
 const METADATA_URL = `${REPO_BASE_URL}metadata.yml`;
@@ -88,7 +89,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                     setAppData(parsedData);
                 } catch (e) {
                     console.error("Failed to fetch or parse app data:", e);
-                    setError("Failed to load app data. Please try again.");
+                    setError(t('appsModal.errorLoading'));
                 } finally {
                     setIsLoading(false);
                 }
@@ -148,15 +149,15 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                         <div className="flex flex-col space-y-6">
                             <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
                                 <div>
-                                    <DialogTitle>Apps</DialogTitle>
+                                    <DialogTitle>{t('sections.apps.title')}</DialogTitle>
                                     <DialogDescription>
-                                        Install and manage applications
+                                        {t('apps.subtitle')}
                                     </DialogDescription>
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <Input
                                         type="text"
-                                        placeholder="Search apps..."
+                                        placeholder={t('appsModal.searchPlaceholder')}
                                         value={searchTerm}
                                         onChange={handleSearchChange}
                                         className="w-full sm:w-[300px]"
@@ -168,7 +169,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                         className="h-10 w-10"
                                     >
                                         <X className="h-4 w-4" />
-                                        <span className="sr-only">Close</span>
+                                        <span className="sr-only">{t('common.close')}</span>
                                     </Button>
                                 </div>
                             </div>
@@ -180,7 +181,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                             <div className="flex justify-center items-center w-full h-full p-6">
                                 <div className="flex flex-col items-center gap-4">
                                     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-                                    <span className="text-muted-foreground">Loading apps...</span>
+                                    <span className="text-muted-foreground">{t('appsModal.loading')}</span>
                                 </div>
                             </div>
                         )}
@@ -206,7 +207,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                             className="mb-4"
                                         >
                                             <ChevronLeft className="mr-2 h-4 w-4" />
-                                            Back to list
+                                            {t('appsModal.backButton')}
                                         </Button>
                                         <Card className="bg-background/95 backdrop-blur-sm">
                                             <CardHeader className="space-y-4">
@@ -231,21 +232,21 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                                             onClick={() => handleLaunch(selectedApp.name)}
                                                             className="w-auto"
                                                         >
-                                                            Launch {selectedApp.name}
+                                                            {t('apps.launchApp', { name: selectedApp.name })}
                                                         </Button>
                                                         <Button 
                                                             variant="outline" 
                                                             onClick={() => handleUpdate(selectedApp.name)}
                                                             className="w-auto"
                                                         >
-                                                            Update {selectedApp.name}
+                                                            {t('apps.updateApp', { name: selectedApp.name })}
                                                         </Button>
                                                         <Button 
                                                             variant="destructive" 
                                                             onClick={() => handleRemove(selectedApp.name)}
                                                             className="w-auto"
                                                         >
-                                                            Remove {selectedApp.name}
+                                                            {t('apps.removeApp', { name: selectedApp.name })}
                                                         </Button>
                                                     </>
                                                 ) : (
@@ -254,7 +255,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                                         onClick={() => handleInstall(selectedApp.name)}
                                                         className="w-auto"
                                                     >
-                                                        Install {selectedApp.name}
+                                                        {t('apps.installApp', { name: selectedApp.name })}
                                                     </Button>
                                                 )}
                                             </CardFooter>
@@ -295,7 +296,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                                 <CardContent className="p-6">
                                                     <div className="flex flex-col items-center justify-center text-center">
                                                         <p className="text-muted-foreground">
-                                                            No apps found matching your search.
+                                                            {t('appsModal.noAppsFound')}
                                                         </p>
                                                     </div>
                                                 </CardContent>

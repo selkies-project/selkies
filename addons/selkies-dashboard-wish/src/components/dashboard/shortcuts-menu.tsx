@@ -7,12 +7,13 @@
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { t } from "@/i18n";
 
 const shortcuts = [
-	{ label: "Toggle fullscreen", combo: "Ctrl + Shift + F" },
-	{ label: "Open or close the dashboard", combo: "Ctrl + Shift + M" },
-	{ label: "Toggle the virtual gamepad", combo: "Ctrl + Shift + G" },
-	{ label: "Lock the pointer to the stream", combo: "Ctrl + Shift + Left click" },
+	{ label: t('sections.shortcuts.fullscreen'), combo: "Ctrl + Shift + F" },
+	{ label: t('sections.shortcuts.openMenu'), combo: "Ctrl + Shift + M" },
+	{ label: t('sections.shortcuts.toggleGamepad'), combo: "Ctrl + Shift + G" },
+	{ label: t('sections.shortcuts.pointerLock'), combo: "Ctrl + Shift + Left click" },
 ];
 
 export function ShortcutsMenu() {
@@ -20,7 +21,7 @@ export function ShortcutsMenu() {
 		<Card className="w-[320px] bg-background/95 backdrop-blur-sm border shadow-sm">
 			<CardContent className="p-4">
 				<Alert className="mb-3">
-					<AlertTitle>Keyboard Shortcuts</AlertTitle>
+					<AlertTitle>{t('sections.shortcuts.title')}</AlertTitle>
 					<AlertDescription>
 						<ul className="space-y-3">
 							{shortcuts.map((s, i) => (
@@ -45,7 +46,7 @@ export function ShortcutsMenu() {
 								rel="noopener noreferrer"
 								href="https://github.com/selkies-project/selkies/blob/main/docs/README.md#citations-in-academic-publications"
 							>
-								<b>Please cite within your publication for academic usage</b>
+								<b>{t('shortcuts.citeNotice')}</b>
 							</a>
 						</li>
 					</ul>

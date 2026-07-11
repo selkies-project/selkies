@@ -269,6 +269,8 @@ class _X11ClipboardMonitor:
     (SelectionClear). xclip remains only as the caller's fallback."""
 
     _READ_TIMEOUT_S = 5.0
+    # INCR reads accumulate at most this much (matches the Wayland read cap).
+    _READ_MAX_BYTES = 64 * 1024 * 1024
     # Per-ChangeProperty chunk: stays under the classic 256 KiB X11 request limit
     # (python-xlib has no BIG-REQUESTS); large payloads append in chunks BEFORE the
     # SelectionNotify, so requestors read one complete property and INCR is not needed.
@@ -447,10 +449,21 @@ class _X11ClipboardMonitor:
                 self._reply = None
             elif prop.property_type == self._incr:
                 # INCR: each property delete requests the next chunk; a zero-length
-                # chunk ends the transfer.
+                # chunk ends the transfer. Wait for events with the remaining
+                # deadline — a stalled owner must time the read out, not wedge the
+                # event thread inside a blocking next_event(). Total size is capped
+                # like the Wayland read so a hostile owner cannot balloon memory.
                 chunks = []
+                total = 0
                 deadline = time.monotonic() + self._READ_TIMEOUT_S
-                while time.monotonic() < deadline:
+                while time.monotonic() < deadline and total <= self._READ_MAX_BYTES:
+                    if not self._d.pending_events():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        r, _, _ = select.select([self._d.fileno()], [], [], remaining)
+                        if not r or not self._d.pending_events():
+                            continue
                     e = self._d.next_event()
                     if (e.type == X.PropertyNotify and e.atom == self._prop
                             and e.state == X.PropertyNewValue):
@@ -459,7 +472,9 @@ class _X11ClipboardMonitor:
                         self._d.flush()
                         if part is None or len(part.value) == 0:
                             break
-                        chunks.append(self._prop_bytes(part))
+                        piece = self._prop_bytes(part)
+                        chunks.append(piece)
+                        total += len(piece)
                     elif e.type in (X.SelectionRequest, X.SelectionClear) \
                             or isinstance(e, xfixes.SelectionNotify):
                         # Keep serving paste requests mid-INCR read.
@@ -1591,8 +1606,6 @@ class WebRTCInput:
 
         self.upload_dir = upload_dir
         self.upload_dir_path = None
-        self.active_uploads_by_path_conn = {}
-        self.active_upload_target_path_conn = None
 
         async def _unhandled_video_bitrate(bitrate):
             logger_webrtc_input.warning(f"unhandled on_video_encoder_bit_rate: {bitrate}")
@@ -1608,7 +1621,7 @@ class WebRTCInput:
         self.on_set_enable_resize = lambda enable_resize, res: logger_webrtc_input.warning("unhandled on_set_enable_resize")
         self.on_client_fps = lambda fps: logger_webrtc_input.warning("unhandled on_client_fps")
         self.on_client_latency = lambda latency: logger_webrtc_input.warning("unhandled on_client_latency")
-        self.on_resize = lambda res: logger_webrtc_input.warning("unhandled on_resize")
+        self.on_resize = lambda res, display_id="primary": logger_webrtc_input.warning("unhandled on_resize")
         self.on_scaling_ratio = lambda res: logger_webrtc_input.warning("unhandled on_scaling_ratio")
         self.on_ping_response = lambda latency: logger_webrtc_input.warning("unhandled on_ping_response")
         self.on_cursor_change = self._on_cursor_change
@@ -3798,7 +3811,7 @@ class WebRTCInput:
                 # The handler may be an async binding or a sync "disabled" fallback
                 # (enable_resize defaults off) — await only a real coroutine so a
                 # skipped resize logs its warning instead of raising 'await None'.
-                _r = self.on_resize(f"{w}x{h}")
+                _r = self.on_resize(f"{w}x{h}", display_id)
                 if asyncio.iscoroutine(_r): await _r
             else: logger_webrtc_input.warning(f"Rejecting resolution change, invalid: {res}")
         elif msg_type == "s":
@@ -3896,48 +3909,6 @@ class WebRTCInput:
                 self._spawn_task(self.on_update_crf(crf_value))
             except Exception as e:
                 logger_webrtc_input.error(f"Error updating CRF value: {e}")
-        elif toks[0].startswith("FILE_UPLOAD_START:"):
-            if self.upload_dir_path is None:
-                logger_webrtc_input.warning("Upload directory doesn't exits, skipping the file upload")
-                return
-            _, b64file, size = toks[0].split(":", 2)
-            # Guard the base64 decode so a malformed filename aborts just this upload.
-            try:
-                file = base64.b64decode(b64file).decode('utf-8', 'replace')
-            except (binascii.Error, ValueError) as e_b64:
-                logger_webrtc_input.error(f"Invalid base64 in FILE_UPLOAD_START filename; aborting upload: {e_b64}")
-                return
-            self.handle_upload_dir(file, size)
-
-        elif toks[0].startswith("FILE_UPLOAD_END:"):
-            end_toks = toks[0].split(":", 1)
-            try:
-                end_file_log = base64.b64decode(end_toks[1]).decode('utf-8', 'replace') if len(end_toks) > 1 else ""
-            except Exception:
-                end_file_log = end_toks[1] if len(end_toks) > 1 else ""
-            logger_webrtc_input.info("Received FILE UPLOAD END: " + end_file_log)
-            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
-                self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
-                logger_webrtc_input.info(f"Upload finished: {self.active_upload_target_path_conn}")
-                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
-                self.active_upload_target_path_conn = None
-
-        elif toks[0].startswith("FILE_UPLOAD_ERROR:"):
-            logger_webrtc_input.error(f"Client reported upload error: {toks[0]}")
-            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
-                self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
-                try:
-                    os.remove(self.active_upload_target_path_conn)
-                except OSError:
-                    pass
-                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
-            self.active_upload_target_path_conn = None
-            error_toks = toks[0].split(":", 2)
-            try:
-                purged_file_log = base64.b64decode(error_toks[1]).decode('utf-8', 'replace') if len(error_toks) > 1 else ""
-            except Exception:
-                purged_file_log = error_toks[1] if len(error_toks) > 1 else ""
-            logger_webrtc_input.info(f"Purged the file {purged_file_log}")
         elif toks[0].startswith("SETTINGS"):
             settings_data = ','.join(toks[1:]) if len(toks) > 1 else ""
             logger_webrtc_input.info(f"Received SETTINGS message: {settings_data}")
@@ -3978,101 +3949,6 @@ class WebRTCInput:
             logger_webrtc_input.error(f"Could not create upload directory {self.upload_dir_path}: {e}")
             self.upload_dir_path = None
 
-    def handle_upload_dir(self, filename, filesize):
-        try:
-            rel_path_from_client, size_str = filename, filesize
-            file_size = int(size_str)
-            if file_size < 0:
-                logger_webrtc_input.error(f"Rejecting upload with invalid negative declared size: {file_size}")
-                return
-
-            sane_rel_path = rel_path_from_client.strip('/\\')
-            sane_rel_path = os.path.normpath(sane_rel_path)
-            path_components = [comp for comp in sane_rel_path.split(os.sep) if comp and comp != '.']
-
-            if not path_components or sane_rel_path.startswith(os.sep) or sane_rel_path.startswith('/') or \
-                sane_rel_path.startswith('\\') or ".." in path_components:
-                logger_webrtc_input.error(f"Invalid or malicious relative path from client: '{rel_path_from_client}'. Discarding.")
-                return
-
-            sane_rel_path = os.path.join(*path_components)
-            final_server_path = os.path.join(self.upload_dir_path, sane_rel_path)
-            real_upload_dir_abs = os.path.realpath(self.upload_dir_path)
-            # Resolve symlinks on the parent before the containment check.
-            intended_parent_dir_abs = os.path.realpath(os.path.dirname(final_server_path))
-
-            if not _is_within_directory(real_upload_dir_abs, intended_parent_dir_abs):
-                logger_webrtc_input.error(f"Path escape attempt detected: '{final_server_path}' (from client: '{rel_path_from_client}') is outside of '{real_upload_dir_abs}'. Discarding.")
-                return
-
-            target_dir = os.path.dirname(final_server_path)
-
-            if target_dir and target_dir != real_upload_dir_abs and not os.path.exists(target_dir):
-                if not _is_within_directory(real_upload_dir_abs, os.path.realpath(target_dir)):
-                    logger_webrtc_input.error(f"Directory creation escape attempt: '{target_dir}' is outside of '{real_upload_dir_abs}'. Discarding.")
-                    return
-                try:
-                    os.makedirs(target_dir, exist_ok=True)
-                    logger_webrtc_input.info(f"Created directory for upload: {target_dir}")
-                except OSError as e_mkdir:
-                    logger_webrtc_input.error(f"Could not create directory {target_dir} for upload: {e_mkdir}")
-                    return
-
-            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
-                try:
-                    self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
-                except Exception as e_close_old:
-                    logger_webrtc_input.warning(f"Error closing previous upload stream {self.active_upload_target_path_conn}: {e_close_old}")
-                del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
-
-            # O_NOFOLLOW prevents writing through a symlink planted at the final
-            # path component (the parent path was already symlink-resolved above).
-            upload_fd = os.open(final_server_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
-            self.active_uploads_by_path_conn[final_server_path] = os.fdopen(upload_fd, "wb")
-            self.active_upload_target_path_conn = final_server_path
-            self.active_upload_declared_size = file_size
-            self.active_upload_bytes_written = 0
-            logger_webrtc_input.info(f"Upload started: {final_server_path} (client rel_path: '{rel_path_from_client}', size: {file_size})")
-        except ValueError:
-            logger_webrtc_input.error(f"Invalid FILE_UPLOAD_START format: {filename}")
-        except Exception as e_fup_start:
-            logger_webrtc_input.error(f"FILE_UPLOAD_START processing error: {e_fup_start}", exc_info=True)
-
-    async def on_msg_data(self, data):
-        # Data being received on auxiliary channel would be of type Bytes
-        if len(data) <= 0:
-            return
-        data_type, payload = data[0], data[1:]
-        if data_type == 0x01:  # inidicates file data
-            if (self.active_upload_target_path_conn and self.active_upload_target_path_conn in self.active_uploads_by_path_conn):
-                try:
-                    # Enforce the declared upload size so a client cannot stream
-                    # unlimited data (e.g. after declaring size=1) to exhaust disk.
-                    declared = getattr(self, "active_upload_declared_size", None)
-                    written = getattr(self, "active_upload_bytes_written", 0)
-                    if declared is not None and written + len(payload) > declared:
-                        logger_webrtc_input.error(f"Upload to {self.active_upload_target_path_conn} exceeded its declared size ({declared} bytes); aborting.")
-                        self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
-                        try:
-                            os.remove(self.active_upload_target_path_conn)
-                        except OSError:
-                            pass
-                        del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
-                        self.active_upload_target_path_conn = None
-                        return
-                    self.active_uploads_by_path_conn[self.active_upload_target_path_conn].write(payload)
-                    self.active_upload_bytes_written = written + len(payload)
-                except Exception as e_write:
-                    logger_webrtc_input.error(f"File write error for {self.active_upload_target_path_conn}: {e_write}")
-                    try:
-                        self.active_uploads_by_path_conn[self.active_upload_target_path_conn].close()
-                        os.remove(self.active_upload_target_path_conn)
-                    except Exception:
-                        pass
-                    del self.active_uploads_by_path_conn[self.active_upload_target_path_conn]
-                    self.active_upload_target_path_conn = None
-            else:
-                logger_webrtc_input.warning("received file data after upload path is closed")
 
 # MOUSE_POSITION
 MOUSE_POSITION = 10

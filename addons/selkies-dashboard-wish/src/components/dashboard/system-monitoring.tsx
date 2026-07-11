@@ -13,6 +13,7 @@ import {
 	ChevronUp
 } from "lucide-react";
 import { getLastServerSettings, getPrefixedKey } from "@/utils";
+import { t } from "@/i18n";
 
 // Declare global window properties
 declare global {
@@ -246,7 +247,7 @@ export function SystemMonitoring() {
 	}, []);
 
 	const formatMemory = (bytes: number | null): string => {
-		if (bytes === null) return "N/A";
+		if (bytes === null) return t('sections.stats.tooltipMemoryNA');
 		const gb = bytes / (1024 * 1024 * 1024);
 		return gb >= 1 ? `${gb.toFixed(1)}GB` : `${(bytes / (1024 * 1024)).toFixed(0)}MB`;
 	};
@@ -299,56 +300,56 @@ export function SystemMonitoring() {
 	// Create metrics array for recharts - only include metrics that have data
 	const allMetrics = [
 		{
-			name: "CPU",
+			name: t('sections.stats.cpuLabel'),
 			current: Math.round(cpuPercent),
 			max: 100,
 			fill: "hsl(250, 100%, 60%)",
 			hasData: hasCpuData
 		},
 		{
-			name: "GPU",
+			name: t('sections.stats.gpuLabel'),
 			current: Math.round(gpuPercent),
 			max: 100,
 			fill: "hsl(260, 100%, 50%)",
 			hasData: hasGpuData
 		},
 		{
-			name: "Sys Mem",
+			name: t('sections.stats.sysMemLabel'),
 			current: Math.round(sysMemPercent),
 			max: 100,
 			fill: "hsl(240, 100%, 60%)",
 			hasData: hasSysMemData
 		},
 		{
-			name: "GPU Mem",
+			name: t('sections.stats.gpuMemLabel'),
 			current: Math.round(gpuMemPercent),
 			max: 100,
 			fill: "hsl(240, 100%, 60%)",
 			hasData: hasGpuMemData
 		},
 		{
-			name: "FPS",
+			name: t('sections.stats.fpsLabel'),
 			current: Math.round(clientFps),
 			max: 60,
 			fill: "hsl(220, 100%, 50%)",
 			hasData: hasFpsData
 		},
 		{
-			name: "Audio",
+			name: t('sections.stats.audioLabel'),
 			current: audioLevel,
 			max: 100,
 			fill: "hsl(230, 100%, 60%)",
 			hasData: hasAudioData
 		},
 		{
-			name: "Bandwidth",
+			name: t('sections.stats.bandwidthLabel'),
 			current: Math.round(bandwidthMbps * 100) / 100,
 			max: maxBandwidthMbps,
 			fill: "hsl(200, 100%, 60%)",
 			hasData: hasBandwidthData
 		},
 		{
-			name: "Latency",
+			name: t('sections.stats.latencyLabel'),
 			current: Math.round(latencyMs * 10) / 10,
 			max: MAX_LATENCY_MS,
 			fill: "hsl(180, 100%, 60%)",
@@ -364,7 +365,7 @@ export function SystemMonitoring() {
 		return (
 			<div className="p-3 rounded-lg bg-card backdrop-blur-sm border shadow-sm w-auto cursor-grab hover:cursor-grab active:cursor-grabbing border bg-background/95 backdrop-blur-sm shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300">
 				<div className="flex items-center justify-between mb-4">
-					<h3 className="text-sm font-semibold text-card-foreground pointer-events-none">System Performance Monitor</h3>
+					<h3 className="text-sm font-semibold text-card-foreground pointer-events-none">{t('stats.monitorTitle')}</h3>
 					<div className="flex items-center gap-2 pointer-events-auto">
 						{/* Toggle View Button */}
 						<Tooltip>
@@ -379,7 +380,7 @@ export function SystemMonitoring() {
 								</Button>
 							</TooltipTrigger>
 							<TooltipContent side="bottom">
-								<p>Compact View</p>
+								<p>{t('stats.compactView')}</p>
 							</TooltipContent>
 						</Tooltip>
 					</div>
@@ -388,7 +389,7 @@ export function SystemMonitoring() {
 				<div className="space-y-2 pointer-events-none">
 					{hasCpuData && (
 						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">CPU</span>
+							<span className="text-sm text-muted-foreground">{t('sections.stats.cpuLabel')}</span>
 							<div className="flex items-center gap-2">
 								<span className="text-sm font-medium text-card-foreground">{Math.round(cpuPercent)}%</span>
 								{(() => {
@@ -403,7 +404,7 @@ export function SystemMonitoring() {
 
 					{hasGpuData && (
 						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">GPU</span>
+							<span className="text-sm text-muted-foreground">{t('sections.stats.gpuLabel')}</span>
 							<div className="flex items-center gap-2">
 								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuPercent)}%</span>
 								{(() => {
@@ -418,7 +419,7 @@ export function SystemMonitoring() {
 
 					{hasSysMemData && (
 						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">System Memory</span>
+							<span className="text-sm text-muted-foreground">{t('sections.stats.sysMemLabel')}</span>
 							<div className="flex items-center gap-2">
 								<span className="text-sm font-medium text-card-foreground">{Math.round(sysMemPercent)}% ({formatMemory(sysMemUsed)}/{formatMemory(sysMemTotal)})</span>
 								{(() => {
@@ -433,7 +434,7 @@ export function SystemMonitoring() {
 
 					{hasGpuMemData && (
 						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">GPU Memory</span>
+							<span className="text-sm text-muted-foreground">{t('sections.stats.gpuMemLabel')}</span>
 							<div className="flex items-center gap-2">
 								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuMemPercent)}% ({formatMemory(gpuMemUsed)}/{formatMemory(gpuMemTotal)})</span>
 								{(() => {
@@ -448,7 +449,7 @@ export function SystemMonitoring() {
 
 					{hasFpsData && (
 						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">FPS</span>
+							<span className="text-sm text-muted-foreground">{t('sections.stats.fpsLabel')}</span>
 							<div className="flex items-center gap-2">
 								<span className="text-sm font-medium text-card-foreground">{Math.round(clientFps)}</span>
 								{(() => {
@@ -463,7 +464,7 @@ export function SystemMonitoring() {
 
 					{hasAudioData && (
 						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">Audio level</span>
+							<span className="text-sm text-muted-foreground">{t('sections.stats.audioLabel')}</span>
 							<div className="flex items-center gap-2">
 								<span className="text-sm font-medium text-card-foreground">{audioLevel}%</span>
 								{(() => {
@@ -478,7 +479,7 @@ export function SystemMonitoring() {
 
 					{hasBandwidthData && (
 						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">Bandwidth</span>
+							<span className="text-sm text-muted-foreground">{t('sections.stats.bandwidthLabel')}</span>
 							<div className="flex items-center gap-2">
 								<span className="text-sm font-medium text-card-foreground">{(Math.round(bandwidthMbps * 100) / 100)} Mbps</span>
 								{(() => {
@@ -493,7 +494,7 @@ export function SystemMonitoring() {
 
 					{hasLatencyData && (
 						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">Latency</span>
+							<span className="text-sm text-muted-foreground">{t('sections.stats.latencyLabel')}</span>
 							<div className="flex items-center gap-2">
 								<span className="text-sm font-medium text-card-foreground">{(Math.round(latencyMs * 10) / 10)} ms</span>
 								{(() => {
@@ -537,7 +538,7 @@ export function SystemMonitoring() {
 							</Button>
 						</TooltipTrigger>
 						<TooltipContent side="bottom">
-							<p>Detailed View</p>
+							<p>{t('stats.detailedView')}</p>
 						</TooltipContent>
 					</Tooltip>
 				</div>

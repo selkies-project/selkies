@@ -5,6 +5,7 @@
  */
 
 import React from "react";
+import { t } from "@/i18n";
 
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
 const DRAG_THRESHOLD = 10;
@@ -34,12 +35,23 @@ export default function PlayerGamepadButton() {
     });
 
     React.useEffect(() => {
-        const detectFirstTouch = () => {
+        // Mirror the main dashboard's virtual-keyboard-button gating: reveal the
+        // toggle on a mobile UA or once a touch is seen. Without a touchscreen the
+        // button never appears, so #player* clients fall back to real gamepads only.
+        const isMobile = typeof window !== "undefined" &&
+            (((navigator as any).userAgentData && (navigator as any).userAgentData.mobile) ||
+                /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
+        if (isMobile) {
             setIsButtonVisible(true);
+            return;
+        }
+        const detectTouch = () => {
+            setIsButtonVisible(true);
+            window.removeEventListener('touchstart', detectTouch);
         };
-        window.addEventListener('touchstart', detectFirstTouch, { once: true, passive: true });
+        window.addEventListener('touchstart', detectTouch, { passive: true } as AddEventListenerOptions);
         return () => {
-            window.removeEventListener('touchstart', detectFirstTouch);
+            window.removeEventListener('touchstart', detectTouch);
         };
     }, []);
 
@@ -142,8 +154,8 @@ export default function PlayerGamepadButton() {
                 boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
                 transition: 'background-color 0.2s ease-in-out',
             }}
-            title="Toggle Touch Gamepad"
-            aria-label="Toggle Touch Gamepad"
+            title={t('gamepads.toggleTouchTitle')}
+            aria-label={t('gamepads.toggleTouchTitle')}
         >
             <GamepadIcon />
         </button>

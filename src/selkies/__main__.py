@@ -55,6 +55,15 @@ def main():
     """
     Entry point for command-line execution.
     """
+    # uvloop makes the whole asyncio loop (timers, callbacks, socket I/O) markedly
+    # faster, which directly lifts the pure-Python WebRTC SCTP data-channel
+    # throughput and keeps large transfers from stalling input. Optional: fall
+    # back to the stock loop if it isn't installed.
+    try:
+        import uvloop
+        uvloop.install()
+    except ImportError:
+        pass
     try:
         asyncio.run(run())
     except KeyboardInterrupt:

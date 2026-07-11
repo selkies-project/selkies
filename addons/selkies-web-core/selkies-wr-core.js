@@ -28,15 +28,11 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import { createClipboardSync } from "./lib/clipboard-sync.js";
+import { createClipboardSync, createClipboardGestures } from "./lib/clipboard-sync.js";
+import { createFileUploader } from "./lib/file-upload.js";
 // Inline (base64 blob) so the worker travels inside selkies-core.js itself —
 // no separate hashed file to place next to whichever chunk references it.
 import ClipboardWorker from './clipboard-worker.js?worker&inline'
-
-// Base64 so paths survive the ',' and ':' delimiters in FILE_UPLOAD messages.
-function b64Path(p) {
-	return btoa(unescape(encodeURIComponent(String(p))));
-}
 
 // Per-transfer id so concurrent multipart clipboard sends are not interleaved.
 let __clipboardTransferCounter = 0;
@@ -323,14 +319,14 @@ export default function webrtc() {
 	let isMicrophoneActive = false;
 	let isGamepadEnabled = true;
 
-	// 64KiB, excluding a byte for prefix
 	// Per-message budget on the data channel: the browser exposes the negotiated
-	// SCTP max-message-size (min of both ends); fall back to the RFC 8841 64 KiB
-	// default pre-negotiation, cap at 1 MiB to bound per-message buffering.
+	// SCTP max-message-size (min of both ends); fall back to the 256 KiB standard
+	// pre-negotiation, cap at 1 MiB to bound per-message buffering. The trailing
+	// 512 bytes leave room for the message prefix/envelope.
 	const dcMessageBudget = () => {
 		const nego = (typeof webrtc !== 'undefined' && webrtc && webrtc.peerConnection &&
 			webrtc.peerConnection.sctp && webrtc.peerConnection.sctp.maxMessageSize) || 0;
-		const limit = nego > 0 ? Math.min(nego, 1024 * 1024) : 64 * 1024;
+		const limit = nego > 0 ? Math.min(nego, 1024 * 1024) : 256 * 1024;
 		return limit - 512;
 	};
 	const CLIENT_CONTROLLER = "controller";
@@ -642,6 +638,13 @@ export default function webrtc() {
 	function sendClientPersistedSettings() {
 		if (isSharedMode) {
 			console.log("Skipping sending client persisted settings in shared mode.");
+			return;
+		}
+		if (window.location.hash.startsWith('#display2')) {
+			// Global settings are the primary page's to assert; a secondary display
+			// posting its own copy would clobber them. Its resolution still flows
+			// through the standard resize message.
+			console.log("Skipping client persisted settings on a secondary display.");
 			return;
 		}
 		const settingsPrefix = `${storageAppName}_`;
@@ -1189,278 +1192,13 @@ export default function webrtc() {
 		}
 	};
 
-	function handleRequestFileUpload() {
-		const hiddenInput = document.getElementById('globalFileInput');
-		if (!hiddenInput) {
-			console.error("Global file input not found!");
-			return;
-		}
-		console.log("Triggering click on hidden file input.");
-		hiddenInput.click();
-	}
-
-	async function handleFileInputChange(event) {
-		const files = event.target.files;
-		if (!files || files.length === 0) {
-			event.target.value = null;
-			return;
-		}
-		// One aux channel at a time: the backend can't receive multiple files concurrently yet.
-		if (!webrtc.createAuxDataChannel()) {
-			console.warn("Simultaneous uploading of files with distinct upload operations is not supported yet");
-			const errorMsg = "Please let the ongoing upload complete.";
-			window.postMessage({
-				type: 'fileUpload',
-				payload: {
-				status: 'warning',
-				fileName: '_N/A_',
-				message: errorMsg
-				}
-			}, window.location.origin);
-			event.target.value = null;
-			return;
-		}
-		console.log(`File input changed, processing ${files.length} files sequentially.`);
-		try {
-			await webrtc.waitForAuxChannelOpen();
-			for (let i = 0; i < files.length; i++) {
-				const file = files[i];
-				const pathToSend = file.name;
-				console.log(`Uploading file ${i + 1}/${files.length}: ${pathToSend}`);
-				await uploadFileObject(file, pathToSend);
-			}
-			console.log("Finished processing all files from input.");
-		} catch (error) {
-			const errorMsg = `An error occurred during the file input upload process: ${error.message || error}`;
-			console.error(errorMsg);
-			window.postMessage({
-				type: 'fileUpload',
-				payload: {
-				status: 'error',
-				fileName: 'N/A',
-				message: errorMsg
-				}
-			}, window.location.origin);
-		} finally {
-			event.target.value = null;
-			webrtc.closeAuxDataChannel();
-		}
-	}
-
-	function uploadFileObject(file, pathToSend) {
-		return new Promise((resolve, reject) => {
-			window.postMessage({
-				type: 'fileUpload',
-				payload: {
-				status: 'start',
-				fileName: pathToSend,
-				fileSize: file.size
-				}
-			}, window.location.origin);
-			webrtc.sendDataChannelMessage(`FILE_UPLOAD_START:${b64Path(pathToSend)}:${file.size}`)
-
-			let offset = 0;
-			const reader = new FileReader();
-			reader.onload = async function(e) {
-				if (e.target.error) {
-					const readErrorMsg = `File read error for ${pathToSend}: ${e.target.error}`;
-					window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: readErrorMsg }}, window.location.origin);
-					webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:File read error`)
-					reject(e.target.error);
-					return;
-				}
-				try {
-					const prefixedView = new Uint8Array(1 + e.target.result.byteLength);
-					prefixedView[0] = 0x01; // Data prefix for file chunk
-					prefixedView.set(new Uint8Array(e.target.result), 1);
-					// A dropped chunk silently truncates the file server-side while the
-					// progress bar still reaches 100%; retry, then fail loudly.
-					let sent = false;
-					for (let attempt = 0; attempt < 40 && !sent; attempt++) {
-						sent = webrtc.sendAuxChannelData(prefixedView.buffer);
-						if (!sent) await new Promise(r => setTimeout(r, 100));
-					}
-					if (!sent) {
-						throw new Error('auxiliary data channel unavailable (chunk not sent)');
-					}
-					offset += e.target.result.byteLength;
-					// Progress = bytes actually DRAINED to the network, not bytes parked
-					// in the channel buffer: an 8 MB file fits the 10 MB buffer whole, so
-					// buffered-based progress jumps to 100% and then "hangs" while SCTP
-					// drains through the real link (TURN relays make that tail long).
-					const buffered = (webrtc._aux_channel && webrtc._aux_channel.bufferedAmount) || 0;
-					const drained = Math.max(0, offset - buffered);
-					const progress = file.size > 0 ? Math.min(100, Math.round((drained / file.size) * 100)) : 100;
-					window.postMessage({
-						type: 'fileUpload',
-						payload: {
-						status: 'progress',
-						fileName: pathToSend,
-						progress: progress,
-						fileSize: file.size
-							}
-					}, window.location.origin);
-					if (offset < file.size) {
-						if(webrtc.isAuxBufferNearThreshold()) {
-							setTimeout(() => readChunk(offset), 50);
-						} else {
-							readChunk(offset)
-						}
-					} else {
-						// Data channels work asynchronously due to their underlying
-						// implementation: wait for the buffer to drain before END, posting
-						// real progress while the tail flushes — on high-RTT links (TURN)
-						// this drain IS most of the transfer.
-						let drainTick = 0;
-						while (webrtc._aux_channel && webrtc._aux_channel.readyState === 'open'
-							&& webrtc._aux_channel.bufferedAmount > 0) {
-							// 50 ms completion granularity; UI progress every 5th tick.
-							if (drainTick++ % 5 === 0) {
-								const tailDrained = Math.max(0, offset - webrtc._aux_channel.bufferedAmount);
-								window.postMessage({
-									type: 'fileUpload',
-									payload: {
-										status: 'progress',
-										fileName: pathToSend,
-										progress: file.size > 0 ? Math.min(100, Math.round((tailDrained / file.size) * 100)) : 100,
-										fileSize: file.size
-									}
-								}, window.location.origin);
-							}
-							await new Promise((r) => setTimeout(r, 50));
-						}
-						webrtc.sendDataChannelMessage(`FILE_UPLOAD_END:${b64Path(pathToSend)}`);
-						window.postMessage({
-						type: 'fileUpload',
-						payload: {
-							status: 'end',
-							fileName: pathToSend,
-							fileSize: file.size
-						}
-						}, window.location.origin);
-						resolve();
-						}
-				} catch (error) {
-					const sendErrorMsg = `error during upload of ${pathToSend}: ${error.message || error}`;
-					window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: sendErrorMsg }}, window.location.origin);
-					webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:send error`);
-					reject(error);
-				}
-			};
-			reader.onerror = function(e) {
-				const generalReadError = `General file reader error for ${pathToSend}: ${e.target.error}`;
-				window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: generalReadError }}, window.location.origin);
-				webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:General file reader error`)
-				reject(e.target.error);
-			};
-
-			function readChunk(startOffset) {
-				const slice = file.slice(startOffset, Math.min(startOffset + dcMessageBudget(), file.size));
-				reader.readAsArrayBuffer(slice);
-			}
-			readChunk(0);
-		});
-	}
-
-	function handleDragOver(ev) {
-		ev.preventDefault();
-		ev.dataTransfer.dropEffect = 'copy';
-	}
-
-	async function handleDrop(ev) {
-		ev.preventDefault();
-		ev.stopPropagation();
-		const entriesToProcess = [];
-		if (!webrtc.createAuxDataChannel()) {
-			console.warn("Simultaneous uploading of files with distinct upload operations is not supported yet");
-			const errorMsg = "Please let the ongoing upload complete";
-			window.postMessage({
-				type: 'fileUpload',
-				payload: {
-				status: 'warning',
-				fileName: '_N/A_',
-				message: errorMsg
-				}
-			}, window.location.origin);
-			return;
-		}
-		if (ev.dataTransfer.items) {
-			for (let i = 0; i < ev.dataTransfer.items.length; i++) {
-				const item = ev.dataTransfer.items[i];
-			  // Only care about file-kind items
-				if (item.kind !== 'file') continue;
-				let entry = null;
-				if (typeof item.webkitGetAsEntry === 'function') entry = item.webkitGetAsEntry();
-				else if (typeof item.getAsEntry === 'function') entry = item.getAsEntry();
-				if (entry) entriesToProcess.push(entry);
-			}
-		} else if (ev.dataTransfer.files.length > 0) {
-			for (let i = 0; i < ev.dataTransfer.files.length; i++) {
-				await uploadFileObject(ev.dataTransfer.files[i], ev.dataTransfer.files[i].name);
-			}
-			webrtc.closeAuxDataChannel();
-			return;
-		}
-
-		// Process the nested entries
-		try {
-			for (const entry of entriesToProcess) await handleDroppedEntry(entry);
-		} catch (error) {
-			const errorMsg = `Error during sequential upload: ${error.message || error}`;
-			window.postMessage({
-				type: 'fileUpload',
-				payload: {
-				status: 'error',
-				fileName: 'N/A',
-				message: errorMsg
-				}
-			}, window.location.origin);
-			webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${b64Path('GENERAL')}:Processing failed`)
-		}
-		webrtc.closeAuxDataChannel();
-	}
-
-	function getFileFromEntry(fileEntry) {
-		return new Promise((resolve, reject) => fileEntry.file(resolve, reject));
-	}
-
-	async function handleDroppedEntry(entry, basePathFallback = "") { // basePathFallback is for non-fullPath scenarios
-		let pathToSend;
-		if (entry.fullPath && typeof entry.fullPath === 'string' && entry.fullPath !== entry.name && (entry.fullPath.includes('/') || entry.fullPath.includes('\\'))) {
-			pathToSend = entry.fullPath;
-			if (pathToSend.startsWith('/')) {
-				pathToSend = pathToSend.substring(1);
-			}
-			console.log(`Using entry.fullPath: "${pathToSend}" for entry.name: "${entry.name}"`);
-		} else {
-			pathToSend = basePathFallback ? `${basePathFallback}/${entry.name}` : entry.name;
-			console.log(`Constructed path: "${pathToSend}" for entry.name: "${entry.name}" (basePathFallback: "${basePathFallback}")`);
-		}
-
-		if (entry.isFile) {
-			try {
-				const file = await getFileFromEntry(entry);
-				await uploadFileObject(file, pathToSend);
-			} catch (err) {
-				console.error(`Error processing file ${pathToSend}: ${err}`);
-				window.postMessage({
-				type: 'fileUpload',
-				payload: { status: 'error', fileName: pathToSend, message: `Error processing file: ${err.message || err}` }
-				}, window.location.origin);
-				webrtc.sendDataChannelMessage(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:Client-side file processing error`)
-			}
-		} else if (entry.isDirectory) {
-			console.log(`Processing directory: ${pathToSend}`);
-			const dirReader = entry.createReader();
-			let entries;
-			do {
-				entries = await new Promise((resolve, reject) => dirReader.readEntries(resolve, reject));
-				for (const subEntry of entries) {
-					await handleDroppedEntry(subEntry, pathToSend);
-				}
-			} while (entries.length > 0);
-		}
-	}
+	// HTTP uploads + drag-drop/file-picker plumbing live in the shared factory
+	// (see lib/file-upload.js); shared sessions must not upload.
+	const fileUploader = createFileUploader({ canUpload: () => !isSharedMode });
+	const handleRequestFileUpload = fileUploader.handleRequestFileUpload;
+	const handleFileInputChange = fileUploader.handleFileInputChange;
+	const handleDragOver = fileUploader.handleDragOver;
+	const handleDrop = fileUploader.handleDrop;
 
 	// Metrics surfacing contract: the essentials are published on window (fps,
 	// network_stats, video_bitrate) for the sidebar/dashboard bridge, the full
@@ -1610,50 +1348,19 @@ export default function webrtc() {
 		}
 	}
 
-	// Paste-ordering hold: a Ctrl/Cmd+V arriving while the local clipboard is still
-	// being read/sent would depart the ordered channel BEFORE the clipboard content
-	// and paste the previous value on the server. Registered before input attaches
-	// (both capture on window), so this runs first: it swallows the chord's key
-	// events, waits for the send to flush (bounded), then replays them in order.
-	const heldPasteEvents = [];
-	let heldPasteReplayPending = false;
-	function replayHeldPasteEvents() {
-		heldPasteReplayPending = false;
-		for (const ev of heldPasteEvents.splice(0)) {
-			try {
-				const replay = new KeyboardEvent(ev.type, ev);
-				Object.defineProperty(replay, '__selkiesClipReplay', { value: true });
-				window.dispatchEvent(replay);
-			} catch (_) { /* never break the key stream */ }
-		}
-	}
-	const PASTE_MOD_CODES = ['ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'];
-	function holdPasteWhileClipboardInFlight(ev) {
-		if (ev.__selkiesClipReplay) return;
-		// While a replay is queued, the chord's modifier keyups must be held too —
-		// a Ctrl keyup overtaking the replayed V would break the chord server-side
-		// (V would arrive unmodified and type a literal 'v').
-		const modHold = heldPasteReplayPending && ev.type === 'keyup' && PASTE_MOD_CODES.includes(ev.code);
-		if (ev.code !== 'KeyV' && !modHold) return;
-		const chord = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
-		// Hold a paste chord while a send is in flight; also hold ANY KeyV event
-		// while a replay is queued (its keyup must not overtake the held keydown,
-		// even if Ctrl was already released).
-		const hold = modHold || (ev.code === 'KeyV' && ((chord && clipboardSendInFlight) || heldPasteReplayPending));
-		if (!hold) return;
-		ev.preventDefault();
-		ev.stopImmediatePropagation();
-		heldPasteEvents.push(ev);
-		if (!heldPasteReplayPending) {
-			heldPasteReplayPending = true;
-			Promise.race([
-				clipboardSendInFlight || Promise.resolve(),
-				new Promise((r) => setTimeout(r, 2000)),
-			]).then(replayHeldPasteEvents, replayHeldPasteEvents);
-		}
-	}
-	window.addEventListener('keydown', holdPasteWhileClipboardInFlight, true);
-	window.addEventListener('keyup', holdPasteWhileClipboardInFlight, true);
+	// Paste-ordering hold + non-Chromium copy/paste gestures live in the shared
+	// factory (see lib/clipboard-sync.js); only the gates and the transport's
+	// send function are per-core. Wired/unwired with the session lifecycle.
+	const clipboardGestures = createClipboardGestures({
+		isChromium,
+		clipboardSync,
+		sendClipboardData: (data, mime) => sendClipboardData(data, mime),
+		canSync: () => !isSharedMode && clipboardStatus === "enabled",
+		canRead: () => !!clipboard_in_enabled,
+		canWrite: () => !!clipboard_out_enabled,
+		binaryEnabled: () => !!enable_binary_clipboard,
+		getSendInFlight: () => clipboardSendInFlight,
+	});
 
 	async function handleWindowFocus() {
 		webrtc.sendDataChannelMessage("kr");
@@ -1665,86 +1372,6 @@ export default function webrtc() {
 		}
 	}
 
-
-	// Safari/Firefox reject navigator.clipboard from focus/message handlers (no
-	// transient activation), so mirror the sync onto Ctrl/Cmd+V (read) and
-	// Ctrl/Cmd+C (write) gestures. Chromium keeps the focus/message path. Never
-	// preventDefault: the keystroke must still reach the remote session.
-	function handleClipboardKeydown(event) {
-		if (isSharedMode || clipboardStatus !== "enabled") return;
-		if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-		// Fire once per physical keypress; don't spam clipboard ops on autorepeat.
-		if (event.repeat) return;
-		// Only drive remote-clipboard sync from the stream; don't hijack copy/paste in
-		// page form fields (settings UI, etc.). The stream's overlay input is exempt.
-		const ae = document.activeElement;
-		if (ae && ae.id !== 'overlayInput' &&
-			(ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable)) {
-			return;
-		}
-		const key = (event.key || '').toLowerCase();
-		if (key === 'v' && clipboard_in_enabled) {
-			readLocalClipboardAndSend();
-		} else if (key === 'c' && clipboard_out_enabled) {
-			// Advertise text/plain ONLY: a Ctrl/Cmd+C can't synchronously know whether the
-			// server's CURRENT clipboard is an image, and a stale cached MIME type
-			// would build a malformed ClipboardItem. Server images arrive via the push handler.
-			const textPromise = clipboardSync.request(false);
-			const items = {
-				'text/plain': textPromise.then((t) =>
-					new Blob([typeof t === 'string' ? t : (clipboardSync.lastText || '')], { type: 'text/plain' }))
-			};
-			let writePromise = null;
-			try {
-				writePromise = navigator.clipboard.write([new ClipboardItem(items)]);
-			} catch (err) {
-				console.warn(`navigator.clipboard.write unavailable on Ctrl+C, using execCommand: ${err && err.name}`);
-				clipboardSync.copyViaExecCommand(textPromise);
-			}
-			if (writePromise && writePromise.catch) {
-				writePromise.catch((err) => {
-					console.warn(`navigator.clipboard.write rejected on Ctrl+C, using execCommand: ${err && err.name}`);
-					clipboardSync.copyViaExecCommand(textPromise);
-				});
-			}
-		}
-	}
-
-	// The 'v' keydown path reads via navigator.clipboard.read()/readText(), which
-	// WebKit/Safari reject with NotAllowedError even with an editable focused. The
-	// 'paste' event exposes event.clipboardData synchronously in both WebKit and
-	// Firefox, so drive paste-to-server from it there (the stream's overlayInput is
-	// the focused editable target, so the event fires and bubbles to the window).
-	// Don't preventDefault: the paste chord must still reach the remote session.
-	function handleClipboardPaste(event) {
-		if (isSharedMode || clipboardStatus !== "enabled" || !clipboard_in_enabled) return;
-		// Only drive remote-clipboard sync from the stream; don't hijack paste into
-		// page form fields (settings UI, etc.). The stream's overlay input is exempt.
-		const ae = document.activeElement;
-		if (ae && ae.id !== 'overlayInput' &&
-			(ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable)) {
-			return;
-		}
-		const cd = event.clipboardData;
-		if (!cd) return;
-		// Prefer an image when binary clipboard is on and the payload carries one.
-		if (enable_binary_clipboard && cd.items) {
-			for (let i = 0; i < cd.items.length; i++) {
-				const it = cd.items[i];
-				if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
-					const file = it.getAsFile();
-					if (file) {
-						file.arrayBuffer()
-							.then((buf) => sendClipboardData(buf, it.type))
-							.catch((err) => console.warn(`Paste image read failed: ${err && err.name}`));
-						return;
-					}
-				}
-			}
-		}
-		const text = cd.getData('text/plain');
-		if (text) sendClipboardData(text);
-	}
 
 	function handleWindowBlur() {
 		// reset keyboard to avoid stuck keys.
@@ -1841,7 +1468,6 @@ export default function webrtc() {
 					} else {
 						webrtc.sendDataChannelMessage(`cbd,${tid},${b64Chunk}`);
 					}
-					await new Promise(resolve => setTimeout(resolve, 10));
 				}
 				if (mimeType === 'text/plain') {
 					webrtc.sendDataChannelMessage(`cwe,${tid}`);
@@ -2089,17 +1715,15 @@ export default function webrtc() {
 				document.addEventListener('visibilitychange', handleVisibilityChange);
 			}
 
-			// Additional displays (#display2-*) have no WebRTC pipeline: connecting one
-			// as a second controller would seize slot 1 and the two pages would evict
-			// each other in an endless takeover loop, killing the primary session.
-			// Fail this page safely instead; the capability lives in WebSockets mode.
-			if (hash.startsWith('#display2')) {
-				if (statusDisplayElement) {
-					statusDisplayElement.textContent = 'Additional displays are not supported over WebRTC yet - switch to WebSockets mode.';
-					statusDisplayElement.classList.remove('hidden');
-				}
-				console.warn('[webrtc] #display2 requested but WebRTC has no multi-display pipeline; not connecting.');
-				return;
+			// Additional displays: signaling scopes controller/slot uniqueness per
+			// display_id and the server runs one media pipeline per display, so a
+			// #display2-<position> page streams its own region of the extended
+			// desktop (websockets parity). The position rides the connect metadata.
+			const displayId = hash.startsWith('#display2') ? 'display2' : 'primary';
+			let displayPosition = 'right';
+			if (displayId === 'display2') {
+				const posMatch = hash.match(/^#display2-(right|left|up|down)/);
+				if (posMatch) displayPosition = posMatch[1];
 			}
 
 			// WebRTC entrypoint, connect to the signaling server
@@ -2113,7 +1737,7 @@ export default function webrtc() {
 			// recovery reload so a superseded page can't re-enter the takeover loop.
 			let fatalConnectionHalt = false;
 			let pcRecoveryTimer = null;
-			var signaling = new WebRTCSignaling(url, clientRole, clientSlot, isStrictViewer, authToken);
+			var signaling = new WebRTCSignaling(url, clientRole, clientSlot, isStrictViewer, authToken, displayId, displayPosition);
 			// A plain GET on the signaling endpoint returns 409 exactly when the
 			// server is serving WebSockets. After repeated connect failures, probe
 			// once and converge the stored mode instead of reload-looping.
@@ -2321,13 +1945,7 @@ export default function webrtc() {
 				// Actions to take whenever window changes focus
 				window.addEventListener('focus', handleWindowFocus);
 				window.addEventListener('blur', handleWindowBlur);
-				// Safari/Firefox clipboard parity: Ctrl/Cmd+V read, Ctrl/Cmd+C write.
-				if (!isChromium) {
-					window.addEventListener('keydown', handleClipboardKeydown, true);
-					// WebKit/Safari reject clipboard.read() from the keydown; the 'paste'
-					// event is allowed, so paste-to-server runs off it on non-Chromium.
-					window.addEventListener('paste', handleClipboardPaste, true);
-				}
+				clipboardGestures.wire();
 			}
 
 			webrtc.onclipboardcontent = async (msg) => {
@@ -2550,11 +2168,7 @@ export default function webrtc() {
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
 			releaseWakeLock();
 			preferredOutputDeviceId = null;
-			// Mirror the non-Chromium keydown registration (capture=true) so it doesn't leak.
-			if (!isChromium) {
-				window.removeEventListener('keydown', handleClipboardKeydown, true);
-				window.removeEventListener('paste', handleClipboardPaste, true);
-			}
+			clipboardGestures.unwire();
 
 			try {
 				clipboardWorker.terminate();

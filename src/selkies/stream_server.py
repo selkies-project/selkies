@@ -31,7 +31,7 @@ from abc import ABCMeta, abstractmethod
 logger = logging.getLogger("stream_server")
 
 
-# Inlined header/footer HTML for the /files directory index.
+# Inlined header/footer HTML for the /api/files directory index.
 FILE_INDEX_HEADER = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -289,7 +289,7 @@ FILE_INDEX_FOOTER = """    </div> <!-- closes .page-container -->
         }
 
         function processDirectoryListing() {
-            const webPathPrefix = '/files/';
+            const webPathPrefix = '/api/files/';
             let diskPathPrefix = '';
             const injectedPathPrefix = window.__SELKIES_INJECTED_PATH_PREFIX__ || '';
             if (injectedPathPrefix) {
@@ -830,6 +830,67 @@ class CentralizedStreamServer:
         except Exception as e:
             return web.json_response({"status": "error", "message": str(e)}, status=400)
 
+    async def handle_upload(self, request: web.Request) -> web.Response:
+        """Stream a client file upload to the file-manager directory over HTTP.
+
+        Available in every streaming mode and not bounded by the data-channel /
+        WebSocket per-message size, so it saturates the link where the per-chunk
+        SCTP path cannot. The destination path (relative to the file-manager
+        root) arrives URL-encoded in the X-Upload-Path header; the body streams
+        straight to disk on the executor, so the event loop keeps serving the
+        stream during the transfer. Path safety mirrors the data-channel path:
+        no traversal outside the root, and O_NOFOLLOW blocks a planted symlink.
+        """
+        settings = request.app["settings"]
+        if "upload" not in settings.file_transfers:
+            return web.json_response({"status": "error", "message": "uploads disabled"}, status=403)
+        root = getattr(settings, "file_manager_path", "") or ""
+        if not root:
+            return web.json_response({"status": "error", "message": "uploads disabled"}, status=403)
+        root = os.path.expanduser(root)
+        rel = urllib.parse.unquote(request.headers.get("X-Upload-Path", "") or "")
+        sane = os.path.normpath(rel.strip("/\\"))
+        parts = [c for c in sane.split(os.sep) if c and c != "."]
+        if not parts or ".." in parts:
+            return web.json_response({"status": "error", "message": "invalid upload path"}, status=400)
+        dest = os.path.join(root, *parts)
+        real_root = os.path.realpath(root)
+        parent = os.path.realpath(os.path.dirname(dest))
+        try:
+            within = os.path.commonpath([real_root, parent]) == real_root
+        except ValueError:
+            within = False
+        if not within:
+            return web.json_response({"status": "error", "message": "path escape rejected"}, status=400)
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as e:
+            return web.json_response({"status": "error", "message": f"mkdir failed: {e}"}, status=500)
+        declared = request.content_length
+        loop = asyncio.get_running_loop()
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        fh = os.fdopen(fd, "wb")
+        written = 0
+        try:
+            async for chunk in request.content.iter_chunked(1 << 20):
+                if declared is not None and written + len(chunk) > declared:
+                    raise ValueError("body exceeds declared Content-Length")
+                await loop.run_in_executor(None, fh.write, chunk)
+                written += len(chunk)
+            await loop.run_in_executor(None, fh.close)
+        except Exception as e:
+            try:
+                fh.close()
+            except Exception:
+                pass
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            return web.json_response({"status": "error", "message": str(e)}, status=400)
+        logger.info(f"HTTP upload finished: {dest} ({written} bytes)")
+        return web.json_response({"status": "success", "bytes": written})
+
     async def handle_status(self, _: web.Request) -> web.Response:
         status = self._get_status()
         return web.json_response(status)
@@ -899,6 +960,10 @@ class CentralizedStreamServer:
                 self._copy_traversable(child, dst / child.name)
 
     async def fancy_index_handler(self, request: web.Request):
+        # The index exists solely to download files, so the listing is gated
+        # with the bytes.
+        if "download" not in self.settings.file_transfers:
+            return web.Response(status=403, text="Forbidden: downloads disabled")
         rel_path = request.match_info.get("path", "").lstrip("/")
         full_path = (self.upload_dir / rel_path).resolve()
 
@@ -973,7 +1038,7 @@ class CentralizedStreamServer:
 
         # Inject the current path into the H1 (which is left open in the header)
         escaped_rel_path = html.escape(rel_path)
-        current_display_path = f"/files/{escaped_rel_path}"
+        current_display_path = f"/api/files/{escaped_rel_path}"
 
         # JavaScript string escaping for upload_dir
         js_safe_upload_dir = json.dumps(str(self.upload_dir))
@@ -1024,6 +1089,7 @@ class CentralizedStreamServer:
             web.get(f"{api_prefix}/api/status", self.handle_status),
             web.get(f"{api_prefix}/api/health", self.handle_health),
             web.post(f"{api_prefix}/api/switch", self.handle_switch),
+            web.post(f"{api_prefix}/api/upload", self.handle_upload),
         ]
         # The Prometheus registry is process-global, so one mode-agnostic
         # endpoint serves both streaming modes.
@@ -1041,7 +1107,7 @@ class CentralizedStreamServer:
                 return web.FileResponse(os.path.join(self.static_fs_path, "index.html"))
 
             self.app.router.add_get(
-                f"{api_prefix}/files/{{path:.*}}", self.fancy_index_handler
+                f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler
             )
             self.app.router.add_get(f"{api_prefix}/", index_handler)
             self.app.router.add_static(

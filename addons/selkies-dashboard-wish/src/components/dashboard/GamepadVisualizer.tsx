@@ -6,6 +6,7 @@
 
 import React from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { t } from "@/i18n";
 
 const GAMEPAD_VIS_THRESHOLD = 0.1;
 const STICK_VIS_MULTIPLIER = 10;
@@ -25,7 +26,7 @@ export function GamepadVisualizer({ gamepadState, gamepadIndex }: GamepadVisuali
     return (
       <Card className="w-full bg-background/95 backdrop-blur-sm">
         <CardHeader>
-          <CardTitle>Loading Gamepad {gamepadIndex}...</CardTitle>
+          <CardTitle>{t('gamepads.loadingGamepad', { index: gamepadIndex })}</CardTitle>
         </CardHeader>
       </Card>
     );
@@ -70,7 +71,7 @@ export function GamepadVisualizer({ gamepadState, gamepadIndex }: GamepadVisuali
   return (
     <Card className="fixed top-4 right-4 w-80 z-50 bg-background/95 backdrop-blur-sm">
       <CardHeader>
-        <CardTitle>Gamepad {gamepadIndex}</CardTitle>
+        <CardTitle>{t('gamepads.gamepadTitle', { index: gamepadIndex })}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="gamepad-visualizer-instance">

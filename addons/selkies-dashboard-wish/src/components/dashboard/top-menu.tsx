@@ -50,6 +50,7 @@ import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, isSecondaryDisplay } from "@/utils";
+import { t } from "@/i18n";
 
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
 
@@ -592,7 +593,7 @@ export function TopMenu({
                   </Button>
                 </MenubarTrigger>
                 <MenubarContent align="start" className="min-w-[180px]">
-                  <MenubarLabel>Gaming</MenubarLabel>
+                  <MenubarLabel>{t('topMenu.gaming')}</MenubarLabel>
                   {(renderableSettings.gamingMode ?? true) && (
                     <MenubarItem
                       onClick={() => {
@@ -604,7 +605,7 @@ export function TopMenu({
                       }}
                     >
                       <Crosshair className="h-4 w-4 mr-2" />
-                      <span className="flex-1">Gaming Mode</span>
+                      <span className="flex-1">{t('gamingModeTitle')}</span>
                     </MenubarItem>
                   )}
                   {!isSecondaryDisplay && (renderableSettings.gamepadToggle ?? true) && (
@@ -616,9 +617,9 @@ export function TopMenu({
                       }}
                     >
                       <Gamepad2 className="h-4 w-4 mr-2" />
-                      <span className="flex-1">Gamepad Input</span>
+                      <span className="flex-1">{t('topMenu.gamepadInput')}</span>
                       <span className="text-xs text-muted-foreground ml-auto">
-                        {isGamepadEnabled ? 'On' : 'Off'}
+                        {isGamepadEnabled ? t('common.on') : t('common.off')}
                       </span>
                     </MenubarItem>
                   )}
@@ -653,7 +654,7 @@ export function TopMenu({
 
                 {!isSecondaryDisplay && (renderableSettings.coreButtons ?? true) && (
                   <>
-                    <MenubarLabel>Stream Controls</MenubarLabel>
+                    <MenubarLabel>{t('topMenu.streamControls')}</MenubarLabel>
 
                     {(renderableSettings.videoToggle ?? true) && (
                       <MenubarItem
@@ -664,9 +665,9 @@ export function TopMenu({
                         }}
                       >
                         <Monitor className="h-4 w-4 mr-2" />
-                        <span className="flex-1">Video Stream</span>
+                        <span className="flex-1">{t('topMenu.videoStream')}</span>
                         <span className="text-xs text-muted-foreground ml-auto">
-                          {isVideoActive ? 'On' : 'Off'}
+                          {isVideoActive ? t('common.on') : t('common.off')}
                         </span>
                       </MenubarItem>
                     )}
@@ -680,9 +681,9 @@ export function TopMenu({
                         }}
                       >
                         <Volume2 className="h-4 w-4 mr-2" />
-                        <span className="flex-1">Audio Stream</span>
+                        <span className="flex-1">{t('topMenu.audioStream')}</span>
                         <span className="text-xs text-muted-foreground ml-auto">
-                          {isAudioActive ? 'On' : 'Off'}
+                          {isAudioActive ? t('common.on') : t('common.off')}
                         </span>
                       </MenubarItem>
                     )}
@@ -696,9 +697,9 @@ export function TopMenu({
                         }}
                       >
                         <Mic className="h-4 w-4 mr-2" />
-                        <span className="flex-1">Microphone</span>
+                        <span className="flex-1">{t('topMenu.microphone')}</span>
                         <span className="text-xs text-muted-foreground ml-auto">
-                          {isMicrophoneActive ? 'On' : 'Off'}
+                          {isMicrophoneActive ? t('common.on') : t('common.off')}
                         </span>
                       </MenubarItem>
                     )}
@@ -712,9 +713,9 @@ export function TopMenu({
                         }}
                       >
                         <Gamepad2 className="h-4 w-4 mr-2" />
-                        <span className="flex-1">Gamepad Input</span>
+                        <span className="flex-1">{t('topMenu.gamepadInput')}</span>
                         <span className="text-xs text-muted-foreground ml-auto">
-                          {isGamepadEnabled ? 'Enabled' : 'Disabled'}
+                          {isGamepadEnabled ? t('common.enabled') : t('common.disabled')}
                         </span>
                       </MenubarItem>
                     )}
@@ -723,13 +724,13 @@ export function TopMenu({
                   </>
                 )}
 
-                <MenubarLabel>Tools & Panels</MenubarLabel>
+                <MenubarLabel>{t('topMenu.toolsPanels')}</MenubarLabel>
 
                 {(renderableSettings.clipboard ?? true) && !isSecondaryDisplay && (
                   <MenubarSub>
                     <MenubarSubTrigger>
                       <ClipboardIcon className="h-4 w-4 mr-2" />
-                      Clipboard
+                      {t('sections.clipboard.title')}
                     </MenubarSubTrigger>
                     <MenubarSubContent>
                       <Clipboard />
@@ -741,7 +742,7 @@ export function TopMenu({
                   <MenubarSub>
                     <MenubarSubTrigger>
                       <FileText className="h-4 w-4 mr-2" />
-                      Files
+                      {t('sections.files.title')}
                     </MenubarSubTrigger>
                     <MenubarSubContent>
                       <Files />
@@ -753,7 +754,7 @@ export function TopMenu({
                   <MenubarSub>
                     <MenubarSubTrigger>
                       <Share2 className="h-4 w-4 mr-2" />
-                      Sharing
+                      {t('sections.sharing.title')}
                     </MenubarSubTrigger>
                     <MenubarSubContent>
                       <Sharing show={true} onClose={() => { }} />
@@ -764,7 +765,7 @@ export function TopMenu({
                 <MenubarSub>
                   <MenubarSubTrigger>
                     <Keyboard className="h-4 w-4 mr-2" />
-                    Shortcuts
+                    {t('sections.shortcuts.title')}
                   </MenubarSubTrigger>
                   <MenubarSubContent>
                     <ShortcutsMenu />
@@ -776,14 +777,14 @@ export function TopMenu({
                 {/* Mobile/Touch Controls */}
                 {(isMobile || hasDetectedTouch) && (
                   <>
-                    <MenubarLabel>Touch Controls</MenubarLabel>
+                    <MenubarLabel>{t('topMenu.touchControls')}</MenubarLabel>
 
                     {!isSecondaryDisplay && (
                       <MenubarItem onClick={handleToggleTouchGamepad}>
                         <Gamepad2 className="h-4 w-4 mr-2" />
-                        <span className="flex-1">Touch Gamepad</span>
+                        <span className="flex-1">{t('topMenu.touchGamepad')}</span>
                         <span className="text-xs text-muted-foreground ml-auto">
-                          {isTouchGamepadActive ? 'On' : 'Off'}
+                          {isTouchGamepadActive ? t('common.on') : t('common.off')}
                         </span>
                       </MenubarItem>
                     )}
@@ -791,9 +792,9 @@ export function TopMenu({
                     {(renderableSettings.trackpad ?? true) && (
                       <MenubarItem onClick={handleToggleTrackpadMode}>
                         <Touchpad className="h-4 w-4 mr-2" />
-                        <span className="flex-1">Trackpad Mode</span>
+                        <span className="flex-1">{t('trackpadModeTitle')}</span>
                         <span className="text-xs text-muted-foreground ml-auto">
-                          {isTrackpadModeActive ? 'On' : 'Off'}
+                          {isTrackpadModeActive ? t('common.on') : t('common.off')}
                         </span>
                       </MenubarItem>
                     )}
@@ -801,7 +802,7 @@ export function TopMenu({
                     {(renderableSettings.keyboardButton ?? true) && (
                       <MenubarItem onClick={handleShowVirtualKeyboard}>
                         <Keyboard className="h-4 w-4 mr-2" />
-                        <span className="flex-1">Virtual Keyboard</span>
+                        <span className="flex-1">{t('topMenu.virtualKeyboard')}</span>
                       </MenubarItem>
                     )}
 
@@ -809,19 +810,15 @@ export function TopMenu({
                   </>
                 )}
 
-                {/* Second Screen Support (no WebRTC multi-display pipeline: a second
-                    controller would evict the primary in a takeover loop) */}
+                {/* Second Screen Support (both transports run one pipeline per display) */}
                 {!isSecondaryDisplay && (
                   <>
                     <MenubarItem
                       onClick={handleAddScreenClick}
-                      disabled={localStorage.getItem(getPrefixedKey("stream_mode")) === "webrtc"}
-                      title={localStorage.getItem(getPrefixedKey("stream_mode")) === "webrtc"
-                        ? "Additional screens require WebSockets mode"
-                        : undefined}
+                      title={t('sections.screen.addScreenTitle')}
                     >
                       <ScreenShare className="h-4 w-4 mr-2" />
-                      <span className="flex-1">Add Second Screen</span>
+                      <span className="flex-1">{t('sections.screen.addScreenTitle')}</span>
                     </MenubarItem>
                     <MenubarSeparator />
                   </>
@@ -870,7 +867,7 @@ export function TopMenu({
                     <LayoutGrid className="h-4 w-4" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>Apps</TooltipContent>
+                <TooltipContent>{t('sections.apps.title')}</TooltipContent>
               </Tooltip>
             )}
 
@@ -885,7 +882,7 @@ export function TopMenu({
                   <Settings2 className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Settings</TooltipContent>
+              <TooltipContent>{t('topMenu.settings')}</TooltipContent>
             </Tooltip>
 
             {(renderableSettings.stats ?? true) && !isSecondaryDisplay && (
@@ -900,7 +897,7 @@ export function TopMenu({
                     <Gauge className="h-4 w-4" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>System Monitoring</TooltipContent>
+                <TooltipContent>{t('topMenu.systemMonitoring')}</TooltipContent>
               </Tooltip>
             )}
 
@@ -923,7 +920,7 @@ export function TopMenu({
                     <Maximize className="h-4 w-4" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>Toggle Fullscreen</TooltipContent>
+                <TooltipContent>{t('topMenu.toggleFullscreen')}</TooltipContent>
               </Tooltip>
             )}
 
@@ -939,7 +936,7 @@ export function TopMenu({
                     <Touchpad className="h-4 w-4" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>Trackpad Mode</TooltipContent>
+                <TooltipContent>{t('trackpadModeTitle')}</TooltipContent>
               </Tooltip>
             )}
 
@@ -954,7 +951,7 @@ export function TopMenu({
                   <Hand className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Drag Handle</TooltipContent>
+              <TooltipContent>{t('topMenu.dragHandle')}</TooltipContent>
             </Tooltip>
           </div>
         </div>

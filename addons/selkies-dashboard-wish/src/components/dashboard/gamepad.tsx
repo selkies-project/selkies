@@ -8,6 +8,7 @@ import * as React from "react";
 import { GamepadVisualizer } from "@/components/dashboard/GamepadVisualizer";
 import { Button } from "@/components/ui/button";
 import { Keyboard } from "lucide-react";
+import { t } from "@/i18n";
 
 const TOUCH_GAMEPAD_HOST_DIV_ID = 'touch-gamepad-host';
 
@@ -181,7 +182,7 @@ export function Gamepad({ isGamepadEnabled, onGamepadToggle }: GamepadProps) {
         <div className="px-3 py-2">
             {isTouchGamepadActive && (
                 <p className="text-sm text-muted-foreground">
-                    Physical gamepad display is hidden while touch gamepad is active.
+                    {t('sections.gamepads.physicalHiddenForTouch')}
                 </p>
             )}
             {!isTouchGamepadActive && (

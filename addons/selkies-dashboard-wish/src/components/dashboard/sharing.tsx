@@ -12,30 +12,31 @@ import { Badge } from "@/components/ui/badge";
 import { Info } from "lucide-react";
 import { toast } from "sonner";
 import { computeRenderableSettings, getLastServerSettings } from "@/utils";
+import { t } from "@/i18n";
 
 const sharingLinks = [
 	{
 		id: "shared",
-		label: "Viewer",
-		badge: "Read Only",
+		label: t('sharing.viewerLabel'),
+		badge: t('sharing.viewerBadge'),
 		hash: "#shared",
 	},
 	{
 		id: "player2",
-		label: "Controller 2",
-		badge: "Gamepad 2",
+		label: t('sharing.controllerLabel', { n: 2 }),
+		badge: t('sharing.controllerBadge', { n: 2 }),
 		hash: "#player2",
 	},
 	{
 		id: "player3",
-		label: "Controller 3",
-		badge: "Gamepad 3",
+		label: t('sharing.controllerLabel', { n: 3 }),
+		badge: t('sharing.controllerBadge', { n: 3 }),
 		hash: "#player3",
 	},
 	{
 		id: "player4",
-		label: "Controller 4",
-		badge: "Gamepad 4",
+		label: t('sharing.controllerLabel', { n: 4 }),
+		badge: t('sharing.controllerBadge', { n: 4 }),
 		hash: "#player4",
 	},
 ];
@@ -80,16 +81,16 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 			setTimeout(() => setCopiedId(null), 2000);
 			
 			// Show success toast
-			toast.success(`${label} Link Copied`, {
-				description: `Link copied to clipboard: ${fullUrl}`,
+			toast.success(t('notifications.copiedTitle', { label }), {
+				description: t('notifications.copiedMessage', { textToCopy: fullUrl }),
 				duration: 3000,
 			});
 		} catch (err) {
 			console.error("Failed to copy link: ", err);
-			
+
 			// Show error toast
-			toast.error(`Failed to Copy ${label} Link`, {
-				description: "Could not copy link to clipboard",
+			toast.error(t('notifications.copyFailedTitle', { label }), {
+				description: t('notifications.copyFailedError'),
 				duration: 5000,
 			});
 		}
@@ -112,7 +113,7 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 			<Card className="w-[320px] bg-background/95 backdrop-blur-sm border shadow-lg rounded-lg relative p-4">
 				<div className="text-center text-muted-foreground">
 					<Info className="h-8 w-8 mx-auto mb-2" />
-					<p className="text-sm">Sharing is disabled by the server administrator.</p>
+					<p className="text-sm">{t('sharing.disabledByAdmin')}</p>
 				</div>
 			</Card>
 		);
@@ -122,7 +123,7 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 		<Card className="w-[320px] bg-background/95 backdrop-blur-sm border shadow-lg rounded-lg relative p-2">
 			<div className="px-2 py-0 flex flex-col gap-2">
 				<div className="flex items-center justify-between mb-1">
-					<CardTitle className="text-xs font-bold">Share Session Links</CardTitle>
+					<CardTitle className="text-xs font-bold">{t('sharing.shareLinksTitle')}</CardTitle>
 					<Tooltip>
 						<TooltipTrigger asChild>
 							<span className="inline-block cursor-help">
@@ -130,8 +131,8 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 							</span>
 						</TooltipTrigger>
 						<TooltipContent className="text-sm bg-primary text-primary-foreground">
-							Share these links to allow others to join your session as a viewer or as a controller.<br />
-							Each link grants access to a specific role.
+							{t('sharing.tooltipLine1')}<br />
+							{t('sharing.tooltipLine2')}
 						</TooltipContent>
 					</Tooltip>
 				</div>
@@ -148,12 +149,12 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 										size="sm"
 										className="px-2 py-0.5 h-6 text-xs font-medium"
 										onClick={() => handleCopyLink(fullUrl, link.id, link.label)}
-										aria-label={`Copy ${link.label} link`}
+										aria-label={t('sharing.copyAria', { label: link.label })}
 									>
 										{copiedId === link.id ? (
-											<span className="text-green-600">Copied!</span>
+											<span className="text-green-600">{t('sharing.copied')}</span>
 										) : (
-											<span>Copy</span>
+											<span>{t('sharing.copy')}</span>
 										)}
 									</Button>
 								</div>
@@ -163,7 +164,7 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 				</div>
 				{filteredSharingLinks.length === 0 && (
 					<div className="text-center text-muted-foreground py-4">
-						<p className="text-sm">No sharing options are currently available.</p>
+						<p className="text-sm">{t('sharing.noneAvailable')}</p>
 					</div>
 				)}
 			</div>

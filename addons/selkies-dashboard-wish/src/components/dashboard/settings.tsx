@@ -6,7 +6,9 @@
 
 import { Card, CardContent } from "@/components/ui/card";
 import { displayLabel } from "../../../../selkies-web-core/lib/util.js";
-import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
+import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
+    USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
+    USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
@@ -21,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { ChevronUp } from "lucide-react";
 import React, { useState, useEffect, useCallback } from "react";
 import { getPrefixedKey, getRoutePrefix, computeRenderableSettings, getLastServerSettings, isSecondaryDisplay } from "@/utils";
+import { t, tl } from "@/i18n";
 
 // Constants
 // Mirror the server's audio_bitrate allowed enum (settings.py) so the slider
@@ -211,14 +214,10 @@ export function Settings() {
         HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     const [rateControlMode, setRateControlMode] = useConditionalSetting(
         RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-    const [videoFullColor, setVideoFullColor] = useState(() => {
-        const saved = localStorage.getItem(getPrefixedKey("video_fullcolor"));
-        return saved !== null ? saved === 'true' : false;
-    });
-    const [videoStreamingMode, setVideoStreamingMode] = useState(() => {
-        const saved = localStorage.getItem(getPrefixedKey("video_streaming_mode"));
-        return saved !== null ? saved === 'true' : false;
-    });
+    const [videoFullColor, setVideoFullColor] = useConditionalSetting(
+        VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
+        VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     const [jpegQuality, setJpegQuality] = useState(() =>
         parseInt(localStorage.getItem(getPrefixedKey("jpeg_quality")), 10) || 60
     );
@@ -231,28 +230,24 @@ export function Settings() {
     const [videoPaintoverBurstFrames, setVideoPaintoverBurstFrames] = useState(() =>
         parseInt(localStorage.getItem(getPrefixedKey("video_paintover_burst_frames")), 10) || 5
     );
-    const [usePaintOverQuality, setUsePaintOverQuality] = useState(() => {
-        const saved = localStorage.getItem(getPrefixedKey("use_paint_over_quality"));
-        return saved !== null ? saved === 'true' : true;
-    });
-    const [useCpu, setUseCpu] = useState(() => {
-        const saved = localStorage.getItem(getPrefixedKey("use_cpu"));
-        return saved !== null ? saved === 'true' : false;
-    });
+    const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
+        USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    const [useCpu, setUseCpu] = useConditionalSetting(
+        USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
 
-    // Anti-aliasing and Browser Cursors State
+    // Anti-aliasing stays client-only (no server truth), so it keeps its own state.
     const [antiAliasing, setAntiAliasing] = useState(() => {
         const saved = localStorage.getItem(getPrefixedKey("antiAliasingEnabled"));
         return saved !== null ? saved === "true" : true;
     });
-    const [useBrowserCursors, setUseBrowserCursors] = useState(() => {
-        const saved = localStorage.getItem(getPrefixedKey("use_browser_cursors"));
-        return saved !== null ? saved === "true" : false;
-    });
-    const [forceAlignedResolution, setForceAlignedResolution] = useState(() => {
-        const saved = localStorage.getItem(getPrefixedKey("force_aligned_resolution"));
-        return saved !== null ? saved === "true" : false;
-    });
+    const [useBrowserCursors, setUseBrowserCursors] = useConditionalSetting(
+        USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    // The value the core reports as actually in effect (multi-monitor forces
+    // browser cursors on); null until the core reports. The toggle displays this
+    // over the stored preference so it never lies about the live state.
+    const [effectiveCursor, setEffectiveCursor] = useState<boolean | null>(null);
+    const [forceAlignedResolution, setForceAlignedResolution] = useConditionalSetting(
+        FORCE_ALIGNED_RESOLUTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
 
     // Audio device state
     const [audioInputDevices, setAudioInputDevices] = useState<any[]>([]);
@@ -299,6 +294,11 @@ export function Settings() {
                 console.log("Settings received server settings:", event.data.payload);
                 setServerSettings(event.data.payload);
                 setRenderableSettings(computeRenderableSettings(event.data.payload));
+            }
+            // The core reports the cursor value actually in effect (multi-monitor
+            // forces browser cursors on); reflect it so the toggle can't lie.
+            if (event.data?.type === "effectiveCursorState" && typeof event.data.value === "boolean") {
+                setEffectiveCursor(event.data.value);
             }
             // Keep the dropdowns in sync when a device is picked elsewhere
             // (e.g. the core's dev sidebar posts the same message type).
@@ -423,61 +423,36 @@ export function Settings() {
             setVideoPaintoverBurstFrames(final);
         }
 
-        // Boolean settings
-        const s_video_fullcolor = serverSettings.video_fullcolor;
-        if (s_video_fullcolor) {
-            const final = s_video_fullcolor.locked ? s_video_fullcolor.value : getStoredBool("video_fullcolor", s_video_fullcolor.value);
-            setVideoFullColor(final);
-        }
-
-        const s_video_streaming_mode = serverSettings.video_streaming_mode;
-        if (s_video_streaming_mode) {
-            const final = s_video_streaming_mode.locked ? s_video_streaming_mode.value : getStoredBool("video_streaming_mode", s_video_streaming_mode.value);
-            setVideoStreamingMode(final);
-        }
-
-        const s_use_paint_over_quality = serverSettings.use_paint_over_quality;
-        if (s_use_paint_over_quality) {
-            const stored = localStorage.getItem(getPrefixedKey("use_paint_over_quality"));
-            const final = s_use_paint_over_quality.locked ? s_use_paint_over_quality.value : (stored !== null ? stored === 'true' : s_use_paint_over_quality.value);
-            setUsePaintOverQuality(final);
-        }
-
-        const s_use_cpu = serverSettings.use_cpu;
-        if (s_use_cpu) {
-            const final = s_use_cpu.locked ? s_use_cpu.value : getStoredBool("use_cpu", s_use_cpu.value);
-            setUseCpu(final);
-        }
+        // video_fullcolor, video_streaming_mode, use_paint_over_quality, use_cpu,
+        // use_browser_cursors and force_aligned_resolution now resolve through the
+        // shared ladder (useConditionalSetting above), so they stay overridden- and
+        // locked-aware without a bespoke sync line here.
 
         const s_scaling_dpi = serverSettings.scaling_dpi;
         if (s_scaling_dpi) {
             const stored = getStoredInt("scaling_dpi");
-            // Precedence: explicit client (stored) > explicit server (overridden) > local-scaling
-            // default. A non-overridden server value is the built-in 96, which the default replaces.
-            const final = s_scaling_dpi.allowed.includes(String(stored)) ? stored
-                : (s_scaling_dpi.overridden ? parseInt(s_scaling_dpi.value, 10) : deriveDpiFromDpr());
-            setSelectedDpi(final);
-            // A derived default only exists on this side of the wire: without a post
-            // the server keeps its built-in DPI and the slider is just a label. Send
-            // it when nothing explicit governs scaling — no client-stored value, no
-            // server override, no manual resolution — and the server isn't there yet.
+            const storedAllowed = s_scaling_dpi.allowed.includes(String(stored));
+            const serverVal = parseInt(s_scaling_dpi.value, 10);
+            const derived = deriveDpiFromDpr();
             const manualActive = !!localStorage.getItem(getPrefixedKey("manual_width"))
                 || serverSettings?.is_manual_resolution_mode?.value === true;
-            if (!s_scaling_dpi.allowed.includes(String(stored)) && !s_scaling_dpi.overridden
-                && !manualActive && final !== parseInt(s_scaling_dpi.value, 10)) {
-                debouncedPostSetting({ scaling_dpi: final });
+            // The derived default only exists client-side: without a post the server
+            // keeps its built-in DPI, so we send it only when nothing explicit governs
+            // scaling (no client choice, no override, no manual resolution) and it
+            // differs from what the server already has.
+            const willPostDerived = !storedAllowed && !s_scaling_dpi.overridden
+                && !manualActive && derived !== serverVal;
+            // The label must show the value ACTUALLY in effect on the server:
+            // client choice > server override > the derived default (only if we post
+            // it) > the server's current value. Never a derived value we didn't apply.
+            const final = storedAllowed ? stored
+                : s_scaling_dpi.overridden ? serverVal
+                : willPostDerived ? derived
+                : serverVal;
+            setSelectedDpi(final);
+            if (willPostDerived) {
+                debouncedPostSetting({ scaling_dpi: derived });
             }
-        }
-
-        // Anti-aliasing and Browser Cursors settings
-        const s_use_browser_cursors = serverSettings.use_browser_cursors;
-        if (s_use_browser_cursors) {
-            const final = s_use_browser_cursors.locked ? s_use_browser_cursors.value : getStoredBool("use_browser_cursors", s_use_browser_cursors.value);
-            setUseBrowserCursors(final);
-        }
-        const s_force_aligned = serverSettings.force_aligned_resolution;
-        if (s_force_aligned) {
-            setForceAlignedResolution(s_force_aligned.locked ? s_force_aligned.value : getStoredBool("force_aligned_resolution", s_force_aligned.value));
         }
     }, [serverSettings, streamMode]);
 
@@ -502,7 +477,7 @@ export function Settings() {
 
                 devices.forEach((device, index) => {
                     if (!device.deviceId) return;
-                    const label = device.label || `Device ${index + 1}`;
+                    const label = device.label || t(device.kind === 'audiooutput' ? 'sections.audio.defaultOutputLabelFallback' : 'sections.audio.defaultInputLabelFallback', { index: index + 1 });
 
                     if (device.kind === 'audioinput') {
                         inputs.push({ deviceId: device.deviceId, label: label });
@@ -518,7 +493,7 @@ export function Settings() {
 
             } catch (err) {
                 console.error('Error getting media devices:', err);
-                setAudioDeviceError(err.message || 'Failed to load audio devices');
+                setAudioDeviceError(err.message || t('sections.audio.deviceErrorDefault', { errorName: err.name || 'unknown' }));
             } finally {
                 setIsLoadingAudioDevices(false);
             }
@@ -663,38 +638,25 @@ export function Settings() {
     };
 
     const handleH264FullColorToggle = () => {
-        const newFullColorState = !videoFullColor;
-        setVideoFullColor(newFullColorState);
-        localStorage.setItem(getPrefixedKey('video_fullcolor'), newFullColorState.toString());
-        debouncedPostSetting({ video_fullcolor: newFullColorState });
+        writeConditional(VIDEO_FULLCOLOR_SPEC, !videoFullColor, setVideoFullColor, { persist: true });
     };
 
     const handleH264StreamingModeToggle = () => {
-        const newStreamingModeState = !videoStreamingMode;
-        setVideoStreamingMode(newStreamingModeState);
-        localStorage.setItem(getPrefixedKey('video_streaming_mode'), newStreamingModeState.toString());
-        debouncedPostSetting({ video_streaming_mode: newStreamingModeState });
+        writeConditional(VIDEO_STREAMING_MODE_SPEC, !videoStreamingMode, setVideoStreamingMode, { persist: true });
     };
 
     const handleUsePaintOverQualityToggle = () => {
-        const newUsePaintOverQualityState = !usePaintOverQuality;
-        setUsePaintOverQuality(newUsePaintOverQualityState);
-        localStorage.setItem(getPrefixedKey('use_paint_over_quality'), newUsePaintOverQualityState.toString());
-        debouncedPostSetting({ use_paint_over_quality: newUsePaintOverQualityState });
+        writeConditional(USE_PAINT_OVER_QUALITY_SPEC, !usePaintOverQuality, setUsePaintOverQuality, { persist: true });
     };
 
     const handleUseCpuToggle = () => {
-        const newUseCpuState = !useCpu;
-        setUseCpu(newUseCpuState);
-        localStorage.setItem(getPrefixedKey('use_cpu'), newUseCpuState.toString());
-        debouncedPostSetting({ use_cpu: newUseCpuState });
+        writeConditional(USE_CPU_SPEC, !useCpu, setUseCpu, { persist: true });
     };
 
-    // Anti-aliasing and Browser Cursors Handlers
+    // Anti-aliasing stays client-only; the core persists antiAliasingEnabled itself.
     const handleAntiAliasingToggle = () => {
         const newState = !antiAliasing;
         setAntiAliasing(newState);
-        // Core persists antiAliasingEnabled itself when handling the message.
         window.postMessage(
             { type: 'setAntiAliasing', value: newState },
             window.location.origin
@@ -702,20 +664,13 @@ export function Settings() {
     };
 
     const handleUseBrowserCursorsToggle = () => {
-        const newState = !useBrowserCursors;
-        setUseBrowserCursors(newState);
-        // Core persists use_browser_cursors itself when handling the message.
-        window.postMessage(
-            { type: 'setUseBrowserCursors', value: newState },
-            window.location.origin
-        );
+        // The core owns persistence; propagate the new preference and let the core
+        // report the effective (possibly multi-monitor-forced) value back.
+        writeConditional(USE_BROWSER_CURSORS_SPEC, !useBrowserCursors, setUseBrowserCursors, { persist: false });
     };
 
     const handleForceAlignedResolutionToggle = () => {
-        const newState = !forceAlignedResolution;
-        setForceAlignedResolution(newState);
-        localStorage.setItem(getPrefixedKey('force_aligned_resolution'), newState.toString());
-        debouncedPostSetting({ force_aligned_resolution: newState });
+        writeConditional(FORCE_ALIGNED_RESOLUTION_SPEC, !forceAlignedResolution, setForceAlignedResolution, { persist: true });
     };
 
     // Manual/preset resolutions pair with CSS scaling: HiDPI off when one is
@@ -733,7 +688,7 @@ export function Settings() {
         const height = parseInt(heightVal, 10);
 
         if (isNaN(width) || width <= 0 || isNaN(height) || height <= 0) {
-            alert("Invalid resolution");
+            alert(t('alerts.invalidResolution'));
             return;
         }
         const evenWidth = roundDownToEven(width);
@@ -795,9 +750,9 @@ export function Settings() {
         <Card className="w-[300px] p-0 pb-4 bg-background/95 backdrop-blur-sm border shadow-sm">
             <Tabs defaultValue={showVideoTab ? "video" : showAudioTab ? "audio" : "resolution"} className="w-full">
                 <TabsList className={`grid w-full bg-muted/50 ${visibleTabCount === 3 ? 'grid-cols-3' : visibleTabCount === 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                    {showVideoTab && <TabsTrigger value="video">Video</TabsTrigger>}
-                    {showAudioTab && <TabsTrigger value="audio">Audio</TabsTrigger>}
-                    {showResolutionTab && <TabsTrigger value="resolution">Resolution</TabsTrigger>}
+                    {showVideoTab && <TabsTrigger value="video">{t('settingsTabs.video')}</TabsTrigger>}
+                    {showAudioTab && <TabsTrigger value="audio">{t('settingsTabs.audio')}</TabsTrigger>}
+                    {showResolutionTab && <TabsTrigger value="resolution">{t('settingsTabs.resolution')}</TabsTrigger>}
                 </TabsList>
 
                 {showResolutionTab && (
@@ -808,7 +763,7 @@ export function Settings() {
                                 {(renderableSettings.hidpi ?? true) && (
                                     <div className="flex items-center justify-between">
                                         <div className="space-y-0.5">
-                                            <label className="text-sm font-medium">HiDPI (Pixel Perfect)</label>
+                                            <label className="text-sm font-medium">{t('sections.screen.hidpiLabel')}</label>
                                         </div>
                                         <Switch
                                             checked={hidpiEnabled}
@@ -820,7 +775,7 @@ export function Settings() {
                                 {/* Anti-aliasing Toggle */}
                                 <div className="flex items-center justify-between">
                                     <div className="space-y-0.5">
-                                        <label className="text-sm font-medium">Anti-aliasing</label>
+                                        <label className="text-sm font-medium">{t('sections.screen.antiAliasingLabel')}</label>
                                     </div>
                                     <Switch
                                         checked={antiAliasing}
@@ -831,7 +786,7 @@ export function Settings() {
                                 {(renderableSettings.forceAlignedResolution ?? true) && (
                                     <div className="flex items-center justify-between">
                                         <div className="space-y-0.5">
-                                            <label className="text-sm font-medium">Force Aligned Resolution</label>
+                                            <label className="text-sm font-medium">{t('sections.screen.forceAlignedResolutionLabel')}</label>
                                         </div>
                                         <Switch
                                             checked={forceAlignedResolution}
@@ -843,10 +798,10 @@ export function Settings() {
                                 {(renderableSettings.useBrowserCursors ?? true) && (
                                     <div className="flex items-center justify-between">
                                         <div className="space-y-0.5">
-                                            <label className="text-sm font-medium">Use CSS Cursors</label>
+                                            <label className="text-sm font-medium">{t('sections.screen.useNativeCursorStylesLabel')}</label>
                                         </div>
                                         <Switch
-                                            checked={useBrowserCursors}
+                                            checked={effectiveCursor !== null ? effectiveCursor : useBrowserCursors}
                                             onCheckedChange={handleUseBrowserCursorsToggle}
                                         />
                                     </div>
@@ -854,7 +809,7 @@ export function Settings() {
 
                                 {(renderableSettings.uiScaling ?? true) && (
                                     <div className="space-y-2">
-                                        <label className="text-sm font-medium">UI Scaling</label>
+                                        <label className="text-sm font-medium">{t('sections.screen.uiScalingLabel')}</label>
                                         <DropdownMenu>
                                             <DropdownMenuTrigger asChild>
                                                 <Button variant="outline" className="w-full justify-between">
@@ -881,11 +836,11 @@ export function Settings() {
                         {!serverSettings?.is_manual_resolution_mode?.locked && (
                             <>
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium">Resolution Preset</label>
+                                    <label className="text-sm font-medium">{tl('sections.screen.presetLabel')}</label>
                                     <DropdownMenu>
                                         <DropdownMenuTrigger asChild>
                                             <Button variant="outline" className="w-full justify-between">
-                                                {presetValue || "-- Select Preset --"}
+                                                {presetValue || t('sections.screen.resolutionPresetSelect')}
                                                 <ChevronUp className="h-4 w-4 rotate-180" />
                                             </Button>
                                         </DropdownMenuTrigger>
@@ -923,24 +878,24 @@ export function Settings() {
 
                                 <div className="flex gap-2">
                                     <div className="flex-1 space-y-2">
-                                        <label className="text-sm font-medium">Width</label>
+                                        <label className="text-sm font-medium">{tl('sections.screen.widthLabel')}</label>
                                         <Input
                                             type="number"
                                             value={manualWidth}
                                             onChange={handleManualWidthChange}
-                                            placeholder="Width"
+                                            placeholder={t('sections.screen.widthPlaceholder')}
                                             min="1"
                                             step="2"
                                             className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                                         />
                                     </div>
                                     <div className="flex-1 space-y-2">
-                                        <label className="text-sm font-medium">Height</label>
+                                        <label className="text-sm font-medium">{tl('sections.screen.heightLabel')}</label>
                                         <Input
                                             type="number"
                                             value={manualHeight}
                                             onChange={handleManualHeightChange}
-                                            placeholder="Height"
+                                            placeholder={t('sections.screen.heightPlaceholder')}
                                             min="1"
                                             step="2"
                                             className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -954,14 +909,14 @@ export function Settings() {
                                         className="flex-1"
                                         onClick={handleSetManualResolution}
                                     >
-                                        Set
+                                        {t('screen.setButton')}
                                     </Button>
                                     <Button
                                         variant="outline"
                                         className="flex-1"
                                         onClick={handleResetResolution}
                                     >
-                                        Reset
+                                        {t('sections.screen.resetButton')}
                                     </Button>
                                 </div>
                             </>
@@ -972,7 +927,7 @@ export function Settings() {
                             className="w-full"
                             onClick={handleScaleLocallyToggle}
                         >
-                            Scale Locally: {scaleLocally ? "On" : "Off"}
+                            {tl('sections.screen.scaleLocallyLabel')}: {t(scaleLocally ? 'sections.screen.scaleLocallyOn' : 'sections.screen.scaleLocallyOff')}
                         </Button>
                     </CardContent>
                 </TabsContent>
@@ -983,7 +938,7 @@ export function Settings() {
                     <CardContent className="space-y-4">
                         {(renderableSettings.enableDualMode ?? (window as any).__SELKIES_DUAL_MODE__ ?? false) && (
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Streaming Mode</label>
+                                <label className="text-sm font-medium">{t('streamingModeTitle')}</label>
                                 <DropdownMenu>
                                     <DropdownMenuTrigger asChild>
                                         <Button variant="outline" className="w-full justify-between">
@@ -1007,7 +962,7 @@ export function Settings() {
 
                         {encoderRenderable && (
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Encoder</label>
+                                <label className="text-sm font-medium">{tl('sections.video.encoderLabel')}</label>
                                 <DropdownMenu>
                                     <DropdownMenuTrigger asChild>
                                         <Button variant="outline" className="w-full justify-between">
@@ -1031,7 +986,7 @@ export function Settings() {
 
                         {(renderableSettings.framerate ?? true) && (
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Frames per second ({framerate} FPS)</label>
+                                <label className="text-sm font-medium">{tl('sections.video.framerateLabel', { framerate })}</label>
                                 <div className="flex items-center gap-2">
                                     <Slider
                                         min={0}
@@ -1056,7 +1011,7 @@ export function Settings() {
                             <>
                                 {showRateControl && (
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium">Rate Control</label>
+                                    <label className="text-sm font-medium">{t('sections.video.rateControlLabel')}</label>
                                     <DropdownMenu>
                                         <DropdownMenuTrigger asChild>
                                             <Button variant="outline" className="w-full justify-between">
@@ -1077,7 +1032,7 @@ export function Settings() {
 
                                 {rateControlMode === 'cbr' && (renderableSettings.videoBitrate ?? true) && (
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium">Video Bitrate ({formatBitrate(videoBitRate)})</label>
+                                    <label className="text-sm font-medium">{tl('sections.video.bitrateLabel', { bitrate: formatBitrate(videoBitRate) })}</label>
                                     <div className="flex items-center gap-2">
                                         <Slider
                                             min={0}
@@ -1097,7 +1052,7 @@ export function Settings() {
 
                                 {rateControlMode === 'crf' && (renderableSettings.videoCRF ?? true) && (
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium">Video CRF ({videoCRF})</label>
+                                    <label className="text-sm font-medium">{tl('sections.video.crfLabel', { crf: videoCRF })}</label>
                                     <div className="flex items-center gap-2">
                                         <Slider
                                             min={0}
@@ -1123,7 +1078,7 @@ export function Settings() {
                                 {(renderableSettings.videoFullColor ?? true) && (
                                 <div className="flex items-center justify-between">
                                     <div className="space-y-0.5">
-                                        <label className="text-sm font-medium">Full Color (4:4:4)</label>
+                                        <label className="text-sm font-medium">{t('sections.video.fullColorLabel')}</label>
                                     </div>
                                     <Switch
                                         checked={videoFullColor}
@@ -1136,7 +1091,7 @@ export function Settings() {
                                 {(renderableSettings.videoStreamingMode ?? true) && (
                                 <div className="flex items-center justify-between">
                                     <div className="space-y-0.5">
-                                        <label className="text-sm font-medium">Turbo Mode</label>
+                                        <label className="text-sm font-medium">{t('sections.video.streamingModeLabel')}</label>
                                     </div>
                                     <Switch
                                         checked={videoStreamingMode}
@@ -1152,7 +1107,7 @@ export function Settings() {
                         {/* Base JPEG quality is independent of paint-over. */}
                         {showJpegOptions && (renderableSettings.jpegQuality ?? true) && (
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">JPEG Quality ({jpegQuality})</label>
+                                <label className="text-sm font-medium">{t('sections.video.jpegQualityLabel', { jpegQuality })}</label>
                                 <div className="flex items-center gap-2">
                                     <Slider
                                         min={serverSettings?.jpeg_quality?.min || 1}
@@ -1172,7 +1127,7 @@ export function Settings() {
                         {(isH264 || activeEncoder === 'jpeg') && (renderableSettings.usePaintOverQuality ?? true) && (
                             <div className="flex items-center justify-between">
                                 <div className="space-y-0.5">
-                                    <label className="text-sm font-medium">Use Paint-Over Quality</label>
+                                    <label className="text-sm font-medium">{t('sections.video.usePaintOverQualityLabel')}</label>
                                 </div>
                                 <Switch
                                     checked={usePaintOverQuality}
@@ -1186,7 +1141,7 @@ export function Settings() {
                             <>
                                 {(renderableSettings.videoPaintoverCRF ?? true) && (
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium">Paint-over CRF ({videoPaintoverCRF})</label>
+                                    <label className="text-sm font-medium">{tl('sections.video.paintoverCrfLabel', { crf: videoPaintoverCRF })}</label>
                                     <div className="flex items-center gap-2">
                                         <Slider
                                             min={serverSettings?.video_paintover_crf?.min || 5}
@@ -1202,7 +1157,7 @@ export function Settings() {
                                 )}
                                 {(renderableSettings.videoPaintoverBurstFrames ?? true) && (
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium">Paint-over Burst Frames ({videoPaintoverBurstFrames})</label>
+                                    <label className="text-sm font-medium">{tl('sections.video.paintoverBurstLabel', { frames: videoPaintoverBurstFrames })}</label>
                                     <div className="flex items-center gap-2">
                                         <Slider
                                             min={serverSettings?.video_paintover_burst_frames?.min || 1}
@@ -1221,7 +1176,7 @@ export function Settings() {
 
                         {showJpegOptions && usePaintOverQuality && (renderableSettings.paintOverJpegQuality ?? true) && (
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Paint-over JPEG Quality ({paintOverJpegQuality})</label>
+                                <label className="text-sm font-medium">{t('sections.video.paintOverJpegQualityLabel', { paintOverJpegQuality })}</label>
                                 <div className="flex items-center gap-2">
                                     <Slider
                                         min={serverSettings?.paint_over_jpeg_quality?.min || 1}
@@ -1241,7 +1196,7 @@ export function Settings() {
                         {activeEncoder === 'h264enc' && (renderableSettings.useCpu ?? true) && (
                             <div className="flex items-center justify-between">
                                 <div className="space-y-0.5">
-                                    <label className="text-sm font-medium">CPU Encoding</label>
+                                    <label className="text-sm font-medium">{t('sections.video.useCpuLabel')}</label>
                                 </div>
                                 <Switch
                                     checked={useCpu}
@@ -1259,7 +1214,7 @@ export function Settings() {
                     <CardContent className="space-y-4">
                         {(renderableSettings.audioBitrate ?? true) && (
                         <div className="space-y-2">
-                            <label className="text-sm font-medium">Audio Bitrate ({audioBitRate / 1000} kbps)</label>
+                            <label className="text-sm font-medium">{tl('sections.audio.bitrateLabel', { bitrate: audioBitRate / 1000 })}</label>
                             <div className="flex items-center gap-2">
                                 <Slider
                                     min={0}
@@ -1286,12 +1241,12 @@ export function Settings() {
                         )}
 
                         <div className="space-y-2">
-                            <label className="text-sm font-medium">Audio Input Device</label>
+                            <label className="text-sm font-medium">{tl('sections.audio.inputLabel')}</label>
                             <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
                                     <Button variant="outline" className="w-full justify-between" disabled={isLoadingAudioDevices || !!audioDeviceError}>
                                         <span className="truncate">
-                                            {audioInputDevices.find(d => d.deviceId === selectedInputDeviceId)?.label || 'Default'}
+                                            {audioInputDevices.find(d => d.deviceId === selectedInputDeviceId)?.label || t('audio.defaultDevice')}
                                         </span>
                                         <ChevronUp className="h-4 w-4 rotate-180 flex-shrink-0" />
                                     </Button>
@@ -1317,12 +1272,12 @@ export function Settings() {
 
                         {isOutputSelectionSupported && (
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Audio Output Device</label>
+                                <label className="text-sm font-medium">{tl('sections.audio.outputLabel')}</label>
                                 <DropdownMenu>
                                     <DropdownMenuTrigger asChild>
                                         <Button variant="outline" className="w-full justify-between" disabled={isLoadingAudioDevices || !!audioDeviceError}>
                                             <span className="truncate">
-                                                {audioOutputDevices.find(d => d.deviceId === selectedOutputDeviceId)?.label || 'Default'}
+                                                {audioOutputDevices.find(d => d.deviceId === selectedOutputDeviceId)?.label || t('audio.defaultDevice')}
                                             </span>
                                             <ChevronUp className="h-4 w-4 rotate-180 flex-shrink-0" />
                                         </Button>
@@ -1348,7 +1303,7 @@ export function Settings() {
                         )}
 
                         {!isOutputSelectionSupported && !isLoadingAudioDevices && !audioDeviceError && (
-                            <p className="text-sm text-muted-foreground">Audio output selection is not supported</p>
+                            <p className="text-sm text-muted-foreground">{t('sections.audio.outputNotSupported')}</p>
                         )}
                     </CardContent>
                 </TabsContent>

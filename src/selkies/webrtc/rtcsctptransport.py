@@ -67,6 +67,8 @@ SCTP_CAUSE_STALE_COOKIE = 0x0003
 SCTP_DATA_LAST_FRAG = 0x01
 SCTP_DATA_FIRST_FRAG = 0x02
 SCTP_DATA_UNORDERED = 0x04
+# RFC 7053 I-bit: the sender asks the receiver to acknowledge without delay.
+SCTP_DATA_SACK_IMMEDIATELY = 0x08
 
 SCTP_MAX_ASSOCIATION_RETRANS = 10
 SCTP_MAX_BURST = 4
@@ -544,9 +546,16 @@ class InboundStream:
         # ceiling on this so a peer that ignores flow control cannot grow the
         # buffer without bound (receive-side max-message-size enforcement).
         self.buffered_bytes = 0
+        # Count of LAST_FRAG chunks currently buffered. A message can only become
+        # deliverable once its final fragment is present, so pop_messages skips its
+        # whole-buffer scan while this is zero — otherwise reassembling one large
+        # message rescans the growing buffer per fragment (O(n^2)).
+        self.last_frag_count = 0
 
     def add_chunk(self, chunk: DataChunk) -> None:
         self.buffered_bytes += len(chunk.user_data)
+        if chunk.flags & SCTP_DATA_LAST_FRAG:
+            self.last_frag_count += 1
         if not self.reassembly or uint32_gt(chunk.tsn, self.reassembly[-1].tsn):
             self.reassembly.append(chunk)
             return
@@ -561,6 +570,10 @@ class InboundStream:
                 break
 
     def pop_messages(self) -> Iterator[tuple[int, int, bytes]]:
+        # No final fragment is buffered yet, so no message can be complete: skip
+        # the whole-buffer scan (this is what keeps reassembly O(n) not O(n^2)).
+        if self.last_frag_count == 0:
+            return
         pos = 0
         start_pos = None
         expected_tsn = None
@@ -604,6 +617,7 @@ class InboundStream:
                 user_data = b"".join(message_chunks)
                 if ordered and chunk.stream_seq == self.sequence_number:
                     self.sequence_number = uint16_add(self.sequence_number, 1)
+                self.last_frag_count -= 1
                 yield (chunk.stream_id, chunk.protocol, user_data)
                 start_pos = None
             pos += 1
@@ -629,6 +643,8 @@ class InboundStream:
             if uint32_gte(tsn, chunk.tsn):
                 pos = i
                 size += len(chunk.user_data)
+                if chunk.flags & SCTP_DATA_LAST_FRAG:
+                    self.last_frag_count -= 1
             else:
                 break
 
@@ -708,8 +724,23 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         self._sack_duplicates: list[int] = []
         self._sack_misordered: set[int] = set()
         self._sack_needed = False
+        # Delayed-SACK (RFC 4960 §6.2): acknowledge every second in-order packet
+        # rather than every one, halving SACK output on a bulk receive (the pure-
+        # Python receive path is CPU-bound). A short timer flushes a lone pending
+        # SACK so a final or cwnd-limited packet is never left unacknowledged, and
+        # a gap always acks immediately so the peer can fast-retransmit.
+        self._sack_delay = 0.020
+        self._sack_delay_handle: Optional[asyncio.TimerHandle] = None
+        self._sack_packets_since = 0
+        # A received DATA chunk carried the RFC 7053 I-bit: acknowledge at once
+        # (the peer is cwnd-limited and waiting on this SACK to send more).
+        self._sack_immediate = False
 
         # outbound
+        # True while at least one sent chunk is flagged for retransmit, so
+        # _transmit can skip its scan of the whole in-flight queue on the common
+        # lossless path (that scan is per-SACK, i.e. O(in-flight) every call).
+        self._retransmit_pending = False
         self._cwnd = 3 * USERDATA_MAX_LENGTH
         self._fast_recovery_exit = None
         self._fast_recovery_transmit = False
@@ -939,9 +970,19 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         for chunk in chunks:
             await self._receive_chunk(chunk)
 
-        # send SACK if needed
+        # SACK immediately on a gap/duplicate (so the peer can fast-retransmit)
+        # or on every second in-order packet; otherwise arm a short timer to
+        # flush the deferred acknowledgement.
         if self._sack_needed:
-            await self._send_sack()
+            if (self._sack_immediate or self._sack_misordered or self._sack_duplicates
+                    or self._sack_packets_since >= 1):
+                await self._send_sack()
+            else:
+                self._sack_packets_since += 1
+                if self._sack_delay_handle is None:
+                    self._sack_delay_handle = self._loop.call_later(
+                        self._sack_delay, self._sack_delay_expired
+                    )
 
     def _maybe_abandon(self, chunk: DataChunk) -> bool:
         """
@@ -1162,6 +1203,8 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         Handle a DATA chunk.
         """
         self._sack_needed = True
+        if chunk.flags & SCTP_DATA_SACK_IMMEDIATELY:
+            self._sack_immediate = True
 
         # mark as received
         if self._mark_received(chunk.tsn):
@@ -1289,6 +1332,7 @@ class RTCSctpTransport(AsyncIOEventEmitter):
                         schunk._misses = 0
                         if not self._maybe_abandon(schunk):
                             schunk._retransmit = True
+                            self._retransmit_pending = True
 
                         schunk._acked = False
                         self._flight_size_decrease(schunk)
@@ -1491,6 +1535,16 @@ class RTCSctpTransport(AsyncIOEventEmitter):
 
         self._sack_duplicates.clear()
         self._sack_needed = False
+        self._sack_immediate = False
+        self._sack_packets_since = 0
+        if self._sack_delay_handle is not None:
+            self._sack_delay_handle.cancel()
+            self._sack_delay_handle = None
+
+    def _sack_delay_expired(self) -> None:
+        self._sack_delay_handle = None
+        if self._sack_needed:
+            asyncio.ensure_future(self._send_sack())
 
     def _set_state(self, state: "RTCSctpTransport.State") -> None:
         """
@@ -1510,6 +1564,9 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             self._t1_cancel()
             self._t2_cancel()
             self._t3_cancel()
+            if self._sack_delay_handle is not None:
+                self._sack_delay_handle.cancel()
+                self._sack_delay_handle = None
             self.__state = "closed"
 
             # close data channels
@@ -1582,6 +1639,7 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         for chunk in self._sent_queue:
             if not self._maybe_abandon(chunk):
                 chunk._retransmit = True
+                self._retransmit_pending = True
         self._update_advanced_peer_ack_point()
 
         # adjust congestion window
@@ -1632,25 +1690,29 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             burst_size = 4 * USERDATA_MAX_LENGTH
         cwnd = min(self._flight_size + burst_size, self._cwnd)
 
-        # retransmit
-        retransmit_earliest = True
-        for chunk in self._sent_queue:
-            if chunk._retransmit:
-                if self._fast_recovery_transmit:
-                    self._fast_recovery_transmit = False
-                elif self._flight_size >= cwnd:
-                    return
-                self._flight_size_increase(chunk)
+        # retransmit — skip the whole-queue scan unless a chunk is actually
+        # flagged (no loss on the common path). An early return on a full cwnd
+        # leaves the flag set so the remaining marked chunks are retried later.
+        if self._retransmit_pending:
+            retransmit_earliest = True
+            for chunk in self._sent_queue:
+                if chunk._retransmit:
+                    if self._fast_recovery_transmit:
+                        self._fast_recovery_transmit = False
+                    elif self._flight_size >= cwnd:
+                        return
+                    self._flight_size_increase(chunk)
 
-                chunk._misses = 0
-                chunk._retransmit = False
-                chunk._sent_count += 1
-                await self._send_chunk(chunk)
-                if retransmit_earliest:
-                    # restart the T3 timer as the earliest outstanding TSN
-                    # is being retransmitted
-                    self._t3_restart()
-            retransmit_earliest = False
+                    chunk._misses = 0
+                    chunk._retransmit = False
+                    chunk._sent_count += 1
+                    await self._send_chunk(chunk)
+                    if retransmit_earliest:
+                        # restart the T3 timer as the earliest outstanding TSN
+                        # is being retransmitted
+                        self._t3_restart()
+                retransmit_earliest = False
+            self._retransmit_pending = False
 
         while self._outbound_queue and self._flight_size < cwnd:
             chunk = self._outbound_queue.popleft()
@@ -1660,6 +1722,12 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             # update counters
             chunk._sent_count += 1
             chunk._sent_time = time.time()
+
+            # RFC 7053: once this send makes us cwnd-limited, ask the receiver to
+            # acknowledge immediately (I-bit) so cwnd reopens without waiting a
+            # delayed-ack interval — the throughput fix for high-RTT links.
+            if self._flight_size + USERDATA_MAX_LENGTH >= self._cwnd:
+                chunk.flags |= SCTP_DATA_SACK_IMMEDIATELY
 
             await self._send_chunk(chunk)
             if not self._t3_handle:
