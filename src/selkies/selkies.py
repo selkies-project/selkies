@@ -3243,6 +3243,7 @@ class DataStreamingServer:
             cs.use_openh264 = (encoder == "openh264enc")
             _auto_gpu = os.environ.get("SELKIES_AUTO_GPU") or os.environ.get("AUTO_GPU") or ""
             if _auto_gpu and _auto_gpu.lower() not in ("false", "0", "no", "off"):
+                cs.auto_gpu = _auto_gpu
                 cs.encode_node_index = -2
             elif self.cli_args.dri_node:
                 cs.encode_node_index = parse_dri_node_to_index(self.cli_args.dri_node)
