@@ -33,7 +33,8 @@ from .webrtc.codecs import configure_multiopus
 from .webrtc_signaling import WebRTCSignalingClient
 from .signaling_server import WebRTCPeerManagement
 from .input_handler import WebRTCInput
-from .display_utils import resize_display, set_dpi, set_cursor_size, parse_gpu_id
+from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_id,
+                            compute_dual_layout, apply_extended_layout, get_new_res)
 from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
 from .settings import settings, AppSettings, SETTING_DEFINITIONS, build_client_settings_payload
 from types import SimpleNamespace
@@ -151,6 +152,14 @@ class WebRTCService(BaseStreamingService):
         self.mon_cloudflare_turn: Optional[CloudflareRTCMonitor] = None
         self.peer_manager: Optional[WebRTCPeerManagement] = None
         self.supervisor = supervisor
+        # Multi-display state (websockets-parity model): connected secondary
+        # display clients, the computed extended-desktop layout the input
+        # handler offsets against, and one media pipeline per display.
+        self.display_clients: Dict[str, Dict[str, Any]] = {}
+        self.display_layouts: Dict[str, Dict[str, int]] = {}
+        self.display_pipelines: Dict[str, MediaPipeline] = {}
+        self._display_lock = asyncio.Lock()
+        self._primary_dims: Optional[tuple] = None
 
         self._init_default_settings()
 
@@ -241,6 +250,7 @@ class WebRTCService(BaseStreamingService):
             turn_servers=turn_servers,
         )
         self.rtc_app.media_pipeline = self.media_pipeline
+        self.display_pipelines["primary"] = self.media_pipeline
 
         # Input handler
         self.input_handler = WebRTCInput(
@@ -259,6 +269,9 @@ class WebRTCService(BaseStreamingService):
             cursor_debug=self.args.debug_cursors,
             upload_dir=self.args.file_manager_path,
             is_wayland=IS_WAYLAND,
+            # Duck-typed layout source: send_x11_mouse offsets a secondary
+            # display's coordinates by display_layouts[display_id].
+            data_server_instance=self,
         )
         self.input_handler.initialize_upload_dir()
 
@@ -308,13 +321,21 @@ class WebRTCService(BaseStreamingService):
             )
 
     async def handle_session_start(
-        self, session_peer_id: str, client_type: str, client_token: Optional[str] = None
+        self, session_peer_id: str, client_type: str, client_token: Optional[str] = None,
+        display_id: str = "primary", display_position: str = "right",
     ) -> None:
         logger.info(
-            f"starting session for client peer id: {session_peer_id} of type: {client_type}"
+            f"starting session for client peer id: {session_peer_id} of type: {client_type} (display '{display_id}')"
         )
         try:
-            await self.rtc_app.start_rtc_connection(session_peer_id, client_type, client_token)
+            if display_id != "primary" and client_type == "controller":
+                if IS_WAYLAND:
+                    logger.warning("Secondary displays are X11-only; refusing display '%s' on Wayland.", display_id)
+                    return
+                # Dimensions arrive through the client's first resize message.
+                entry = self.display_clients.setdefault(display_id, {"width": 0, "height": 0})
+                entry["position"] = display_position
+            await self.rtc_app.start_rtc_connection(session_peer_id, client_type, client_token, display_id)
             # Initialize stats location directory
             if self.args.enable_webrtc_statistics:
                 await self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
@@ -384,14 +405,15 @@ class WebRTCService(BaseStreamingService):
         self.media_pipeline.on_pipeline_started = self.send_current_cursor
 
         # RTCApp callbacks
-        self.rtc_app.request_idr_frame = self.media_pipeline.dynamic_idr_frame
+        self.rtc_app.request_idr_frame = self.request_idr_for_display
+        self.rtc_app.start_display_media = self.start_display_media
+        self.rtc_app.stop_display_media = self.stop_display_media
         self.rtc_app.on_sdp = self.signaling_client.send_sdp
         self.rtc_app.on_ice = self.signaling_client.send_ice
         self.rtc_app.on_data_open = self.handle_data_channel_open
         self.rtc_app.on_data_close = lambda: logger.info("Data channel closed")
         self.rtc_app.on_data_error = lambda e: logger.error(f"Data channel error: {e}")
         self.rtc_app.on_data_message = self.input_handler.on_message
-        self.rtc_app.on_data_msg_bytes = self.input_handler.on_msg_data
 
         # Input handler callbacks
         self.input_handler.on_cursor_change = lambda data: (
@@ -434,7 +456,7 @@ class WebRTCService(BaseStreamingService):
         if self.args.enable_resize:
             self.input_handler.on_resize = self.on_resize_handler
         else:
-            self.input_handler.on_resize = lambda res: logger.warning(
+            self.input_handler.on_resize = lambda res, display_id="primary": logger.warning(
                 f"remote resizing disabled, skipping resize to {res}"
             )
 
@@ -497,7 +519,35 @@ class WebRTCService(BaseStreamingService):
         if self.args.enable_metrics_http:
             await self.metrics.set_webrtc_stats(webrtc_stat_type, webrtc_stats)
 
-    async def on_resize_handler(self, res: str) -> None:
+    async def on_resize_handler(self, res: str, display_id: str = "primary") -> None:
+        """Route a client resolution to its display: the primary resizes the real
+        display directly while it is alone; once a secondary display is connected
+        (or for any secondary), the resolution feeds the extended-desktop layout
+        instead (websockets parity)."""
+        display_id = display_id or "primary"
+        if display_id != "primary" or self.display_clients:
+            try:
+                w_str, h_str = res.split("x")
+                w, h = min(int(w_str), 7680) & ~1, min(int(h_str), 4320) & ~1
+                if w <= 0 or h <= 0:
+                    return
+            except ValueError:
+                logger.error(f"Invalid resolution format in resize request: {res}")
+                return
+            if display_id == "primary":
+                self._primary_dims = (w, h)
+            else:
+                entry = self.display_clients.get(display_id)
+                if entry is None:
+                    logger.warning(f"Resize for unknown display '{display_id}' ignored.")
+                    return
+                entry["width"], entry["height"] = w, h
+            await self.reconfigure_displays()
+            return
+        self._primary_dims = None
+        await self._resize_primary_display(res)
+
+    async def _resize_primary_display(self, res: str) -> None:
         """Handle change of resolution change"""
         # Only an admin-configured manual-resolution lock (server config) blocks client
         # resizes, mirroring the WebSocket handler. The client's own manual/auto toggle
@@ -585,6 +635,109 @@ class WebRTCService(BaseStreamingService):
             )
             if self.media_pipeline:
                 self.media_pipeline.last_resize_success = False
+
+    async def request_idr_for_display(self, display_id: str = "primary") -> None:
+        pipeline = self.display_pipelines.get(display_id or "primary")
+        if pipeline is not None:
+            await pipeline.dynamic_idr_frame()
+
+    async def start_display_media(self, display_id: str) -> None:
+        """A display's controller connected: the primary starts its pipeline right
+        away; a secondary waits for its dimensions (the client's first resize
+        message), which trigger the layout pass that creates its pipeline."""
+        if display_id == "primary" and self.media_pipeline:
+            await self.media_pipeline.start_media_pipeline()
+
+    async def stop_display_media(self, display_id: str) -> None:
+        if display_id == "primary":
+            if self.media_pipeline:
+                await self.media_pipeline.stop_media_pipeline()
+            return
+        async with self._display_lock:
+            pipeline = self.display_pipelines.pop(display_id, None)
+            self.display_clients.pop(display_id, None)
+            self.display_layouts.pop(display_id, None)
+            if pipeline is not None:
+                await pipeline.stop_media_pipeline()
+        await self.reconfigure_displays()
+
+    async def reconfigure_displays(self) -> None:
+        """Lay the extended desktop out for the connected displays and point each
+        display's capture at its region — the WR counterpart of the websockets
+        reconfigure engine, for the primary plus one secondary display."""
+        if IS_WAYLAND:
+            return
+        async with self._display_lock:
+            secondary = next(
+                ((did, info) for did, info in self.display_clients.items()
+                 if did != "primary" and info.get("width", 0) > 0 and info.get("height", 0) > 0),
+                None,
+            )
+            if secondary is None:
+                # Back to a single display: restore the plain full-screen capture.
+                if self.display_layouts:
+                    self.display_layouts = {}
+                    p_w, p_h = self._primary_dims or (self.media_pipeline.width, self.media_pipeline.height)
+                    await resize_display(f"{p_w}x{p_h}")
+                    self.media_pipeline.capture_region = None
+                    self.media_pipeline.width, self.media_pipeline.height = p_w, p_h
+                    if self.media_pipeline.is_media_pipeline_running():
+                        await self.media_pipeline.restart_screen_capture()
+                return
+            did, info = secondary
+            if self._primary_dims is None:
+                # The primary never resized through the layout path: take its
+                # pipeline dimensions (kept current by the single-display path),
+                # falling back to the live screen resolution.
+                p_w, p_h = self.media_pipeline.width, self.media_pipeline.height
+                if p_w <= 0 or p_h <= 0:
+                    curr, _, _, _, _ = await get_new_res("1x1")
+                    try:
+                        p_w, p_h = (int(v) for v in curr.lower().split("x"))
+                    except (ValueError, AttributeError):
+                        logger.error("Cannot determine primary display size; aborting layout.")
+                        return
+                self._primary_dims = (p_w, p_h)
+            layouts, total_w, total_h = compute_dual_layout(
+                self._primary_dims, (info["width"], info["height"]),
+                info.get("position", "right"),
+            )
+            layouts[did] = layouts.pop("secondary")
+            if not await apply_extended_layout(layouts, total_w, total_h):
+                return
+            self.display_layouts = layouts
+            p = layouts["primary"]
+            await self.media_pipeline.update_capture_region(p["x"], p["y"], p["w"], p["h"])
+            s = layouts[did]
+            pipeline = self.display_pipelines.get(did)
+            if pipeline is None:
+                pipeline = MediaPipelinePixel(
+                    async_event_loop=asyncio.get_running_loop(),
+                    encoder_rtc=self.args.encoder_rtc,
+                    framerate=int(self.args.framerate),
+                    video_bitrate=float(self.args.video_bitrate),
+                    audio_enabled=False,
+                    width=s["w"],
+                    height=s["h"],
+                    crf=int(self.args.video_crf),
+                    video_fullcolor=bool(self.args.video_fullcolor),
+                    use_cpu=bool(self.args.use_cpu),
+                    video_streaming_mode=bool(self.args.video_streaming_mode),
+                    use_paint_over_quality=bool(self.args.use_paint_over_quality),
+                    video_paintover_crf=int(self.args.video_paintover_crf),
+                    video_paintover_burst_frames=int(self.args.video_paintover_burst_frames),
+                    display_id=did,
+                    capture_region=(s["x"], s["y"]),
+                )
+                pipeline.rc_mode = self.media_pipeline.rc_mode
+                pipeline.produce_data = (
+                    lambda buf, pts, kind, _did=did: self.rtc_app.consume_data(buf, pts, kind, _did)
+                )
+                self.display_pipelines[did] = pipeline
+                await pipeline.start_media_pipeline()
+                logger.info(f"Secondary display '{did}' pipeline started at {s}")
+            else:
+                await pipeline.update_capture_region(s["x"], s["y"], s["w"], s["h"])
 
     async def handle_scaling(self, dpi_value: float) -> None:
         # Idempotent: the dashboard and the core each re-assert their DPI on
@@ -992,7 +1145,15 @@ class WebRTCService(BaseStreamingService):
                     )
                 )
             )
-        if self.media_pipeline:
+        for display_id, pipeline in list(self.display_pipelines.items()):
+            stop_coros.append(
+                (
+                    _await_with_timeout(
+                        pipeline.stop_media_pipeline(), f"media_pipeline[{display_id}]", 3.0
+                    )
+                )
+            )
+        if self.media_pipeline and "primary" not in self.display_pipelines:
             stop_coros.append(
                 (
                     _await_with_timeout(

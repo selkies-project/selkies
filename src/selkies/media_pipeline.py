@@ -120,8 +120,16 @@ class MediaPipelinePixel(MediaPipeline):
         use_paint_over_quality: bool = True,
         video_paintover_crf: int = 18,
         video_paintover_burst_frames: int = 5,
+        display_id: str = "primary",
+        capture_region=None,
     ):
         self.async_event_loop = async_event_loop
+        # Which display this pipeline feeds and, for a secondary display, the
+        # region of the extended framebuffer it captures ((x, y) origin; the
+        # dimensions ride self.width/self.height). None captures from (0, 0)
+        # with auto size — the single-display behavior.
+        self.display_id = display_id or "primary"
+        self.capture_region = capture_region
         self.audio_channels = audio_channels
         self.encoder_rtc = encoder_rtc
         self.framerate = framerate
@@ -385,12 +393,19 @@ class MediaPipelinePixel(MediaPipeline):
         cs = CaptureSettings()
         cs.capture_width = self.width
         cs.capture_height = self.height
-        cs.capture_x = 0
-        cs.capture_y = 0
+        if self.capture_region is not None:
+            # A laid-out region of the extended framebuffer: pin the exact
+            # geometry (auto-adjust would balloon the region to the whole root).
+            cs.capture_x = int(self.capture_region[0])
+            cs.capture_y = int(self.capture_region[1])
+            cs.auto_adjust_screen_capture_size = False
+        else:
+            cs.capture_x = 0
+            cs.capture_y = 0
+            cs.auto_adjust_screen_capture_size = True
         cs.target_fps = float(self.framerate)
         cs.capture_cursor = self.capture_cursor
         cs.output_mode = 1
-        cs.auto_adjust_screen_capture_size = True
         # WebRTC has its own RTP framing; omit pixelflux's per-stripe header on both
         # backends (the Wayland backend now supports omission) so there's no Python
         # strip. frame_id comes from the frame attribute, not the header.
@@ -536,6 +551,25 @@ class MediaPipelinePixel(MediaPipeline):
             logger.error(f"Failed to start screen capture: {e}", exc_info=True)
             self.capture_module = None
             self._is_screen_capturing = False
+            # Propagate so start_media_pipeline neither marks itself running nor
+            # fires on_pipeline_started: a swallowed failure here reads as a live
+            # stream to the transport while nothing is captured.
+            raise MediaPipelineError(f"screen capture failed to start: {e}") from e
+
+    async def update_capture_region(self, x: int, y: int, w: int, h: int):
+        """Re-target the live capture to a new region of the extended framebuffer
+        (no restart); falls back to a restart when no live capture exists."""
+        self.capture_region = (int(x), int(y))
+        self.width, self.height = int(w), int(h)
+        if self._is_screen_capturing and self.capture_module is not None:
+            try:
+                await asyncio.to_thread(
+                    self.capture_module.update_capture_region, int(x), int(y), int(w), int(h)
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Live capture re-target failed ({e}); restarting capture.")
+        await self.restart_screen_capture()
 
     async def stop_screen_capture(self):
         if not self._is_screen_capturing or self.capture_module is None:

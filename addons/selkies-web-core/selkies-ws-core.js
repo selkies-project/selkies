@@ -12,8 +12,12 @@ import {
 } from './lib/input.js';
 import {
   createClipboardSync,
+  createClipboardGestures,
   writeImageToLocalClipboard
 } from './lib/clipboard-sync.js';
+import {
+  createFileUploader
+} from './lib/file-upload.js';
 
 // Parse an audio frame body into the ordered Opus frames to decode, using RED redundancy
 // to recover frames the sender dropped under backpressure (pcmflux's delivery ring and the
@@ -175,20 +179,16 @@ const START_VIDEO_WATCHDOG_MS = 3000;
 const START_VIDEO_WATCHDOG_MAX_ATTEMPTS = 3;
 const METRICS_INTERVAL_MS = 500;
 const BACKPRESSURE_INTERVAL_MS = 50;
-// Transport-capacity-derived chunk sizes: defaults assume aiohttp's stock 4 MiB
+// Transport-capacity-derived chunk size: defaults assume aiohttp's stock 4 MiB
 // receive cap; the server advertises its real ceiling (ws_max_message_bytes) in
-// server_settings and these are recomputed to fill the frame.
+// server_settings and this is recomputed to fill the frame.
 let wsMaxMessageBytes = 4 * 1024 * 1024;
-let UPLOAD_CHUNK_SIZE = wsMaxMessageBytes - 1024;           // binary frame + header margin
 let CLIPBOARD_CHUNK_SIZE = ((wsMaxMessageBytes - 4096) * 3) >> 2; // raw bytes pre-base64
 const applyWsMessageBudget = (bytes) => {
   if (!Number.isFinite(bytes) || bytes < 65536) return;
   wsMaxMessageBytes = bytes;
-  UPLOAD_CHUNK_SIZE = wsMaxMessageBytes - 1024;
   CLIPBOARD_CHUNK_SIZE = ((wsMaxMessageBytes - 4096) * 3) >> 2;
 };
-const FILE_UPLOAD_THROTTLE_MS = 200;
-let fileUploadProgressLastSent = {};
 // Resources for resolution controls
 window.is_manual_resolution_mode = false;
 let manual_width = null;
@@ -213,14 +213,15 @@ function applyEffectiveCursorSetting() {
         console.log(`Applying effective cursor setting. Multi-monitor: ${isMultiMonitorActive}, User Pref: ${userPreference}, Final: ${finalSetting}`);
         window.webrtcInput.setUseBrowserCursors(finalSetting);
     }
+    // Tell the dashboard the value actually in effect so its toggle reflects the
+    // multi-monitor override instead of the user preference alone.
+    try {
+        window.postMessage({ type: 'effectiveCursorState', value: finalSetting }, window.location.origin);
+    } catch (e) { /* postMessage unavailable */ }
 }
 function setRealViewportHeight() {
   const vh = window.innerHeight * 0.01;
   document.documentElement.style.setProperty('--vh', `${vh}px`);
-}
-// Base64-encode so the ',' and ':' wire delimiters survive in filenames.
-function b64Path(p) {
-  return btoa(unescape(encodeURIComponent(String(p))));
 }
 // One id per multipart clipboard transfer.
 let clipboardTransferCounter = 0;
@@ -594,17 +595,6 @@ const playStream = () => {
   if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
   requestWakeLock();
   console.log("playStream called in WebSocket mode - UI elements hidden.");
-};
-
-const enableClipboard = () => {
-  navigator.clipboard
-    .readText()
-    .then((text) => {
-      console.log("Clipboard API read access confirmed.");
-    })
-    .catch((err) => {
-      console.error(`Failed to read clipboard contents: ${err}`);
-    });
 };
 
 const updateStatusDisplay = () => {
@@ -1818,6 +1808,29 @@ function processPendingChunksForStripe(stripe_y_start) {
 }
 
 let decodedStripesQueue = [];
+// Off-screen back-buffer for the STRIPED paths (h264enc-striped, jpeg) only. Stripes
+// accumulate here so damage-gated undamaged rows persist, and a whole frame is blitted
+// to the visible canvas only at a frame boundary — so the display never shows a mix of
+// frame_ids (the per-band seam). Full-frame h264enc/openh264enc do NOT use this: they
+// present one whole decoded frame atomically via the MSTG <video> path.
+let stripeBackCanvas = null;
+let stripeBackCtx = null;
+let stripePendingFrameId = null;
+let stripePendingDirty = false;
+function ensureStripeBackBuffer() {
+  if (!canvas) return null;
+  if (!stripeBackCanvas) {
+    stripeBackCanvas = document.createElement('canvas');
+    stripeBackCtx = stripeBackCanvas.getContext('2d', { desynchronized: true });
+  }
+  if (stripeBackCanvas.width !== canvas.width || stripeBackCanvas.height !== canvas.height) {
+    stripeBackCanvas.width = canvas.width;
+    stripeBackCanvas.height = canvas.height;
+    stripePendingFrameId = null;
+    stripePendingDirty = false;
+  }
+  return stripeBackCtx;
+}
 // Newest JPEG-stripe frame id drawn per startY, so out-of-order older stripes are skipped.
 let lastDrawnJpegStripeFrameId = {};
 // A stripe is "stale" only if it trails the last drawn id by at most this many frames
@@ -1894,7 +1907,8 @@ function handleDecodedVncStripeFrame(yPos, frame) {
   }
   decodedStripesQueue.push({
     yPos,
-    frame
+    frame,
+    frameId: frame.timestamp
   });
 }
 
@@ -1971,77 +1985,13 @@ function handleAudioDeviceChange(event) {
   }, window.location.origin);
 }
 
-function handleRequestFileUpload() {
-  if (isSharedMode) {
-    console.log("Shared mode: File upload via requestFileUpload blocked.");
-    return;
-  }
-  const hiddenInput = document.getElementById('globalFileInput');
-  if (!hiddenInput) {
-    console.error("Global file input not found!");
-    return;
-  }
-  if (!websocket || websocket.readyState !== WebSocket.OPEN) {
-    console.warn("WebSocket is not open. File upload cannot be initiated.");
-    return;
-  }
-  console.log("Triggering click on hidden file input.");
-  hiddenInput.click();
-}
-
-async function handleFileInputChange(event) {
-  if (isSharedMode) {
-    console.log("Shared mode: File upload via fileInputChange blocked.");
-    event.target.value = null;
-    return;
-  }
-  const files = event.target.files;
-  if (!files || files.length === 0) {
-    event.target.value = null;
-    return;
-  }
-  console.log(`File input changed, processing ${files.length} files sequentially.`);
-  if (!websocket || websocket.readyState !== WebSocket.OPEN) {
-    console.error("WebSocket is not open. Cannot upload selected files.");
-    window.postMessage({
-      type: 'fileUpload',
-      payload: {
-        status: 'error',
-        fileName: 'N/A',
-        message: "WebSocket not open for upload."
-      }
-    }, window.location.origin);
-    event.target.value = null;
-    return;
-  }
-  try {
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const pathToSend = file.name;
-      console.log(`Uploading file ${i + 1}/${files.length}: ${pathToSend}`);
-      await uploadFileObject(file, pathToSend);
-    }
-    console.log("Finished processing all files from input.");
-  } catch (error) {
-    const errorMsg = `An error occurred during the file input upload process: ${error.message || error}`;
-    console.error(errorMsg);
-    window.postMessage({
-      type: 'fileUpload',
-      payload: {
-        status: 'error',
-        fileName: 'N/A',
-        message: errorMsg
-      }
-    }, window.location.origin);
-    if (websocket && websocket.readyState === WebSocket.OPEN) {
-      try {
-        websocket.send(`FILE_UPLOAD_ERROR:${b64Path('GENERAL')}:File input processing failed`);
-      } catch (_) {}
-    }
-  } finally {
-    event.target.value = null;
-  }
-}
+// HTTP uploads + drag-drop/file-picker plumbing live in the shared factory
+// (see lib/file-upload.js); shared sessions must not upload.
+const fileUploader = createFileUploader({ canUpload: () => !isSharedMode });
+const handleRequestFileUpload = fileUploader.handleRequestFileUpload;
+const handleFileInputChange = fileUploader.handleFileInputChange;
+const handleDragOver = fileUploader.handleDragOver;
+const handleDrop = fileUploader.handleDrop;
 
 /**
  * Requests a screen wake lock to prevent the device from sleeping.
@@ -3189,137 +3139,20 @@ function initWebsockets() {
     window.addEventListener('focus', () => { readLocalClipboardAndSend(); });
   }
 
-  // Paste-ordering hold: a Ctrl/Cmd+V arriving while the local clipboard is still
-  // being read/sent (focus-read or multipart transfer in flight) would depart the
-  // ordered channel BEFORE the clipboard content and paste the previous value on
-  // the server. Registered before input attaches (both capture on window), so this
-  // runs first: it swallows the chord's key events, waits for the send to flush
-  // (bounded), then replays them in order for the input stack.
-  const heldPasteEvents = [];
-  let heldPasteReplayPending = false;
-  function replayHeldPasteEvents() {
-    heldPasteReplayPending = false;
-    for (const ev of heldPasteEvents.splice(0)) {
-      try {
-        const replay = new KeyboardEvent(ev.type, ev);
-        Object.defineProperty(replay, '__selkiesClipReplay', { value: true });
-        window.dispatchEvent(replay);
-      } catch (_) { /* never break the key stream */ }
-    }
-  }
-  const PASTE_MOD_CODES = ['ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'];
-  function holdPasteWhileClipboardInFlight(ev) {
-    if (ev.__selkiesClipReplay) return;
-    // While a replay is queued, the chord's modifier keyups must be held too —
-    // a Ctrl keyup overtaking the replayed V would break the chord server-side
-    // (V would arrive unmodified and type a literal 'v').
-    const modHold = heldPasteReplayPending && ev.type === 'keyup' && PASTE_MOD_CODES.includes(ev.code);
-    if (ev.code !== 'KeyV' && !modHold) return;
-    const chord = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
-    // Hold a paste chord while a send is in flight; also hold ANY KeyV event
-    // while a replay is queued (its keyup must not overtake the held keydown,
-    // even if Ctrl was already released).
-    const hold = modHold || (ev.code === 'KeyV' && ((chord && clipboardSendInFlight) || heldPasteReplayPending));
-    if (!hold) return;
-    ev.preventDefault();
-    ev.stopImmediatePropagation();
-    heldPasteEvents.push(ev);
-    if (!heldPasteReplayPending) {
-      heldPasteReplayPending = true;
-      Promise.race([
-        clipboardSendInFlight || Promise.resolve(),
-        new Promise((r) => setTimeout(r, 2000)),
-      ]).then(replayHeldPasteEvents, replayHeldPasteEvents);
-    }
-  }
-  window.addEventListener('keydown', holdPasteWhileClipboardInFlight, true);
-  window.addEventListener('keyup', holdPasteWhileClipboardInFlight, true);
-
-  // Safari/Firefox reject navigator.clipboard from the focus/message handlers
-  // (no transient activation), so for those browsers mirror the sync onto the
-  // Ctrl/Cmd+V (read) and Ctrl/Cmd+C (write) key gestures. Chrome keeps using
-  // the focus/message path untouched. Never preventDefault: the keystroke must
-  // still reach the remote session.
-  if (!isChromium) {
-    window.addEventListener('keydown', (event) => {
-      if (isSharedMode || !window.clipboard_enabled) return;
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-      // Once per physical keypress: autorepeat must not spam REQUEST_CLIPBOARD / reads.
-      if (event.repeat) return;
-      // Only drive remote-clipboard sync from the stream; don't hijack copy/paste in
-      // page form fields (settings UI, etc.). The stream's overlay input is exempt.
-      const ae = document.activeElement;
-      if (ae && ae.id !== 'overlayInput' &&
-          (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable)) {
-        return;
-      }
-      const key = (event.key || '').toLowerCase();
-      // Read (Ctrl/Cmd+V) is handled by the 'paste' listener below via event.clipboardData:
-      // synchronous, no Firefox paste-prompt, and no double-send. Reading here through
-      // navigator.clipboard.readText() would re-raise the prompt and send twice.
-      if (key === 'c' && clipboard_out_enabled) {
-        // Advertise text/plain ONLY: a Ctrl/Cmd+C can't synchronously know whether the
-        // server's CURRENT clipboard is an image, and a stale cached MIME type would
-        // build a malformed ClipboardItem (image entry holding text). Server images
-        // are delivered by the push handler instead.
-        const textPromise = clipboardSync.request(false);
-        const items = {
-          'text/plain': textPromise.then((t) =>
-            new Blob([typeof t === 'string' ? t : (clipboardSync.lastText || '')], { type: 'text/plain' }))
-        };
-        let writePromise = null;
-        try {
-          writePromise = navigator.clipboard.write([new ClipboardItem(items)]);
-        } catch (err) {
-          // Synchronous throw (e.g. ClipboardItem/clipboard.write unsupported).
-          console.warn(`navigator.clipboard.write unavailable on Ctrl+C, using execCommand: ${err && err.name}`);
-          clipboardSync.copyViaExecCommand(textPromise);
-        }
-        if (writePromise && writePromise.catch) {
-          writePromise.catch((err) => {
-            console.warn(`navigator.clipboard.write rejected on Ctrl+C, using execCommand: ${err && err.name} - ${err && err.message}`);
-            clipboardSync.copyViaExecCommand(textPromise);
-          });
-        }
-      }
-    }, true);
-
-    // The 'v' keydown path reads via navigator.clipboard.read()/readText(), which
-    // WebKit/Safari reject with NotAllowedError even with an editable focused. The
-    // 'paste' event exposes event.clipboardData synchronously in both WebKit and
-    // Firefox, so drive paste-to-server from it there (the stream's overlayInput is
-    // the focused editable target, so the event fires and bubbles to the window).
-    // Don't preventDefault: the paste chord must still reach the remote session.
-    window.addEventListener('paste', (event) => {
-      if (isSharedMode || !window.clipboard_enabled || !clipboard_in_enabled) return;
-      // Only drive remote-clipboard sync from the stream; don't hijack paste into
-      // page form fields (settings UI, etc.). The stream's overlay input is exempt.
-      const ae = document.activeElement;
-      if (ae && ae.id !== 'overlayInput' &&
-          (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable)) {
-        return;
-      }
-      const cd = event.clipboardData;
-      if (!cd) return;
-      // Prefer an image when binary clipboard is on and the payload carries one.
-      if (enable_binary_clipboard && cd.items) {
-        for (let i = 0; i < cd.items.length; i++) {
-          const it = cd.items[i];
-          if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
-            const file = it.getAsFile();
-            if (file) {
-              file.arrayBuffer()
-                .then((buf) => sendClipboardData(buf, it.type))
-                .catch((err) => console.warn(`Paste image read failed: ${err && err.name}`));
-              return;
-            }
-          }
-        }
-      }
-      const text = cd.getData('text/plain');
-      if (text) sendClipboardData(text);
-    }, true);
-  }
+  // Paste-ordering hold + non-Chromium copy/paste gestures live in the shared
+  // factory (see lib/clipboard-sync.js); only the gates and the transport's
+  // send function are per-core.
+  const clipboardGestures = createClipboardGestures({
+    isChromium,
+    clipboardSync,
+    sendClipboardData: (data, mime) => sendClipboardData(data, mime),
+    canSync: () => !isSharedMode && !!window.clipboard_enabled,
+    canRead: () => !!clipboard_in_enabled,
+    canWrite: () => !!clipboard_out_enabled,
+    binaryEnabled: () => !!enable_binary_clipboard,
+    getSendInFlight: () => clipboardSendInFlight,
+  });
+  clipboardGestures.wire();
 
   const clearVideoCanvasVisually = () => {
     if (canvasContext && canvas) {
@@ -3541,14 +3374,32 @@ function initWebsockets() {
       // Striped H.264 (controller and shared viewers alike): composite stripes onto
       // the 2D canvas (a track-generator <video> can't composite partial-height stripes).
       let paintedSomethingThisCycle = false;
-      for (const stripeData of decodedStripesQueue) {
-        if (canvas.width > 0 && canvas.height > 0) {
-            canvasContext.drawImage(stripeData.frame, 0, stripeData.yPos);
+      const backCtx = ensureStripeBackBuffer();
+      const hadStripes = decodedStripesQueue.length > 0;
+      if (backCtx && canvas.width > 0 && canvas.height > 0) {
+        for (const stripeData of decodedStripesQueue) {
+          const fid = stripeData.frameId;
+          if (stripePendingFrameId !== null && fid !== stripePendingFrameId && stripePendingDirty) {
+            // A newer frame_id started: the buffered frame is complete -> present it whole.
+            canvasContext.drawImage(stripeBackCanvas, 0, 0);
+            stripePendingDirty = false;
+            paintedSomethingThisCycle = true;
+          }
+          stripePendingFrameId = fid;
+          backCtx.drawImage(stripeData.frame, 0, stripeData.yPos);
+          stripePendingDirty = true;
+          stripeData.frame.close();
         }
-        stripeData.frame.close();
-        paintedSomethingThisCycle = true;
+      } else {
+        for (const stripeData of decodedStripesQueue) { try { stripeData.frame.close(); } catch (e) {} }
       }
       decodedStripesQueue = [];
+      // Idle flush: nothing arrived this tick but a whole frame is still held -> present it.
+      if (!hadStripes && stripePendingDirty && canvas.width > 0 && canvas.height > 0) {
+        canvasContext.drawImage(stripeBackCanvas, 0, 0);
+        stripePendingDirty = false;
+        paintedSomethingThisCycle = true;
+      }
       if (paintedSomethingThisCycle && !streamStarted) {
         startStream();
       }
@@ -3560,6 +3411,7 @@ function initWebsockets() {
             console.warn(`[paintVideoFrame] Canvas dimensions (${canvas.width}x${canvas.height}) may be too small for JPEG stripes.`);
           }
         }
+        const backCtx = ensureStripeBackBuffer();
         while (jpegStripeRenderQueue.length > 0) {
           const segment = jpegStripeRenderQueue.shift();
           if (segment && segment.image) {
@@ -3577,8 +3429,16 @@ function initWebsockets() {
               }
             }
             try {
-              if (canvas.width > 0 && canvas.height > 0) {
-                canvasContext.drawImage(segment.image, 0, segment.startY);
+              if (backCtx && canvas.width > 0 && canvas.height > 0) {
+                if (segFrameId !== undefined && stripePendingFrameId !== null &&
+                    segFrameId !== stripePendingFrameId && stripePendingDirty) {
+                  // A newer frame_id started: present the completed frame whole.
+                  canvasContext.drawImage(stripeBackCanvas, 0, 0);
+                  stripePendingDirty = false;
+                }
+                if (segFrameId !== undefined) stripePendingFrameId = segFrameId;
+                backCtx.drawImage(segment.image, 0, segment.startY);
+                stripePendingDirty = true;
               }
               if (segFrameId !== undefined) {
                 lastDrawnJpegStripeFrameId[segment.startY] = segFrameId;
@@ -3600,6 +3460,10 @@ function initWebsockets() {
             if (!inputInitialized && !isSharedMode) initializeInput();
           }
         }
+      } else if (stripePendingDirty && canvasContext && canvas.width > 0 && canvas.height > 0) {
+        // Idle flush: queue empty but a whole frame is still buffered -> present it.
+        canvasContext.drawImage(stripeBackCanvas, 0, 0);
+        stripePendingDirty = false;
       }
     } else if (isSharedMode) {
       if (!document.hidden || (isSharedMode && sharedClientState === 'ready')) {
@@ -4406,7 +4270,10 @@ function initWebsockets() {
                 if (chunkType === 'key') {
                     decoderInfo.hasReceivedKeyframe = true;
                 }
-                const chunkTimestamp = performance.now() * 1000;
+                // Striped H.264 carries the frame_id in the timestamp so the paint loop can
+                // present whole frames; full-frame (MSTG <video>) keeps a monotonic clock.
+                const chunkTimestamp = (currentEncoderMode === 'h264enc-striped')
+                    ? vncFrameID : (performance.now() * 1000);
                 const chunkData = {
                     type: chunkType,
                     timestamp: chunkTimestamp,
@@ -5626,251 +5493,6 @@ function cleanup() {
   lastFpsUpdateTime = performance.now();
   console.log("Cleanup: Finished cleanup process.");
   window.isCleaningUp = false;
-}
-
-function handleDragOver(ev) {
-  if (isSharedMode) {
-      ev.preventDefault();
-      ev.dataTransfer.dropEffect = 'none';
-      return;
-  }
-  ev.preventDefault();
-  ev.dataTransfer.dropEffect = 'copy';
-}
-
-async function handleDrop(ev) {
-  ev.preventDefault();
-  ev.stopPropagation();
-  if (isSharedMode) {
-    console.log("Shared mode: File upload via drag-drop blocked.");
-    return;
-  }
-  if (!websocket || websocket.readyState !== WebSocket.OPEN) {
-    window.postMessage({
-      type: 'fileUpload',
-      payload: {
-        status: 'error',
-        fileName: 'N/A',
-        message: "WebSocket not open."
-      }
-    }, window.location.origin);
-    return;
-  }
-  const entriesToProcess = [];
-  if (ev.dataTransfer.items) {
-    for (let i = 0; i < ev.dataTransfer.items.length; i++) {
-      const entry = ev.dataTransfer.items[i].webkitGetAsEntry() || ev.dataTransfer.items[i].getAsEntry();
-      if (entry) entriesToProcess.push(entry);
-    }
-  } else if (ev.dataTransfer.files.length > 0) {
-    for (let i = 0; i < ev.dataTransfer.files.length; i++) {
-      await uploadFileObject(ev.dataTransfer.files[i], ev.dataTransfer.files[i].name);
-    }
-    return;
-  }
-
-  try {
-    for (const entry of entriesToProcess) await handleDroppedEntry(entry);
-  } catch (error) {
-    const errorMsg = `Error during sequential upload: ${error.message || error}`;
-    window.postMessage({
-      type: 'fileUpload',
-      payload: {
-        status: 'error',
-        fileName: 'N/A',
-        message: errorMsg
-      }
-    }, window.location.origin);
-    if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(`FILE_UPLOAD_ERROR:${b64Path('GENERAL')}:Processing failed`);
-  }
-}
-
-function getFileFromEntry(fileEntry) {
-  return new Promise((resolve, reject) => fileEntry.file(resolve, reject));
-}
-
-async function handleDroppedEntry(entry, basePathFallback = "") {
-  let pathToSend;
-  if (entry.fullPath && typeof entry.fullPath === 'string' && entry.fullPath !== entry.name && (entry.fullPath.includes('/') || entry.fullPath.includes('\\'))) {
-    pathToSend = entry.fullPath;
-    if (pathToSend.startsWith('/')) {
-        pathToSend = pathToSend.substring(1);
-    }
-    console.log(`Using entry.fullPath: "${pathToSend}" for entry.name: "${entry.name}"`);
-  } else {
-    pathToSend = basePathFallback ? `${basePathFallback}/${entry.name}` : entry.name;
-    console.log(`Constructed path: "${pathToSend}" for entry.name: "${entry.name}" (basePathFallback: "${basePathFallback}")`);
-  }
-
-  if (entry.isFile) {
-    try {
-      const file = await getFileFromEntry(entry);
-      await uploadFileObject(file, pathToSend);
-    } catch (err) {
-      console.error(`Error processing file ${pathToSend}: ${err}`);
-       window.postMessage({
-        type: 'fileUpload',
-        payload: { status: 'error', fileName: pathToSend, message: `Error processing file: ${err.message || err}` }
-      }, window.location.origin);
-      if (websocket && websocket.readyState === WebSocket.OPEN) {
-         websocket.send(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:Client-side file processing error`);
-      }
-    }
-  } else if (entry.isDirectory) {
-    console.log(`Processing directory: ${pathToSend}`);
-    const dirReader = entry.createReader();
-    let entries;
-    do {
-      entries = await new Promise((resolve, reject) => dirReader.readEntries(resolve, reject));
-      for (const subEntry of entries) {
-        await handleDroppedEntry(subEntry, pathToSend);
-      }
-    } while (entries.length > 0);
-  }
-}
-
-function readEntriesPromise(dirReader) {
-  return new Promise((resolve, reject) => dirReader.readEntries(resolve, reject));
-}
-
-async function readDirectoryEntries(dirReader) {
-  let entries;
-  do {
-    entries = await readEntriesPromise(dirReader);
-    for (const entry of entries) await handleDroppedEntry(entry);
-  } while (entries.length > 0);
-}
-
-function uploadFileObject(file, pathToSend) {
-  return new Promise((resolve, reject) => {
-    if (!websocket || websocket.readyState !== WebSocket.OPEN) {
-      const errorMsg = `WS closed for ${pathToSend}.`;
-      window.postMessage({
-        type: 'fileUpload',
-        payload: {
-          status: 'error',
-          fileName: pathToSend,
-          message: errorMsg
-        }
-      }, window.location.origin);
-      reject(new Error(errorMsg));
-      return;
-    }
-
-    window.postMessage({
-      type: 'fileUpload',
-      payload: {
-        status: 'start',
-        fileName: pathToSend,
-        fileSize: file.size
-      }
-    }, window.location.origin);
-    
-    websocket.send(`FILE_UPLOAD_START:${b64Path(pathToSend)}:${file.size}`);
-    
-    let offset = 0;
-    fileUploadProgressLastSent[pathToSend] = 0;
-    
-    const MAX_BUFFER_THRESHOLD = 10 * 1024 * 1024;
-    const BUFFER_CHECK_INTERVAL_MS = 50; 
-
-    const reader = new FileReader();
-
-    reader.onload = function(e) {
-      if (!websocket || websocket.readyState !== WebSocket.OPEN) {
-        const uploadErrorMsg = `WS closed during upload of ${pathToSend}`;
-        window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: uploadErrorMsg }}, window.location.origin);
-        reject(new Error(uploadErrorMsg));
-        return;
-      }
-
-      if (e.target.error) {
-        const readErrorMsg = `File read error for ${pathToSend}: ${e.target.error}`;
-        window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: readErrorMsg }}, window.location.origin);
-        websocket.send(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:File read error`);
-        reject(e.target.error);
-        return;
-      }
-
-      try {
-        const resultLen = e.target.result.byteLength;
-        const prefixedView = new Uint8Array(1 + resultLen);
-        prefixedView[0] = 0x01;
-        prefixedView.set(new Uint8Array(e.target.result), 1);
-        websocket.send(prefixedView.buffer);
-        offset += resultLen;
-        const progress = file.size > 0 ? Math.round((offset / file.size) * 100) : 100;
-        const now = Date.now();
-        
-        if (now - fileUploadProgressLastSent[pathToSend] > FILE_UPLOAD_THROTTLE_MS) {
-          window.postMessage({
-            type: 'fileUpload',
-            payload: {
-              status: 'progress',
-              fileName: pathToSend,
-              progress: progress,
-              fileSize: file.size
-            }
-          }, window.location.origin);
-          fileUploadProgressLastSent[pathToSend] = now;
-        }
-
-        if (offset < file.size) {
-          attemptNextRead(offset);
-        } else {
-          window.postMessage({
-            type: 'fileUpload',
-            payload: { status: 'progress', fileName: pathToSend, progress: 100, fileSize: file.size }
-          }, window.location.origin);
-          
-          websocket.send(`FILE_UPLOAD_END:${b64Path(pathToSend)}`);
-          
-          window.postMessage({
-            type: 'fileUpload',
-            payload: {
-              status: 'end',
-              fileName: pathToSend,
-              fileSize: file.size
-            }
-          }, window.location.origin);
-          resolve();
-        }
-
-      } catch (wsError) {
-        const sendErrorMsg = `WS send error during upload of ${pathToSend}: ${wsError.message || wsError}`;
-        window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: sendErrorMsg }}, window.location.origin);
-        websocket.send(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:WS send error`);
-        reject(wsError);
-      }
-    };
-
-    reader.onerror = function(e) {
-      const generalReadError = `General file reader error for ${pathToSend}: ${e.target.error}`;
-      window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: generalReadError }}, window.location.origin);
-      websocket.send(`FILE_UPLOAD_ERROR:${b64Path(pathToSend)}:General file reader error`);
-      reject(e.target.error);
-    };
-
-    function attemptNextRead(currentOffset) {
-      if (websocket.bufferedAmount > MAX_BUFFER_THRESHOLD) {
-        setTimeout(() => attemptNextRead(currentOffset), BUFFER_CHECK_INTERVAL_MS);
-      } else {
-        readChunk(currentOffset);
-      }
-    }
-
-    function readChunk(startOffset) {
-      if (!websocket || websocket.readyState !== WebSocket.OPEN) {
-        const chunkReadError = `WS closed before reading next chunk of ${pathToSend}`;
-        window.postMessage({ type: 'fileUpload', payload: { status: 'error', fileName: pathToSend, message: chunkReadError }}, window.location.origin);
-        reject(new Error(chunkReadError));
-        return;
-      }
-      const slice = file.slice(startOffset, Math.min(startOffset + UPLOAD_CHUNK_SIZE, file.size));
-      reader.readAsArrayBuffer(slice);
-    }
-    readChunk(0);
-  });
 }
 
 function performServerInitiatedVideoReset(reason = "unknown") {

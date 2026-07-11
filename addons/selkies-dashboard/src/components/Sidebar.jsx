@@ -7,7 +7,9 @@
 // src/components/Sidebar.jsx
 import { useState, useEffect, useCallback, useRef } from "react";
 import { displayLabel } from "../../../selkies-web-core/lib/util.js";
-import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
+import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
+  USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
+  USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import { getTranslator } from "../translations";
 import yaml from "js-yaml";
@@ -988,43 +990,32 @@ function Sidebar() {
         : s_video_paintover_burst.default;
       setVideoPaintoverBurstFrames(final);
     }
-    const s_use_paint_over_quality = serverSettings.use_paint_over_quality;
-    if (s_use_paint_over_quality) {
-      const final = s_use_paint_over_quality.locked ? s_use_paint_over_quality.value : getStoredBool("use_paint_over_quality", s_use_paint_over_quality.value);
-      setUsePaintOverQuality(final);
-    }
-    const s_video_fullcolor = serverSettings.video_fullcolor;
-    if (s_video_fullcolor) {
-      const final = s_video_fullcolor.locked ? s_video_fullcolor.value : getStoredBool("video_fullcolor", s_video_fullcolor.value);
-      setVideoFullColor(final);
-    }
-    const s_video_streaming_mode = serverSettings.video_streaming_mode;
-    if (s_video_streaming_mode) {
-      const final = s_video_streaming_mode.locked ? s_video_streaming_mode.value : getStoredBool("video_streaming_mode", s_video_streaming_mode.value);
-      setVideoStreamingMode(final);
-    }
-    const s_use_cpu = serverSettings.use_cpu;
-    if (s_use_cpu) {
-      const final = s_use_cpu.locked ? s_use_cpu.value : getStoredBool("use_cpu", s_use_cpu.value);
-      setUseCpu(final);
-    }
+    // use_paint_over_quality, video_fullcolor, video_streaming_mode, use_cpu,
+    // use_browser_cursors and force_aligned_resolution resolve through the shared
+    // ladder (useConditionalSetting above), so they need no bespoke sync here.
     const s_scaling_dpi = serverSettings.scaling_dpi;
     if (s_scaling_dpi) {
       const stored = getStoredInt("scaling_dpi");
-      // Precedence: explicit client (stored) > explicit server (overridden) > local-scaling
-      // default. A non-overridden server value is the built-in 96, which the default replaces.
-      const final = s_scaling_dpi.allowed.includes(String(stored)) ? stored
-        : (s_scaling_dpi.overridden ? parseInt(s_scaling_dpi.value, 10) : deriveDpiFromDpr());
-      setSelectedDpi(final);
-      // A derived default only exists on this side of the wire: without a post
-      // the server keeps its built-in DPI and the slider is just a label. Send
-      // it when nothing explicit governs scaling — no client-stored value, no
-      // server override, no manual resolution — and the server isn't there yet.
+      const storedAllowed = s_scaling_dpi.allowed.includes(String(stored));
+      const serverVal = parseInt(s_scaling_dpi.value, 10);
+      const derived = deriveDpiFromDpr();
       const manualActive = !!localStorage.getItem(getPrefixedKey("manual_width"))
         || serverSettings?.is_manual_resolution_mode?.value === true;
-      if (!s_scaling_dpi.allowed.includes(String(stored)) && !s_scaling_dpi.overridden
-          && !manualActive && final !== parseInt(s_scaling_dpi.value, 10)) {
-        debouncedPostSetting({ scaling_dpi: final });
+      // The derived default only exists client-side: post it only when nothing
+      // explicit governs scaling (no client choice, no override, no manual
+      // resolution) and it differs from what the server already has.
+      const willPostDerived = !storedAllowed && !s_scaling_dpi.overridden
+        && !manualActive && derived !== serverVal;
+      // The label must show the value ACTUALLY in effect: client choice > server
+      // override > the derived default (only if we post it) > the server's current
+      // value. Never a derived value we didn't apply.
+      const final = storedAllowed ? stored
+        : s_scaling_dpi.overridden ? serverVal
+        : willPostDerived ? derived
+        : serverVal;
+      setSelectedDpi(final);
+      if (willPostDerived) {
+        debouncedPostSetting({ scaling_dpi: derived });
       }
     }
     const s_enable_binary_clipboard = serverSettings.enable_binary_clipboard;
@@ -1032,13 +1023,9 @@ function Sidebar() {
       const final = s_enable_binary_clipboard.locked ? s_enable_binary_clipboard.value : getStoredBool("enable_binary_clipboard", s_enable_binary_clipboard.value);
       setEnableBinaryClipboard(final);
     }
-    const s_use_browser_cursors = serverSettings.use_browser_cursors;
-    if (s_use_browser_cursors) {
-      const final = s_use_browser_cursors.locked ? s_use_browser_cursors.value : getStoredBool("use_browser_cursors", s_use_browser_cursors.value);
-      setUseBrowserCursors(final);
-    }
-    // HiDPI and rate control are conditional settings handled by their
-    // useConditionalSetting hooks (init + sync + dependency re-derivation).
+    // HiDPI, rate control, and the boolean settings above are conditional
+    // settings handled by their useConditionalSetting hooks (init + sync +
+    // dependency re-derivation).
     const s_ui_title = serverSettings.ui_title;
     if (s_ui_title) {
         setUiTitle(s_ui_title.value);
@@ -1046,11 +1033,6 @@ function Sidebar() {
     const s_ui_show_logo = serverSettings.ui_show_logo;
     if (s_ui_show_logo) {
         setUiShowLogo(s_ui_show_logo.value);
-    }
-    const s_force_aligned_resolution = serverSettings.force_aligned_resolution;
-    if (s_force_aligned_resolution) {
-      const final = s_force_aligned_resolution.locked ? s_force_aligned_resolution.value : getStoredBool("force_aligned_resolution", s_force_aligned_resolution.value);
-      setForceAlignedResolution(final);
     }
   }, [serverSettings]);
 
@@ -1134,13 +1116,6 @@ function Sidebar() {
   const [videoPaintoverBurstFrames, setVideoPaintoverBurstFrames] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("video_paintover_burst_frames")), 10) || 5
   );
-  const [usePaintOverQuality, setUsePaintOverQuality] = useState(() => {
-    const saved = localStorage.getItem(getPrefixedKey("use_paint_over_quality"));
-    return saved !== null ? saved === 'true' : DEFAULT_USE_PAINT_OVER_QUALITY;
-  });
-  const [videoFullColor, setVideoFullColor] = useState(
-    localStorage.getItem(getPrefixedKey("video_fullcolor")) === "true"
-  );
   const [jpeg_quality, setJpegQuality] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("jpeg_quality")), 10) ||
       DEFAULT_JPEG_QUALITY
@@ -1148,12 +1123,6 @@ function Sidebar() {
   const [paint_over_jpeg_quality, setPaintOverJpegQuality] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("paint_over_jpeg_quality")), 10) ||
       DEFAULT_PAINT_OVER_JPEG_QUALITY
-  );
-  const [use_cpu, setUseCpu] = useState(
-    localStorage.getItem(getPrefixedKey("use_cpu")) === "true"
-  );
-  const [videoStreamingMode, setVideoStreamingMode] = useState(
-    localStorage.getItem(getPrefixedKey("video_streaming_mode")) === "true"
   );
   const [selectedDpi, setSelectedDpi] = useState(
     // Explicit stored value diverges (wins); otherwise default to the local display scaling.
@@ -1182,17 +1151,25 @@ function Sidebar() {
     HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [rateControlMode, setRateControlMode] = useConditionalSetting(
     RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-  const [forceAlignedResolution, setForceAlignedResolution] = useState(() => {
-    const saved = localStorage.getItem(getPrefixedKey("force_aligned_resolution"));
-    return saved !== null ? saved === "true" : false;
-  });
+  const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
+    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [videoFullColor, setVideoFullColor] = useConditionalSetting(
+    VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [use_cpu, setUseCpu] = useConditionalSetting(
+    USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
+    VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [forceAlignedResolution, setForceAlignedResolution] = useConditionalSetting(
+    FORCE_ALIGNED_RESOLUTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [use_browser_cursors, setUseBrowserCursors] = useConditionalSetting(
+    USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  // The value the core reports as actually in effect (multi-monitor forces
+  // browser cursors on); null until reported. Displayed over the stored
+  // preference so the toggle can't lie about the live state.
+  const [effectiveCursor, setEffectiveCursor] = useState(null);
   const [antiAliasing, setAntiAliasing] = useState(() => {
     const saved = localStorage.getItem(getPrefixedKey("antiAliasingEnabled"));
     return saved !== null ? saved === "true" : true;
-  });
-  const [use_browser_cursors, setUseBrowserCursors] = useState(() => {
-    const saved = localStorage.getItem(getPrefixedKey("use_browser_cursors"));
-    return saved !== null ? saved === "true" : false;
   });
   const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
     const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
@@ -1607,24 +1584,16 @@ function Sidebar() {
     debouncedPostSetting({ video_paintover_burst_frames: selectedFrames });
   };
   const handleH264FullColorToggle = () => {
-    const newFullColorState = !videoFullColor;
-    setVideoFullColor(newFullColorState);
-    debouncedPostSetting({ video_fullcolor: newFullColorState });
+    writeConditional(VIDEO_FULLCOLOR_SPEC, !videoFullColor, setVideoFullColor, { persist: true });
   };
   const handleUsePaintOverQualityToggle = () => {
-    const newUsePaintOverQualityState = !usePaintOverQuality;
-    setUsePaintOverQuality(newUsePaintOverQualityState);
-    debouncedPostSetting({ use_paint_over_quality: newUsePaintOverQualityState });
+    writeConditional(USE_PAINT_OVER_QUALITY_SPEC, !usePaintOverQuality, setUsePaintOverQuality, { persist: true });
   };
   const handleUseCpuToggle = () => {
-    const newUseCpuState = !use_cpu;
-    setUseCpu(newUseCpuState);
-    debouncedPostSetting({ use_cpu: newUseCpuState });
+    writeConditional(USE_CPU_SPEC, !use_cpu, setUseCpu, { persist: true });
   };
   const handleH264StreamingModeToggle = () => {
-    const newStreamingModeState = !videoStreamingMode;
-    setVideoStreamingMode(newStreamingModeState);
-    debouncedPostSetting({ video_streaming_mode: newStreamingModeState });
+    writeConditional(VIDEO_STREAMING_MODE_SPEC, !videoStreamingMode, setVideoStreamingMode, { persist: true });
   };
   const handleRateControlChange = (event) => {
     // Explicit choice: pin it (persist) so encoder changes stop overriding.
@@ -1704,10 +1673,7 @@ function Sidebar() {
     writeConditional(HIDPI_SPEC, !manual, setHidpiEnabled, { persist: false });
   };
   const handleForceAlignedResolutionToggle = () => {
-    const newState = !forceAlignedResolution;
-    setForceAlignedResolution(newState);
-    debouncedPostSetting({ force_aligned_resolution: newState });
-    localStorage.setItem(getPrefixedKey("force_aligned_resolution"), String(newState));
+    writeConditional(FORCE_ALIGNED_RESOLUTION_SPEC, !forceAlignedResolution, setForceAlignedResolution, { persist: true });
   };
   const handleAntiAliasingToggle = () => {
     const newState = !antiAliasing;
@@ -1718,12 +1684,9 @@ function Sidebar() {
     );
   };
   const handleUseBrowserCursorsToggle = () => {
-    const newState = !use_browser_cursors;
-    setUseBrowserCursors(newState);
-    window.postMessage(
-      { type: "setUseBrowserCursors", value: newState },
-      window.location.origin
-    );
+    // The core owns persistence; propagate the new preference and let the core
+    // report the effective (possibly multi-monitor-forced) value back.
+    writeConditional(USE_BROWSER_CURSORS_SPEC, !use_browser_cursors, setUseBrowserCursors, { persist: false });
   };
   const handleEnableBinaryClipboardToggle = () => {
     const newState = !enableBinaryClipboard;
@@ -2076,6 +2039,10 @@ function Sidebar() {
           if (message.audio !== undefined) setIsAudioActive(message.audio);
           if (message.microphone !== undefined)
             setIsMicrophoneActive(message.microphone);
+        } else if (message.type === "effectiveCursorState" && typeof message.value === "boolean") {
+          // The core reports the cursor value actually in effect (multi-monitor
+          // forces browser cursors on); reflect it so the toggle can't lie.
+          setEffectiveCursor(message.value);
         } else if (message.type === 'clientRoleUpdate') {
           setIsViewerRole(message.role === 'viewer');
           if (message.role === 'viewer') setIsToggleVisible(false);
@@ -2951,10 +2918,7 @@ function Sidebar() {
                         className="resolution-button toggle-button"
                         onClick={handleAddScreenClick}
                         style={{ marginBottom: "10px" }}
-                        disabled={isWebrtc}
-                        title={isWebrtc
-                          ? t("sections.screen.addScreenWebrtcTitle", "Additional screens require WebSockets mode")
-                          : t("sections.screen.addScreenTitle", "Add a second screen")}
+                        title={t("sections.screen.addScreenTitle", "Add a second screen")}
                       >
                         {t("sections.screen.addScreenButton", "Add Screen +")}
                       </button>
@@ -3018,9 +2982,9 @@ function Sidebar() {
                         </label>
                         <button
                           id="useBrowserCursorsToggle"
-                          className={`toggle-button-sidebar ${use_browser_cursors ? "active" : ""}`}
+                          className={`toggle-button-sidebar ${(effectiveCursor !== null ? effectiveCursor : use_browser_cursors) ? "active" : ""}`}
                           onClick={handleUseBrowserCursorsToggle}
-                          aria-pressed={use_browser_cursors}
+                          aria-pressed={effectiveCursor !== null ? effectiveCursor : use_browser_cursors}
                           title={t(use_browser_cursors ? "sections.screen.useNativeCursorStylesDisableTitle" : "sections.screen.useNativeCursorStylesEnableTitle",
                                   use_browser_cursors ? "Use canvas cursor rendering (Paint to canvas)" : "Use CSS cursor rendering (Replace system cursors)")}
                         >
@@ -4123,7 +4087,7 @@ function Sidebar() {
           >
             &times;
           </button>
-          <iframe src="./files/" title="Downloadable Files" />
+          <iframe src="./api/files/" title="Downloadable Files" />
         </div>
       )}
       {isAppsModalOpen && (

@@ -281,6 +281,110 @@ def _resize_on_display(d, res_str, w_req, h_req):
     return mode_w, mode_h
 
 
+def compute_dual_layout(primary_wh, secondary_wh, position):
+    """Extended-desktop layout for a primary display plus one secondary placed at
+    `position` ("right"/"left"/"up"/"down") — the same placement model the
+    websockets transport uses, so a display looks identical over either transport.
+    Returns ({display_id_or_primary: {x, y, w, h}}, total_w, total_h) with the
+    total width rounded up to a multiple of 8 (xrandr framebuffer alignment);
+    the secondary's id is filled in by the caller."""
+    p_w, p_h = primary_wh
+    s_w, s_h = secondary_wh
+    if position == "left":
+        layouts = {"secondary": {"x": 0, "y": 0, "w": s_w, "h": s_h},
+                   "primary": {"x": s_w, "y": 0, "w": p_w, "h": p_h}}
+        total_w, total_h = p_w + s_w, max(p_h, s_h)
+    elif position == "down":
+        layouts = {"primary": {"x": 0, "y": 0, "w": p_w, "h": p_h},
+                   "secondary": {"x": 0, "y": p_h, "w": s_w, "h": s_h}}
+        total_w, total_h = max(p_w, s_w), p_h + s_h
+    elif position == "up":
+        layouts = {"secondary": {"x": 0, "y": 0, "w": s_w, "h": s_h},
+                   "primary": {"x": 0, "y": s_h, "w": p_w, "h": p_h}}
+        total_w, total_h = max(p_w, s_w), p_h + s_h
+    else:
+        layouts = {"primary": {"x": 0, "y": 0, "w": p_w, "h": p_h},
+                   "secondary": {"x": p_w, "y": 0, "w": s_w, "h": s_h}}
+        total_w, total_h = p_w + s_w, max(p_h, s_h)
+    return layouts, (total_w + 7) & ~7, total_h
+
+
+async def _run_xrandr(args, what):
+    """Run one xrandr command, returning success; failures are logged, not raised
+    (layout application degrades per step exactly like the websockets engine)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "xrandr", *args,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await _communicate_or_kill(proc)
+        if proc.returncode != 0:
+            logger_app_resize.warning(f"xrandr {what} failed: {stderr.decode(errors='replace').strip()}")
+            return False
+        return True
+    except Exception as e:
+        logger_app_resize.warning(f"xrandr {what} failed: {e}")
+        return False
+
+
+async def list_selkies_monitors():
+    """Names of the logical monitors this software created (selkies-*)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "xrandr", "--listmonitors",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await _communicate_or_kill(proc)
+        names = []
+        for line in stdout.decode(errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and "selkies-" in parts[1]:
+                names.append(parts[1].lstrip("*+"))
+        return names
+    except Exception:
+        return []
+
+
+async def apply_extended_layout(layouts, total_w, total_h):
+    """Drive xrandr into an extended-desktop framebuffer covering `layouts`
+    (display_id -> {x,y,w,h}): ensure the total mode exists, size the framebuffer,
+    and define one selkies-<id> logical monitor per display so window managers
+    tile against the per-display regions. Mirrors the websockets engine's command
+    sequence. Returns True when the framebuffer was set."""
+    total_mode = f"{total_w}x{total_h}"
+    curr_res, _, available, _, screen_name = await get_new_res(total_mode)
+    if not screen_name:
+        logger_app_resize.error("Could not determine output name; cannot apply layout.")
+        return False
+    for monitor_name in await list_selkies_monitors():
+        await _run_xrandr(["--delmonitor", monitor_name], f"delete monitor {monitor_name}")
+    if total_mode not in (available or []):
+        if not await ensure_mode(total_mode):
+            try:
+                _, modeline = await generate_xrandr_gtf_modeline(total_mode)
+                await _run_xrandr(["--newmode", total_mode] + modeline.split(), "create mode")
+                await _run_xrandr(["--addmode", screen_name, total_mode], "add mode")
+            except Exception as e:
+                logger_app_resize.error(f"Could not create extended mode {total_mode}: {e}")
+                return False
+    if (curr_res or "").lower().replace(" ", "") != total_mode:
+        if not await _run_xrandr(
+            ["--fb", total_mode, "--output", screen_name, "--mode", total_mode],
+            "set framebuffer",
+        ):
+            return False
+    # The physical output can belong to only one logical monitor: give it to the
+    # primary; the others attach to none.
+    for display_id, layout in sorted(layouts.items(), key=lambda kv: kv[0] != "primary"):
+        geometry = f"{layout['w']}/0x{layout['h']}/0+{layout['x']}+{layout['y']}"
+        await _run_xrandr(
+            ["--setmonitor", f"selkies-{display_id}", geometry, screen_name],
+            f"set logical monitor selkies-{display_id}",
+        )
+        screen_name = "none"
+    return True
+
+
 async def get_new_res(res_str):
     """Current/fitted resolution info for the first connected output:
     (curr_res, fitted res_str, sorted mode names, max res, output name).

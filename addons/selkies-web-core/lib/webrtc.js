@@ -186,11 +186,6 @@ export class WebRTCClient {
 		this._recvQueue = Promise.resolve();
 
 		/**
-		 * @type {RTCDataChannel}
-		 */
-		this._aux_channel = null;
-
-		/**
 		 * @type {Input}
 		 */
 		this.input = null;
@@ -606,10 +601,19 @@ export class WebRTCClient {
 		if (this._sendQueue) {
 			try { await this._sendQueue; } catch (e) { /* queued send failed; proceed */ }
 		}
-		while (this._send_channel && this._send_channel.readyState === 'open' &&
-			this._send_channel.bufferedAmount > threshold) {
-			await new Promise((r) => setTimeout(r, 25));
-		}
+		const ch = this._send_channel;
+		if (!ch || ch.readyState !== 'open' || ch.bufferedAmount <= threshold) return;
+		// Resume the instant the buffer crosses below the threshold via the
+		// bufferedamountlow event rather than a fixed poll interval: polling lets
+		// the SCTP send buffer drain to empty between chunks, which collapses
+		// throughput. Keeping ~threshold bytes queued keeps the pipe full while
+		// still yielding the channel to input/stats.
+		ch.bufferedAmountLowThreshold = threshold;
+		await new Promise((resolve) => {
+			const done = () => { ch.removeEventListener('bufferedamountlow', done); resolve(); };
+			ch.addEventListener('bufferedamountlow', done);
+			if (ch.readyState !== 'open' || ch.bufferedAmount <= threshold) done();
+		});
 	}
 
 	sendDataChannelMessage(message) {
@@ -643,141 +647,6 @@ export class WebRTCClient {
 		}
 	}
 
-	/**
-	 * Creates a dynamic auxiliary data channel.
-	 * Returns true if created, else false.
-	 * @returns {boolean}
-	 */
-	createAuxDataChannel() {
-		if (this._aux_channel === null) {
-			this._aux_channel = this.peerConnection.createDataChannel("data", {
-				// Data channels defaults to 'ordered' and not 'negotiated'
-				// explicitly mentioned for readability
-				ordered: true,
-				negotiated: false,
-			});
-			this._aux_channel.onopen = () => {
-				this._setStatus("An auxiliary data channel opened up");
-				// A theoretical buffer threshold to not overflow the browser impl buffer limit
-				this._aux_channel.bufferedAmountLowThreshold = 10 * 1024 * 1024;
-			}
-			this._aux_channel.onmessage = (msg) => {
-				this._setDebug("Received msg from auxiliary data channel: ", msg);
-			}
-			this._aux_channel.onerror = (err) => {
-				this._aux_channel = null;
-				this._setError("Auxiliary data channel error: " + (err.message || err));
-			}
-			this._aux_channel.onclose = () => {
-				this._aux_channel = null;
-				this._setStatus("Gracefully closed the auxiliary data channel");
-			}
-			return true;
-		}
-		return false;
-	}
-
-	/**
-	 * Waits for the Auxiliary data channel to open
-	 * @returns {Promise}
-	 */
-	waitForAuxChannelOpen(timeout = 5000) {
-		return new Promise((resolve, reject) => {
-			const start = Date.now();
-			const check = () => {
-				if (this._aux_channel !== null && this._aux_channel.readyState === 'open') {
-					return resolve();
-				}
-				if (Date.now() - start > timeout) {
-					return reject(new Error('Timeout: Auxiliary data channel did not open'));
-				}
-				setTimeout(check, 50);
-			};
-			check();
-		});
-	}
-
-	/**
-	 * Sends data to peer data channel
-	 * @param {ArrayBuffer} data
-	 */
-	sendAuxChannelData(data) {
-		if (this._aux_channel !== null && this._aux_channel.readyState === 'open') {
-			try {
-				this._aux_channel.send(data);
-				return true;
-			} catch (err) {
-				this._setError("Failed to send on auxiliary data channel: ", err);
-				return false;
-			}
-		} else {
-			console.warn("Auxiliary data channel closed or uninitialized");
-			return false;
-		}
-	}
-
-	/**
-	 * Closes the auxiliary data channel
-	 */
-	closeAuxDataChannel() {
-		if (this._aux_channel !== null && this._aux_channel.readyState === 'open') {
-			this._aux_channel.close();
-			console.log("Closing aux data channel");
-		} else {
-			console.warn("Aux data channel does not exist, or already closed");
-		}
-	}
-
-	/**
-	 * Returns true if Auxiliary data channel buffer reached the set threshold, else false.
-	 * Based on the return value, the caller can slow down the data push rate to the channel.
-	 * @returns {boolean}
-	 */
-	isAuxBufferNearThreshold() {
-		if (this._aux_channel === null || this._aux_channel.readyState !== 'open') {
-			console.warn("Auxiliary data channel does not exist");
-			return false;
-		} else {
-			let threshold = this._aux_channel.bufferedAmount / this._aux_channel.bufferedAmountLowThreshold;
-			if (threshold >= 0.9) {
-				this._setDebug(`Auxiliary data channel buffer reached ${Math.trunc(threshold*100)}% threshold`);
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * Waits for the Auxiliary data channel buffer to drain.
-	 * @param {number} optional optional timeout in ms (if omitted, waits until drained)
-	 * @returns {Promise} - Resolves when the auxiliary data channel buffer is drained.
-	 */
-	awaitForAuxBufferToDrain(timeoutMs) {
-		const pollInterval = 50;
-		const start = Date.now();
-
-		return new Promise((resolve, reject) => {
-			if (this._aux_channel === null) {
-				resolve();
-				return;
-			}
-
-			// Check the buffer status periodically
-			const check = () => {
-				if (this._aux_channel && this._aux_channel.bufferedAmount === 0) {
-					console.log("Auxiliary data channel buffer drained");
-					resolve();
-					return;
-				}
-				if (typeof timeoutMs === 'number' && (Date.now() - start) >= timeoutMs) {
-					reject(new Error("Timeout waiting for aux data channel buffer to drain"));
-					return;
-				}
-				setTimeout(check, pollInterval);
-			};
-			check();
-		});
-	}
 
 	/**
 	 * Handler for gamepad disconnect message.

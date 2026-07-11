@@ -91,8 +91,9 @@ class WebRTCSignalingClient:
         self.on_disconnect: Callable[[], Awaitable[None]] = lambda: logger.warning(
             "unhandled on_disconnect callback"
         )
-        self.on_session_start: Callable[[str, str, Optional[str]], Awaitable[None]] = (
-            lambda client_peer_id, client_type, client_token=None: logger.warning(
+        self.on_session_start: Callable[..., Awaitable[None]] = (
+            lambda client_peer_id, client_type, client_token=None,
+            display_id="primary", display_position="right": logger.warning(
                 "unhandled on_session_start callback"
             )
         )
@@ -264,13 +265,19 @@ class WebRTCSignalingClient:
 
         elif message.startswith("SESSION_START"):
             toks = message.strip().split(" ")
-            if len(toks) in (3, 4):
-                # peer_id is of format client-<UUID>; an optional 4th field is the
-                # secure-mode collaboration token (present only when supplied).
+            if len(toks) in (3, 5, 6):
+                # peer_id is of format client-<UUID>. The full form carries the
+                # display this client drives and its layout position; an optional
+                # final field is the secure-mode collaboration token. The 3-token
+                # form (no display fields) maps to the primary display.
                 client_peer_id = toks[1]
                 client_type = toks[2]
-                client_token = toks[3] if len(toks) == 4 else None
-                await self.on_session_start(client_peer_id, client_type, client_token)
+                display_id = toks[3] if len(toks) >= 5 else "primary"
+                display_position = toks[4] if len(toks) >= 5 else "right"
+                client_token = toks[5] if len(toks) == 6 else None
+                await self.on_session_start(
+                    client_peer_id, client_type, client_token, display_id, display_position
+                )
             else:
                 logger.error(f"invalid SESSION_START message: {message}")
 

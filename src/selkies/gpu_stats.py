@@ -183,6 +183,12 @@ def _aitop_gpus(vendors=None):
             if vendors is not None and vendor not in vendors:
                 continue
             for info in monitor.get_gpu_info() or []:
+                # All-zero readings with no PCI identity are fabricated placeholders
+                # (aitop's Intel monitor emits them on hosts with no Intel GPU); a
+                # real-but-unreadable card resurfaces via the sysfs backfill with a
+                # true PCI address, which dri_node matching can actually use.
+                if not info.utilization and not info.memory_total and not info.memory_used:
+                    continue
                 gpus.append(
                     GPUStat(
                         len(gpus),

@@ -216,3 +216,173 @@ export function createClipboardSync({ sendRequest }) {
         get lastMime() { return lastMime; },
     };
 }
+
+/**
+ * Keyboard/paste gesture wiring for clipboard sync, shared by both transports.
+ *
+ * Owns the three window-level pieces around the per-transport read/send
+ * functions:
+ *
+ * - Paste-ordering hold: a Ctrl/Cmd+V arriving while the local clipboard is
+ *   still being read/sent would depart the ordered channel BEFORE the
+ *   clipboard content and paste the previous value on the server. The chord's
+ *   key events are swallowed, held until the send flushes (bounded), then
+ *   replayed in order for the input stack.
+ * - Non-Chromium Ctrl/Cmd+C: Safari/Firefox reject navigator.clipboard from
+ *   focus/message handlers (no transient activation), so the server clipboard
+ *   is written inside the copy gesture via a ClipboardItem whose blob is a
+ *   Promise, with execCommand('copy') as last resort.
+ * - Non-Chromium paste-to-server: driven by the 'paste' event's synchronous
+ *   event.clipboardData. There is deliberately NO Ctrl/Cmd+V
+ *   navigator.clipboard read: WebKit rejects it from keydown, Firefox
+ *   re-raises its paste prompt, and it would double-send next to the paste
+ *   event.
+ *
+ * Gates are callbacks because the two cores keep their enablement state in
+ * different variables; every gate is re-read per event so runtime settings
+ * changes apply immediately. Never preventDefault on consumed gestures: the
+ * chord must still reach the remote session.
+ */
+export function createClipboardGestures({
+    isChromium,
+    clipboardSync,
+    sendClipboardData,
+    canSync,
+    canRead,
+    canWrite,
+    binaryEnabled,
+    getSendInFlight,
+}) {
+    // Only drive remote-clipboard sync from the stream; don't hijack
+    // copy/paste in page form fields (settings UI, etc.). The stream's
+    // overlay input is exempt.
+    function inPageFormField() {
+        const ae = document.activeElement;
+        return !!(ae && ae.id !== 'overlayInput' &&
+            (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' ||
+             ae.tagName === 'SELECT' || ae.isContentEditable));
+    }
+
+    const heldPasteEvents = [];
+    let heldPasteReplayPending = false;
+    function replayHeldPasteEvents() {
+        heldPasteReplayPending = false;
+        for (const ev of heldPasteEvents.splice(0)) {
+            try {
+                const replay = new KeyboardEvent(ev.type, ev);
+                Object.defineProperty(replay, '__selkiesClipReplay', { value: true });
+                window.dispatchEvent(replay);
+            } catch (_) { /* never break the key stream */ }
+        }
+    }
+    const PASTE_MOD_CODES = ['ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'];
+    function holdPasteWhileClipboardInFlight(ev) {
+        if (ev.__selkiesClipReplay) return;
+        // While a replay is queued, the chord's modifier keyups must be held
+        // too — a Ctrl keyup overtaking the replayed V would break the chord
+        // server-side (V would arrive unmodified and type a literal 'v').
+        const modHold = heldPasteReplayPending && ev.type === 'keyup' && PASTE_MOD_CODES.includes(ev.code);
+        if (ev.code !== 'KeyV' && !modHold) return;
+        const chord = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
+        // Hold a paste chord while a send is in flight; also hold ANY KeyV
+        // event while a replay is queued (its keyup must not overtake the held
+        // keydown, even if Ctrl was already released).
+        const hold = modHold || (ev.code === 'KeyV' && ((chord && getSendInFlight()) || heldPasteReplayPending));
+        if (!hold) return;
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        heldPasteEvents.push(ev);
+        if (!heldPasteReplayPending) {
+            heldPasteReplayPending = true;
+            Promise.race([
+                getSendInFlight() || Promise.resolve(),
+                new Promise((r) => setTimeout(r, 2000)),
+            ]).then(replayHeldPasteEvents, replayHeldPasteEvents);
+        }
+    }
+
+    function onCopyKeydown(event) {
+        if (!canSync()) return;
+        if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+        // Once per physical keypress: autorepeat must not spam REQUEST_CLIPBOARD.
+        if (event.repeat) return;
+        if (inPageFormField()) return;
+        const key = (event.key || '').toLowerCase();
+        // Read (Ctrl/Cmd+V) is handled by the 'paste' listener via
+        // event.clipboardData: synchronous, no Firefox paste-prompt, and no
+        // double-send. Reading here through navigator.clipboard would re-raise
+        // the prompt and send twice.
+        if (key === 'c' && canWrite()) {
+            // Advertise text/plain ONLY: a Ctrl/Cmd+C can't synchronously know
+            // whether the server's CURRENT clipboard is an image, and a stale
+            // cached MIME type would build a malformed ClipboardItem (image
+            // entry holding text). Server images are delivered by the push
+            // handler instead.
+            const textPromise = clipboardSync.request(false);
+            const items = {
+                'text/plain': textPromise.then((t) =>
+                    new Blob([typeof t === 'string' ? t : (clipboardSync.lastText || '')], { type: 'text/plain' }))
+            };
+            let writePromise = null;
+            try {
+                writePromise = navigator.clipboard.write([new ClipboardItem(items)]);
+            } catch (err) {
+                // Synchronous throw (e.g. ClipboardItem/clipboard.write unsupported).
+                console.warn(`navigator.clipboard.write unavailable on Ctrl+C, using execCommand: ${err && err.name}`);
+                clipboardSync.copyViaExecCommand(textPromise);
+            }
+            if (writePromise && writePromise.catch) {
+                writePromise.catch((err) => {
+                    console.warn(`navigator.clipboard.write rejected on Ctrl+C, using execCommand: ${err && err.name} - ${err && err.message}`);
+                    clipboardSync.copyViaExecCommand(textPromise);
+                });
+            }
+        }
+    }
+
+    function onPaste(event) {
+        if (!canSync() || !canRead()) return;
+        if (inPageFormField()) return;
+        const cd = event.clipboardData;
+        if (!cd) return;
+        // Prefer an image when binary clipboard is on and the payload carries one.
+        if (binaryEnabled() && cd.items) {
+            for (let i = 0; i < cd.items.length; i++) {
+                const it = cd.items[i];
+                if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
+                    const file = it.getAsFile();
+                    if (file) {
+                        file.arrayBuffer()
+                            .then((buf) => sendClipboardData(buf, it.type))
+                            .catch((err) => console.warn(`Paste image read failed: ${err && err.name}`));
+                        return;
+                    }
+                }
+            }
+        }
+        const text = cd.getData('text/plain');
+        if (text) sendClipboardData(text);
+    }
+
+    function wire() {
+        // Registered before input attaches (both capture on window), so the
+        // hold runs first.
+        window.addEventListener('keydown', holdPasteWhileClipboardInFlight, true);
+        window.addEventListener('keyup', holdPasteWhileClipboardInFlight, true);
+        if (!isChromium) {
+            window.addEventListener('keydown', onCopyKeydown, true);
+            window.addEventListener('paste', onPaste, true);
+        }
+    }
+
+    function unwire() {
+        window.removeEventListener('keydown', holdPasteWhileClipboardInFlight, true);
+        window.removeEventListener('keyup', holdPasteWhileClipboardInFlight, true);
+        if (!isChromium) {
+            window.removeEventListener('keydown', onCopyKeydown, true);
+            window.removeEventListener('paste', onPaste, true);
+        }
+    }
+
+    return { wire, unwire };
+}

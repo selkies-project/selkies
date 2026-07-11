@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey } from "@/utils";
+import { t } from "@/i18n";
 
 export function Clipboard() {
 	const [dashboardClipboardContent, setDashboardClipboardContent] = useState('');
@@ -107,7 +108,7 @@ export function Clipboard() {
 		<div className="w-[300px] p-4 flex flex-col gap-2">
 			{(renderableSettings.binaryClipboard ?? true) && (
 				<div className="flex items-center justify-between">
-					<Label className="text-sm font-medium">Binary Clipboard</Label>
+					<Label className="text-sm font-medium">{t('sections.clipboard.binaryModeLabel')}</Label>
 					<Switch
 						checked={enableBinaryClipboard}
 						onCheckedChange={handleBinaryClipboardToggle}
@@ -115,14 +116,14 @@ export function Clipboard() {
 				</div>
 			)}
 
-			<Label htmlFor="dashboardClipboardTextarea">Clipboard</Label>
+			<Label htmlFor="dashboardClipboardTextarea">{t('sections.clipboard.title')}</Label>
 			<Textarea
 				id="dashboardClipboardTextarea"
 				value={dashboardClipboardContent}
 				onChange={handleClipboardChange}
 				onBlur={handleClipboardBlur}
 				rows={5}
-				placeholder="Enter text to copy to remote clipboard..."
+				placeholder={t('clipboard.inputPlaceholder')}
 				className="allow-native-input resize-none bg-background/95 overflow-y-auto max-h-[150px]"
 			/>
 
@@ -135,7 +136,7 @@ export function Clipboard() {
 						onClick={handleImageButtonClick}
 						className="flex-1"
 					>
-						Upload Image
+						{t('clipboard.uploadImage')}
 					</Button>
 					{clipboardImageUrl && (
 						<Button
@@ -144,7 +145,7 @@ export function Clipboard() {
 							onClick={handleClearImage}
 							className="flex-1"
 						>
-							Clear Image
+							{t('clipboard.clearImage')}
 						</Button>
 					)}
 				</div>
@@ -161,7 +162,7 @@ export function Clipboard() {
 					<div className="mt-2">
 						<img
 							src={clipboardImageUrl}
-							alt="Clipboard preview"
+							alt={t('clipboard.previewAlt')}
 							className="max-w-full max-h-32 object-contain rounded border"
 						/>
 					</div>

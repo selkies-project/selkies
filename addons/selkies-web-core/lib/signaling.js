@@ -45,7 +45,7 @@ export class WebRTCSignaling {
      *    Reference implementation:
      *      https://github.com/GStreamer/gstreamer/tree/main/subprojects/gst-examples/webrtc/signaling
      */
-    constructor(server, client_type, client_slot, client_strict_viewer, client_token) {
+    constructor(server, client_type, client_slot, client_strict_viewer, client_token, display_id, display_position) {
         /**
          * @private
          * @type {URL}
@@ -166,6 +166,22 @@ export class WebRTCSignaling {
         this.client_token = client_token;
 
         /**
+         * @private
+         * @type {string}
+         */
+        // Which display this client drives; the server scopes controller/slot
+        // uniqueness per display so display2 never evicts the primary.
+        this.display_id = display_id || 'primary';
+
+        /**
+         * @private
+         * @type {string}
+         */
+        // Where a secondary display sits relative to the primary in the
+        // extended desktop layout.
+        this.display_position = display_position || 'right';
+
+        /**
          * @type {function}
          */
         this.onshowalert = null;
@@ -245,6 +261,8 @@ export class WebRTCSignaling {
             'client_slot': this.client_slot,
             'client_strict_viewer': this.client_strict_viewer,
             'client_token': this.client_token,
+            'display_id': this.display_id,
+            'display_position': this.display_position,
         }
         this._ws_conn.send(`HELLO ${this.peer_type} ${JSON.stringify(meta)}`);
         this._setStatus("Registering with server, peer type: " + this.peer_type + ", client type: " + this.client_type);

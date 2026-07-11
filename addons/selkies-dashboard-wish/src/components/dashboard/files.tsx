@@ -10,6 +10,7 @@ import { X } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { computeRenderableSettings, getLastServerSettings } from "@/utils";
+import { t } from "@/i18n";
 
 // Helper function to format bytes
 function formatBytes(bytes: number, decimals = 2): string {
@@ -53,20 +54,20 @@ export function Files({}: FilesProps = {}) {
                 const { status, fileName, progress, message: errMsg } = message.payload;
 
                 if (status === 'start') {
-                    toast.loading(`Uploading ${fileName}...`, {
+                    toast.loading(t('uploads.uploadingFile', { fileName }), {
                         id: fileName,
                     });
                 } else if (status === 'progress') {
-                    toast.loading(`Uploading ${fileName}: ${progress}%`, {
+                    toast.loading(t('uploads.uploadingFileProgress', { fileName, progress }), {
                         id: fileName,
                     });
                 } else if (status === 'end') {
-                    toast.success(`Successfully uploaded ${fileName}`, {
+                    toast.success(t('uploads.uploadSuccessFile', { fileName }), {
                         id: fileName,
                     });
                 } else if (status === 'error') {
-                    const errorMessage = errMsg ? `Error: ${errMsg}` : 'Unknown error';
-                    toast.error(`Failed to upload ${fileName}: ${errorMessage}`, {
+                    const errorMessage = errMsg ? `${t('notifications.errorPrefix')} ${errMsg}` : t('notifications.unknownError');
+                    toast.error(t('uploads.uploadFailedFile', { fileName, errorMessage }), {
                         id: fileName,
                     });
                 }
@@ -91,7 +92,7 @@ export function Files({}: FilesProps = {}) {
                         className="mb-2"
                         onClick={handleUploadClick}
                     >
-                        Upload Files
+                        {t('sections.files.uploadButton')}
                     </Button>
                 )}
                 {showDownload && (
@@ -100,7 +101,7 @@ export function Files({}: FilesProps = {}) {
                         className="mb-2"
                         onClick={toggleFilesModal}
                     >
-                        Download Files
+                        {t('sections.files.downloadButtonTitle')}
                     </Button>
                 )}
             </div>
@@ -111,9 +112,9 @@ export function Files({}: FilesProps = {}) {
                         <div className="flex flex-col space-y-6">
                             <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
                                 <div>
-                                    <DialogTitle>Files</DialogTitle>
+                                    <DialogTitle>{t('sections.files.title')}</DialogTitle>
                                     <DialogDescription>
-                                        Download and manage files
+                                        {t('files.subtitle')}
                                     </DialogDescription>
                                 </div>
                                 <div className="flex items-center gap-2">
@@ -124,7 +125,7 @@ export function Files({}: FilesProps = {}) {
                                         className="h-10 w-10"
                                     >
                                         <X className="h-4 w-4" />
-                                        <span className="sr-only">Close</span>
+                                        <span className="sr-only">{t('common.close')}</span>
                                     </Button>
                                 </div>
                             </div>
@@ -132,9 +133,9 @@ export function Files({}: FilesProps = {}) {
                     </DialogHeader>
 
                     <div className="flex-1 overflow-hidden">
-                        <iframe 
-                            src="/files" 
-                            title="Downloadable Files"
+                        <iframe
+                            src="api/files/"
+                            title={t('filesModal.iframeTitle')}
                             className="w-full h-[calc(90vh-8rem)] border-0"
                         />
                     </div>

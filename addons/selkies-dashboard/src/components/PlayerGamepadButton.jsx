@@ -33,13 +33,23 @@ function PlayerGamepadButton() {
     });
 
     React.useEffect(() => {
-        const detectFirstTouch = () => {
-            console.log("Player client: First touch detected. Showing gamepad toggle button.");
+        // Mirror the main dashboard's virtual-keyboard-button gating: reveal the
+        // toggle on a mobile UA or once a touch is seen. Without a touchscreen the
+        // button never appears, so #player* clients fall back to real gamepads only.
+        const isMobile = typeof window !== "undefined" &&
+            ((navigator.userAgentData && navigator.userAgentData.mobile) ||
+                /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
+        if (isMobile) {
             setIsButtonVisible(true);
+            return;
+        }
+        const detectTouch = () => {
+            setIsButtonVisible(true);
+            window.removeEventListener('touchstart', detectTouch);
         };
-        window.addEventListener('touchstart', detectFirstTouch, { once: true, passive: true });
+        window.addEventListener('touchstart', detectTouch, { passive: true });
         return () => {
-            window.removeEventListener('touchstart', detectFirstTouch, { once: true, passive: true });
+            window.removeEventListener('touchstart', detectTouch);
         };
     }, []);
 

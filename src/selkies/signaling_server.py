@@ -33,6 +33,14 @@ class Peer:
     # read-write collaboration (mirrors the WS mk-token path).
     client_token: Optional[str] = None
     peer_status: Optional[str] = None
+    # Which display this peer drives ("primary", "display2", ...). Controller and
+    # slot uniqueness are scoped per display so a second display's client does not
+    # evict the primary (mirrors the WS per-display model).
+    display_id: str = "primary"
+    # Where a secondary display sits relative to the primary in the extended
+    # desktop layout ("right"/"left"/"up"/"down"); carried to the server side so
+    # it can lay the framebuffer out like the WS mode does.
+    display_position: str = "right"
 
 
 class WebRTCPeerManagement:
@@ -168,8 +176,11 @@ class WebRTCPeerManagement:
 
             if not peer:
                 return
-            # if controller closes the connection also close server side connection
-            if peer.client_type == "controller":
+            # A PRIMARY controller closing also closes the server-side connection
+            # (the legacy full-session reset). A secondary display's controller must
+            # NOT: the server socket is shared by every display's session, so it is
+            # only told the session ended — like a viewer — and the primary lives on.
+            if peer.client_type == "controller" and peer.display_id == "primary":
                 other_peer = self.peers.get(other_id)
                 if other_peer:
                     logger.info(
@@ -179,8 +190,8 @@ class WebRTCPeerManagement:
                     )
                     wso: WebSocketResponse = other_peer.ws
                     await wso.close(code=1000, message=b"Connection closed")
-            elif peer.client_type == "viewer":
-                # if viewer closes the connection notify the server
+            elif peer.client_type in ("controller", "viewer"):
+                # Notify the server the session ended without dropping its socket.
                 other_peer = self.peers.get(other_id)
                 if other_peer:
                     wso = other_peer.ws
@@ -467,7 +478,9 @@ class WebRTCPeerManagement:
                         )
                     )
                     # Notify callee. callee is always server
-                    session_start = "SESSION_START {} {}".format(uid, client_type)
+                    session_start = "SESSION_START {} {} {} {}".format(
+                        uid, client_type, peer.display_id, peer.display_position
+                    )
                     # Relay the caller's secure-mode token (space-free) as an extra field
                     # so the server side can grant read-write collaboration to a matching
                     # viewer; omitted when absent to avoid a trailing empty token.
@@ -572,6 +585,8 @@ class WebRTCPeerManagement:
         client_slot = None
         client_strict_viewer = None
         client_token = None
+        display_id = "primary"
+        display_position = "right"
         # Partner notifications for evicted dead peers: collected under the lock but
         # flushed after release so a slow partner socket can't stall other handshakes.
         dead_peer_notifications: List[Callable[[], Awaitable[Any]]] = []
@@ -604,6 +619,9 @@ class WebRTCPeerManagement:
                         client_slot = json_metadata.get("client_slot")
                         client_strict_viewer = json_metadata.get("client_strict_viewer")
                         client_token = json_metadata.get("client_token")
+                        display_id = json_metadata.get("display_id") or "primary"
+                        pos = json_metadata.get("display_position")
+                        display_position = pos if pos in ("right", "left", "up", "down") else "right"
                     except json.JSONDecodeError:
                         await ws.close(code=1002, message=b"invalid protocol")
                         raise Exception("Invalid JSON metadata from {!r}".format(raddr))
@@ -645,12 +663,14 @@ class WebRTCPeerManagement:
                             (pid, peer)
                             for pid, peer in self.peers.items()
                             if hasattr(peer, "peer_type") and peer.peer_type == "client"
+                            and getattr(peer, "display_id", "primary") == display_id
                         ]
                         # The newest connection wins (parity with websockets mode,
                         # where a new display connection supersedes the old one): a
                         # refresh must never be blocked by its own not-yet-reaped
                         # predecessor. Dead holders are reaped; a live one is closed.
-                        if existing_clients and self._eviction_storm(("client",)):
+                        # Scoped per display so display2 never supersedes primary.
+                        if existing_clients and self._eviction_storm(("client", display_id)):
                             await ws.close(
                                 code=4000,
                                 message=b"Session takeover loop detected; another page holds this session.",
@@ -661,7 +681,7 @@ class WebRTCPeerManagement:
                         for pid, peer in existing_clients:
                             evict_peer_locked(
                                 pid, peer, b"Superseded by a new connection.",
-                                storm_key=("client",),
+                                storm_key=("client", display_id),
                             )
                             logger.info(
                                 "Evicting client {!r} for non-sharing reconnect from {!r}".format(
@@ -683,12 +703,14 @@ class WebRTCPeerManagement:
                                 (pid, peer)
                                 for pid, peer in self.peers.items()
                                 if getattr(peer, "client_slot", None) == client_slot
+                                and getattr(peer, "display_id", "primary") == display_id
                             ]
                             # The newest claimant wins the slot (parity with
                             # websockets mode): reap dead holders, supersede live
                             # ones — a page refresh reconnects before its old socket
-                            # is reaped and must not bounce off itself.
-                            if colliding and self._eviction_storm(("slot", client_slot)):
+                            # is reaped and must not bounce off itself. Scoped per
+                            # display so the same slot on display2 is independent.
+                            if colliding and self._eviction_storm(("slot", display_id, client_slot)):
                                 await ws.close(
                                     code=4000,
                                     message=b"Player slot takeover loop detected; another page holds this slot.",
@@ -702,7 +724,7 @@ class WebRTCPeerManagement:
                                 evict_peer_locked(
                                     pid, peer,
                                     b"Superseded by a new connection for this player slot.",
-                                    storm_key=("slot", client_slot),
+                                    storm_key=("slot", display_id, client_slot),
                                 )
                                 logger.info(
                                     "Evicting peer {!r} holding slot {!r} for reconnect from {!r}".format(
@@ -727,6 +749,7 @@ class WebRTCPeerManagement:
                             for pid, peer in self.peers.items()
                             if hasattr(peer, "client_type")
                             and peer.client_type == "controller"
+                            and getattr(peer, "display_id", "primary") == display_id
                         ),
                         None,
                     )
@@ -737,7 +760,9 @@ class WebRTCPeerManagement:
                             # mode, which kills the old primary client when a new
                             # one connects). _evict_dead_peer_locked keeps the
                             # server alive (SESSION_END, not a server-socket close).
-                            if self._eviction_storm(("controller",)):
+                            # Scoped per display: display2's controller and the
+                            # primary's controller coexist without evicting each other.
+                            if self._eviction_storm(("controller", display_id)):
                                 await ws.close(
                                     code=4000,
                                     message=b"Session takeover loop detected; another page holds this session.",
@@ -750,7 +775,7 @@ class WebRTCPeerManagement:
                             evict_peer_locked(
                                 ctrl_pid, ctrl_peer,
                                 b"Superseded by a new controller connection.",
-                                storm_key=("controller",),
+                                storm_key=("controller", display_id),
                             )
                             peer_controller = None
                             logger.info(
@@ -803,6 +828,8 @@ class WebRTCPeerManagement:
                     client_slot=client_slot,
                     client_strict_viewer=client_strict_viewer,
                     client_token=client_token,
+                    display_id=display_id,
+                    display_position=display_position,
                 )
                 result = (puid, peer_type, client_type, client_slot, client_strict_viewer)
         finally:
