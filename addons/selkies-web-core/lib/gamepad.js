@@ -141,7 +141,11 @@ export class GamepadManager {
                     const pressed = currentGp.buttons[x].pressed;
                     let buttonIndex = x;
 
-                    if (navigator.userAgent.includes("Firefox")) {
+                    // Firefox reports X/Y swapped only for pads it could not map
+                    // to the standard layout; a pad that declares standard mapping
+                    // (including the synthetic touch gamepad) is already in
+                    // standard order and must not be re-swapped.
+                    if (currentGp.mapping !== "standard" && navigator.userAgent.includes("Firefox")) {
                         if (x === 2) buttonIndex = 3;
                         else if (x === 3) buttonIndex = 2;
                     }

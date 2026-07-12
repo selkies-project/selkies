@@ -446,7 +446,10 @@
                         else if (maxDistance <= 0) { x = 0; y = 0;}
                         handleElement.style.left = `${x + (currentBaseSize - currentHandleSize) / 2}px`;
                         handleElement.style.top = `${y + (currentBaseSize - currentHandleSize) / 2}px`;
-                        if (maxDistance > 0) { updateGamepadAxis(joyConfig.axes[0], x / maxDistance); updateGamepadAxis(joyConfig.axes[1], y / maxDistance * -1); }
+                        // Screen-Y grows downward, matching the standard-gamepad
+                        // axis convention (down = +1), so the vertical axis passes
+                        // through unnegated just like the horizontal one.
+                        if (maxDistance > 0) { updateGamepadAxis(joyConfig.axes[0], x / maxDistance); updateGamepadAxis(joyConfig.axes[1], y / maxDistance); }
                         else { updateGamepadAxis(joyConfig.axes[0], 0); updateGamepadAxis(joyConfig.axes[1], 0); }
                     }
                     base.addEventListener('touchstart', onJoystickTouchStart, { passive: false });

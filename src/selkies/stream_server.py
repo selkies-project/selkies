@@ -8,6 +8,7 @@ import ssl
 import hmac
 import json
 import html
+import time
 import shutil
 import base64
 import pathlib
@@ -29,6 +30,14 @@ from abc import ABCMeta, abstractmethod
 
 
 logger = logging.getLogger("stream_server")
+
+
+# A chunked upload whose transfer sits idle longer than this is expired: its
+# tracking entry and on-disk .part file are removed the next time any chunked
+# upload request arrives. Generous relative to chunk cadence (one ≤64 MiB
+# slice completes well within this on any usable link), so only transfers
+# whose client is truly gone are reaped.
+UPLOAD_PART_TTL_SECONDS = 3600
 
 
 # Inlined header/footer HTML for the /api/files directory index.
@@ -305,7 +314,10 @@ FILE_INDEX_FOOTER = """    </div> <!-- closes .page-container -->
                 h1.textContent = newText;
             }
 
-            const isAtRoot = window.location.pathname === webPathPrefix;
+            // The listing can be mounted behind a deployment prefix (subfolder
+            // setting, fronting proxy), so match the tail of the pathname
+            // rather than assuming '/api/files/' starts it.
+            const isAtRoot = window.location.pathname.endsWith(webPathPrefix);
             if (isAtRoot) {
                 const parentLink = document.querySelector('table#list td.link a[href^="../"]');
                 if (parentLink && parentLink.textContent.trim() === "Parent directory/") {
@@ -374,6 +386,11 @@ class CentralizedStreamServer:
         self.upload_dir = pathlib.Path(
             os.path.expanduser(self.settings.file_manager_path)
         ).resolve()
+        # In-flight chunked HTTP uploads, keyed by destination path. Each entry
+        # tracks the client-chosen transfer id, the next expected byte offset,
+        # the .part file path, a last-activity stamp for expiry, and a busy
+        # flag that rejects interleaved writes to the same destination.
+        self._chunked_uploads: Dict[str, Dict[str, Any]] = {}
         self.web_files_ctx = None
 
         self._clients_present = False
@@ -830,6 +847,56 @@ class CentralizedStreamServer:
         except Exception as e:
             return web.json_response({"status": "error", "message": str(e)}, status=400)
 
+    async def _stream_upload_body(self, request: web.Request, path: str, append: bool) -> int:
+        """Stream a request body to `path` with executor-thread writes.
+
+        Creates/truncates the file when `append` is False, appends when True;
+        O_NOFOLLOW blocks a planted symlink either way. Enforces the declared
+        Content-Length. Returns the byte count written; on failure the handle
+        is closed and the exception propagates (the caller owns removal of the
+        target file).
+        """
+        declared = request.content_length
+        loop = asyncio.get_running_loop()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_TRUNC)
+        fd = os.open(path, flags, 0o644)
+        fh = os.fdopen(fd, "wb")
+        written = 0
+        try:
+            async for chunk in request.content.iter_chunked(1 << 20):
+                if declared is not None and written + len(chunk) > declared:
+                    raise ValueError("body exceeds declared Content-Length")
+                await loop.run_in_executor(None, fh.write, chunk)
+                written += len(chunk)
+            await loop.run_in_executor(None, fh.close)
+        except Exception:
+            try:
+                fh.close()
+            except Exception:
+                pass
+            raise
+        return written
+
+    def _discard_chunked_upload(self, dest: str, part_path: str):
+        """Drop a chunked transfer's tracking entry and its on-disk .part file."""
+        self._chunked_uploads.pop(dest, None)
+        try:
+            os.remove(part_path)
+        except OSError:
+            pass
+
+    def _expire_stale_chunked_uploads(self):
+        """Reap transfers idle past UPLOAD_PART_TTL_SECONDS (entry + .part file)."""
+        now = time.monotonic()
+        for key in [k for k, s in self._chunked_uploads.items()
+                    if now - s["ts"] > UPLOAD_PART_TTL_SECONDS and not s["busy"]]:
+            stale = self._chunked_uploads.pop(key)
+            try:
+                os.remove(stale["part"])
+            except OSError:
+                pass
+            logger.info(f"Expired stale chunked upload: {key}")
+
     async def handle_upload(self, request: web.Request) -> web.Response:
         """Stream a client file upload to the file-manager directory over HTTP.
 
@@ -840,6 +907,27 @@ class CentralizedStreamServer:
         straight to disk on the executor, so the event loop keeps serving the
         stream during the transfer. Path safety mirrors the data-channel path:
         no traversal outside the root, and O_NOFOLLOW blocks a planted symlink.
+
+        Two request shapes share the endpoint:
+
+        - Plain: one POST carrying the whole file, no chunk headers — written
+          straight onto the destination.
+        - Chunked (the client slices files above its 64 MiB threshold so no
+          single request body exceeds a fronting proxy's per-request cap, e.g.
+          Cloudflare's 100 MB): sequential POSTs for the same X-Upload-Path,
+          each also carrying
+            X-Upload-Id:     opaque client-chosen transfer id
+            X-Upload-Offset: absolute byte offset of this slice
+            X-Upload-Total:  final file size in bytes
+            X-Upload-Final:  "1" on the last slice
+          Slices accumulate in "<dest>.part". Offset 0 (re)creates the .part —
+          which is also how a stale one from an abandoned transfer for the same
+          path gets replaced — and non-zero offsets must exactly continue the
+          tracked transfer (same id, offset equal to the bytes already banked,
+          matching .part size) or the transfer is discarded with 409. The final
+          slice validates the accumulated size against X-Upload-Total and
+          renames the .part onto the destination atomically. Transfers idle
+          past UPLOAD_PART_TTL_SECONDS are expired on the next chunked request.
         """
         settings = request.app["settings"]
         if "upload" not in settings.file_transfers:
@@ -866,30 +954,101 @@ class CentralizedStreamServer:
             os.makedirs(parent, exist_ok=True)
         except OSError as e:
             return web.json_response({"status": "error", "message": f"mkdir failed: {e}"}, status=500)
-        declared = request.content_length
-        loop = asyncio.get_running_loop()
-        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
-        fh = os.fdopen(fd, "wb")
-        written = 0
+
+        upload_id = request.headers.get("X-Upload-Id")
+        offset_header = request.headers.get("X-Upload-Offset")
+        if (upload_id is None) != (offset_header is None):
+            return web.json_response(
+                {"status": "error", "message": "X-Upload-Id and X-Upload-Offset must be sent together"},
+                status=400,
+            )
+
+        if upload_id is None:
+            # Plain single-POST upload.
+            try:
+                written = await self._stream_upload_body(request, dest, append=False)
+            except Exception as e:
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+                return web.json_response({"status": "error", "message": str(e)}, status=400)
+            logger.info(f"HTTP upload finished: {dest} ({written} bytes)")
+            return web.json_response({"status": "success", "bytes": written})
+
+        # Chunked upload.
         try:
-            async for chunk in request.content.iter_chunked(1 << 20):
-                if declared is not None and written + len(chunk) > declared:
-                    raise ValueError("body exceeds declared Content-Length")
-                await loop.run_in_executor(None, fh.write, chunk)
-                written += len(chunk)
-            await loop.run_in_executor(None, fh.close)
-        except Exception as e:
+            offset = int(offset_header or "")
+            total = int(request.headers["X-Upload-Total"]) if "X-Upload-Total" in request.headers else -1
+        except ValueError:
+            return web.json_response({"status": "error", "message": "malformed chunk headers"}, status=400)
+        if offset < 0 or ("X-Upload-Total" in request.headers and total < 0):
+            return web.json_response({"status": "error", "message": "malformed chunk headers"}, status=400)
+        final = request.headers.get("X-Upload-Final") == "1"
+        part_path = dest + ".part"
+
+        self._expire_stale_chunked_uploads()
+
+        state = self._chunked_uploads.get(dest)
+        if offset == 0:
+            if state is not None and state["busy"]:
+                return web.json_response(
+                    {"status": "error", "message": "another chunk for this path is in flight"},
+                    status=409,
+                )
+            # New transfer: any tracked or leftover .part for this path is stale
+            # and gets replaced (the write below truncates it).
+            state = {"id": upload_id, "offset": 0, "ts": time.monotonic(),
+                     "part": part_path, "busy": False}
+            self._chunked_uploads[dest] = state
+        else:
+            if state is not None and state["busy"]:
+                # Never discard here: the in-flight writer owns the .part.
+                return web.json_response(
+                    {"status": "error", "message": "another chunk for this path is in flight"},
+                    status=409,
+                )
             try:
-                fh.close()
-            except Exception:
-                pass
-            try:
-                os.remove(dest)
+                part_size = os.path.getsize(part_path)
             except OSError:
-                pass
+                part_size = -1
+            if (state is None or state["id"] != upload_id
+                    or state["offset"] != offset or part_size != offset):
+                self._discard_chunked_upload(dest, part_path)
+                return web.json_response(
+                    {"status": "error",
+                     "message": f"chunk sequence mismatch at offset {offset}; transfer discarded"},
+                    status=409,
+                )
+
+        state["busy"] = True
+        try:
+            written = await self._stream_upload_body(request, part_path, append=offset > 0)
+        except Exception as e:
+            self._discard_chunked_upload(dest, part_path)
             return web.json_response({"status": "error", "message": str(e)}, status=400)
-        logger.info(f"HTTP upload finished: {dest} ({written} bytes)")
-        return web.json_response({"status": "success", "bytes": written})
+        state["busy"] = False
+        state["offset"] = offset + written
+        state["ts"] = time.monotonic()
+
+        if not final:
+            return web.json_response({"status": "success", "bytes": state["offset"], "complete": False})
+
+        received = state["offset"]
+        if total >= 0 and received != total:
+            self._discard_chunked_upload(dest, part_path)
+            return web.json_response(
+                {"status": "error", "message": f"size mismatch: received {received}, expected {total}"},
+                status=400,
+            )
+        try:
+            os.replace(part_path, dest)
+        except OSError as e:
+            self._discard_chunked_upload(dest, part_path)
+            return web.json_response({"status": "error", "message": f"finalize failed: {e}"}, status=500)
+        self._chunked_uploads.pop(dest, None)
+        logger.info(f"HTTP chunked upload finished: {dest} ({received} bytes)")
+        return web.json_response({"status": "success", "bytes": received, "complete": True})
 
     async def handle_status(self, _: web.Request) -> web.Response:
         status = self._get_status()

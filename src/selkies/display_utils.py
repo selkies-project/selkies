@@ -309,6 +309,59 @@ def compute_dual_layout(primary_wh, secondary_wh, position):
     return layouts, (total_w + 7) & ~7, total_h
 
 
+def clamp_primary_feedback(primary_wh, layouts, position):
+    """Guard the extended-desktop layout against auto-resize feedback, shared by
+    both transports: after the extend, a maximized primary client reports the
+    FULL extended screen; re-cropping the primary to that would span both
+    monitors and grow the framebuffer without bound. When the primary's
+    reported size fills the current extended screen (`layouts`) along the
+    secondary's axis, keep the established primary-monitor size instead.
+    Returns the (w, h) to lay the primary out with."""
+    prev_primary = layouts.get("primary") if layouts else None
+    if not prev_primary:
+        return primary_wh
+    p_w, p_h = primary_wh
+    cur_total_w = max(l["x"] + l["w"] for l in layouts.values())
+    cur_total_h = max(l["y"] + l["h"] for l in layouts.values())
+    if (position in ("right", "left") and p_w >= cur_total_w) or (
+        position in ("up", "down") and p_h >= cur_total_h
+    ):
+        return prev_primary["w"], prev_primary["h"]
+    return primary_wh
+
+
+def parse_resize_dims(res_str):
+    """Parse a client resize request "WxH", shared by both transports: cap to
+    the 8K ceiling a client may drive the server to, and round down to even
+    (YUV 4:2:0 chroma alignment). Returns (w, h), or None when malformed or
+    non-positive."""
+    try:
+        w_str, h_str = res_str.split("x")
+        w, h = int(w_str), int(h_str)
+    except (ValueError, AttributeError):
+        return None
+    w, h = min(w, 7680) & ~1, min(h, 4320) & ~1
+    if w <= 0 or h <= 0:
+        return None
+    return w, h
+
+
+def cursor_size_for_dpi(dpi, base_size):
+    """Cursor pixel size scaled from its 96-DPI base (both transports derive
+    the X cursor size from the desktop DPI with this)."""
+    return max(1, int(round(float(dpi) / 96.0 * base_size)))
+
+
+def align_dims_16(w, h):
+    """force_aligned_resolution: round dimensions down to multiples of 16
+    (encoder macroblock alignment), refusing to shrink below 16. Returns the
+    dimensions unchanged when alignment would collapse them."""
+    aligned_w, aligned_h = w - (w % 16), h - (h % 16)
+    if aligned_w >= 16 and aligned_h >= 16:
+        return aligned_w, aligned_h
+    return w, h
+
+
 async def _run_xrandr(args, what):
     """Run one xrandr command, returning success; failures are logged, not raised
     (layout application degrades per step exactly like the websockets engine)."""
@@ -345,6 +398,12 @@ async def list_selkies_monitors():
         return []
 
 
+async def clear_selkies_monitors():
+    """Delete every logical monitor this software created (selkies-*)."""
+    for monitor_name in await list_selkies_monitors():
+        await _run_xrandr(["--delmonitor", monitor_name], f"delete monitor {monitor_name}")
+
+
 async def apply_extended_layout(layouts, total_w, total_h):
     """Drive xrandr into an extended-desktop framebuffer covering `layouts`
     (display_id -> {x,y,w,h}): ensure the total mode exists, size the framebuffer,
@@ -356,8 +415,7 @@ async def apply_extended_layout(layouts, total_w, total_h):
     if not screen_name:
         logger_app_resize.error("Could not determine output name; cannot apply layout.")
         return False
-    for monitor_name in await list_selkies_monitors():
-        await _run_xrandr(["--delmonitor", monitor_name], f"delete monitor {monitor_name}")
+    await clear_selkies_monitors()
     if total_mode not in (available or []):
         if not await ensure_mode(total_mode):
             try:
@@ -375,6 +433,7 @@ async def apply_extended_layout(layouts, total_w, total_h):
             return False
     # The physical output can belong to only one logical monitor: give it to the
     # primary; the others attach to none.
+    output_name = screen_name
     for display_id, layout in sorted(layouts.items(), key=lambda kv: kv[0] != "primary"):
         geometry = f"{layout['w']}/0x{layout['h']}/0+{layout['x']}+{layout['y']}"
         await _run_xrandr(
@@ -382,6 +441,9 @@ async def apply_extended_layout(layouts, total_w, total_h):
             f"set logical monitor selkies-{display_id}",
         )
         screen_name = "none"
+    # Flag the physical output primary so the WM anchors panels and new windows to the
+    # primary monitor (WebSocket parity).
+    await _run_xrandr(["--output", output_name, "--primary"], "designate primary output")
     return True
 
 

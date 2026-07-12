@@ -199,6 +199,11 @@ export class WebRTCClient {
 		 * @type {function}
 		 */
 		this.onserversettings = null;
+
+		/**
+		 * @type {function}
+		 */
+		this.ondisplayconfig = null;
 	}
 
 	/**
@@ -539,6 +544,10 @@ export class WebRTCClient {
 		} else if (msg.type === 'server_settings') {
 			if (this.onserversettings !== null) {
 				this.onserversettings(msg.data);
+			}
+		} else if (msg.type === 'display_config_update') {
+			if (this.ondisplayconfig !== null) {
+				this.ondisplayconfig(msg.data);
 			}
 		} else {
 			this._setError("Unhandled message received: " + msg.type);

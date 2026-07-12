@@ -7,20 +7,36 @@
 /**
  * File uploads, shared by both transports.
  *
- * Every upload is a plain HTTP POST to /api/upload rather than a stream of
- * chunks over the WebSocket or a data channel: the browser's native HTTP path
- * and the server's C-accelerated aiohttp saturate the link, whereas per-message
+ * Every upload is HTTP POSTs to /api/upload rather than a stream of chunks
+ * over the WebSocket or a data channel: the browser's native HTTP path and
+ * the server's C-accelerated aiohttp saturate the link, whereas per-message
  * chunk processing is bounded by pure-Python per-chunk work — and an upload
  * cannot stall or kill the realtime session socket. The destination path rides
  * URL-encoded in the X-Upload-Path header; progress is reported to the
  * dashboards as `{type: 'fileUpload'}` window messages (statuses: start /
  * progress / end / error / warning).
  *
+ * Files at or under UPLOAD_CHUNK_BYTES go up as ONE plain POST (the whole
+ * Blob, no extra headers — the shape every server accepts). Larger files are
+ * sliced with Blob.slice (never read into memory) into sequential POSTs of at
+ * most UPLOAD_CHUNK_BYTES so no single request body exceeds a fronting
+ * proxy's per-request cap (e.g. Cloudflare rejects bodies over 100 MB). Each
+ * slice carries the same X-Upload-Path plus:
+ *   X-Upload-Id:     opaque per-file transfer id
+ *   X-Upload-Offset: absolute byte offset of the slice
+ *   X-Upload-Total:  final file size in bytes
+ *   X-Upload-Final:  "1" on the last slice
+ * The server appends slices to a .part file and atomically renames it into
+ * place on the final one. Progress is cumulative across slices, so the
+ * dashboards render one smooth bar per file.
+ *
  * One upload OPERATION (a file-picker set or a dropped tree) runs at a time:
  * sequential POSTs keep server-side writes ordered and the progress UI
  * coherent. `canUpload` is a per-core gate (e.g. shared/viewer sessions must
  * not upload).
  */
+const UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
+
 export function createFileUploader({ canUpload = () => true } = {}) {
     let operationInFlight = false;
 
@@ -38,47 +54,79 @@ export function createFileUploader({ canUpload = () => true } = {}) {
         return true;
     }
 
-    function uploadFileObject(file, pathToSend) {
+    // One POST of `body` (a File or Blob slice) to `url`. Resolves on 2xx,
+    // rejects with the dashboard-facing message otherwise; upload progress is
+    // relayed to `onProgress` raw so the caller can accumulate across slices.
+    function postUploadBody(url, pathToSend, body, extraHeaders, onProgress) {
         return new Promise((resolve, reject) => {
-            post({ status: 'start', fileName: pathToSend, fileSize: file.size });
-            const report = (status, extra) =>
-                post({ status, fileName: pathToSend, fileSize: file.size, ...extra });
-            try {
-                // Same-origin URL resolves any subfolder prefix.
-                const url = new URL('api/upload', window.location.href).href;
-                const xhr = new XMLHttpRequest();
-                xhr.open('POST', url, true);
-                xhr.withCredentials = true;
-                xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-                xhr.setRequestHeader('X-Upload-Path', encodeURIComponent(pathToSend));
-                xhr.upload.onprogress = (e) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', url, true);
+            xhr.withCredentials = true;
+            xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+            xhr.setRequestHeader('X-Upload-Path', encodeURIComponent(pathToSend));
+            for (const [name, value] of Object.entries(extraHeaders || {})) {
+                xhr.setRequestHeader(name, value);
+            }
+            xhr.upload.onprogress = onProgress;
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve();
+                } else {
+                    reject(new Error(`upload failed (${xhr.status}): ${String(xhr.responseText || '').slice(0, 160)}`));
+                }
+            };
+            xhr.onerror = () => {
+                reject(new Error(`network error uploading ${pathToSend}`));
+            };
+            xhr.send(body);
+        });
+    }
+
+    async function uploadFileObject(file, pathToSend) {
+        post({ status: 'start', fileName: pathToSend, fileSize: file.size });
+        const report = (status, extra) =>
+            post({ status, fileName: pathToSend, fileSize: file.size, ...extra });
+        const percentOf = (sentBytes) => (file.size > 0)
+            ? Math.min(100, Math.round((sentBytes / file.size) * 100)) : 0;
+        try {
+            // Same-origin URL resolves any subfolder prefix.
+            const url = new URL('api/upload', window.location.href).href;
+            if (file.size <= UPLOAD_CHUNK_BYTES) {
+                // Single plain POST — no chunk headers.
+                await postUploadBody(url, pathToSend, file, null, (e) => {
                     const progress = (e.lengthComputable && file.size > 0)
                         ? Math.min(100, Math.round((e.loaded / e.total) * 100)) : 0;
                     report('progress', { progress });
-                };
-                xhr.onload = () => {
-                    if (xhr.status >= 200 && xhr.status < 300) {
-                        report('progress', { progress: 100 });
-                        report('end');
-                        resolve();
-                    } else {
-                        const msg = `upload failed (${xhr.status}): ${String(xhr.responseText || '').slice(0, 160)}`;
-                        report('error', { message: msg });
-                        reject(new Error(msg));
-                    }
-                };
-                xhr.onerror = () => {
-                    const msg = `network error uploading ${pathToSend}`;
-                    report('error', { message: msg });
-                    reject(new Error(msg));
-                };
-                xhr.send(file);
-            } catch (error) {
-                const msg = `error during upload of ${pathToSend}: ${error.message || error}`;
-                post({ status: 'error', fileName: pathToSend, message: msg });
-                reject(error);
+                });
+            } else {
+                const transferId = (window.crypto && crypto.randomUUID)
+                    ? crypto.randomUUID()
+                    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+                for (let offset = 0; offset < file.size;) {
+                    const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.size);
+                    const headers = {
+                        'X-Upload-Id': transferId,
+                        'X-Upload-Offset': String(offset),
+                        'X-Upload-Total': String(file.size),
+                    };
+                    if (end >= file.size) headers['X-Upload-Final'] = '1';
+                    const sentBefore = offset;
+                    await postUploadBody(url, pathToSend, file.slice(offset, end), headers, (e) => {
+                        if (!e.lengthComputable) return;
+                        // Cumulative across slices: one smooth bar per file.
+                        report('progress', { progress: percentOf(sentBefore + e.loaded) });
+                    });
+                    offset = end;
+                    report('progress', { progress: percentOf(offset) });
+                }
             }
-        });
+            report('progress', { progress: 100 });
+            report('end');
+        } catch (error) {
+            const msg = (error && error.message) ? error.message : `error during upload of ${pathToSend}: ${error}`;
+            report('error', { message: msg });
+            throw error;
+        }
     }
 
     function getFileFromEntry(fileEntry) {

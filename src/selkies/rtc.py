@@ -34,7 +34,7 @@ try:
 except (ImportError, RuntimeError):
     pcmflux = None
 
-from .settings import settings as app_settings
+from .settings import settings as app_settings, inflate_gz_bounded
 from .webrtc import (
     RTCPeerConnection,
     RTCIceCandidate,
@@ -51,12 +51,20 @@ from .webrtc.rtcicetransport import (
     Candidate,
     candidate_from_aioice
 )
+from .webrtc.exceptions import InvalidStateError
 import av
 from fractions import Fraction
 from typing import List, Any, Dict, Optional, Union
 from .webrtc.contrib.media import MediaRelay
 from enum import Enum
 from .media_pipeline import MediaPipeline
+# The viewer/collaborator input-authority lists live with the input protocol
+# (input_handler) and are shared verbatim with the websockets gate.
+from .input_handler import (
+    VIEWER_ALLOWED_PREFIXES,
+    VIEWER_COLLAB_EXTRA_PREFIXES,
+    VIEWER_SILENT_DROP_PREFIXES,
+)
 
 logger = logging.getLogger("rtc")
 logger.setLevel(logging.INFO)
@@ -122,11 +130,6 @@ class ClientType(str, Enum):
     CONTROLLER = "controller"
     VIEWER = "viewer"
 
-# Server-side input authority: a viewer peer (shared/#player co-op) may only send
-# these; anything else (keyboard, mouse, clipboard, cmd) is dropped. Mirrors the WS
-# viewer gate so a modified client can't inject input a controller didn't grant.
-VIEWER_ALLOWED_PREFIXES = ("SETTINGS,", "START_VIDEO", "REQUEST_KEYFRAME", "js,")
-
 class RTCAppError(Exception):
     pass
 
@@ -138,16 +141,16 @@ class PipelineBridge:
     wants continuity so a brief consumer stall doesn't silently drop samples).
     """
     def __init__(self, maxsize: int = 1):
-        self._lock = asyncio.Lock()
         self._queue = asyncio.Queue(maxsize=maxsize)
 
-    async def set_data(self, data: Any):
-        # If the queue is already full, the consumer is lagging so drop the
+    def set_data(self, data: Any):
+        # Synchronous, no lock: the drop-oldest check and the put have no await, so
+        # the single-threaded loop runs them without interleaving (all access is on
+        # the loop thread). If the queue is full the consumer is lagging, so drop the
         # oldest queued item to make space for the new one.
-        async with self._lock:
-            if self._queue.full():
-                self._queue.get_nowait()
-            self._queue.put_nowait(data)
+        if self._queue.full():
+            self._queue.get_nowait()
+        self._queue.put_nowait(data)
 
     async def get_data(self):
         # asynchronously wait until an item is available in the queue
@@ -198,16 +201,18 @@ class RTCApp:
         # single-display behavior (the primary pipeline follows its controller).
         self.start_display_media = self._default_start_display_media
         self.stop_display_media = self._default_stop_display_media
-        # Active WebRTC mic decoders (pcmflux AudioPlayback), stopped on teardown.
-        self._mic_states = []
+        # Per-display encoder resolution for offer building (codec preference and
+        # SDP munging): the owning service overrides this when displays can run
+        # different encoders; the default is the single global encoder.
+        self.get_encoder_for_display = lambda display_id: self.encoder
 
-        # Data channel events
-        self.on_data_open = lambda: logger.warning('unhandled on_data_open')
+        # Data channel events. on_data_open receives the channel that opened so
+        # per-connection greetings (server settings, current cursor) reach the
+        # joining peer, not just the controller.
+        self.on_data_open = lambda channel=None: logger.warning('unhandled on_data_open')
         self.on_data_close = lambda: logger.warning('unhandled on_data_close')
-        self.on_data_error = lambda: logger.warning('unhandled on_data_error')
+        self.on_data_error = lambda e=None: logger.warning('unhandled on_data_error')
         self.on_data_message = lambda msg, display_id='primary': logger.warning('unhandled on_data_message')
-        # Peer advertised gzip support on the input channel (re-negotiated per peer).
-        self._gz_tx = False
 
         # WebRTC ICE and SDP events
         self.on_ice = lambda ice, client_peer_id: logger.warning('unhandled ice event')
@@ -374,9 +379,14 @@ class RTCApp:
             "system", {"action": "resolution," + res})
 
     def send_ping(self, t: float):
-        """Sends a ping request over the data channel to measure latency"""
-        self.__send_data_channel_message(
-            "ping", {"start_time": float("%.3f" % t)})
+        """Sends a ping request to the PRIMARY controller only: latency is measured
+        against one shared ping_start, and the websockets transport likewise derives
+        its reported latency from the primary client."""
+        state, data_channel = self.get_data_channel()
+        if not state:
+            return
+        self.send_message_to_channel(
+            data_channel, "ping", {"start_time": float("%.3f" % t)})
 
     def send_latency_time(self, latency: float):
         """Sends measured latency response time in ms"""
@@ -403,40 +413,78 @@ class RTCApp:
         data_channel_state = peer_obj.get("data_channel").readyState
         return conn_state == "connected" and data_channel_state == "open", peer_obj.get("data_channel")
 
-    def __send_data_channel_message(self, msg_type: str, data: Any):
-        """Sends message to the peer through the data channel.
-        Message is dropped if the channel is not open.
-        """
-        if not self.peer_connections:
-            return
+    def _iter_open_data_channels(self):
+        """Every connected peer's open data channel — controllers and viewers,
+        all displays."""
+        for peer_obj in self.peer_connections.values():
+            peer_conn = peer_obj.get("peer_conn")
+            channel = peer_obj.get("data_channel")
+            if (
+                peer_conn is not None
+                and channel is not None
+                and peer_conn.connectionState == "connected"
+                and channel.readyState == "open"
+            ):
+                yield channel
 
-        state, data_channel = self.get_data_channel()
-        if not state:
-            logger.info("skipping message because data channel is not ready: %s" % msg_type)
-            return
-
+    def send_message_to_channel(self, channel, msg_type: str, data: Any):
+        """Sends one typed message to one specific peer's data channel."""
         msg = {"type": msg_type, "data": data}
         payload = json.dumps(msg)
         try:
             # Large payloads (cursor PNGs, settings, clipboard, stats) compress well;
-            # small ones aren't worth the CPU or the risk to input latency.
-            if self._gz_tx and len(payload) >= 512:
-                data_channel.send(gzip.compress(payload.encode("utf-8"), 6))
+            # small ones aren't worth the CPU or the risk to input latency. Only
+            # channels that completed the _gz handshake may receive gzip.
+            if getattr(channel, "_selkies_gz_tx", False) and len(payload) >= 512:
+                channel.send(gzip.compress(payload.encode("utf-8"), 6))
             else:
-                data_channel.send(payload)
+                channel.send(payload)
         except ValueError as e:
             # Oversized for the peer's negotiated max-message-size: dropping one
             # message and logging beats the peer hard-closing the channel.
             logger.error("dropping oversized data channel message '%s': %s", msg_type, e)
+        except InvalidStateError:
+            # The channel left 'open' between the readiness check and the send
+            # (close racing a sender): drop the message like any not-ready channel.
+            logger.info("skipping message because data channel closed mid-send: %s" % msg_type)
+
+    def __send_data_channel_message(self, msg_type: str, data: Any):
+        """Broadcasts a typed message to every connected peer (all display
+        controllers and viewers) — the websockets transport broadcasts cursor,
+        stats, and clipboard to all of its clients, so the channel path must too.
+        Channels that are not open are skipped.
+        """
+        if not self.peer_connections:
+            return
+        sent = False
+        for channel in self._iter_open_data_channels():
+            self.send_message_to_channel(channel, msg_type, data)
+            sent = True
+        if not sent:
+            logger.info("skipping message because no data channel is ready: %s" % msg_type)
 
     def send_media_data_over_channel(self, msg_type, data):
         self.__send_data_channel_message(msg_type, data)
 
     def get_controller_instance(self):
-        """Returns the peer connection object for the controller client, if it exists."""
-        return next((obj for obj in self.peer_connections.values() if obj.get("client_type") == ClientType.CONTROLLER), None)
+        """Returns the peer connection object for the controller client, if it exists.
+        With multiple display controllers connected, the PRIMARY display's controller
+        is the authoritative one (latency pings and controller-directed replies)."""
+        controllers = [
+            obj for obj in self.peer_connections.values()
+            if obj.get("client_type") == ClientType.CONTROLLER
+        ]
+        if not controllers:
+            return None
+        return next(
+            (obj for obj in controllers if obj.get("display_id", "primary") == "primary"),
+            controllers[0],
+        )
 
-    def munge_sdp(self, sdp: str):
+    def munge_sdp(self, sdp: str, encoder: Optional[str] = None):
+        # Displays can run different encoders; the caller passes the one this
+        # offer's display uses (default: the primary/global encoder).
+        encoder = encoder or self.encoder
         sdp_text = sdp
         # rtx-time needs to be set to 125 milliseconds for optimal performance
         if 'rtx-time' not in sdp_text:
@@ -446,15 +494,15 @@ class RTCApp:
             logger.warning("injecting modified rtx-time to SDP")
             sdp_text = re.sub(r'rtx-time=\d+', r'rtx-time=125', sdp_text)
         # Enable sps-pps-idr-in-keyframe=1 in H.264 and H.265
-        if "h264" in self.encoder or "x264" in self.encoder or "h265" in self.encoder or "x265" in self.encoder:
+        if "h264" in encoder or "x264" in encoder or "h265" in encoder or "x265" in encoder:
             if 'sps-pps-idr-in-keyframe' not in sdp_text:
                 logger.warning("injecting sps-pps-idr-in-keyframe to SDP")
                 sdp_text = sdp_text.replace('packetization-mode=', 'sps-pps-idr-in-keyframe=1;packetization-mode=')
             elif 'sps-pps-idr-in-keyframe=1' not in sdp_text:
                 logger.warning("injecting modified sps-pps-idr-in-keyframe to SDP")
                 sdp_text = re.sub(r'sps-pps-idr-in-keyframe=\d+', r'sps-pps-idr-in-keyframe=1', sdp_text)
-            if ("h264" in self.encoder or "x264" in self.encoder) \
-                    and "openh264" not in self.encoder and app_settings.video_fullcolor[0]:
+            if ("h264" in encoder or "x264" in encoder) \
+                    and "openh264" not in encoder and app_settings.video_fullcolor[0]:
                 # Full-colour is a 4:4:4 bitstream: advertise the High 4:4:4 profile so a
                 # decoder isn't handed a 4:2:0 baseline profile-level-id that can't match
                 # what it receives. 4:2:0 keeps 42e01f (the Firefox negotiation trick).
@@ -551,7 +599,9 @@ class RTCApp:
 
         return "\r\n".join(out)
 
-    async def consume_data(self, buf, pts, kind, display_id: str = "primary"):
+    def consume_data(self, buf, pts, kind, display_id: str = "primary"):
+        # Synchronous: scheduled via loop.call_soon_threadsafe from the capture
+        # thread (no per-frame Future/Task), since set_data no longer awaits.
         graph = self.displays.get(display_id or "primary")
         if graph is None:
             return
@@ -568,7 +618,7 @@ class RTCApp:
                         packet.dts = packet.pts
                     bridge = graph.get("video_bridge")
                     if bridge is not None:
-                        await bridge.set_data(packet)
+                        bridge.set_data(packet)
                 except Exception as e:
                     logger.error(f"error processing video sample: {e}")
         elif kind == "audio":
@@ -581,7 +631,7 @@ class RTCApp:
                         packet.pts = pts
                     bridge = graph.get("audio_bridge")
                     if bridge is not None:
-                        await bridge.set_data(packet)
+                        bridge.set_data(packet)
                 except Exception as e:
                     logger.error(f"error processing audio sample: {e}")
 
@@ -782,35 +832,43 @@ class RTCApp:
         the input dispatcher (the late-bound on_data_message) sees the message."""
         if isinstance(msg, (bytes, bytearray)) and bytes(msg[:2]) == b"\x1f\x8b":
             try:
-                msg = gzip.decompress(msg).decode("utf-8")
+                # Bounded inflate, mirroring the WebSocket 0x05 path: the channel's
+                # negotiated max-message-size caps the compressed size only.
+                msg = inflate_gz_bounded(msg)
             except Exception:
                 logger.warning("Dropping undecodable compressed data channel message")
                 return
         if msg == "_gz,1":
             # The peer can gunzip: echo the capability so it compresses its own large
-            # sends, and compress outbound payloads when this is the controller's
-            # channel (the only one __send_data_channel_message targets).
+            # sends, and mark THIS channel so outbound payloads to it may be gzipped.
+            # Compression is negotiated per channel — every display page and viewer
+            # handshakes (or not) independently.
             if channel is not None:
-                _, ctrl_channel = self.get_data_channel()
-                if channel is ctrl_channel:
-                    self._gz_tx = True
+                channel._selkies_gz_tx = True
                 try:
                     channel.send("_gz,1")
                 except Exception as e:
                     logger.warning("Failed to ack compression handshake: %s", e)
             return
-        if display_id != "primary" and isinstance(msg, str) and msg.startswith("SETTINGS,"):
-            # Global settings are the primary display's to assert; a secondary
-            # display's copy would clobber them (its resolution rides "r," instead).
-            logger.debug("Dropping SETTINGS from secondary display '%s'", display_id)
+        if client_type == ClientType.VIEWER and isinstance(msg, str) and msg.startswith("SETTINGS,"):
+            # A viewer's settings snapshot is connection sync only, never applied —
+            # the websockets transport likewise ignores viewer payloads server-side.
+            logger.debug("Ignoring SETTINGS payload from a viewer (display '%s')", display_id)
             return
         if client_type == ClientType.VIEWER and isinstance(msg, str):
-            # A viewer may only send the allow-listed messages — unless it is an
-            # authenticated read-write collaborator (mk token + enable_collab), which
-            # mirrors the WS path. The collaborator check is only reached for
-            # otherwise-disallowed input, so normal viewer traffic pays nothing.
-            if not msg.startswith(VIEWER_ALLOWED_PREFIXES) and not self._viewer_is_collaborator(client_token):
-                logger.warning("Dropping unauthorized viewer input: %s", msg[:32])
+            # A viewer may only send the allow-listed messages; an authenticated
+            # read-write collaborator (mk token + enable_collab) additionally gets
+            # the keyboard/mouse/clipboard set — the same two tiers as the WS gate
+            # (a collaborator still can't send cmd or other controller-only
+            # messages). The collaborator check is only reached for otherwise-
+            # disallowed input, so normal viewer traffic pays nothing.
+            if not msg.startswith(VIEWER_ALLOWED_PREFIXES) and not (
+                msg.startswith(VIEWER_COLLAB_EXTRA_PREFIXES)
+                and self._viewer_is_collaborator(client_token)
+            ):
+                # Blur/visibility lifecycle noise is dropped silently (WS parity).
+                if not msg.startswith(VIEWER_SILENT_DROP_PREFIXES):
+                    logger.warning("Dropping unauthorized viewer input: %s", msg[:32])
                 return
         return self.on_data_message(msg, display_id or "primary")
 
@@ -867,8 +925,9 @@ class RTCApp:
             # This peer is done either way; its never-established channels emit
             # no 'close', so stop their consumers here.
             await self._cancel_channel_consumers(peer_obj)
-            if display_id == 'primary':
-                await self._stop_mic_playbacks()
+            # Per-peer mic teardown: only THIS peer's playback stops; the other
+            # primary peers (controller + co-op viewers) keep their mics.
+            await self._stop_mic_playback_state(peer_obj.get("mic_state"))
             if removed is not None and removed.get('client_type') == ClientType.CONTROLLER:
                 await self._teardown_display_graph(display_id)
             logger.info("Peer connection closed", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
@@ -932,19 +991,23 @@ class RTCApp:
         # must not require a renegotiation the stack doesn't do. A LOCKED-off microphone
         # setting still withholds the m-line entirely. Only the primary display carries audio.
         mic_on, mic_locked = app_settings.microphone_enabled
+        mic_state = None
         if display_id == "primary" and bool(app_settings.audio_enabled[0]) and (mic_on or not mic_locked):
-            self._setup_mic_receiver(peer_connection)
+            mic_state = self._setup_mic_receiver(peer_connection)
 
         # Primary data channel, fully reliable + ordered: input, clipboard, and
         # upload control all ride it, and none of them tolerate loss.
+        # (Compression is negotiated per channel via the _gz handshake.)
         data_channel = peer_connection.createDataChannel("input", ordered=True)
-        # New controller channel: compression support is re-negotiated per peer.
-        self._gz_tx = False
 
         # Assign event handlers for the input data channel. Messages are
         # serialized through a single per-channel consumer so input events
         # (e.g. key down/up) are dispatched strictly in arrival order.
-        data_channel.on("open", self.on_data_open)
+        # close/error are late-bound (setup_callbacks reassigns the handlers).
+        # open passes the channel so the greeting goes to the peer that joined.
+        data_channel.on("open", lambda ch=data_channel: self.on_data_open(ch))
+        data_channel.on("close", lambda: self.on_data_close())
+        data_channel.on("error", lambda e=None: self.on_data_error(e))
         input_consumer = self._serialize_channel(
             data_channel,
             lambda msg, ch=data_channel, ct=client_type, tok=client_token, did=display_id: self._on_input_channel_message(msg, ch, ct, tok, did),
@@ -953,21 +1016,32 @@ class RTCApp:
         peer_connection.on("connectionstatechange", lambda cid=client_peer_id: asyncio.run_coroutine_threadsafe(self.on_connectionstatechange(cid), loop=self.async_event_loop))
 
         try:
-            preferred_codec = self.get_mime_by_encoder(self.encoder)
+            try:
+                display_encoder = self.get_encoder_for_display(display_id) or self.encoder
+            except Exception:
+                display_encoder = self.encoder
+            preferred_codec = self.get_mime_by_encoder(display_encoder)
             if preferred_codec is None:
-                raise RTCAppError(f"Encoder {self.encoder} is not supported")
+                raise RTCAppError(f"Encoder {display_encoder} is not supported")
             self.force_codec(peer_connection, rtp_video_sender, preferred_codec)
 
             await peer_connection.setLocalDescription(await peer_connection.createOffer())
             offer = peer_connection.localDescription
 
             sdp = offer.sdp
-            sdp = self.munge_sdp(sdp)
+            sdp = self.munge_sdp(sdp, display_encoder)
             await self.on_sdp('offer', sdp, client_peer_id)
         except BaseException:
-            # Failure before registration: no teardown path could ever reach
-            # this consumer, so it must be stopped here.
+            # Failure before registration: no teardown path could ever reach this
+            # consumer or this connection (_stop_rtc_pipeline only finds registered
+            # peers), so both must be torn down here — otherwise the fully-built
+            # RTCPeerConnection (ICE gatherers, channel, tracks, mic receiver) is
+            # orphaned alive on every offer/SDP-send failure.
             input_consumer.cancel()
+            try:
+                await peer_connection.close()
+            except Exception:
+                logger.warning("Failed to close peer connection after failed start", exc_info=True)
             raise
 
         self.peer_connections[client_peer_id] = {
@@ -978,6 +1052,9 @@ class RTCApp:
             # A channel that never reaches SCTP-established never emits 'close',
             # so its consumer must also be cancellable from teardown paths.
             "channel_consumers": [input_consumer],
+            # This peer's OWN mic playback state (None when no mic m-line): mic
+            # teardown is per-peer, so one peer closing never silences the others.
+            "mic_state": mic_state,
         }
 
     def _setup_mic_receiver(self, peer_connection):
@@ -997,10 +1074,11 @@ class RTCApp:
                 logger.info(f"mic opus-only preference not applied: {e}")
 
         loop = self.async_event_loop
-        state = {"pb": None, "starting": False}
-        self._mic_states.append(state)
+        state = {"pb": None, "starting": False, "closed": False}
 
         def sink(codec, frame):
+            if state["closed"]:
+                return
             data = bytes(getattr(frame, "data", b"") or b"")
             if not data:
                 return
@@ -1021,6 +1099,11 @@ class RTCApp:
                             ps.channels = 1
                             ps.latency_ms = 40
                             await asyncio.to_thread(pb2.start, ps)
+                            if state["closed"]:
+                                # Peer torn down while the start was in flight:
+                                # discard rather than publish into a dead state.
+                                await asyncio.to_thread(pb2.stop)
+                                return
                             state["pb"] = pb2
                         except Exception as e:
                             logger.error(f"WebRTC mic playback start failed: {e}")
@@ -1040,17 +1123,23 @@ class RTCApp:
                 pass
 
         mic_tx.receiver._encoded_audio_sink = sink
+        return state
 
-    async def _stop_mic_playbacks(self):
-        states, self._mic_states = self._mic_states, []
-        for st in states:
-            pb = st.get("pb")
-            st["pb"] = None
-            if pb is not None:
-                try:
-                    await asyncio.to_thread(pb.stop)
-                except Exception:
-                    pass
+    async def _stop_mic_playback_state(self, state):
+        """Stop ONE peer's mic playback (per-peer ownership: a closing peer must
+        never silence the mic of the other primary peers). Marks the state closed
+        so an in-flight first-packet start cannot publish a live playback into a
+        torn-down peer (which nothing would ever stop)."""
+        if not state:
+            return
+        state["closed"] = True
+        pb = state.get("pb")
+        state["pb"] = None
+        if pb is not None:
+            try:
+                await asyncio.to_thread(pb.stop)
+            except Exception:
+                pass
 
     def get_mime_by_encoder(self, encoder: str) -> Optional[str]:
         """Returns respective mime type by encoder name"""
@@ -1102,6 +1191,9 @@ class RTCApp:
             if peer_conn is not None:
                 await peer_conn.close()
             await self._cancel_channel_consumers(peer_obj)
+            # Explicit stop deletes the registration before the 'closed' state
+            # event can see it, so this peer's mic must be stopped here too.
+            await self._stop_mic_playback_state(peer_obj.get("mic_state"))
             try:
                 del self.peer_connections[client_peer_id]
             except KeyError:

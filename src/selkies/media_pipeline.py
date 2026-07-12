@@ -157,7 +157,7 @@ class MediaPipelinePixel(MediaPipeline):
         self.audio_enabled = audio_enabled
         self.audio_device_name = audio_device_name
         self.capture_cursor = False
-        self.produce_data: Callable[[bytes, int, str], Awaitable[None]] = lambda buf, pts, kind: logger.warning(
+        self.produce_data: Callable[[bytes, int, str], None] = lambda buf, pts, kind: logger.warning(
             "unhandled produce_data"
         )
         self.send_data_channel_message: Callable[[str], None] = lambda msg: logger.warning(
@@ -188,13 +188,15 @@ class MediaPipelinePixel(MediaPipeline):
 
         :visible: set True to enable
         """
-        if not self._is_screen_capturing or self.capture_module is None:
-            return
-
         if self.capture_cursor == visible:
             return
 
+        # Record the choice even while capture is down: the next start reads
+        # capture_cursor from the settings snapshot, so a toggle sent during a
+        # pause (or before a secondary display starts) still takes effect.
         self.capture_cursor = visible
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
         try:
             # Live toggle: the capture thread re-reads the cursor flag per grab.
             self.capture_module.update_tunables(self.generate_capture_settings())
@@ -499,9 +501,11 @@ class MediaPipelinePixel(MediaPipeline):
                 if pts <= self._last_video_pts:
                     pts = self._last_video_pts + 1
                 self._last_video_pts = pts
-                asyncio.run_coroutine_threadsafe(
-                    self.produce_data(data_bytes, pts, "video"),
-                    self.async_event_loop,
+                # consume_data is synchronous now (its bridge put no longer awaits),
+                # so schedule it with the lighter call_soon_threadsafe -- no per-frame
+                # Future/Task allocation -- matching the websockets path.
+                self.async_event_loop.call_soon_threadsafe(
+                    self.produce_data, data_bytes, pts, "video"
                 )
 
         except Exception as e:
@@ -659,9 +663,8 @@ class MediaPipelinePixel(MediaPipeline):
                         # and keeps a reference so `frame` stays alive.
                         data_bytes = memoryview(frame)
 
-                        asyncio.run_coroutine_threadsafe(
-                            self.produce_data(data_bytes, frame.pts, "audio"),
-                            self.async_event_loop,
+                        self.async_event_loop.call_soon_threadsafe(
+                            self.produce_data, data_bytes, frame.pts, "audio"
                         )
                 except Exception as e:
                     logger.info(f"Error audio capture callback: {e}")

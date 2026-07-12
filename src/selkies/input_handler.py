@@ -90,6 +90,31 @@ try:
 except (ImportError, RuntimeError):
     ScreenCapture = None
 
+# Server-side input authority, shared by both transports so a modified client
+# can't inject input a controller didn't grant. A read-only viewer peer
+# (shared/#player co-op) may only send VIEWER_ALLOWED_PREFIXES; a viewer
+# holding the active mk token while enable_collab is on (a read-write
+# collaborator) may additionally send the keyboard/mouse/clipboard set below.
+# cmd and other settings-mutating messages stay controller-only on both.
+VIEWER_ALLOWED_PREFIXES = (
+    "SETTINGS,",
+    "START_VIDEO",
+    # A viewer must be able to pause its own video feed on tab hide (the client
+    # sends this); without it a broadcast-pause can never trigger for viewers.
+    "STOP_VIDEO",
+    "REQUEST_KEYFRAME",
+    "js,",
+)
+VIEWER_COLLAB_EXTRA_PREFIXES = (
+    "kd", "ku", "kh", "kr", "m", "m2",
+    "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr",
+    "REQUEST_CLIPBOARD",
+)
+# Lifecycle noise every client emits on blur/visibility changes (kr =
+# release-all, cr = clipboard read-back): a read-only viewer sending them is
+# normal operation, so they are dropped without a warning.
+VIEWER_SILENT_DROP_PREFIXES = ("kr", "cr")
+
 
 class _WaylandKeymapOwner:
     """Owns keysym policy for the Wayland compositor: resolves keysyms to keycodes
@@ -905,7 +930,6 @@ STANDARD_XPAD_CONFIG = {
     "version": 0x0114,
 
     # EVDEV codes. The order here defines our internal abstract button indices.
-    # This list is now cleaned up to match a standard controller layout.
     "btn_map": [
         BTN_A,      # Internal abstract button 0
         BTN_B,      # Internal abstract button 1
@@ -934,7 +958,6 @@ STANDARD_XPAD_CONFIG = {
 
     "mapping": {
         # Maps client button numbers to our internal abstract button *indices*.
-        # With the cleaned up btn_map, this is now much simpler.
         "btns": { # client_btn_idx -> internal_abstract_btn_idx
             0: 0,  # Client A -> internal index 0 (BTN_A)
             1: 1,  # Client B -> internal index 1 (BTN_B)
@@ -976,8 +999,10 @@ STANDARD_XPAD_CONFIG = {
 def get_js_event_packed(ev_type, number, value):
     """Packs a js_event struct."""
     # struct js_event { __u32 time; __s16 value; __u8 type; __u8 number; };
+    # `type` is __u8, so pack it as 'B' — 'b' (signed) raises struct.error the
+    # moment the 0x80 JS_EVENT_INIT flag is OR'd into the type (value >= 128).
     ts_ms = int(time.time() * 1000) & 0xFFFFFFFF # Ensure it fits in u32
-    return struct.pack("=IhbB", ts_ms, int(value), ev_type, number)
+    return struct.pack("=IhBB", ts_ms, int(value), ev_type, number)
 
 def get_evdev_events_packed(ev_type, ev_code, ev_value, client_arch_bits):
     """Packs an input_event struct and a SYN_REPORT, using client architecture for timeval."""
@@ -1141,7 +1166,7 @@ class SelkiesGamepad:
             "name": STANDARD_XPAD_CONFIG.get("name", f"Selkies Virtual JS{js_idx}"),
             "vendor_id": STANDARD_XPAD_CONFIG.get("vendor_id", 0x0000),
             "product_id": STANDARD_XPAD_CONFIG.get("product_id", 0x0000),
-            "version": STANDARD_XPAD_CONFIG.get("version_id", 0x0100), 
+            "version": STANDARD_XPAD_CONFIG.get("version", 0x0114),
             "buttons": STANDARD_XPAD_CONFIG.get("btn_map", []), 
             "axes": STANDARD_XPAD_CONFIG.get("axes_map", [])
         }
@@ -1607,7 +1632,7 @@ class WebRTCInput:
         self.upload_dir = upload_dir
         self.upload_dir_path = None
 
-        async def _unhandled_video_bitrate(bitrate):
+        async def _unhandled_video_bitrate(bitrate, display_id="primary"):
             logger_webrtc_input.warning(f"unhandled on_video_encoder_bit_rate: {bitrate}")
         self.on_video_encoder_bit_rate = _unhandled_video_bitrate
         async def _unhandled_audio_bitrate(bitrate):
@@ -1615,9 +1640,10 @@ class WebRTCInput:
         self.on_audio_encoder_bit_rate = _unhandled_audio_bitrate
         async def _unhandled_mouse_pointer(visible):
             logger_webrtc_input.warning(f"unhandled on_mouse_pointer_visible: {visible}")
-        self.on_mouse_pointer_visible = _unhandled_mouse_pointer 
+        self.on_mouse_pointer_visible = _unhandled_mouse_pointer
         self.on_clipboard_read = self._on_clipboard_read
-        self.on_set_fps = lambda fps: logger_webrtc_input.warning("unhandled on_set_fps")
+        self.on_set_fps = lambda fps, display_id="primary": logger_webrtc_input.warning("unhandled on_set_fps")
+        self.on_request_keyframe = lambda display_id="primary": logger_webrtc_input.warning("unhandled on_request_keyframe")
         self.on_set_enable_resize = lambda enable_resize, res: logger_webrtc_input.warning("unhandled on_set_enable_resize")
         self.on_client_fps = lambda fps: logger_webrtc_input.warning("unhandled on_client_fps")
         self.on_client_latency = lambda latency: logger_webrtc_input.warning("unhandled on_client_latency")
@@ -1634,7 +1660,7 @@ class WebRTCInput:
         self.multipart_clipboard_id = None
         self.multipart_clipboard_kind = None
         self.data_server_instance = data_server_instance
-        self.on_update_settings = lambda settings_json: logger_webrtc_input.warning("unhandled update_settings")
+        self.on_update_settings = lambda settings_json, display_id="primary": logger_webrtc_input.warning("unhandled update_settings")
         self.is_wayland = is_wayland
         self.wayland_input = None
         # Keysym policy lives here, not in the compositor: built lazily from the
@@ -1690,8 +1716,8 @@ class WebRTCInput:
         self.key_repeat_heartbeat_grace = 0.3
         self.key_repeat_state = {}         # keysym -> monotonic time of next due repeat
         self.key_repeat_task = None
-        self.on_update_rate_control_mode = lambda mode: logger_webrtc_input.warning("unhandled on_update_rate_control_mode")
-        self.on_update_crf = lambda value: logger_webrtc_input.warning("unhandled on_update_crf")
+        self.on_update_rate_control_mode = lambda mode, display_id="primary": logger_webrtc_input.warning("unhandled on_update_rate_control_mode")
+        self.on_update_crf = lambda value, display_id="primary": logger_webrtc_input.warning("unhandled on_update_crf")
 
         if self.is_wayland:
             if shutil.which("kwin_wayland"):
@@ -2178,10 +2204,14 @@ class WebRTCInput:
                 # would add a blocking server round-trip on every mouse move.
                 self.xdisplay.flush()
         elif action == MOUSE_SCROLL_UP:
-            if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_WHEEL, 1)
+            # The XTest/Wayland backends (the defaults) map this action to a physical
+            # wheel-DOWN (button 5 / REL_WHEEL -1) — the MOUSE_SCROLL_* constants are
+            # named for the client button, not the physical direction. uinput must
+            # match, so REL_WHEEL is -1 here, not +1 (which scrolled the wrong way).
+            if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_WHEEL, -1)
             elif self.mouse: self.mouse.scroll(0, -1)
         elif action == MOUSE_SCROLL_DOWN:
-            if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_WHEEL, -1)
+            if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_WHEEL, 1)
             elif self.mouse: self.mouse.scroll(0, 1)
         elif action == MOUSE_SCROLL_LEFT:
             if self.mouse: self.mouse.scroll(-1, 0)
@@ -3580,11 +3610,12 @@ class WebRTCInput:
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
         elif msg_type == "vb":
             try:
-                # Mbps; fractional values carry sub-Mbps targets.
+                # Mbps; fractional values carry sub-Mbps targets. Per-display: the
+                # sending page's channel names the display whose stream it tunes.
                 bitrate = float(toks[1])
                 if bitrate <= 0:
                     return
-                await self.on_video_encoder_bit_rate(bitrate)
+                await self.on_video_encoder_bit_rate(bitrate, display_id)
             except Exception as e:
                 logger_webrtc_input.error(f"Error video bitrate change: {e}")
         elif msg_type == "ab":
@@ -3808,9 +3839,9 @@ class WebRTCInput:
             res = toks[1]
             if re.fullmatch(r"^\d+x\d+$", res):
                 w, h = [int(i) + int(i)%2 for i in res.split("x")]
-                # The handler may be an async binding or a sync "disabled" fallback
-                # (enable_resize defaults off) — await only a real coroutine so a
-                # skipped resize logs its warning instead of raising 'await None'.
+                # The handler may be an async binding or a sync "disabled" fallback —
+                # await only a real coroutine so a skipped resize logs its warning
+                # instead of raising 'await None'.
                 _r = self.on_resize(f"{w}x{h}", display_id)
                 if asyncio.iscoroutine(_r): await _r
             else: logger_webrtc_input.warning(f"Rejecting resolution change, invalid: {res}")
@@ -3847,7 +3878,7 @@ class WebRTCInput:
                 fps = int(toks[1])
                 if fps <= 0:
                     return
-                await self.on_set_fps(fps)
+                await self.on_set_fps(fps, display_id)
             except Exception as e:
                 logger_webrtc_input.error(f"Error fps change: {e}")
         elif msg_type == "_arg_resize":
@@ -3897,7 +3928,7 @@ class WebRTCInput:
             try:
                 mode = toks[1].strip().lower()
                 rc_mode = RateControlMode(mode)
-                self._spawn_task(self.on_update_rate_control_mode(rc_mode))
+                self._spawn_task(self.on_update_rate_control_mode(rc_mode, display_id))
             except Exception as e:
                 logger_webrtc_input.error(f"Error updating rate control mode: {e}")
         elif msg_type == "_crf":
@@ -3906,7 +3937,7 @@ class WebRTCInput:
                 if not (0 <= crf_value <= 51):
                     logger_webrtc_input.warning(f"CRF value out of range (0-51): {crf_value}")
                     return
-                self._spawn_task(self.on_update_crf(crf_value))
+                self._spawn_task(self.on_update_crf(crf_value, display_id))
             except Exception as e:
                 logger_webrtc_input.error(f"Error updating CRF value: {e}")
         elif toks[0].startswith("SETTINGS"):
@@ -3914,7 +3945,9 @@ class WebRTCInput:
             logger_webrtc_input.info(f"Received SETTINGS message: {settings_data}")
             try:
                 settings_json = json.loads(settings_data)
-                self._spawn_task(self.on_update_settings(settings_json))
+                # Settings apply to the display whose channel delivered them (the
+                # transport-level id, not a payload field a page could spoof).
+                self._spawn_task(self.on_update_settings(settings_json, display_id))
             except Exception as e:
                 logger_webrtc_input.error(f"Failed to parse SETTINGS data: {e}")
         elif toks[0] == "SET_NATIVE_CURSOR_RENDERING":
@@ -3925,6 +3958,11 @@ class WebRTCInput:
                 await self.on_mouse_pointer_visible(toks[1].strip().lower() in ("1", "true"))
             except (IndexError, ValueError) as e:
                 logger_webrtc_input.warning(f"Malformed SET_NATIVE_CURSOR_RENDERING message: {msg[:60]}, error: {e}")
+        elif toks[0] == "REQUEST_KEYFRAME":
+            # App-level IDR request (viewer-allowed); routes to the pipeline of
+            # the display whose channel delivered it, like the RTCP PLI path.
+            _kf = self.on_request_keyframe(display_id)
+            if asyncio.iscoroutine(_kf): await _kf
         else:
             logger_webrtc_input.info(f"Unknown data channel message: {msg[:100]}")
 
