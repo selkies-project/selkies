@@ -95,6 +95,7 @@ const REPO_BASE_URL =
   "https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/";
 const METADATA_URL = `${REPO_BASE_URL}metadata.yml`;
 const IMAGE_BASE_URL = `${REPO_BASE_URL}img/`;
+const METADATA_FETCH_TIMEOUT_MS = 10000;
 
 const MAX_NOTIFICATIONS = 3;
 const NOTIFICATION_TIMEOUT_SUCCESS = 5000;
@@ -116,6 +117,15 @@ const audioBitrateOptions = [32000, 48000, 64000, 96000, 128000, 192000, 256000,
 const DEFAULT_VIDEO_BITRATE = 8;   // in mbps
 const RATE_CONTROL_CBR = "cbr";
 const RATE_CONTROL_CRF = "crf";
+// Rate control resolves through the shared precedence ladder with CBR as the
+// dashboard default for every encoder (the conditional layer and the
+// no-server-settings fallback alike); locked/pinned/server-explicit values and
+// the server's allowed list still win, and CRF stays user-selectable.
+const RATE_CONTROL_CBR_DEFAULT_SPEC = {
+  ...RATE_CONTROL_SPEC,
+  conditional: () => RATE_CONTROL_CBR,
+  fallback: RATE_CONTROL_CBR,
+};
 
 // Sub-Mbps CBR stops for constrained links, ahead of the whole-Mbps range.
 const SUB_MBPS_BITRATE_STEPS = [0.1, 0.25, 0.5, 0.75];
@@ -309,6 +319,10 @@ const SelkiesLogo = ({ width = 30, height = 30, className, t, ...props }) => (
 
 const INSTALLED_APPS_STORAGE_KEY = "prootInstalledApps";
 
+// Session cache of the fetched proot-apps catalog: AppsModal is conditionally
+// mounted, so each open is a fresh mount; a hit here skips the network.
+let cachedAppData = null;
+
 // Audio level (RMS, 0..1) for the WebRTC stream's audio track via a dashboard-owned
 // AnalyserNode (never routed to a destination, so playback is unaffected). The
 // websockets worklet path exposes window.currentAudioLevel instead.
@@ -346,6 +360,7 @@ function AppsModal({ isOpen, onClose, t }) {
   const [appData, setAppData] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [fetchAttempt, setFetchAttempt] = useState(0);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedApp, setSelectedApp] = useState(null);
   const [installedApps, setInstalledApps] = useState(() => {
@@ -378,34 +393,57 @@ function AppsModal({ isOpen, onClose, t }) {
     );
   }, [installedApps]);
 
+  // Catalog fetch: one attempt per modal open (plus explicit Retry bumps of
+  // fetchAttempt) — a failure settles into the error view rather than
+  // refetching. The fetch is aborted after a timeout and on close/unmount,
+  // and the cleanup's `active` flag suppresses any late setState.
   useEffect(() => {
-    if (isOpen && !appData && !isLoading) {
-      const fetchAppData = async () => {
-        setIsLoading(true);
-        setError(null);
-        try {
-          const response = await fetch(METADATA_URL);
-          if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-          }
-          const yamlText = await response.text();
-          const parsedData = yaml.load(yamlText);
-          setAppData(parsedData);
-        } catch (e) {
-          console.error("Failed to fetch or parse app data:", e);
-          setError(
-            t(
-              "appsModal.errorLoading",
-              "Failed to load app data. Please try again."
-            )
-          );
-        } finally {
-          setIsLoading(false);
-        }
-      };
-      fetchAppData();
+    if (!isOpen || appData) return;
+    if (cachedAppData) {
+      setAppData(cachedAppData);
+      return;
     }
-  }, [isOpen, appData, isLoading, t, yaml]);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(
+      () => controller.abort(),
+      METADATA_FETCH_TIMEOUT_MS
+    );
+    let active = true;
+    setIsLoading(true);
+    setError(null);
+    (async () => {
+      try {
+        const response = await fetch(METADATA_URL, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const yamlText = await response.text();
+        const parsedData = yaml.load(yamlText);
+        if (!active) return;
+        cachedAppData = parsedData;
+        setAppData(parsedData);
+      } catch (e) {
+        if (!active) return;
+        console.error("Failed to fetch or parse app data:", e);
+        setError(
+          t(
+            "appsModal.errorLoading",
+            "Failed to load app data. Please try again."
+          )
+        );
+      } finally {
+        clearTimeout(timeoutId);
+        if (active) setIsLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [isOpen, appData, fetchAttempt, t]);
 
   const handleSearchChange = (event) =>
     setSearchTerm(event.target.value.toLowerCase());
@@ -475,7 +513,17 @@ function AppsModal({ isOpen, onClose, t }) {
             <p>{t("appsModal.loading", "Loading apps...")}</p>
           </div>
         )}
-        {error && <p className="apps-modal-error">{error}</p>}
+        {error && (
+          <div className="apps-modal-error">
+            <p>{error}</p>
+            <button
+              onClick={() => setFetchAttempt((n) => n + 1)}
+              className="app-action-button install"
+            >
+              {t("appsModal.retryButton", "Retry")}
+            </button>
+          </div>
+        )}
         {!isLoading && !error && appData && (
           <>
             {selectedApp ? (
@@ -1150,7 +1198,24 @@ function Sidebar() {
   const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
     HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [rateControlMode, setRateControlMode] = useConditionalSetting(
-    RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  // The CBR dashboard default diverges from the server's own per-encoder
+  // derivation (CRF for the striped/jpeg encoders), and the hook above only
+  // sets local UI state: without pushing the resolved default the server
+  // keeps encoding CRF while the dashboard displays CBR and offers the
+  // bitrate slider. Pinned/locked/operator-overridden values resolve to the
+  // server's value and post nothing.
+  useEffect(() => {
+    if (!serverSettings) return;
+    if (isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readStored)) return;
+    const resolved = resolveSpec(
+      RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, readStored);
+    const serverValue = serverSettings[RATE_CONTROL_CBR_DEFAULT_SPEC.serverKey]?.value;
+    if (resolved && serverValue !== undefined && resolved !== serverValue) {
+      writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, resolved, setRateControlMode, { persist: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverSettings]);
   const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
     USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [videoFullColor, setVideoFullColor] = useConditionalSetting(
@@ -1530,12 +1595,12 @@ function Sidebar() {
     }
     // Rate control follows the encoder unless pinned (explicit client/server
     // choice). A derived change is not persisted, so it keeps following.
-    if (!isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readStored)) {
+    if (!isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readStored)) {
       const rcResolved = resolveSpec(
-        RATE_CONTROL_SPEC, serverSettings,
+        RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings,
         { ...conditionalCtx, activeEncoder: selectedEncoder }, readStored);
       if (rcResolved !== rateControlMode) {
-        writeConditional(RATE_CONTROL_SPEC, rcResolved, setRateControlMode, { persist: false });
+        writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, rcResolved, setRateControlMode, { persist: false });
       }
     }
   };
@@ -1597,7 +1662,7 @@ function Sidebar() {
   };
   const handleRateControlChange = (event) => {
     // Explicit choice: pin it (persist) so encoder changes stop overriding.
-    writeConditional(RATE_CONTROL_SPEC, event.target.value, setRateControlMode, { persist: true });
+    writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, event.target.value, setRateControlMode, { persist: true });
   };
   const handleAudioInputChange = (event) => {
     const deviceId = event.target.value;
@@ -1672,6 +1737,20 @@ function Sidebar() {
     if (serverSettings?.use_css_scaling?.locked) return;
     writeConditional(HIDPI_SPEC, !manual, setHidpiEnabled, { persist: false });
   };
+  // Reset-to-window also returns UI scaling to its derived (devicePixelRatio-
+  // based) default: the pinned client choice is dropped so the derived default
+  // governs again, and the value propagates like a user change (state update +
+  // settings post). Locked or operator-explicit (overridden) values govern
+  // scaling instead — the same gate as the startup derived-default post — so
+  // skip then.
+  const resetDpiToDerivedDefault = () => {
+    const s = serverSettings?.scaling_dpi;
+    if (s?.locked || s?.overridden) return;
+    localStorage.removeItem(getPrefixedKey("scaling_dpi"));
+    const derived = deriveDpiFromDpr();
+    setSelectedDpi(derived);
+    debouncedPostSetting({ scaling_dpi: derived });
+  };
   const handleForceAlignedResolutionToggle = () => {
     writeConditional(FORCE_ALIGNED_RESOLUTION_SPEC, !forceAlignedResolution, setForceAlignedResolution, { persist: true });
   };
@@ -1724,6 +1803,7 @@ function Sidebar() {
       window.location.origin
     );
     deriveHidpiForResolution(false);
+    resetDpiToDerivedDefault();
   };
   const handleVideoToggle = () =>
     window.postMessage(

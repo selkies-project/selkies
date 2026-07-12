@@ -288,7 +288,7 @@ class H264Encoder(Encoder):
 
     def _encode_frame(
         self, frame: av.VideoFrame, force_keyframe: bool
-    ) -> Iterator[bytes]:
+    ) -> Iterator[memoryview]:
         if self.codec and (
             frame.width != self.codec.width
             or frame.height != self.codec.height

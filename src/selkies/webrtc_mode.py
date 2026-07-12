@@ -23,6 +23,7 @@ import sys
 import logging
 import asyncio
 import argparse
+import shutil
 
 from aiohttp import web
 from typing import Any, Dict, List, Optional
@@ -34,9 +35,12 @@ from .webrtc_signaling import WebRTCSignalingClient
 from .signaling_server import WebRTCPeerManagement
 from .input_handler import WebRTCInput
 from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_id,
-                            compute_dual_layout, apply_extended_layout, get_new_res)
+                            compute_dual_layout, apply_extended_layout, get_new_res,
+                            clear_selkies_monitors, clamp_primary_feedback,
+                            parse_resize_dims, cursor_size_for_dpi, align_dims_16)
 from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
-from .settings import settings, AppSettings, SETTING_DEFINITIONS, build_client_settings_payload
+from .settings import (settings, AppSettings, SETTING_DEFINITIONS,
+                       build_client_settings_payload, sanitize_client_setting)
 from types import SimpleNamespace
 from .webrtc_utils import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
 from .stream_server import BaseStreamingService, CentralizedStreamServer
@@ -119,12 +123,6 @@ CURSOR_SIZE = settings.cursor_size if settings.cursor_size > 0 else 32
 # capture via the CaptureSettings use_wayland field.
 IS_WAYLAND = bool(settings.wayland[0])
 
-# Default int bounds (mirror selkies.py). Min is not 0: settings without an
-# explicit min may use -1 sentinels that must not be clamped up.
-INT_SETTING_DEFAULT_MAX = 1_000_000
-INT_SETTING_DEFAULT_MIN = -1_000_000
-
-
 def get_server_settings() -> dict:
     return {"settings": build_client_settings_payload()}
 
@@ -160,6 +158,10 @@ class WebRTCService(BaseStreamingService):
         self.display_pipelines: Dict[str, MediaPipeline] = {}
         self._display_lock = asyncio.Lock()
         self._primary_dims: Optional[tuple] = None
+        # Multi-monitor WM swap (websockets parity): heavy DEs tile poorly across the
+        # per-display regions, so swap to a minimal Openbox once a secondary joins.
+        self._wm_swap_is_supported: Optional[bool] = None
+        self._is_wm_swapped = False
 
         self._init_default_settings()
 
@@ -202,7 +204,10 @@ class WebRTCService(BaseStreamingService):
     async def initialize_components(self) -> None:
         """Initialize all application components"""
 
-        if self.args.enable_metrics_http:
+        # Metrics backs BOTH the Prometheus endpoint and the WebRTC CSV statistics,
+        # so build it when either flag is on: CSV-only configs must not leave
+        # self.metrics as None (session start dereferences it for the CSV file).
+        if self.args.enable_metrics_http or self.args.enable_webrtc_statistics:
             webrtc_csv = self.args.enable_webrtc_statistics
             self.metrics = Metrics(using_webrtc_csv=webrtc_csv)
 
@@ -329,6 +334,13 @@ class WebRTCService(BaseStreamingService):
         )
         try:
             if display_id != "primary" and client_type == "controller":
+                second_screen_enabled, _ = self.settings.second_screen
+                if not second_screen_enabled:
+                    logger.warning(
+                        "Secondary display '%s' refused: second screens are disabled by server settings.",
+                        display_id,
+                    )
+                    return
                 if IS_WAYLAND:
                     logger.warning("Secondary displays are X11-only; refusing display '%s' on Wayland.", display_id)
                     return
@@ -337,7 +349,7 @@ class WebRTCService(BaseStreamingService):
                 entry["position"] = display_position
             await self.rtc_app.start_rtc_connection(session_peer_id, client_type, client_token, display_id)
             # Initialize stats location directory
-            if self.args.enable_webrtc_statistics:
+            if self.args.enable_webrtc_statistics and self.metrics:
                 await self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
             logger.info(f"started session for client peer id {session_peer_id}")
         except Exception as e:
@@ -426,9 +438,9 @@ class WebRTCService(BaseStreamingService):
         )
         self.input_handler.on_video_encoder_bit_rate = self.handle_video_bitrate_change
         self.input_handler.on_audio_encoder_bit_rate = self.handle_audio_bitrate_change
-        self.input_handler.on_mouse_pointer_visible = lambda v: (
-            self.media_pipeline.set_pointer_visible(v)
-        )
+        # Native-cursor capture toggles every display's capture (websockets parity:
+        # its capture_cursor tunable is global across displays).
+        self.input_handler.on_mouse_pointer_visible = self.handle_pointer_visible
         self.input_handler.on_clipboard_read = lambda d, t: (
             self.rtc_app.send_clipboard_data(d, t)
         )
@@ -444,37 +456,48 @@ class WebRTCService(BaseStreamingService):
         )
         self.input_handler.on_client_webrtc_stats = self.handle_client_werbtc_stats
         self.input_handler.on_update_settings = self.handle_update_settings
-        self.input_handler.on_update_rate_control_mode = (
-            self.media_pipeline.update_rate_control_mode
-        )
-        self.input_handler.on_update_crf = self.media_pipeline.set_crf
+        self.input_handler.on_update_rate_control_mode = self.handle_rate_control_change
+        self.input_handler.on_update_crf = self.handle_crf_change
+        # Offers resolve their codec/SDP munging per display, so displays can run
+        # different encoders.
+        self.rtc_app.get_encoder_for_display = self._encoder_for_display
 
         # DPI scaling is independent of enable_resize, which gates only dynamic
         # resolution changes. The WebSocket transport applies scaling through the
         # SETTINGS payload regardless of the resize gate, so wire scaling here too.
         self.input_handler.on_scaling_ratio = self.handle_scaling
-        if self.args.enable_resize:
-            self.input_handler.on_resize = self.on_resize_handler
-        else:
-            self.input_handler.on_resize = lambda res, display_id="primary": logger.warning(
-                f"remote resizing disabled, skipping resize to {res}"
-            )
+        # A secondary display's whole bring-up rides its resize message, so it must not be
+        # gated; enable_resize gates only the primary's dynamic resolution (in on_resize_handler).
+        self.input_handler.on_resize = self.on_resize_handler
 
         # Monitoring callbacks
         self.gpu_monitor.on_stats = self.handle_gpu_stats
         self.system_monitor.on_timer = self.handle_system_monitor
 
-    def handle_data_channel_open(self) -> None:
+    def handle_data_channel_open(self, channel=None) -> None:
         logger.info("opened peer data channel for user input to X11")
-        # Send initial server side settings to client for conditional UI rendering
+        # Greet the peer that just joined (every display page and viewer needs the
+        # server settings for conditional UI, the current cursor, and the display
+        # roster) on ITS channel; without one, fall back to broadcasting.
         server_settings_payload = get_server_settings()
-        self.rtc_app.send_media_data_over_channel(
-            "server_settings", server_settings_payload
-        )
-        self.send_current_cursor()
+        if channel is not None:
+            self.rtc_app.send_message_to_channel(
+                channel, "server_settings", server_settings_payload
+            )
+            displays = ["primary"] + [d for d in self.display_clients.keys() if d != "primary"]
+            self.rtc_app.send_message_to_channel(
+                channel, "display_config_update", {"displays": displays}
+            )
+        else:
+            self.rtc_app.send_media_data_over_channel(
+                "server_settings", server_settings_payload
+            )
+            self._broadcast_display_config()
+        self.send_current_cursor(channel)
 
-    def send_current_cursor(self) -> None:
-        """Resend the current cursor over the data channel (on channel open / video restart).
+    def send_current_cursor(self, channel=None) -> None:
+        """Resend the current cursor (on channel open / video restart): to one
+        peer's channel when given, otherwise to every connected peer.
 
         Idempotent; a slept/woken tab clears its cursor canvas and needs it back.
         """
@@ -492,31 +515,54 @@ class WebRTCService(BaseStreamingService):
         if not cursor_data:
             return
         try:
-            self.rtc_app.send_cursor_data(cursor_data)
+            if channel is not None:
+                self.rtc_app.send_message_to_channel(channel, "cursor", cursor_data)
+            else:
+                self.rtc_app.send_cursor_data(cursor_data)
         except Exception as e:
             logger.warning(f"Failed to send current cursor to client: {e}")
 
-    async def handle_video_bitrate_change(self, bitrate: float) -> None:
-        """Handle video bitrate change request."""
-        if self.media_pipeline:
-            await self.media_pipeline.set_video_bitrate(bitrate)
+    async def handle_pointer_visible(self, visible: bool) -> None:
+        """Compose the cursor into the captured video, on every display's capture
+        (the websockets capture_cursor tunable is likewise global)."""
+        for pipeline in list(self.display_pipelines.values()):
+            if pipeline is not None:
+                await pipeline.set_pointer_visible(visible)
+
+    async def handle_video_bitrate_change(self, bitrate: float, display_id: str = "primary") -> None:
+        """Video bitrate change for the display whose page sent it."""
+        await self._apply_display_setting(display_id or "primary", "video_bitrate", bitrate)
 
     async def handle_audio_bitrate_change(self, bitrate: int) -> None:
         """Handle audio bitrate change request."""
         if self.media_pipeline:
             await self.media_pipeline.set_audio_bitrate(bitrate)
 
-    async def handle_fps_change(self, fps: int) -> None:
-        """Handle FPS change request."""
-        if self.media_pipeline:
-            await self.media_pipeline.set_framerate(fps)
-        else:
-            logger.error("Media pipeline not initialized, cannot set framerate")
+    async def handle_fps_change(self, fps: int, display_id: str = "primary") -> None:
+        """Framerate change for the display whose page sent it."""
+        await self._apply_display_setting(display_id or "primary", "framerate", fps)
+
+    async def handle_rate_control_change(self, mode: Any, display_id: str = "primary") -> None:
+        """Rate-control switch for the display whose page sent it; honors the
+        server's enable_rate_control lock like the SETTINGS path."""
+        if self.args.enable_rate_control is False:
+            logger.debug("Server has rate control disabled. Ignoring rate-control change.")
+            return
+        # Store the plain value: str(<str-Enum>) formats as the member name on
+        # some supported Python versions, which would corrupt later comparisons.
+        mode_str = mode.value if isinstance(mode, RateControlMode) else str(mode)
+        await self._apply_display_setting(display_id or "primary", "rate_control_mode", mode_str)
+
+    async def handle_crf_change(self, crf: int, display_id: str = "primary") -> None:
+        """CRF change for the display whose page sent it."""
+        await self._apply_display_setting(display_id or "primary", "video_crf", int(crf))
 
     async def handle_client_werbtc_stats(
         self, webrtc_stat_type: str, webrtc_stats: str
     ) -> None:
-        if self.args.enable_metrics_http:
+        # Gate on the Metrics object itself (built for metrics-http AND/OR the CSV
+        # statistics flag) so CSV-only configs actually ingest the stats they enabled.
+        if self.metrics:
             await self.metrics.set_webrtc_stats(webrtc_stat_type, webrtc_stats)
 
     async def on_resize_handler(self, res: str, display_id: str = "primary") -> None:
@@ -525,15 +571,17 @@ class WebRTCService(BaseStreamingService):
         (or for any secondary), the resolution feeds the extended-desktop layout
         instead (websockets parity)."""
         display_id = display_id or "primary"
+        if display_id == "primary" and not self.args.enable_resize:
+            logger.warning(f"remote resizing disabled, skipping resize to {res}")
+            return
         if display_id != "primary" or self.display_clients:
-            try:
-                w_str, h_str = res.split("x")
-                w, h = min(int(w_str), 7680) & ~1, min(int(h_str), 4320) & ~1
-                if w <= 0 or h <= 0:
-                    return
-            except ValueError:
-                logger.error(f"Invalid resolution format in resize request: {res}")
+            dims = parse_resize_dims(res)
+            if dims is None:
+                logger.error(f"Invalid resize request: {res}")
                 return
+            w, h = dims
+            if self._display_setting(display_id, "force_aligned_resolution"):
+                w, h = align_dims_16(w, h)
             if display_id == "primary":
                 self._primary_dims = (w, h)
             else:
@@ -560,37 +608,15 @@ class WebRTCService(BaseStreamingService):
             )
             return
         try:
-            w_str, h_str = res.split("x")
-            target_w, target_h = int(w_str), int(h_str)
-            # Cap so a client-driven resize cannot reach the X server unbounded.
-            target_w = min(target_w, 7680)
-            target_h = min(target_h, 4320)
-
-            # Ensure dimensions are positive
-            if target_w <= 0 or target_h <= 0:
-                logger.error(
-                    f"Invalid target dimensions in resize request: {target_w}x{target_h}. Ignoring"
-                )
-                if self.media_pipeline:
-                    self.media_pipeline.last_resize_success = False
-                return  # Do not proceed with invalid dimensions
-
-            # Ensure dimensions are even
-            if target_w % 2 != 0:
-                logger.debug(f"Adjusting odd width {target_w} to {target_w - 1}")
-                target_w -= 1
-            if target_h % 2 != 0:
-                logger.debug(f"Adjusting odd height {target_h} to {target_h - 1}")
-                target_h -= 1
-
-            # Re-check positivity after odd adjustment
-            if target_w <= 0 or target_h <= 0:
-                logger.error(
-                    f"Dimensions became invalid ({target_w}x{target_h}) after odd adjustment. Ignoring"
-                )
+            dims = parse_resize_dims(res)
+            if dims is None:
+                logger.error(f"Invalid resize request: {res}. Ignoring")
                 if self.media_pipeline:
                     self.media_pipeline.last_resize_success = False
                 return
+            target_w, target_h = dims
+            if getattr(self.args, "force_aligned_resolution", False):
+                target_w, target_h = align_dims_16(target_w, target_h)
 
             # Idempotent: clients re-assert their resolution on reconnects and
             # settings broadcasts; re-applying the current size would churn
@@ -626,9 +652,6 @@ class WebRTCService(BaseStreamingService):
                 )
                 self.media_pipeline.last_resize_success = False
 
-        except ValueError:
-            logger.error(f"Invalid resolution format in resize request: {res}")
-            self.media_pipeline.last_resize_success = False
         except Exception as e:
             logger.error(
                 f"Error during resize handling for '{res}': {e}", exc_info=True
@@ -661,6 +684,36 @@ class WebRTCService(BaseStreamingService):
                 await pipeline.stop_media_pipeline()
         await self.reconfigure_displays()
 
+    async def _maybe_swap_wm_for_multimonitor(self) -> None:
+        """Swap a heavy DE (XFCE/Plasma) to a minimal Openbox once a secondary display
+        joins, so windows tile cleanly against the per-display regions (websockets parity)."""
+        if IS_WAYLAND or self._is_wm_swapped:
+            return
+        if self._wm_swap_is_supported is None:
+            self._wm_swap_is_supported = bool(
+                shutil.which("xfce4-session") or shutil.which("startplasma-x11")
+            )
+        if not self._wm_swap_is_supported:
+            return
+        cmd = ["openbox", "--replace"]
+        config_path = "/tmp/openbox_selkies_config.xml"
+        try:
+            with open(config_path, "w") as f:
+                f.write("<openbox_config></openbox_config>\n")
+            cmd = ["openbox", "--config-file", config_path, "--replace"]
+        except IOError as e:
+            logger.error(f"Could not write Openbox config ({e}); proceeding without it.")
+        # One attempt per session, succeed or not — the websockets engine likewise
+        # fires its detached swap once and does not retry on later reconfigures.
+        self._is_wm_swapped = True
+        try:
+            await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            logger.info("Multi-monitor setup: switched to Openbox.")
+        except Exception as e:
+            logger.error(f"Failed to switch to Openbox: {e}")
+
     async def reconfigure_displays(self) -> None:
         """Lay the extended desktop out for the connected displays and point each
         display's capture at its region — the WR counterpart of the websockets
@@ -678,13 +731,18 @@ class WebRTCService(BaseStreamingService):
                 if self.display_layouts:
                     self.display_layouts = {}
                     p_w, p_h = self._primary_dims or (self.media_pipeline.width, self.media_pipeline.height)
+                    # Remove the stale selkies-* logical monitors before shrinking the
+                    # framebuffer, so a secondary region does not linger outside it (WS parity).
+                    await clear_selkies_monitors()
                     await resize_display(f"{p_w}x{p_h}")
                     self.media_pipeline.capture_region = None
                     self.media_pipeline.width, self.media_pipeline.height = p_w, p_h
                     if self.media_pipeline.is_media_pipeline_running():
                         await self.media_pipeline.restart_screen_capture()
+                self._broadcast_display_config()
                 return
             did, info = secondary
+            await self._maybe_swap_wm_for_multimonitor()
             if self._primary_dims is None:
                 # The primary never resized through the layout path: take its
                 # pipeline dimensions (kept current by the single-display path),
@@ -698,6 +756,10 @@ class WebRTCService(BaseStreamingService):
                         logger.error("Cannot determine primary display size; aborting layout.")
                         return
                 self._primary_dims = (p_w, p_h)
+            # Auto-resize feedback guard, shared with the websockets layout engine.
+            self._primary_dims = clamp_primary_feedback(
+                self._primary_dims, self.display_layouts, info.get("position", "right")
+            )
             layouts, total_w, total_h = compute_dual_layout(
                 self._primary_dims, (info["width"], info["height"]),
                 info.get("position", "right"),
@@ -711,33 +773,63 @@ class WebRTCService(BaseStreamingService):
             s = layouts[did]
             pipeline = self.display_pipelines.get(did)
             if pipeline is None:
+                # A display's pipeline is built from ITS settings (the display's
+                # SETTINGS arrive before its first resize lays it out), falling
+                # back per key to the service defaults.
+                setting = lambda key: self._display_setting(did, key)
                 pipeline = MediaPipelinePixel(
                     async_event_loop=asyncio.get_running_loop(),
-                    encoder_rtc=self.args.encoder_rtc,
-                    framerate=int(self.args.framerate),
-                    video_bitrate=float(self.args.video_bitrate),
+                    encoder_rtc=str(setting("encoder_rtc")),
+                    framerate=int(setting("framerate")),
+                    video_bitrate=float(setting("video_bitrate")),
                     audio_enabled=False,
                     width=s["w"],
                     height=s["h"],
-                    crf=int(self.args.video_crf),
-                    video_fullcolor=bool(self.args.video_fullcolor),
-                    use_cpu=bool(self.args.use_cpu),
-                    video_streaming_mode=bool(self.args.video_streaming_mode),
-                    use_paint_over_quality=bool(self.args.use_paint_over_quality),
-                    video_paintover_crf=int(self.args.video_paintover_crf),
-                    video_paintover_burst_frames=int(self.args.video_paintover_burst_frames),
+                    crf=int(setting("video_crf")),
+                    video_fullcolor=bool(setting("video_fullcolor")),
+                    use_cpu=bool(setting("use_cpu")),
+                    video_streaming_mode=bool(setting("video_streaming_mode")),
+                    use_paint_over_quality=bool(setting("use_paint_over_quality")),
+                    video_paintover_crf=int(setting("video_paintover_crf")),
+                    video_paintover_burst_frames=int(setting("video_paintover_burst_frames")),
                     display_id=did,
                     capture_region=(s["x"], s["y"]),
                 )
-                pipeline.rc_mode = self.media_pipeline.rc_mode
+                if self.args.enable_rate_control:
+                    pipeline.rc_mode = RateControlMode(setting("rate_control_mode"))
+                else:
+                    pipeline.rc_mode = self.media_pipeline.rc_mode
+                # The native-cursor toggle is global across displays: a secondary
+                # joining after the toggle starts with the primary's current state.
+                pipeline.capture_cursor = self.media_pipeline.capture_cursor
                 pipeline.produce_data = (
                     lambda buf, pts, kind, _did=did: self.rtc_app.consume_data(buf, pts, kind, _did)
                 )
                 self.display_pipelines[did] = pipeline
-                await pipeline.start_media_pipeline()
+                try:
+                    await pipeline.start_media_pipeline()
+                except Exception as e:
+                    # Leave no half-built pipeline behind: drop it so the next resize /
+                    # reconfigure retries the bring-up instead of finding a dead pipeline
+                    # and only re-targeting it (bring-up recovery, WS-style fallback).
+                    logger.error(f"Secondary display '{did}' pipeline failed to start ({e}); will retry on next reconfigure.")
+                    self.display_pipelines.pop(did, None)
+                    return
                 logger.info(f"Secondary display '{did}' pipeline started at {s}")
             else:
                 await pipeline.update_capture_region(s["x"], s["y"], s["w"], s["h"])
+        self._broadcast_display_config()
+
+    def _broadcast_display_config(self) -> None:
+        """Tell every connected page which displays are attached (websockets
+        parity: the primary page forces browser-cursor rendering while a
+        secondary is connected, keyed off this broadcast)."""
+        if not self.rtc_app:
+            return
+        displays = ["primary"] + [d for d in self.display_clients.keys() if d != "primary"]
+        self.rtc_app.send_media_data_over_channel(
+            "display_config_update", {"displays": displays}
+        )
 
     async def handle_scaling(self, dpi_value: float) -> None:
         # Idempotent: the dashboard and the core each re-assert their DPI on
@@ -762,8 +854,7 @@ class WebRTCService(BaseStreamingService):
                 if self.media_pipeline.is_media_pipeline_running():
                     await self.media_pipeline.restart_screen_capture()
 
-        calculated_cursor_size = int(round(dpi_value / 96.0 * CURSOR_SIZE))
-        new_cursor_size = max(1, calculated_cursor_size)  # Ensure at least 1px
+        new_cursor_size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
 
         logger.info(
             f"Attempting to set cursor size to: {new_cursor_size} (based on DPI {dpi_value})"
@@ -793,10 +884,69 @@ class WebRTCService(BaseStreamingService):
         if self.metrics:
             self.metrics.set_gpu_utilization(load * 100)
 
-    async def handle_update_settings(self, settings_json: dict) -> None:
+    # Live per-pipeline setters for the client-tunable video settings. Each
+    # display's pipeline owns its running values; these route one sanitized
+    # value into one pipeline.
+    _VIDEO_SETTING_APPLIERS = {
+        "rate_control_mode": lambda p, v: p.update_rate_control_mode(RateControlMode(v)),
+        "video_crf": lambda p, v: p.set_crf(v),
+        "video_bitrate": lambda p, v: p.set_video_bitrate(v),
+        "framerate": lambda p, v: p.set_framerate(v),
+        "use_cpu": lambda p, v: p.set_use_cpu(bool(v)),
+        "encoder_rtc": lambda p, v: p.set_encoder_rtc(str(v)),
+        "video_fullcolor": lambda p, v: p.set_video_fullcolor(bool(v)),
+        "video_streaming_mode": lambda p, v: p.set_video_streaming_mode(bool(v)),
+        "use_paint_over_quality": lambda p, v: p.set_use_paint_over_quality(bool(v)),
+        "video_paintover_crf": lambda p, v: p.set_video_paintover_crf(int(v)),
+        "video_paintover_burst_frames": lambda p, v: p.set_video_paintover_burst_frames(int(v)),
+    }
+
+    def _display_setting(self, display_id: str, key: str) -> Any:
+        """A display's current value for a client-tunable setting: the primary
+        reads the service args; a secondary reads its own stored overrides,
+        falling back to the args it was seeded from (websockets model: each
+        display's SETTINGS payload configures only that display's stream)."""
+        if display_id != "primary":
+            entry = self.display_clients.get(display_id)
+            if entry is not None and key in entry:
+                return entry[key]
+        return getattr(self.args, key, None)
+
+    def _store_display_setting(self, display_id: str, key: str, value: Any) -> None:
+        if display_id == "primary":
+            setattr(self.args, key, value)
+        else:
+            entry = self.display_clients.get(display_id)
+            if entry is not None:
+                entry[key] = value
+
+    async def _apply_display_setting(self, display_id: str, key: str, value: Any) -> None:
+        """Store one video setting as the display's current value and apply it to
+        the display's live pipeline when it exists (a secondary that has not been
+        laid out yet picks the stored value up at pipeline creation)."""
+        applier = self._VIDEO_SETTING_APPLIERS.get(key)
+        if applier is None:
+            return
+        self._store_display_setting(display_id, key, value)
+        pipeline = self.display_pipelines.get(display_id)
+        if pipeline is not None:
+            await applier(pipeline, value)
+        if key == "encoder_rtc" and display_id == "primary" and self.rtc_app:
+            # Keep the RTCApp's global encoder current: it is the default for
+            # munge_sdp/codec choice on CONNECTIONS CREATED LATER, and the
+            # startup snapshot would go stale after a switch. Secondary displays
+            # resolve per display through get_encoder_for_display.
+            self.rtc_app.encoder = str(value)
+
+    def _encoder_for_display(self, display_id: str) -> str:
+        return str(self._display_setting(display_id, "encoder_rtc") or self.args.encoder_rtc)
+
+    async def handle_update_settings(self, settings_json: dict, display_id: str = "primary") -> None:
         # Every entry needs server-side backing: a live setter dispatched below, or state
         # the server reads later (the manual-resolution trio feeds the start-time resize
         # and resolution policy; the live resize itself rides the `r,` input message).
+        # Video keys apply to the SENDING display only (websockets model); audio and
+        # the clipboard policy are stream-global whichever display asserts them.
         settings_allowed_to_update = [
             "rate_control_mode",
             "video_crf",
@@ -808,6 +958,8 @@ class WebRTCService(BaseStreamingService):
             "is_manual_resolution_mode",
             "manual_width",
             "manual_height",
+            # Enforced on the resize paths (the client also aligns before sending).
+            "force_aligned_resolution",
             "encoder_rtc",
             "video_fullcolor",
             "video_streaming_mode",
@@ -815,86 +967,21 @@ class WebRTCService(BaseStreamingService):
             "video_paintover_crf",
             "video_paintover_burst_frames",
         ]
+        # The manual-resolution trio is server/startup resolution policy, not a
+        # per-stream tunable: only the primary's payload may assert it.
+        primary_only_keys = ("is_manual_resolution_mode", "manual_width", "manual_height")
+        global_keys = ("audio_bitrate", "enable_binary_clipboard")
+
+        display_id = display_id or "primary"
+        if display_id != "primary" and display_id not in self.display_clients:
+            logger.warning(
+                f"Ignoring settings for unknown display '{display_id}' (not connected)."
+            )
+            return
 
         def sanitize_value(name: str, client_value: Any) -> Any:
-            """Clamps ranges, validates enums, and enforces bools against server limits."""
-            setting_def = next(
-                (s for s in SETTING_DEFINITIONS if s["name"] == name), None
-            )
-            if not setting_def:
-                return None
-            server_limit = getattr(self.settings, name)
-            if client_value is None:
-                if setting_def["type"] == "range":
-                    min_val, max_val = server_limit
-                    return (
-                        min_val
-                        if min_val == max_val
-                        else setting_def.get("meta", {}).get("default_value")
-                    )
-                elif setting_def["type"] == "bool":
-                    return server_limit[0]
-                else:  # enum, list, str, int
-                    return server_limit
-            try:
-                if setting_def["type"] == "range":
-                    min_val, max_val = server_limit
-                    # Fractional values are legal (sub-Mbps bitrates); keep
-                    # integral values as ints. Mirrors the websockets twin.
-                    numeric = float(client_value)
-                    if numeric.is_integer():
-                        numeric = int(numeric)
-                    sanitized = max(min_val, min(numeric, max_val))
-                    if sanitized != numeric:
-                        logger.warning(
-                            f"Client value for '{name}' ({client_value}) was clamped to {sanitized} (server range: {min_val}-{max_val})."
-                        )
-                    return sanitized
-                elif setting_def["type"] == "enum":
-                    allowed_values = setting_def["meta"]["allowed"]
-                    if str(client_value) in allowed_values:
-                        # Normalize to str so later equality checks don't flip on str-vs-int.
-                        return str(client_value)
-                    server_default = (
-                        allowed_values[0] if allowed_values else setting_def["default"]
-                    )
-                    logger.warning(
-                        f"Client value for '{name}' ('{client_value}') is not in the allowed list {allowed_values}. Using server default '{server_default}'."
-                    )
-                    return server_default
-                elif setting_def["type"] in ("int", "float"):
-                    sanitized = int(client_value) if setting_def["type"] == "int" else float(client_value)
-                    meta = setting_def.get("meta", {})
-                    # Top-level min/max win over meta so declared bounds aren't loosened
-                    # by the sentinel-safe negative fallback.
-                    min_val = setting_def.get("min", meta.get("min", INT_SETTING_DEFAULT_MIN))
-                    # Cap client numbers so they can't request resource-exhausting values.
-                    max_val = setting_def.get("max", meta.get("max", INT_SETTING_DEFAULT_MAX))
-                    clamped = max(min_val, min(sanitized, max_val))
-                    if clamped != sanitized:
-                        logger.warning(
-                            f"Client value for '{name}' ({client_value}) was clamped to {clamped} (bounds: {min_val}-{max_val})."
-                        )
-                    return clamped
-                elif setting_def["type"] == "bool":
-                    server_val, is_locked = server_limit
-                    client_bool = str(client_value).lower() in ["true", "1"]
-                    if is_locked:
-                        if client_bool != server_val:
-                            logger.warning(
-                                f"Client tried to change locked setting '{name}' to '{client_bool}'. Request ignored, using server value '{server_val}'."
-                            )
-                        return server_val
-                    return client_bool
-            except (ValueError, TypeError, IndexError, OverflowError):
-                # OverflowError guards JSON inf (1e999 -> int(inf)); fall back to default.
-                def_val_meta = setting_def.get("meta", {}).get("default_value")
-                return (
-                    def_val_meta
-                    if def_val_meta is not None
-                    else setting_def.get("default")
-                )
-            return client_value
+            """One-transport wrapper over the shared sanitizer (settings.py)."""
+            return sanitize_client_setting(name, client_value, self.settings, logger)
 
         for key in settings_allowed_to_update:
             client_value = settings_json.get(key)
@@ -905,53 +992,32 @@ class WebRTCService(BaseStreamingService):
                     f"Server has rate control disabled. Ignoring update for '{key}'."
                 )
                 continue
-            current_value = getattr(self.args, key, None)
-            if current_value is not None:
-                sanitized_value = sanitize_value(key, client_value)
-                if sanitized_value is not None and sanitized_value != current_value:
-                    if key == "rate_control_mode":
-                        await self.media_pipeline.update_rate_control_mode(
-                            RateControlMode(sanitized_value)
-                        )
-                    elif key == "video_crf":
-                        await self.media_pipeline.set_crf(sanitized_value)
-                    elif key == "video_bitrate" and self.media_pipeline:
-                        await self.media_pipeline.set_video_bitrate(sanitized_value)
-                    elif key == "audio_bitrate" and self.media_pipeline:
-                        await self.media_pipeline.set_audio_bitrate(
-                            int(sanitized_value)
-                        )
-                    elif key == "framerate" and self.media_pipeline:
-                        await self.media_pipeline.set_framerate(sanitized_value)
-                    elif key == "use_cpu" and self.media_pipeline:
-                        await self.media_pipeline.set_use_cpu(bool(sanitized_value))
-                    elif key == "encoder_rtc" and self.media_pipeline:
-                        await self.media_pipeline.set_encoder_rtc(str(sanitized_value))
-                        # Keep the RTCApp's encoder current: munge_sdp keys its
-                        # profile decisions off it for CONNECTIONS CREATED LATER,
-                        # and the startup snapshot would go stale after a switch.
-                        if self.rtc_app:
-                            self.rtc_app.encoder = str(sanitized_value)
-                    elif key == "video_fullcolor" and self.media_pipeline:
-                        await self.media_pipeline.set_video_fullcolor(bool(sanitized_value))
-                    elif key == "video_streaming_mode" and self.media_pipeline:
-                        await self.media_pipeline.set_video_streaming_mode(bool(sanitized_value))
-                    elif key == "use_paint_over_quality" and self.media_pipeline:
-                        await self.media_pipeline.set_use_paint_over_quality(bool(sanitized_value))
-                    elif key == "video_paintover_crf" and self.media_pipeline:
-                        await self.media_pipeline.set_video_paintover_crf(int(sanitized_value))
-                    elif key == "video_paintover_burst_frames" and self.media_pipeline:
-                        await self.media_pipeline.set_video_paintover_burst_frames(int(sanitized_value))
-                    elif key == "enable_binary_clipboard":
-                        await self.input_handler.update_binary_clipboard_setting(
-                            sanitized_value
-                        )
-                    logger.debug(
-                        f"Updated setting '{key}' from {current_value} to {sanitized_value} based on client settings"
-                    )
-                    setattr(self.args, key, sanitized_value)
-            else:
+            if key in primary_only_keys and display_id != "primary":
+                continue
+            if getattr(self.args, key, None) is None:
                 logger.warning(f"Received unknown setting '{key}' from client")
+                continue
+            current_value = self._display_setting(display_id, key)
+            sanitized_value = sanitize_value(key, client_value)
+            if sanitized_value is None or sanitized_value == current_value:
+                continue
+            if key == "audio_bitrate":
+                # Audio exists only on the primary display's pipeline.
+                if self.media_pipeline:
+                    await self.media_pipeline.set_audio_bitrate(int(sanitized_value))
+                setattr(self.args, key, sanitized_value)
+            elif key == "enable_binary_clipboard":
+                await self.input_handler.update_binary_clipboard_setting(sanitized_value)
+                setattr(self.args, key, sanitized_value)
+            elif key in self._VIDEO_SETTING_APPLIERS:
+                await self._apply_display_setting(display_id, key, sanitized_value)
+            else:
+                # Policy state with no live setter (manual trio, force_aligned):
+                # stored for the resize paths / startup to read.
+                self._store_display_setting(display_id, key, sanitized_value)
+            logger.debug(
+                f"Updated setting '{key}' for display '{display_id}' from {current_value} to {sanitized_value}"
+            )
 
     def mon_rtc_config(self, stun_servers, turn_servers, rtc_config):
         if self.peer_manager:
@@ -963,61 +1029,69 @@ class WebRTCService(BaseStreamingService):
 
     async def _congestion_control_loop(self) -> None:
         """GCC-style bitrate adaptation from transport-wide-cc receiver feedback:
-        follow the slowest peer's goodput estimate with headroom, back off
-        multiplicatively on loss, and retarget the encoder within the allowed
-        video_bitrate range. Only CBR mode has a bitrate target to steer."""
+        per display, follow the slowest of ITS peers' goodput estimates with
+        headroom, back off multiplicatively on loss, and retarget that display's
+        encoder within the allowed video_bitrate range — one display's congested
+        link never steers another's stream. Only CBR mode has a target to steer."""
         lo_mbps, hi_mbps = settings.video_bitrate
         logger.info(
             f"Congestion control loop started (CBR only, range {lo_mbps}-{hi_mbps} Mbps)."
         )
         while True:
             await asyncio.sleep(1.0)
-            pipeline = self.media_pipeline
             rtc_app = self.rtc_app
-            if (
-                not pipeline
-                or not rtc_app
-                or getattr(pipeline, "rc_mode", None) != RateControlMode.CBR
-            ):
+            if not rtc_app:
                 continue
-            goodputs, worst_loss = [], 0.0
+            # Group receiver estimates by the display each peer watches
+            # (viewers of a display count toward that display's link).
+            per_display: Dict[str, Dict[str, Any]] = {}
             for peer in rtc_app.peer_connections.values():
                 pc = peer.get("peer_conn")
                 sctp = getattr(pc, "sctp", None)
                 estimate = getattr(getattr(sctp, "transport", None), "twcc_estimate", None)
                 if not estimate:
                     continue
+                did = peer.get("display_id", "primary") or "primary"
+                bucket = per_display.setdefault(did, {"goodputs": [], "worst_loss": 0.0})
                 if estimate.get("goodput_bps"):
-                    goodputs.append(estimate["goodput_bps"])
-                worst_loss = max(worst_loss, estimate.get("loss_fraction", 0.0))
-            if not goodputs:
-                continue
-            current = float(pipeline.video_bitrate)
-            # The user-selected bitrate is the CEILING: congestion control only
-            # backs off below it and recovers up to it. Clamping to the allowed
-            # RANGE instead let a fast local segment ramp an 8 Mbps session to
-            # 80+ Mbps, saturating the real path (TURN/WAN) with queuing lag and
-            # loss-corrupted frames.
-            ceiling = float(getattr(self.args, "video_bitrate", hi_mbps) or hi_mbps)
-            ceiling = max(lo_mbps, min(hi_mbps, ceiling))
-            if worst_loss > 0.10:
-                target = current * 0.7
-            else:
-                # Damage-gated encoders are application-limited: measured goodput
-                # is merely what was sent (an idle screen reads ~0), NOT link
-                # capacity — so it must never drag the target DOWN. It may lift
-                # the target when it shows real headroom; otherwise recover
-                # multiplicatively toward the user ceiling after a loss backoff.
-                target = min(ceiling, max(current * 1.15, min(goodputs) * 0.85 / 1_000_000))
-            # Steer at kbps precision (what set_video_bitrate applies). Float math
-            # throughout so a sub-Mbps CBR target or range cap isn't truncated to 0.
-            target = round(max(lo_mbps, min(ceiling, target)), 3)
-            if target != round(current, 3):
-                logger.info(
-                    f"Congestion control: video bitrate {current:g} -> {target:g} Mbps "
-                    f"(goodput {min(goodputs) / 1e6:.1f} Mbps, loss {worst_loss:.1%})"
-                )
-                await pipeline.set_video_bitrate(target)
+                    bucket["goodputs"].append(estimate["goodput_bps"])
+                bucket["worst_loss"] = max(bucket["worst_loss"], estimate.get("loss_fraction", 0.0))
+            for did, bucket in per_display.items():
+                pipeline = self.display_pipelines.get(did)
+                if (
+                    pipeline is None
+                    or getattr(pipeline, "rc_mode", None) != RateControlMode.CBR
+                ):
+                    continue
+                goodputs, worst_loss = bucket["goodputs"], bucket["worst_loss"]
+                if not goodputs:
+                    continue
+                current = float(pipeline.video_bitrate)
+                # The user-selected bitrate is the CEILING: congestion control only
+                # backs off below it and recovers up to it. Clamping to the allowed
+                # RANGE instead let a fast local segment ramp an 8 Mbps session to
+                # 80+ Mbps, saturating the real path (TURN/WAN) with queuing lag and
+                # loss-corrupted frames.
+                ceiling = float(self._display_setting(did, "video_bitrate") or hi_mbps)
+                ceiling = max(lo_mbps, min(hi_mbps, ceiling))
+                if worst_loss > 0.10:
+                    target = current * 0.7
+                else:
+                    # Damage-gated encoders are application-limited: measured goodput
+                    # is merely what was sent (an idle screen reads ~0), NOT link
+                    # capacity — so it must never drag the target DOWN. It may lift
+                    # the target when it shows real headroom; otherwise recover
+                    # multiplicatively toward the user ceiling after a loss backoff.
+                    target = min(ceiling, max(current * 1.15, min(goodputs) * 0.85 / 1_000_000))
+                # Steer at kbps precision (what set_video_bitrate applies). Float math
+                # throughout so a sub-Mbps CBR target or range cap isn't truncated to 0.
+                target = round(max(lo_mbps, min(ceiling, target)), 3)
+                if target != round(current, 3):
+                    logger.info(
+                        f"Congestion control[{did}]: video bitrate {current:g} -> {target:g} Mbps "
+                        f"(goodput {min(goodputs) / 1e6:.1f} Mbps, loss {worst_loss:.1%})"
+                    )
+                    await pipeline.set_video_bitrate(target)
 
     async def start_components(self) -> None:
         """Start all asynchronous tasks"""
@@ -1033,12 +1107,10 @@ class WebRTCService(BaseStreamingService):
         # re-derives it on DPI changes); Wayland gets its size via CaptureSettings.
         if not IS_WAYLAND and settings.cursor_size > 0:
             initial_dpi = float(getattr(settings, "scaling_dpi", "96"))
-            await set_cursor_size(max(1, int(round(initial_dpi / 96.0 * CURSOR_SIZE))))
+            await set_cursor_size(cursor_size_for_dpi(initial_dpi, CURSOR_SIZE))
 
         if self.args.congestion_control:
             self.tasks.append(asyncio.create_task(self._congestion_control_loop()))
-
-        # Metrics HTTP server is now integrated with aiohttp, no separate server needed
 
         if self.gpu_monitor:
             self.gpu_monitor.start()
@@ -1194,7 +1266,6 @@ class WebRTCService(BaseStreamingService):
             stop_coros.append(
                 (_await_with_timeout(self.system_monitor.stop(), "system_monitor", 2.0))
             )
-        # Metrics HTTP server is now integrated with aiohttp, no separate server to stop
 
         if self.mon_hmac_turn:
             stop_coros.append(

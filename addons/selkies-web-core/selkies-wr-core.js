@@ -344,6 +344,13 @@ export default function webrtc() {
 	let antiAliasingEnabled = true;
 	let trackpadMode = false;
 	let useBrowserCursors = false;
+	// Whether a secondary display page is connected (server display_config_update
+	// broadcast). Multi-monitor forces browser-cursor rendering: the server-drawn
+	// cursor overlay only tracks one capture region.
+	let isSecondaryDisplayConnected = false;
+	// Round resolutions to multiples of 16 (encoder macroblock alignment) instead
+	// of the default 2 when the force_aligned_resolution setting is on.
+	let force_aligned_resolution = false;
 
 	let enable_binary_clipboard = true;
 	let multipartClipboard = {
@@ -462,9 +469,33 @@ export default function webrtc() {
 		return "[" + ts + "]" + " " + msg;
 	}
 
-	const roundDownToEven = (num) => {
-		return Math.floor(num / 2) * 2;
+	// Resolution rounding shared with the websockets core: 2-pixel alignment
+	// normally (YUV 4:2:0 chroma), 16-pixel when force_aligned_resolution is on.
+	const alignResolution = (num) => {
+		const alignment = force_aligned_resolution ? 16 : 2;
+		return Math.floor(num / alignment) * alignment;
 	};
+
+	// Browser-cursor rendering resolves from the user preference PLUS the
+	// multi-monitor override (this page being a secondary, or the primary while a
+	// secondary is connected) — the server-drawn cursor overlay only tracks one
+	// capture region. Mirrors the websockets core.
+	function applyEffectiveCursorSetting() {
+		const userPreference = getBoolParam('use_browser_cursors', false);
+		const isDisplay2 = window.location.hash.startsWith('#display2');
+		const isMultiMonitorActive = (isDisplay2 || isSecondaryDisplayConnected);
+		const finalSetting = isMultiMonitorActive ? true : userPreference;
+		useBrowserCursors = finalSetting;
+		if (input && typeof input.setUseBrowserCursors === 'function') {
+			console.log(`Applying effective cursor setting. Multi-monitor: ${isMultiMonitorActive}, User Pref: ${userPreference}, Final: ${finalSetting}`);
+			input.setUseBrowserCursors(finalSetting);
+		}
+		// Tell the dashboard the value actually in effect so its toggle reflects
+		// the multi-monitor override instead of the user preference alone.
+		try {
+			window.postMessage({ type: 'effectiveCursorState', value: finalSetting }, window.location.origin);
+		} catch (e) { /* postMessage unavailable */ }
+	}
 
 	function playStream() {
 		showStart = false;
@@ -640,13 +671,10 @@ export default function webrtc() {
 			console.log("Skipping sending client persisted settings in shared mode.");
 			return;
 		}
-		if (window.location.hash.startsWith('#display2')) {
-			// Global settings are the primary page's to assert; a secondary display
-			// posting its own copy would clobber them. Its resolution still flows
-			// through the standard resize message.
-			console.log("Skipping client persisted settings on a secondary display.");
-			return;
-		}
+		// Every display page sends its persisted settings: the server applies a
+		// payload to the display whose channel delivered it, so a secondary
+		// configures only its own stream (websockets model). Its resolution
+		// still flows through the standard resize message.
 		const settingsPrefix = `${storageAppName}_`;
 		const settingsToSend = {};
 		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
@@ -692,8 +720,8 @@ export default function webrtc() {
 
 		if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
 			settingsToSend['is_manual_resolution_mode'] = true;
-			settingsToSend['manual_width'] = roundDownToEven(manualWidth * dpr);
-			settingsToSend['manual_height'] = roundDownToEven(manualHeight * dpr);
+			settingsToSend['manual_width'] = alignResolution(manualWidth * dpr);
+			settingsToSend['manual_height'] = alignResolution(manualHeight * dpr);
 		}
 		settingsToSend['useCssScaling'] = useCssScaling;
 
@@ -713,8 +741,8 @@ export default function webrtc() {
 		}
 
 		const dpr = (window.isManualResolutionMode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
-		const logicalWidth = roundDownToEven(targetWidth * dpr);
-		const logicalHeight = roundDownToEven(targetHeight * dpr);
+		const logicalWidth = alignResolution(targetWidth * dpr);
+		const logicalHeight = alignResolution(targetHeight * dpr);
 		console.log(`applyManualStyle logicalWidth: ${logicalWidth} logicalHeight: ${logicalHeight}`)
 		if (videoElement.width !== logicalWidth || videoElement.height !== logicalHeight) {
 			videoElement.width = logicalWidth;
@@ -767,8 +795,8 @@ export default function webrtc() {
 		// (`target*`) — styling with physical pixels overflows the viewport by
 		// dpr^2 on HiDPI displays.
 		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
-		const logicalWidth = roundDownToEven(targetWidth * dpr);
-		const logicalHeight = roundDownToEven(targetHeight * dpr);
+		const logicalWidth = alignResolution(targetWidth * dpr);
+		const logicalHeight = alignResolution(targetHeight * dpr);
 		console.log(`resetToWinRes logicalWidth: ${logicalWidth} logicalHeight: ${logicalHeight}`)
 		if (videoElement.width !== logicalWidth || videoElement.height !== logicalHeight) {
 			videoElement.width = logicalWidth;
@@ -803,12 +831,12 @@ export default function webrtc() {
 			// A manual/preset resolution IS the exact framebuffer; don't multiply by dpr, or a
 			// useCssScaling flip (HiDPI toggle / preset apply) swings it 2x<->1x. Mirrors ws-core.
 			dpr = 1;
-			realWidth = roundDownToEven(width);
-			realHeight = roundDownToEven(height);
+			realWidth = alignResolution(width);
+			realHeight = alignResolution(height);
 		} else {
 			dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
-			realWidth = roundDownToEven(width * dpr);
-			realHeight = roundDownToEven(height * dpr);
+			realWidth = alignResolution(width * dpr);
+			realHeight = alignResolution(height * dpr);
 		}
 		const resString = `${realWidth}x${realHeight}`;
 		console.log(`Sending resolution to server: ${resString}, Pixel Ratio Used: ${dpr}, useCssScaling: ${useCssScaling}`);
@@ -867,6 +895,11 @@ export default function webrtc() {
 		if (window.isManualResolutionMode && manualWidth && manualHeight) {
 			console.log(`Applying manual resolution: ${manualWidth}x${manualHeight}`);
 			applyManualStyle(manualWidth, manualHeight, scaleLocal);
+			// A secondary display lays out from its reported size, so a manual-mode
+			// secondary must report on connect too; the auto branch below covers the primary.
+			if (window.location.hash.startsWith('#display2')) {
+				sendResolutionToServer(manualWidth, manualHeight);
+			}
 		} else {
 			console.log("Applying window resolution");
 			// If manual resolution is not set, reset to window resolution
@@ -985,8 +1018,8 @@ export default function webrtc() {
 							applyManualStyle(manualWidth, manualHeight, scaleLocal);
 						} else if (!isSharedMode && input) {
 							const currentWindowRes = input.getWindowResolution();
-							const autoWidth = roundDownToEven(currentWindowRes[0]);
-							const autoHeight = roundDownToEven(currentWindowRes[1]);
+							const autoWidth = alignResolution(currentWindowRes[0]);
+							const autoHeight = alignResolution(currentWindowRes[1]);
 							sendResolutionToServer(autoWidth, autoHeight);
 							resetToWindowResolution(autoWidth, autoHeight);
 						}
@@ -1080,11 +1113,9 @@ export default function webrtc() {
 				break;
 			case 'setUseBrowserCursors':
 				if (typeof message.value === 'boolean') {
-					useBrowserCursors = message.value;
-					setBoolParam('use_browser_cursors', useBrowserCursors);
-					if (input && typeof input.setUseBrowserCursors === 'function') {
-						input.setUseBrowserCursors(useBrowserCursors);
-					}
+					setBoolParam('use_browser_cursors', message.value);
+					// The multi-monitor override may force the effective value on.
+					applyEffectiveCursorSetting();
 				} else {
 					console.warn("Invalid value received for setUseBrowserCursors:", message.value);
 				}
@@ -1118,6 +1149,7 @@ export default function webrtc() {
 		if (settings.use_paint_over_quality !== undefined) passthrough.use_paint_over_quality = !!settings.use_paint_over_quality;
 		if (settings.video_paintover_crf !== undefined) passthrough.video_paintover_crf = parseInt(settings.video_paintover_crf, 10);
 		if (settings.video_paintover_burst_frames !== undefined) passthrough.video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames, 10);
+		if (settings.force_aligned_resolution !== undefined) passthrough.force_aligned_resolution = !!settings.force_aligned_resolution;
 		// Encoder switch (h264enc <-> openh264enc): the server restarts the pipeline on this.
 		if (settings.encoder_rtc !== undefined) passthrough.encoder_rtc = settings.encoder_rtc;
 		if (Object.keys(passthrough).length > 0) {
@@ -1148,10 +1180,12 @@ export default function webrtc() {
 		if (settings.scaling_dpi !== undefined) {
 			const dpi = parseInt(settings.scaling_dpi, 10);
 			if (!isNaN(dpi) && dpi > 0) {
-				// Persist like ws-core so the value survives a refresh and is
-				// re-applied on connect (loadLastSessionSettings sends s,<dpi>).
+				// Not persisted here: the localStorage pin belongs to the dashboard,
+				// which writes it only for an explicit slider pick. Persisting every
+				// posted value would re-pin the derived-default and reset-to-derived
+				// posts, freezing DPI across displays with different devicePixelRatio
+				// (the connect path derives the DPI when unpinned).
 				scalingDPI = dpi;
-				setIntParam('scaling_dpi', dpi);
 				webrtc.sendDataChannelMessage(`s,${dpi}`);
 			}
 		}
@@ -1181,6 +1215,18 @@ export default function webrtc() {
 			webrtc.sendDataChannelMessage(`_crf,${crf}`);
 			setIntParam('video_crf', crf);
 			console.log(`H264 CRF set to ${crf}`);
+		}
+		if (settings.force_aligned_resolution !== undefined) {
+			force_aligned_resolution = !!settings.force_aligned_resolution;
+			setBoolParam('force_aligned_resolution', force_aligned_resolution);
+			// Re-assert the current resolution so the stream snaps to the new
+			// alignment without waiting for the next window resize.
+			if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
+				sendResolutionToServer(manualWidth, manualHeight);
+			} else if (!isSharedMode && input) {
+				const currentWindowRes = input.getWindowResolution();
+				sendResolutionToServer(currentWindowRes[0], currentWindowRes[1]);
+			}
 		}
 	}
 
@@ -1702,6 +1748,7 @@ export default function webrtc() {
 			antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 			trackpadMode = getBoolParam('trackpadMode', false);
 			useBrowserCursors = getBoolParam('use_browser_cursors', false);
+			force_aligned_resolution = getBoolParam('force_aligned_resolution', false);
 
 			if (!isSharedMode) {
 				// listen for dashboard messages (Dashboard -> core client)
@@ -1781,7 +1828,9 @@ export default function webrtc() {
 			// Apply persisted input preferences and announce state to the
 			// dashboard (parity with the websockets core).
 			if (trackpadMode) input.setTrackpadMode(true);
-			if (useBrowserCursors) input.setUseBrowserCursors(true);
+			// Resolves the user preference plus the multi-monitor override (a
+			// #display2 page always renders its own cursor).
+			applyEffectiveCursorSetting();
 			window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
 			window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 
@@ -2002,6 +2051,18 @@ export default function webrtc() {
 				input.updateServerCursor(cursorData);
 			}
 
+			webrtc.ondisplayconfig = (config) => {
+				// A secondary joining/leaving flips the multi-monitor cursor
+				// override on the primary page (websockets parity).
+				const displays = (config && config.displays) || [];
+				const secondaryConnected = displays.some((d) => d !== 'primary');
+				if (isSecondaryDisplayConnected !== secondaryConnected) {
+					console.log(`Secondary display connection status changed to: ${secondaryConnected}`);
+					isSecondaryDisplayConnected = secondaryConnected;
+					applyEffectiveCursorSetting();
+				}
+			}
+
 			webrtc.onsystemaction = (action) => {
 				webrtc._setStatus("Executing system action: " + action);
 				if (action === 'reload') {
@@ -2107,7 +2168,7 @@ export default function webrtc() {
 			}
 
 			// Apply the fetched (or fallback) RTC config and open the connection.
-			// Extracted so a failed TURN fetch still connects: the data channel is
+			// A shared function, so a failed TURN fetch still connects: the data channel is
 			// what delivers serverSettings, and without it the dashboard never
 			// renders its controls or the WebSocket/WebRTC toggle — i.e. it freezes.
 			const applyRtcConfigAndConnect = (config) => {

@@ -6,3 +6,4 @@ src/*.egg-info
 NOTES.md
 **/__pycache__/
 src/**/.ruff_cache
+src/selkies/selkies_web/

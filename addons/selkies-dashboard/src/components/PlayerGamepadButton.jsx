@@ -16,8 +16,11 @@ const GamepadIcon = () => (
     </svg>
 );
 
+// Floating, draggable touch-gamepad toggle for the #player2..#player4
+// clients, which render no dashboard. Always visible: these slots exist to
+// contribute gamepad input, so the toggle must be reachable on any device
+// without depending on touch detection.
 function PlayerGamepadButton() {
-    const [isButtonVisible, setIsButtonVisible] = React.useState(false);
     const [isTouchGamepadActive, setIsTouchGamepadActive] = React.useState(false);
     const [isTouchGamepadSetup, setIsTouchGamepadSetup] = React.useState(false);
 
@@ -31,27 +34,6 @@ function PlayerGamepadButton() {
         initialBottom: 0,
         initialRight: 0,
     });
-
-    React.useEffect(() => {
-        // Mirror the main dashboard's virtual-keyboard-button gating: reveal the
-        // toggle on a mobile UA or once a touch is seen. Without a touchscreen the
-        // button never appears, so #player* clients fall back to real gamepads only.
-        const isMobile = typeof window !== "undefined" &&
-            ((navigator.userAgentData && navigator.userAgentData.mobile) ||
-                /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
-        if (isMobile) {
-            setIsButtonVisible(true);
-            return;
-        }
-        const detectTouch = () => {
-            setIsButtonVisible(true);
-            window.removeEventListener('touchstart', detectTouch);
-        };
-        window.addEventListener('touchstart', detectTouch, { passive: true });
-        return () => {
-            window.removeEventListener('touchstart', detectTouch);
-        };
-    }, []);
 
     const handleToggleTouchGamepad = React.useCallback(() => {
         const newActiveState = !isTouchGamepadActive;
@@ -119,10 +101,6 @@ function PlayerGamepadButton() {
         }
         handleToggleTouchGamepad();
     };
-
-    if (!isButtonVisible) {
-        return null;
-    }
 
     return (
         <button

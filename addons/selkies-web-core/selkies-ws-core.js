@@ -37,7 +37,9 @@ function extractOpusFrames(arrayBuffer) {
   const bytes = new Uint8Array(arrayBuffer);
   const nRed = bytes[1];
   if (!nRed) { lastAudioTs = null; return [arrayBuffer.slice(2)]; }
-  if (arrayBuffer.byteLength < 6 + nRed * 4 + 1) return [arrayBuffer.slice(2)]; // malformed
+  // Malformed RED (fixed part truncated): for n_red>0 the bytes after the flag
+  // word are pts+block headers, not Opus, so there is no primary to salvage.
+  if (arrayBuffer.byteLength < 6 + nRed * 4 + 1) { lastAudioTs = null; return []; }
   const pts = ((bytes[2] << 24) | (bytes[3] << 16) | (bytes[4] << 8) | bytes[5]) >>> 0;
   let pos = 6;
   const offsets = [], lens = [];
@@ -48,6 +50,13 @@ function extractOpusFrames(arrayBuffer) {
     pos += 4;
   }
   pos += 1; // primary header
+  // The header guard above only covers the fixed part; the declared block
+  // lengths must also fit the actual payload, or slice() silently clamps and a
+  // truncated Opus frame (plus an empty primary) reaches the decoder. The
+  // primary cannot be located without trustworthy lengths, so drop the packet.
+  let declared = pos;
+  for (let i = 0; i < nRed; i++) { declared += lens[i]; }
+  if (declared > arrayBuffer.byteLength) { lastAudioTs = null; return []; }
   const blocks = [];
   for (let i = 0; i < nRed; i++) {
     blocks.push({ ts: (pts - offsets[i]) >>> 0, buf: arrayBuffer.slice(pos, pos + lens[i]) });
@@ -808,7 +817,7 @@ function presentFrameToVideo(frame) {
           if (canvas) canvas.style.display = 'none';
         });
       } else {
-        mstgRendered = true;   // can't observe rendering: keep the old behavior
+        mstgRendered = true;   // can't observe rendering; assume presented
       }
     }
   }
@@ -955,7 +964,7 @@ function activateWorkerSinkDisplay() {
           if (canvas) canvas.style.display = 'none';
         });
       } else {
-        videoWorkerRendered = true;   // can't observe rendering: keep the old behavior
+        videoWorkerRendered = true;   // can't observe rendering; assume presented
       }
     }
     // canvas mode: revealed by the worker's one-time 'presented' message
@@ -1411,6 +1420,9 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     return;
   }
   canvasGeomDirty = true;  // canvas box changes below -> re-mirror onto the <video>/worker canvas
+  // Geometry changed: the per-stripe-row keys (keyed by startY) are now stale, so
+  // drop them to bound this map's growth — same guard resetCanvasStyle applies.
+  lastDrawnJpegStripeFrameId = {};
 
   const dpr = (isSharedMode || window.is_manual_resolution_mode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
   const internalBufferWidth = alignResolution(targetWidth * dpr);
@@ -2180,6 +2192,11 @@ const initializeInput = () => {
       return;
     }
 
+    // Same invariant as setManualResolution/resetResolutionToWindow: a geometry
+    // change strands per-startY stripe decoders (rows that vanish on shrink keep
+    // a live GPU-backed VideoDecoder nothing ever feeds or closes), so flush them
+    // before announcing the new resolution.
+    clearAllVncStripeDecoders();
     sendResolutionToServer(evenWidth, evenHeight);
     resetCanvasStyle(evenWidth, evenHeight);
   };
@@ -2410,9 +2427,6 @@ function receiveMessage(event) {
              if (manual_width && manual_height) {
                 applyManualCanvasStyle(manual_width, manual_height, true);
              }
-          }
-          if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc' && currentEncoderMode !== 'openh264enc' && currentEncoderMode !== 'h264enc-striped') {
-            triggerInitializeDecoder();
           }
         }
       } else {
@@ -2899,7 +2913,10 @@ function handleSettingsMessage(settings) {
   }
   if (settings.scaling_dpi !== undefined) {
     scalingDPI = parseInt(settings.scaling_dpi, 10);
-    setIntParam('scaling_dpi', scalingDPI);
+    // Not persisted here: the localStorage pin belongs to the dashboard, which
+    // writes it only for an explicit slider pick. Persisting every posted value
+    // would re-pin the dashboard's derived-default and reset-to-derived posts,
+    // freezing DPI across displays with different devicePixelRatio.
     // DPI rides the SETTINGS payload below (server set_dpi); no separate s, command,
     // which the WebSocket server does not act on and would only mislog.
     settingsChanged = true;
@@ -3207,10 +3224,8 @@ function initWebsockets() {
       }
     } else {
       console.log('Tab is visible, requesting video pipeline start if it was inactive.');
-      if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc' && currentEncoderMode !== 'openh264enc' && currentEncoderMode !== 'h264enc-striped') {
-          console.log('Tab visible: Re-initializing VideoDecoder to recover from background reclamation.');
-          triggerInitializeDecoder(); 
-      }
+      // No decoder re-init here: shared mode returned above, and the lazy init in
+      // the frame sink re-creates a background-reclaimed decoder on the next frame.
       if (websocket && websocket.readyState === WebSocket.OPEN) {
         if (!isVideoPipelineActive) {
           websocket.send('START_VIDEO');
@@ -3258,10 +3273,9 @@ function initWebsockets() {
   }
 
   function handleDecodedFrame(frame) {
-    // Frames arriving from the main VideoDecoder: shared mode, plus any full-frame mode that
-    // isn't jpeg/h264enc/openh264enc/h264enc-striped (those use the JPEG and per-stripe decoder paths).
-    // Only shared full-frame viewing feeds the main VideoDecoder; controllers route
-    // every encoder through the JPEG or per-stripe decoder paths.
+    // Frames arriving from the main VideoDecoder. Only shared full-frame viewing
+    // feeds it — controllers route every encoder through the JPEG or per-stripe
+    // decoder paths — so anything decoded while not in shared mode is closed below.
     const isMainDecoderMode = isSharedMode;
 
     if (document.hidden && isMainDecoderMode) {
@@ -4465,9 +4479,10 @@ function initWebsockets() {
             if (!isTokenAuthMode) {
                 initializeInput();
             }
-            if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc' && currentEncoderMode !== 'openh264enc' && currentEncoderMode !== 'h264enc-striped') {
-              initializeDecoder();
-            }
+            // No main-decoder init here: only shared mode ever renders through the
+            // main VideoDecoder (handleDecodedFrame closes non-shared frames), so a
+            // decoder configured for a non-shared client is never fed and can pin a
+            // scarce hardware decode session for nothing.
         }
 
         initializeAudio().then(() => {
@@ -5116,6 +5131,11 @@ function cleanupJpegStripeQueue() {
   }
   if (closedCount > 0) console.log(`Cleanup: Closed ${closedCount} JPEG stripe images.`);
   lastDrawnJpegStripeFrameId = {};
+  // Reset the frame-boundary blit latch with the queue: a stale dirty flag from
+  // the previous mode would blit the old back-buffer once on the next frame-id
+  // boundary after an encoder switch at unchanged resolution.
+  stripePendingFrameId = null;
+  stripePendingDirty = false;
 }
 
 function clearDecodedStripesQueue() {
@@ -5127,6 +5147,8 @@ function clearDecodedStripesQueue() {
       /* ignore */
     }
   }
+  stripePendingFrameId = null;
+  stripePendingDirty = false;
 }
 
 // Surround (>2ch) is Chromium's multistream Opus: the decoder needs an OpusHead

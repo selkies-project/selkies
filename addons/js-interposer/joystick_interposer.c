@@ -2108,11 +2108,10 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
             len = ioctl_size;
             if (!arg || len <=0 ) { errno = EFAULT; ret_val = -1; goto exit_ev_ioctl; }
             // Report NO input properties: a real gamepad (the X-Box 360 pad we emulate)
-            // sets none. The old code advertised INPUT_PROP_POINTING_STICK, which makes
-            // udev/libinput input_id classify the device as a pointing-stick (pointer)
-            // and exclude it from joystick enumeration -- this is why SDL2-evdev apps
-            // such as Xemu failed to detect the pad while the legacy
-            // /dev/input/jsX path (used by other emulators) still worked.
+            // sets none. Advertising INPUT_PROP_POINTING_STICK here makes udev/libinput
+            // input_id classify the device as a pointing-stick (pointer) and exclude it
+            // from joystick enumeration, so SDL2-evdev apps such as Xemu fail to detect
+            // the pad even though the /dev/input/jsX path still works.
             memset(arg, 0, len);
             ret_val = (int)len;
             sji_log_info("IOCTL_EV(%s): EVIOCGPROP(%d) -> no properties (gamepad)", interposer->open_dev_name, len);
