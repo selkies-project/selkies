@@ -546,33 +546,54 @@ class InboundStream:
         # ceiling on this so a peer that ignores flow control cannot grow the
         # buffer without bound (receive-side max-message-size enforcement).
         self.buffered_bytes = 0
-        # Count of LAST_FRAG chunks currently buffered. A message can only become
-        # deliverable once its final fragment is present, so pop_messages skips its
-        # whole-buffer scan while this is zero — otherwise reassembling one large
-        # message rescans the growing buffer per fragment (O(n^2)).
+        # Counts of FIRST_FRAG and LAST_FRAG chunks currently buffered. A message can
+        # only become deliverable once BOTH its first and final fragments are present,
+        # so pop_messages skips its whole-buffer scan while either count is zero.
+        # Tracking both (not just LAST) is what bounds the unordered path: a large
+        # message whose LAST arrives before its earlier fragments would otherwise make
+        # every subsequent fragment re-walk the growing buffer looking for a start that
+        # is not there yet (O(n^2)); with first_frag_count == 0 those scans are skipped.
+        self.first_frag_count = 0
         self.last_frag_count = 0
 
     def add_chunk(self, chunk: DataChunk) -> None:
         self.buffered_bytes += len(chunk.user_data)
+        if chunk.flags & SCTP_DATA_FIRST_FRAG:
+            self.first_frag_count += 1
         if chunk.flags & SCTP_DATA_LAST_FRAG:
             self.last_frag_count += 1
         if not self.reassembly or uint32_gt(chunk.tsn, self.reassembly[-1].tsn):
             self.reassembly.append(chunk)
             return
 
-        for i, rchunk in enumerate(self.reassembly):
-            # should never happen, the chunk should have been eliminated
-            # as a duplicate when _mark_received() is called
-            assert rchunk.tsn != chunk.tsn, "duplicate chunk in reassembly"
-
-            if uint32_gt(rchunk.tsn, chunk.tsn):
-                self.reassembly.insert(i, chunk)
-                break
+        # Binary search for the insertion point instead of a linear scan, so a
+        # burst of reordered fragments reassembles in O(n log n) rather than
+        # O(n^2). The buffered window is bounded well under 2^31 by the per-stream
+        # reassembly cap, so modular TSN order is a total order over it and the
+        # `uint32_gt(chunk.tsn, reassembly[mid].tsn)` predicate is monotonic across
+        # the (already TSN-sorted) list — the exact precondition the linear insert
+        # relied on, so this is equivalent, just faster.
+        lo, hi = 0, len(self.reassembly)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if uint32_gt(chunk.tsn, self.reassembly[mid].tsn):
+                lo = mid + 1
+            else:
+                hi = mid
+        # should never happen, the chunk should have been eliminated
+        # as a duplicate when _mark_received() is called
+        assert (
+            lo >= len(self.reassembly) or self.reassembly[lo].tsn != chunk.tsn
+        ), "duplicate chunk in reassembly"
+        self.reassembly.insert(lo, chunk)
 
     def pop_messages(self) -> Iterator[tuple[int, int, bytes]]:
-        # No final fragment is buffered yet, so no message can be complete: skip
-        # the whole-buffer scan (this is what keeps reassembly O(n) not O(n^2)).
-        if self.last_frag_count == 0:
+        # A complete message needs BOTH a first and a last fragment buffered; if
+        # either is absent nothing can be delivered, so skip the whole-buffer scan.
+        # This is what keeps reassembly O(n) not O(n^2) — in particular for the
+        # unordered path, where an early-arriving LAST would otherwise trigger a
+        # full re-walk on every subsequent fragment until the FIRST shows up.
+        if self.first_frag_count == 0 or self.last_frag_count == 0:
             return
         pos = 0
         start_pos = None
@@ -617,6 +638,9 @@ class InboundStream:
                 user_data = b"".join(message_chunks)
                 if ordered and chunk.stream_seq == self.sequence_number:
                     self.sequence_number = uint16_add(self.sequence_number, 1)
+                # Each delivered message consumes exactly one FIRST (at start_pos,
+                # which is only ever set on a FIRST_FRAG chunk) and one LAST (here).
+                self.first_frag_count -= 1
                 self.last_frag_count -= 1
                 yield (chunk.stream_id, chunk.protocol, user_data)
                 start_pos = None
@@ -643,6 +667,8 @@ class InboundStream:
             if uint32_gte(tsn, chunk.tsn):
                 pos = i
                 size += len(chunk.user_data)
+                if chunk.flags & SCTP_DATA_FIRST_FRAG:
+                    self.first_frag_count -= 1
                 if chunk.flags & SCTP_DATA_LAST_FRAG:
                     self.last_frag_count -= 1
             else:
@@ -954,7 +980,13 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         # is this an init?
         init_chunk = len([x for x in chunks if isinstance(x, InitChunk)])
         if init_chunk:
-            assert len(chunks) == 1
+            # An INIT must be the only chunk in the packet (RFC 4960 3.2.2). A
+            # peer that bundles more is a protocol violation; drop the packet
+            # rather than raising (an AssertionError would kill the association,
+            # and asserts vanish under `python -O`).
+            if len(chunks) != 1:
+                self.__log_debug("Dropping packet: INIT bundled with other chunks")
+                return
             expected_tag = 0
         else:
             expected_tag = self._local_verification_tag
@@ -1028,7 +1060,12 @@ class RTCSctpTransport(AsyncIOEventEmitter):
 
         # consolidate misordered entries
         self._sack_misordered.add(tsn)
-        for tsn in sorted(self._sack_misordered):
+        # Order by SCTP modular (uint32) distance from the cumulative TSN, not raw
+        # integer value: at the 2^32 wrap raw sorting puts the low post-wrap TSNs
+        # before 0xFFFFFFFF, so the contiguous run is tested out of order and the
+        # cumulative ack wedges at the boundary.
+        base = self._last_received_tsn
+        for tsn in sorted(self._sack_misordered, key=lambda t: (t - base) % SCTP_TSN_MODULO):
             if tsn == tsn_plus_one(self._last_received_tsn):
                 self._last_received_tsn = tsn
             else:
@@ -1909,8 +1946,14 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         if pp_id == WEBRTC_DCEP and len(data):
             msg_type = data[0]
             if msg_type == DATA_CHANNEL_OPEN and len(data) >= 12:
-                # we should not receive an open for an existing channel
-                assert stream_id not in self._data_channels
+                # A DCEP OPEN reusing a live stream id is a protocol violation;
+                # ignore it rather than raising (an AssertionError here would tear
+                # down the whole association, and asserts vanish under `python -O`).
+                if stream_id in self._data_channels:
+                    self.__log_debug(
+                        "Ignoring DATA_CHANNEL_OPEN for existing stream %d", stream_id
+                    )
+                    return
 
                 (
                     msg_type,
@@ -1955,7 +1998,13 @@ class RTCSctpTransport(AsyncIOEventEmitter):
                 # emit channel
                 self.emit("datachannel", channel)
             elif msg_type == DATA_CHANNEL_ACK:
-                assert stream_id in self._data_channels
+                # An ACK for an unknown stream is a protocol violation; ignore it
+                # rather than raising (see the OPEN handler above re: -O / teardown).
+                if stream_id not in self._data_channels:
+                    self.__log_debug(
+                        "Ignoring DATA_CHANNEL_ACK for unknown stream %d", stream_id
+                    )
+                    return
                 channel = self._data_channels[stream_id]
                 channel._setReadyState("open")
         elif pp_id == WEBRTC_STRING and stream_id in self._data_channels:

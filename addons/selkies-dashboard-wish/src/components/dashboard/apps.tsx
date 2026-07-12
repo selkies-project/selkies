@@ -17,6 +17,7 @@ import { t } from "@/i18n";
 const REPO_BASE_URL = 'https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/';
 const METADATA_URL = `${REPO_BASE_URL}metadata.yml`;
 const IMAGE_BASE_URL = `${REPO_BASE_URL}img/`;
+const METADATA_FETCH_TIMEOUT_MS = 10000;
 const INSTALLED_APPS_STORAGE_KEY = 'prootInstalledApps';
 
 interface App {
@@ -26,6 +27,10 @@ interface App {
     icon: string;
     disabled?: boolean;
 }
+
+// Session cache of the fetched catalog: the modal is conditionally mounted by
+// its parent, so each open is a fresh mount; a hit here skips the network.
+let cachedAppData: { include: App[] } | null = null;
 
 interface AppsProps {
     isOpen?: boolean;
@@ -37,6 +42,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     const [appData, setAppData] = useState<{ include: App[] } | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [fetchAttempt, setFetchAttempt] = useState(0);
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedApp, setSelectedApp] = useState<App | null>(null);
     const [installedApps, setInstalledApps] = useState<string[]>(() => {
@@ -74,29 +80,47 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         }
     };
 
+    // Catalog fetch: one attempt per modal open (plus explicit Retry bumps of
+    // fetchAttempt) — a failure settles into the error view rather than
+    // refetching. The fetch is aborted after a timeout and on close/unmount,
+    // and the cleanup's `active` flag suppresses any late setState.
     useEffect(() => {
-        if (isAppsModalOpen && !appData && !isLoading) {
-            const fetchAppData = async () => {
-                setIsLoading(true);
-                setError(null);
-                try {
-                    const response = await fetch(METADATA_URL);
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    const yamlText = await response.text();
-                    const parsedData = yaml.load(yamlText) as { include: App[] };
-                    setAppData(parsedData);
-                } catch (e) {
-                    console.error("Failed to fetch or parse app data:", e);
-                    setError(t('appsModal.errorLoading'));
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-            fetchAppData();
+        if (!isAppsModalOpen || appData) return;
+        if (cachedAppData) {
+            setAppData(cachedAppData);
+            return;
         }
-    }, [isAppsModalOpen, appData, isLoading]);
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), METADATA_FETCH_TIMEOUT_MS);
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        (async () => {
+            try {
+                const response = await fetch(METADATA_URL, { signal: controller.signal });
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const yamlText = await response.text();
+                const parsedData = yaml.load(yamlText) as { include: App[] };
+                if (!active) return;
+                cachedAppData = parsedData;
+                setAppData(parsedData);
+            } catch (e) {
+                if (!active) return;
+                console.error("Failed to fetch or parse app data:", e);
+                setError(t('appsModal.errorLoading'));
+            } finally {
+                clearTimeout(timeoutId);
+                if (active) setIsLoading(false);
+            }
+        })();
+        return () => {
+            active = false;
+            clearTimeout(timeoutId);
+            controller.abort();
+        };
+    }, [isAppsModalOpen, appData, fetchAttempt]);
 
     const handleSearchChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         setSearchTerm(event.target.value.toLowerCase());
@@ -165,7 +189,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                     <Button
                                         variant="secondary"
                                         size="icon"
-                                        onClick={() => setIsAppsModalOpen(false)}
+                                        onClick={() => handleModalClose(false)}
                                         className="h-10 w-10"
                                     >
                                         <X className="h-4 w-4" />
@@ -188,11 +212,17 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                         {error && (
                             <div className="p-6">
                                 <Card className="border-destructive">
-                                    <CardContent className="p-6">
+                                    <CardContent className="p-6 space-y-4">
                                         <div className="flex items-center gap-2 text-destructive">
                                             <X className="h-4 w-4" />
                                             <p>{error}</p>
                                         </div>
+                                        <Button
+                                            variant="outline"
+                                            onClick={() => setFetchAttempt(n => n + 1)}
+                                        >
+                                            {t('appsModal.retryButton')}
+                                        </Button>
                                     </CardContent>
                                 </Card>
                             </div>

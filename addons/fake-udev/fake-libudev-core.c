@@ -90,11 +90,9 @@ virtual_gamepad_definition_t virtual_gamepads[NUM_VIRTUAL_GAMEPADS];
 bool virtual_gamepads_initialized = false;
 
 // Buffers for strings that need to live as long as the lib
-// static char input_names[NUM_VIRTUAL_GAMEPADS][128]; // No longer used as name is static
 static char input_phys[NUM_VIRTUAL_GAMEPADS][64];
 static char input_uniq[NUM_VIRTUAL_GAMEPADS][64];
 static char input_devpaths[NUM_VIRTUAL_GAMEPADS][256];
-// static char usb_prod_names[NUM_VIRTUAL_GAMEPADS][128]; // No longer used as product is static
 static char usb_serials[NUM_VIRTUAL_GAMEPADS][64];
 
 static void fake_udev_logging_init_if_needed() {

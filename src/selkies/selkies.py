@@ -33,9 +33,20 @@ from .display_utils import (
     ensure_mode,
     set_dpi,
     set_cursor_size,
+    clamp_primary_feedback,
+    parse_resize_dims,
+    cursor_size_for_dpi,
+    align_dims_16,
 )
-from .input_handler import WebRTCInput as InputHandler, CLIPBOARD_CHUNK_SIZE
-from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, build_client_settings_payload
+from .input_handler import (
+    WebRTCInput as InputHandler,
+    CLIPBOARD_CHUNK_SIZE,
+    VIEWER_ALLOWED_PREFIXES,
+    VIEWER_COLLAB_EXTRA_PREFIXES,
+    VIEWER_SILENT_DROP_PREFIXES,
+)
+from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, inflate_gz_bounded, sanitize_client_setting
+from .settings import settings as app_settings
 from .stream_server import BaseStreamingService
 
 # Constants
@@ -165,16 +176,12 @@ user_tokens = {}
 client_permissions = {}
 active_mk_token = None
 
-# Fallback bounds for client int settings with no declared max (anti-exhaustion).
-# Floor isn't 0: some settings use -1 etc. as sentinels.
-INT_SETTING_DEFAULT_MAX = 1_000_000
-INT_SETTING_DEFAULT_MIN = -1_000_000
-
 # Only WS control-text messages at least this large are gzip-wrapped (opcode 0x05)
 # for gzip-capable clients. Below it, the compression saving doesn't pay for the CPU
 # and — crucially — latency-critical small data (input, status verbs) is left raw.
 # Matches the WebRTC DataChannel threshold so both transports behave identically.
 WS_GZIP_MIN_BYTES = 512
+
 
 def _path_is_within(directory, target):
     """Return True if `target` is `directory` itself or strictly inside it.
@@ -209,9 +216,27 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
     When per_client_timeout is set, a client whose send stalls past the bound is
     treated as dead: the send is cancelled and the socket is dropped and closed. A
     cancelled send_str may have left a half-written frame on the wire, so that socket
-    must never be reused for later sends."""
+    must never be reused for later sends.
+
+    Returns the set of clients dropped by this call. Removal mutates the PASSED
+    collection, so callers that fan out over a computed temporary set (the media
+    senders) must subtract the returned set from their authoritative registry
+    themselves — otherwise the dead socket re-enters the very next per-frame set."""
     if not clients:
-        return
+        return set()
+
+    # Hard per-frame ceiling, both text and binary. Nothing legitimate reaches
+    # it — large control payloads (clipboard) are segmented far below
+    # WS_MAX_MESSAGE_BYTES before they get here — so an oversized message is an
+    # upstream bug, and emitting it would trip proxy/WS-stack frame limits and
+    # stall the socket. Refuse loudly instead of sending. (len() equals the
+    # byte count for every large control message: they are base64/ASCII-JSON.)
+    if len(message) > WS_MESSAGE_SIZE_HARD_CAP:
+        data_logger.error(
+            f"Refusing to broadcast a {len(message)}-byte WebSocket message "
+            f"(hard cap {WS_MESSAGE_SIZE_HARD_CAP} bytes); message dropped."
+        )
+        return set()
 
     async def _send_one(client):
         if isinstance(message, (bytes, bytearray, memoryview)):
@@ -233,7 +258,7 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
         client = next(iter(clients))
         if client.closed:
             clients.discard(client)
-            return
+            return {client}
         try:
             if per_client_timeout is not None:
                 await asyncio.wait_for(_send_one(client), timeout=per_client_timeout)
@@ -243,14 +268,16 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
             # Stalled send was cancelled; the socket is no longer safe to reuse.
             clients.discard(client)
             _close_abandoned_ws(client)
+            return {client}
         except ConnectionResetError:
             clients.discard(client)
+            return {client}
         except (OSError, RuntimeError) as result:
             if any(term in str(result).lower() for term in ['broken pipe', 'connection reset', 'closed']):
                 clients.discard(client)
-            else:
-                data_logger.warning(f"Broadcast exception (client not removed): {type(result).__name__}: {result}")
-        return
+                return {client}
+            data_logger.warning(f"Broadcast exception (client not removed): {type(result).__name__}: {result}")
+        return set()
 
     client_task_pairs = []
     closed_clients = set()
@@ -291,6 +318,7 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
 
     if closed_clients:
         clients -= closed_clients
+    return closed_clients
 
 class SelkiesAppError(Exception):
     pass
@@ -310,8 +338,19 @@ class SelkiesStreamingApp:
     ):
         self.server_enable_resize = ENABLE_RESIZE
         self.mode = mode
+        # Fallback geometry for capture paths that run before any client has
+        # sized the display (viewer-driven capture on a controller-less server).
+        # A configured manual resolution is the server's declared geometry, so
+        # seed from it: on Wayland the fallback isn't cosmetic — the capture
+        # start actively resizes the compositor output to these dimensions.
         self.display_width = 1024
         self.display_height = 768
+        if settings.is_manual_resolution_mode[0]:
+            manual_w = int(settings.manual_width or 0)
+            manual_h = int(settings.manual_height or 0)
+            if manual_w > 0 and manual_h > 0:
+                self.display_width = manual_w - (manual_w % 2)
+                self.display_height = manual_h - (manual_h % 2)
         self.pipeline_running = False
         self.async_event_loop = async_event_loop
         # Honor the configured channel count (surround captures as multistream Opus).
@@ -418,6 +457,10 @@ class DataStreamingServer(BaseStreamingService):
         self.input_handler = None
         self._tasks_to_run = []
         self.RECONNECT_DEBOUNCE_MS = 500
+        # Reload/reconnect grace: how long a disconnected display's entry (and
+        # its running capture) waits for the page to come back before teardown.
+        self.RECONNECT_GRACE_S = 3.0
+        self._display_teardown_tasks = set()
         self.MAX_RECENT_CLIENTS = 1000
         self.last_connection_times = OrderedDict()
         self._latest_client_render_fps = 0.0
@@ -632,8 +675,15 @@ class DataStreamingServer(BaseStreamingService):
         )
 
         self.input_handler.on_clipboard_read = self.app.send_ws_clipboard_data
-        self.input_handler.on_set_fps = self.app.set_framerate
-        
+        # The websockets app has one global framerate; the display_id the shared
+        # protocol threads through is only meaningful to the WebRTC service.
+        self.input_handler.on_set_fps = (
+            lambda fps, display_id='primary': self.app.set_framerate(fps)
+        )
+        # The shared input protocol's pointer-visibility toggle ("p,N") is the
+        # same tunable as SET_NATIVE_CURSOR_RENDERING (both fire on pointer lock).
+        self.input_handler.on_mouse_pointer_visible = self.set_native_cursor_rendering
+
         if ENABLE_RESIZE:
             self.input_handler.on_resize = lambda res_str, display_id='primary': on_resize_handler(
                 res_str, self.app, self, display_id
@@ -644,6 +694,19 @@ class DataStreamingServer(BaseStreamingService):
                 "Scaling disabled."
             )
         logger.info("DataStreamingServer initialization complete.")
+
+    async def set_native_cursor_rendering(self, enabled: bool):
+        """Compose the X cursor into the captured video (vs the client-drawn
+        overlay); applies to every display's capture. Reached both from the
+        SET_NATIVE_CURSOR_RENDERING message and the shared input protocol's
+        pointer-visibility toggle ("p,N"), which map to the same tunable."""
+        if self.capture_cursor == enabled:
+            data_logger.info(f"Native cursor rendering: value {enabled} is already set.")
+            return
+        self.capture_cursor = enabled
+        if len(self.capture_instances) > 0:
+            data_logger.info("Cursor rendering changed, triggering display reconfiguration.")
+            await self.reconfigure_displays()
 
     async def broadcast_display_config(self):
         """Broadcasts the current display configuration to all clients."""
@@ -738,10 +801,15 @@ class DataStreamingServer(BaseStreamingService):
                 self._bytes_sent_in_interval += len(message_to_send) * len(primary_viewers)
                 # Bounded sends: one stalled socket must not freeze the shared
                 # audio stream (a timed-out client is dropped and closed).
-                await _broadcast_to_clients(
+                dropped = await _broadcast_to_clients(
                     primary_viewers, message_to_send,
                     per_client_timeout=SHARED_STREAM_SEND_TIMEOUT_SECONDS,
                 )
+                if dropped:
+                    # primary_viewers is a per-chunk temporary: propagate the drop
+                    # to the authoritative registry, or the dead socket re-enters
+                    # the fan-out on the very next chunk.
+                    self.clients -= dropped
 
                 self.pcmflux_audio_queue.task_done()
         except asyncio.CancelledError:
@@ -1033,6 +1101,30 @@ class DataStreamingServer(BaseStreamingService):
             except Exception:
                 pass
 
+    async def _broadcast_live_server_settings(self, display_id: str):
+        """Re-announce server settings carrying the display's LIVE encoder.
+
+        The handshake payload holds boot config only; after an encoder switch
+        every connected client — shared viewers included — must re-key its
+        wire-format demux, or it drops the new mode's chunks forever.
+        """
+        try:
+            payload = build_client_settings_payload()
+            live_encoder = self.display_clients.get(display_id, {}).get('encoder')
+            if live_encoder and isinstance(payload.get('encoder'), dict):
+                payload['encoder'] = dict(payload['encoder'])
+                payload['encoder']['value'] = live_encoder
+            payload['ws_max_message_bytes'] = {"value": WS_MAX_MESSAGE_BYTES}
+            msg = json.dumps({"type": "server_settings", "settings": payload})
+        except Exception as e:
+            data_logger.warning(f"Could not build live server settings broadcast: {e}")
+            return
+        for client in list(self.clients):
+            try:
+                await client.send_str(msg)
+            except (ConnectionResetError, OSError, RuntimeError):
+                pass
+
     def _set_backpressure_enabled(self, display_id: str, display_state: dict, enabled: bool):
         """Update the backpressure flag, requesting an IDR when it lifts.
 
@@ -1272,67 +1364,8 @@ class DataStreamingServer(BaseStreamingService):
             f"Applying and sanitizing client settings for '{display_id}' (initial={is_initial_settings})"
         )
         def sanitize_value(name, client_value):
-            """Clamps ranges, validates enums, and enforces bools against server limits."""
-            setting_def = next((s for s in SETTING_DEFINITIONS if s['name'] == name), None)
-            if not setting_def:
-                return None
-            server_limit = getattr(self.cli_args, name)
-            if client_value is None:
-                if setting_def['type'] == 'range':
-                    min_val, max_val = server_limit
-                    return min_val if min_val == max_val else setting_def.get('meta', {}).get('default_value')
-                elif setting_def['type'] == 'bool':
-                    return server_limit[0]
-                else: # enum, list, str, int
-                    return server_limit
-            try:
-                if setting_def['type'] == 'range':
-                    min_val, max_val = server_limit
-                    # Fractional values are legal (sub-Mbps bitrates); keep
-                    # integral values as ints.
-                    numeric = float(client_value)
-                    if numeric.is_integer():
-                        numeric = int(numeric)
-                    sanitized = max(min_val, min(numeric, max_val))
-                    if sanitized != numeric:
-                        data_logger.warning(f"Client value for '{name}' ({client_value}) was clamped to {sanitized} (server range: {min_val}-{max_val}).")
-                    return sanitized
-                elif setting_def['type'] == 'enum':
-                    allowed_values = setting_def['meta']['allowed']
-                    if str(client_value) in allowed_values:
-                        # Return the value in the same (string) type as the allowed
-                        # list and the stored default, so later equality checks
-                        # don't spuriously flip on str-vs-int mismatches.
-                        return str(client_value)
-                    server_default = allowed_values[0] if allowed_values else setting_def['default']
-                    data_logger.warning(f"Client value for '{name}' ('{client_value}') is not in the allowed list {allowed_values}. Using server default '{server_default}'.")
-                    return server_default
-                elif setting_def['type'] in ('int', 'float'):
-                    sanitized = int(client_value) if setting_def['type'] == 'int' else float(client_value)
-                    meta = setting_def.get('meta', {})
-                    # Top-level min/max win over meta; sentinel-safe negative fallback
-                    # only applies when no bound is declared.
-                    min_val = setting_def.get('min', meta.get('min', INT_SETTING_DEFAULT_MIN))
-                    # Clamp client values (e.g. manual_width/height) against exhaustion;
-                    # fall back to a generous cap when no explicit max is declared.
-                    max_val = setting_def.get('max', meta.get('max', INT_SETTING_DEFAULT_MAX))
-                    clamped = max(min_val, min(sanitized, max_val))
-                    if clamped != sanitized:
-                        data_logger.warning(f"Client value for '{name}' ({client_value}) was clamped to {clamped} (bounds: {min_val}-{max_val}).")
-                    return clamped
-                elif setting_def['type'] == 'bool':
-                    server_val, is_locked = server_limit
-                    client_bool = str(client_value).lower() in ['true', '1']
-                    if is_locked:
-                        if client_bool != server_val:
-                            data_logger.warning(f"Client tried to change locked setting '{name}' to '{client_bool}'. Request ignored, using server value '{server_val}'.")
-                        return server_val
-                    return client_bool
-            except (ValueError, TypeError, IndexError, OverflowError):
-                # OverflowError guards JSON inf (1e999 -> int(inf)); fall back to default.
-                def_val_meta = setting_def.get('meta', {}).get('default_value')
-                return def_val_meta if def_val_meta is not None else setting_def.get('default')
-            return client_value
+            """One-transport wrapper over the shared sanitizer (settings.py)."""
+            return sanitize_client_setting(name, client_value, self.cli_args, data_logger)
         try:
             async with self._reconfigure_lock:
                 old_settings = display_state.copy()
@@ -1384,14 +1417,12 @@ class DataStreamingServer(BaseStreamingService):
                 else:
                     apply_alignment = display_state["force_aligned_resolution"]
                 if apply_alignment:
-                    aligned_w = target_w - (target_w % 16)
-                    aligned_h = target_h - (target_h % 16)
-                    if aligned_w >= 16 and aligned_h >= 16:
-                        if aligned_w != target_w or aligned_h != target_h:
-                            data_logger.info(
-                                f"Aligning resolution for '{display_id}' from {target_w}x{target_h} to {aligned_w}x{aligned_h} (16-pixel alignment)."
-                            )
-                        target_w, target_h = aligned_w, aligned_h
+                    aligned_w, aligned_h = align_dims_16(target_w, target_h)
+                    if aligned_w != target_w or aligned_h != target_h:
+                        data_logger.info(
+                            f"Aligning resolution for '{display_id}' from {target_w}x{target_h} to {aligned_w}x{aligned_h} (16-pixel alignment)."
+                        )
+                    target_w, target_h = aligned_w, aligned_h
                 resolution_actually_changed = (target_w != old_display_width or target_h != old_display_height)
                 position_actually_changed = (new_position != old_position)
                 if resolution_actually_changed or position_actually_changed:
@@ -1427,11 +1458,17 @@ class DataStreamingServer(BaseStreamingService):
                     self.enable_binary_clipboard = sanitize_value("enable_binary_clipboard", settings.get("enable_binary_clipboard"))
                     await self.input_handler.update_binary_clipboard_setting(self.enable_binary_clipboard)
                 new_dpi = sanitize_value("scaling_dpi", settings.get("scaling_dpi"))
+                if app_settings._overridden.get("scaling_dpi", False):
+                    # An operator-set DPI (CLI/env) governs the desktop: client
+                    # DPI syncs must not clobber it.
+                    if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
+                        data_logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
+                    new_dpi = old_settings.get("scaling_dpi")
                 if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
                     data_logger.info(f"DPI changed from {old_settings.get('scaling_dpi')} to {new_dpi}. Applying system-level change.")
                     await set_dpi(new_dpi)
                     if CURSOR_SIZE > 0 and not IS_WAYLAND:
-                        new_cursor_size = max(1, int(round(int(new_dpi) / 96.0 * CURSOR_SIZE)))
+                        new_cursor_size = cursor_size_for_dpi(new_dpi, CURSOR_SIZE)
                         await set_cursor_size(new_cursor_size)
                
                     if IS_WAYLAND:
@@ -1518,6 +1555,13 @@ class DataStreamingServer(BaseStreamingService):
                                 x_offset=layout['x'], y_offset=layout['y']
                             )
                             await self._start_backpressure_task_if_needed(display_id)
+                            # The restarted capture must repaint even on a static
+                            # screen (the Wayland damage tracker stays warm across
+                            # a stop/start), and clients on the old wire format
+                            # need to relearn the encoder: force a keyframe and
+                            # re-announce the live settings to every client.
+                            self._schedule_idr_for_display(display_id)
+                            await self._broadcast_live_server_settings(display_id)
                         else:
                             data_logger.warning(
                                 f"Cannot restart capture for '{display_id}': no layout found. "
@@ -1655,6 +1699,10 @@ class DataStreamingServer(BaseStreamingService):
         # Per-connection stats sender; the system/gpu/network collectors it reads
         # from are instance-wide singletons created/torn down on self.
         stats_sender_task_ws = None
+        # Per-connection START_AUDIO worker: it blocks on client_settings_received
+        # (which may never be set), so it must be cancelled with the connection
+        # rather than left to run audio ops for a departed client.
+        start_audio_task_ws = None
 
         mic_setup_done = False
         mic_disabled_sent = False
@@ -1749,7 +1797,11 @@ class DataStreamingServer(BaseStreamingService):
                     try:
                         data_logger.info("Attempting to establish PulseAudio connection...")
                         pulse = pulsectl_asyncio.PulseAsync("selkies-mic-handler")
-                        await pulse.connect()
+                        # Bounded: this runs on the handshake's critical path, and a
+                        # missing PulseAudio otherwise stalls every new connection for
+                        # the library's full retry cycle before the client can even
+                        # claim its display (mic setup degrades the same either way).
+                        await asyncio.wait_for(pulse.connect(), timeout=2.0)
                         data_logger.info("PulseAudio connection established.")
                     except Exception as e_pa_conn:
                         data_logger.error(
@@ -1768,7 +1820,10 @@ class DataStreamingServer(BaseStreamingService):
                 if (msg.type == WSMsgType.BINARY and msg.data
                         and msg.data[0] == 0x05):
                     try:
-                        _text = gzip.decompress(msg.data[1:]).decode("utf-8")
+                        _text = inflate_gz_bounded(msg.data[1:])
+                    except ValueError as e:
+                        data_logger.warning(f"Dropping client gzip frame: {e}")
+                        continue
                     except Exception:
                         data_logger.warning("Dropping undecodable client gzip frame.")
                         continue
@@ -2032,29 +2087,20 @@ class DataStreamingServer(BaseStreamingService):
                         continue
                     perms = client_permissions.get(websocket)
                     if perms and perms.get("role") == "viewer":
-                        allowed_viewer_prefixes = [
-                            "SETTINGS,",
-                            "START_VIDEO",
-                            # A viewer must be able to pause its own video feed
-                            # on tab hide (the client sends this); without it the
-                            # broadcast-pause below can never trigger for viewers.
-                            "STOP_VIDEO",
-                            "REQUEST_KEYFRAME",
-                            "js,",
-                        ]
-                        # Read-write collaboration (a token-authenticated viewer drives
-                        # keyboard/mouse/clipboard) is gated by enable_collab: when off,
-                        # the viewer stays read-only even with a valid mk token.
+                        # The two-tier authority lists are shared with the WebRTC
+                        # gate (input_handler): read-only viewers get the base set;
+                        # read-write collaboration (a token-authenticated viewer
+                        # drives keyboard/mouse/clipboard) is gated by enable_collab —
+                        # when off, the viewer stays read-only even with a valid mk
+                        # token.
+                        allowed_viewer_prefixes = list(VIEWER_ALLOWED_PREFIXES)
                         if settings.enable_collab[0] and active_mk_token and perms.get("token") == active_mk_token:
-                            allowed_viewer_prefixes.extend(["kd", "ku", "kh", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr", "REQUEST_CLIPBOARD"])
+                            allowed_viewer_prefixes.extend(VIEWER_COLLAB_EXTRA_PREFIXES)
                         if not any(message.startswith(prefix) for prefix in allowed_viewer_prefixes):
-                            # Every client's input core emits lifecycle messages on its
-                            # own blur/visibility changes (kr = release-all, cr =
-                            # clipboard read-back). A read-only viewer sending them is
-                            # normal operation, not an attack: drop silently — executing
-                            # a viewer's kr would clobber the controller's held
-                            # modifiers, and warning per blur floods the log.
-                            if not message.startswith(("kr", "cr")):
+                            # Executing a viewer's blur/visibility lifecycle noise
+                            # (kr would clobber the controller's held modifiers) is
+                            # refused, but silently — warning per blur floods the log.
+                            if not message.startswith(VIEWER_SILENT_DROP_PREFIXES):
                                 data_logger.warning(f"DENIED unauthorized message from viewer {remote_address}: {message[:100]}...")
                             continue
 
@@ -2110,6 +2156,16 @@ class DataStreamingServer(BaseStreamingService):
                                     except (ConnectionResetError, OSError, RuntimeError):
                                         pass
                                     return
+                                if IS_WAYLAND:
+                                    data_logger.warning(
+                                        f"Secondary display '{display_id}' refused: extended displays are X11-only (not supported on Wayland)."
+                                    )
+                                    try:
+                                        await websocket.send_str("KILL Secondary displays are not supported on Wayland.")
+                                        await websocket.close(code=1008, message=b"Secondary display unsupported on Wayland")
+                                    except (ConnectionResetError, OSError, RuntimeError):
+                                        pass
+                                    return
  
                             client_display_id = display_id
                             if display_id in ['primary', 'display2']:
@@ -2122,6 +2178,12 @@ class DataStreamingServer(BaseStreamingService):
                                         data_logger.warning(
                                             f"Killing old client for '{display_id}' at {old_ws_raddr}. Reason: {kill_reason}"
                                         )
+                                        # Hand the display entry to this socket BEFORE the close
+                                        # below yields: the superseded handler's cleanup only tears
+                                        # down an entry its own socket still owns, so without the
+                                        # handoff it deletes the display and stops the capture this
+                                        # connection is taking over.
+                                        existing_client_info['ws'] = websocket
                                         try:
                                             await old_ws.send_str(f"KILL {kill_reason}")
                                             await old_ws.close(code=1000, message=b"Superseded by new client")
@@ -2179,7 +2241,10 @@ class DataStreamingServer(BaseStreamingService):
                                     'use_paint_over_quality': self._initial_use_paint_over_quality,
                                     'rate_control_mode': self.rc_mode.value,
                                     'video_bitrate': self._initial_video_bitrate,
-                                    'scale': 1.0,
+                                    # Seed from the configured DPI so a Wayland
+                                    # first load captures at the intended scale
+                                    # before any client DPI sync arrives.
+                                    'scale': float(getattr(app_settings, "scaling_dpi", "96") or 96) / 96.0,
                                 }
                             else:
                                 data_logger.info(f"Client is taking over existing display '{display_id}'. Updating state for new connection.")
@@ -2191,6 +2256,14 @@ class DataStreamingServer(BaseStreamingService):
                                 display_state['sent_timestamps'].clear()
                                 display_state['rtt_samples'].clear()
                                 display_state['smoothed_rtt'] = 0.0
+                                # A warm takeover keeps the running capture: hand the
+                                # rejoining page a decoder reset and a keyframe, since
+                                # no reconfigure runs when its dimensions are unchanged.
+                                try:
+                                    await websocket.send_str(f"PIPELINE_RESETTING {display_id}")
+                                except (ConnectionResetError, OSError, RuntimeError):
+                                    pass
+                                self._schedule_idr_for_display(display_id)
  
                             await self._apply_client_settings(
                                 websocket,
@@ -2236,6 +2309,14 @@ class DataStreamingServer(BaseStreamingService):
                                 acked_frame_id = int(parts[-1])
                             else:
                                 raise ValueError("ACK message has too few parts.")
+                            # Sent ids are masked to uint16 (& 0xFFFF), so any ack
+                            # outside that wire space is a protocol violation. The
+                            # -1 'no ACK yet' sentinel is server-internal: accepting
+                            # it (or any out-of-range int) from the wire would let a
+                            # client disable backpressure and the stall detector, or
+                            # skew the circular desync arithmetic.
+                            if not (0 <= acked_frame_id <= MAX_UINT16_FRAME_ID):
+                                raise ValueError("ACK frame id outside uint16 wire space.")
 
                             display_state = self.display_clients.get(target_display_id)
                             if display_state:
@@ -2294,9 +2375,15 @@ class DataStreamingServer(BaseStreamingService):
                             self.video_paused_clients.discard(websocket)
                             data_logger.info(f"START_VIDEO from resuming client ({remote_address}): rejoining its video feed.")
 
-                        if client_display_id and client_display_id in self.display_clients:
+                        display_entry = self.display_clients.get(client_display_id) if client_display_id else None
+                        if display_entry is not None and display_entry.get('ws') is not websocket:
+                            # Display-wide toggles are honored only from the socket that
+                            # currently owns the display: a superseded connection (page
+                            # reload overlap) must not drive its successor's stream.
+                            data_logger.info(f"Ignoring START_VIDEO for '{client_display_id}' from a superseded connection.")
+                        elif display_entry is not None:
                             data_logger.info(f"Received START_VIDEO for '{client_display_id}'. Starting its stream.")
-                            display_state = self.display_clients[client_display_id]
+                            display_state = display_entry
                             # Keep this intent flag write sync-adjacent to the capture start below:
                             # under cooperative asyncio there is no await between them, so the flag
                             # and the lock-serialized capture op stay atomic vs a concurrent
@@ -2370,9 +2457,19 @@ class DataStreamingServer(BaseStreamingService):
                                     await self.reconfigure_displays()
 
                     elif message == "STOP_VIDEO":
-                        if client_display_id and client_display_id in self.display_clients:
+                        stop_entry = self.display_clients.get(client_display_id) if client_display_id else None
+                        if stop_entry is not None and stop_entry.get('ws') is not websocket:
+                            # A dying page's tab-hide STOP_VIDEO can arrive on the superseded
+                            # socket after the reloaded page already owns the display: honor
+                            # display-wide stops only from the owning socket.
+                            data_logger.info(f"Ignoring STOP_VIDEO for '{client_display_id}' from a superseded connection.")
+                            try:
+                                await websocket.send_str("VIDEO_STOPPED")
+                            except (ConnectionResetError, OSError, RuntimeError):
+                                pass
+                        elif stop_entry is not None:
                             data_logger.info(f"Received STOP_VIDEO for '{client_display_id}'. Stopping stream.")
-                            self.display_clients[client_display_id]['video_active'] = False
+                            stop_entry['video_active'] = False
                             await self._stop_capture_for_display(client_display_id)
                             try:
                                 await websocket.send_str("VIDEO_STOPPED")
@@ -2437,7 +2534,11 @@ class DataStreamingServer(BaseStreamingService):
                                 else:
                                     data_logger.warning("START_AUDIO: Cannot start server-to-client audio (pcmflux not available).")
                                     await websocket.send_str("AUDIO_DISABLED")
-                        asyncio.create_task(_handle_start_audio_request())
+                        # Track per-connection: a re-request supersedes the pending
+                        # one, and disconnect cleanup cancels whatever is in flight.
+                        if start_audio_task_ws and not start_audio_task_ws.done():
+                            start_audio_task_ws.cancel()
+                        start_audio_task_ws = asyncio.create_task(_handle_start_audio_request())
 
                     elif message == "STOP_AUDIO":
                         async with self._reconfigure_guard():
@@ -2479,14 +2580,7 @@ class DataStreamingServer(BaseStreamingService):
                             new_capture_cursor_str = message.split(",")[1].strip().lower()
                             new_capture_cursor = new_capture_cursor_str in ("1", "true")
                             data_logger.info(f"Received SET_NATIVE_CURSOR_RENDERING: {new_capture_cursor}")
-
-                            if self.capture_cursor != new_capture_cursor:
-                                self.capture_cursor = new_capture_cursor
-                                if len(self.capture_instances) > 0:
-                                    data_logger.info("Cursor rendering changed, triggering display reconfiguration.")
-                                    await self.reconfigure_displays()
-                            else:
-                                data_logger.info(f"SET_NATIVE_CURSOR_RENDERING: Value {new_capture_cursor} is already set.")
+                            await self.set_native_cursor_rendering(new_capture_cursor)
                         except (IndexError, ValueError) as e:
                             data_logger.warning(f"Malformed SET_NATIVE_CURSOR_RENDERING message: {message}, error: {e}")
 
@@ -2495,7 +2589,12 @@ class DataStreamingServer(BaseStreamingService):
                         try:
                             dpi_value_str = message.split(",")[1]
                             dpi_value = int(dpi_value_str)
-                            
+                            if app_settings._overridden.get("scaling_dpi", False):
+                                # An operator-set DPI (CLI/env) governs the desktop:
+                                # client DPI syncs must not clobber it.
+                                data_logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
+                                continue
+
                             scale_val = float(dpi_value) / 96.0
 
                             data_logger.info(f"Received DPI setting from client: {dpi_value} (Scale: {scale_val})")
@@ -2544,8 +2643,7 @@ class DataStreamingServer(BaseStreamingService):
                                     data_logger.warning("Wayland scaling requested but 'wlr-randr' binary not found.")
 
                             if CURSOR_SIZE > 0:
-                                calculated_cursor_size = int(round(dpi_value / 96.0 * CURSOR_SIZE))
-                                new_cursor_size = max(1, calculated_cursor_size)
+                                new_cursor_size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
 
                                 data_logger.info(f"Attempting to set cursor size to: {new_cursor_size} (based on DPI {dpi_value})")
                                 if await set_cursor_size(new_cursor_size):
@@ -2671,24 +2769,84 @@ class DataStreamingServer(BaseStreamingService):
                 if client_info.get('ws') is websocket:
                     disconnected_display_id = disp_id
                     break
-            
+
             if disconnected_display_id:
-                del self.display_clients[disconnected_display_id]
-                data_logger.info(f"Client for '{disconnected_display_id}' disconnected. Removing and triggering full display reconfiguration.")
-                await self.reconfigure_displays()
+                # Defer the display teardown by a short grace window: a reloading
+                # page reconnects within a second or two and takes the entry over
+                # with its capture still warm (the takeover path hands it a reset
+                # and an IDR). Tearing down here would serialize the successor's
+                # startup behind this handler's reconfigure/shutdown on the
+                # reconfigure lock — seconds of black stream on every reload. If
+                # nobody claims the display, the teardown runs after the grace.
+                data_logger.info(
+                    f"Client for '{disconnected_display_id}' disconnected. Deferring display teardown by {self.RECONNECT_GRACE_S:.0f}s for a possible reconnect."
+                )
+
+                async def _teardown_if_unclaimed(did=disconnected_display_id, dead_ws=websocket):
+                    disconnect_ts = time.monotonic()
+                    deadline = disconnect_ts + 15.0
+                    while True:
+                        await asyncio.sleep(self.RECONNECT_GRACE_S)
+                        entry = self.display_clients.get(did)
+                        if entry is None or entry.get('ws') is not dead_ws:
+                            data_logger.info(f"Display '{did}' was claimed by a new connection during the grace period; teardown skipped.")
+                            return
+                        # A connection newer than the disconnect is a page that may
+                        # still be mid-handshake (its audio setup runs before it can
+                        # claim the display): hold the teardown for it until the
+                        # deadline, so an unclaimed display still tears down.
+                        latest_connect = max(self.last_connection_times.values(), default=0.0)
+                        if latest_connect > disconnect_ts and time.monotonic() < deadline:
+                            continue
+                        break
+                    entry = self.display_clients.get(did)
+                    if entry is None or entry.get('ws') is not dead_ws:
+                        data_logger.info(f"Display '{did}' was claimed by a new connection during the grace period; teardown skipped.")
+                        return
+                    del self.display_clients[did]
+                    data_logger.info(f"Client for '{did}' did not return within the grace period. Removing and triggering full display reconfiguration.")
+                    await self.reconfigure_displays()
+                    # A viewer-started capture has no owning display client, so the
+                    # reconfigure above never stops it: stop it when the last
+                    # consumer leaves (no-op when a controller's reconfigure did).
+                    if not self.clients and not self.display_clients and 'primary' in self.capture_instances:
+                        data_logger.info("Last consumer disconnected; stopping viewer-started primary capture.")
+                        await self._stop_capture_for_display('primary')
+                    if not self.clients:
+                        data_logger.info("Last client gone after the grace period. Tearing down singleton collectors and pipelines.")
+                        for _singleton_attr in (
+                            "_network_monitor_task_ws",
+                            "_system_monitor_task_ws",
+                            "_gpu_monitor_task_ws",
+                        ):
+                            _singleton_task = getattr(self, _singleton_attr, None)
+                            if _singleton_task and not _singleton_task.done():
+                                _singleton_task.cancel()
+                            setattr(self, _singleton_attr, None)
+                        self.capture_cursor = False
+                        self._last_keyframe_request.clear()
+                        self._shared_stats_ws.clear()
+                        self._shared_network_stats.clear()
+                        # shutdown_pipelines() -> reconfigure_displays() acquires
+                        # _reconfigure_lock itself; it must not be held here.
+                        await self.shutdown_pipelines()
+
+                _teardown_task = asyncio.create_task(_teardown_if_unclaimed())
+                self._display_teardown_tasks.add(_teardown_task)
+                _teardown_task.add_done_callback(self._display_teardown_tasks.discard)
             else:
                 data_logger.info(f"Unregistered client at {raddr} disconnected. No display reconfiguration needed.")
-            # A viewer-started capture has no owning display client, so the
-            # reconfigure above never stops it: stop it when the last consumer
-            # leaves (no-op when a controller's reconfigure already did).
-            if not self.clients and not self.display_clients and 'primary' in self.capture_instances:
-                data_logger.info("Last consumer disconnected; stopping viewer-started primary capture.")
-                await self._stop_capture_for_display('primary')
+                # A viewer-started capture has no owning display client, so
+                # nothing else stops it: stop it when the last consumer leaves.
+                if not self.clients and not self.display_clients and 'primary' in self.capture_instances:
+                    data_logger.info("Last consumer disconnected; stopping viewer-started primary capture.")
+                    await self._stop_capture_for_display('primary')
 
-            # Cancel only the per-connection stats sender; the singleton collectors
+            # Cancel only the per-connection tasks; the singleton collectors
             # are torn down on last-client disconnect (cancelling here breaks remaining clients).
             monitor_tasks = [
                 stats_sender_task_ws,
+                start_audio_task_ws,
             ]
             for _task_to_cancel in monitor_tasks:
                 if _task_to_cancel and not _task_to_cancel.done():
@@ -2756,7 +2914,10 @@ class DataStreamingServer(BaseStreamingService):
                 except Exception as e_reset:
                     data_logger.warning(f"Failed to reset keyboard after client disconnect: {e_reset}")
 
-            if not self.clients:
+            # For a display-owning socket this teardown is deferred into the
+            # reconnect-grace task above; run it here only for clients that
+            # never owned a display (viewers, unregistered sockets).
+            if disconnected_display_id is None and not self.clients:
                  data_logger.info(f"Last client ({raddr}) disconnected. All pipelines should have been stopped by reconfigure_displays.")
                  # Tear down the singleton collectors only on last client; null each
                  # ref so a fast reconnect restarts them (cancel is async).
@@ -3026,6 +3187,10 @@ class DataStreamingServer(BaseStreamingService):
             if position not in ('right', 'left', 'up', 'down'):
                 data_logger.warning(f"Invalid display position '{position}'; falling back to 'right'.")
                 position = 'right'
+            # Auto-resize feedback guard, shared with the WebRTC layout engine.
+            p_w, p_h = clamp_primary_feedback(
+                (p_w, p_h), getattr(self, 'display_layouts', None), position
+            )
             if p_w > 0 and p_h > 0 and s_w > 0 and s_h > 0:
                 if position == 'right':
                     layouts['primary'] = {'x': 0, 'y': 0, 'w': p_w, 'h': p_h}
@@ -3267,11 +3432,16 @@ class DataStreamingServer(BaseStreamingService):
                     try:
                         # Bounded sends: a stalled shared viewer must not freeze
                         # primary video for the controller and other viewers.
-                        await _broadcast_to_clients(
+                        dropped = await _broadcast_to_clients(
                             send_targets, data_chunk,
                             per_client_timeout=SHARED_STREAM_SEND_TIMEOUT_SECONDS,
                         )
                         self._bytes_sent_in_interval += len(data_chunk) * len(send_targets)
+                        if dropped:
+                            # send_targets is a per-frame temporary: propagate the
+                            # drop to the authoritative registry, or the dead socket
+                            # re-enters the fan-out on the very next frame.
+                            self.clients -= dropped
                     except Exception as e:
                         data_logger.error(f"Error during primary broadcast: {e}")
 
@@ -3288,8 +3458,24 @@ class DataStreamingServer(BaseStreamingService):
                     if len(client_info['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
                         client_info['sent_timestamps'].popitem(last=False)
                     try:
-                        await websocket.send_bytes(data_chunk)
+                        # Bounded send, matching the primary path: a wedged secondary
+                        # socket must not pin this sender inside the await, where the
+                        # backpressure gate (checked only at loop top) can never
+                        # preempt it. A cancelled send may leave a half-written
+                        # frame, so the socket is dropped and closed, not reused.
+                        await asyncio.wait_for(
+                            websocket.send_bytes(data_chunk),
+                            timeout=SHARED_STREAM_SEND_TIMEOUT_SECONDS,
+                        )
                         self._bytes_sent_in_interval += len(data_chunk)
+                    except asyncio.TimeoutError:
+                        # Checked before OSError: on 3.11+ TimeoutError subclasses it.
+                        data_logger.warning(
+                            f"Client for '{display_id}' send stalled past "
+                            f"{SHARED_STREAM_SEND_TIMEOUT_SECONDS}s; dropping."
+                        )
+                        _close_abandoned_ws(websocket)
+                        break
                     except (ConnectionResetError, OSError, RuntimeError):
                         data_logger.warning(f"Client for '{display_id}' connection closed during send.")
                         break
@@ -3614,13 +3800,18 @@ class DataStreamingServer(BaseStreamingService):
                 asyncio.create_task(self.input_handler.start_cursor_monitor(), name="CursorMon")
             )
 
+        # Apply the configured desktop DPI at startup so the first session sees
+        # it even before any client syncs its own (96 is the X default — skip
+        # the xrdb churn when nothing diverges).
+        startup_dpi = int(float(getattr(settings, "scaling_dpi", "96") or 96))
+        if not IS_WAYLAND and startup_dpi != 96:
+            await set_dpi(startup_dpi)
+
         # Apply an explicit --cursor-size to the X server at startup (the DPI-change
         # handlers re-derive it on later changes); the Wayland compositor gets its
         # cursor size via CaptureSettings instead.
         if not IS_WAYLAND and settings.cursor_size > 0:
-            await set_cursor_size(
-                max(1, int(round(int(settings.scaling_dpi) / 96.0 * CURSOR_SIZE)))
-            )
+            await set_cursor_size(cursor_size_for_dpi(int(settings.scaling_dpi), CURSOR_SIZE))
 
         try:
             await self.shutdown_event.wait()
@@ -3899,6 +4090,12 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
     Handles client resize request. Updates the state for a specific display and triggers a full reconfiguration.
     """
     logger_app_resize.info(f"on_resize_handler for display '{display_id}' with resolution: {res_str}")
+    if (display_id == 'primary'
+            and not getattr(current_app_instance, 'server_enable_resize', True)):
+        # enable_resize gates only the PRIMARY's dynamic resolution; a secondary's resize
+        # is its layout bring-up and must stay allowed (WebRTC parity).
+        logger_app_resize.warning(f"Primary resize to {res_str} ignored: dynamic resizing disabled.")
+        return
     if data_server_instance:
         server_is_manual, _ = data_server_instance.cli_args.is_manual_resolution_mode
         if server_is_manual:
@@ -3907,32 +4104,21 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
             )
             return
     try:
-        w_str, h_str = res_str.split("x")
-        target_w, target_h = int(w_str), int(h_str)
-        # Cap so a client-driven resize cannot reach xrandr --fb unbounded.
-        target_w = min(target_w, 7680)
-        target_h = min(target_h, 4320)
-
-        if target_w <= 0 or target_h <= 0:
-            logger_app_resize.error(f"Invalid target dimensions in resize request: {target_w}x{target_h}. Ignoring.")
+        dims = parse_resize_dims(res_str)
+        if dims is None:
+            logger_app_resize.error(f"Invalid resize request: {res_str}. Ignoring.")
             return
-        if target_w % 2 != 0: target_w -= 1
-        if target_h % 2 != 0: target_h -= 1
-        if target_w <= 0 or target_h <= 0:
-            logger_app_resize.error(f"Dimensions became invalid ({target_w}x{target_h}) after odd adjustment. Ignoring.")
-            return
+        target_w, target_h = dims
 
         if data_server_instance and display_id in data_server_instance.display_clients:
             client_info = data_server_instance.display_clients[display_id]
             if client_info.get('force_aligned_resolution'):
-                aligned_w = target_w - (target_w % 16)
-                aligned_h = target_h - (target_h % 16)
-                if aligned_w >= 16 and aligned_h >= 16:
-                    if aligned_w != target_w or aligned_h != target_h:
-                        logger_app_resize.info(
-                            f"Aligning resize request for '{display_id}' from {target_w}x{target_h} to {aligned_w}x{aligned_h} (16-pixel alignment)."
-                        )
-                    target_w, target_h = aligned_w, aligned_h
+                aligned_w, aligned_h = align_dims_16(target_w, target_h)
+                if aligned_w != target_w or aligned_h != target_h:
+                    logger_app_resize.info(
+                        f"Aligning resize request for '{display_id}' from {target_w}x{target_h} to {aligned_w}x{aligned_h} (16-pixel alignment)."
+                    )
+                target_w, target_h = aligned_w, aligned_h
             if client_info.get('width') == target_w and client_info.get('height') == target_h:
                 logger_app_resize.info(f"Redundant resize request for {display_id} to {target_w}x{target_h}. No action.")
                 return

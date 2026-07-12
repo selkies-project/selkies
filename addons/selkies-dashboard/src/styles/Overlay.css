@@ -1262,6 +1262,9 @@ a:active {
 .apps-modal-error {
     color: var(--notification-error-color);
 }
+.apps-modal-error .app-action-button {
+    margin-top: 12px;
+}
 
 /* Search bar within the apps modal. */
 .apps-search-bar {

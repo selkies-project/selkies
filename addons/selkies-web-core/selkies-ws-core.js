@@ -37,7 +37,9 @@ function extractOpusFrames(arrayBuffer) {
   const bytes = new Uint8Array(arrayBuffer);
   const nRed = bytes[1];
   if (!nRed) { lastAudioTs = null; return [arrayBuffer.slice(2)]; }
-  if (arrayBuffer.byteLength < 6 + nRed * 4 + 1) return [arrayBuffer.slice(2)]; // malformed
+  // Malformed RED (fixed part truncated): for n_red>0 the bytes after the flag
+  // word are pts+block headers, not Opus, so there is no primary to salvage.
+  if (arrayBuffer.byteLength < 6 + nRed * 4 + 1) { lastAudioTs = null; return []; }
   const pts = ((bytes[2] << 24) | (bytes[3] << 16) | (bytes[4] << 8) | bytes[5]) >>> 0;
   let pos = 6;
   const offsets = [], lens = [];
@@ -48,6 +50,13 @@ function extractOpusFrames(arrayBuffer) {
     pos += 4;
   }
   pos += 1; // primary header
+  // The header guard above only covers the fixed part; the declared block
+  // lengths must also fit the actual payload, or slice() silently clamps and a
+  // truncated Opus frame (plus an empty primary) reaches the decoder. The
+  // primary cannot be located without trustworthy lengths, so drop the packet.
+  let declared = pos;
+  for (let i = 0; i < nRed; i++) { declared += lens[i]; }
+  if (declared > arrayBuffer.byteLength) { lastAudioTs = null; return []; }
   const blocks = [];
   for (let i = 0; i < nRed; i++) {
     blocks.push({ ts: (pts - offsets[i]) >>> 0, buf: arrayBuffer.slice(pos, pos + lens[i]) });
@@ -206,7 +215,7 @@ let clipboard_in_enabled = true;
 let clipboard_out_enabled = true;
 let use_browser_cursors = false;
 function applyEffectiveCursorSetting() {
-    const userPreference = getBoolParam('use_browser_cursors', false);
+    const userPreference = getBoolParam('use_browser_cursors', true);
     const isMultiMonitorActive = (displayId === 'display2' || (displayId === 'primary' && isSecondaryDisplayConnected));
     const finalSetting = isMultiMonitorActive ? true : userPreference;
     if (window.webrtcInput && typeof window.webrtcInput.setUseBrowserCursors === 'function') {
@@ -365,6 +374,7 @@ const networkStat = {
 };
 let debug = false;
 let streamStarted = false;
+let firstFrameRecoveryTimer = null;
 let inputInitialized = false;
 let scaleLocallyManual;
 window.fps = 0;
@@ -475,7 +485,11 @@ function sanitizeAndStoreSettings(serverSettings) {
     const wasUnset = window.localStorage.getItem(finalKey) === null;
 
     if (setting.min !== undefined && setting.max !== undefined) {
-      const clientValue = getIntParam(key, setting.default);
+      // Float-aware: fractional ranges (sub-Mbps bitrate) must not be parsed as
+      // ints — that reads "0.5" as 0, flags it out of range, and wipes the pick
+      // back to the server default on every connect. In-range stored values are
+      // kept verbatim (no write-back), so fractions survive untruncated.
+      const clientValue = getFloatParam(key, setting.default);
       if (wasUnset) {
         window[key] = clientValue;
       } else if (clientValue < setting.min || clientValue > setting.max) {
@@ -485,7 +499,6 @@ function sanitizeAndStoreSettings(serverSettings) {
         changes[key] = setting.default;
       } else {
         window[key] = clientValue;
-        setIntParam(key, clientValue);
       }
     }
     else if (setting.allowed !== undefined) {
@@ -516,9 +529,16 @@ function sanitizeAndStoreSettings(serverSettings) {
           changes[key] = serverValue;
         }
         window[key] = serverValue;
-        setBoolParam(key, serverValue);
+        // Not persisted: the lock governs at runtime, and writing it into the
+        // user's own key would masquerade as their pick after an unlock.
       } else if (wasUnset) {
         window[key] = serverValue;
+        if (setting.overridden) {
+          // An operator-configured (unlocked) value must actually be applied
+          // when the user has no stored pick — mirroring window state alone
+          // leaves runtime consumers on their built-in defaults.
+          changes[key] = serverValue;
+        }
       } else {
         const clientValue = getBoolParam(key, serverValue);
         window[key] = clientValue;
@@ -562,7 +582,7 @@ if (getStringParam('scaling_dpi', null) === null) {
   scalingDPI = getIntParam('scaling_dpi', 96);
 }
 antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
-use_browser_cursors = getBoolParam('use_browser_cursors', false);
+use_browser_cursors = getBoolParam('use_browser_cursors', true);
 if (displayId === 'display2') {
     use_browser_cursors = true;
 }
@@ -808,7 +828,7 @@ function presentFrameToVideo(frame) {
           if (canvas) canvas.style.display = 'none';
         });
       } else {
-        mstgRendered = true;   // can't observe rendering: keep the old behavior
+        mstgRendered = true;   // can't observe rendering; assume presented
       }
     }
   }
@@ -955,7 +975,7 @@ function activateWorkerSinkDisplay() {
           if (canvas) canvas.style.display = 'none';
         });
       } else {
-        videoWorkerRendered = true;   // can't observe rendering: keep the old behavior
+        videoWorkerRendered = true;   // can't observe rendering; assume presented
       }
     }
     // canvas mode: revealed by the worker's one-time 'presented' message
@@ -1295,6 +1315,12 @@ function getCurrentSettingsPayload() {
     for (const [key, read] of storedEntries) {
         if (hasStoredParam(key)) settingsToSend[key] = read();
     }
+    // scaling_dpi is client-authoritative — synced to the local display scaling
+    // or the dashboard's pick — matching the WebRTC core, which always sends its
+    // s, command on connect. Ride the live value even when unpinned so the
+    // derived default and dashboard changes reach the running server; the
+    // desktop DPI is independent of the resolution.
+    settingsToSend['scaling_dpi'] = scalingDPI;
     if (window.is_manual_resolution_mode && manual_width != null && manual_height != null) {
         settingsToSend['is_manual_resolution_mode'] = true;
         settingsToSend['manual_width'] = alignResolution(manual_width);
@@ -1411,6 +1437,9 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     return;
   }
   canvasGeomDirty = true;  // canvas box changes below -> re-mirror onto the <video>/worker canvas
+  // Geometry changed: the per-stripe-row keys (keyed by startY) are now stale, so
+  // drop them to bound this map's growth — same guard resetCanvasStyle applies.
+  lastDrawnJpegStripeFrameId = {};
 
   const dpr = (isSharedMode || window.is_manual_resolution_mode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
   const internalBufferWidth = alignResolution(targetWidth * dpr);
@@ -2180,6 +2209,11 @@ const initializeInput = () => {
       return;
     }
 
+    // Same invariant as setManualResolution/resetResolutionToWindow: a geometry
+    // change strands per-startY stripe decoders (rows that vanish on shrink keep
+    // a live GPU-backed VideoDecoder nothing ever feeds or closes), so flush them
+    // before announcing the new resolution.
+    clearAllVncStripeDecoders();
     sendResolutionToServer(evenWidth, evenHeight);
     resetCanvasStyle(evenWidth, evenHeight);
   };
@@ -2229,24 +2263,16 @@ const initializeInput = () => {
 
   const keyboardInputAssist = document.getElementById('keyboard-input-assist');
   if (keyboardInputAssist && inputInstance && !isSharedMode) {
-    keyboardInputAssist.addEventListener('input', (event) => {
-      const typedString = keyboardInputAssist.value;
-      if (typedString) {
-        inputInstance._typeString(typedString);
-        keyboardInputAssist.value = '';
-      }
-    });
+    // Typed characters are handled by the Input class's own 'input' listener on
+    // this element (_handleMobileInput); only the control keys mobile keyboards
+    // emit as keydown need forwarding here.
     keyboardInputAssist.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' || event.keyCode === 13) {
-        const enterKeysym = 0xFF0D;
-        inputInstance._guac_press(enterKeysym);
-        setTimeout(() => inputInstance._guac_release(enterKeysym), 5);
+        inputInstance._sendMomentaryKey(0xFF0D);
         event.preventDefault();
         keyboardInputAssist.value = '';
       } else if (event.key === 'Backspace' || event.keyCode === 8) {
-        const backspaceKeysym = 0xFF08;
-        inputInstance._guac_press(backspaceKeysym);
-        setTimeout(() => inputInstance._guac_release(backspaceKeysym), 5);
+        inputInstance._sendMomentaryKey(0xFF08);
         event.preventDefault();
       }
     });
@@ -2410,9 +2436,6 @@ function receiveMessage(event) {
              if (manual_width && manual_height) {
                 applyManualCanvasStyle(manual_width, manual_height, true);
              }
-          }
-          if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc' && currentEncoderMode !== 'openh264enc' && currentEncoderMode !== 'h264enc-striped') {
-            triggerInitializeDecoder();
           }
         }
       } else {
@@ -2892,16 +2915,14 @@ function handleSettingsMessage(settings) {
     setBoolParam('use_paint_over_quality', use_paint_over_quality);
     settingsChanged = true;
   }
-  if (settings.is_manual_resolution_mode === true) {
-    scalingDPI = 96;
-    setIntParam('scaling_dpi', scalingDPI);
-    settingsChanged = true;
-  }
   if (settings.scaling_dpi !== undefined) {
     scalingDPI = parseInt(settings.scaling_dpi, 10);
-    setIntParam('scaling_dpi', scalingDPI);
-    // DPI rides the SETTINGS payload below (server set_dpi); no separate s, command,
-    // which the WebSocket server does not act on and would only mislog.
+    // Not persisted here: the localStorage pin belongs to the dashboard, which
+    // writes it only for an explicit slider pick. Persisting every posted value
+    // would re-pin the dashboard's derived-default and reset-to-derived posts,
+    // freezing DPI across displays with different devicePixelRatio.
+    // The payload builder always rides the live scalingDPI, so the value reaches
+    // the server (set_dpi) whether or not it is pinned.
     settingsChanged = true;
   }
   if (settings.enable_binary_clipboard !== undefined) {
@@ -3162,6 +3183,7 @@ function initWebsockets() {
       } catch (e) { console.error("Error clearing canvas on visibility change:", e); }
     }
   };
+  let hiddenVideoStopTimer = null;
   document.addEventListener('visibilitychange', async () => {
     if (isSharedMode) {
       // A shared viewer pauses its OWN video feed on tab-hide: the server drops
@@ -3190,27 +3212,36 @@ function initWebsockets() {
       return;
     }
     if (document.hidden) {
-      console.log('Tab is hidden, stopping video pipeline if active.');
-      if (websocket && websocket.readyState === WebSocket.OPEN) {
-        if (isVideoPipelineActive) {
-          websocket.send('STOP_VIDEO');
-          isVideoPipelineActive = false;
-          window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
-          console.log("Tab hidden: Sent STOP_VIDEO. Clearing canvas visually. Server will send PIPELINE_RESETTING for full state reset.");
-          if (canvasContext && canvas) {
-              try {
-                  canvasContext.setTransform(1, 0, 0, 1, 0, 0);
-                  canvasContext.clearRect(0, 0, canvas.width, canvas.height);
-              } catch (e) { console.error("Error clearing canvas on tab hidden:", e); }
+      // Defer the pause: a navigating/reloading document reports hidden just
+      // before it unloads, and a STOP_VIDEO fired then races the successor
+      // connection's startup server-side. Timers never fire in an unloading
+      // document, so only a genuine tab-hide reaches the send.
+      if (hiddenVideoStopTimer === null) {
+        hiddenVideoStopTimer = setTimeout(() => {
+          hiddenVideoStopTimer = null;
+          if (!document.hidden) return;
+          console.log('Tab is hidden, stopping video pipeline if active.');
+          if (websocket && websocket.readyState === WebSocket.OPEN) {
+            if (isVideoPipelineActive) {
+              websocket.send('STOP_VIDEO');
+              isVideoPipelineActive = false;
+              window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
+              console.log("Tab hidden: Sent STOP_VIDEO. Clearing canvas visually. Server will send PIPELINE_RESETTING for full state reset.");
+              if (canvasContext && canvas) {
+                  try {
+                      canvasContext.setTransform(1, 0, 0, 1, 0, 0);
+                      canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+                  } catch (e) { console.error("Error clearing canvas on tab hidden:", e); }
+              }
+            }
           }
-        }
+        }, 250);
       }
     } else {
+      if (hiddenVideoStopTimer !== null) { clearTimeout(hiddenVideoStopTimer); hiddenVideoStopTimer = null; }
       console.log('Tab is visible, requesting video pipeline start if it was inactive.');
-      if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc' && currentEncoderMode !== 'openh264enc' && currentEncoderMode !== 'h264enc-striped') {
-          console.log('Tab visible: Re-initializing VideoDecoder to recover from background reclamation.');
-          triggerInitializeDecoder(); 
-      }
+      // No decoder re-init here: shared mode returned above, and the lazy init in
+      // the frame sink re-creates a background-reclaimed decoder on the next frame.
       if (websocket && websocket.readyState === WebSocket.OPEN) {
         if (!isVideoPipelineActive) {
           websocket.send('START_VIDEO');
@@ -3258,10 +3289,9 @@ function initWebsockets() {
   }
 
   function handleDecodedFrame(frame) {
-    // Frames arriving from the main VideoDecoder: shared mode, plus any full-frame mode that
-    // isn't jpeg/h264enc/openh264enc/h264enc-striped (those use the JPEG and per-stripe decoder paths).
-    // Only shared full-frame viewing feeds the main VideoDecoder; controllers route
-    // every encoder through the JPEG or per-stripe decoder paths.
+    // Frames arriving from the main VideoDecoder. Only shared full-frame viewing
+    // feeds it — controllers route every encoder through the JPEG or per-stripe
+    // decoder paths — so anything decoded while not in shared mode is closed below.
     const isMainDecoderMode = isSharedMode;
 
     if (document.hidden && isMainDecoderMode) {
@@ -4287,6 +4317,13 @@ function initWebsockets() {
                         initiateFallback(e, `stripe_decode_Y=${vncStripeYStart}`);
                     }
                 } else if (decoderInfo.decoder.state === "unconfigured" || decoderInfo.decoder.state === "configuring") {
+                    // A chunk whose geometry doesn't match the configuring decoder is
+                    // a straggler from the previous encoder mode (stop+start overlap):
+                    // queueing it would fail decode later and trip the fallback reload.
+                    if (decoderInfo.width && (decoderInfo.width !== stripeWidth || decoderInfo.height !== stripeHeight)) {
+                        console.warn(`Dropping stale stripe chunk for Y=${vncStripeYStart}: ${stripeWidth}x${stripeHeight} vs decoder ${decoderInfo.width}x${decoderInfo.height}.`);
+                        return;
+                    }
                     decoderInfo.pendingChunks.push(chunkData);
                 } else {
                      console.warn(`VNC stripe decoder for Y=${vncStripeYStart} in unexpected state: ${decoderInfo.decoder.state}. Dropping chunk.`);
@@ -4465,9 +4502,10 @@ function initWebsockets() {
             if (!isTokenAuthMode) {
                 initializeInput();
             }
-            if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc' && currentEncoderMode !== 'openh264enc' && currentEncoderMode !== 'h264enc-striped') {
-              initializeDecoder();
-            }
+            // No main-decoder init here: only shared mode ever renders through the
+            // main VideoDecoder (handleDecodedFrame closes non-shared frames), so a
+            // decoder configured for a non-shared client is never fed and can pin a
+            // scarce hardware decode session for nothing.
         }
 
         initializeAudio().then(() => {
@@ -4524,6 +4562,22 @@ function initWebsockets() {
         loadingText = 'Waiting for stream...';
         updateStatusDisplay();
         initializationComplete = true;
+        // Self-heal a silent server: a freshly connected page has no keyframe
+        // loop of its own, so if no frame lands shortly after the handshake,
+        // nudge the encoder for an IDR a few times before giving up to the
+        // regular recovery paths.
+        if (firstFrameRecoveryTimer !== null) clearInterval(firstFrameRecoveryTimer);
+        let firstFrameNudges = 0;
+        firstFrameRecoveryTimer = setInterval(() => {
+          if (streamStarted || !websocket || websocket.readyState !== WebSocket.OPEN || firstFrameNudges >= 5) {
+            clearInterval(firstFrameRecoveryTimer);
+            firstFrameRecoveryTimer = null;
+            return;
+          }
+          firstFrameNudges++;
+          console.log(`No frame since connect; requesting keyframe (attempt ${firstFrameNudges}).`);
+          requestKeyframe();
+        }, 3000);
       }
       else if (clientMode === 'websockets') {
         if (event.data.startsWith('{')) {
@@ -4596,7 +4650,12 @@ function initWebsockets() {
               const cout = obj.settings && obj.settings.clipboard_out_enabled;
               if (cout && typeof cout.value === 'boolean') clipboard_out_enabled = cout.value;
               const ebc = obj.settings && obj.settings.enable_binary_clipboard;
-              if (ebc && typeof ebc.value === 'boolean') enable_binary_clipboard = ebc.value;
+              // User-toggleable: force the gate only when the server locks it;
+              // otherwise the stored choice governs (the dashboard toggle and the
+              // server-side apply both already follow the stored value).
+              if (ebc && typeof ebc.value === 'boolean') {
+                enable_binary_clipboard = ebc.locked ? ebc.value : getBoolParam('enable_binary_clipboard', ebc.value);
+              }
               window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
               if (Object.keys(changes).length > 0) {
                   console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
@@ -5116,6 +5175,11 @@ function cleanupJpegStripeQueue() {
   }
   if (closedCount > 0) console.log(`Cleanup: Closed ${closedCount} JPEG stripe images.`);
   lastDrawnJpegStripeFrameId = {};
+  // Reset the frame-boundary blit latch with the queue: a stale dirty flag from
+  // the previous mode would blit the old back-buffer once on the next frame-id
+  // boundary after an encoder switch at unchanged resolution.
+  stripePendingFrameId = null;
+  stripePendingDirty = false;
 }
 
 function clearDecodedStripesQueue() {
@@ -5127,6 +5191,8 @@ function clearDecodedStripesQueue() {
       /* ignore */
     }
   }
+  stripePendingFrameId = null;
+  stripePendingDirty = false;
 }
 
 // Surround (>2ch) is Chromium's multistream Opus: the decoder needs an OpusHead

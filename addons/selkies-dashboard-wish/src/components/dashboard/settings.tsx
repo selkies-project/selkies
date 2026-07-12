@@ -110,6 +110,15 @@ const STREAMING_MODES = [STREAM_MODE_WEBSOCKETS, STREAM_MODE_WEBRTC];
 const DEFAULT_STREAM_MODE = STREAM_MODE_WEBSOCKETS;
 
 const rateControlOptions = ["cbr", "crf"];
+// Rate control resolves through the shared precedence ladder with CBR as the
+// dashboard default for every encoder (the conditional layer and the
+// no-server-settings fallback alike); locked/pinned/server-explicit values and
+// the server's allowed list still win, and CRF stays user-selectable.
+const RATE_CONTROL_CBR_DEFAULT_SPEC = {
+    ...RATE_CONTROL_SPEC,
+    conditional: () => "cbr",
+    fallback: "cbr",
+};
 const DEFAULT_VIDEO_BITRATE = 8;
 
 const roundDownToEven = (num: number) => {
@@ -213,7 +222,24 @@ export function Settings() {
     const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
         HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     const [rateControlMode, setRateControlMode] = useConditionalSetting(
-        RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+        RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    // The CBR dashboard default diverges from the server's own per-encoder
+    // derivation (CRF for the striped/jpeg encoders), and the hook above only
+    // sets local UI state: without pushing the resolved default the server
+    // keeps encoding CRF while the dashboard displays CBR and offers the
+    // bitrate slider. Pinned/locked/operator-overridden values resolve to the
+    // server's value and post nothing.
+    useEffect(() => {
+        if (!serverSettings) return;
+        if (isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readStored)) return;
+        const resolved = resolveSpec(
+            RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, readStored);
+        const serverValue = serverSettings[RATE_CONTROL_CBR_DEFAULT_SPEC.serverKey]?.value;
+        if (resolved && serverValue !== undefined && resolved !== serverValue) {
+            writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, resolved, setRateControlMode, { persist: false });
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [serverSettings]);
     const [videoFullColor, setVideoFullColor] = useConditionalSetting(
         VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
@@ -579,12 +605,12 @@ export function Settings() {
         }
         // Rate control follows the encoder unless pinned (explicit client/server
         // choice). A derived change is not persisted, so it keeps following.
-        if (!isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readStored)) {
+        if (!isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readStored)) {
             const rcResolved = resolveSpec(
-                RATE_CONTROL_SPEC, serverSettings,
+                RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings,
                 { ...conditionalCtx, activeEncoder: selectedEncoder }, readStored);
             if (rcResolved !== rateControlMode) {
-                writeConditional(RATE_CONTROL_SPEC, rcResolved, setRateControlMode, { persist: false });
+                writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, rcResolved, setRateControlMode, { persist: false });
             }
         }
     };
@@ -603,7 +629,7 @@ export function Settings() {
 
     const handleRateControlChange = (mode: string) => {
         // Explicit choice: pin it (persist) so encoder changes stop overriding.
-        writeConditional(RATE_CONTROL_SPEC, mode, setRateControlMode, { persist: true });
+        writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, mode, setRateControlMode, { persist: true });
     };
 
     const handleVideoBitRateChange = (selectedBitRate: number) => {
@@ -665,8 +691,11 @@ export function Settings() {
 
     const handleUseBrowserCursorsToggle = () => {
         // The core owns persistence; propagate the new preference and let the core
-        // report the effective (possibly multi-monitor-forced) value back.
-        writeConditional(USE_BROWSER_CURSORS_SPEC, !useBrowserCursors, setUseBrowserCursors, { persist: false });
+        // report the effective (possibly multi-monitor-forced) value back. Derive
+        // from the DISPLAYED value: while multi-monitor forces the toggle on, the
+        // base preference may be off, and negating the base would silently persist
+        // the forced value over the user's real choice.
+        writeConditional(USE_BROWSER_CURSORS_SPEC, !(effectiveCursor ?? useBrowserCursors), setUseBrowserCursors, { persist: false });
     };
 
     const handleForceAlignedResolutionToggle = () => {
@@ -679,6 +708,21 @@ export function Settings() {
     const deriveHidpiForResolution = (manual: boolean) => {
         if (serverSettings?.use_css_scaling?.locked) return;
         writeConditional(HIDPI_SPEC, !manual, setHidpiEnabled, { persist: false });
+    };
+
+    // Reset-to-window also returns UI scaling to its derived (devicePixelRatio-
+    // based) default: the pinned client choice is dropped so the derived default
+    // governs again, and the value propagates like a user change (state update +
+    // settings post). Locked or operator-explicit (overridden) values govern
+    // scaling instead — the same gate as the startup derived-default post — so
+    // skip then.
+    const resetDpiToDerivedDefault = () => {
+        const s = serverSettings?.scaling_dpi;
+        if (s?.locked || s?.overridden) return;
+        localStorage.removeItem(getPrefixedKey('scaling_dpi'));
+        const derived = deriveDpiFromDpr();
+        setSelectedDpi(derived);
+        debouncedPostSetting({ scaling_dpi: derived });
     };
 
     const handleSetManualResolution = () => {
@@ -710,6 +754,7 @@ export function Settings() {
         localStorage.removeItem(getPrefixedKey('manual_height'));
         window.postMessage({ type: 'resetResolutionToWindow' }, window.location.origin);
         deriveHidpiForResolution(false);
+        resetDpiToDerivedDefault();
     };
 
     // CBR stops: sub-Mbps steps for constrained links, then whole Mbps.

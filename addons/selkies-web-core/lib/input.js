@@ -1106,6 +1106,8 @@ const KeyboardUtil = {
     // Resolve a keysym from the PHYSICAL key code. Used when the IME swallows the
     // logical key (keyCode 229 / key 'Process') but the event is really a shortcut
     // chord: shortcuts match on the base (level-0) keysym, so letters map lowercase.
+    // Covers every key that participates in common shortcuts: letters, digits,
+    // punctuation, and the non-printable set (Tab, Enter, arrows, F-keys, ...).
     getKeysymFromCode: function(code) {
         if (!code) return null;
         if (/^Key[A-Z]$/.test(code)) {
@@ -1114,6 +1116,10 @@ const KeyboardUtil = {
         if (/^Digit[0-9]$/.test(code)) {
             return Keysyms.lookup(code.charCodeAt(5));
         }
+        const fkey = /^F([1-9]|1[0-2])$/.exec(code);
+        if (fkey) {
+            return KeyTable.XK_F1 + (parseInt(fkey[1], 10) - 1);
+        }
         const punct = {
             'Minus': 0x2d, 'Equal': 0x3d, 'BracketLeft': 0x5b, 'BracketRight': 0x5d,
             'Backslash': 0x5c, 'Semicolon': 0x3b, 'Quote': 0x27, 'Backquote': 0x60,
@@ -1121,6 +1127,18 @@ const KeyboardUtil = {
         };
         if (code in punct) {
             return Keysyms.lookup(punct[code]);
+        }
+        const special = {
+            'Tab': KeyTable.XK_Tab, 'Enter': KeyTable.XK_Return,
+            'Backspace': KeyTable.XK_BackSpace, 'Delete': KeyTable.XK_Delete,
+            'Escape': KeyTable.XK_Escape, 'Insert': KeyTable.XK_Insert,
+            'Home': KeyTable.XK_Home, 'End': KeyTable.XK_End,
+            'PageUp': KeyTable.XK_Page_Up, 'PageDown': KeyTable.XK_Page_Down,
+            'ArrowUp': KeyTable.XK_Up, 'ArrowDown': KeyTable.XK_Down,
+            'ArrowLeft': KeyTable.XK_Left, 'ArrowRight': KeyTable.XK_Right,
+        };
+        if (code in special) {
+            return special[code];
         }
         return null;
     }
@@ -1172,10 +1190,14 @@ export class Input {
         this.listeners_context = [];
         this._queue = new Queue();
         this._allowTrackpadScrolling = true;
-        // Treat wheel input as a discrete mouse wheel until the detector proves it a
-        // trackpad, so the very first events (before 4 samples are collected) are
-        // accumulated rather than dropped by the trackpad throttle.
-        this._allowThreshold = false;
+        // Until the detector has its 4 samples, treat wheel input as a trackpad:
+        // the throttle path never drops events (they accumulate and flush at the
+        // window end), so an unclassified burst costs at most one smoothing window
+        // of latency, and the first event of a session still emits immediately.
+        // Starting as a discrete wheel instead would emit every unclassified event
+        // on arrival — a trackpad gesture's opening deltas would blast through as
+        // scroll clicks before the detector can engage.
+        this._allowThreshold = true;
         this._smallestDeltaY = 10000;
         this._smallestLineDeltaY = 10000;
         this._wheelThreshold = 100;
@@ -1187,6 +1209,13 @@ export class Input {
         this._wheelDirY = null;
         this._wheelAccumX = 0;
         this._wheelDirX = null;
+        // Timestamp of the last wheel event, driving the idle reset of the learned
+        // notch quantums: the smallest-delta learning is only valid within one input
+        // device's scroll session. Without a reset, a trackpad's tiny pixel deltas
+        // (quantum ~1-10px) poison the divisor for a later mouse wheel's 120px
+        // detents (120 notches per click). A device switch always involves an idle
+        // gap, so forgetting after one re-learns from scratch exactly like page load.
+        this._lastWheelEventTs = 0;
         this.cursorScaleFactor = null;
         this._cursorBase64Data = null;
 
@@ -1206,6 +1235,10 @@ export class Input {
         this._isSynth = false;
         this.isComposing = false;
         this.compositionString = "";
+        // Shortcut chord (e.g. Ctrl+A) that arrived while an IME composition was
+        // active: held until the composition the chord terminates has committed,
+        // so the shortcut applies AFTER the committed text lands server-side.
+        this._pendingChord = null;
         this.keyboardInputAssist = document.getElementById('keyboard-input-assist');
 
         this._activeTouches = new Map();
@@ -1438,15 +1471,41 @@ export class Input {
             return;
         }
         if (this.isComposing || event.isComposing || event.keyCode === 229) {
-            // A modifier chord while the IME is idle is a real shortcut the IME will
-            // not compose (e.g. Ctrl+A with a CJK layout active): the browser still
-            // reports keyCode 229 / key 'Process', so resolve the physical code and
-            // send it momentarily (Ctrl/Alt/Meta are already held server-side).
+            // A modifier chord (e.g. Ctrl+A with a CJK layout active) is a real
+            // shortcut the IME will not compose; resolve it from the physical code.
+            // IME idle: send the key momentarily (the modifier keydown arrived
+            // outside composition, so it is already held server-side). Mid-
+            // composition: the same keypress makes the IME commit, so hold the
+            // FULL chord (modifier snapshot + key) until the composition settles —
+            // firing now would apply the shortcut BEFORE the committed text lands,
+            // and no modifier is held server-side (their keydowns are swallowed
+            // below along with everything else while composing). If no commit
+            // follows promptly, the IME consumed the chord itself: discard it.
             if ((event.ctrlKey || event.altKey || event.metaKey) &&
-                !this.isComposing && !event.isComposing) {
+                !(event.getModifierState && event.getModifierState('AltGraph'))) {
                 const chordKeysym = KeyboardUtil.getKeysymFromCode(event.code);
                 if (chordKeysym) {
-                    this._sendMomentaryKey(chordKeysym);
+                    if (this.isComposing || event.isComposing) {
+                        this._pendingChord = {
+                            keysym: chordKeysym,
+                            ctrl: event.ctrlKey, alt: event.altKey,
+                            meta: event.metaKey, shift: event.shiftKey,
+                            at: performance.now(),
+                        };
+                    } else {
+                        // Windows defers a fresh ControlLeft keydown for AltGr
+                        // detection; a chord letter arriving inside that window
+                        // would reach the server as a bare keypress. Commit the
+                        // armed Control NOW so the momentary key lands as a chord.
+                        // Composing chords must NOT do this: their modifiers are
+                        // re-pressed by the pending-chord flush after the commit.
+                        if (this._altGrArmed) {
+                            this._altGrArmed = false;
+                            clearTimeout(this._altGrTimeout);
+                            this._sendKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
+                        }
+                        this._sendMomentaryKey(chordKeysym);
+                    }
                 }
             }
             _stopEvent(event);
@@ -1520,6 +1579,25 @@ export class Input {
                 keysym = KeyTable.XK_ISO_Level3_Shift;
             } else {
                 this._sendKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
+            }
+        }
+
+        // Shortcut chord on a non-Latin layout (Cyrillic/Greek/Hebrew/CJK jamo...):
+        // event.key is the localized character, whose keysym the server session's
+        // layout usually cannot map with the modifier applied — Ctrl+A arrives as
+        // Ctrl+<U+0444> and the shortcut is lost. Shortcuts match on the physical
+        // position for such layouts (the OS convention), so resolve the keysym
+        // from event.code instead. ASCII event.key values stay layout-resolved
+        // (QWERTZ Ctrl+Z must stay 'z', not the positional 'y'), and AltGr chords
+        // are character input, never shortcuts.
+        if (keysym !== null &&
+            (event.ctrlKey || event.metaKey ||
+             (event.altKey && !event.getModifierState('AltGraph')))) {
+            const kchar = event.key;
+            if (typeof kchar === 'string' && [...kchar].length === 1 &&
+                kchar.codePointAt(0) > 0x7f) {
+                const positional = KeyboardUtil.getKeysymFromCode(event.code);
+                if (positional) keysym = positional;
             }
         }
 
@@ -1689,6 +1767,35 @@ export class Input {
         if (!this._guac_markEvent(event)) return;
         this.isComposing = true;
         this.compositionString = "";
+        // Composition continued instead of committing: the held chord (if any)
+        // was consumed by the IME itself, so it must not fire remotely.
+        this._pendingChord = null;
+    }
+
+    /**
+     * Fire a chord that was held during composition, after the commit's text
+     * has been delivered. Scheduled via setTimeout(0) from _compositionEnd so
+     * the browser's post-commit input event (which carries the committed text
+     * on Linux) is processed first; stale chords (no prompt commit) are dropped.
+     * Sent as a self-contained press/release sequence — the chord's modifier
+     * keydowns were swallowed by the composition guard, so nothing is held
+     * server-side, and holding a modifier across the commit would corrupt it
+     * (the preedit clear would arrive as Ctrl+BackSpace).
+     */
+    _flushPendingChord() {
+        const chord = this._pendingChord;
+        this._pendingChord = null;
+        if (chord === null) return;
+        if (performance.now() - chord.at > 500) return;
+        const mods = [];
+        if (chord.ctrl) mods.push(KeyTable.XK_Control_L);
+        if (chord.alt) mods.push(KeyTable.XK_Alt_L);
+        if (chord.meta) mods.push(KeyTable.XK_Super_L);
+        if (chord.shift) mods.push(KeyTable.XK_Shift_L);
+        for (const m of mods) this.send("kd," + m);
+        this.send("kd," + chord.keysym);
+        this.send("ku," + chord.keysym);
+        for (const m of mods.reverse()) this.send("ku," + m);
     }
 
     _compositionUpdate(event) {
@@ -1700,6 +1807,9 @@ export class Input {
     _compositionEnd(event) {
         if (!this._guac_markEvent(event)) return;
         if (!this.isComposing) return;
+        if (this._pendingChord !== null) {
+            setTimeout(() => this._flushPendingChord(), 0);
+        }
         if (browser.isLinux()) {
             this._updateCompositionText("");
             this.isComposing = false;
@@ -1762,6 +1872,12 @@ export class Input {
     _handleMobileInput(event) {
         const text = event.target.value;
         if (!text) {
+            return;
+        }
+        // A chord (Ctrl/Alt/Meta held) is sent by the keydown path; the assist
+        // element's text echo of it must not ALSO type the letter.
+        if (this._chordModifierHeld()) {
+            event.target.value = '';
             return;
         }
         for (let i = 0; i < text.length; i++) {
@@ -1832,7 +1948,13 @@ export class Input {
         }
         if (down && event.button === 0 && event.ctrlKey && event.shiftKey) {
             const targetElement = event.target.requestPointerLock ? event.target : this.element;
-            targetElement.requestPointerLock().catch(err => console.error("Pointer lock failed:", err));
+            // requestPointerLock() returns undefined (not a Promise) on older
+            // engines (Safari, Firefox < 122); failures there surface via the
+            // pointerlockerror event instead.
+            const lockPromise = targetElement.requestPointerLock();
+            if (lockPromise && typeof lockPromise.catch === 'function') {
+                lockPromise.catch(err => console.error("Pointer lock failed:", err));
+            }
             this.cursorDiv.style.visibility = 'hidden';
             event.preventDefault();
             return;
@@ -1851,7 +1973,11 @@ export class Input {
             this.x = Math.round(movementX_logical * dpr_for_input_coords);
             this.y = Math.round(movementY_logical * dpr_for_input_coords);
 
-        } else if (event.type === 'mousemove' || event.type === 'pointermove') {
+        } else if (event.type === 'mousemove' || event.type === 'pointermove' ||
+                   event.type === 'pointerdown' || event.type === 'pointerup') {
+            // Pen taps must map coordinates here too: a non-hovering stylus emits
+            // no pointermove before contact, so the press would otherwise go out
+            // at the previous pointer's stale x/y.
             if (this._applySinkCoordinates(event.clientX, event.clientY, canvas, videoEle)) {
                 // Absolute coords mapped against the active sink (ws-core canvas or
                 // wr-core <video>); this.x/this.y were set by the helper.
@@ -1869,13 +1995,23 @@ export class Input {
                 }
             }
         }
-        if (event.type === 'mousedown' || event.type === 'mouseup') {
+        // Pen pointerdown/pointerup must drive the mask too: the pen handlers
+        // preventDefault() the pointerdown, which suppresses the compatibility
+        // mousedown, so without this a stylus tap would move the cursor but never
+        // click.
+        if (event.type === 'mousedown' || event.type === 'mouseup' ||
+            ((event.type === 'pointerdown' || event.type === 'pointerup') && event.button >= 0)) {
             var mask = 1 << event.button;
             if (down) {
                 this.buttonMask |= mask;
             } else {
                 this.buttonMask &= ~mask;
             }
+        } else if (event.type === 'pointercancel') {
+            // A cancel ends all pen contact with button = -1 (no per-button
+            // transition), and no pointerup follows: clear every pen-mappable
+            // button (tip 0, barrel 2, eraser 5) or the mask stays stuck down.
+            this.buttonMask &= ~((1 << 0) | (1 << 2) | (1 << 5));
         }
         if (event.type === 'mousemove' || event.type === 'pointermove') {
             // Coalesce high-frequency motion: a 1000 Hz mouse would otherwise emit
@@ -2530,7 +2666,32 @@ export class Input {
         return true;
     }
 
+    // Forget everything learned about the current scroll device: notch quantums,
+    // wheel-vs-trackpad classification samples, and fractional-notch carries. Called
+    // after a wheel-idle gap, because the learned state is only valid for the device
+    // that produced it — a mouse wheel following trackpad use must not divide its
+    // 120px detents by the trackpad's 1-10px learned quantum (massive over-scroll),
+    // and vice versa. Post-reset behavior is identical to a fresh page load.
+    _resetWheelLearning() {
+        this._smallestDeltaY = 10000;
+        this._smallestLineDeltaY = 10000;
+        this._allowThreshold = true;
+        while (!this._queue.isEmpty()) { this._queue.dequeue(); }
+        this._wheelAccumY = 0;
+        this._wheelDirY = null;
+        this._wheelAccumX = 0;
+        this._wheelDirX = null;
+    }
+
     _mouseWheelWrapper(event) {
+        // One second without wheel events ends the scroll session: longer than any
+        // intra-gesture gap (momentum tails included), far shorter than a physical
+        // trackpad<->mouse hand-over, so per-device learning never leaks across.
+        const nowTs = performance.now();
+        if (nowTs - this._lastWheelEventTs > 1000) {
+            this._resetWheelLearning();
+        }
+        this._lastWheelEventTs = nowTs;
         // Line- and page-mode wheel events are always a discrete mouse wheel
         // (trackpads report pixel deltas), so bypass the trackpad detector and
         // accumulate them directly — never dropping a notch.
@@ -2583,6 +2744,15 @@ export class Input {
         }
         // DOM_DELTA_PIXEL
         if (magnitude < this._smallestDeltaY) { this._smallestDeltaY = magnitude; }
+        if (this._allowThreshold) {
+            // Trackpad-classified deltas measure pan distance, not notches: the
+            // learned quantum would be the gesture's tiniest ramp-up sample
+            // (1-2px), turning one glide into hundreds of clicks. Use the same
+            // fixed 100px-per-notch as the horizontal axis. The quantum keeps
+            // learning above so a discrete wheel classified later in the session
+            // resolves against its true notch size.
+            return magnitude / 100;
+        }
         return magnitude / this._smallestDeltaY;
     }
 
@@ -2701,8 +2871,11 @@ export class Input {
     }
 
     _gamepadConnected(event) {
+        // Reject negatives too (e.g. a controllerSlot of 0 yields -1): button/axis
+        // sends refuse such an index, so connecting it would create a phantom slot
+        // that never receives input.
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (server_gp_index === undefined || server_gp_index === null) return;
+        if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
         if (!this.gamepadManager) {
             this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this));
         }
@@ -2718,13 +2891,13 @@ export class Input {
     _gamepadDisconnect(event) {
          if (this.ongamepaddisconnected !== null) { this.ongamepaddisconnected(); }
          const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-         if (server_gp_index === undefined || server_gp_index === null) return;
+         if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
          this.send("js,d," + server_gp_index);
     }
 
     _gamepadButton(gp_num, btn_num, val) {
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (server_gp_index === undefined || server_gp_index < 0) return;
+        if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
         this.send("js,b," + server_gp_index + "," + btn_num + "," + val);
         if (this._isSidebarOpen) {
             window.postMessage({ type: 'gamepadButtonUpdate', gamepadIndex: server_gp_index, buttonIndex: btn_num, value: val }, window.location.origin);
@@ -2733,7 +2906,7 @@ export class Input {
 
     _gamepadAxis(gp_num, axis_num, val) {
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (server_gp_index === undefined || server_gp_index < 0) return;
+        if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
         if (navigator.userAgent.toLowerCase().includes('firefox')) {
             if (axis_num === 4) {
                 const buttonVal = (val + 1.0) / 2.0;
@@ -2770,13 +2943,19 @@ export class Input {
     _armPointerLock(attempt = 0) {
         if (this.isSharedMode || !this._isStreamFullscreen()) return;
         if (document.pointerLockElement === this.element) return;
-        this.element.requestPointerLock().catch((err) => {
-            if (attempt < 5) {
-                setTimeout(() => this._armPointerLock(attempt + 1), 60);
-            } else {
-                console.warn("Pointer lock failed on fullscreen:", err);
-            }
-        });
+        // requestPointerLock() returns undefined (not a Promise) on older engines
+        // (Safari, Firefox < 122); there the transition-race retry cannot run and
+        // failures surface via the pointerlockerror event instead.
+        const lockPromise = this.element.requestPointerLock();
+        if (lockPromise && typeof lockPromise.catch === 'function') {
+            lockPromise.catch((err) => {
+                if (attempt < 5) {
+                    setTimeout(() => this._armPointerLock(attempt + 1), 60);
+                } else {
+                    console.warn("Pointer lock failed on fullscreen:", err);
+                }
+            });
+        }
     }
 
     _onFullscreenChange() {
@@ -2959,6 +3138,10 @@ export class Input {
         this._activeTouches.clear();
         this._activeTouchIdentifier = null;
         this._isTwoFingerGesture = false;
+        // Drop any coalesced motion still waiting on its animation-frame flush so a
+        // queued move cannot fire send() after this instance is detached. The
+        // already-scheduled RAF then no-ops (the flush early-returns on null).
+        this._pendingMove = null;
         if ((this.buttonMask & 1) === 1) {
              this.buttonMask &= ~1;
              this._sendMouseState();

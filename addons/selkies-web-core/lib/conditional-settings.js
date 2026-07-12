@@ -95,10 +95,10 @@ export const RATE_CONTROL_SPEC = {
     propagate: (mode, _ctx, io) => io.postSetting({ rate_control_mode: mode }),
 };
 
-// Plain boolean settings that carry a server truth (value/overridden/locked) but
-// used to read an ad-hoc hardcoded default, so a locked/overridden operator value
-// never reached the toggle. Routing them through the ladder makes the displayed
-// state track the real applied value. serverKey === storageKey for all of these.
+// Plain boolean settings that carry a server truth (value/overridden/locked).
+// Routing them through the ladder makes the displayed state track the real
+// applied value, so a locked/overridden operator value reaches the toggle.
+// serverKey === storageKey for all of these.
 function boolSpec(key, fallback, propagate) {
     return { id: key, serverKey: key, storageKey: key, parse: (v) => v === "true", fallback, propagate };
 }

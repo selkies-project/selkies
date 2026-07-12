@@ -6,6 +6,7 @@ import argparse
 import os
 import logging
 import re
+import zlib
 from typing import Any, Dict, List
 
 # Settings precedence: CLI flag > SELKIES_<NAME> env > fallback env_var(s) > 'default'.
@@ -28,7 +29,35 @@ from typing import Any, Dict, List
 # One WebSocket message ceiling for BOTH directions: enforced on receive
 # (aiohttp max_msg_size) and advertised to clients so multipart chunk sizing
 # (clipboard, uploads) fills the frame on either end.
-WS_MAX_MESSAGE_BYTES = 8 * 1024 * 1024
+# WS_MESSAGE_SIZE_HARD_CAP is the absolute per-message bound (32 MiB): proxies
+# and WebSocket stacks in the field degrade or reject frames beyond it, so the
+# advertised/enforced value is clamped under it and the server refuses to emit
+# any single frame above it (see _broadcast_to_clients) or to inflate a client
+# 0x05 gzip frame past WS_MAX_MESSAGE_BYTES.
+WS_MESSAGE_SIZE_HARD_CAP = 32 * 1024 * 1024
+WS_MAX_MESSAGE_BYTES = min(8 * 1024 * 1024, WS_MESSAGE_SIZE_HARD_CAP)
+
+
+def inflate_gz_bounded(payload):
+    """Inflate a client gzip payload, bounded by the shared message ceiling.
+
+    The inflated bytes stand in for a raw TEXT message, which could never
+    exceed WS_MAX_MESSAGE_BYTES on either transport (aiohttp's max_msg_size on
+    WebSockets, the negotiated max-message-size on the data channel), so the
+    same budget applies here — an unbounded gzip.decompress would let a single
+    small frame balloon ~1000x into process memory.
+    Raises ValueError for a payload that inflates past the cap, is truncated,
+    or does not decode as UTF-8.
+    """
+    d = zlib.decompressobj(wbits=31)  # gzip container
+    inflated = d.decompress(payload, WS_MAX_MESSAGE_BYTES + 1)
+    if len(inflated) > WS_MAX_MESSAGE_BYTES:
+        raise ValueError(
+            f"inflates past the {WS_MAX_MESSAGE_BYTES}-byte per-message ceiling"
+        )
+    if not d.eof:
+        raise ValueError("truncated gzip stream")
+    return inflated.decode("utf-8")
 
 SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     # -------------------- Common Settings for both modes --------------------
@@ -993,11 +1022,22 @@ class AppSettings:
                             # the web UI (the server accepts more than the UI offers).
                             vr = setting.get("meta", {}).get("value_range")
                             in_range_value = None
-                            if not valid_items and stype == "enum" and vr and len(user_items) == 1:
+                            # Gate on value_range presence, NOT on `not valid_items`:
+                            # a single in-range value that happens to equal a curated
+                            # stop must still keep the full menu (the whole point of
+                            # value_range is that the server accepts more than the UI
+                            # shows). Excluding on-stop values collapsed the dropdown
+                            # to that one option.
+                            if stype == "enum" and vr and len(user_items) == 1:
                                 try:
                                     n = float(user_items[0])
                                     if vr[0] <= n <= vr[1]:
-                                        in_range_value = user_items[0]
+                                        # Normalize to canonical integer form so a
+                                        # decimal-formatted override ('128000.0')
+                                        # can't crash downstream int() consumers.
+                                        in_range_value = (
+                                            str(int(n)) if n == int(n) else user_items[0]
+                                        )
                                 except ValueError:
                                     pass
                             if in_range_value is not None:
@@ -1112,8 +1152,13 @@ class AppSettings:
                     )
                     processed_value = (min_val, max_val)
             processed[name] = processed_value
-        width_overridden = overrides.get("manual_width", False)
-        height_overridden = overrides.get("manual_height", False)
+        # A manual dimension activates manual mode only when it is a POSITIVE value.
+        # 0 is both the built-in default and the "no manual width" sentinel, so a
+        # templated launcher emitting `--manual-width 0` for an unset field must not
+        # silently lock the display to 1024x768. (An explicit is_manual_resolution_mode
+        # override still forces manual mode via manual_mode_bool_is_set below.)
+        width_overridden = overrides.get("manual_width", False) and processed.get("manual_width", 0) > 0
+        height_overridden = overrides.get("manual_height", False) and processed.get("manual_height", 0) > 0
         manual_mode_bool_is_set = processed.get(
             "is_manual_resolution_mode", (False, False)
         )[0]
@@ -1226,6 +1271,92 @@ def build_client_settings_payload():
     out['clipboard_in_enabled'] = {'value': clip in ('true', 'in')}
     out['clipboard_out_enabled'] = {'value': clip in ('true', 'out')}
     return out
+
+
+# Default int bounds for client-provided numeric settings. Min is not 0:
+# settings without an explicit min may use -1 sentinels that must not be
+# clamped up. Shared by both transports' sanitizers.
+INT_SETTING_DEFAULT_MAX = 1_000_000
+INT_SETTING_DEFAULT_MIN = -1_000_000
+
+
+def sanitize_client_setting(name, client_value, source, log):
+    """Clamp/validate ONE client-provided setting against the server's limits —
+    the sanitizer shared by both transports (websockets SETTINGS payloads and
+    the WebRTC settings channel), so a value is accepted or clamped identically
+    whichever path delivered it.
+
+    `source` exposes the server's resolved values by attribute (the parsed
+    settings namespace); `log` is the calling transport's logger. Returns the
+    sanitized value, or None when the setting is unknown.
+
+    Rules: ranges clamp into the server min/max (fractional values are legal —
+    sub-Mbps bitrates — and integral values stay ints); enums fall back to the
+    server default when not allowed; ints/floats clamp into declared bounds
+    (top-level min/max win over meta so declared bounds aren't loosened by the
+    sentinel-safe negative fallback); locked bools keep the server value. A
+    None client value resolves to the server value/default for the type.
+    """
+    setting_def = next((s for s in SETTING_DEFINITIONS if s['name'] == name), None)
+    if not setting_def:
+        return None
+    server_limit = getattr(source, name)
+    if client_value is None:
+        if setting_def['type'] == 'range':
+            min_val, max_val = server_limit
+            return min_val if min_val == max_val else setting_def.get('meta', {}).get('default_value')
+        elif setting_def['type'] == 'bool':
+            return server_limit[0]
+        else:  # enum, list, str, int
+            return server_limit
+    try:
+        if setting_def['type'] == 'range':
+            min_val, max_val = server_limit
+            numeric = float(client_value)
+            if numeric.is_integer():
+                numeric = int(numeric)
+            sanitized = max(min_val, min(numeric, max_val))
+            if sanitized != numeric:
+                log.warning(
+                    f"Client value for '{name}' ({client_value}) was clamped to {sanitized} (server range: {min_val}-{max_val})."
+                )
+            return sanitized
+        elif setting_def['type'] == 'enum':
+            allowed_values = setting_def['meta']['allowed']
+            if str(client_value) in allowed_values:
+                # Normalize to str so later equality checks don't flip on str-vs-int.
+                return str(client_value)
+            server_default = allowed_values[0] if allowed_values else setting_def['default']
+            log.warning(
+                f"Client value for '{name}' ('{client_value}') is not in the allowed list {allowed_values}. Using server default '{server_default}'."
+            )
+            return server_default
+        elif setting_def['type'] in ('int', 'float'):
+            sanitized = int(client_value) if setting_def['type'] == 'int' else float(client_value)
+            meta = setting_def.get('meta', {})
+            min_val = setting_def.get('min', meta.get('min', INT_SETTING_DEFAULT_MIN))
+            max_val = setting_def.get('max', meta.get('max', INT_SETTING_DEFAULT_MAX))
+            clamped = max(min_val, min(sanitized, max_val))
+            if clamped != sanitized:
+                log.warning(
+                    f"Client value for '{name}' ({client_value}) was clamped to {clamped} (bounds: {min_val}-{max_val})."
+                )
+            return clamped
+        elif setting_def['type'] == 'bool':
+            server_val, is_locked = server_limit
+            client_bool = str(client_value).lower() in ['true', '1']
+            if is_locked:
+                if client_bool != server_val:
+                    log.warning(
+                        f"Client tried to change locked setting '{name}' to '{client_bool}'. Request ignored, using server value '{server_val}'."
+                    )
+                return server_val
+            return client_bool
+    except (ValueError, TypeError, IndexError, OverflowError):
+        # OverflowError guards JSON inf (1e999 -> int(inf)); fall back to default.
+        def_val_meta = setting_def.get('meta', {}).get('default_value')
+        return def_val_meta if def_val_meta is not None else setting_def.get('default')
+    return client_value
 
 if settings.debug[0]:
     logging.getLogger().setLevel(logging.DEBUG)
