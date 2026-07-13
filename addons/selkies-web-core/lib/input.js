@@ -2277,14 +2277,18 @@ export class Input {
     }
 
     _dropThreshold() {
+        // A physical mouse wheel emits large deltaY values (~100+ per notch);
+        // spinning it quickly makes the browser coalesce ticks into fewer wheel
+        // events with even larger, and varying, deltas. A trackpad instead
+        // streams many small deltas. Detect a mouse wheel (and bypass the
+        // trackpad throttle) when the sampled deltas are predominantly large,
+        // rather than requiring consecutive deltas to be exactly equal, which
+        // coalesced fast-wheel events can never satisfy.
         var count = 0;
-        var val1 = this._queue.dequeue();
         while (!this._queue.isEmpty()) {
-            var valNext = this._queue.dequeue();
-            if (valNext >= 80 && val1 == valNext) { count++; }
-            val1 = valNext;
+            if (this._queue.dequeue() >= 80) { count++; }
         }
-        return count >= 2;
+        return count >= 3;
     }
 
     _mouseWheelWrapper(event) {
