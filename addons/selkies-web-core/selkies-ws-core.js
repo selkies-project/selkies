@@ -2278,7 +2278,13 @@ function initWebsockets() {
   );
 
   window.addEventListener('focus', async () => {
-    if (isSharedMode || !window.clipboard_enabled || !clipboard_in_enabled) return;
+    // Only Chromium can read the system clipboard silently. On Firefox and
+    // Safari, navigator.clipboard.read()/readText() outside of a genuine paste
+    // gesture pops up an ephemeral "Paste" prompt (enabled after a ~1s delay).
+    // Firing that on every window focus constantly interrupts the user and
+    // blocks input (see #258, #234). Skip the focus-based read on those engines;
+    // clipboard can still be pushed to the server via the sidebar textarea.
+    if (isSharedMode || !isChromium || !window.clipboard_enabled || !clipboard_in_enabled) return;
 
     if (!enable_binary_clipboard) {
       navigator.clipboard
