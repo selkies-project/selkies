@@ -665,6 +665,15 @@ function useConditionalSetting(spec, serverSettings, ctx, deps) {
   return [value, setValue];
 }
 
+// The toggle handle's inline `top` positions its center (Overlay.css keeps the
+// translateY(-50%)), so clamp by half the handle height to keep it fully
+// inside the viewport, expressed as a percentage of the viewport height.
+const TOGGLE_HANDLE_HEIGHT_PX = 60; // keep in sync with .toggle-handle in Overlay.css
+const clampToggleHandleTopPct = (pct) => {
+  const halfHandlePct = (TOGGLE_HANDLE_HEIGHT_PX / 2 / window.innerHeight) * 100;
+  return Math.min(100 - halfHandlePct, Math.max(halfHandlePct, pct));
+};
+
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
   const [isToggleVisible, setIsToggleVisible] = useState(true);
@@ -1300,6 +1309,21 @@ function Sidebar() {
     initialBottom: 0,
     initialRight: 0,
   });
+  // Sidebar toggle handle: vertical position as a percentage of the viewport
+  // height (a resize keeps it proportional), persisted across reloads.
+  const [toggleHandleTopPct, setToggleHandleTopPct] = useState(() => {
+    const stored = parseFloat(localStorage.getItem(getPrefixedKey("sidebarToggleTopPct")));
+    return Number.isFinite(stored) ? clampToggleHandleTopPct(stored) : 50;
+  });
+  const toggleDragInfo = useRef({
+    isDragging: false,
+    hasDragged: false,
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    initialTopPct: 50,
+    lastTopPct: 50,
+  });
   const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
   // Audio-bitrate choices from the server's allowed enum (fallback to the local
   // list before serverSettings); the slider below indexes into this.
@@ -1395,6 +1419,57 @@ function Sidebar() {
       return;
     }
     handleShowVirtualKeyboard();
+  };
+
+  const handleTogglePointerDown = (e) => {
+    toggleDragInfo.current.isDragging = true;
+    toggleDragInfo.current.hasDragged = false;
+    toggleDragInfo.current.pointerId = e.pointerId;
+    toggleDragInfo.current.startX = e.clientX;
+    toggleDragInfo.current.startY = e.clientY;
+    toggleDragInfo.current.initialTopPct = toggleHandleTopPct;
+    toggleDragInfo.current.lastTopPct = toggleHandleTopPct;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const handleTogglePointerMove = (e) => {
+    if (!toggleDragInfo.current.isDragging) return;
+
+    const dx = e.clientX - toggleDragInfo.current.startX;
+    const dy = e.clientY - toggleDragInfo.current.startY;
+
+    if (!toggleDragInfo.current.hasDragged && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
+      toggleDragInfo.current.hasDragged = true;
+    }
+
+    if (toggleDragInfo.current.hasDragged) {
+      const newTopPct = clampToggleHandleTopPct(
+        toggleDragInfo.current.initialTopPct + (dy / window.innerHeight) * 100
+      );
+      toggleDragInfo.current.lastTopPct = newTopPct;
+      setToggleHandleTopPct(newTopPct);
+    }
+  };
+
+  const handleTogglePointerUp = (e) => {
+    if (e.currentTarget.hasPointerCapture(toggleDragInfo.current.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    if (toggleDragInfo.current.hasDragged) {
+      localStorage.setItem(getPrefixedKey("sidebarToggleTopPct"), toggleDragInfo.current.lastTopPct.toString());
+    }
+    toggleDragInfo.current.isDragging = false;
+    toggleDragInfo.current.pointerId = null;
+  };
+
+  const onToggleHandleClick = (e) => {
+    if (toggleDragInfo.current.hasDragged) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleDragInfo.current.hasDragged = false;
+      return;
+    }
+    toggleSidebar();
   };
 
   const toggleAppsModal = () => setIsAppsModalOpen(!isAppsModalOpen);
@@ -2424,7 +2499,12 @@ function Sidebar() {
       {isToggleVisible && (
         <div
           className='toggle-handle'
-          onClick={toggleSidebar}
+          onClick={onToggleHandleClick}
+          onPointerDown={handleTogglePointerDown}
+          onPointerMove={handleTogglePointerMove}
+          onPointerUp={handleTogglePointerUp}
+          onPointerCancel={handleTogglePointerUp}
+          style={{ top: `${toggleHandleTopPct}%`, touchAction: 'none' }}
           title={`${isOpen ? 'Close' : 'Open'} Dashboard`}
         >
           <div className="toggle-indicator"></div>
