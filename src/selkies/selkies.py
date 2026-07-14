@@ -337,8 +337,19 @@ class SelkiesStreamingApp:
     ):
         self.server_enable_resize = ENABLE_RESIZE
         self.mode = mode
+        # Fallback geometry for capture paths that run before any client has
+        # sized the display (viewer-driven capture on a controller-less server).
+        # A configured manual resolution is the server's declared geometry, so
+        # seed from it: on Wayland the fallback isn't cosmetic — the capture
+        # start actively resizes the compositor output to these dimensions.
         self.display_width = 1024
         self.display_height = 768
+        if settings.is_manual_resolution_mode[0]:
+            manual_w = int(settings.manual_width or 0)
+            manual_h = int(settings.manual_height or 0)
+            if manual_w > 0 and manual_h > 0:
+                self.display_width = manual_w - (manual_w % 2)
+                self.display_height = manual_h - (manual_h % 2)
         self.pipeline_running = False
         self.async_event_loop = async_event_loop
         # Honor the configured channel count (surround captures as multistream Opus).

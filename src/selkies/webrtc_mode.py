@@ -193,13 +193,20 @@ class WebRTCService(BaseStreamingService):
         # Initial display size: honor a configured manual resolution; otherwise leave
         # the display as-is (physical/preset displays stay untouched) — the first
         # client reconfigures it to its own size anyway.
+        self._manual_dims = None
         if getattr(self.args, "is_manual_resolution_mode", False):
             width = int(getattr(self.args, "manual_width", 0) or 0)
             height = int(getattr(self.args, "manual_height", 0) or 0)
             if width > 0 and height > 0:
-                asyncio.run_coroutine_threadsafe(
-                    resize_display(f"{width}x{height}"), asyncio.get_running_loop()
-                )
+                # Remembered for the pipeline built in initialize_components: it
+                # must capture what this resize (X11) produces, and on Wayland the
+                # capture start itself sizes the compositor output from it.
+                self._manual_dims = (width - (width % 2), height - (height % 2))
+                if not IS_WAYLAND:
+                    # Wayland has no X server to resize; nothing else to do here.
+                    asyncio.run_coroutine_threadsafe(
+                        resize_display(f"{width}x{height}"), asyncio.get_running_loop()
+                    )
 
     async def initialize_components(self) -> None:
         """Initialize all application components"""
@@ -238,6 +245,12 @@ class WebRTCService(BaseStreamingService):
             video_paintover_crf=int(self.args.video_paintover_crf),
             video_paintover_burst_frames=int(self.args.video_paintover_burst_frames),
         )
+        if self._manual_dims:
+            # The pipeline must capture the manual geometry, not its constructor
+            # default: on X11 the startup resize_display above already set the
+            # screen to it, and on Wayland these dimensions ARE the resize (the
+            # capture start sizes the compositor output from them).
+            self.media_pipeline.width, self.media_pipeline.height = self._manual_dims
         if self.args.enable_rate_control:
             self.media_pipeline.rc_mode = RateControlMode(self.args.rate_control_mode)
 
