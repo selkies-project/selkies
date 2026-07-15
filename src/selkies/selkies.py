@@ -27,7 +27,7 @@ from . import gpu_stats
 from .display_utils import (
     parse_dri_node_to_index,
     parse_gpu_id,
-    format_wayland_cursor,
+    format_pixelflux_cursor,
     get_new_res,
     generate_xrandr_gtf_modeline,
     ensure_mode,
@@ -3640,14 +3640,14 @@ class DataStreamingServer(BaseStreamingService):
                 except Exception as e:
                     data_logger.error(f"Error in capture callback for {display_id}: {e}", exc_info=False)
 
-            def wayland_cursor_handler(msg_type, data_bytes, hot_x, hot_y):
+            def pixelflux_cursor_handler(msg_type, data_bytes, hot_x, hot_y):
                 try:
-                    payload = format_wayland_cursor(
+                    payload = format_pixelflux_cursor(
                         msg_type, data_bytes, hot_x, hot_y, self.cursor_size)
                     if payload is not None:
                         self.app.send_ws_cursor_data(payload)
                 except Exception as e:
-                    data_logger.error(f"Error handling wayland cursor: {e}")
+                    data_logger.error(f"Error handling pixelflux cursor: {e}")
 
             queue_size = getattr(self, 'BACKPRESSURE_QUEUE_SIZE', 120)
             self.video_chunk_queues[display_id] = asyncio.Queue(maxsize=queue_size)
@@ -3662,12 +3662,12 @@ class DataStreamingServer(BaseStreamingService):
                     f"Reusing ScreenCapture instance for '{display_id}' (backend kept warm)."
                 )
 
-            if IS_WAYLAND:
-                capture_module.set_cursor_callback(wayland_cursor_handler)
-                data_logger.info(f"Registered Wayland cursor callback for '{display_id}'")
-                # Do not emit an empty-cursor hide just because capture (re)started:
-                # it would blank a reconnecting client's cursor and poison the
-                # resend cache. Real cursor updates arrive via the callback.
+            # pixelflux is the cursor source on both backends (compositor on
+            # Wayland, XFixes monitor on X11; an older X11-only pixelflux
+            # stashes this harmlessly and the python monitor keeps delivering).
+            # No hide is emitted on a capture (re)start: it would blank a
+            # reconnecting client's cursor and poison the resend cache.
+            capture_module.set_cursor_callback(pixelflux_cursor_handler)
 
             await self.capture_loop.run_in_executor(
                 None,
@@ -3777,6 +3777,10 @@ class DataStreamingServer(BaseStreamingService):
         # Wayland compositor cursor-theme size (X11 cursor size is set on the X
         # server itself); <=0 keeps the theme default.
         cs.cursor_size = int(getattr(self.cli_args, 'cursor_size', -1))
+        # Out-of-band delivery cap: track the input handler's DPI-scaled value
+        # so pixelflux's XFixes monitor caps like the python monitor did.
+        ih = getattr(self, 'input_handler', None)
+        cs.cursor_size_cap = int(getattr(ih, 'cursor_size_cap', 0) or 0) or max(32, cs.cursor_size)
 
         watermark_path_str = self.cli_args.watermark_path
         if watermark_path_str and os.path.exists(watermark_path_str):

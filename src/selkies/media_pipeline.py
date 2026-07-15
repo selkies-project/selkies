@@ -29,7 +29,7 @@ from abc import ABCMeta, abstractmethod
 from typing import Callable, Awaitable
 
 from .settings import settings as app_settings
-from .display_utils import parse_dri_node_to_index, parse_gpu_id, format_wayland_cursor
+from .display_utils import parse_dri_node_to_index, parse_gpu_id, format_pixelflux_cursor
 
 # C-API (non-abi3) wheels: a missing/ABI-skewed build raises ImportError or
 # RuntimeError at import. Degrade to None so plain WS mode and module import
@@ -166,10 +166,13 @@ class MediaPipelinePixel(MediaPipeline):
         # Fired after the video stream (re)starts so the transport can resend the
         # cursor (a slept/woken tab clears its cursor canvas). No-op by default.
         self.on_pipeline_started: Callable[[], None] = lambda: None
-        # Wayland cursor updates from the compositor callback, already in the
-        # client cursor-message shape (curdata/width/height/hotx/hoty/handle).
-        # X11 sessions use the XFixes monitor in the input handler instead.
+        # Cursor updates from pixelflux (Wayland compositor / X11 XFixes
+        # monitor), already in the client cursor-message shape
+        # (curdata/width/height/hotx/hoty/handle).
         self.on_cursor_data: Callable[[dict], None] = lambda data: None
+        # Longest cursor edge the X11 monitor delivers (DPI-scaled upstream);
+        # <= 0 falls back to the capture-settings default.
+        self.get_cursor_size_cap: Callable[[], int] = lambda: 0
 
         self.capture_module = None
         self.pcmflux_module = None
@@ -467,6 +470,8 @@ class MediaPipelinePixel(MediaPipeline):
         cs.use_wayland = bool(app_settings.wayland[0])
         cs.recording_socket = str(getattr(app_settings, 'recording_socket', '') or '')
         cs.cursor_size = int(getattr(app_settings, 'cursor_size', -1))
+        cap = int(self.get_cursor_size_cap() or 0)
+        cs.cursor_size_cap = cap if cap > 0 else max(32, cs.cursor_size)
         cs.debug_logging = bool(app_settings.debug[0])
         if cs.use_wayland:
             cs.scale = self.scale
@@ -511,19 +516,20 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.error(f"Error in capture callback: {e}", exc_info=False)
 
-    def _wayland_cursor_handler(self, msg_type, data_bytes, hot_x, hot_y):
-        """Compositor cursor events -> client cursor messages (websockets parity).
-        Runs on the compositor thread; delivery hops to the asyncio loop."""
+    def _pixelflux_cursor_handler(self, msg_type, data_bytes, hot_x, hot_y):
+        """pixelflux cursor events (either backend) -> client cursor messages
+        (websockets parity). Runs on the capture-side thread; delivery hops to
+        the asyncio loop."""
         try:
             size = int(getattr(app_settings, "cursor_size", -1) or -1)
             if size <= 0:
                 size = 24
-            payload = format_wayland_cursor(msg_type, data_bytes, hot_x, hot_y, size)
+            payload = format_pixelflux_cursor(msg_type, data_bytes, hot_x, hot_y, size)
             if payload is None:
                 return
             self.async_event_loop.call_soon_threadsafe(self.on_cursor_data, payload)
         except Exception as e:
-            logger.error(f"Error handling wayland cursor: {e}")
+            logger.error(f"Error handling pixelflux cursor: {e}")
 
     async def start_screen_capture(self):
         if self._is_screen_capturing:
@@ -540,10 +546,11 @@ class MediaPipelinePixel(MediaPipeline):
 
         try:
             self.capture_module = ScreenCapture()
-            if bool(app_settings.wayland[0]):
-                # The compositor is the only cursor source on Wayland; without this
-                # registration WebRTC sessions have no cursor at all.
-                self.capture_module.set_cursor_callback(self._wayland_cursor_handler)
+            # pixelflux is the cursor source on both backends (compositor on
+            # Wayland, XFixes monitor on X11). An older X11-only pixelflux
+            # stashes this harmlessly and the input handler's python monitor
+            # keeps delivering instead.
+            self.capture_module.set_cursor_callback(self._pixelflux_cursor_handler)
             await asyncio.to_thread(
                 self.capture_module.start_capture,
                 settings,

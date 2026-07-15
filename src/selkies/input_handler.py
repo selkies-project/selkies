@@ -35,9 +35,11 @@ import re
 import json
 import aiofiles
 import msgpack
+import zlib
 from PIL import Image
 import urllib.parse
 import urllib.request
+from .display_utils import pixelflux_x11_cursor
 from .media_pipeline import RateControlMode
 from .settings import settings, WS_MAX_MESSAGE_BYTES
 try:
@@ -3247,6 +3249,11 @@ class WebRTCInput:
         if self.is_wayland:
             logger_webrtc_input.info("Wayland mode: Cursor monitor disabled (handled by compositor callback).")
             return
+        if pixelflux_x11_cursor():
+            logger_webrtc_input.info(
+                "X11 cursor monitor disabled (pixelflux cursor callback active)."
+            )
+            return
         if not self.xdisplay.has_extension("XFIXES"):
             if self.xdisplay.query_extension("XFIXES") is None:
                 logger_webrtc_input.error(
@@ -3309,6 +3316,12 @@ class WebRTCInput:
                         "XFIXES extension not supported, cannot fetch current cursor"
                     )
                     return None
+            # XFixes requires per-connection version negotiation before any
+            # other request; the cursor monitor used to do it at startup, but
+            # this on-demand fetch must not depend on the monitor running.
+            if not getattr(self, "_xfixes_negotiated", False):
+                self.xdisplay.xfixes_query_version()
+                self._xfixes_negotiated = True
             screen = self.xdisplay.screen()
             cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
             return self.cursor_to_msg(cursor_image)
@@ -3324,14 +3337,14 @@ class WebRTCInput:
         if not cursor or cursor.width == 0 or cursor.height == 0:
             return {
                 "curdata": "", "width": 0, "height": 0,
-                "hotx": 0, "hoty": 0, "handle": cursor.cursor_serial if cursor else 0,
+                "hotx": 0, "hoty": 0, "handle": 0,
             }
         im = self._cursor_image_to_pil(cursor)
         bbox = im.getbbox()
         if bbox is None:
             return {
                 "curdata": "", "width": 0, "height": 0,
-                "hotx": 0, "hoty": 0, "handle": cursor.cursor_serial,
+                "hotx": 0, "hoty": 0, "handle": 0,
             }
         cropped_im = im.crop(bbox)
         left, upper, right, lower = bbox
@@ -3359,7 +3372,9 @@ class WebRTCInput:
             "height": cropped_im.height,
             "hotx": new_hotx,
             "hoty": new_hoty,
-            "handle": cursor.cursor_serial,
+            # Content-derived (like the pixelflux callback path) so a client's
+            # cursor cache stays one handle space across both sources.
+            "handle": zlib.crc32(png_data) or 1,
         }
 
     async def stop_gamepad_servers(self):

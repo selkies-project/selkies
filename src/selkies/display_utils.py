@@ -7,6 +7,7 @@ import re
 import os
 import time
 import sys
+import zlib
 from asyncio import subprocess
 import asyncio
 import threading
@@ -1125,10 +1126,12 @@ def parse_dri_node_to_index(node_path: str) -> int:
         return -1
 
 
-def format_wayland_cursor(msg_type, data_bytes, hot_x, hot_y, size):
-    """Compositor cursor event -> the client cursor payload, or None to skip.
-    "hide" clears the cursor; "png" carries an image sized `size`; anything else
-    (a transient extraction failure) keeps the last good cursor."""
+def format_pixelflux_cursor(msg_type, data_bytes, hot_x, hot_y, size):
+    """pixelflux cursor event (Wayland compositor or X11 XFixes monitor) -> the
+    client cursor payload, or None to skip. "hide" clears the cursor; "png"
+    carries an image; anything else (a transient extraction failure) keeps the
+    last good cursor. The handle is content-derived, so a client's cursor cache
+    dedupes flips between the same shapes."""
     if msg_type == "hide":
         return {
             "curdata": "", "width": 0, "height": 0,
@@ -1139,6 +1142,18 @@ def format_wayland_cursor(msg_type, data_bytes, hot_x, hot_y, size):
             "curdata": base64.b64encode(data_bytes).decode("ascii"),
             "width": size, "height": size,
             "hotx": hot_x, "hoty": hot_y,
-            "handle": int(time.time() * 1000),
+            "handle": zlib.crc32(data_bytes) or 1,
         }
     return None
+
+
+def pixelflux_x11_cursor():
+    """True when the installed pixelflux delivers X11 cursor shapes through
+    set_cursor_callback (its XFixes monitor thread); selkies then skips its
+    python cursor monitor. Older pixelflux stashes the callback without ever
+    firing it on X11, so registering is safe either way."""
+    try:
+        import pixelflux
+    except Exception:
+        return False
+    return bool(getattr(pixelflux, "X11_CURSOR_CALLBACK", False))

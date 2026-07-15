@@ -446,10 +446,14 @@ class WebRTCService(BaseStreamingService):
         self.input_handler.on_cursor_change = lambda data: (
             self.rtc_app.send_cursor_data(data)
         )
-        # Wayland cursors come from the compositor via the media pipeline; route
-        # them through the same transport callback as the X11 XFixes monitor.
+        # Cursors come from pixelflux on both backends (Wayland compositor /
+        # X11 XFixes monitor); route them through the same transport callback,
+        # capped at the input handler's DPI-scaled cursor size.
         self.media_pipeline.on_cursor_data = lambda data: (
             self.input_handler.on_cursor_change(data)
+        )
+        self.media_pipeline.get_cursor_size_cap = lambda: getattr(
+            self.input_handler, "cursor_size_cap", 0
         )
         self.input_handler.on_video_encoder_bit_rate = self.handle_video_bitrate_change
         self.input_handler.on_audio_encoder_bit_rate = self.handle_audio_bitrate_change
@@ -820,6 +824,11 @@ class WebRTCService(BaseStreamingService):
                 pipeline.produce_data = (
                     lambda buf, pts, kind, _did=did: self.rtc_app.consume_data(buf, pts, kind, _did)
                 )
+                # pixelflux's cursor-callback slot is process-global (the last
+                # registration wins), so a secondary's capture start must route
+                # cursor events into the same transport sink as the primary.
+                pipeline.on_cursor_data = self.media_pipeline.on_cursor_data
+                pipeline.get_cursor_size_cap = self.media_pipeline.get_cursor_size_cap
                 self.display_pipelines[did] = pipeline
                 try:
                     await pipeline.start_media_pipeline()
