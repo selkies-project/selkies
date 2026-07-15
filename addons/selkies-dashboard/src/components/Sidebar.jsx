@@ -670,8 +670,14 @@ function useConditionalSetting(spec, serverSettings, ctx, deps) {
 // inside the viewport, expressed as a percentage of the viewport height.
 const TOGGLE_HANDLE_HEIGHT_PX = 60; // keep in sync with .toggle-handle in Overlay.css
 const clampToggleHandleTopPct = (pct) => {
-  const halfHandlePct = (TOGGLE_HANDLE_HEIGHT_PX / 2 / window.innerHeight) * 100;
-  return Math.min(100 - halfHandlePct, Math.max(halfHandlePct, pct));
+  const safePct = Number.isFinite(pct) ? pct : 50;
+  // A zero/undefined viewport height (headless, pre-layout, test env) would make
+  // halfHandlePct Infinity and clamp everything to a broken edge, so fall back
+  // to a plain 0..100 clamp until a real height is known.
+  const vh = window.innerHeight;
+  if (!vh || !Number.isFinite(vh)) return Math.min(100, Math.max(0, safePct));
+  const halfHandlePct = (TOGGLE_HANDLE_HEIGHT_PX / 2 / vh) * 100;
+  return Math.min(100 - halfHandlePct, Math.max(halfHandlePct, safePct));
 };
 
 function Sidebar() {
@@ -1443,8 +1449,11 @@ function Sidebar() {
     }
 
     if (toggleDragInfo.current.hasDragged) {
+      // Guard a zero/undefined viewport height so the drag delta can't become
+      // Infinity; clampToggleHandleTopPct also falls back, this keeps the math sane.
+      const vh = window.innerHeight || 1;
       const newTopPct = clampToggleHandleTopPct(
-        toggleDragInfo.current.initialTopPct + (dy / window.innerHeight) * 100
+        toggleDragInfo.current.initialTopPct + (dy / vh) * 100
       );
       toggleDragInfo.current.lastTopPct = newTopPct;
       setToggleHandleTopPct(newTopPct);
@@ -1452,8 +1461,12 @@ function Sidebar() {
   };
 
   const handleTogglePointerUp = (e) => {
-    if (e.currentTarget.hasPointerCapture(toggleDragInfo.current.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
+    // pointerId is null if a pointerup arrives without our pointerdown (e.g. the
+    // capture was lost); hasPointerCapture(null) would coerce to id 0 and could
+    // release a foreign capture, so only touch capture for our own pointer.
+    const pid = toggleDragInfo.current.pointerId;
+    if (pid !== null && e.currentTarget.hasPointerCapture(pid)) {
+      e.currentTarget.releasePointerCapture(pid);
     }
     if (toggleDragInfo.current.hasDragged) {
       localStorage.setItem(getPrefixedKey("sidebarToggleTopPct"), toggleDragInfo.current.lastTopPct.toString());
