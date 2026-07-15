@@ -35,11 +35,14 @@ import re
 import json
 import aiofiles
 import msgpack
-import zlib
 from PIL import Image
 import urllib.parse
 import urllib.request
-from .display_utils import pixelflux_x11_cursor
+from .display_utils import (
+    pixelflux_x11_cursor,
+    unpremultiply_rgba,
+    cursor_content_handle,
+)
 from .media_pipeline import RateControlMode
 from .settings import settings, WS_MAX_MESSAGE_BYTES
 try:
@@ -3362,6 +3365,10 @@ class WebRTCInput:
             )
             new_hotx = int(new_hotx * scale_factor)
             new_hoty = int(new_hoty * scale_factor)
+        # XFixes pixels are premultiplied; straighten only after any resize
+        # (resampling is linear per channel in premultiplied space), matching
+        # the pixelflux monitor's pipeline.
+        cropped_im = unpremultiply_rgba(cropped_im)
         with io.BytesIO() as f:
             cropped_im.save(f, "PNG")
             png_data = f.getvalue()
@@ -3372,9 +3379,12 @@ class WebRTCInput:
             "height": cropped_im.height,
             "hotx": new_hotx,
             "hoty": new_hoty,
-            # Content-derived (like the pixelflux callback path) so a client's
-            # cursor cache stays one handle space across both sources.
-            "handle": zlib.crc32(png_data) or 1,
+            # Same pixel-content handle space as format_pixelflux_cursor, so
+            # the connect-time seed and the live path dedupe one shape to one
+            # client cache entry.
+            "handle": cursor_content_handle(
+                cropped_im.tobytes(), cropped_im.width, cropped_im.height,
+                new_hotx, new_hoty),
         }
 
     async def stop_gamepad_servers(self):

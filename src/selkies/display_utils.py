@@ -3,8 +3,10 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import base64
+import io
 import re
 import os
+import struct
 import time
 import sys
 import zlib
@@ -12,6 +14,8 @@ from asyncio import subprocess
 import asyncio
 import threading
 from shutil import which
+
+from PIL import Image, ImageMath
 
 from .Xlib import X as x11_X
 from .Xlib import display as x11_display
@@ -1126,23 +1130,78 @@ def parse_dri_node_to_index(node_path: str) -> int:
         return -1
 
 
+def unpremultiply_rgba(im):
+    """Premultiplied-alpha RGBA image -> straight alpha (what PNG carries).
+    Cursor pixel sources store premultiplied color (XFixes and Xcursor by
+    format definition, wl_shm by Wayland convention). The integer math is
+    bit-identical to pixelflux's rust `unpremultiply_rgba` — floor((c*255 +
+    a//2) / a) clamped to 255, alpha-0 color forced to 0 (PIL's I-mode "/" is
+    C integer division whose zero-divisor guard yields 0) — so the python seed
+    and the rust live path hash a cursor to the same content handle. Runs as
+    C-level band arithmetic; a binary-alpha image (most cursors) is returned
+    untouched after one histogram."""
+    if im.mode != "RGBA":
+        im = im.convert("RGBA")
+    alpha = im.getchannel("A")
+    hist = alpha.histogram()
+    if not sum(hist[1:255]):
+        if not hist[0]:
+            return im
+        # Binary alpha with transparent pixels: only their color needs zeroing.
+        out = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        out.paste(im, mask=alpha.point(lambda v: 255 if v else 0))
+        return out
+    a32 = alpha.convert("I")
+    bands = []
+    for name in ("R", "G", "B"):
+        c32 = im.getchannel(name).convert("I")
+        if hasattr(ImageMath, "lambda_eval"):
+            band = ImageMath.lambda_eval(
+                lambda d: d["min"]((d["c"] * 255 + d["a"] / 2) / d["a"], 255),
+                c=c32, a=a32)
+        else:
+            band = ImageMath.eval("min((c*255 + a/2)/a, 255)", c=c32, a=a32)
+        bands.append(band.convert("L"))
+    bands.append(alpha)
+    return Image.merge("RGBA", bands)
+
+
+def cursor_content_handle(rgba_bytes, width, height, hot_x, hot_y):
+    """Encoder-independent cursor cache handle: a CRC over the straight-alpha
+    pixels and geometry rather than the PNG bytes, so the python-xlib seed and
+    the pixelflux live path (different PNG encoders) agree on one handle per
+    shape. Downscaled (capped) cursors may still differ between the two
+    sources — the resamplers differ — costing one redundant client redraw.
+    Never 0: the wire contract reserves handle 0 for hide."""
+    meta = struct.pack("<iiii", width, height, hot_x, hot_y)
+    return zlib.crc32(meta, zlib.crc32(rgba_bytes)) or 1
+
+
 def format_pixelflux_cursor(msg_type, data_bytes, hot_x, hot_y, size):
     """pixelflux cursor event (Wayland compositor or X11 XFixes monitor) -> the
     client cursor payload, or None to skip. "hide" clears the cursor; "png"
     carries an image; anything else (a transient extraction failure) keeps the
-    last good cursor. The handle is content-derived, so a client's cursor cache
-    dedupes flips between the same shapes."""
+    last good cursor. The handle is derived from the decoded pixel content, so
+    a client's cursor cache dedupes flips between the same shapes regardless of
+    which source encoded them."""
     if msg_type == "hide":
         return {
             "curdata": "", "width": 0, "height": 0,
             "hotx": 0, "hoty": 0, "handle": 0,
         }
     if msg_type == "png" and data_bytes:
+        try:
+            with Image.open(io.BytesIO(data_bytes)) as im:
+                rgba = im.convert("RGBA")
+                handle = cursor_content_handle(
+                    rgba.tobytes(), rgba.width, rgba.height, hot_x, hot_y)
+        except Exception:
+            handle = zlib.crc32(data_bytes) or 1
         return {
             "curdata": base64.b64encode(data_bytes).decode("ascii"),
             "width": size, "height": size,
             "hotx": hot_x, "hoty": hot_y,
-            "handle": zlib.crc32(data_bytes) or 1,
+            "handle": handle,
         }
     return None
 
