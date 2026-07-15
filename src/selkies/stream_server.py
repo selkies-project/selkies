@@ -298,29 +298,47 @@ FILE_INDEX_FOOTER = """    </div> <!-- closes .page-container -->
         }
 
         function processDirectoryListing() {
-            const webPathPrefix = '/api/files/';
-            let diskPathPrefix = '';
-            const injectedPathPrefix = window.__SELKIES_INJECTED_PATH_PREFIX__ || '';
-            if (injectedPathPrefix) {
-                diskPathPrefix = injectedPathPrefix;
-            } else {
-                diskPathPrefix = '';
+            // Shared with the nginx fancyindex footer (addons/selkies-web-core/
+            // nginx/footer.html): the listing is mounted at /api/files/ (the
+            // scheme the dashboards iframe) or the legacy /files/, optionally
+            // behind a deployment subfolder or fronting proxy — derive the
+            // mount from the pathname rather than assuming a fixed prefix.
+            const path = window.location.pathname;
+            let webPathPrefix = '/api/files/';
+            let idx = path.indexOf(webPathPrefix);
+            if (idx === -1) {
+                webPathPrefix = '/files/';
+                idx = path.indexOf(webPathPrefix);
             }
+            const injectedPathPrefix = window.__SELKIES_INJECTED_PATH_PREFIX__ || '';
+            const diskPathPrefix = injectedPathPrefix || '';
             const h1 = document.querySelector('h1');
 
-            if (h1) {
-                const originalText = h1.textContent;
-                const newText = originalText.replace(webPathPrefix, diskPathPrefix);
-                h1.textContent = newText;
+            if (h1 && idx !== -1) {
+                const text = h1.textContent;
+                const j = text.indexOf(webPathPrefix);
+                if (j !== -1) {
+                    const tail = text.slice(j + webPathPrefix.length);
+                    h1.textContent = diskPathPrefix.replace(/\\/+$/, '') + '/' + tail;
+                }
             }
 
-            // The listing can be mounted behind a deployment prefix (subfolder
-            // setting, fronting proxy), so match the tail of the pathname
-            // rather than assuming '/api/files/' starts it.
-            const isAtRoot = window.location.pathname.endsWith(webPathPrefix);
+            // The listing exists to download files: force file links to save
+            // (directories keep navigating and the thead sort links keep
+            // sorting). nginx-served listings send no Content-Disposition
+            // header, so without this a click inside the dashboard's
+            // file-browser iframe renders the file inline instead.
+            document.querySelectorAll('table#list td a').forEach(function(a) {
+                const href = a.getAttribute('href') || '';
+                if (href && !href.endsWith('/') && !href.startsWith('?')) {
+                    a.setAttribute('download', '');
+                }
+            });
+
+            const isAtRoot = idx !== -1 && path.endsWith(webPathPrefix);
             if (isAtRoot) {
-                const parentLink = document.querySelector('table#list td.link a[href^="../"]');
-                if (parentLink && parentLink.textContent.trim() === "Parent directory/") {
+                const parentLink = document.querySelector('table#list a[href^="../"]');
+                if (parentLink) {
                     const parentRow = parentLink.closest('tr');
                     if (parentRow) {
                         parentRow.style.display = 'none';
@@ -1137,7 +1155,18 @@ class CentralizedStreamServer:
             return web.Response(status=404, text="Not Found")
 
         if full_path.is_file():
-            return web.FileResponse(full_path)
+            # Attachment disposition so a click in the dashboard's file-browser
+            # iframe always saves the file; inline types (text, images, PDF)
+            # would otherwise render inside the modal instead of downloading.
+            filename = full_path.name.encode("ascii", "replace").decode().replace('"', "_")
+            quoted = urllib.parse.quote(full_path.name)
+            return web.FileResponse(
+                full_path,
+                headers={
+                    "Content-Disposition":
+                        f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quoted}'
+                },
+            )
 
         # A directory URL must end in "/" so its relative links (../, name/) resolve
         # one level down instead of against the parent.
@@ -1249,6 +1278,11 @@ class CentralizedStreamServer:
             web.get(f"{api_prefix}/api/health", self.handle_health),
             web.post(f"{api_prefix}/api/switch", self.handle_switch),
             web.post(f"{api_prefix}/api/upload", self.handle_upload),
+            # The file-browser/download API serves the file-manager directory and
+            # has no dependency on the static web content; registered here so a
+            # deployment whose frontend is served elsewhere (nginx, web_root
+            # unset) still gets downloads instead of a 404.
+            web.get(f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler),
         ]
         # The Prometheus registry is process-global, so one mode-agnostic
         # endpoint serves both streaming modes.
@@ -1265,9 +1299,6 @@ class CentralizedStreamServer:
             async def index_handler(_):
                 return web.FileResponse(os.path.join(self.static_fs_path, "index.html"))
 
-            self.app.router.add_get(
-                f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler
-            )
             self.app.router.add_get(f"{api_prefix}/", index_handler)
             self.app.router.add_static(
                 f"{api_prefix}/", self.static_fs_path, name="static"

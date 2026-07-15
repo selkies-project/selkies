@@ -12,26 +12,46 @@
         }
 
         function processDirectoryListing() {
-            const webPathPrefix = '/files/';
-            let diskPathPrefix = '';
-            const injectedPathPrefix = window.__SELKIES_INJECTED_PATH_PREFIX__ || '';
-            if (injectedPathPrefix) {
-                diskPathPrefix = injectedPathPrefix;
-            } else {
-                diskPathPrefix = 'REPLACE_DOWNLOADS_PATH';
+            // The listing is mounted at /api/files/ (the scheme the dashboards
+            // iframe) or the legacy /files/, optionally behind a deployment
+            // subfolder or fronting proxy — derive the mount from the pathname
+            // rather than assuming a fixed prefix.
+            const path = window.location.pathname;
+            let webPathPrefix = '/api/files/';
+            let idx = path.indexOf(webPathPrefix);
+            if (idx === -1) {
+                webPathPrefix = '/files/';
+                idx = path.indexOf(webPathPrefix);
             }
+            const injectedPathPrefix = window.__SELKIES_INJECTED_PATH_PREFIX__ || '';
+            const diskPathPrefix = injectedPathPrefix || 'REPLACE_DOWNLOADS_PATH';
             const h1 = document.querySelector('h1');
 
-            if (h1) {
-                const originalText = h1.textContent;
-                const newText = originalText.replace(webPathPrefix, diskPathPrefix);
-                h1.textContent = newText;
+            if (h1 && idx !== -1) {
+                const text = h1.textContent;
+                const j = text.indexOf(webPathPrefix);
+                if (j !== -1) {
+                    const tail = text.slice(j + webPathPrefix.length);
+                    h1.textContent = diskPathPrefix.replace(/\/+$/, '') + '/' + tail;
+                }
             }
 
-            const isAtRoot = window.location.pathname === webPathPrefix;
+            // The listing exists to download files: force file links to save
+            // (directories keep navigating and the thead sort links keep
+            // sorting). nginx-served listings send no Content-Disposition
+            // header, so without this a click inside the dashboard's
+            // file-browser iframe renders the file inline instead.
+            document.querySelectorAll('table#list td a').forEach(function(a) {
+                const href = a.getAttribute('href') || '';
+                if (href && !href.endsWith('/') && !href.startsWith('?')) {
+                    a.setAttribute('download', '');
+                }
+            });
+
+            const isAtRoot = idx !== -1 && path.endsWith(webPathPrefix);
             if (isAtRoot) {
-                const parentLink = document.querySelector('table#list td.link a[href^="../"]');
-                if (parentLink && parentLink.textContent.trim() === "Parent directory/") {
+                const parentLink = document.querySelector('table#list a[href^="../"]');
+                if (parentLink) {
                     const parentRow = parentLink.closest('tr');
                     if (parentRow) {
                         parentRow.style.display = 'none';
