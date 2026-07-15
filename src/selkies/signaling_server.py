@@ -14,6 +14,9 @@ from aiohttp import web, WSMessage, WSMsgType
 from typing import Awaitable, Callable, Dict, Set, Optional, Any, Tuple, List
 
 from .webrtc_utils import generate_rtc_config, _is_trusted_config_file
+from .settings import settings as app_settings
+# Live control-plane token view (provisioned via /api/tokens), read per handshake.
+from .selkies import current_session_tokens
 
 logger = logging.getLogger("signaling")
 
@@ -561,6 +564,30 @@ class WebRTCPeerManagement:
     def _record_eviction(self, key: Any) -> None:
         self._eviction_times.setdefault(key, []).append(asyncio.get_event_loop().time())
 
+    def _secure_token_rejected(self, client_token) -> bool:
+        """Secure mode (master token configured) binds streaming access to a
+        server-issued token, mirroring the websockets handshake: a client peer must
+        present a client_token that maps to a provisioned token. The auth middleware
+        skips Basic on WS upgrades in secure mode expecting this gate, so without it
+        a client peer would reach signaling unauthenticated."""
+        if not app_settings.master_token:
+            return False
+        tokens, _ = current_session_tokens()
+        return not client_token or client_token not in tokens
+
+    def _secure_effective_client_type(self, client_type, client_token):
+        """Secure mode: the token's provisioned role is authoritative (client_type is
+        self-asserted over signaling). Coerce a viewer-role token's 'controller' claim
+        to viewer so it can't own a media graph, open a secondary display, or drive
+        input — mirroring ws_handler's token-derived role."""
+        if not app_settings.master_token or client_type != "controller":
+            return client_type
+        tokens, _ = current_session_tokens()
+        perms = tokens.get(client_token) if client_token else None
+        if perms and perms.get("role") == "controller":
+            return client_type
+        return "viewer"
+
     async def hello_peer(
         self, ws: WebSocketResponse, raddr: str
     ) -> Tuple[str, str, Optional[str], Optional[int], Optional[bool]]:
@@ -656,8 +683,14 @@ class WebRTCPeerManagement:
                 if peer_type == "client" and client_type not in ("viewer", "controller"):
                     await ws.close(code=1002, message=b"invalid protocol")
                     raise Exception("Invalid client type from {!r}".format(raddr))
+                if peer_type == "client" and self._secure_token_rejected(client_token):
+                    await ws.close(code=4001, message=b"Invalid authentication token")
+                    raise Exception(
+                        "Rejecting client from {!r}: missing or invalid token in secure mode".format(raddr)
+                    )
 
                 if peer_type == "client":
+                    client_type = self._secure_effective_client_type(client_type, client_token)
                     if not self.enable_sharing:
                         existing_clients = [
                             (pid, peer)

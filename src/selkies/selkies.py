@@ -176,6 +176,13 @@ user_tokens = {}
 client_permissions = {}
 active_mk_token = None
 
+
+def current_session_tokens():
+    """Live control-plane token view — (user_tokens mapping, active mk-token) — as
+    provisioned via /api/tokens. Both transports authorize input against this."""
+    return user_tokens, active_mk_token
+
+
 # Only WS control-text messages at least this large are gzip-wrapped (opcode 0x05)
 # for gzip-capable clients. Below it, the compression saving doesn't pay for the CPU
 # and — crucially — latency-critical small data (input, status verbs) is left raw.
@@ -2721,7 +2728,10 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.warning(f"BLOCK (Secure Mode): Malformed gamepad message from {remote_address}: {message}")
                                 continue
 
-                        if self.is_secure_mode and message.split(',')[0] in ["kd", "ku", "kh", "kr", "m", "m2", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr", "REQUEST_CLIPBOARD"]:
+                        # maxsplit=1: the gate needs only the verb, and a clipboard chunk can be
+                        # WS_MAX_MESSAGE_BYTES (8 MiB) — a full split here (then again in the
+                        # dispatcher) would stall the event loop for milliseconds per large paste.
+                        if self.is_secure_mode and message.split(',', 1)[0] in ["kd", "ku", "kh", "kr", "m", "m2", "co", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr", "REQUEST_CLIPBOARD"]:
                             perms = client_permissions.get(websocket)
                             token = perms.get("token") if perms else None
                             
@@ -3891,11 +3901,13 @@ class DataStreamingServer(BaseStreamingService):
         main_router.add_post(f'{api_prefix}/api/tokens', self.handle_tokens)
 
     async def handle_tokens(self, request: web.Request):
-        if self.supervisor.current_mode != self.mode:
-            return web.json_response({"error": "WebSocket mode inactive"}, status=409)
-
-        if not self.is_secure_mode:
-            return web.json_response({"error": "WebSocket not in secure mode"}, status=404)
+        # Provisioning is transport-independent: user_tokens/active_mk_token govern
+        # authority for both the websockets and WebRTC gates, so tokens are accepted
+        # in any active mode (unlike the data WS endpoint below, which is mode-gated).
+        # Read master_token from settings, not self.is_secure_mode, which is only set
+        # once the websockets service's initialize() runs (never in WebRTC mode).
+        if not settings.master_token:
+            return web.json_response({"error": "Server not in secure mode"}, status=404)
 
         global user_tokens, active_mk_token
         try:

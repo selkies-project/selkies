@@ -65,6 +65,9 @@ from .input_handler import (
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
+# Live control-plane token view (provisioned via /api/tokens on the websockets
+# control plane), read per message so re-provisioning is honored.
+from .selkies import current_session_tokens
 
 logger = logging.getLogger("rtc")
 logger.setLevel(logging.INFO)
@@ -818,14 +821,46 @@ class RTCApp:
             return False
         if not bool(app_settings.enable_collab[0]):
             return False
-        try:
-            # active_mk_token is a runtime global owned by the WS control plane
-            # (set via the secure-mode /api/tokens endpoint, registered in all
-            # modes); read it dynamically so a re-provision is honored per message.
-            from . import selkies as _sk
-            return _sk.active_mk_token is not None and client_token == _sk.active_mk_token
-        except Exception:
+        _, mk = current_session_tokens()
+        return mk is not None and client_token == mk
+
+    def _secure_input_denied(self, msg, client_token):
+        """Secure-mode (master token configured) input authority, mirroring the WS
+        gate: cmd and the keyboard/mouse/clipboard set are admitted only from the
+        active mk-token holder, or from a controller-role token when no mk-token is
+        provisioned. client_type is self-asserted over signaling, so a peer that
+        merely claims 'controller' is still held to the token here."""
+        if not app_settings.master_token:
             return False
+        # "co" is composed-text typing (co,end,<text>) — keyboard input like kd/ku.
+        if msg.split(",", 1)[0] not in ("cmd", "co") and not msg.startswith(VIEWER_COLLAB_EXTRA_PREFIXES):
+            return False
+        tokens, mk = current_session_tokens()
+        if mk is not None:
+            authorized = bool(client_token) and client_token == mk
+        else:
+            perms = tokens.get(client_token) if client_token else None
+            authorized = bool(perms) and perms.get("role") == "controller"
+        if not authorized:
+            logger.warning("Dropping unauthorized secure-mode input: %s", msg[:32])
+        return not authorized
+
+    def _secure_gamepad_denied(self, msg, client_token):
+        """Secure-mode gamepad authority, mirroring the WS gate: a client may only
+        drive its own assigned slot (js index == slot - 1), so a viewer or collaborator
+        can't spoof another player's controller. No slot on the token => no gamepad."""
+        if not app_settings.master_token or not msg.startswith("js,"):
+            return False
+        tokens, _ = current_session_tokens()
+        perms = tokens.get(client_token) if client_token else None
+        slot = perms.get("slot") if perms else None
+        if slot is None:
+            return True
+        try:
+            index = int(msg.split(",", 3)[2])
+        except (IndexError, ValueError):
+            return True
+        return int(slot) - 1 != index
 
     def _on_input_channel_message(self, msg, channel=None, client_type=None, client_token=None, display_id="primary"):
         """Decompress gzip'd payloads and intercept the compression handshake before
@@ -870,6 +905,11 @@ class RTCApp:
                 if not msg.startswith(VIEWER_SILENT_DROP_PREFIXES):
                     logger.warning("Dropping unauthorized viewer input: %s", msg[:32])
                 return
+        if isinstance(msg, str) and self._secure_input_denied(msg, client_token):
+            return
+        if isinstance(msg, str) and self._secure_gamepad_denied(msg, client_token):
+            logger.warning("Dropping gamepad input for unassigned slot: %s", msg[:32])
+            return
         return self.on_data_message(msg, display_id or "primary")
 
     async def on_peer_connection_established(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary"):

@@ -1142,11 +1142,13 @@ class CentralizedStreamServer:
         if "download" not in self.settings.file_transfers:
             return web.Response(status=403, text="Forbidden: downloads disabled")
         rel_path = request.match_info.get("path", "").lstrip("/")
-        full_path = (self.upload_dir / rel_path).resolve()
-
-        try:
-            full_path.relative_to(self.upload_dir)
-        except ValueError:
+        base = str(self.upload_dir)
+        # Contain within the (already-resolved) upload_dir: realpath normalizes and
+        # follows symlinks, then the resolved candidate must be the root itself or
+        # sit beneath it — the os.sep guard stops a sibling like <root>-other from
+        # matching. Rejects ../ traversal and symlinked escapes alike.
+        full_path = pathlib.Path(os.path.realpath(os.path.join(base, rel_path)))
+        if str(full_path) != base and not str(full_path).startswith(base + os.sep):
             return web.Response(
                 status=403, text="Forbidden: Directory Traversal detected"
             )
@@ -1171,7 +1173,9 @@ class CentralizedStreamServer:
         # A directory URL must end in "/" so its relative links (../, name/) resolve
         # one level down instead of against the parent.
         if not request.path.endswith("/"):
-            location = request.path + "/"
+            # Same-origin redirect: force exactly one leading slash so the location
+            # can never be read as a protocol-relative URL (//host).
+            location = "/" + request.path.lstrip("/") + "/"
             if request.query_string:
                 location += "?" + request.query_string
             raise web.HTTPMovedPermanently(location)
