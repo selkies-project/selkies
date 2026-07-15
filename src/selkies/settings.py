@@ -18,10 +18,10 @@ from typing import Any, Dict, List
 #     menu and default.
 #   - Bool (case-insensitive): "true"/"1" = on, anything else = off; a
 #     "|locked" suffix (e.g. "true|locked") forbids the client changing it.
-#   - Range: "8-165" restricts the allowed span (initial value = built-in
+#   - Range: "8-240" restricts the allowed span (initial value = built-in
 #     default, clamped in); a bare value "60" keeps the built-in span and makes
 #     it the initial value, widening the span if it falls outside (so legacy
-#     fixed-value configs still resolve); "60,8-165" sets initial + span in one
+#     fixed-value configs still resolve); "60,8-240" sets initial + span in one
 #     value; a degenerate span "60-60" locks the setting.
 #   - An override set to "" means "use the built-in default"; list types keep
 #     their explicit ""/"none" = disable semantics.
@@ -123,9 +123,9 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "framerate",
         "type": "range",
-        "default": "8-165",
+        "default": "8-240",
         "meta": {"default_value": 60},
-        "help": 'Framerate: allowed range (e.g., "8-165"), initial value (e.g., "60"), or both ("60,8-165"); "60-60" locks.',
+        "help": 'Framerate: allowed range (e.g., "8-240"), initial value (e.g., "60"), or both ("60,8-240"); "60-60" locks.',
     },
     {
         "name": "video_crf",
@@ -137,9 +137,9 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "video_bitrate",
         "type": "range",
-        "default": "0.1-100",
+        "default": "0.1-1000",
         "meta": {"default_value": 8},
-        "help": 'Video bitrate aka CBR, in Megabits per second (Mbps): allowed range (e.g., "0.1-100"), initial value (e.g., "8" for 8 Mbps, "0.25" for 250 Kbps), or both ("8,0.1-100"); "8-8" locks.',
+        "help": 'Video bitrate aka CBR, in Megabits per second (Mbps): allowed range (e.g., "0.1-1000"), initial value (e.g., "8" for 8 Mbps, "0.25" for 250 Kbps), or both ("8,0.1-1000"); "8-8" locks.',
     },
     {
         "name": "rate_control_mode",
@@ -1091,7 +1091,7 @@ class AppSettings:
                     # "min-max" sets the allowed span; a bare value sets the
                     # initial value on the built-in span, widening it when it
                     # falls outside (fixed-value configs must stay valid).
-                    # "60,8-165" sets both; a degenerate span ("60-60") locks.
+                    # "60,8-240" sets both; a degenerate span ("60-60") locks.
                     tokens = [
                         token.strip()
                         for token in str(raw_value).split(",")

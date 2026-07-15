@@ -129,6 +129,9 @@ const RATE_CONTROL_CBR_DEFAULT_SPEC = {
 
 // Sub-Mbps CBR stops for constrained links, ahead of the whole-Mbps range.
 const SUB_MBPS_BITRATE_STEPS = [0.1, 0.25, 0.5, 0.75];
+// Above 100 Mbps the slider coarsens to these stops; per-Mbps granularity
+// stops mattering there and a 1000-position slider would be unusable.
+const COARSE_MBPS_BITRATE_STEPS = [150, 200, 300, 400, 500, 750, 1000];
 
 
 function formatBytes(bytes, decimals = 2, rawDict) {
@@ -2387,12 +2390,14 @@ function Sidebar() {
   const showJpegOptions = encoder === 'jpeg';
   const showPaintOverQualityToggle = showH264Options || showJpegOptions;
 
-  // CBR stops: sub-Mbps steps for constrained links, then whole Mbps.
+  // CBR stops: sub-Mbps steps for constrained links, whole Mbps to 100, then
+  // the coarse steps to 1000.
   const videoBitrateOptions = (() => {
     const min = serverSettings?.video_bitrate?.min ?? 0.1;
     const max = serverSettings?.video_bitrate?.max ?? 100;
     const stops = SUB_MBPS_BITRATE_STEPS.filter((v) => v >= min && v <= max);
-    for (let v = Math.max(1, Math.ceil(min)); v <= Math.floor(max); v++) stops.push(v);
+    for (let v = Math.max(1, Math.ceil(min)); v <= Math.min(100, Math.floor(max)); v++) stops.push(v);
+    stops.push(...COARSE_MBPS_BITRATE_STEPS.filter((v) => v >= min && v <= max));
     return stops.length ? stops : [min];
   })();
   const bitrateSliderIndex = (() => {
@@ -2766,7 +2771,7 @@ function Sidebar() {
                       type="range"
                       id="framerateSlider"
                       min={serverSettings?.framerate?.min || 8}
-                      max={serverSettings?.framerate?.max || 165}
+                      max={serverSettings?.framerate?.max || 240}
                       step="1"
                       value={framerate}
                       onChange={handleFramerateChange}

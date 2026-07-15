@@ -83,12 +83,15 @@ const encoderOptionsRTC = [
 // Every H.264 encoder supports both CBR and CRF (constant-QP) rate control.
 const H264_ENCODERS = ["h264enc", "h264enc-striped", "openh264enc", "nvh264enc"];
 
-const framerateOptions = [8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144];
+const FRAMERATE_STEPS = [8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144, 165, 240];
 
 const videoCRFOptions = [50, 45, 40, 35, 30, 25, 20, 10, 1];
 
 // Sub-Mbps CBR stops for constrained links, ahead of the whole-Mbps range.
 const SUB_MBPS_BITRATE_STEPS = [0.1, 0.25, 0.5, 0.75];
+// Above 100 Mbps the slider coarsens to these stops; per-Mbps granularity
+// stops mattering there and a 1000-position slider would be unusable.
+const COARSE_MBPS_BITRATE_STEPS = [150, 200, 300, 400, 500, 750, 1000];
 
 const readStored = (key: string) => localStorage.getItem(getPrefixedKey(key));
 
@@ -757,13 +760,29 @@ export function Settings() {
         resetDpiToDerivedDefault();
     };
 
-    // CBR stops: sub-Mbps steps for constrained links, then whole Mbps.
+    // CBR stops: sub-Mbps steps for constrained links, whole Mbps to 100, then
+    // the coarse steps to 1000.
     const videoBitrateOptions = (() => {
         const min = serverSettings?.video_bitrate?.min ?? 0.1;
         const max = serverSettings?.video_bitrate?.max ?? 100;
         const stops = SUB_MBPS_BITRATE_STEPS.filter(v => v >= min && v <= max);
-        for (let v = Math.max(1, Math.ceil(min)); v <= Math.floor(max); v++) stops.push(v);
+        for (let v = Math.max(1, Math.ceil(min)); v <= Math.min(100, Math.floor(max)); v++) stops.push(v);
+        stops.push(...COARSE_MBPS_BITRATE_STEPS.filter(v => v >= min && v <= max));
         return stops.length ? stops : [min];
+    })();
+    // Framerate stops clipped to the server-allowed span, mirroring how the
+    // stored value itself is clamped.
+    const framerateOptions = (() => {
+        const min = serverSettings?.framerate?.min ?? 8;
+        const max = serverSettings?.framerate?.max ?? 240;
+        const stops = FRAMERATE_STEPS.filter(v => v >= min && v <= max);
+        return stops.length ? stops : [min];
+    })();
+    const framerateIndex = (() => {
+        const exact = framerateOptions.indexOf(framerate);
+        if (exact >= 0) return exact;
+        const above = framerateOptions.findIndex(v => v >= framerate);
+        return above >= 0 ? above : framerateOptions.length - 1;
     })();
     const bitrateIndex = (() => {
         const exact = videoBitrateOptions.indexOf(videoBitRate);
@@ -1037,7 +1056,7 @@ export function Settings() {
                                         min={0}
                                         max={framerateOptions.length - 1}
                                         step={1}
-                                        value={[framerateOptions.indexOf(framerate)]}
+                                        value={[framerateIndex]}
                                         onValueChange={(value) => {
                                             const index = value[0];
                                             const selectedFramerate = framerateOptions[index];
