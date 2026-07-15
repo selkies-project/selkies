@@ -1143,12 +1143,24 @@ class CentralizedStreamServer:
             return web.Response(status=403, text="Forbidden: downloads disabled")
         rel_path = request.match_info.get("path", "").lstrip("/")
         base = str(self.upload_dir)
-        # Contain within the (already-resolved) upload_dir: realpath normalizes and
-        # follows symlinks, then the resolved candidate must be the root itself or
-        # sit beneath it — the os.sep guard stops a sibling like <root>-other from
-        # matching. Rejects ../ traversal and symlinked escapes alike.
-        full_path = pathlib.Path(os.path.realpath(os.path.join(base, rel_path)))
-        if str(full_path) != base and not str(full_path).startswith(base + os.sep):
+        # Reject any ".." segment before touching the filesystem, then rebuild the
+        # path from validated components so it can only descend from upload_dir
+        # (the same validated-components policy the upload handler applies). Real
+        # browsers resolve ../ client-side, so a literal ".." here is only ever an
+        # escape attempt.
+        parts = [c for c in os.path.normpath(rel_path).split(os.sep) if c and c != "."]
+        if ".." in parts:
+            return web.Response(
+                status=403, text="Forbidden: Directory Traversal detected"
+            )
+        full_path = pathlib.Path(os.path.realpath(os.path.join(base, *parts)))
+        # Defense in depth: after symlinks are followed the resolved path must still
+        # be the root itself or sit beneath it.
+        try:
+            within = os.path.commonpath([base, str(full_path)]) == base
+        except ValueError:
+            within = False
+        if not within:
             return web.Response(
                 status=403, text="Forbidden: Directory Traversal detected"
             )
