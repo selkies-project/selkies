@@ -1481,11 +1481,11 @@ export class Input {
             // and no modifier is held server-side (their keydowns are swallowed
             // below along with everything else while composing). If no commit
             // follows promptly, the IME consumed the chord itself: discard it.
-            // Windows defers a fresh ControlLeft keydown (AltGr detection), so Control
-            // is physically down but not yet held server-side while _altGrArmed. The
-            // Korean IME can deliver the Process (229) keydown for the chord letter
-            // with ctrlKey UNSET even though Control is held, so treat the armed state
-            // as an intended Ctrl or the letter escapes as a bare keypress.
+            // Windows defers a fresh ControlLeft keydown (AltGr detection): Control is
+            // physically down but not yet held server-side while _altGrArmed, and the
+            // Korean IME can deliver the Process (229) chord keydown with ctrlKey UNSET.
+            // Treat the armed state as an intended Ctrl or the chord letter escapes as
+            // a bare keypress (the "first Ctrl+A types 'a'" report).
             const armedCtrl = this._altGrArmed;
             if ((event.ctrlKey || event.altKey || event.metaKey || armedCtrl) &&
                 !(event.getModifierState && event.getModifierState('AltGraph'))) {
@@ -1499,23 +1499,20 @@ export class Input {
                             at: performance.now(),
                         };
                     } else {
-                        // Windows defers a fresh ControlLeft keydown for AltGr
-                        // detection; a chord letter arriving inside that window
-                        // would reach the server as a bare keypress. Commit the
-                        // armed Control NOW so the momentary key lands as a chord.
-                        // Composing chords must NOT do this: their modifiers are
-                        // re-pressed by the pending-chord flush after the commit.
+                        // Disarm WITHOUT holding Control: the chord is sent
+                        // self-contained below (press+release together). Holding the
+                        // armed Control and relying on its keyup would strand it when
+                        // the IME swallows that keyup — a stuck Control turns every
+                        // later key into Ctrl+key, so the IME only yields Latin letters
+                        // ("locked to English") until the heartbeat reaper clears it.
                         if (this._altGrArmed) {
                             this._altGrArmed = false;
                             clearTimeout(this._altGrTimeout);
-                            this._sendKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
                         }
-                        // A modifier pressed while the IME was still composing
-                        // was swallowed with the rest of the composition, so it
-                        // is NOT held server-side (Windows 11 Korean IME commits
-                        // on the modifier, then delivers the letter as 'Process').
                         // Wrap the key with the missing chord modifiers or it
-                        // lands as a bare keypress and types the letter.
+                        // lands as a bare keypress and types the letter. The armed
+                        // (deferred) Control counts as missing since it was never
+                        // sent, so it is pressed and released with the key here.
                         const missingMods = [];
                         if ((event.ctrlKey || armedCtrl) && !this._keysymHeld(KeyTable.XK_Control_L, KeyTable.XK_Control_R)) {
                             missingMods.push(KeyTable.XK_Control_L);
