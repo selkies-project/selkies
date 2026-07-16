@@ -756,6 +756,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'STUN port for NAT hole punching with WebRTC, change to your internal STUN/TURN server for local networks without internet, defaults to "19302"',
     },
     {
+        "name": "webrtc_public_ip",
+        "type": "str",
+        "default": "",
+        "help": 'Public IPv4 address to advertise in WebRTC host ICE candidates (Pion-style NAT1TO1), for a host behind static 1:1 NAT (e.g. a cloud VM with an elastic IP where all UDP ports map through). When set, the private host-candidate address in each SDP offer is replaced with this IP so a remote peer can reach the host candidate directly; server-reflexive (STUN) and relay (TURN) candidates are left untouched, so hole-punching and TURN fallback still work. Empty (default) keeps the gathered private address unchanged.',
+    },
+    {
         "name": "enable_cloudflare_turn",
         "type": "bool",
         "default": False,

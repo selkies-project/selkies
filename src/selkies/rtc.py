@@ -600,7 +600,36 @@ class RTCApp:
         # scoped to the m=video section so they survive future codec/aiortc changes.
         sdp_text = self._munge_video_bandwidth(sdp_text)
 
+        # NAT1TO1: advertise a configured public IPv4 in host ICE candidates so a
+        # host behind static 1:1 NAT (cloud VM + elastic IP) is reachable directly.
+        # No-op unless webrtc_public_ip is set; STUN/TURN candidates are preserved.
+        sdp_text = self._rewrite_host_candidate_ip(
+            sdp_text, getattr(app_settings, "webrtc_public_ip", "")
+        )
+
         return sdp_text
+
+    # ICE candidate: a=candidate:<foundation> <comp> <transport> <priority>
+    #                <connection-address> <port> typ <cand-type> ...
+    _HOST_CANDIDATE_IPV4 = re.compile(
+        r"(a=candidate:\S+ \d+ \S+ \d+ )"    # 1: up to the connection-address
+        r"(\d{1,3}(?:\.\d{1,3}){3})"          # 2: IPv4 connection-address
+        r"( \d+ typ host\b)",                 # 3: port + "typ host"
+        re.IGNORECASE,
+    )
+    _IPV4 = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+    def _rewrite_host_candidate_ip(self, sdp_text: str, public_ip: str) -> str:
+        """Replace the connection-address of IPv4 'typ host' ICE candidates with
+        public_ip (Pion-style NAT1TO1). Only host candidates are touched: srflx
+        (STUN) and relay (TURN) candidates, their raddr, and every port /
+        foundation / priority are left exactly as gathered, so hole-punching and
+        TURN fallback keep working. A no-op when public_ip is empty or not a valid
+        dotted-quad IPv4, so the default behaviour is unchanged."""
+        ip = (public_ip or "").strip()
+        if not ip or not self._IPV4.match(ip) or not all(0 <= int(o) <= 255 for o in ip.split(".")):
+            return sdp_text
+        return self._HOST_CANDIDATE_IPV4.sub(lambda m: m.group(1) + ip + m.group(3), sdp_text)
 
     def _munge_video_bandwidth(self, sdp_text: str) -> str:
         XGOOGLE = "x-google-max-bitrate=300000;x-google-min-bitrate=0"
