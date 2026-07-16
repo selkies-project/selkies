@@ -504,16 +504,23 @@ class RTCPeerConnection(AsyncIOEventEmitter):
             iceTransport = self.__sctp.transport.transport
             await iceTransport.addRemoteCandidate(candidate)
 
-        # Update the remote description.
-        media = self.__remoteDescription().media
-        for sdp_m_line_index in range(0, len(media)):
-            if candidate is None:
-                media[sdp_m_line_index].ice_candidates_complete = True
-            elif (
-                candidate.sdpMLineIndex == sdp_m_line_index
-                or candidate.sdpMid == media[sdp_m_line_index].rtp.muxId
-            ):
-                media[sdp_m_line_index].ice_candidates.append(candidate)
+        # Update the remote description if it exists.
+        # The spec forbids adding candidates prior to setRemoteDescription
+        # but this used to work in previous versions.
+        if remote_description := self.__remoteDescription():
+            media = remote_description.media
+            for sdp_m_line_index in range(0, len(media)):
+                if candidate is None:
+                    media[sdp_m_line_index].ice_candidates_complete = True
+                elif (
+                    candidate.sdpMLineIndex == sdp_m_line_index
+                    or candidate.sdpMid == media[sdp_m_line_index].rtp.muxId
+                ):
+                    media[sdp_m_line_index].ice_candidates.append(candidate)
+        else:
+            logger.warning(
+                "RTCPeerConnection addIceCandidate called without remote description"
+            )
 
     def addTrack(self, track: MediaStreamTrack) -> RTCRtpSender:
         """
@@ -764,6 +771,21 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         def next_mline_index() -> int:
             return len(description.media)
 
+        def add_datachannel_section() -> None:
+            self.__sctp_mline_index = next_mline_index()
+            description.media.append(
+                create_media_description_for_sctp(
+                    self.__sctp, legacy=self._sctpLegacySdp, mid=allocate_mid(mids)
+                )
+            )
+
+        # JSEP specifies data channels should only be added after audio/video
+        # m-sections, but the `alwaysNegotiateDataChannels` option overrides that:
+        # https://w3c.github.io/webrtc-extensions/#always-negotiating-datachannels
+        if not self.__sctp and self.__configuration.alwaysNegotiateDataChannels:
+            self.__createSctpTransport()
+            add_datachannel_section()
+
         for transceiver in filter(
             lambda x: x.mid is None and not x.stopped, self.__transceivers
         ):
@@ -776,13 +798,12 @@ class RTCPeerConnection(AsyncIOEventEmitter):
                     mid=allocate_mid(mids),
                 )
             )
-        if self.__sctp and self.__sctp.mid is None:
-            self.__sctp_mline_index = next_mline_index()
-            description.media.append(
-                create_media_description_for_sctp(
-                    self.__sctp, legacy=self._sctpLegacySdp, mid=allocate_mid(mids)
-                )
-            )
+        if (
+            self.__sctp
+            and self.__sctp.mid is None
+            and not self.__configuration.alwaysNegotiateDataChannels
+        ):
+            add_datachannel_section()
 
         bundle = sdp.GroupDescription(semantic="BUNDLE", items=[])
         for media in description.media:

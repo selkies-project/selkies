@@ -430,10 +430,21 @@ CHUNK_CLASSES = [
 CHUNK_TYPES = dict((cls.type, cls) for cls in CHUNK_CLASSES)
 
 
+# SCTP packet and chunk header sizes.
+SCTP_COMMON_HEADER_LENGTH = 12
+SCTP_CHUNK_HEADER_LENGTH = 4
+# An SCTP packet must contain the common header plus at least one chunk header.
+SCTP_PACKET_MINIMUM_LENGTH = SCTP_COMMON_HEADER_LENGTH + SCTP_CHUNK_HEADER_LENGTH
+
+
 def parse_packet(data: bytes) -> tuple[int, int, int, list[Chunk]]:
     length = len(data)
-    if length < 12:
-        raise ValueError("SCTP packet length is less than 12 bytes")
+
+    # Check the packet is long enough for the common header and one chunk header.
+    if length < SCTP_PACKET_MINIMUM_LENGTH:
+        raise ValueError(
+            f"SCTP packet length is less than {SCTP_PACKET_MINIMUM_LENGTH} bytes"
+        )
 
     source_port, destination_port, verification_tag = unpack_from("!HHL", data)
 
@@ -443,10 +454,16 @@ def parse_packet(data: bytes) -> tuple[int, int, int, list[Chunk]]:
         raise ValueError("SCTP packet has invalid checksum")
 
     chunks: list[Chunk] = []
-    pos = 12
-    while pos <= length - 4:
+    pos = SCTP_COMMON_HEADER_LENGTH
+    while pos <= length - SCTP_CHUNK_HEADER_LENGTH:
         chunk_type, chunk_flags, chunk_length = unpack_from("!BBH", data, pos)
-        chunk_body = data[pos + 4 : pos + chunk_length]
+
+        # Validate the chunk length: at least a chunk header, and within the packet.
+        if chunk_length < SCTP_CHUNK_HEADER_LENGTH or pos + chunk_length > length:
+            raise ValueError(
+                f"SCTP chunk has an invalid length of {chunk_length} bytes"
+            )
+        chunk_body = data[pos + SCTP_CHUNK_HEADER_LENGTH : pos + chunk_length]
         chunk_cls = CHUNK_TYPES.get(chunk_type)
         if chunk_cls:
             chunks.append(chunk_cls(flags=chunk_flags, body=chunk_body))
