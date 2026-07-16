@@ -336,6 +336,11 @@ export class WebRTCClient {
 				this.peerConnection.setLocalDescription(local_sdp).then(() => {
 					this._setDebug("Sending SDP answer");
 					this.signaling.sendSDP(this.peerConnection.localDescription);
+				}).catch((e) => {
+					// A rejected setLocalDescription (e.g. munged-answer rules)
+					// must surface — swallowing it stalls the whole session with
+					// no answer ever sent.
+					this._setError("Error setting local description: " + e);
 				});
 			}).catch(() => {
 				this._setError("Error creating local SDP");

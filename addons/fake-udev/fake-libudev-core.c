@@ -1632,6 +1632,15 @@ struct udev_list_entry *udev_device_get_current_tags_list_entry(struct udev_devi
 
 const char *udev_device_get_driver(struct udev_device *udev_device) {
     const char* syspath = udev_device ? udev_device_get_syspath(udev_device) : "NULL_DEVICE";
+    /* A real wired Xbox 360 pad binds the "xpad" driver on its USB interface,
+     * and Firefox keys its X/Y (BTN_WEST/BTN_NORTH) correction on that driver
+     * name; report it on the USB parent or Firefox leaves the kernel's xpad
+     * naming quirk uncorrected and shows X/Y swapped. No button codes change,
+     * so the js and evdev consumers (Chrome, SDL) are unaffected. */
+    if (udev_device && udev_device->node_type == VIRTUAL_TYPE_USB_PARENT) {
+        FAKE_UDEV_LOG_DEBUG("udev_device_get_driver: reporting 'xpad' for USB parent %s", syspath);
+        return "xpad";
+    }
     FAKE_UDEV_LOG_INFO("STUB: udev_device_get_driver called for device %p (%s), returning NULL.", (void*)udev_device, syspath);
     return NULL;
 }

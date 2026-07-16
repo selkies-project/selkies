@@ -1263,6 +1263,11 @@ function Sidebar() {
   const [isGamepadEnabled, setIsGamepadEnabled] = useState(true);
   const [dashboardClipboardContent, setDashboardClipboardContent] =
     useState("");
+  // Large server clipboards arrive as a bounded, truncated preview; editing it
+  // would echo the cut-down text back over the real server clipboard on blur,
+  // so truncated content renders read-only.
+  const [dashboardClipboardTruncated, setDashboardClipboardTruncated] =
+    useState(false);
   const [audioInputDevices, setAudioInputDevices] = useState([]);
   const [audioOutputDevices, setAudioOutputDevices] = useState([]);
   const [selectedInputDeviceId, setSelectedInputDeviceId] = useState("default");
@@ -1870,11 +1875,13 @@ function Sidebar() {
   };
   const handleClipboardChange = (event) =>
     setDashboardClipboardContent(event.target.value);
-  const handleClipboardBlur = (event) =>
+  const handleClipboardBlur = (event) => {
+    if (dashboardClipboardTruncated) return;
     window.postMessage(
       { type: "clipboardUpdateFromUI", text: event.target.value },
       window.location.origin
     );
+  };
   const toggleTheme = () => {
     const newTheme = theme === "dark" ? "light" : "dark";
     setTheme(newTheme);
@@ -2147,8 +2154,10 @@ function Sidebar() {
           if (message.gamepad !== undefined)
             setIsGamepadEnabled(message.gamepad);
         } else if (message.type === "clipboardContentUpdate") {
-          if (typeof message.text === "string")
+          if (typeof message.text === "string") {
             setDashboardClipboardContent(message.text);
+            setDashboardClipboardTruncated(message.truncated === true);
+          }
         } else if (message.type === "audioDeviceStatusUpdate") {
           if (message.inputDeviceId !== undefined)
             setSelectedInputDeviceId(message.inputDeviceId || "default");
@@ -3762,6 +3771,7 @@ function Sidebar() {
                         value={dashboardClipboardContent}
                         onChange={handleClipboardChange}
                         onBlur={handleClipboardBlur}
+                        readOnly={dashboardClipboardTruncated}
                         rows="5"
                         placeholder={t("sections.clipboard.placeholder")}
                       />

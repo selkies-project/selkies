@@ -13,7 +13,9 @@ import {
 import {
   createClipboardSync,
   createClipboardGestures,
-  writeImageToLocalClipboard
+  writeImageToLocalClipboard,
+  createDeferredClipboardWriter,
+  clipboardPreviewMessage
 } from './lib/clipboard-sync.js';
 import {
   createFileUploader
@@ -245,6 +247,9 @@ const clipboardSync = createClipboardSync({
         }
     }
 });
+// Server pushes carry no user activation; Firefox/WebKit reject the write
+// until the next real gesture, so those writes go through this retry queue.
+const deferredClipboardWriter = createDeferredClipboardWriter();
 let multipartClipboard = {
     data: [],
     mimeType: '',
@@ -4805,24 +4810,31 @@ function initWebsockets() {
                             blob.text().then(text => {
                                 // Cache + settle any pending Ctrl/Cmd+C copy promise.
                                 clipboardSync.resolveServer(text, null, 'text/plain');
-                                // Local write is gated per-direction (server->client = out).
+                                // Local write is gated per-direction (server->client = out)
+                                // and retried on the next gesture when the browser
+                                // demands activation.
                                 if (clipboard_out_enabled) {
-                                    navigator.clipboard.writeText(text).catch(err => console.error('Could not copy server clipboard text to local: ' + err));
+                                    deferredClipboardWriter.write(
+                                        () => navigator.clipboard.writeText(text), {
+                                            onFailure: (err) => console.error('Could not copy server clipboard text to local: ' + err),
+                                        });
                                 }
-                                window.postMessage({ type: 'clipboardContentUpdate', text: text }, window.location.origin);
+                                window.postMessage(clipboardPreviewMessage(text), window.location.origin);
                             });
                         } else if (clipboard_out_enabled) {
                             // Settle any pending Ctrl/Cmd+C copy promise with the image blob.
                             clipboardSync.resolveServer(undefined, blob, multipartClipboard.mimeType, multipartClipboard.data);
                             const mpMime = multipartClipboard.mimeType;
-                            writeImageToLocalClipboard(blob, mpMime).then(() => {
-                                console.log(`Successfully wrote multi-part image (${mpMime}) from server to local clipboard.`);
-                                clipboardSync.captureLocalImageSig();
-                                const uiText = `Image (${mpMime}) received from session and copied to clipboard.`;
-                                window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
-                            }).catch(err => {
-                                console.error('Failed to write multi-part image to clipboard:', err);
-                            });
+                            deferredClipboardWriter.write(
+                                () => writeImageToLocalClipboard(blob, mpMime), {
+                                    onSuccess: () => {
+                                        console.log(`Successfully wrote multi-part image (${mpMime}) from server to local clipboard.`);
+                                        clipboardSync.captureLocalImageSig();
+                                        const uiText = `Image (${mpMime}) received from session and copied to clipboard.`;
+                                        window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
+                                    },
+                                    onFailure: (err) => console.error('Failed to write multi-part image to clipboard:', err),
+                                });
                         }
                     } catch (e) {
                         console.error('Error assembling final clipboard content:', e);
@@ -4858,14 +4870,16 @@ function initWebsockets() {
                 // Settle any pending Ctrl/Cmd+C copy promise with this fresh
                 // image blob (binary requests resolve to the Blob, text to its text()).
                 clipboardSync.resolveServer(undefined, blob, mimeType, bytes);
-                writeImageToLocalClipboard(blob, mimeType).then(() => {
-                    console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
-                    clipboardSync.captureLocalImageSig();
-                    const uiText = `Image (${mimeType}) received from session and copied to clipboard.`;
-                    window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
-                }).catch(err => {
-                    console.error('Failed to write image to clipboard:', err);
-                });
+                deferredClipboardWriter.write(
+                    () => writeImageToLocalClipboard(blob, mimeType), {
+                        onSuccess: () => {
+                            console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
+                            clipboardSync.captureLocalImageSig();
+                            const uiText = `Image (${mimeType}) received from session and copied to clipboard.`;
+                            window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
+                        },
+                        onFailure: (err) => console.error('Failed to write image to clipboard:', err),
+                    });
             } catch (e) {
                 console.error('Error processing binary clipboard data from server:', e);
             }
@@ -4882,14 +4896,15 @@ function initWebsockets() {
             // Cache + settle any pending Ctrl/Cmd+C copy promise with this fresh
             // text (resolves the ClipboardItem created in the keydown handler).
             clipboardSync.resolveServer(decodedText, null, 'text/plain');
-            // Local write is gated per-direction (server->client = out).
+            // Local write is gated per-direction (server->client = out) and
+            // retried on the next gesture when the browser demands activation.
             if (clipboard_out_enabled) {
-                navigator.clipboard.writeText(decodedText).catch(err => console.error('Could not copy server clipboard to local: ' + err));
+                deferredClipboardWriter.write(
+                    () => navigator.clipboard.writeText(decodedText), {
+                        onFailure: (err) => console.error('Could not copy server clipboard to local: ' + err),
+                    });
             }
-            window.postMessage({
-              type: 'clipboardContentUpdate',
-              text: decodedText
-            }, window.location.origin);
+            window.postMessage(clipboardPreviewMessage(decodedText), window.location.origin);
 
           } catch (e) {
             console.error('Error processing clipboard data:', e);

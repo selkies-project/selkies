@@ -43,6 +43,79 @@ export async function writeImageToLocalClipboard(blob, mime) {
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': outBlob })]);
 }
 
+/**
+ * Deferred local-clipboard writer for server pushes. Firefox (and WebKit)
+ * reject navigator.clipboard writes outside a transient user activation, and a
+ * server push handler never has one — so on an activation/focus rejection the
+ * write is stashed and retried on the next real gesture instead of being lost.
+ * Only the newest pending write is kept: the clipboard is last-value-wins.
+ */
+export function createDeferredClipboardWriter() {
+    let pending = null;
+
+    function isActivationError(err) {
+        return !!err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+    }
+
+    function flush() {
+        const w = pending;
+        if (!w) return;
+        pending = null;
+        w.attempt().then(
+            () => { if (w.onSuccess) w.onSuccess(); },
+            (err) => {
+                // Still no activation (e.g. synthetic event): keep it for the
+                // next gesture unless something newer replaced it meanwhile.
+                if (isActivationError(err)) { if (!pending) pending = w; }
+                else if (w.onFailure) w.onFailure(err);
+            });
+    }
+
+    // Activation-granting gestures; registered once, cheap no-ops while idle.
+    for (const type of ['pointerdown', 'keydown']) {
+        window.addEventListener(type, flush, true);
+    }
+
+    /**
+     * Run `attempt` (an async clipboard write) now; on an activation/focus
+     * rejection queue it for the next gesture. onSuccess fires whenever the
+     * write eventually lands; onFailure only for non-activation errors.
+     */
+    function write(attempt, { onSuccess, onFailure } = {}) {
+        return attempt().then(
+            () => { if (onSuccess) onSuccess(); return true; },
+            (err) => {
+                if (isActivationError(err)) {
+                    pending = { attempt, onSuccess, onFailure };
+                    return false;
+                }
+                if (onFailure) onFailure(err);
+                return false;
+            });
+    }
+
+    return { write };
+}
+
+/**
+ * Preview form of server clipboard text for the dashboard UI. Multi-MB
+ * payloads structured-clone through postMessage and land in a controlled
+ * textarea, freezing the page; the UI only needs a bounded preview. The
+ * `truncated` flag tells the dashboard to render it read-only so a blur
+ * can't echo the cut-down text back over the real server clipboard.
+ */
+export const CLIPBOARD_PREVIEW_LIMIT = 256 * 1024;
+
+export function clipboardPreviewMessage(text) {
+    const truncated = text.length > CLIPBOARD_PREVIEW_LIMIT;
+    return {
+        type: 'clipboardContentUpdate',
+        text: truncated ? text.slice(0, CLIPBOARD_PREVIEW_LIMIT) : text,
+        truncated,
+        totalLength: text.length,
+    };
+}
+
 export function createClipboardSync({ sendRequest }) {
     let lastText = '';
     let lastBlob = null;

@@ -108,6 +108,43 @@ logger.addHandler(handler)
 DATA_CHANNEL_FALLBACK_CHUNK_SIZE = ((262144 - 512) * 3) // 4
 
 
+# Pacing for bulk (clipboard) sends: never let more than this sit in a
+# channel's SCTP queue. Bounds server memory and, since input/cursor/stats
+# share the one ordered stream, bounds how long they queue behind a bulk
+# payload on a slow link.
+DATA_CHANNEL_BULK_HIGH_WATER = 1024 * 1024
+
+
+async def drain_data_channel(channel, high=DATA_CHANNEL_BULK_HIGH_WATER,
+                             timeout=15.0):
+    """Wait until `channel` has at most `high` queued bytes.
+
+    Uses the channel's bufferedamountlow event with a temporarily lowered
+    threshold; the timeout keeps a stalled/closing channel from wedging the
+    sender (the send path already drops on closed channels).
+    """
+    if channel.bufferedAmount <= high:
+        return
+    prev = channel.bufferedAmountLowThreshold
+    loop = asyncio.get_running_loop()
+    low = loop.create_future()
+
+    def _on_low():
+        if not low.done():
+            low.set_result(None)
+
+    channel.bufferedAmountLowThreshold = high
+    channel.on("bufferedamountlow", _on_low)
+    try:
+        if channel.bufferedAmount > high:
+            await asyncio.wait_for(low, timeout)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        channel.remove_listener("bufferedamountlow", _on_low)
+        channel.bufferedAmountLowThreshold = prev
+
+
 def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
     """Raw-byte chunk size for base64 payloads over the data channel.
 
@@ -284,7 +321,13 @@ class RTCApp:
             raise RTCAppError("ERROR: ice candidate is not an instance of RTCIceCandidate")
 
     async def send_clipboard_data(self, data: Union[str, bytes], mime_type: str = "text/plain"):
-        """Sends clipboard data over the data channel in chunks"""
+        """Sends clipboard data over the data channel in chunks.
+
+        Chunk sends are paced against each channel's SCTP queue (see
+        drain_data_channel) so a multi-MB clipboard neither buffers unboundedly
+        in memory nor starves input/cursor/stats behind it on the one ordered
+        stream, and the per-chunk gzip runs off the event loop.
+        """
         if not data:
             return
 
@@ -314,12 +357,23 @@ class RTCApp:
             )
             while read < len(data_bytes):
                 chunk = data_bytes[read:read + clipboard_chunk_size]
-                b64_encoded_chunk = base64.b64encode(chunk).decode("utf-8")
-                self.__send_data_channel_message(
-                    "clipboard-msg-data", {"content": b64_encoded_chunk}
-                )
+                payload = json.dumps({
+                    "type": "clipboard-msg-data",
+                    "data": {"content": base64.b64encode(chunk).decode("utf-8")},
+                })
+                # One compression per chunk, shared by every gzip-capable
+                # channel; skipped when no open channel completed the handshake.
+                gz_payload = None
+                channels = list(self._iter_open_data_channels())
+                if any(getattr(c, "_selkies_gz_tx", False) for c in channels):
+                    gz_payload = await asyncio.to_thread(
+                        gzip.compress, payload.encode("utf-8"), 6)
+                for channel in channels:
+                    self._send_prepared_to_channel(
+                        channel, "clipboard-msg-data", payload, gz_payload)
+                for channel in channels:
+                    await drain_data_channel(channel)
                 read += len(chunk)
-                await asyncio.sleep(0)
             self.__send_data_channel_message("clipboard-msg-end", {})
 
         logger.info(f"Sent clipboard data of length {len(data_bytes)} with mime type {mime_type}")
@@ -432,14 +486,23 @@ class RTCApp:
 
     def send_message_to_channel(self, channel, msg_type: str, data: Any):
         """Sends one typed message to one specific peer's data channel."""
-        msg = {"type": msg_type, "data": data}
-        payload = json.dumps(msg)
+        payload = json.dumps({"type": msg_type, "data": data})
+        # Large payloads (cursor PNGs, settings, clipboard, stats) compress well;
+        # small ones aren't worth the CPU or the risk to input latency. Only
+        # channels that completed the _gz handshake may receive gzip.
+        gz_payload = None
+        if getattr(channel, "_selkies_gz_tx", False) and len(payload) >= 512:
+            gz_payload = gzip.compress(payload.encode("utf-8"), 6)
+        self._send_prepared_to_channel(channel, msg_type, payload, gz_payload)
+
+    def _send_prepared_to_channel(self, channel, msg_type: str, payload: str,
+                                  gz_payload: Optional[bytes]):
+        """Guarded raw send of an already-serialized (and possibly
+        pre-compressed) message; bulk senders reuse one compression across
+        channels instead of re-gzipping per peer."""
         try:
-            # Large payloads (cursor PNGs, settings, clipboard, stats) compress well;
-            # small ones aren't worth the CPU or the risk to input latency. Only
-            # channels that completed the _gz handshake may receive gzip.
-            if getattr(channel, "_selkies_gz_tx", False) and len(payload) >= 512:
-                channel.send(gzip.compress(payload.encode("utf-8"), 6))
+            if gz_payload is not None and getattr(channel, "_selkies_gz_tx", False):
+                channel.send(gz_payload)
             else:
                 channel.send(payload)
         except ValueError as e:
@@ -650,7 +713,7 @@ class RTCApp:
         self.stun_servers = stun_servers
         self.turn_servers = turn_servers
         if changed:
-            logger.info(
+            logger.debug(
                 "RTC ICE servers updated; applies to new connections "
                 "(established sessions keep their current ICE)."
             )

@@ -28,7 +28,7 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import { createClipboardSync, createClipboardGestures } from "./lib/clipboard-sync.js";
+import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, clipboardPreviewMessage } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 // Inline (base64 blob) so the worker travels inside selkies-core.js itself —
 // no separate hashed file to place next to whichever chunk references it.
@@ -366,6 +366,9 @@ export default function webrtc() {
 	const clipboardSync = createClipboardSync({
 		sendRequest: () => webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD')
 	});
+	// Server pushes carry no user activation; Firefox/WebKit reject the write
+	// until the next real gesture, so those writes go through this retry queue.
+	const deferredClipboardWriter = createDeferredClipboardWriter();
 	const isChromium = (() => {
 		const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
 			(navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -2046,36 +2049,32 @@ export default function webrtc() {
 					if (isText) {
 						clipboardSync.resolveServer(content, null, 'text/plain');
 						// Parity with the websockets core: the dashboard UI gets the
-						// text regardless; the local clipboard write is gated
-						// per-direction (server->client = out) and best-effort — an
-						// unfocused tab must not hide the update from the UI.
-						window.postMessage({
-							type: 'clipboardContentUpdate',
-							text: content,
-						}, window.location.origin);
+						// (bounded) preview regardless; the local clipboard write is
+						// gated per-direction (server->client = out) and retried on
+						// the next gesture when the browser demands activation.
+						window.postMessage(clipboardPreviewMessage(content),
+							window.location.origin);
 						if (clipboard_out_enabled) {
-							navigator.clipboard.writeText(content)
-								.then(() => {
-									console.log('Successfully wrote text from server to local clipboard.');
-								})
-								.catch(err => {
-									console.log('Could not copy text to clipboard: ', err);
+							deferredClipboardWriter.write(
+								() => navigator.clipboard.writeText(content), {
+									onSuccess: () => console.log('Successfully wrote text from server to local clipboard.'),
+									onFailure: (err) => console.log('Could not copy text to clipboard: ', err),
 								});
 						}
 					} else {
 						if (enable_binary_clipboard && clipboard_out_enabled) {
 							try { content.getType(mimeType).then(async (b) => clipboardSync.resolveServer(undefined, b, mimeType, new Uint8Array(await b.arrayBuffer()))).catch(() => {}); } catch (_) {}
-							navigator.clipboard.write([content])
-								.then(() => {
-									window.postMessage({
-										type: 'clipboardContentUpdate',
-										text: "received an image from server",
-									}, window.location.origin);
-									console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
-									clipboardSync.captureLocalImageSig();
-								})
-								.catch(err => {
-									console.error('Failed to write image to clipboard: ', err);
+							deferredClipboardWriter.write(
+								() => navigator.clipboard.write([content]), {
+									onSuccess: () => {
+										window.postMessage({
+											type: 'clipboardContentUpdate',
+											text: "received an image from server",
+										}, window.location.origin);
+										console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
+										clipboardSync.captureLocalImageSig();
+									},
+									onFailure: (err) => console.error('Failed to write image to clipboard: ', err),
 								});
 						}
 					}

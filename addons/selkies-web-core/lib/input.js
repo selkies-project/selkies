@@ -1504,7 +1504,29 @@ export class Input {
                             clearTimeout(this._altGrTimeout);
                             this._sendKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
                         }
+                        // A modifier pressed while the IME was still composing
+                        // was swallowed with the rest of the composition, so it
+                        // is NOT held server-side (Windows 11 Korean IME commits
+                        // on the modifier, then delivers the letter as 'Process').
+                        // Wrap the key with the missing chord modifiers or it
+                        // lands as a bare keypress and types the letter.
+                        const missingMods = [];
+                        if (event.ctrlKey && !this._keysymHeld(KeyTable.XK_Control_L, KeyTable.XK_Control_R)) {
+                            missingMods.push(KeyTable.XK_Control_L);
+                        }
+                        if (event.altKey && !this._keysymHeld(KeyTable.XK_Alt_L, KeyTable.XK_Alt_R)) {
+                            missingMods.push(KeyTable.XK_Alt_L);
+                        }
+                        if (event.metaKey && !this._keysymHeld(KeyTable.XK_Super_L, KeyTable.XK_Super_R,
+                                                               KeyTable.XK_Meta_L, KeyTable.XK_Meta_R)) {
+                            missingMods.push(KeyTable.XK_Super_L);
+                        }
+                        if (event.shiftKey && !this._keysymHeld(KeyTable.XK_Shift_L, KeyTable.XK_Shift_R)) {
+                            missingMods.push(KeyTable.XK_Shift_L);
+                        }
+                        for (const m of missingMods) this.send("kd," + m);
                         this._sendMomentaryKey(chordKeysym);
+                        for (const m of missingMods.reverse()) this.send("ku," + m);
                     }
                 }
             }
@@ -1865,6 +1887,14 @@ export class Input {
                 ks === KeyTable.XK_Meta_L || ks === KeyTable.XK_Meta_R) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    /** True when any of the given keysyms is currently held server-side. */
+    _keysymHeld(...keysyms) {
+        for (const code in this._keyDownList) {
+            if (keysyms.includes(this._keyDownList[code])) return true;
         }
         return false;
     }

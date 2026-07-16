@@ -968,6 +968,35 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         for i, media in enumerate(description.media):
             dtlsTransport: Optional[RTCDtlsTransport] = None
             self.__seenMids.add(media.rtp.muxId)
+            if media.port == 0:
+                # The peer rejected this m-line (RFC 3264: port zero); nothing
+                # negotiates. Drop its never-started transports from the state
+                # aggregation so the connection doesn't wait on them forever —
+                # close() still reaches them through the transceiver list.
+                if media.kind in ["audio", "video"]:
+                    for transceiver in self.__transceivers:
+                        if transceiver.kind == media.kind and transceiver.mid in [
+                            None,
+                            media.rtp.muxId,
+                        ]:
+                            if transceiver.mid is None:
+                                transceiver._set_mid(media.rtp.muxId)
+                                transceiver._set_mline_index(i)
+                            if description.type in ["answer", "pranswer"]:
+                                transceiver._setCurrentDirection("inactive")
+                            rejectedDtls = transceiver.receiver.transport
+                            if not any(
+                                t is not transceiver
+                                and t.receiver.transport is rejectedDtls
+                                for t in self.__transceivers
+                            ):
+                                self.__dtlsTransports.discard(rejectedDtls)
+                                self.__iceTransports.discard(rejectedDtls.transport)
+                            break
+                elif media.kind == "application" and self.__sctp:
+                    self.__dtlsTransports.discard(self.__sctp.transport)
+                    self.__iceTransports.discard(self.__sctp.transport.transport)
+                continue
             if media.kind in ["audio", "video"]:
                 # find transceiver
                 transceiver = None
@@ -1081,22 +1110,28 @@ class RTCPeerConnection(AsyncIOEventEmitter):
             if self.__sctp and self.__sctp.mid == primaryMid:
                 primaryTransport = self.__sctp.transport
 
-            # replace transport for bundled media
+            # replace transport for bundled media; a slave that already shares
+            # the primary transport (same-kind transceivers are created on one
+            # transport) must not retire it as an "old" transport — e.g. a
+            # Firefox answer that rejected the first m-line re-anchors the
+            # bundle on such a shared transport.
             oldTransports = set()
             slaveMids = bundle.items[1:]
             for transceiver in self.__transceivers:
                 if transceiver.mid in slaveMids and not transceiver._bundled:
-                    oldTransports.add(transceiver.receiver.transport)
-                    transceiver.receiver.setTransport(primaryTransport)
-                    transceiver.sender.setTransport(primaryTransport)
+                    if transceiver.receiver.transport is not primaryTransport:
+                        oldTransports.add(transceiver.receiver.transport)
+                        transceiver.receiver.setTransport(primaryTransport)
+                        transceiver.sender.setTransport(primaryTransport)
                     transceiver._bundled = True
             if (
                 self.__sctp
                 and self.__sctp.mid in slaveMids
                 and not self.__sctp._bundled
             ):
-                oldTransports.add(self.__sctp.transport)
-                self.__sctp.setTransport(primaryTransport)
+                if self.__sctp.transport is not primaryTransport:
+                    oldTransports.add(self.__sctp.transport)
+                    self.__sctp.setTransport(primaryTransport)
                 self.__sctp._bundled = True
 
             # stop and discard old ICE transports
@@ -1451,6 +1486,12 @@ class RTCPeerConnection(AsyncIOEventEmitter):
                     )
 
         for media in description.media:
+            # A rejected m-line (RFC 3264: port zero) negotiates nothing and
+            # carries no ICE/DTLS parameters — e.g. Firefox answering a video
+            # section it has no codec for — so none of these checks apply.
+            if media.port == 0:
+                continue
+
             # check ICE credentials were provided
             if not media.ice.usernameFragment or not media.ice.password:
                 raise ValueError("ICE username fragment or password is missing")

@@ -24,6 +24,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 
 try:
     import pynvml
@@ -36,6 +37,11 @@ except Exception:  # universal-vendor telemetry; sysfs backfill covers its absen
     GPUMonitorFactory = None
 
 logger = logging.getLogger("gpu_stats")
+
+# GPU presence is reported through this logger; aitop re-emits vendor detection
+# at INFO on every factory build, so keep its detection chatter off the stream.
+if GPUMonitorFactory is not None:
+    logging.getLogger("aitop.core.gpu.factory").setLevel(logging.WARNING)
 
 _nvml_ready = False
 
@@ -172,13 +178,35 @@ def _aitop_vendor(monitor):
     return type(monitor).__name__.replace("GPUMonitor", "").replace("NPUMonitor", "").lower()
 
 
+_aitop_monitors_cache = None
+_aitop_monitors_lock = threading.Lock()
+
+
+def _aitop_monitors():
+    """aitop monitors, built once and reused. create_monitors() re-detects
+    vendors and appends to PATH on every call, so polling it per frame grows
+    PATH until subprocess spawns fail with E2BIG. A build failure is cached as
+    an empty list for the same reason — retrying each poll would keep growing
+    PATH; NVML/sysfs still cover the stats."""
+    global _aitop_monitors_cache
+    if _aitop_monitors_cache is None:
+        with _aitop_monitors_lock:
+            if _aitop_monitors_cache is None:
+                try:
+                    _aitop_monitors_cache = GPUMonitorFactory.create_monitors()
+                except Exception as exc:
+                    logger.warning("aitop monitor detection failed: %s", exc)
+                    _aitop_monitors_cache = []
+    return _aitop_monitors_cache
+
+
 def _aitop_gpus(vendors=None):
     """Multi-vendor telemetry via aitop's monitors (utilization + memory in MiB)."""
     if GPUMonitorFactory is None:
         return []
     gpus = []
     try:
-        for monitor in GPUMonitorFactory.create_monitors():
+        for monitor in _aitop_monitors():
             vendor = _aitop_vendor(monitor)
             if vendors is not None and vendor not in vendors:
                 continue

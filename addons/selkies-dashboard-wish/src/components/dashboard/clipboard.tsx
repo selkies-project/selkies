@@ -14,6 +14,10 @@ import { t } from "@/i18n";
 
 export function Clipboard() {
 	const [dashboardClipboardContent, setDashboardClipboardContent] = useState('');
+	// Large server clipboards arrive as a bounded, truncated preview; editing it
+	// would echo the cut-down text back over the real server clipboard on blur,
+	// so truncated content renders read-only.
+	const [clipboardTruncated, setClipboardTruncated] = useState(false);
 	const [clipboardImageUrl, setClipboardImageUrl] = useState<string | null>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
 	const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
@@ -43,6 +47,7 @@ export function Clipboard() {
 			if (message.type === 'clipboardContentUpdate') {
 				if (typeof message.text === 'string') {
 					setDashboardClipboardContent(message.text);
+					setClipboardTruncated(message.truncated === true);
 				}
 			}
 
@@ -67,6 +72,7 @@ export function Clipboard() {
 	};
 
 	const handleClipboardBlur = (event: React.FocusEvent<HTMLTextAreaElement>) => {
+		if (clipboardTruncated) return;
 		window.postMessage({ type: 'clipboardUpdateFromUI', text: event.target.value }, window.location.origin);
 	};
 
@@ -122,6 +128,7 @@ export function Clipboard() {
 				value={dashboardClipboardContent}
 				onChange={handleClipboardChange}
 				onBlur={handleClipboardBlur}
+				readOnly={clipboardTruncated}
 				rows={5}
 				placeholder={t('clipboard.inputPlaceholder')}
 				className="allow-native-input resize-none bg-background/95 overflow-y-auto max-h-[150px]"
