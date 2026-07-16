@@ -701,13 +701,25 @@ class MediaPipelinePixel(MediaPipeline):
         driven via subprocess on this path: the in-process asyncio PA bindings can
         run a native event callback against freed state under load (observed
         SIGSEGV in the loop during peer churn), and these are rare one-shot ops."""
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "pactl", *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=5)
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=5)
+            except asyncio.TimeoutError:
+                # Reap the timed-out process instead of orphaning it: a pactl
+                # blocked on a stuck PA server would otherwise leak per call.
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+                logger.warning(f"pactl {' '.join(args)} timed out after 5s; killed.")
+                return ""
             if proc.returncode != 0:
                 logger.warning(
                     f"pactl {' '.join(args)} failed: {err.decode(errors='replace').strip()}"

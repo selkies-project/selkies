@@ -87,6 +87,15 @@ class Display(object):
         self.socket_error_lock = lock.allocate_lock()
         self.socket_error = None
 
+        # Optional deadline (seconds) bounding a blocking wait for a request
+        # REPLY. None keeps the stock behaviour (block forever); a value makes
+        # an unresponsive server surface as a closed connection instead of
+        # freezing the caller. Event waits are never bounded — a quiet server
+        # sending no events is not an error. socket.settimeout does not help
+        # here: the blocking wait is a select(), which settimeout does not
+        # affect.
+        self.blocking_timeout = None
+
         # Event queue
         self.event_queue_read_lock = lock.allocate_lock()
         self.event_queue_write_lock = lock.allocate_lock()
@@ -543,10 +552,25 @@ class Display(object):
 
                 if recv or flush:
                     timeout = 0
+                elif request is not None and self.blocking_timeout is not None:
+                    # Bound the wait for a request reply only; an event wait
+                    # (timeout None below) legitimately blocks until an event
+                    # arrives.
+                    timeout = self.blocking_timeout
                 else:
                     timeout = None
 
                 rs, ws, es = select.select([self.socket], writeset, [], timeout)
+
+                if timeout and not rs and not ws and not es:
+                    # A bounded request-reply wait expired: the server accepted
+                    # the request but produced nothing for `timeout` seconds
+                    # (driver hang, a foreign client's server grab). Treat the
+                    # connection as dead so the caller drops it and falls back,
+                    # rather than blocking here forever. timeout is truthy only
+                    # for that bounded case (0 for polls, None for event waits).
+                    self.close_internal('server: request reply timed out')
+                    raise self.socket_error
 
             # Ignore errors caused by a signal received while blocking.
             # All other errors are re-raised.

@@ -598,7 +598,11 @@ class Object(ValueField):
         return self.type.parse_value(val, display)
 
     def pack_value(self, val):
-        return self.type.pack_value(val)
+        # to_binary's variable-field loop expects (binary, length, format);
+        # Struct.pack_value returns only the binary. Only variable-sized
+        # structs (structcode None, e.g. RandR MonitorInfo) reach this path —
+        # fixed-size Objects pack through the static struct.pack call.
+        return self.type.pack_value(val), None, None
 
     def check_value(self, val):
         if isinstance(val, tuple):

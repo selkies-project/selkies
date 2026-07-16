@@ -28,7 +28,7 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, clipboardPreviewMessage } from "./lib/clipboard-sync.js";
+import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, clipboardPreviewMessage, readLocalClipboard } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 // Inline (base64 blob) so the worker travels inside selkies-core.js itself —
 // no separate hashed file to place next to whichever chunk references it.
@@ -279,6 +279,10 @@ export default function webrtc() {
 
 	var videoElement = null;
 	var audioElement = null;
+	// Last stream resolution asked of the server, in physical stream pixels;
+	// compared against the track's intrinsic size to detect a realized size
+	// that differs from the request (mode snapping / rejected resize).
+	var lastRequestedStreamRes = null;
 	// Screen Wake Lock sentinel + preferred audio output device (parity with the WS core).
 	let wakeLockSentinel = null;
 	let preferredOutputDeviceId = null;
@@ -884,6 +888,7 @@ export default function webrtc() {
 			realHeight = alignResolution(height * dpr);
 		}
 		const resString = `${realWidth}x${realHeight}`;
+		lastRequestedStreamRes = [realWidth, realHeight];
 		console.log(`Sending resolution to server: ${resString}, Pixel Ratio Used: ${dpr}, useCssScaling: ${useCssScaling}`);
 		webrtc.sendDataChannelMessage(`r,${resString}`);
 	}
@@ -1414,43 +1419,23 @@ export default function webrtc() {
 		const clipboardSendTracker = new Promise((resolve) => { settleClipboardSend = resolve; });
 		clipboardSendInFlight = clipboardSendTracker;
 		try {
-			if (enable_binary_clipboard) {
-				const clipboardItems = await navigator.clipboard.read();
-				if (!clipboardItems || clipboardItems.length === 0) {
-						return;
-				}
-
-				const item = clipboardItems[0];
-				const imageType = item.types.find(t => t.startsWith('image/'));
-				if (imageType) {
-					const blob = await item.getType(imageType);
-					const arrayBuffer = await blob.arrayBuffer();
-					await sendClipboardData(arrayBuffer, imageType);
-					console.log(`Sent binary clipboard on focus via sendClipboardData: ${imageType}, size: ${blob.size} bytes`);
-				} else if (item.types.includes('text/plain')) {
-					const blob = await item.getType('text/plain');
-					const text = await blob.text();
-					if (text && text === lastClipboardText) {
-						return;
-					}
-					await sendClipboardData(text);
-					lastClipboardText = text;
-					console.log("Sent clipboard text (from binary-enabled path) on focus via sendClipboardData");
-				}
-			}
-			else {
-				const text = await navigator.clipboard.readText();
-				if (text && text === lastClipboardText) {
-					return;
-				}
-				if (text) {
-					await sendClipboardData(text);
-					lastClipboardText = text;
+			// Shared reader (lib/clipboard-sync.js): text/image-normalized, with the
+			// DataError->readText() fallback for large text living in one place.
+			const res = await readLocalClipboard(enable_binary_clipboard);
+			if (res) {
+				if (res.kind === 'image') {
+					const arrayBuffer = await res.blob.arrayBuffer();
+					await sendClipboardData(arrayBuffer, res.mime);
+					console.log(`Sent binary clipboard on focus via sendClipboardData: ${res.mime}, size: ${res.blob.size} bytes`);
+				} else if (res.text !== lastClipboardText) {
+					await sendClipboardData(res.text);
+					lastClipboardText = res.text;
 					console.log("Sent clipboard text on focus via sendClipboardData");
 				}
 			}
 		} catch (err) {
-			if (err.name !== 'NotFoundError' && !err.message.includes('not focused')) {
+			if (err.name !== 'NotFoundError' && err.name !== 'DataError' && err.name !== 'NotAllowedError'
+				&& !(err.message && err.message.includes('not focused'))) {
 				console.warn(`Clipboard read error: ${err.name}`);
 			}
 		} finally {
@@ -1471,6 +1456,7 @@ export default function webrtc() {
 		canWrite: () => !!clipboard_out_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
 		getSendInFlight: () => clipboardSendInFlight,
+		getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
 	});
 
 	async function handleWindowFocus() {
@@ -1735,6 +1721,17 @@ export default function webrtc() {
 			videoElement.className = 'video';
 			videoElement.autoplay = true;
 			videoElement.playsInline = true;
+			videoElement.addEventListener('resize', () => {
+				// The track's intrinsic size IS the realized server resolution.
+				// When it disagrees with what was requested, window-math input
+				// mapping (CSS × dpr == server px) is wrong; the flag routes
+				// input.js through the video's fitted content box instead.
+				const vw = videoElement.videoWidth, vh = videoElement.videoHeight;
+				if (vw > 0 && vh > 0 && lastRequestedStreamRes) {
+					window.streamResolutionDiverged =
+						(vw !== lastRequestedStreamRes[0] || vh !== lastRequestedStreamRes[1]);
+				}
+			});
 
 			const hiddenFileInput = document.createElement('input');
 			hiddenFileInput.type = 'file';

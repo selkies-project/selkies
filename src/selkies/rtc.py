@@ -180,8 +180,13 @@ class PipelineBridge:
     the freshest frame), a deeper bound acts as a short drop-oldest FIFO (audio
     wants continuity so a brief consumer stall doesn't silently drop samples).
     """
-    def __init__(self, maxsize: int = 1):
+    def __init__(self, maxsize: int = 1, on_drop=None):
         self._queue = asyncio.Queue(maxsize=maxsize)
+        # Fired (on the loop thread) whenever a queued item is dropped. The video
+        # bridge uses it to force a recovery keyframe: a dropped ENCODED frame
+        # breaks the wire reference chain with no RTP gap, so the browser never
+        # requests a PLI and the smear would persist under infinite GOP.
+        self._on_drop = on_drop
 
     def set_data(self, data: Any):
         # Synchronous, no lock: the drop-oldest check and the put have no await, so
@@ -190,6 +195,8 @@ class PipelineBridge:
         # oldest queued item to make space for the new one.
         if self._queue.full():
             self._queue.get_nowait()
+            if self._on_drop is not None:
+                self._on_drop()
         self._queue.put_nowait(data)
 
     async def get_data(self):
@@ -1045,6 +1052,33 @@ class RTCApp:
         display_id = peer_obj.get("display_id") or "primary"
         asyncio.run_coroutine_threadsafe(self.request_idr_frame(display_id), self.async_event_loop)
 
+    def _idr_on_video_drop(self, display_id: str, min_interval: float = 0.5):
+        """Drop hook for a display's video bridge. A dropped encoded frame leaves the
+        wire referencing a picture no client received; the drop is upstream of RTP so
+        no loss is signalled and the browser never asks for a keyframe, leaving a
+        persistent smear under infinite GOP. Force a recovery IDR, debounced so a
+        sustained consumer lag doesn't turn every dropped frame into a large keyframe
+        and deepen the congestion."""
+        state = {"last": None}
+
+        def on_drop():
+            loop = self.async_event_loop
+            if loop is None:
+                return
+            now = loop.time()
+            if state["last"] is not None and now - state["last"] < min_interval:
+                return
+            state["last"] = now
+            req = getattr(self, "request_idr_frame", None)
+            if req is None:
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(req(display_id), loop)
+            except Exception:
+                pass
+
+        return on_drop
+
     async def _start_rtc_pipeline(
         self,
         client_peer_id: str,
@@ -1062,7 +1096,7 @@ class RTCApp:
         # display page renders video and carries input, matching the WS model.
         if client_type is ClientType.CONTROLLER:
             graph: Dict[str, Any] = {"relay": MediaRelay()}
-            graph["video_bridge"] = PipelineBridge()
+            graph["video_bridge"] = PipelineBridge(on_drop=self._idr_on_video_drop(display_id))
             graph["video_media"] = VideoMedia(graph["video_bridge"])
             if display_id == "primary":
                 # Audio uses a small drop-oldest FIFO so a brief sender stall keeps
@@ -1315,7 +1349,8 @@ class RTCApp:
         The relay's __run_track workers only exit when the SOURCE track errors,
         so dropping the reference alone leaks them pending in recv() ("Task was
         destroyed but it is pending!")."""
-        graph = self.displays.pop(display_id or 'primary', None)
+        display_id = display_id or 'primary'
+        graph = self.displays.pop(display_id, None)
         if not graph:
             return
         relay = graph.get('relay')
@@ -1324,6 +1359,28 @@ class RTCApp:
                 await relay.stop()
             except Exception as e_relay:
                 logger.warning(f"Media relay teardown error (continuing): {e_relay}")
+        # The relay's tracks are gone, so every viewer (#shared / #player*) of this
+        # display is now bound to a dead source: its sender would block in recv()
+        # forever, frozen on the last frame, while ICE stays "connected" so the
+        # client never self-heals. Close those peer connections so the clients see
+        # the drop and reload — reconnecting to the controller's fresh graph.
+        await self._close_display_viewers(display_id)
+
+    async def _close_display_viewers(self, display_id: str):
+        victims = [
+            (pid, obj) for pid, obj in list(self.peer_connections.items())
+            if (obj.get('display_id') or 'primary') == display_id
+            and obj.get('client_type') != ClientType.CONTROLLER
+        ]
+        for pid, obj in victims:
+            pc = obj.get('peer_conn')
+            if pc is None:
+                continue
+            try:
+                logger.info(f"Closing orphaned viewer '{pid}' of display '{display_id}' after controller loss")
+                await pc.close()
+            except Exception as e:
+                logger.debug(f"Error closing orphaned viewer '{pid}': {e}")
 
     async def start_rtc_connection(self, client_peer_id: str, client_type: str, client_token: Optional[str] = None, display_id: str = "primary"):
         try:

@@ -31,6 +31,12 @@ from .display_utils import (
     get_new_res,
     generate_xrandr_gtf_modeline,
     ensure_mode,
+    resize_display,
+    list_logical_monitors,
+    set_logical_monitor,
+    delete_logical_monitor,
+    designate_primary_output,
+    grow_framebuffer,
     set_dpi,
     set_cursor_size,
     clamp_primary_feedback,
@@ -245,6 +251,13 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
         )
         return set()
 
+    # The gzip frame is identical for every gzip-capable client, so compute it
+    # at most once per broadcast instead of once per client (a large clipboard
+    # payload compressed N times stalls the loop N times). The check-and-set is
+    # synchronous — no await between the None test and the assignment — so
+    # concurrent _send_one coroutines never double-compress.
+    gz_frame_holder = []
+
     async def _send_one(client):
         if isinstance(message, (bytes, bytearray, memoryview)):
             # Binary control frames pass through untouched (media has its own
@@ -255,7 +268,9 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
             # gzip-capable client: send a 0x05-tagged gzip frame. Small,
             # latency-critical messages (input, status verbs) stay raw text —
             # they are below the threshold, so compression never touches them.
-            await client.send_bytes(b"\x05" + gzip.compress(message.encode("utf-8"), 6))
+            if not gz_frame_holder:
+                gz_frame_holder.append(b"\x05" + gzip.compress(message.encode("utf-8"), 6))
+            await client.send_bytes(gz_frame_holder[0])
         else:
             await client.send_str(message)
 
@@ -392,20 +407,22 @@ class SelkiesStreamingApp:
                     message = f"clipboard_binary,{mime_type},{encoded_data}"
                 else:
                     message = f"clipboard,{encoded_data}"
-                await _broadcast_to_clients(self.data_streaming_server.clients, message)
+                # Bounded: the clipboard monitor task calls this, and one
+                # stalled client must not wedge clipboard delivery for all.
+                await _broadcast_to_clients(self.data_streaming_server.clients, message, per_client_timeout=2.0)
             else:
                 data_logger.info(f"Sending large clipboard data ({mime_type}, {total_size} bytes) via multipart.")
                 start_message = f"clipboard_start,{mime_type},{total_size}"
-                await _broadcast_to_clients(self.data_streaming_server.clients, start_message)
+                await _broadcast_to_clients(self.data_streaming_server.clients, start_message, per_client_timeout=2.0)
                 offset = 0
                 while offset < total_size:
                     chunk = data_bytes[offset:offset + CLIPBOARD_CHUNK_SIZE]
                     encoded_chunk = base64.b64encode(chunk).decode('ascii')
                     data_message = f"clipboard_data,{encoded_chunk}"
-                    await _broadcast_to_clients(self.data_streaming_server.clients, data_message)
+                    await _broadcast_to_clients(self.data_streaming_server.clients, data_message, per_client_timeout=2.0)
                     offset += len(chunk)
                     await asyncio.sleep(0)
-                await _broadcast_to_clients(self.data_streaming_server.clients, "clipboard_finish")
+                await _broadcast_to_clients(self.data_streaming_server.clients, "clipboard_finish", per_client_timeout=2.0)
                 data_logger.info("Finished sending multi-part clipboard data.")
         except Exception as e:
             data_logger.error(f"Failed to send clipboard data: {e}", exc_info=True)
@@ -425,7 +442,10 @@ class SelkiesStreamingApp:
             clients_ref = self.data_streaming_server.clients
 
             async def _broadcast_cursor_helper():
-                await _broadcast_to_clients(clients_ref, msg_to_broadcast)
+                # Bounded: cursor changes arrive from a pixelflux thread at high
+                # rate; a stalled client would otherwise accumulate one blocked
+                # coroutine per cursor change.
+                await _broadcast_to_clients(clients_ref, msg_to_broadcast, per_client_timeout=2.0)
 
             asyncio.run_coroutine_threadsafe(
                 _broadcast_cursor_helper(), self.async_event_loop
@@ -728,7 +748,8 @@ class DataStreamingServer(BaseStreamingService):
         message_str = f"DISPLAY_CONFIG_UPDATE,{json.dumps(payload)}"
         
         data_logger.info(f"Broadcasting display config update: {message_str}")
-        await _broadcast_to_clients(self.clients, message_str)
+        # Bounded: callers hold _reconfigure_lock.
+        await _broadcast_to_clients(self.clients, message_str, per_client_timeout=2.0)
 
     def refresh_cursor_cache(self):
         if not self.app:
@@ -1126,11 +1147,10 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e:
             data_logger.warning(f"Could not build live server settings broadcast: {e}")
             return
-        for client in list(self.clients):
-            try:
-                await client.send_str(msg)
-            except (ConnectionResetError, OSError, RuntimeError):
-                pass
+        # Bounded broadcast: this runs while _apply_client_settings holds
+        # _reconfigure_lock, so a frozen client's full socket buffer must be
+        # dropped, not waited on.
+        await _broadcast_to_clients(self.clients, msg, per_client_timeout=2.0)
 
     def _set_backpressure_enabled(self, display_id: str, display_state: dict, enabled: bool):
         """Update the backpressure flag, requesting an IDR when it lifts.
@@ -1287,7 +1307,9 @@ class DataStreamingServer(BaseStreamingService):
             }
             message_str = json.dumps(message)
             data_logger.info(f"Broadcasting primary stream resolution to all clients: {message_str}")
-            await _broadcast_to_clients(self.clients, message_str)
+            # Bounded: this runs under _reconfigure_lock, and one frozen client
+            # must not wedge display control for everyone.
+            await _broadcast_to_clients(self.clients, message_str, per_client_timeout=2.0)
 
     def _parse_settings_payload(self, payload_str: str) -> dict:
         settings_data = json.loads(payload_str)
@@ -1488,12 +1510,22 @@ class DataStreamingServer(BaseStreamingService):
                             wl_idx = getattr(self.cli_args, 'wayland_socket_index', 0)
                             env["WAYLAND_DISPLAY"] = f"wayland-{wl_idx}"
                             data_logger.info(f"Wayland Settings: Executing '{' '.join(cmd)}' on wayland-{wl_idx}")
-                            try: 
+                            try:
                                 proc = await asyncio.create_subprocess_exec(
                                     *cmd, env=env,
                                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                                 )
-                                await proc.communicate()
+                                # Bounded: this runs under _reconfigure_lock; a wedged
+                                # compositor must not hold it forever.
+                                try:
+                                    await asyncio.wait_for(proc.communicate(), timeout=10.0)
+                                except asyncio.TimeoutError:
+                                    try:
+                                        proc.kill()
+                                    except ProcessLookupError:
+                                        pass
+                                    await proc.wait()
+                                    data_logger.error("wlr-randr timed out in settings apply; killed.")
                             except Exception as e:
                                 data_logger.error(f"Failed to execute wlr-randr in settings apply: {e}")
 
@@ -2192,8 +2224,16 @@ class DataStreamingServer(BaseStreamingService):
                                         # connection is taking over.
                                         existing_client_info['ws'] = websocket
                                         try:
-                                            await old_ws.send_str(f"KILL {kill_reason}")
-                                            await old_ws.close(code=1000, message=b"Superseded by new client")
+                                            # The superseded socket is exactly the one most
+                                            # likely frozen (that is why the user reconnected);
+                                            # bound it or the takeover session hangs here.
+                                            await asyncio.wait_for(old_ws.send_str(f"KILL {kill_reason}"), timeout=2.0)
+                                            await asyncio.wait_for(
+                                                old_ws.close(code=1000, message=b"Superseded by new client"),
+                                                timeout=2.0,
+                                            )
+                                        except asyncio.TimeoutError:
+                                            _close_abandoned_ws(old_ws)
                                         except (ConnectionResetError, OSError, RuntimeError):
                                             data_logger.info(f"Old client for '{display_id}' was already disconnected.")
                                         except Exception as e:
@@ -2217,7 +2257,9 @@ class DataStreamingServer(BaseStreamingService):
                                         old_ws = old_secondary_client.get('ws')
                                         if old_ws:
                                             try:
-                                                await old_ws.send_str("VIDEO_STOPPED")
+                                                await asyncio.wait_for(old_ws.send_str("VIDEO_STOPPED"), timeout=2.0)
+                                            except asyncio.TimeoutError:
+                                                _close_abandoned_ws(old_ws)
                                             except (ConnectionResetError, OSError, RuntimeError):
                                                 pass
                             if display_id not in self.display_clients:
@@ -2537,7 +2579,7 @@ class DataStreamingServer(BaseStreamingService):
                                         started = True
                                         data_logger.info("START_AUDIO: pcmflux audio pipeline already active.")
                                     if started:
-                                        await _broadcast_to_clients(self.clients, "AUDIO_STARTED")
+                                        await _broadcast_to_clients(self.clients, "AUDIO_STARTED", per_client_timeout=2.0)
                                 else:
                                     data_logger.warning("START_AUDIO: Cannot start server-to-client audio (pcmflux not available).")
                                     await websocket.send_str("AUDIO_DISABLED")
@@ -2553,10 +2595,18 @@ class DataStreamingServer(BaseStreamingService):
                             if self.is_pcmflux_capturing:
                                 await self._stop_pcmflux_pipeline()
                             if self.clients:
-                                await _broadcast_to_clients(self.clients, "AUDIO_STOPPED")
+                                await _broadcast_to_clients(self.clients, "AUDIO_STOPPED", per_client_timeout=2.0)
 
                     elif message.startswith("r,"):
-                        await self.client_settings_received.wait() 
+                        # Bounded: this is THE loop that would process the initial
+                        # SETTINGS; waiting on it unbounded here deadlocks the
+                        # session if a client emits r, first. Resolutions are
+                        # re-asserted after SETTINGS anyway, so dropping is safe.
+                        try:
+                            await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            data_logger.warning("Ignoring resize request received before initial SETTINGS.")
+                            continue
                         raddr = remote_address
                         
                         parts = message.split(',')
@@ -2582,7 +2632,11 @@ class DataStreamingServer(BaseStreamingService):
                         await on_resize_handler(target_res_str, self.app, self, display_id)
 
                     elif message.startswith("SET_NATIVE_CURSOR_RENDERING,"):
-                        await self.client_settings_received.wait()
+                        try:
+                            await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            data_logger.warning("Ignoring SET_NATIVE_CURSOR_RENDERING before initial SETTINGS.")
+                            continue
                         try:
                             new_capture_cursor_str = message.split(",")[1].strip().lower()
                             new_capture_cursor = new_capture_cursor_str in ("1", "true")
@@ -2592,7 +2646,11 @@ class DataStreamingServer(BaseStreamingService):
                             data_logger.warning(f"Malformed SET_NATIVE_CURSOR_RENDERING message: {message}, error: {e}")
 
                     elif message.startswith("s,"):
-                        await self.client_settings_received.wait()
+                        try:
+                            await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            data_logger.warning("Ignoring DPI sync received before initial SETTINGS.")
+                            continue
                         try:
                             dpi_value_str = message.split(",")[1]
                             dpi_value = int(dpi_value_str)
@@ -2639,7 +2697,15 @@ class DataStreamingServer(BaseStreamingService):
                                             stdout=asyncio.subprocess.PIPE,
                                             stderr=asyncio.subprocess.PIPE
                                         )
-                                        stdout, stderr = await proc.communicate()
+                                        try:
+                                            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+                                        except asyncio.TimeoutError:
+                                            try:
+                                                proc.kill()
+                                            except ProcessLookupError:
+                                                pass
+                                            await proc.wait()
+                                            stdout, stderr = b"", b"timed out after 10s"
                                         if proc.returncode != 0:
                                             data_logger.error(f"wlr-randr failed: {stderr.decode().strip()}")
                                         else:
@@ -3025,24 +3091,9 @@ class DataStreamingServer(BaseStreamingService):
             return False
 
     async def _get_current_monitors(self):
-        """Parses `xrandr --listmonitors` to get names of existing logical monitors."""
-        monitors = []
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "xrandr", "--listmonitors",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode == 0:
-                output = stdout.decode()
-                for line in output.splitlines()[1:]:
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        monitors.append(parts[1].lstrip('+*'))
-        except Exception as e:
-            data_logger.error(f"Failed to list current monitors: {e}")
-        return monitors
+        """Names of all existing logical monitors (native RandR query first,
+        xrandr parse fallback)."""
+        return await list_logical_monitors()
 
 
     async def _stop_capture_for_display(self, display_id: str):
@@ -3127,11 +3178,17 @@ class DataStreamingServer(BaseStreamingService):
             ws = client_data.get('ws')
             if ws:
                 try:
-                    await ws.send_str("VIDEO_STOPPED")
+                    # Bounded: this runs under _reconfigure_lock; a frozen
+                    # client's socket gets dropped, never waited on.
+                    await asyncio.wait_for(ws.send_str("VIDEO_STOPPED"), timeout=2.0)
                     # Remember that this client was told the pipeline stopped (it sets
                     # isVideoPipelineActive=false and discards frames). A later successful
                     # reconfigure must send VIDEO_STARTED so it re-accepts frames.
                     client_data['stop_signaled'] = True
+                except asyncio.TimeoutError:
+                    # The cancelled send may have left a half-written frame; the
+                    # socket must not be reused.
+                    _close_abandoned_ws(ws)
                 except (ConnectionResetError, OSError, RuntimeError):
                     pass
 
@@ -3171,7 +3228,7 @@ class DataStreamingServer(BaseStreamingService):
                 if screen_name:
                     current_monitors = await self._get_current_monitors()
                     for monitor_name in current_monitors:
-                        await self._run_command(["xrandr", "--delmonitor", monitor_name], f"cleanup monitor {monitor_name}", best_effort=True)
+                        await delete_logical_monitor(monitor_name)
             return
         data_logger.info("Calculating new extended desktop layout from ALL clients...")
         layouts = {}
@@ -3273,7 +3330,7 @@ class DataStreamingServer(BaseStreamingService):
                 return
             current_monitors = await self._get_current_monitors()
             for monitor_name in current_monitors:
-                await self._run_command(["xrandr", "--delmonitor", monitor_name], f"delete old monitor {monitor_name}", best_effort=True)
+                await delete_logical_monitor(monitor_name)
             total_mode_str = f"{total_width}x{total_height}"
             if total_mode_str not in available_resolutions:
                 data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
@@ -3299,10 +3356,7 @@ class DataStreamingServer(BaseStreamingService):
                     cur_w, cur_h = total_width, total_height
                 union_w, union_h = max(cur_w, total_width), max(cur_h, total_height)
                 if (union_w, union_h) != (total_width, total_height):
-                    await self._run_command(
-                        ["xrandr", "--fb", f"{union_w}x{union_h}"],
-                        "grow framebuffer for live re-target", best_effort=True
-                    )
+                    await grow_framebuffer(union_w, union_h)
                 for did in sorted(keep_ids):
                     layout = layouts[did]
                     module = self.capture_instances[did]['module']
@@ -3323,18 +3377,75 @@ class DataStreamingServer(BaseStreamingService):
             if curr_norm == total_mode_str:
                 data_logger.info(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
             else:
-                await self._run_command(["xrandr", "--fb", total_mode_str, "--output", screen_name, "--mode", total_mode_str], "set framebuffer")
+                # Native-first mode+framebuffer apply; the realized-size clamp
+                # below reconciles state if the X server refuses it.
+                if not await resize_display(total_mode_str):
+                    data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
             data_logger.info("Defining logical monitors for the window manager...")
-            for display_id, layout in layouts.items():
-                geometry = f"{layout['w']}/0x{layout['h']}/0+{layout['x']}+{layout['y']}"
-                monitor_name = f"selkies-{display_id}"
-                cmd = ["xrandr", "--setmonitor", monitor_name, geometry, screen_name]
-                await self._run_command(cmd, f"set logical monitor {monitor_name}")
-            if 'primary' in layouts:
-                await self._run_command(
-                    ["xrandr", "--output", screen_name, "--primary"],
-                    "set primary output"
+            # The physical output can belong to only one logical monitor: give
+            # it to the primary; the others attach to none.
+            take_output = True
+            for display_id, layout in sorted(layouts.items(), key=lambda kv: kv[0] != 'primary'):
+                await set_logical_monitor(
+                    f"selkies-{display_id}", layout['x'], layout['y'], layout['w'], layout['h'],
+                    take_output, screen_name=screen_name,
                 )
+                take_output = False
+            if 'primary' in layouts:
+                await designate_primary_output(screen_name)
+            # The X server, not the request, is the authority on the realized
+            # geometry: a driver can reject the mode or framebuffer size and
+            # leave the root at its old dimensions, and a capture region
+            # outside the root fails or grabs garbage. Re-read the root and
+            # clamp the layouts — and the per-display state the resolution
+            # broadcast reports — to what was actually realized, so clients
+            # render the stream that really exists.
+            realized_res, _, _, _, _ = await get_new_res("1x1")
+            try:
+                realized_w, realized_h = (
+                    int(v) for v in (realized_res or "").lower().replace(" ", "").split("x")
+                )
+            except (ValueError, AttributeError):
+                realized_w, realized_h = total_width, total_height
+            if (realized_w > 0 and realized_h > 0
+                    and (realized_w, realized_h) != (total_width, total_height)):
+                data_logger.warning(
+                    f"Realized screen size {realized_w}x{realized_h} differs from target "
+                    f"{total_width}x{total_height}; clamping display layouts to it."
+                )
+                for did, layout in layouts.items():
+                    clamped_w = max(2, min(layout['w'], realized_w - layout['x']) & ~1)
+                    clamped_h = max(2, min(layout['h'], realized_h - layout['y']) & ~1)
+                    if (clamped_w, clamped_h) == (layout['w'], layout['h']):
+                        continue
+                    data_logger.warning(
+                        f"Display '{did}': layout {layout['w']}x{layout['h']} clamped to "
+                        f"{clamped_w}x{clamped_h} inside the realized root."
+                    )
+                    layout['w'], layout['h'] = clamped_w, clamped_h
+                    client_data = self.display_clients.get(did)
+                    if client_data:
+                        client_data['width'], client_data['height'] = clamped_w, clamped_h
+                    if did == 'primary':
+                        self.app.display_width = clamped_w
+                        self.app.display_height = clamped_h
+                    # A capture kept alive across this pass was re-targeted to the
+                    # pre-clamp region; move it inside the realized root or rebuild it.
+                    inst = self.capture_instances.get(did)
+                    if did in keep_ids and inst and inst.get('module'):
+                        try:
+                            inst['module'].update_capture_region(
+                                layout['x'], layout['y'], clamped_w, clamped_h
+                            )
+                            inst['settings'] = self._get_capture_settings(
+                                did, clamped_w, clamped_h, layout['x'], layout['y']
+                            )
+                        except Exception as e:
+                            data_logger.warning(
+                                f"Re-target to clamped region failed for '{did}' ({e}); restarting it."
+                            )
+                            keep_ids.discard(did)
+                            await self._stop_capture_for_display(did)
         data_logger.info("Starting separate capture instances for each ACTIVE display region...")
         for display_id, layout in layouts.items():
             client_data = self.display_clients.get(display_id)
@@ -3368,7 +3479,9 @@ class DataStreamingServer(BaseStreamingService):
                         ws = client_data.get('ws')
                         if ws:
                             try:
-                                await ws.send_str("VIDEO_STARTED")
+                                await asyncio.wait_for(ws.send_str("VIDEO_STARTED"), timeout=2.0)
+                            except asyncio.TimeoutError:
+                                _close_abandoned_ws(ws)
                             except (ConnectionResetError, OSError, RuntimeError):
                                 pass
                         client_data['stop_signaled'] = False
@@ -4158,7 +4271,10 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
                         alive = False
                 if alive and inst.get('callback'):
                     settings = data_server_instance._get_capture_settings(display_id, target_w, target_h, 0, 0)
-                    await asyncio.to_thread(module.start_capture, inst['callback'], settings)
+                    # Serialized against concurrent capture stop/start: a live
+                    # in-place restart racing a teardown corrupts the instance.
+                    async with data_server_instance._video_capture_lock:
+                        await asyncio.to_thread(module.start_capture, inst['callback'], settings)
                     inst['settings'] = settings
                 else:
                     await data_server_instance._stop_capture_for_display(display_id)

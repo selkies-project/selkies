@@ -15,7 +15,8 @@ import {
   createClipboardGestures,
   writeImageToLocalClipboard,
   createDeferredClipboardWriter,
-  clipboardPreviewMessage
+  clipboardPreviewMessage,
+  readLocalClipboard
 } from './lib/clipboard-sync.js';
 import {
   createFileUploader
@@ -2219,6 +2220,9 @@ const initializeInput = () => {
     // a live GPU-backed VideoDecoder nothing ever feeds or closes), so flush them
     // before announcing the new resolution.
     clearAllVncStripeDecoders();
+    // Window-derived geometry is being restored; if the server realizes
+    // something else, the stream_resolution broadcast re-flags it.
+    window.streamResolutionDiverged = false;
     sendResolutionToServer(evenWidth, evenHeight);
     resetCanvasStyle(evenWidth, evenHeight);
   };
@@ -3127,42 +3131,23 @@ function initWebsockets() {
     // Tracked so a paste chord arriving mid read/transfer can be held until the
     // clipboard content has fully departed (see the capture-phase hold below).
     const work = (async () => {
-      if (!enable_binary_clipboard) {
-        try {
-          const text = await navigator.clipboard.readText();
-          if (!text) return;
-          await sendClipboardData(text);
+      try {
+        // Shared reader (lib/clipboard-sync.js): text- or image-normalized, with
+        // the DataError->readText() fallback for large text living in one place.
+        const res = await readLocalClipboard(enable_binary_clipboard);
+        if (!res) return;
+        if (res.kind === 'image') {
+          const arrayBuffer = await res.blob.arrayBuffer();
+          await sendClipboardData(arrayBuffer, res.mime);
+          console.log(`Sent binary clipboard via sendClipboardData: ${res.mime}, size: ${res.blob.size} bytes`);
+        } else {
+          await sendClipboardData(res.text);
           console.log("Sent clipboard text via sendClipboardData");
-        } catch (err) {
-          if (err.name !== 'NotFoundError' && !err.message.includes('not focused')) {
-            console.warn(`Could not read text clipboard: ${err.name} - ${err.message}`);
-          }
         }
-      } else {
-        try {
-          const clipboardItems = await navigator.clipboard.read();
-          if (!clipboardItems || clipboardItems.length === 0) {
-            return;
-          }
-          const clipboardItem = clipboardItems[0];
-          const imageType = clipboardItem.types.find(type => type.startsWith('image/'));
-
-          if (imageType) {
-            const blob = await clipboardItem.getType(imageType);
-            const arrayBuffer = await blob.arrayBuffer();
-            await sendClipboardData(arrayBuffer, imageType);
-            console.log(`Sent binary clipboard via sendClipboardData: ${imageType}, size: ${blob.size} bytes`);
-          } else if (clipboardItem.types.includes('text/plain')) {
-            const blob = await clipboardItem.getType('text/plain');
-            const text = await blob.text();
-            if (!text) return;
-            await sendClipboardData(text);
-            console.log("Sent clipboard text (from binary-enabled path) via sendClipboardData");
-          }
-        } catch (err) {
-          if (err.name !== 'NotFoundError' && !err.message.includes('not focused')) {
-            console.warn(`Could not read clipboard using advanced API: ${err.name} - ${err.message}`);
-          }
+      } catch (err) {
+        if (err.name !== 'NotFoundError' && err.name !== 'DataError' && err.name !== 'NotAllowedError'
+            && !(err.message && err.message.includes('not focused'))) {
+          console.warn(`Could not read clipboard: ${err.name} - ${err.message}`);
         }
       }
     })();
@@ -3196,6 +3181,7 @@ function initWebsockets() {
     canWrite: () => !!clipboard_out_enabled,
     binaryEnabled: () => !!enable_binary_clipboard,
     getSendInFlight: () => clipboardSendInFlight,
+    getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
   });
   clipboardGestures.wire();
 
@@ -4778,6 +4764,41 @@ function initWebsockets() {
                } else {
                  console.warn(`Shared mode: Received invalid stream_resolution dimensions: ${obj.width}x${obj.height}`);
                }
+             }
+           } else {
+             const appliedWidth = parseInt(obj.width, 10);
+             const appliedHeight = parseInt(obj.height, 10);
+             if (appliedWidth > 0 && appliedHeight > 0) {
+               // The server reports the resolution it actually realized; encoder
+               // alignment (force_aligned_resolution), RandR CVT cell snapping or
+               // a mode-set the X server rejected can all make it differ from
+               // what this client requested. Canvas geometry, stripe decoders and
+               // input mapping must follow the realized size or the stream
+               // renders scaled/misplaced.
+               const dprUsed = (window.is_manual_resolution_mode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+               const bufferWidth = alignResolution(appliedWidth);
+               const bufferHeight = alignResolution(appliedHeight);
+               if (canvas && bufferWidth > 0 && bufferHeight > 0 &&
+                   (canvas.width !== bufferWidth || canvas.height !== bufferHeight)) {
+                 console.log(`Server realized stream resolution ${appliedWidth}x${appliedHeight} (canvas buffer ${canvas.width}x${canvas.height}); reconciling.`);
+                 clearAllVncStripeDecoders();
+                 // Window-math input mapping assumes CSS × dpr == server px;
+                 // that no longer holds, so route input through the canvas box.
+                 window.streamResolutionDiverged = true;
+                 if (window.is_manual_resolution_mode) {
+                   manual_width = bufferWidth;
+                   manual_height = bufferHeight;
+                   applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
+                 } else {
+                   // +0.5 keeps applyManualCanvasStyle's alignResolution(target*dpr)
+                   // from flooring one even-step below the realized size when the
+                   // divide/multiply round trip lands just under the integer on
+                   // fractional device pixel ratios.
+                   applyManualCanvasStyle((bufferWidth + 0.5) / dprUsed, (bufferHeight + 0.5) / dprUsed, true);
+                 }
+               }
+             } else {
+               console.warn(`Received invalid stream_resolution dimensions: ${obj.width}x${obj.height}`);
              }
            }
          } else {

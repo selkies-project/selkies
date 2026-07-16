@@ -30,6 +30,14 @@ import { Queue } from './util.js';
  */
 const WHITELIST_CLASS = 'allow-native-input';
 
+// code -> getModifierState() name, for every modifier tracked in _keyDownList.
+const MODIFIER_STATE_BY_CODE = {
+    ShiftLeft: 'Shift', ShiftRight: 'Shift',
+    ControlLeft: 'Control', ControlRight: 'Control',
+    AltLeft: 'Alt', AltRight: 'Alt',
+    MetaLeft: 'Meta', MetaRight: 'Meta',
+};
+
 const KeyTable = {
     XK_VoidSymbol:                  0xffffff,
     XK_BackSpace:                   0xff08,
@@ -1434,6 +1442,26 @@ export class Input {
         try { el.focus({ preventScroll: true }); } catch (e) { /* detached element */ }
     }
 
+    _releaseDesyncedModifiers(event) {
+        // A keyup the browser never delivered (grabbed by the OS, an IME, or a
+        // sibling surface while focus never left) leaves the modifier in
+        // _keyDownList, and the 'kh' heartbeat then refreshes it forever — the
+        // server's stale-key sweep never fires and every later keystroke
+        // arrives modified (the "everything types uppercase" lock). Trusted
+        // events carry live modifier state, so release anything the browser
+        // says is no longer down. Composition events are exempt: IMEs do not
+        // report modifier state reliably mid-composition.
+        if (typeof event.getModifierState !== 'function') return;
+        if (this.isComposing || event.isComposing || event.keyCode === 229) return;
+        for (const code in this._keyDownList) {
+            const state = MODIFIER_STATE_BY_CODE[code];
+            if (state && !event.getModifierState(state)) {
+                this._sendKeyEvent(this._keyDownList[code], code, false);
+                delete this._keyDownList[code];
+            }
+        }
+    }
+
     resetKeyboard() {
         this._stopKeyHeartbeat();
         // Cancel the pending Windows-AltGr timer so it can't fire after a reset and
@@ -1465,6 +1493,7 @@ export class Input {
     _handleKeyDown(event) {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
+        this._releaseDesyncedModifiers(event);
         const keycode = KeyboardUtil.getKeyCode(event);
         if (keycode in this._keyDownList) {
             _stopEvent(event);
@@ -1963,6 +1992,9 @@ export class Input {
         const client_dpr = window.devicePixelRatio || 1;
         const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || window.isManualResolutionMode || this.isSharedMode) ? 1 : client_dpr;
         const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
+        if (down) {
+            this._releaseDesyncedModifiers(event);
+        }
         if (down && event.target === this.element && document.activeElement !== this.element) {
             this._focusCompositionHost();
         }
@@ -2265,9 +2297,15 @@ export class Input {
     // backing-store size over the CSS rect, clamped. Returns false when no sink applies
     // (auto resolution) so callers run their DPR-scaled window math instead.
     _applySinkCoordinates(clientX, clientY, canvas, videoEle) {
-        const sink = ((window.is_manual_resolution_mode || this.isSharedMode) && canvas)
+        // streamResolutionDiverged: the server realized a different resolution
+        // than the window-derived request (mode snapping / rejected mode-set),
+        // so the window-math contract (CSS × dpr == server px) is broken and
+        // coordinates must be mapped through the stream box like manual mode —
+        // the canvas buffer on the websockets core, the <video> intrinsic size
+        // on the WebRTC core.
+        const sink = ((window.is_manual_resolution_mode || this.isSharedMode || window.streamResolutionDiverged) && canvas)
             ? canvas
-            : (window.isManualResolutionMode && videoEle) ? videoEle : null;
+            : ((window.isManualResolutionMode || window.streamResolutionDiverged) && videoEle) ? videoEle : null;
         if (!sink) {
             return false;
         }
@@ -2302,12 +2340,26 @@ export class Input {
         if (!(rect.width > 0 && rect.height > 0) && this._lastSinkRect) {
             rect = this._lastSinkRect;
         }
-        if (rect.width > 0 && rect.height > 0 && sink.width > 0 && sink.height > 0) {
+        // A <video> reports its realized stream size in videoWidth/Height (the
+        // width/height attributes may be unset); a canvas reports its buffer.
+        const sinkW = sink.videoWidth || sink.width;
+        const sinkH = sink.videoHeight || sink.height;
+        if (rect.width > 0 && rect.height > 0 && sinkW > 0 && sinkH > 0) {
             this._lastSinkRect = rect;
-            const scaleX = sink.width / rect.width; // buffer / CSS
-            const scaleY = sink.height / rect.height;
-            this.x = Math.max(0, Math.min(sink.width, Math.round((clientX - rect.left) * scaleX)));
-            this.y = Math.max(0, Math.min(sink.height, Math.round((clientY - rect.top) * scaleY)));
+            let boxLeft = rect.left, boxTop = rect.top, boxW = rect.width, boxH = rect.height;
+            if (sink.tagName === 'VIDEO' && (sink.style.objectFit || 'contain') !== 'fill') {
+                // object-fit: contain letterboxes the frame inside the element
+                // box; map against the fitted content box, not the element box.
+                const fit = Math.min(rect.width / sinkW, rect.height / sinkH);
+                boxW = sinkW * fit;
+                boxH = sinkH * fit;
+                boxLeft += (rect.width - boxW) / 2;
+                boxTop += (rect.height - boxH) / 2;
+            }
+            const scaleX = sinkW / boxW; // stream px / CSS px
+            const scaleY = sinkH / boxH;
+            this.x = Math.max(0, Math.min(sinkW, Math.round((clientX - boxLeft) * scaleX)));
+            this.y = Math.max(0, Math.min(sinkH, Math.round((clientY - boxTop) * scaleY)));
             return true;
         }
         // Never measured: fall back to the windowMath path instead of

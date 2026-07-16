@@ -158,6 +158,10 @@ class WebRTCService(BaseStreamingService):
         self.display_pipelines: Dict[str, MediaPipeline] = {}
         self._display_lock = asyncio.Lock()
         self._primary_dims: Optional[tuple] = None
+        # Last (w, h) a client asked the primary to become. The realized size
+        # may legitimately differ (CVT cell alignment widens the mode), so
+        # idempotence must be judged against the request, not just the result.
+        self._last_resize_request: Optional[tuple] = None
         # Multi-monitor WM swap (websockets parity): heavy DEs tile poorly across the
         # per-display regions, so swap to a minimal Openbox once a secondary joins.
         self._wm_swap_is_supported: Optional[bool] = None
@@ -245,7 +249,11 @@ class WebRTCService(BaseStreamingService):
             # dimensions ARE the resize (the capture start sizes the compositor
             # output from them).
             if not IS_WAYLAND:
-                await resize_display(f"{self._manual_dims[0]}x{self._manual_dims[1]}")
+                realized = await resize_display(f"{self._manual_dims[0]}x{self._manual_dims[1]}")
+                if realized:
+                    # Capture what the X server realized (CVT cell alignment can
+                    # widen the mode), never a region the root may not cover.
+                    self._manual_dims = realized
             self.media_pipeline.width, self.media_pipeline.height = self._manual_dims
         if self.args.enable_rate_control:
             self.media_pipeline.rc_mode = RateControlMode(self.args.rate_control_mode)
@@ -639,12 +647,18 @@ class WebRTCService(BaseStreamingService):
 
             # Idempotent: clients re-assert their resolution on reconnects and
             # settings broadcasts; re-applying the current size would churn
-            # RandR (X11) or restart the capture (Wayland) for nothing.
+            # RandR (X11) or restart the capture (Wayland) for nothing. The
+            # last request is honored too: when the realized size differs from
+            # it (CVT cell alignment), the same re-asserted request must not
+            # read as "not applied yet" forever.
             if (
                 self.media_pipeline
-                and self.media_pipeline.width == target_w
-                and self.media_pipeline.height == target_h
                 and self.media_pipeline.last_resize_success
+                and (
+                    (self.media_pipeline.width == target_w
+                     and self.media_pipeline.height == target_h)
+                    or self._last_resize_request == (target_w, target_h)
+                )
             ):
                 logger.debug(f"Resolution already {target_w}x{target_h}; skipping re-apply.")
                 return
@@ -660,11 +674,19 @@ class WebRTCService(BaseStreamingService):
                 logger.info(f"Wayland capture resized to {target_w}x{target_h}")
                 return
 
-            success = await resize_display(f"{target_w}x{target_h}")
-            if success:
-                logger.info(f"resize_display('{target_w}x{target_h}') reported success")
-                self.media_pipeline.width = target_w
-                self.media_pipeline.height = target_h
+            realized = await resize_display(f"{target_w}x{target_h}")
+            if realized:
+                realized_w, realized_h = realized
+                if (realized_w, realized_h) != (target_w, target_h):
+                    logger.info(
+                        f"resize_display realized {realized_w}x{realized_h} for request {target_w}x{target_h}"
+                    )
+                else:
+                    logger.info(f"resize_display('{target_w}x{target_h}') reported success")
+                self.media_pipeline.width = realized_w
+                self.media_pipeline.height = realized_h
+                self.media_pipeline.last_resize_success = True
+                self._last_resize_request = (target_w, target_h)
             else:
                 logger.error(
                     f"resize_display('{target_w}x{target_h}') reported failure"
@@ -753,7 +775,9 @@ class WebRTCService(BaseStreamingService):
                     # Remove the stale selkies-* logical monitors before shrinking the
                     # framebuffer, so a secondary region does not linger outside it (WS parity).
                     await clear_selkies_monitors()
-                    await resize_display(f"{p_w}x{p_h}")
+                    realized = await resize_display(f"{p_w}x{p_h}")
+                    if realized:
+                        p_w, p_h = realized
                     self.media_pipeline.capture_region = None
                     self.media_pipeline.width, self.media_pipeline.height = p_w, p_h
                     if self.media_pipeline.is_media_pipeline_running():

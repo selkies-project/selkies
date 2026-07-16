@@ -44,6 +44,50 @@ export async function writeImageToLocalClipboard(blob, mime) {
 }
 
 /**
+ * Read the local clipboard for the focus/gesture send path, shared by both
+ * transports (websockets-canonical). Returns {kind:'text', text} |
+ * {kind:'image', blob, mime} | null. Chromium's advanced read()/getType()
+ * throws DataError on large text (and some images); readText() still returns
+ * the text, so every failure path falls back to it rather than dropping the
+ * sync. Throws only genuinely unexpected errors for the caller to log.
+ */
+export async function readLocalClipboard(binaryEnabled) {
+    const textFallback = async () => {
+        const t = await navigator.clipboard.readText().catch(() => '');
+        return t ? { kind: 'text', text: t } : null;
+    };
+    if (!binaryEnabled) {
+        const text = await navigator.clipboard.readText();
+        return text ? { kind: 'text', text } : null;
+    }
+    let items;
+    try {
+        items = await navigator.clipboard.read();
+    } catch (err) {
+        if (err && err.name === 'DataError') return textFallback();
+        throw err;
+    }
+    if (!items || items.length === 0) return null;
+    const item = items[0];
+    const imageType = item.types.find((t) => t.startsWith('image/'));
+    try {
+        if (imageType) {
+            const blob = await item.getType(imageType);
+            return { kind: 'image', blob, mime: imageType };
+        }
+        if (item.types.includes('text/plain')) {
+            const blob = await item.getType('text/plain');
+            const text = await blob.text();
+            return text ? { kind: 'text', text } : null;
+        }
+    } catch (err) {
+        if (err && err.name === 'DataError') return textFallback();
+        throw err;
+    }
+    return null;
+}
+
+/**
  * Deferred local-clipboard writer for server pushes. Firefox (and WebKit)
  * reject navigator.clipboard writes outside a transient user activation, and a
  * server push handler never has one — so on an activation/focus rejection the
@@ -52,49 +96,65 @@ export async function writeImageToLocalClipboard(blob, mime) {
  */
 export function createDeferredClipboardWriter() {
     let pending = null;
+    // Resolves when the most recent write attempt (immediate or flushed) settles.
+    // The paste-ordering hold awaits it so a server->client write LANDS before a
+    // paste reads the local clipboard — otherwise the stashed write flushes on the
+    // paste's own keydown and lands just after the read, so the first paste is
+    // one-behind and the user has to paste twice.
+    let inFlight = null;
 
     function isActivationError(err) {
         return !!err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+    }
+
+    function track(promise) {
+        inFlight = promise;
+        promise.finally(() => { if (inFlight === promise) inFlight = null; });
+    }
+
+    function attemptOnce(w) {
+        return w.attempt().then(
+            () => { if (w.onSuccess) w.onSuccess(); return true; },
+            (err) => {
+                // Still no focus/activation (e.g. synthetic event, or the tab is
+                // blurred — Chromium rejects clipboard writes from an unfocused
+                // document): keep it for the next gesture/focus unless something
+                // newer replaced it meanwhile.
+                if (isActivationError(err)) { if (!pending) pending = w; return false; }
+                if (w.onFailure) w.onFailure(err);
+                return false;
+            });
     }
 
     function flush() {
         const w = pending;
         if (!w) return;
         pending = null;
-        w.attempt().then(
-            () => { if (w.onSuccess) w.onSuccess(); },
-            (err) => {
-                // Still no activation (e.g. synthetic event): keep it for the
-                // next gesture unless something newer replaced it meanwhile.
-                if (isActivationError(err)) { if (!pending) pending = w; }
-                else if (w.onFailure) w.onFailure(err);
-            });
+        track(attemptOnce(w));
     }
 
-    // Activation-granting gestures; registered once, cheap no-ops while idle.
-    for (const type of ['pointerdown', 'keydown']) {
+    // keydown/pointerdown carry a user activation; focus/visibilitychange land the
+    // write the instant Chromium will accept it (it rejects writes from an
+    // unfocused document), so a push that arrived while the tab was blurred is
+    // current well before the user's next paste instead of waiting for a stray
+    // keystroke. All are cheap no-ops while nothing is stashed.
+    for (const type of ['pointerdown', 'keydown', 'focus']) {
         window.addEventListener(type, flush, true);
     }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) flush(); }, true);
 
     /**
      * Run `attempt` (an async clipboard write) now; on an activation/focus
-     * rejection queue it for the next gesture. onSuccess fires whenever the
+     * rejection queue it for the next gesture/focus. onSuccess fires whenever the
      * write eventually lands; onFailure only for non-activation errors.
      */
     function write(attempt, { onSuccess, onFailure } = {}) {
-        return attempt().then(
-            () => { if (onSuccess) onSuccess(); return true; },
-            (err) => {
-                if (isActivationError(err)) {
-                    pending = { attempt, onSuccess, onFailure };
-                    return false;
-                }
-                if (onFailure) onFailure(err);
-                return false;
-            });
+        const p = attemptOnce({ attempt, onSuccess, onFailure });
+        track(p);
+        return p;
     }
 
-    return { write };
+    return { write, flush, getInFlight: () => inFlight };
 }
 
 /**
@@ -325,6 +385,7 @@ export function createClipboardGestures({
     canWrite,
     binaryEnabled,
     getSendInFlight,
+    getDeferredWriteInFlight,
 }) {
     // Only drive remote-clipboard sync from the stream; don't hijack
     // copy/paste in page form fields (settings UI, etc.). The stream's
@@ -357,18 +418,24 @@ export function createClipboardGestures({
         const modHold = heldPasteReplayPending && ev.type === 'keyup' && PASTE_MOD_CODES.includes(ev.code);
         if (ev.code !== 'KeyV' && !modHold) return;
         const chord = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
-        // Hold a paste chord while a send is in flight; also hold ANY KeyV
-        // event while a replay is queued (its keyup must not overtake the held
-        // keydown, even if Ctrl was already released).
-        const hold = modHold || (ev.code === 'KeyV' && ((chord && getSendInFlight()) || heldPasteReplayPending));
+        // Hold a paste chord while a send is in flight OR a server->client
+        // local-clipboard write is still landing (else the paste reads the old
+        // value — "paste twice"); also hold ANY KeyV event while a replay is
+        // queued (its keyup must not overtake the held keydown, even if Ctrl was
+        // already released).
+        const writeInFlight = getDeferredWriteInFlight ? getDeferredWriteInFlight() : null;
+        const hold = modHold || (ev.code === 'KeyV' &&
+            ((chord && (getSendInFlight() || writeInFlight)) || heldPasteReplayPending));
         if (!hold) return;
         ev.preventDefault();
         ev.stopImmediatePropagation();
         heldPasteEvents.push(ev);
         if (!heldPasteReplayPending) {
             heldPasteReplayPending = true;
+            const waitFor = [getSendInFlight() || Promise.resolve()];
+            if (getDeferredWriteInFlight) waitFor.push(getDeferredWriteInFlight() || Promise.resolve());
             Promise.race([
-                getSendInFlight() || Promise.resolve(),
+                Promise.all(waitFor),
                 new Promise((r) => setTimeout(r, 2000)),
             ]).then(replayHeldPasteEvents, replayHeldPasteEvents);
         }

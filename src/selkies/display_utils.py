@@ -106,6 +106,16 @@ def _module_display():
     if _x11_conn is None:
         conn = x11_display.Display()
         conn.set_close_down_mode(x11_X.RetainPermanent)
+        try:
+            # An alive-but-unresponsive X server (driver hang, a foreign
+            # client's server grab) would otherwise block these helpers forever
+            # waiting for a reply while they hold _x11_lock — and every retry
+            # then parks another executor thread behind that lock. Bound the
+            # reply wait so it raises ConnectionClosedError instead; the helpers
+            # drop this connection and fall back to their subprocess paths.
+            conn.display.blocking_timeout = 15.0
+        except Exception:
+            pass
         conn.sync()
         _x11_conn = conn
     return _x11_conn
@@ -244,8 +254,13 @@ def _sync_resize_randr(res_str):
 def _resize_on_display(d, res_str, w_req, h_req):
     """The RandR mode-create/activate/screen-size sequence on connection `d`."""
     root, res, out_id, oi, names = _connected_output_state(d)
+    # CVT-RB snaps the width up to its 8-pixel cell, so the realized mode can
+    # be wider than requested. Key the mode by its REAL geometry: a mode whose
+    # name disagrees with its pixel size breaks later xrandr calls that derive
+    # framebuffer dimensions from the name.
+    mode_name = f"{-(-w_req // 8) * 8}x{h_req}"
     mode_id, mode_w, mode_h = _ensure_mode_on_display(
-        d, root, res, oi, out_id, names, res_str, w_req, h_req
+        d, root, res, oi, out_id, names, mode_name, w_req, h_req
     )
     crtc = oi.crtc or (oi.crtcs[0] if oi.crtcs else 0)
     if not crtc:
@@ -276,7 +291,16 @@ def _resize_on_display(d, res_str, w_req, h_req):
         if status != randr.SetConfigSuccess:
             raise RuntimeError(f"SetCrtcConfig returned status {status}")
     finally:
-        d.ungrab_server()
+        # The ungrab must be FLUSHED here, not just queued: when an X error
+        # aborts the sequence above, the exception propagates before any later
+        # sync would run, and a queued-but-unsent ungrab leaves the whole X
+        # server grabbed — every other client (xrandr, capture, WMs) hangs
+        # until this process exits.
+        try:
+            d.ungrab_server()
+            d.flush()
+        except Exception:
+            pass
     d.sync()
     geom = root.get_geometry()
     if (geom.width, geom.height) != (mode_w, mode_h):
@@ -385,28 +409,185 @@ async def _run_xrandr(args, what):
         return False
 
 
-async def list_selkies_monitors():
-    """Names of the logical monitors this software created (selkies-*)."""
+def _sync_list_monitors():
+    """Blocking RandR 1.5 monitor-name query on the module connection."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root = d.screen().root
+            reply = randr.get_monitors(root, is_active=False)
+            names = []
+            for m in reply.monitors:
+                try:
+                    names.append(d.get_atom_name(m.name))
+                except Exception:
+                    continue
+            return names
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            raise
+
+
+def _sync_set_monitor(name, x, y, w, h, take_output):
+    """Blocking RandR 1.5 set-monitor on the module connection. take_output
+    attaches the (single) connected physical output; an output can belong to
+    only one logical monitor, so exactly one monitor per layout takes it."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root, _, out_id, _, _ = _connected_output_state(d)
+            info = {
+                "name": d.intern_atom(name),
+                "primary": False,
+                "automatic": False,
+                "x": int(x),
+                "y": int(y),
+                "width_in_pixels": int(w),
+                "height_in_pixels": int(h),
+                "width_in_millimeters": max(1, round(w * 25.4 / 96.0)),
+                "height_in_millimeters": max(1, round(h * 25.4 / 96.0)),
+                "crtcs": [out_id] if take_output else [],
+            }
+            randr.set_monitor(root, info)
+            d.sync()
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            raise
+
+
+def _sync_delete_monitor(name):
+    """Blocking RandR 1.5 delete-monitor on the module connection."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root = d.screen().root
+            randr.delete_monitor(root, d.intern_atom(name))
+            d.sync()
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            raise
+
+
+def _sync_set_output_primary():
+    """Blocking RandR set-output-primary (first connected output)."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root, _, out_id, _, _ = _connected_output_state(d)
+            randr.set_output_primary(root, out_id)
+            d.sync()
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            raise
+
+
+def _sync_grow_screen(w, h):
+    """Blocking grow-only screen resize (never shrinks; no CRTC change)."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root = d.screen().root
+            geom = root.get_geometry()
+            if geom.width >= w and geom.height >= h:
+                return
+            randr.set_screen_size(
+                root, w, h,
+                max(1, round(w * 25.4 / 96.0)), max(1, round(h * 25.4 / 96.0)),
+            )
+            d.sync()
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            raise
+
+
+async def list_logical_monitors():
+    """Names of ALL RandR logical monitors: native query first, xrandr
+    --listmonitors parse as fallback."""
     try:
-        proc = await asyncio.create_subprocess_exec(
+        return await asyncio.to_thread(_sync_list_monitors)
+    except Exception as e:
+        logger_app_resize.info(f"Native monitor list failed ({e}); using xrandr fallback.")
+    names = []
+    try:
+        proc = await subprocess.create_subprocess_exec(
             "xrandr", "--listmonitors",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         stdout, _ = await _communicate_or_kill(proc)
-        names = []
-        for line in stdout.decode(errors="replace").splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and "selkies-" in parts[1]:
-                names.append(parts[1].lstrip("*+"))
-        return names
-    except Exception:
-        return []
+        if proc.returncode == 0:
+            for line in stdout.decode(errors="replace").splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2:
+                    names.append(parts[1].lstrip("*+"))
+    except Exception as e:
+        logger_app_resize.warning(f"xrandr --listmonitors failed: {e}")
+    return names
+
+
+async def set_logical_monitor(name, x, y, w, h, take_output, screen_name=None):
+    """Define/replace logical monitor `name` over the given pixel geometry:
+    native RandR 1.5 first, xrandr --setmonitor fallback. Returns success."""
+    try:
+        await asyncio.to_thread(_sync_set_monitor, name, x, y, w, h, take_output)
+        return True
+    except Exception as e:
+        logger_app_resize.info(f"Native set-monitor '{name}' failed ({e}); using xrandr fallback.")
+    geometry = f"{w}/0x{h}/0+{x}+{y}"
+    output = screen_name if (take_output and screen_name) else "none"
+    return await _run_xrandr(
+        ["--setmonitor", name, geometry, output], f"set logical monitor {name}"
+    )
+
+
+async def delete_logical_monitor(name):
+    """Delete logical monitor `name`: native first, xrandr fallback. Returns
+    success (deleting an absent monitor counts as failure on both paths)."""
+    try:
+        await asyncio.to_thread(_sync_delete_monitor, name)
+        return True
+    except Exception as e:
+        logger_app_resize.debug(f"Native delete-monitor '{name}' failed ({e}); using xrandr fallback.")
+    return await _run_xrandr(["--delmonitor", name], f"delete monitor {name}")
+
+
+async def designate_primary_output(screen_name=None):
+    """Flag the connected physical output primary so the WM anchors panels and
+    new windows to it: native first, xrandr fallback. Returns success."""
+    try:
+        await asyncio.to_thread(_sync_set_output_primary)
+        return True
+    except Exception as e:
+        logger_app_resize.info(f"Native set-output-primary failed ({e}); using xrandr fallback.")
+    if screen_name:
+        return await _run_xrandr(["--output", screen_name, "--primary"], "designate primary output")
+    return False
+
+
+async def grow_framebuffer(w, h):
+    """Grow-only framebuffer resize, used before live captures re-target so no
+    region ever lies outside the root: native first, xrandr --fb fallback."""
+    try:
+        await asyncio.to_thread(_sync_grow_screen, w, h)
+        return True
+    except Exception as e:
+        logger_app_resize.info(f"Native framebuffer grow failed ({e}); using xrandr fallback.")
+    return await _run_xrandr(["--fb", f"{w}x{h}"], "grow framebuffer")
+
+
+async def list_selkies_monitors():
+    """Names of the logical monitors this software created (selkies-*)."""
+    return [n for n in await list_logical_monitors() if "selkies-" in n]
 
 
 async def clear_selkies_monitors():
     """Delete every logical monitor this software created (selkies-*)."""
     for monitor_name in await list_selkies_monitors():
-        await _run_xrandr(["--delmonitor", monitor_name], f"delete monitor {monitor_name}")
+        await delete_logical_monitor(monitor_name)
 
 
 async def apply_extended_layout(layouts, total_w, total_h):
@@ -431,24 +612,20 @@ async def apply_extended_layout(layouts, total_w, total_h):
                 logger_app_resize.error(f"Could not create extended mode {total_mode}: {e}")
                 return False
     if (curr_res or "").lower().replace(" ", "") != total_mode:
-        if not await _run_xrandr(
-            ["--fb", total_mode, "--output", screen_name, "--mode", total_mode],
-            "set framebuffer",
-        ):
+        if not await resize_display(total_mode):
             return False
     # The physical output can belong to only one logical monitor: give it to the
     # primary; the others attach to none.
-    output_name = screen_name
+    take_output = True
     for display_id, layout in sorted(layouts.items(), key=lambda kv: kv[0] != "primary"):
-        geometry = f"{layout['w']}/0x{layout['h']}/0+{layout['x']}+{layout['y']}"
-        await _run_xrandr(
-            ["--setmonitor", f"selkies-{display_id}", geometry, screen_name],
-            f"set logical monitor selkies-{display_id}",
+        await set_logical_monitor(
+            f"selkies-{display_id}", layout["x"], layout["y"], layout["w"], layout["h"],
+            take_output, screen_name=screen_name,
         )
-        screen_name = "none"
+        take_output = False
     # Flag the physical output primary so the WM anchors panels and new windows to the
     # primary monitor (WebSocket parity).
-    await _run_xrandr(["--output", output_name, "--primary"], "designate primary output")
+    await designate_primary_output(screen_name)
     return True
 
 
@@ -525,7 +702,9 @@ async def _get_new_res_xrandr(res_str):
 async def resize_display(res_str):  # e.g., res_str is "2560x1280"
     """Resizes the display to res_str: native RandR first (mode created from
     CVT-RB timings when absent), xrandr/cvt subprocess chain as fallback.
-    Returns True on success."""
+    Returns the realized (width, height) — CVT cell alignment may make it
+    wider than requested — or None on failure. Callers must capture and
+    report the realized size, not the request."""
     try:
         w, h = await asyncio.to_thread(_sync_resize_randr, res_str)
     except Exception as e:
@@ -536,14 +715,16 @@ async def resize_display(res_str):  # e.g., res_str is "2560x1280"
     logger_app_resize.info(
         f"Successfully applied RandR mode '{res_str}' ({w}x{h})."
     )
-    return True
+    return w, h
 
 
 async def _resize_display_xrandr(res_str):
     """
     Resizes the display using xrandr to the specified resolution string.
-    Adds a new mode via cvt/gtf if the requested mode doesn't exist,
-    using res_str (e.g., "2560x1280") as the mode name for xrandr.
+    Adds a new mode via cvt/gtf if the requested mode doesn't exist, naming it
+    for the geometry the modeline really carries (cvt snaps width up to the
+    8-pixel CVT cell, so it can be wider than requested). Returns the realized
+    (width, height), or None on failure.
     """
     _, _, available_resolutions, _, screen_name = await _get_new_res_xrandr(res_str)
 
@@ -551,9 +732,16 @@ async def _resize_display_xrandr(res_str):
         logger_app_resize.error(
             "Cannot resize display via xrandr, no screen identified."
         )
-        return False
+        return None
+
+    try:
+        w_req, h_req = (int(p) for p in res_str.split("x"))
+    except ValueError:
+        logger_app_resize.error(f"Invalid resolution format: {res_str}")
+        return None
 
     target_mode_to_set = res_str
+    realized_w, realized_h = w_req, h_req
 
     if res_str not in available_resolutions:
         logger_app_resize.info(
@@ -568,55 +756,73 @@ async def _resize_display_xrandr(res_str):
             logger_app_resize.error(
                 f"Failed to generate modeline for {res_str}: {e}"
             )
-            return False
+            return None
 
-        cmd_new = ["xrandr", "--newmode", res_str] + modeline_params.split()
-        new_mode_proc = await subprocess.create_subprocess_exec(
-            *cmd_new,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        stdout_new, stderr_new = await _communicate_or_kill(new_mode_proc)
-        if new_mode_proc.returncode != 0:
-            logger_app_resize.error(
-                f"Failed to create new xrandr mode with '{' '.join(cmd_new)}': {stderr_new.decode()}"
-            )
-            return False
-        logger_app_resize.info(f"Successfully ran: {' '.join(cmd_new)}")
+        # Modeline layout: clock hdisp hss hse htot vdisp vss vse vtot flags…
+        # The active pixels in the timings are the mode's real geometry; the
+        # mode is named for what it IS so the name stays usable for --fb math.
+        params = modeline_params.split()
+        try:
+            realized_w, realized_h = int(params[1]), int(params[5])
+        except (IndexError, ValueError):
+            realized_w, realized_h = w_req, h_req
+        target_mode_to_set = f"{realized_w}x{realized_h}"
 
-        # Use res_str (e.g., "2560x1280") as the mode name for --addmode
-        cmd_add = ["xrandr", "--addmode", screen_name, res_str]
-        add_mode_proc = await subprocess.create_subprocess_exec(
-            *cmd_add,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        stdout_add, stderr_add = await _communicate_or_kill(add_mode_proc)
-        if add_mode_proc.returncode != 0:
-            logger_app_resize.error(
-                f"Failed to add mode '{res_str}' to screen '{screen_name}': {stderr_add.decode()}"
-            )
-            # Cleanup commands
-            delmode_proc = await subprocess.create_subprocess_exec(
-                "xrandr", "--delmode", screen_name, res_str,
+        if target_mode_to_set not in available_resolutions:
+            cmd_new = ["xrandr", "--newmode", target_mode_to_set] + params
+            new_mode_proc = await subprocess.create_subprocess_exec(
+                *cmd_new,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
-            await _communicate_or_kill(delmode_proc)
-            
-            rmmode_proc = await subprocess.create_subprocess_exec(
-                "xrandr", "--rmmode", res_str,
+            stdout_new, stderr_new = await _communicate_or_kill(new_mode_proc)
+            if new_mode_proc.returncode != 0:
+                logger_app_resize.error(
+                    f"Failed to create new xrandr mode with '{' '.join(cmd_new)}': {stderr_new.decode()}"
+                )
+                return None
+            logger_app_resize.info(f"Successfully ran: {' '.join(cmd_new)}")
+
+            cmd_add = ["xrandr", "--addmode", screen_name, target_mode_to_set]
+            add_mode_proc = await subprocess.create_subprocess_exec(
+                *cmd_add,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
-            await _communicate_or_kill(rmmode_proc)
-            return False
-        logger_app_resize.info(f"Successfully ran: {' '.join(cmd_add)}")
+            stdout_add, stderr_add = await _communicate_or_kill(add_mode_proc)
+            if add_mode_proc.returncode != 0:
+                logger_app_resize.error(
+                    f"Failed to add mode '{target_mode_to_set}' to screen '{screen_name}': {stderr_add.decode()}"
+                )
+                # Cleanup commands
+                delmode_proc = await subprocess.create_subprocess_exec(
+                    "xrandr", "--delmode", screen_name, target_mode_to_set,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                await _communicate_or_kill(delmode_proc)
+
+                rmmode_proc = await subprocess.create_subprocess_exec(
+                    "xrandr", "--rmmode", target_mode_to_set,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                await _communicate_or_kill(rmmode_proc)
+                return None
+            logger_app_resize.info(f"Successfully ran: {' '.join(cmd_add)}")
 
     logger_app_resize.info(
         f"Applying xrandr mode '{target_mode_to_set}' for screen '{screen_name}'."
     )
-    cmd_output = ["xrandr", "--output", screen_name, "--mode", target_mode_to_set]
+    # Force the framebuffer to the mode too. Without --fb, a larger root left
+    # over from a prior extended layout keeps the screen oversized, so the new
+    # mode lands in the top-left and whole-root capture shows black bars — the
+    # native RandR path (set_screen_size) and the websockets path (--fb) both
+    # force it, so the fallback must match. The framebuffer is sized from the
+    # mode's realized geometry, never the request: a framebuffer narrower than
+    # the active mode is rejected outright by xrandr.
+    cmd_output = ["xrandr", "--output", screen_name, "--mode", target_mode_to_set,
+                  "--fb", f"{realized_w}x{realized_h}"]
     set_mode_proc = await subprocess.create_subprocess_exec(
         *cmd_output,
         stdout=subprocess.PIPE,
@@ -624,15 +830,36 @@ async def _resize_display_xrandr(res_str):
     )
     stdout_set, stderr_set = await _communicate_or_kill(set_mode_proc)
     if set_mode_proc.returncode != 0:
-        logger_app_resize.error(
-            f"Failed to set mode '{target_mode_to_set}' on screen '{screen_name}': {stderr_set.decode()}"
-        )
-        return False
+        # A pre-existing mode may carry CVT-snapped geometry wider than its
+        # name says (modes created before names tracked geometry); a
+        # framebuffer sized from the name is then too small and xrandr rejects
+        # the whole command. Retry once with the snapped width.
+        snapped_w = -(-w_req // 8) * 8
+        retried = False
+        if target_mode_to_set == res_str and snapped_w != realized_w:
+            cmd_retry = ["xrandr", "--output", screen_name, "--mode", target_mode_to_set,
+                         "--fb", f"{snapped_w}x{h_req}"]
+            retry_proc = await subprocess.create_subprocess_exec(
+                *cmd_retry,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            _, stderr_retry = await _communicate_or_kill(retry_proc)
+            if retry_proc.returncode == 0:
+                realized_w, realized_h = snapped_w, h_req
+                retried = True
+            else:
+                stderr_set = stderr_retry
+        if not retried:
+            logger_app_resize.error(
+                f"Failed to set mode '{target_mode_to_set}' on screen '{screen_name}': {stderr_set.decode()}"
+            )
+            return None
 
     logger_app_resize.info(
-        f"Successfully applied xrandr mode '{target_mode_to_set}'."
+        f"Successfully applied xrandr mode '{target_mode_to_set}' ({realized_w}x{realized_h})."
     )
-    return True
+    return realized_w, realized_h
 
 
 # A modeline is fully determined by (resolution, refresh) — the timings change

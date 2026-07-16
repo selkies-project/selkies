@@ -45,6 +45,10 @@ from .display_utils import (
 )
 from .media_pipeline import RateControlMode
 from .settings import settings, WS_MAX_MESSAGE_BYTES
+from .wayland_typer import (
+    WaylandVirtualKeyboard,
+    WaylandVirtualKeyboardUnavailable,
+)
 try:
     libxkb = ctypes.CDLL("libxkbcommon.so.0")
     libxkb.xkb_keysym_to_utf8.argtypes = [ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t]
@@ -79,6 +83,7 @@ try:
     from .Xlib import XK
     from .Xlib.ext import xfixes, xtest
     from .Xlib.protocol import event as xevent
+    from .Xlib import error as xlib_error
     X11_LIBS_AVAILABLE = True
 except ImportError:
     X11_LIBS_AVAILABLE = False
@@ -86,6 +91,7 @@ except ImportError:
     display = None
     X = None
     XK = None
+    xlib_error = None
     xfixes = None
     xtest = None
     xevent = None
@@ -790,6 +796,12 @@ logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
 # cannot grow the in-memory buffer without bound (memory-exhaustion DoS).
 MULTIPART_CLIPBOARD_MAX_SIZE = 64 * 1024 * 1024
 
+# Deadline (seconds) bounding a wait for an X reply on the input connection.
+# Generous: no healthy round trip approaches it, so it fires only on a genuinely
+# unresponsive server, converting an unbounded event-loop freeze into a bounded
+# stall plus reconnect.
+INPUT_X_REPLY_TIMEOUT_S = 20.0
+
 
 def _is_within_directory(directory: str, target: str) -> bool:
     """Return True if `target` is `directory` itself or strictly inside it.
@@ -1481,11 +1493,17 @@ class SelkiesGamepad:
                         if not writer.is_closing():
                             try:
                                 writer.write(js_data)
-                                await writer.drain()
+                                # Bounded: a game that stops reading its socket must
+                                # not freeze this gamepad's event processor for the
+                                # other consumers.
+                                await asyncio.wait_for(writer.drain(), timeout=1.0)
                                 logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: JS event drained to client #{i}.")
-                            except (ConnectionResetError, BrokenPipeError): pass 
-                            except Exception as e: 
-                                logger_selkies_gamepad.error(f"Error sending to JS client #{i}: {e}", exc_info=True) 
+                            except asyncio.TimeoutError:
+                                logger_selkies_gamepad.warning(f"Gamepad {self.js_sock_path}: JS client #{i} stalled; closing it.")
+                                writer.close()
+                            except (ConnectionResetError, BrokenPipeError): pass
+                            except Exception as e:
+                                logger_selkies_gamepad.error(f"Error sending to JS client #{i}: {e}", exc_info=True)
                 
                 # Send to EVDEV clients
                 if evdev_template:
@@ -1496,10 +1514,13 @@ class SelkiesGamepad:
                                 client_arch_bits = client_info.get('arch_bits', 64) 
                                 evdev_data = get_evdev_events_packed(ev_type, ev_code, ev_value, client_arch_bits)
                                 writer.write(evdev_data)
-                                await writer.drain()
+                                await asyncio.wait_for(writer.drain(), timeout=1.0)
                                 logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: EVDEV event drained to client #{i}.")
-                            except (ConnectionResetError, BrokenPipeError): pass 
-                            except Exception as e: 
+                            except asyncio.TimeoutError:
+                                logger_selkies_gamepad.warning(f"Gamepad {self.js_sock_path}: EVDEV client #{i} stalled; closing it.")
+                                writer.close()
+                            except (ConnectionResetError, BrokenPipeError): pass
+                            except Exception as e:
                                 logger_selkies_gamepad.error(f"Error sending to EVDEV client #{i}: {e}", exc_info=True)
                 
                 self.events_queue.task_done()
@@ -1680,6 +1701,13 @@ class WebRTCInput:
         self._wl_keymap_owner_lock = asyncio.Lock()
         self._wl_keymap_retry_at = 0.0
         self.use_clipboard_fallback = False
+        # In-process zwp_virtual_keyboard_v1 client for compositors without
+        # the pixelflux keymap API; built lazily on first non-layout text. A
+        # compositor that lacks the protocol is re-probed on a cooldown only,
+        # so per-keystroke fallbacks stay cheap.
+        self._wl_typer = None
+        self._wl_typer_lock = asyncio.Lock()
+        self._wl_typer_retry_at = 0.0
         self.clipboard_paused = False
         # Change-detection baseline shared by the monitor AND write_clipboard: content
         # this server just wrote must never be re-broadcast (client<->server echo loop),
@@ -1758,6 +1786,61 @@ class WebRTCInput:
         else: self.rtc_app.send_cursor_data(data)
 
     def __keyboard_connect(self): self.keyboard = _XTestKeyboard(self.xdisplay) if self.xdisplay else None
+
+    def _apply_input_x_reply_bound(self):
+        """Bound the wait for an X REPLY on the shared input connection so an
+        unresponsive server (driver hang, a foreign client's server grab) raises
+        ConnectionClosedError instead of freezing the event loop forever. XTEST
+        injection (mouse motion/buttons, key press) is a no-reply request and is
+        unaffected — only the modifier query (query_keymap) and the cursor-image
+        fetch block, and those recover via _reconnect_xdisplay(). Event waits stay
+        unbounded (a quiet server sending no cursor events is not an error)."""
+        if self.xdisplay is None:
+            return
+        try:
+            self.xdisplay.display.blocking_timeout = INPUT_X_REPLY_TIMEOUT_S
+        except Exception:
+            pass
+
+    def _reconnect_xdisplay(self):
+        """Rebuild the input X connection after a bounded reply-wait closed it.
+        Every consumer (keyboard, mouse, cursor monitor) shares this connection
+        on the event loop, so no other thread can be mid-call — this is race-free.
+        Best effort: leaves xdisplay None on failure and input degrades until a
+        later reconnect succeeds. Returns True when reconnected."""
+        old = self.xdisplay
+        self.xdisplay = None
+        self.keyboard = None
+        self.mouse = None
+        try:
+            if old is not None:
+                old.close()
+        except Exception:
+            pass
+        try:
+            self.xdisplay = display.Display()
+        except Exception as e:
+            logger_webrtc_input.error(f"Could not reconnect input X display: {e}")
+            self.xdisplay = None
+            return False
+        self._apply_input_x_reply_bound()
+        self.__keyboard_connect()
+        if not self.is_wayland:
+            self.mouse = _XTestMouse(self.xdisplay)
+        if self.cursors_running:
+            try:
+                screen = self.xdisplay.screen()
+                self.xdisplay.xfixes_select_cursor_input(
+                    screen.root, xfixes.XFixesDisplayCursorNotifyMask
+                )
+            except Exception as e:
+                logger_webrtc_input.warning(f"Could not re-arm cursor monitor after reconnect: {e}")
+        logger_webrtc_input.warning("Input X connection was unresponsive; reconnected.")
+        return True
+
+    def _is_x_conn_closed(self, exc):
+        """True if `exc` is the connection-closed error the reply bound raises."""
+        return xlib_error is not None and isinstance(exc, xlib_error.ConnectionClosedError)
 
     async def _load_server_autorepeat_rate(self):
         """Best-effort: adopt the X server's configured autorepeat delay/rate for our
@@ -1866,6 +1949,7 @@ class WebRTCInput:
         if not self.is_wayland and X11_LIBS_AVAILABLE:
             try: self.xdisplay = display.Display()
             except Exception as e: logger_webrtc_input.error(f"Failed to connect to X display: {e}"); self.xdisplay = None
+            self._apply_input_x_reply_bound()
         if self.xdisplay:
             try:
                 screen = self.xdisplay.screen()
@@ -1967,6 +2051,9 @@ class WebRTCInput:
         self.pressed_keys.clear()
         self.reaped_atomic_keys.clear()
         self.key_repeat_state.clear()
+        if self._wl_typer is not None:
+            typer, self._wl_typer = self._wl_typer, None
+            typer.close()
         # Drop any half-received multipart clipboard so a new connection can't inherit it.
         self._reset_multipart_clipboard()
 
@@ -2094,6 +2181,8 @@ class WebRTCInput:
                                 logger_webrtc_input.debug(
                                     f"XTEST atomic repeat failed for keysym {keysym}; falling back: {e}"
                                 )
+                                if self._is_x_conn_closed(e):
+                                    self._reconnect_xdisplay()
                         if not injected:
                             unicode_codepoint = (keysym & 0x00FFFFFF
                                                  if (keysym & 0xFF000000) == 0x01000000 else keysym)
@@ -2253,8 +2342,8 @@ class WebRTCInput:
             # exposes only inject_key + set_keymap_string. Layout keys resolve with
             # Shift/AltGr synthesis; anything the layout lacks — the Unicode plane,
             # Euro, IME output — binds to a dynamic overlay keycode. Every keysym
-            # flows ordered through the one compositor channel; wtype/clipboard
-            # below are error fallbacks.
+            # flows ordered through the one compositor channel; the
+            # virtual-keyboard/clipboard paths below are error fallbacks.
             owner = await self._ensure_wayland_keymap_owner()
             if owner is not None:
                 try:
@@ -2356,7 +2445,9 @@ class WebRTCInput:
                     self.keyboard.press(keysym)
                 else:
                     self.keyboard.release(keysym)
-            except Exception:
+            except Exception as e:
+                if self._is_x_conn_closed(e):
+                    self._reconnect_xdisplay()
                 await self._xdotool_fallback(keysym, down)
 
     def _type_text_xtest(self, text):
@@ -2423,6 +2514,34 @@ class WebRTCInput:
                     f"Wayland keymap owner unavailable ({e}); retrying in 5s.")
             return self._wl_keymap_owner
 
+    async def _wl_type_text(self, text):
+        """Inject text through the compositor's zwp_virtual_keyboard_manager_v1
+        (the in-process wtype equivalent). The client connection persists across
+        calls so the overlay keymap accumulates; a failed connection is dropped
+        and the next call reconnects. Raises when the compositor lacks the
+        protocol or the injection fails, so callers can degrade the same way
+        they would on any injection error."""
+        async with self._wl_typer_lock:
+            if self._wl_typer is None:
+                if time.monotonic() < self._wl_typer_retry_at:
+                    raise WaylandVirtualKeyboardUnavailable(
+                        "compositor does not advertise zwp_virtual_keyboard_manager_v1"
+                        " (retry pending)")
+                display = f"wayland-{self.wayland_socket_index}"
+                try:
+                    self._wl_typer = await WaylandVirtualKeyboard.connect(
+                        display=display)
+                except WaylandVirtualKeyboardUnavailable:
+                    self._wl_typer_retry_at = time.monotonic() + 30.0
+                    raise
+            typer = self._wl_typer
+            try:
+                await typer.type_text(text)
+            except Exception:
+                self._wl_typer = None
+                typer.close()
+                raise
+
     async def _xdotool_fallback(self, keysym_number, down=True):
         if self.is_wayland:
             if not down:
@@ -2465,24 +2584,9 @@ class WebRTCInput:
                     await self._inject_unicode_via_clipboard(char_to_type)
                     return
                 try:
-                    command_wtype = ["wtype", "--", char_to_type]
-                    process_wtype = await subprocess.create_subprocess_exec(
-                        *command_wtype,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        env=self._get_wl_env()
-                    )
-                    try:
-                        await asyncio.wait_for(process_wtype.communicate(), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        try:
-                            process_wtype.kill()
-                        except ProcessLookupError:
-                            pass
-                        await process_wtype.wait()
-                        raise
+                    await self._wl_type_text(char_to_type)
                 except Exception as e:
-                    logger_webrtc_input.warning(f"wtype fallback failed: {e}")
+                    logger_webrtc_input.warning(f"virtual-keyboard fallback failed: {e}")
 
             return
 
@@ -3312,6 +3416,10 @@ class WebRTCInput:
             self.on_cursor_change(cursor_data)
         except Exception as e:
             logger_webrtc_input.warning("exception from fetching initial cursor image: %s", e)
+            if self._is_x_conn_closed(e) and self._reconnect_xdisplay():
+                # Rebind to the reconnected connection (the old screen's Display
+                # is closed); xfixes cursor input was re-armed by the reconnect.
+                screen = self.xdisplay.screen()
 
         while self.cursors_running:
             if self.xdisplay.pending_events() == 0:
@@ -3328,6 +3436,10 @@ class WebRTCInput:
                     logger_webrtc_input.warning(
                         "exception from fetching cursor image on change: %s", e
                     )
+                    if self._is_x_conn_closed(e) and self._reconnect_xdisplay():
+                        # Rebind screen to the reconnected connection; the loop
+                        # below polls/reads events on the new self.xdisplay.
+                        screen = self.xdisplay.screen()
         logger_webrtc_input.info("cursor monitor stopped")
 
     def stop_cursor_monitor(self):
@@ -3423,8 +3535,9 @@ class WebRTCInput:
 
         def native_inject():
             # The keymap owner injects any keysym in order (overlay-bound when
-            # needed), so text needs no batching; the buffer + wtype/clipboard
-            # batch survive only for sessions without the compositor keymap API.
+            # needed), so text needs no batching; the buffer + virtual-keyboard/
+            # clipboard batch survive only for sessions without the compositor
+            # keymap API.
             return bool(self.wayland_input and hasattr(self.wayland_input, 'set_keymap_string'))
 
         async def flush_buffer():
@@ -3434,30 +3547,16 @@ class WebRTCInput:
 
                 # Buffered text is, by construction, the non-layout-representable keysyms
                 # (Latin-1 accents, Euro, Unicode plane) and IME composition strings. Inject
-                # it as text — clipboard paste under KWin, wtype under wlroots — never through
-                # the keymap, whose overlay swap is a non-op outside the English layout.
+                # it as text — clipboard paste under KWin, zwp_virtual_keyboard under
+                # wlroots — never through the keymap, whose overlay swap is a non-op
+                # outside the English layout.
                 if getattr(self, 'use_clipboard_fallback', False):
                     await self._inject_unicode_via_clipboard(combined_text)
                 else:
                     try:
-                        cmd = ["wtype", "--", combined_text]
-                        proc = await subprocess.create_subprocess_exec(
-                            *cmd,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            env=self._get_wl_env()
-                        )
-                        try:
-                            await asyncio.wait_for(proc.communicate(), timeout=2.0)
-                        except asyncio.TimeoutError:
-                            try:
-                                proc.kill()
-                            except ProcessLookupError:
-                                pass
-                            await proc.wait()
-                            raise
+                        await self._wl_type_text(combined_text)
                     except Exception as e:
-                        logger_webrtc_input.warning(f"Batched wtype failed: {e}")
+                        logger_webrtc_input.warning(f"Batched virtual-keyboard injection failed: {e}")
 
         while True:
             try:
