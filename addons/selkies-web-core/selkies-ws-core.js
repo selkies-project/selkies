@@ -2540,6 +2540,25 @@ function receiveMessage(event) {
       const newClipboardText = message.text;
       sendClipboardData(newClipboardText);
       break;
+    case 'clipboardImageUpdate':
+      // Dashboard image upload: hand the blob to the same binary path the
+      // focus/paste read uses. Only meaningful when binary clipboard is on
+      // (the server drops image writes otherwise).
+      if (isSharedMode) {
+        console.log("Shared mode: Clipboard image write to server blocked.");
+        break;
+      }
+      if (message.imageBlob && enable_binary_clipboard) {
+        (async () => {
+          try {
+            const buf = await message.imageBlob.arrayBuffer();
+            await sendClipboardData(buf, message.imageBlob.type || 'image/png');
+          } catch (e) {
+            console.warn('Failed to send uploaded clipboard image:', e);
+          }
+        })();
+      }
+      break;
     case 'pipelineStatusUpdate':
       console.log('Received pipelineStatusUpdate message:', message);
       let stateChangedFromStatus = false;

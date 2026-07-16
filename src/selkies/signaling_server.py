@@ -589,7 +589,7 @@ class WebRTCPeerManagement:
         return "viewer"
 
     async def hello_peer(
-        self, ws: WebSocketResponse, raddr: str
+        self, ws: WebSocketResponse, raddr: str, auth_role_ceiling: Optional[str] = None
     ) -> Tuple[str, str, Optional[str], Optional[int], Optional[bool]]:
         """Exchange hello message and register peer.
         Args:
@@ -691,6 +691,10 @@ class WebRTCPeerManagement:
 
                 if peer_type == "client":
                     client_type = self._secure_effective_client_type(client_type, client_token)
+                    # Legacy basic-auth: a view-only credential caps the role at
+                    # viewer no matter what this self-asserted client_type claims.
+                    if auth_role_ceiling == "viewer" and client_type == "controller":
+                        client_type = "viewer"
                     if not self.enable_sharing:
                         existing_clients = [
                             (pid, peer)
@@ -887,10 +891,14 @@ class WebRTCPeerManagement:
             raise
         return result
 
-    async def signaling_handler(self, ws: WebSocketResponse, raddr: str) -> None:
+    async def signaling_handler(
+        self, ws: WebSocketResponse, raddr: str, auth_role_ceiling: Optional[str] = None
+    ) -> None:
         """Signaling handler to manage the peers connected for signaling purposes.
         Args:
             ws: aiohttp WebSocketResponse
+            auth_role_ceiling: highest role the transport-level credential grants
+                ("viewer" caps a self-asserted controller in legacy basic-auth mode).
         """
         peer_id = None
         try:
@@ -900,7 +908,7 @@ class WebRTCPeerManagement:
                 client_type,
                 client_slot,
                 client_strict_viewer,
-            ) = await self.hello_peer(ws, raddr)
+            ) = await self.hello_peer(ws, raddr, auth_role_ceiling)
         except Exception as e:
             logger.error(f"Error during handshake with peer {raddr}: {e}")
             return

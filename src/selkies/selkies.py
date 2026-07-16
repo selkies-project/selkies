@@ -3946,6 +3946,12 @@ class DataStreamingServer(BaseStreamingService):
         # Extract legacy role/slot from query params
         query_role = request.query.get('role', '')
         query_slot = request.query.get('slot')
+        # A view-only basic-auth credential caps the role at viewer no matter what
+        # the query string asks for (legacy, non-secure mode); secure mode leaves
+        # the ceiling unset and lets the token govern.
+        if request.get("auth_role_ceiling") == "viewer":
+            query_role = "viewer"
+            query_slot = None
         try:
             await self.ws_handler(ws, remote_address, token, query_role=query_role, query_slot=query_slot)
         finally:

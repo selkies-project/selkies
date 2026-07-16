@@ -748,16 +748,29 @@ class CentralizedStreamServer:
                 return web.Response(status=401, text="Invalid Credentials")
             username, password = auth_decoded.split(":", 1)
             # Compare as UTF-8 bytes; hmac.compare_digest rejects non-ASCII str.
-            is_valid = hmac.compare_digest(
+            user_ok = hmac.compare_digest(
                 username.encode("utf-8"), str(settings.basic_auth_user).encode("utf-8")
-            ) and hmac.compare_digest(
-                password.encode("utf-8"), str(settings.basic_auth_password).encode("utf-8")
             )
-            if not is_valid:
+            pw = password.encode("utf-8")
+            main_ok = hmac.compare_digest(
+                pw, str(settings.basic_auth_password).encode("utf-8")
+            )
+            # A separate view-only password authenticates the same user but caps the
+            # connection at the viewer role; the ws handlers coerce a self-asserted
+            # controller down to it (see auth_role_ceiling). Both comparisons run so
+            # the reply timing never reveals which password was presented.
+            viewonly_secret = str(getattr(settings, "basic_auth_viewonly_password", "") or "")
+            viewonly_ok = bool(viewonly_secret) and hmac.compare_digest(
+                pw, viewonly_secret.encode("utf-8")
+            )
+            if not (user_ok and (main_ok or viewonly_ok)):
                 logger.warning(
                     f"Invalid credentials provided for user: {settings.basic_auth_user}"
                 )
                 return web.Response(status=401, text="Invalid Credentials")
+            request["auth_role_ceiling"] = (
+                "viewer" if (viewonly_ok and not main_ok) else "controller"
+            )
         except Exception:
             return web.Response(status=401, text="Invalid Credentials")
         return await handler(request)

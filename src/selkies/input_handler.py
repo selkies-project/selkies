@@ -586,6 +586,12 @@ class _X11ClipboardMonitor:
             self._changed.clear()
         return got
 
+    def alive(self):
+        """False once the event thread has exited (display disruption, XFixes
+        error). A dead monitor never reports another change, so the outbound
+        monitor loop rebuilds it instead of waiting on it forever."""
+        return not self._stop and self._thread.is_alive()
+
     def close(self):
         self._stop = True
         try:
@@ -3165,7 +3171,28 @@ class WebRTCInput:
                         changed = True
                         first_pass = False
                     elif x11_monitor is not None:
-                        changed = await x11_monitor.wait_change(2.0)
+                        if not x11_monitor.alive():
+                            # The dedicated X connection/event thread exited (display
+                            # disruption, XFixes error). Rebuild it in place so outbound
+                            # clipboard heals on its own instead of staying dead until
+                            # the user toggles the binary-clipboard setting.
+                            logger_webrtc_input.warning(
+                                "X11 clipboard monitor thread exited; respawning.")
+                            try:
+                                x11_monitor.close()
+                            except Exception:
+                                pass
+                            self._x11_clipboard_monitor = None
+                            x11_monitor = self._ensure_x11_clipboard_monitor()
+                            if x11_monitor is None:
+                                await asyncio.sleep(0.5)
+                                changed = False
+                            else:
+                                # Republish current content on the fresh monitor; the
+                                # baseline compare below still suppresses no-op sends.
+                                changed = True
+                        else:
+                            changed = await x11_monitor.wait_change(2.0)
                     elif wl_native_queue is not None:
                         try:
                             wl_native_item = await asyncio.wait_for(wl_native_queue.get(), 2.0)

@@ -497,6 +497,13 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Password used when basic authentication is set",
     },
     {
+        "name": "basic_auth_viewonly_password",
+        "type": "str",
+        "default": "",
+        "env_var": "VIEWONLY_PASSWORD",
+        "help": "Optional second basic-auth password that grants view-only access. Clients authenticating with it are capped at the viewer role (no keyboard, mouse, clipboard, gamepad, or command input) regardless of the role they request, while the main password authorizes full control. Empty disables the split. Ignored in secure mode, where the master token governs roles.",
+    },
+    {
         "name": "subfolder",
         "type": "str",
         "default": "",
@@ -887,6 +894,7 @@ SENSITIVE_SETTING_NAMES = frozenset({
     "https_key",
     "basic_auth_user",
     "basic_auth_password",
+    "basic_auth_viewonly_password",
     "turn_rest_api_key",
     "turn_shared_secret",
     "turn_password",

@@ -13,7 +13,7 @@ const shortcuts = [
 	{ label: t('sections.shortcuts.fullscreen'), combo: "Ctrl + Shift + F" },
 	{ label: t('sections.shortcuts.openMenu'), combo: "Ctrl + Shift + M" },
 	{ label: t('sections.shortcuts.toggleGamepad'), combo: "Ctrl + Shift + G" },
-	{ label: t('sections.shortcuts.pointerLock'), combo: "Ctrl + Shift + Left click" },
+	{ label: t('sections.shortcuts.pointerLock'), combo: "Ctrl + Shift + Left Click" },
 ];
 
 export function ShortcutsMenu() {

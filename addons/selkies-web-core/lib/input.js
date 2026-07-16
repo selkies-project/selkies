@@ -1481,14 +1481,20 @@ export class Input {
             // and no modifier is held server-side (their keydowns are swallowed
             // below along with everything else while composing). If no commit
             // follows promptly, the IME consumed the chord itself: discard it.
-            if ((event.ctrlKey || event.altKey || event.metaKey) &&
+            // Windows defers a fresh ControlLeft keydown (AltGr detection), so Control
+            // is physically down but not yet held server-side while _altGrArmed. The
+            // Korean IME can deliver the Process (229) keydown for the chord letter
+            // with ctrlKey UNSET even though Control is held, so treat the armed state
+            // as an intended Ctrl or the letter escapes as a bare keypress.
+            const armedCtrl = this._altGrArmed;
+            if ((event.ctrlKey || event.altKey || event.metaKey || armedCtrl) &&
                 !(event.getModifierState && event.getModifierState('AltGraph'))) {
                 const chordKeysym = KeyboardUtil.getKeysymFromCode(event.code);
                 if (chordKeysym) {
                     if (this.isComposing || event.isComposing) {
                         this._pendingChord = {
                             keysym: chordKeysym,
-                            ctrl: event.ctrlKey, alt: event.altKey,
+                            ctrl: event.ctrlKey || armedCtrl, alt: event.altKey,
                             meta: event.metaKey, shift: event.shiftKey,
                             at: performance.now(),
                         };
@@ -1511,7 +1517,7 @@ export class Input {
                         // Wrap the key with the missing chord modifiers or it
                         // lands as a bare keypress and types the letter.
                         const missingMods = [];
-                        if (event.ctrlKey && !this._keysymHeld(KeyTable.XK_Control_L, KeyTable.XK_Control_R)) {
+                        if ((event.ctrlKey || armedCtrl) && !this._keysymHeld(KeyTable.XK_Control_L, KeyTable.XK_Control_R)) {
                             missingMods.push(KeyTable.XK_Control_L);
                         }
                         if (event.altKey && !this._keysymHeld(KeyTable.XK_Alt_L, KeyTable.XK_Alt_R)) {

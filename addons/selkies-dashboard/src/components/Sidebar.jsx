@@ -4048,7 +4048,7 @@ function Sidebar() {
                       { combo: "Ctrl + Shift + F", label: t("sections.shortcuts.fullscreen", "Toggle fullscreen") },
                       { combo: "Ctrl + Shift + M", label: t("sections.shortcuts.openMenu", "Open or close the dashboard") },
                       { combo: "Ctrl + Shift + G", label: t("sections.shortcuts.toggleGamepad", "Toggle the virtual gamepad") },
-                      { combo: "Ctrl + Shift + Left click", label: t("sections.shortcuts.pointerLock", "Lock the pointer to the stream") },
+                      { combo: "Ctrl + Shift + Left Click", label: t("sections.shortcuts.pointerLock", "Lock the pointer to the stream") },
                     ].map((sc) => (
                       <div
                         key={sc.combo}

@@ -1418,7 +1418,9 @@ class WebRTCService(BaseStreamingService):
 
         peername = request.transport.get_extra_info("peername")
         remote_address = peername if peername else (request.remote, 0)
-        await self.peer_manager.signaling_handler(ws, remote_address)
+        await self.peer_manager.signaling_handler(
+            ws, remote_address, auth_role_ceiling=request.get("auth_role_ceiling")
+        )
         return ws
 
     async def handle_turn_req(self, request: web.Request) -> web.Response:

@@ -1125,6 +1125,25 @@ export default function webrtc() {
 				const newClipboardText = message.text;
 				sendClipboardData(newClipboardText);
 				break;
+			case 'clipboardImageUpdate':
+				// Dashboard image upload: hand the blob to the same binary path the
+				// focus/paste read uses. Only meaningful when binary clipboard is on
+				// (the server drops image writes otherwise).
+				if (isSharedMode) {
+					console.log("Shared mode: Clipboard image write to server blocked.");
+					break;
+				}
+				if (message.imageBlob && enable_binary_clipboard) {
+					(async () => {
+						try {
+							const buf = await message.imageBlob.arrayBuffer();
+							await sendClipboardData(buf, message.imageBlob.type || 'image/png');
+						} catch (e) {
+							console.warn('Failed to send uploaded clipboard image:', e);
+						}
+					})();
+				}
+				break;
 			case 'audioDeviceSelected':
 				// Output-device routing (setSinkId); mic-input device selection is not
 				// plumbed on the WebRTC mic path, so only 'output' is honored here.
@@ -1989,6 +2008,19 @@ export default function webrtc() {
 
 				// Bind input handlers. For shared mode, the listeners are limited
 				input.attach();
+
+				// Pull the current server clipboard once on connect, mirroring the
+				// websockets core. Without this a WebRTC session (or one reached by
+				// switching transports, which reloads the page) shows no server
+				// clipboard — images included — until the next server-side change.
+				// The server silently drops a viewer's 'cr', so this is safe in
+				// shared mode too.
+				try {
+					webrtc.sendDataChannelMessage('cr');
+				} catch (e) {
+					console.warn('Failed to send initial clipboard request (cr):', e);
+				}
+
 				if (isSharedMode) {
 					console.log('Shared mode: skipping loading of last session settings and sending persisted settings to server');
 					return;
@@ -2178,31 +2210,16 @@ export default function webrtc() {
 				}
 			}
 
-			// The clipboard-read permission query REJECTS with TypeError on Firefox
-			// and WebKit (Safari), which would leave clipboardStatus 'disabled' and
-			// kill the Ctrl/Cmd clipboard sync on those engines. There, gate on
-			// capability + secure context instead; per-call NotAllowed errors are
-			// already handled with execCommand/paste fallbacks. Chromium keeps the
-			// permission-query path, which reflects a real granted state there.
-			if (isChromium) {
-				if (navigator.permissions) {
-					navigator.permissions.query({
-						name: 'clipboard-read'
-					}).then(permissionStatus => {
-						// Will be 'granted', 'denied' or 'prompt':
-						if (permissionStatus.state === 'granted') {
-								clipboardStatus = 'enabled';
-						}
-
-						// Listen for changes to the permission state
-						permissionStatus.onchange = () => {
-								if (permissionStatus.state === 'granted') {
-										clipboardStatus = 'enabled';
-								}
-						};
-					}).catch(() => {});
-				}
-			} else if (window.isSecureContext && navigator.clipboard) {
+			// Enable clipboard sync on capability + secure context for every engine,
+			// matching the websockets core. The clipboard-read permission query
+			// rejects with TypeError on Firefox/WebKit and reports 'prompt' on
+			// Chromium until the user grants persistent access; gating the whole
+			// sync (send AND receive) on state === 'granted' silently disabled the
+			// clipboard on Chromium over WebRTC while websockets worked. Per-call
+			// NotAllowed/NotFound errors are handled at each read with paste
+			// fallbacks, and the Chromium focus read still raises its one-time
+			// prompt exactly as before.
+			if (window.isSecureContext && navigator.clipboard) {
 				clipboardStatus = 'enabled';
 			}
 
