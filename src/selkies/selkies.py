@@ -3186,8 +3186,8 @@ class DataStreamingServer:
             await self.capture_loop.run_in_executor(
                 None,
                 capture_module.start_capture,
-                settings,
-                queue_data_for_display
+                queue_data_for_display,
+                settings
             )
 
             self.capture_instances[display_id] = {
@@ -3221,7 +3221,6 @@ class DataStreamingServer:
         cs.debug_logging = self.cli_args.debug[0]
         cs.use_wayland = IS_WAYLAND
         cs.omit_stripe_headers = False
-        cs.deferred_free = True
 
         encoder = display_state.get('encoder', self.app.encoder)
         if encoder == "jpeg":

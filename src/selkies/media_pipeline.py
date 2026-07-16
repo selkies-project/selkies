@@ -316,7 +316,7 @@ class MediaPipelinePixel(MediaPipeline):
 
         try:
             self.capture_module = ScreenCapture()
-            await self.async_event_loop.run_in_executor(None, self.capture_module.start_capture, settings, self._screen_capture_callback)
+            await self.async_event_loop.run_in_executor(None, self.capture_module.start_capture, self._screen_capture_callback, settings)
             self._is_screen_capturing = True
             logger.info("Started screen capture module")
         except Exception as e:
@@ -345,7 +345,7 @@ class MediaPipelinePixel(MediaPipeline):
             try:
                 settings = self.generate_capture_settings()
                 await self.async_event_loop.run_in_executor(
-                    None, self.capture_module.start_capture, settings, self._screen_capture_callback
+                    None, self.capture_module.start_capture, self._screen_capture_callback, settings
                 )
                 logger.info("Screen capture reconfigured")
             except Exception as e:
