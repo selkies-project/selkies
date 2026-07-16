@@ -553,8 +553,8 @@ class MediaPipelinePixel(MediaPipeline):
             self.capture_module.set_cursor_callback(self._pixelflux_cursor_handler)
             await asyncio.to_thread(
                 self.capture_module.start_capture,
-                settings,
                 self._screen_capture_callback,
+                settings,
             )
             self._is_screen_capturing = True
             logger.info("Started screen capture module")
@@ -609,8 +609,8 @@ class MediaPipelinePixel(MediaPipeline):
                 settings = self.generate_capture_settings()
                 await asyncio.to_thread(
                     self.capture_module.start_capture,
-                    settings,
                     self._screen_capture_callback,
+                    settings,
                 )
                 logger.info("Screen capture reconfigured")
             except Exception as e:

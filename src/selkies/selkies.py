@@ -3347,7 +3347,7 @@ class DataStreamingServer(BaseStreamingService):
                         module, fresh = inst['module'], inst['settings']
                         if IS_WAYLAND:
                             # A start on the live capture reconfigures it in place.
-                            await asyncio.to_thread(module.start_capture, fresh, inst['callback'])
+                            await asyncio.to_thread(module.start_capture, inst['callback'], fresh)
                         else:
                             module.update_framerate(float(fresh.target_fps))
                             module.update_video_bitrate(int(fresh.video_bitrate_kbps))
@@ -3583,8 +3583,6 @@ class DataStreamingServer(BaseStreamingService):
         try:
             settings = self._get_capture_settings(display_id, width, height, x_offset, y_offset)
 
-            deferred_capture = bool(settings.deferred_free)
-
             def queue_data_for_display(frame):
                 if frame is None:
                     return
@@ -3592,29 +3590,20 @@ class DataStreamingServer(BaseStreamingService):
                     if not len(frame):
                         return
 
-                    if deferred_capture:
-                        # Zero-copy: the frame owns its native buffer and frees it once the
-                        # last view/reference drops. Keep the frame itself as `owner` so every
-                        # later return/exception (and the WS transport) frees it by dropping it.
-                        queue = self.video_chunk_queues.get(display_id)
-                        if not queue:
-                            return  # frame drops here -> buffer freed
-                        # memoryview(frame) is a zero-copy view; it (and the frame) stay alive
-                        # until the queue item and every WS transport release them.
-                        item_to_queue = {'data': memoryview(frame), 'owner': frame,
-                                         # Only the low 16 bits go on the wire (uint16), which
-                                         # is what the client ACKs; mask here so sent_timestamps
-                                         # RTT lookups and the uint16 circular-distance
-                                         # backpressure math keep matching past frame 65535.
-                                         'frame_id': frame.frame_id & 0xFFFF}
-                    else:
-                        queue = self.video_chunk_queues.get(display_id)
-                        if not queue:
-                            return
-                        # Copy fallback (deferred_free off): the frame already carries its
-                        # native wire header (0x03 JPEG / 0x04 H.264), so no re-framing here.
-                        data_bytes = bytes(frame)
-                        item_to_queue = {'data': data_bytes, 'frame_id': frame.frame_id & 0xFFFF}  # low 16 bits = wire/ACK space
+                    # Zero-copy: the frame owns its native buffer and frees it once the
+                    # last view/reference drops. Keep the frame itself as `owner` so every
+                    # later return/exception (and the WS transport) frees it by dropping it.
+                    queue = self.video_chunk_queues.get(display_id)
+                    if not queue:
+                        return  # frame drops here -> buffer freed
+                    # memoryview(frame) is a zero-copy view; it (and the frame) stay alive
+                    # until the queue item and every WS transport release them.
+                    item_to_queue = {'data': memoryview(frame), 'owner': frame,
+                                     # Only the low 16 bits go on the wire (uint16), which
+                                     # is what the client ACKs; mask here so sent_timestamps
+                                     # RTT lookups and the uint16 circular-distance
+                                     # backpressure math keep matching past frame 65535.
+                                     'frame_id': frame.frame_id & 0xFFFF}
 
                     def do_put():
                         try:
@@ -3672,8 +3661,8 @@ class DataStreamingServer(BaseStreamingService):
             await self.capture_loop.run_in_executor(
                 None,
                 capture_module.start_capture,
-                settings,
-                queue_data_for_display
+                queue_data_for_display,
+                settings
             )
 
             self.capture_instances[display_id] = {
@@ -3748,12 +3737,11 @@ class DataStreamingServer(BaseStreamingService):
         cs.damage_block_threshold = 10
         cs.damage_block_duration = 20
         cs.use_cpu = display_state.get('use_cpu', self._initial_use_cpu)
-        # Deferred-free zero-copy: aiohttp may retain a memoryview of the encoded buffer
-        # past send_bytes, so we keep the owning frame alive behind any live view/slice;
-        # it frees the buffer once the last reference drops. JPEG now emits its wire header
-        # (0x03) natively like H.264, so every mode is zero-copy.
-        cs.deferred_free = True
-        
+        # Zero-copy delivery: aiohttp may retain a memoryview of the encoded buffer past
+        # send_bytes, so we keep the owning StripeFrame alive behind any live view/slice; it
+        # frees the buffer once the last reference drops. pixelflux frames always own their
+        # buffer (JPEG emits its 0x03 wire header natively like H.264), so every mode is zero-copy.
+
         # Forward explicit --encode-dri as an authoritative PATH; --gpu-id picks the
         # encoder device by index when no path is given. Unset, pixelflux defaults to
         # ID 0 — the first GPU — unless AUTO_GPU affinity aims it elsewhere.
@@ -4164,7 +4152,7 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
                         alive = False
                 if alive and inst.get('callback'):
                     settings = data_server_instance._get_capture_settings(display_id, target_w, target_h, 0, 0)
-                    await asyncio.to_thread(module.start_capture, settings, inst['callback'])
+                    await asyncio.to_thread(module.start_capture, inst['callback'], settings)
                     inst['settings'] = settings
                 else:
                     await data_server_instance._stop_capture_for_display(display_id)
