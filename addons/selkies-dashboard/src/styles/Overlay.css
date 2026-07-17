@@ -1095,6 +1095,25 @@ a:active {
   text-decoration: none;
 }
 
+/* The academic-citation link: override the underline-stripping above so it
+   clearly reads as clickable and invites a press (underline, link color, a
+   brighter hover, and a pointer cursor). */
+a.cite-link,
+a.cite-link:link,
+a.cite-link:visited {
+  color: var(--link-color, #4a90e2);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  font-size: 0.82em;
+  transition: color 0.15s ease;
+}
+a.cite-link:hover,
+a.cite-link:active {
+  color: var(--link-hover-color, #6fb0f0);
+  text-decoration: underline;
+}
+
 /* --- Files Modal Styles --- */
 /* Styles for the file browser modal.
    Rounded corners, positioned above sidebar/notifications. */

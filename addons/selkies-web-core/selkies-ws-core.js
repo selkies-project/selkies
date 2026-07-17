@@ -18,6 +18,7 @@ import {
   clipboardPreviewMessage,
   readLocalClipboard
 } from './lib/clipboard-sync.js';
+import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js';
 import {
   createFileUploader
 } from './lib/file-upload.js';
@@ -237,6 +238,7 @@ function setRealViewportHeight() {
 }
 // One id per multipart clipboard transfer.
 let clipboardTransferCounter = 0;
+const clipboardWorker = new ClipboardWorkerBridge();
 // Resources for clipboard
 let enable_binary_clipboard = true;
 // Server-clipboard cache + change-only sync + Ctrl/Cmd+C request queue
@@ -2230,6 +2232,29 @@ const initializeInput = () => {
   handleResizeUI_globalRef = handleResizeUI;
   originalWindowResizeHandler = debounce(handleResizeUI, 500);
 
+  // Auto-mode framebuffer resolution is logical-size x devicePixelRatio, but a DPR
+  // change on its own — dragging the window to a monitor of a different pixel
+  // density, or an OS display-scaling change — fires no 'resize' event, so the
+  // stream stays at the old density until the next manual resize (the screen renders
+  // at the wrong scale). Re-run the auto-resize path when DPR changes; handleResizeUI
+  // self-guards manual/shared mode. matchMedia resolution queries are one-shot at a
+  // given dppx, so re-arm after each change to track the new ratio.
+  const watchDevicePixelRatio = () => {
+    let mql = null;
+    const onDprChange = () => {
+      if (typeof handleResizeUI_globalRef === 'function') handleResizeUI_globalRef();
+      arm();
+    };
+    const arm = () => {
+      if (mql) { try { mql.removeEventListener('change', onDprChange); } catch (_) {} }
+      const dpr = window.devicePixelRatio || 1;
+      mql = window.matchMedia(`(resolution: ${dpr}dppx)`);
+      mql.addEventListener('change', onDprChange, { once: true });
+    };
+    arm();
+  };
+  watchDevicePixelRatio();
+
   if (isSharedMode) {
     console.log("Shared mode: Auto-resize event listener (originalWindowResizeHandler) NOT attached.");
   } else if (!window.is_manual_resolution_mode) {
@@ -2791,61 +2816,27 @@ async function sendClipboardData(data, mimeType = 'text/plain') {
     let dataBytes;
     if (isBinary) {
         dataBytes = new Uint8Array(data);
-    } else { 
+    } else {
         dataBytes = new TextEncoder().encode(data);
         mimeType = 'text/plain';
     }
-    if (dataBytes.byteLength < CLIPBOARD_CHUNK_SIZE) {
-        let binaryString = '';
-        for (let i = 0; i < dataBytes.length; i++) {
-            binaryString += String.fromCharCode(dataBytes[i]);
-        }
-        const base64Data = btoa(binaryString);
-        if (mimeType === 'text/plain') {
-            websocket.send(`cw,${base64Data}`);
-            console.log('Sent small clipboard text in single message.');
-        } else {
-            websocket.send(`cb,${mimeType},${base64Data}`);
-            console.log(`Sent small binary clipboard data in single message: ${mimeType}`);
-        }
-    } else {
-        console.log(`Sending large clipboard data (${dataBytes.byteLength} bytes) in multiple parts.`);
-        const totalSize = dataBytes.byteLength;
-        const tid = ++clipboardTransferCounter;
-        if (mimeType === 'text/plain') {
-            websocket.send(`cws,${tid},${totalSize}`);
-        } else {
-            websocket.send(`cbs,${tid},${mimeType},${totalSize}`);
-        }
-        for (let offset = 0; offset < totalSize; offset += CLIPBOARD_CHUNK_SIZE) {
-            // Backpressure: an unthrottled multi-MB clipboard burst starves uploads
-            // and input sharing the same socket.
+    // Shared chunked send (see lib/clipboard-worker-bridge.js) — identical wire
+    // protocol and worker offload as WebRTC. Transport specifics: WS send + a
+    // bufferedAmount backpressure gate (a burst must not starve uploads/input on
+    // the same socket).
+    await sendClipboardChunked(dataBytes, mimeType, {
+        worker: clipboardWorker,
+        send: (m) => websocket.send(m),
+        waitDrain: async () => {
             while (websocket.bufferedAmount > 4 * 1024 * 1024) {
                 await new Promise(resolve => setTimeout(resolve, 50));
-                if (websocket.readyState !== WebSocket.OPEN) return;
+                if (websocket.readyState !== WebSocket.OPEN) return false;
             }
-            const chunk = dataBytes.subarray(offset, offset + CLIPBOARD_CHUNK_SIZE);
-            let binaryString = '';
-            for (let i = 0; i < chunk.length; i++) {
-                binaryString += String.fromCharCode(chunk[i]);
-            }
-            const base64Chunk = btoa(binaryString);
-
-            if (mimeType === 'text/plain') {
-                websocket.send(`cwd,${tid},${base64Chunk}`);
-            } else {
-                websocket.send(`cbd,${tid},${base64Chunk}`);
-            }
-            await new Promise(resolve => setTimeout(resolve, 0));
-        }
-
-        if (mimeType === 'text/plain') {
-            websocket.send(`cwe,${tid}`);
-        } else {
-            websocket.send(`cbe,${tid}`);
-        }
-        console.log('Finished sending multi-part clipboard data.');
-    }
+            return true;
+        },
+        chunkRawBytes: CLIPBOARD_CHUNK_SIZE,
+        nextTid: () => ++clipboardTransferCounter,
+    });
 }
 
 function handleSettingsMessage(settings) {
@@ -2993,6 +2984,11 @@ function handleSettingsMessage(settings) {
   if (settings.video_bitrate !== undefined) {
     videoBitrate = parseFloat(settings.video_bitrate);
     setIntParam('video_bitrate', videoBitrate);
+    settingsChanged = true;
+  }
+  if (settings.audio_bitrate !== undefined) {
+    audio_bitrate = parseInt(settings.audio_bitrate, 10);
+    setIntParam('audio_bitrate', audio_bitrate);
     settingsChanged = true;
   }
   if (settings.force_aligned_resolution !== undefined) {

@@ -114,7 +114,7 @@ export function Clipboard() {
 		<div className="w-[300px] p-4 flex flex-col gap-2">
 			{(renderableSettings.binaryClipboard ?? true) && (
 				<div className="flex items-center justify-between">
-					<Label className="text-sm font-medium">{t('sections.clipboard.binaryModeLabel')}</Label>
+					<Label className="text-sm font-medium" title={t('sections.clipboard.binaryModeDetails')}>{t('sections.clipboard.binaryModeLabel')}</Label>
 					<Switch
 						checked={enableBinaryClipboard}
 						onCheckedChange={handleBinaryClipboardToggle}

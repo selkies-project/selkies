@@ -26,7 +26,7 @@ export function ShortcutsMenu() {
 						<ul className="space-y-3">
 							{shortcuts.map((s, i) => (
 								<li key={i} className="flex flex-col items-center gap-1 text-center">
-									<Badge variant="secondary" className="text-xs px-2 py-0.5 font-mono bg-primary/90 text-primary-foreground">
+									<Badge variant="secondary" className="text-xs px-2 py-0.5 font-mono bg-primary/90 text-primary-foreground whitespace-normal h-auto overflow-visible break-words max-w-full text-center">
 										{s.combo}
 									</Badge>
 									<span className="text-foreground text-sm">

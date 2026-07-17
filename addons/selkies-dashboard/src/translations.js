@@ -164,6 +164,7 @@ const en = {
             openMenu: "Open or close the dashboard",
             toggleGamepad: "Toggle the virtual gamepad",
             pointerLock: "Lock the pointer to the stream",
+            citeNotice: "Please cite within your publication for academic usage",
         },
         sharing: {
             title: "Sharing"
@@ -371,6 +372,7 @@ const es = {
             openMenu: "Abrir o cerrar el panel",
             toggleGamepad: "Alternar el gamepad virtual",
             pointerLock: "Bloquear el puntero en la transmisión",
+            citeNotice: "Cite esta obra en su publicación para uso académico",
         },
         sharing: {
             title: "Compartir"
@@ -578,6 +580,7 @@ const zh = {
             openMenu: "打开或关闭仪表板",
             toggleGamepad: "切换虚拟手柄",
             pointerLock: "将指针锁定到串流",
+            citeNotice: "学术用途请在您的出版物中引用",
         },
         sharing: {
             title: "共享"
@@ -785,6 +788,7 @@ const hi = {
             openMenu: "डैशबोर्ड खोलें या बंद करें",
             toggleGamepad: "वर्चुअल गेमपैड टॉगल करें",
             pointerLock: "पॉइंटर को स्ट्रीम पर लॉक करें",
+            citeNotice: "अकादमिक उपयोग हेतु कृपया अपने प्रकाशन में उद्धृत करें",
         },
         sharing: {
             title: "साझा करना"
@@ -992,6 +996,7 @@ const pt = {
             openMenu: "Abrir ou fechar o painel",
             toggleGamepad: "Alternar o gamepad virtual",
             pointerLock: "Bloquear o ponteiro na transmissão",
+            citeNotice: "Cite esta obra em sua publicação para uso acadêmico",
         },
         sharing: {
             title: "Compartilhamento"
@@ -1199,6 +1204,7 @@ const fr = {
             openMenu: "Ouvrir ou fermer le tableau de bord",
             toggleGamepad: "Basculer la manette virtuelle",
             pointerLock: "Verrouiller le pointeur sur le flux",
+            citeNotice: "Veuillez citer cette œuvre dans votre publication pour un usage académique",
         },
         sharing: {
             title: "Partage"
@@ -1406,6 +1412,7 @@ const ru = {
             openMenu: "Открыть или закрыть панель",
             toggleGamepad: "Переключить виртуальный геймпад",
             pointerLock: "Зафиксировать указатель в потоке",
+            citeNotice: "Для академического использования просьба сослаться в публикации",
         },
         sharing: {
             title: "Общий доступ"
@@ -1613,6 +1620,7 @@ const de = {
             openMenu: "Dashboard öffnen oder schließen",
             toggleGamepad: "Virtuelles Gamepad umschalten",
             pointerLock: "Zeiger im Stream sperren",
+            citeNotice: "Für akademische Nutzung bitte in Ihrer Publikation zitieren",
         },
         sharing: {
             title: "Teilen"
@@ -1820,6 +1828,7 @@ const tr = {
             openMenu: "Paneli aç veya kapat",
             toggleGamepad: "Sanal oyun kolunu aç/kapat",
             pointerLock: "İşaretçiyi yayına kilitle",
+            citeNotice: "Akademik kullanım için lütfen yayınınızda atıf yapın",
         },
         sharing: {
             title: "Paylaşım"
@@ -2027,6 +2036,7 @@ const it = {
             openMenu: "Apri o chiudi la dashboard",
             toggleGamepad: "Attiva/disattiva il gamepad virtuale",
             pointerLock: "Blocca il puntatore sullo stream",
+            citeNotice: "Per uso accademico si prega di citare nella propria pubblicazione",
         },
         sharing: {
             title: "Condivisione"
@@ -2234,6 +2244,7 @@ const nl = {
             openMenu: "Dashboard openen of sluiten",
             toggleGamepad: "Virtuele gamepad in-/uitschakelen",
             pointerLock: "Aanwijzer vergrendelen op de stream",
+            citeNotice: "Citeer dit werk in uw publicatie voor academisch gebruik",
         },
         sharing: {
             title: "Delen"
@@ -2441,6 +2452,7 @@ const ar = {
             openMenu: "فتح لوحة التحكم أو إغلاقها",
             toggleGamepad: "تبديل ذراع التحكم الافتراضي",
             pointerLock: "قفل المؤشر على البث",
+            citeNotice: "للاستخدام الأكاديمي، يُرجى الاستشهاد بهذا العمل في منشورك",
         },
         sharing: {
             title: "المشاركة"
@@ -2648,6 +2660,7 @@ const ko = {
             openMenu: "대시보드 열기 또는 닫기",
             toggleGamepad: "가상 게임패드 전환",
             pointerLock: "포인터를 스트림에 고정",
+            citeNotice: "학술적 이용 시 출판물에 인용해 주세요",
         },
         sharing: {
             title: "공유"
@@ -2855,6 +2868,7 @@ const ja = {
             openMenu: "ダッシュボードを開く/閉じる",
             toggleGamepad: "仮想ゲームパッドを切り替え",
             pointerLock: "ポインターをストリームにロック",
+            citeNotice: "学術利用の際は出版物での引用をお願いします",
         },
         sharing: {
             title: "共有"
@@ -3062,6 +3076,7 @@ const vi = {
             openMenu: "Mở hoặc đóng bảng điều khiển",
             toggleGamepad: "Bật/tắt tay cầm ảo",
             pointerLock: "Khóa con trỏ vào luồng",
+            citeNotice: "Vui lòng trích dẫn trong ấn phẩm của bạn khi sử dụng cho mục đích học thuật",
         },
         sharing: {
             title: "Chia sẻ"
@@ -3269,6 +3284,7 @@ const th = {
             openMenu: "เปิดหรือปิดแดชบอร์ด",
             toggleGamepad: "สลับเกมแพดเสมือน",
             pointerLock: "ล็อกตัวชี้กับสตรีม",
+            citeNotice: "โปรดอ้างอิงในสิ่งพิมพ์ของคุณสำหรับการใช้งานเชิงวิชาการ",
         },
         sharing: {
             title: "การแชร์"
@@ -3476,6 +3492,7 @@ const fil = {
             openMenu: "Buksan o isara ang dashboard",
             toggleGamepad: "I-toggle ang virtual na gamepad",
             pointerLock: "I-lock ang pointer sa stream",
+            citeNotice: "Mangyaring banggitin sa iyong publikasyon para sa akademikong paggamit",
         },
         sharing: {
             title: "Pagbabahagi"
@@ -3683,6 +3700,7 @@ const da = {
             openMenu: "Åbn eller luk dashboardet",
             toggleGamepad: "Slå den virtuelle gamepad til/fra",
             pointerLock: "Lås markøren til streamen",
+            citeNotice: "Citér venligst i din publikation ved akademisk brug",
         },
         sharing: {
             title: "Deling"

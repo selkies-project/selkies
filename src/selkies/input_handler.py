@@ -307,6 +307,8 @@ class _X11ClipboardMonitor:
     _READ_TIMEOUT_S = 5.0
     # INCR reads accumulate at most this much (matches the Wayland read cap).
     _READ_MAX_BYTES = 64 * 1024 * 1024
+    # Cap on a file-manager (text/uri-list) image pasted from disk.
+    _URI_FILE_MAX_BYTES = 10 * 1024 * 1024
     # Per-ChangeProperty chunk: stays under the classic 256 KiB X11 request limit
     # (python-xlib has no BIG-REQUESTS); large payloads append in chunks BEFORE the
     # SelectionNotify, so requestors read one complete property and INCR is not needed.
@@ -334,6 +336,10 @@ class _X11ClipboardMonitor:
             'image/png', 'image/jpeg', 'image/bmp', 'image/webp', 'image/svg+xml')]
         self._text_targets = [(self._d.get_atom(t), t) for t in (
             'UTF8_STRING', 'text/plain;charset=utf-8', 'STRING')]
+        # File managers copy an image as a text/uri-list of file:// URIs, not the
+        # image bytes; resolve it locally so a paste from the file manager works
+        # in-process (the xclip fallback covered only this case).
+        self._uri_list_atom = self._d.get_atom('text/uri-list')
         self._d.xfixes_select_selection_input(
             self._win, self._clipboard,
             xfixes.XFixesSetSelectionOwnerNotifyMask
@@ -555,12 +561,51 @@ class _X11ClipboardMonitor:
                     got = self._convert_and_wait(atom)
                     if got and got[0]:
                         return bytes(got[0]), mime
+            # File-manager copy: no image target, but a text/uri-list of file://
+            # URIs pointing at an image on disk.
+            if self._uri_list_atom in offered:
+                got = self._convert_and_wait(self._uri_list_atom)
+                if got and got[0]:
+                    resolved = self._resolve_uri_list_image(bytes(got[0]))
+                    if resolved is not None:
+                        return resolved
         for atom, _name in self._text_targets:
             if atom in offered:
                 got = self._convert_and_wait(atom)
                 if got is not None and got[0] is not None:
                     return bytes(got[0]).decode('utf-8', errors='replace'), 'text/plain'
         return None, None
+
+    def _resolve_uri_list_image(self, data_bytes):
+        """Resolve a text/uri-list (file-manager copy) to (image_bytes, mime): the
+        first local file:// URI with a known image extension, read bounded. Returns
+        None when nothing qualifies."""
+        mime_map = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                    '.bmp': 'image/bmp', '.webp': 'image/webp', '.svg': 'image/svg+xml'}
+        try:
+            text = data_bytes.decode('utf-8', errors='replace')
+        except Exception:
+            return None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            try:
+                parsed = urllib.parse.urlparse(line)
+                if parsed.scheme != 'file':
+                    continue
+                path = urllib.request.url2pathname(parsed.path)
+                if not os.path.isfile(path):
+                    continue
+                mime = mime_map.get(os.path.splitext(path)[1].lower())
+                if not mime:
+                    continue
+                if 0 < os.path.getsize(path) <= self._URI_FILE_MAX_BYTES:
+                    with open(path, 'rb') as f:
+                        return f.read(self._URI_FILE_MAX_BYTES), mime
+            except OSError:
+                continue
+        return None
 
     def offer(self, data, mime_type):
         """Blocking (call via executor): take CLIPBOARD ownership and serve `data`
@@ -2279,6 +2324,20 @@ class WebRTCInput:
         for k in list(self.translated_keys):
             try: await self.send_x11_keypress(k, down=False)
             except Exception as e: logger_webrtc_input.warning(f"Error releasing translated key {k}: {e}")
+        # Normalize a stuck Lock (Caps Lock) modifier. The client resolves letter
+        # case itself and sends the final keysym (XK_a vs XK_A), so an engaged
+        # server Lock inverts every letter — typing uppercase, with Shift yielding
+        # lowercase. CapsLock is not forwarded from the browser, but a prior session
+        # or the desktop's own startup can leave Lock engaged; toggle it back off.
+        try:
+            if self.xdisplay.screen().root.query_pointer().mask & Xlib.X.LockMask:
+                caps_kc = self.xdisplay.keysym_to_keycode(0xffe5)
+                if caps_kc:
+                    xtest.fake_input(self.xdisplay, Xlib.X.KeyPress, caps_kc)
+                    xtest.fake_input(self.xdisplay, Xlib.X.KeyRelease, caps_kc)
+                    self.xdisplay.flush()
+        except Exception as e:
+            logger_webrtc_input.warning(f"Could not normalize Lock modifier: {e}")
         # Clear server-side key state (after the release loop consumes it) to avoid stuck-modifier desync.
         self.active_modifiers.clear()
         self.active_shortcut_modifiers.clear()
@@ -3907,13 +3966,14 @@ class WebRTCInput:
                     mime_type = self.multipart_clipboard_mime_type
                     # Awaited in-line: messages on this channel are ordered, so a paste
                     # keystroke right behind the transfer must find the clipboard already
-                    # set (write_clipboard's internals are timeout-bounded).
-                    if mime_type == "text/plain":
-                        text_data = data.decode("utf-8", "ignore")
-                        if await self.write_clipboard(text_data):
-                            logger_webrtc_input.info(f"Set multi-part clipboard content, length: {len(text_data)}")
-                    else:
-                        if await self.write_clipboard(data, mime_type=mime_type):
+                    # set (write_clipboard's internals are timeout-bounded). Pass the raw
+                    # UTF-8 bytes straight through (write_clipboard accepts bytes and the
+                    # native X11 offer runs in a thread) to skip a redundant multi-MB
+                    # decode+re-encode round-trip on the event loop for large text.
+                    if await self.write_clipboard(data, mime_type=mime_type):
+                        if mime_type == "text/plain":
+                            logger_webrtc_input.info(f"Set multi-part clipboard content, length: {len(data)}")
+                        else:
                             logger_webrtc_input.info(f"Set multi-part binary clipboard content ({mime_type}), size: {len(data)} bytes")
                 self._reset_multipart_clipboard()
         elif msg_type == "cr":

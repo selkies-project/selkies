@@ -4166,7 +4166,10 @@ function Sidebar() {
                         <kbd
                           style={{
                             fontFamily: "monospace",
-                            whiteSpace: "nowrap",
+                            whiteSpace: "normal",
+                            overflowWrap: "anywhere",
+                            maxWidth: "100%",
+                            textAlign: "center",
                             padding: "2px 6px",
                             borderRadius: "4px",
                             border: "1px solid var(--item-border)",
@@ -4177,6 +4180,17 @@ function Sidebar() {
                         <span>{sc.label}</span>
                       </div>
                     ))}
+                    <div style={{ marginTop: "8px", textAlign: "center" }}>
+                      <a
+                        className="cite-link"
+                        href="https://github.com/selkies-project/selkies/blob/main/docs/README.md#citations-in-academic-publications"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {t("sections.shortcuts.citeNotice", "Please cite within your publication for academic usage")}
+                        {" ↗"}
+                      </a>
+                    </div>
                   </div>
                 )}
               </div>

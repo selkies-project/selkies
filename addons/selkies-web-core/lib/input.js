@@ -1495,6 +1495,16 @@ export class Input {
         if (!this._guac_markEvent(event)) return;
         this._releaseDesyncedModifiers(event);
         const keycode = KeyboardUtil.getKeyCode(event);
+        if (keycode === 'CapsLock' && KeyboardUtil.getKey(event) === 'CapsLock') {
+            // Case is already resolved into event.key and sent as the final keysym
+            // (XK_a vs XK_A). Forwarding CapsLock only toggles the server's Lock
+            // modifier, which then inverts every letter (types uppercase; Shift then
+            // yields lowercase). Swallow the unremapped key; an OS-level remap
+            // (caps:escape / caps:ctrl_modifier) reports a different event.key and
+            // still passes through as that key.
+            _stopEvent(event);
+            return;
+        }
         if (keycode in this._keyDownList) {
             _stopEvent(event);
             return;
@@ -1698,12 +1708,6 @@ export class Input {
             keysym = this._keyDownList[code];
         }
 
-        if ((browser.isMac() || browser.isIOS()) && (code === 'CapsLock')) {
-            this._sendMomentaryKey(KeyTable.XK_Caps_Lock);
-            _stopEvent(event);
-            return;
-        }
-
         const jpBadKeys = [
             KeyTable.XK_Zenkaku_Hankaku, KeyTable.XK_Eisu_toggle,
             KeyTable.XK_Katakana, KeyTable.XK_Hiragana, KeyTable.XK_Romaji
@@ -1741,6 +1745,11 @@ export class Input {
 
         const code = KeyboardUtil.getKeyCode(event);
 
+        if (code === 'CapsLock' && KeyboardUtil.getKey(event) === 'CapsLock') {
+            // Never forwarded on keydown (see _handleKeyDown), so nothing to release.
+            return;
+        }
+
         if (browser.isMac() && (code === 'MetaLeft' || code === 'MetaRight')) {
             console.log(`macOS: Command key ('${code}') released. Cleaning up potentially stuck keys.`);
 
@@ -1771,10 +1780,6 @@ export class Input {
             this._altGrArmed = false;
             clearTimeout(this._altGrTimeout);
             this._sendKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
-        }
-
-        if ((browser.isMac() || browser.isIOS()) && (code === 'CapsLock')) {
-            return;
         }
 
         const keysym = this._keyDownList[code];

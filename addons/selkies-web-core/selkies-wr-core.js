@@ -32,7 +32,7 @@ import { createClipboardSync, createClipboardGestures, createDeferredClipboardWr
 import { createFileUploader } from "./lib/file-upload.js";
 // Inline (base64 blob) so the worker travels inside selkies-core.js itself —
 // no separate hashed file to place next to whichever chunk references it.
-import ClipboardWorker from './clipboard-worker.js?worker&inline'
+import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
 
 // Per-transfer id so concurrent multipart clipboard sends are not interleaved.
 let __clipboardTransferCounter = 0;
@@ -140,93 +140,6 @@ function InitUI() {
 		backdrop-filter: blur(5px);
 	`;
   document.head.appendChild(style);
-}
-
-class ClipboardWorkerBridge {
-    constructor() {
-        this.worker = null;
-        this.callbacks = new Map();
-        this.msgId = 0;
-    }
-
-    /**
-     * Initializes the Web Worker
-     */
-    init() {
-        if (!this.worker) {
-			this.worker = new ClipboardWorker(); 
-            this.worker.onmessage = (e) => {
-                const { id, success, result, error, mimeType, byteLength } = e.data;
-                const resolveReject = this.callbacks.get(id);
-                if (resolveReject) {
-                    this.callbacks.delete(id);
-                    if (success) {
-                        resolveReject.resolve({ result, mimeType, byteLength });
-                    } else {
-                        resolveReject.reject(new Error(error));
-                    }
-                }
-            };
-            console.log("Clipboard Web Worker initialized.");
-        }
-    }
-
-    /**
-     * Kills the background thread and cleans up memory
-     */
-	terminate() {
-		if (!this.worker) return;
-		this.worker.terminate();
-		this.worker = null; 
-		const pendingCallbacks = Array.from(this.callbacks.values());
-		this.callbacks.clear();
-		for (const { reject } of pendingCallbacks) {
-			const err = new Error("Worker Terminated");
-			err.name = "AbortError";
-			reject(err);
-		}
-		console.log("Clipboard Web Worker terminated and pending operations aborted.");
-	}
-
-    /**
-     * Sends text to the worker to be encoded to Base64
-     */
-    async encodeText(text) {
-        this.init();
-        return new Promise((resolve, reject) => {
-            const id = ++this.msgId;
-            this.callbacks.set(id, { resolve, reject });
-            this.worker.postMessage({ id, action: 'ENCODE_TEXT_TO_B64', payload: text });
-        });
-    }
-
-    /**
-     * Sends an ArrayBuffer to the worker to be encoded to Base64.
-     * Uses Zero-Copy Transfer.
-     */
-    async encodeBinary(arrayBuffer) {
-        this.init();
-        return new Promise((resolve, reject) => {
-            const id = ++this.msgId;
-            this.callbacks.set(id, { resolve, reject });
-            this.worker.postMessage(
-                { id, action: 'ENCODE_BINARY_TO_B64', payload: arrayBuffer },
-                [arrayBuffer]
-            );
-        });
-    }
-
-    /**
-     * Sends Base64 string to be decoded back to Text or ArrayBuffer
-     */
-    async decode(base64String, mimeType) {
-        this.init();
-        return new Promise((resolve, reject) => {
-            const id = ++this.msgId;
-            this.callbacks.set(id, { resolve, reject });
-            this.worker.postMessage({ id, action: 'DECODE_FROM_B64', payload: base64String, mimeType });
-        });
-    }
 }
 
 export default function webrtc() {
@@ -932,6 +845,28 @@ export default function webrtc() {
 		}
 	}
 
+	// Auto-mode framebuffer resolution is logical-size x devicePixelRatio, but a DPR
+	// change alone (window dragged to a monitor of a different pixel density, or an OS
+	// display-scaling change) fires no 'resize' event, so the stream stays at the old
+	// density until the next resize. Re-run the auto-resize path when DPR changes;
+	// self-gated to auto mode (mirrors the manual-centering resize listener above).
+	// matchMedia resolution queries are one-shot at a given dppx, so re-arm each time.
+	const watchDevicePixelRatio = () => {
+		let mql = null;
+		const onDprChange = () => {
+			if (!window.isManualResolutionMode && !isSharedMode) { resizeStart(); }
+			arm();
+		};
+		const arm = () => {
+			if (mql) { try { mql.removeEventListener('change', onDprChange); } catch (_) {} }
+			const dpr = window.devicePixelRatio || 1;
+			mql = window.matchMedia(`(resolution: ${dpr}dppx)`);
+			mql.addEventListener('change', onDprChange, { once: true });
+		};
+		arm();
+	};
+	watchDevicePixelRatio();
+
 	function loadLastSessionSettings() {
 		if (isSharedMode) {
 			console.log("Skipping loading last session settings in shared mode.");
@@ -1171,6 +1106,23 @@ export default function webrtc() {
 					input.setSynth(message.value);
 				}
 				break;
+			case 'showVirtualKeyboard': {
+				// Parity with ws-core: focus the off-screen assist input so the
+				// mobile soft keyboard opens; blur it on the next touch of the stream.
+				if (isSharedMode) { break; }
+				const kbdAssistInput = document.getElementById('keyboard-input-assist');
+				const mainInteractionOverlay = document.getElementById('overlayInput');
+				if (kbdAssistInput) {
+					kbdAssistInput.value = '';
+					kbdAssistInput.focus();
+					if (mainInteractionOverlay) {
+						mainInteractionOverlay.addEventListener('touchstart', () => {
+							if (document.activeElement === kbdAssistInput) { kbdAssistInput.blur(); }
+						}, { once: true, passive: true });
+					}
+				}
+				break;
+			}
 			case 'setAntiAliasing':
 				if (typeof message.value === 'boolean') {
 					antiAliasingEnabled = message.value;
@@ -1507,64 +1459,29 @@ export default function webrtc() {
 		if (!clipboardSync.shouldSend(data, mimeType)) return;
 
 		const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
-		let arrayBuffer;
-		let totalSize;
-
+		let dataBytes;
 		if (isBinary) {
-			if (data instanceof Uint8Array && (data.byteOffset > 0 || data.byteLength !== data.buffer.byteLength)) {
-				arrayBuffer = data.slice().buffer;
-			} else {
-				arrayBuffer = data.buffer || data;
-			}
-			totalSize = arrayBuffer.byteLength;
+			dataBytes = data instanceof Uint8Array ? data : new Uint8Array(data);
 		} else {
-			const uint8 = new TextEncoder().encode(data);
-			arrayBuffer = uint8.buffer;
-			totalSize = uint8.byteLength;
+			dataBytes = new TextEncoder().encode(data);
 			mimeType = 'text/plain';
 		}
-
+		// Shared chunked send (see lib/clipboard-worker-bridge.js) — identical wire
+		// protocol and per-chunk worker offload as WebSockets. Transport specifics:
+		// the data-channel send + a drain gate (a multi-MB burst overflows the SCTP
+		// send buffer and Chromium closes the channel -> whole session dies). Raw
+		// chunk sized so its base64 fits the data-channel message budget.
 		try {
-			const { result: fullBase64 } = await clipboardWorker.encodeBinary(arrayBuffer);
-			const b64Size = fullBase64.length;
-			const clipboardChunk = dcMessageBudget();
-			if (b64Size <= clipboardChunk) {
-				if (mimeType === 'text/plain') {
-					webrtc.sendDataChannelMessage(`cw,${fullBase64}`);
-					console.log('Sent small clipboard text in single message.');
-				} else {
-					webrtc.sendDataChannelMessage(`cb,${mimeType},${fullBase64}`);
-					console.log(`Sent small binary clipboard data in single message: ${mimeType}`);
-				}
-			} else {
-				console.log(`Sending large clipboard data (${totalSize} bytes) in multiple parts.`);
-				const tid = ++__clipboardTransferCounter;
-				if (mimeType === 'text/plain') {
-					webrtc.sendDataChannelMessage(`cws,${tid},${totalSize}`);
-				} else {
-					webrtc.sendDataChannelMessage(`cbs,${tid},${mimeType},${totalSize}`);
-				}
-				for (let offset = 0; offset < b64Size; offset += clipboardChunk) {
-					// Backpressure: drain the async gzip queue AND the SCTP buffer, or a
-					// multi-MB burst overflows the send buffer and Chromium closes the
-					// channel (OperationError -> whole session dies).
-					if (webrtc.waitForDataChannelDrain) {
-						await webrtc.waitForDataChannelDrain(1024 * 1024);
-					}
-					const b64Chunk = fullBase64.substring(offset, offset + clipboardChunk);
-					if (mimeType === 'text/plain') {
-						webrtc.sendDataChannelMessage(`cwd,${tid},${b64Chunk}`);
-					} else {
-						webrtc.sendDataChannelMessage(`cbd,${tid},${b64Chunk}`);
-					}
-				}
-				if (mimeType === 'text/plain') {
-					webrtc.sendDataChannelMessage(`cwe,${tid}`);
-				} else {
-					webrtc.sendDataChannelMessage(`cbe,${tid}`);
-				}
-				console.log('Finished sending multi-part clipboard data.');
-			}
+			await sendClipboardChunked(dataBytes, mimeType, {
+				worker: clipboardWorker,
+				send: (m) => webrtc.sendDataChannelMessage(m),
+				waitDrain: async () => {
+					if (webrtc.waitForDataChannelDrain) await webrtc.waitForDataChannelDrain(1024 * 1024);
+					return true;
+				},
+				chunkRawBytes: Math.max(1, Math.floor(dcMessageBudget() * 3 / 4)),
+				nextTid: () => ++__clipboardTransferCounter,
+			});
 		} catch (err) {
 			console.error("Error sending clipboard data:", err);
 		}

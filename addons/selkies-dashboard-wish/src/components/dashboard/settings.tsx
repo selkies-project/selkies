@@ -850,7 +850,7 @@ export function Settings() {
                                 {(renderableSettings.forceAlignedResolution ?? true) && (
                                     <div className="flex items-center justify-between">
                                         <div className="space-y-0.5">
-                                            <label className="text-sm font-medium">{t('sections.screen.forceAlignedResolutionLabel')}</label>
+                                            <label className="text-sm font-medium" title={t('sections.screen.forceAlignedResolutionDetails')}>{t('sections.screen.forceAlignedResolutionLabel')}</label>
                                         </div>
                                         <Switch
                                             checked={forceAlignedResolution}
@@ -1155,7 +1155,7 @@ export function Settings() {
                                 {(renderableSettings.videoStreamingMode ?? true) && (
                                 <div className="flex items-center justify-between">
                                     <div className="space-y-0.5">
-                                        <label className="text-sm font-medium">{t('sections.video.streamingModeLabel')}</label>
+                                        <label className="text-sm font-medium" title={t('sections.video.streamingModeDetails')}>{t('sections.video.streamingModeLabel')}</label>
                                     </div>
                                     <Switch
                                         checked={videoStreamingMode}
