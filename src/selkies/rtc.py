@@ -23,6 +23,7 @@ import logging
 import asyncio
 import gzip
 import inspect
+import ipaddress
 import re
 import json
 import base64
@@ -617,17 +618,21 @@ class RTCApp:
         r"( \d+ typ host\b)",                 # 3: port + "typ host"
         re.IGNORECASE,
     )
-    _IPV4 = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
-
     def _rewrite_host_candidate_ip(self, sdp_text: str, public_ip: str) -> str:
         """Replace the connection-address of IPv4 'typ host' ICE candidates with
         public_ip (Pion-style NAT1TO1). Only host candidates are touched: srflx
         (STUN) and relay (TURN) candidates, their raddr, and every port /
         foundation / priority are left exactly as gathered, so hole-punching and
         TURN fallback keep working. A no-op when public_ip is empty or not a valid
-        dotted-quad IPv4, so the default behaviour is unchanged."""
+        IPv4 address, so the default behaviour is unchanged."""
         ip = (public_ip or "").strip()
-        if not ip or not self._IPV4.match(ip) or not all(0 <= int(o) <= 255 for o in ip.split(".")):
+        if not ip:
+            return sdp_text
+        try:
+            # Only IPv4 host candidates are rewritten; reject IPv6 and garbage.
+            if not isinstance(ipaddress.ip_address(ip), ipaddress.IPv4Address):
+                return sdp_text
+        except ValueError:
             return sdp_text
         return self._HOST_CANDIDATE_IPV4.sub(lambda m: m.group(1) + ip + m.group(3), sdp_text)
 

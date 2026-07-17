@@ -2,9 +2,9 @@
 
 These test the pure SDP-rewrite logic in isolation — no browser, ICE agent or
 network is involved — so they run as a fast, deterministic regression gate. The
-regex under test lives on RTCApp (``_rewrite_host_candidate_ip`` /
-``_HOST_CANDIDATE_IPV4`` / ``_IPV4`` in ``selkies.rtc``); it is copied here as a
-free function so the test needs no aiortc/aioice runtime to import.
+logic under test lives on RTCApp (``_rewrite_host_candidate_ip`` /
+``_HOST_CANDIDATE_IPV4`` in ``selkies.rtc``); it is copied here as a free
+function so the test needs no aiortc/aioice runtime to import.
 
 Live end-to-end verification (documented in the PR): run a Selkies container with
 ``SELKIES_WEBRTC_PUBLIC_IP=<public-ip>`` on a 1:1-NAT host and confirm in
@@ -13,6 +13,7 @@ and the selected candidate pair reaches ``succeeded`` on it, while an unset run
 shows the private IP and falls back to TURN.
 """
 
+import ipaddress
 import re
 
 _HOST_CANDIDATE_IPV4 = re.compile(
@@ -21,12 +22,16 @@ _HOST_CANDIDATE_IPV4 = re.compile(
     r"( \d+ typ host\b)",
     re.IGNORECASE,
 )
-_IPV4 = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
 def _rewrite_host_candidate_ip(sdp_text, public_ip):
     ip = (public_ip or "").strip()
-    if not ip or not _IPV4.match(ip) or not all(0 <= int(o) <= 255 for o in ip.split(".")):
+    if not ip:
+        return sdp_text
+    try:
+        if not isinstance(ipaddress.ip_address(ip), ipaddress.IPv4Address):
+            return sdp_text
+    except ValueError:
         return sdp_text
     return _HOST_CANDIDATE_IPV4.sub(lambda m: m.group(1) + ip + m.group(3), sdp_text)
 
@@ -79,6 +84,8 @@ def test_empty_or_invalid_ip_is_noop():
     assert _rewrite_host_candidate_ip(SDP, "example.com") == SDP
     assert _rewrite_host_candidate_ip(SDP, "999.1.1.1") == SDP
     assert _rewrite_host_candidate_ip(SDP, "203.0.113") == SDP
+    # An IPv6 public IP is rejected — only IPv4 host candidates are rewritten.
+    assert _rewrite_host_candidate_ip(SDP, "2001:db8::1") == SDP
 
 
 def test_idempotent():
