@@ -3288,12 +3288,7 @@ class WebRTCInput:
         capture = self._wayland_display_name()
         override = (self.app_wayland_display or "").strip()
         if override:
-            self._app_wl_display_cached = override
-            if override != capture:
-                logger_webrtc_input.info(
-                    f"Wayland app compositor '{override}' (configured); routing "
-                    f"input + clipboard there, capture stays on '{capture}'.")
-            return override
+            return self._adopt_app_wl_display(override, capture, "configured")
         resolved = None
         try:
             import stat as _stat
@@ -3315,12 +3310,28 @@ class WebRTCInput:
         except Exception as e:
             logger_webrtc_input.debug(f"App-compositor autodetect failed: {e}")
         if resolved and resolved != capture:
-            self._app_wl_display_cached = resolved
-            logger_webrtc_input.info(
-                f"Wayland app compositor '{resolved}' auto-detected (nested under "
-                f"capture compositor '{capture}'); routing input + clipboard there.")
-            return resolved
+            return self._adopt_app_wl_display(resolved, capture, "auto-detected")
         return capture
+
+    def _adopt_app_wl_display(self, resolved, capture, how):
+        """Cache the resolved app compositor and, when it is distinct from the
+        capture compositor, hand it to pixelflux over the Python ABI so its
+        Computer-Use backend targets the same session. pixelflux keeps its own
+        PIXELFLUX_APP_WAYLAND_DISPLAY / SELKIES_APP_WAYLAND_DISPLAY env fallback
+        for standalone use without selkies."""
+        self._app_wl_display_cached = resolved
+        if resolved != capture:
+            logger_webrtc_input.info(
+                f"Wayland app compositor '{resolved}' ({how}); routing input + "
+                f"clipboard there, capture stays on '{capture}'.")
+            setter = getattr(self.wayland_input, "set_app_wayland_display", None)
+            if setter is not None:
+                try:
+                    setter(resolved)
+                except Exception as e:
+                    logger_webrtc_input.debug(
+                        f"pixelflux set_app_wayland_display failed: {e}")
+        return resolved
 
     def _has_separate_app_compositor(self):
         """True when apps live under a compositor distinct from pixelflux's
