@@ -3066,10 +3066,8 @@ export class Input {
         if (!this.gamepadManager) {
             this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this));
         }
-        let axisCount = event.gamepad.axes.length;
-        if (navigator.userAgent.toLowerCase().includes('firefox')) {
-            axisCount = Math.max(axisCount, 6);
-        }
+        // Counts are advisory: the server presents a fixed Xbox pad regardless, and
+        // Firefox's non-standard axis layout is normalized in _gamepadButton/_gamepadAxis.
         const connectMsg = "js,c," + server_gp_index + "," + btoa(event.gamepad.id) + "," + event.gamepad.axes.length + "," + event.gamepad.buttons.length;
         this.send(connectMsg);
         if (this.ongamepadconnected !== null) { this.ongamepadconnected(event.gamepad.id); }
