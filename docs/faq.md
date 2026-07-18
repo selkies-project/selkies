@@ -72,6 +72,17 @@ In order to use the web interface when this is not possible (or when you are usi
 
 </details>
 
+## There is no video output when the screen is locked on an existing desktop.
+
+<details markdown>
+  <summary>Open Answer</summary>
+
+When the screen locks, the display manager switches to a lock screen greeter running on a separate display or virtual terminal (with LightDM, for instance, a second X server such as `:1` is spawned for the greeter). Selkies keeps capturing the original `DISPLAY`, which no longer produces any output, so the video stream stays black until the screen is unlocked, after which capture resumes normally.
+
+To avoid this, disable screen locking in your desktop environment and disable any autostarted screen locker (`light-locker`, `xscreensaver`, `gnome-screensaver`), then turn off the screensaver and DPMS with `xset s off -dpms`. With NVIDIA GPUs, DPMS blanking may additionally require setting `Option "HardDPMS" "False"` under the `Device` or `Screen` section in `/etc/X11/xorg.conf`. Alternatively, use a container or session without a display manager, where no lock screen exists.
+
+</details>
+
 ## My touchpad does not move while pressing a key with the keyboard.
 
 <details markdown>
