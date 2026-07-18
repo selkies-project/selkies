@@ -58,16 +58,16 @@ logger = logging.getLogger("webrtc")
 
 
 def _selkies_is_aioice_frame_chain(exc) -> bool:
-    """True when every frame of the exception's traceback that belongs to a
-    package points into aioice (allowing asyncio's own event-loop frames)."""
+    """True when the exception's traceback passes through the vendored ICE
+    package (selkies.ice, the incorporated aioice), allowing asyncio's own
+    event-loop frames."""
     tb = getattr(exc, "__traceback__", None)
-    saw_aioice = False
+    saw_ice = False
     while tb is not None:
-        fname = tb.tb_frame.f_code.co_filename
-        if "aioice" in fname:
-            saw_aioice = True
+        if "selkies/ice/" in tb.tb_frame.f_code.co_filename:
+            saw_ice = True
         tb = tb.tb_next
-    return saw_aioice
+    return saw_ice
 
 
 class _AsyncioSendNoiseFilter(logging.Filter):
@@ -111,7 +111,7 @@ def _install_webrtc_teardown_noise_filters(loop) -> None:
                 return
             if exc.__class__.__name__ == "TransactionTimeout" and (
                 _selkies_is_aioice_frame_chain(exc)
-                or "aioice" in str(context.get("future", ""))
+                or "selkies/ice/" in str(context.get("future", ""))
             ):
                 logger.debug("aioice TURN transaction outlived its allocation; ignored.")
                 return

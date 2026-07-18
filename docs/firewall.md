@@ -30,6 +30,10 @@ This exposes your container to the host network, which disables container networ
 
 If this does not fix the connection issue (normally when the server is behind another additional firewall), you cannot use the above fixes for security or technical reasons, or when deploying multiple desktop containers in one host, **move on to the next section**.
 
+### Static 1:1 NAT (cloud instance with a public IP)
+
+If your host sits behind **static 1:1 NAT** — most commonly a cloud instance whose private address is mapped one-to-one to a fixed public/elastic IP, with the WebRTC UDP ports forwarded (see [Self-Hosted Instances](#self-hosted-instances)) — the host ICE candidates Selkies gathers still carry the *private* address, which a remote peer cannot reach, so the connection falls back to a TURN relay (or fails if none is configured). Set the command-line option `--webrtc-public-ip` or the environment variable `SELKIES_WEBRTC_PUBLIC_IP` to your public IPv4 and/or IPv6 address (comma- or space-separated to supply both); Selkies then advertises each address in its host ICE candidates of the matching family (equivalent to a `NAT1TO1` mapping) so the peer connects directly. Server-reflexive (STUN) and relay (TURN) candidates are left untouched, so hole-punching and TURN fallback still work if the direct path is blocked. Leave it empty (the default) on any host that is not behind static 1:1 NAT.
+
 ## TURN Server
 
 A TURN server is required if trying to use this project inside a Docker® or Kubernetes container without host networking, or in other cases where the HTML5 web interface loads but the connection to the server fails.

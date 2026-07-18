@@ -763,6 +763,8 @@ class _XTestKeyboard:
                 if all(s == 0 for s in syms)]
 
     def _free_spares(self):
+        if self._spare_keycodes is None:
+            self._spare_keycodes = self._find_spare_keycodes()
         used = set(self._overlay.values())
         return [kc for kc in self._spare_keycodes if kc not in used]
 

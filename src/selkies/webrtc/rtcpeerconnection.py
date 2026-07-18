@@ -1234,9 +1234,13 @@ class RTCPeerConnection(AsyncIOEventEmitter):
                 iceServers=self.__configuration.iceServers,
                 local_username=parameters.usernameFragment,
                 local_password=parameters.password,
+                ice_host_public_ips=self.__configuration.iceHostPublicIps,
             )
         else:
-            iceGatherer = RTCIceGatherer(iceServers=self.__configuration.iceServers)
+            iceGatherer = RTCIceGatherer(
+                iceServers=self.__configuration.iceServers,
+                ice_host_public_ips=self.__configuration.iceHostPublicIps,
+            )
 
         iceGatherer.on("statechange", self.__updateIceGatheringState)
         iceTransport = RTCIceTransport(iceGatherer)

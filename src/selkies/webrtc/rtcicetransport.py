@@ -37,7 +37,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from aioice import Candidate, Connection, ConnectionClosed
+from ..ice import Candidate, Connection, ConnectionClosed
 from pyee.asyncio import AsyncIOEventEmitter
 
 from .exceptions import InvalidStateError
@@ -219,6 +219,7 @@ class RTCIceGatherer(AsyncIOEventEmitter):
         iceServers: Optional[list[RTCIceServer]] = None,
         local_username: Optional[str] = None,
         local_password: Optional[str] = None,
+        ice_host_public_ips: Optional[list[str]] = None,
     ) -> None:
         super().__init__()
 
@@ -230,6 +231,7 @@ class RTCIceGatherer(AsyncIOEventEmitter):
             ice_controlling=False,
             local_username=local_username,
             local_password=local_password,
+            nat1to1_ips=ice_host_public_ips,
             **ice_kwargs,
         )
         self._remote_candidates_end = False

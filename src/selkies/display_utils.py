@@ -1466,6 +1466,7 @@ async def _set_xcursor_resource(size):
     their cursor size from here, not from XFCE/GNOME settings daemons."""
     if not which("xrdb"):
         return False
+    process = None
     try:
         process = await subprocess.create_subprocess_exec(
             "xrdb", "-merge", "-",
@@ -1475,10 +1476,11 @@ async def _set_xcursor_resource(size):
         return process.returncode == 0
     except Exception as e:
         logger_app_resize.debug(f"xrdb Xcursor.size merge failed: {e}")
-        try:
-            process.kill()
-        except Exception:
-            pass
+        if process is not None:
+            try:
+                process.kill()
+            except Exception:
+                pass
         return False
 
 

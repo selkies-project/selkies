@@ -42,7 +42,8 @@ dependencies = [
     # PulseAudio Microphone
     "pulsectl-asyncio",
     # WebRTC
-    "aioice>=0.10.1,<1.0.0",
+    "dnspython>=2.0.0",
+    "ifaddr>=0.2.0",
     "av",
     "cffi>=1.0.0",
     "cryptography>=44.0.0",

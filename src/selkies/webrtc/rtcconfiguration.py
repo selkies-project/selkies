@@ -100,3 +100,6 @@ class RTCConfiguration:
 
     alwaysNegotiateDataChannels: bool = False
     "Whether to always negotiate data channels in the SDP."
+
+    iceHostPublicIps: Optional[list[str]] = None
+    "Public IPv4/IPv6 addresses to advertise in host ICE candidates (static 1:1 NAT)."

@@ -830,7 +830,17 @@ class RTCApp:
             if turn.get('credential') is not None:
                 turn_kwargs['credential'] = turn.get('credential')
             ice_servers.append(RTCIceServer(**turn_kwargs))
-        config = RTCConfiguration(iceServers=ice_servers, bundlePolicy=RTCBundlePolicy.MAX_BUNDLE)
+        # NAT1TO1: advertise operator-configured public IPv4/IPv6 addresses in
+        # host ICE candidates for hosts behind static 1:1 NAT (comma- or
+        # space-separated; each family maps to its own host candidates).
+        public_ips = (
+            getattr(app_settings, "webrtc_public_ip", "") or ""
+        ).replace(",", " ").split()
+        config = RTCConfiguration(
+            iceServers=ice_servers,
+            bundlePolicy=RTCBundlePolicy.MAX_BUNDLE,
+            iceHostPublicIps=public_ips or None,
+        )
         return config
 
     def force_codec(self, pc: RTCPeerConnection, sender: RTCRtpSender, forced_codec_mime: str):
