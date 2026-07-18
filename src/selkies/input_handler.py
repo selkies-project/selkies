@@ -1823,8 +1823,14 @@ class WebRTCInput:
         upload_dir=None,
         is_wayland=False,
         wayland_socket_index=0,
+        app_wayland_display="",
     ):
         self.wayland_socket_index = wayland_socket_index
+        # Socket of the compositor apps run under (input + clipboard target) when
+        # it differs from the pixelflux capture compositor; resolved lazily since
+        # a nested session (labwc/kwin) comes up after this process.
+        self.app_wayland_display = app_wayland_display
+        self._app_wl_display_cached = None
         self.active_shortcut_modifiers = set()
         self.SHORTCUT_MODIFIER_XKEY_NAMES = {
             'Control_L', 'Control_R', 
@@ -2865,7 +2871,7 @@ class WebRTCInput:
                     raise WaylandVirtualKeyboardUnavailable(
                         "compositor does not advertise zwp_virtual_keyboard_manager_v1"
                         " (retry pending)")
-                display = self._wayland_display_name()
+                display = self._app_wayland_display()
                 try:
                     self._wl_typer = await WaylandVirtualKeyboard.connect(
                         display=display)
@@ -3267,9 +3273,67 @@ class WebRTCInput:
         return (os.environ.get("WAYLAND_DISPLAY")
                 or f"wayland-{self.wayland_socket_index}")
 
+    def _app_wayland_display(self):
+        """Socket of the compositor applications run under — the target for input
+        injection and clipboard. It equals the capture compositor for a plain
+        pixelflux session, but a nested session (labwc/kwin) that pixelflux
+        captures owns the apps on its own socket, so input and clipboard aimed at
+        the capture compositor never reach them. Resolution order: the explicit
+        app_wayland_display setting; else the single other wayland-* socket in
+        XDG_RUNTIME_DIR besides the capture compositor's; else the capture socket.
+        A distinct result is cached; the capture fallback is not, so a nested
+        compositor that appears after startup is picked up on a later call."""
+        if self._app_wl_display_cached is not None:
+            return self._app_wl_display_cached
+        capture = self._wayland_display_name()
+        override = (self.app_wayland_display or "").strip()
+        if override:
+            self._app_wl_display_cached = override
+            if override != capture:
+                logger_webrtc_input.info(
+                    f"Wayland app compositor '{override}' (configured); routing "
+                    f"input + clipboard there, capture stays on '{capture}'.")
+            return override
+        resolved = None
+        try:
+            import stat as _stat
+            runtime = os.environ.get("XDG_RUNTIME_DIR")
+            cap_base = os.path.basename(capture)
+            if runtime and os.path.isdir(runtime):
+                others = sorted(
+                    n for n in os.listdir(runtime)
+                    if n.startswith("wayland-") and not n.endswith(".lock")
+                    and n != cap_base
+                    and _stat.S_ISSOCK(os.stat(os.path.join(runtime, n)).st_mode))
+                if len(others) == 1:
+                    resolved = others[0]
+                elif len(others) > 1:
+                    logger_webrtc_input.warning(
+                        "Multiple candidate app-compositor sockets %s; set "
+                        "app_wayland_display to choose. Using capture compositor.",
+                        others)
+        except Exception as e:
+            logger_webrtc_input.debug(f"App-compositor autodetect failed: {e}")
+        if resolved and resolved != capture:
+            self._app_wl_display_cached = resolved
+            logger_webrtc_input.info(
+                f"Wayland app compositor '{resolved}' auto-detected (nested under "
+                f"capture compositor '{capture}'); routing input + clipboard there.")
+            return resolved
+        return capture
+
+    def _has_separate_app_compositor(self):
+        """True when apps live under a compositor distinct from pixelflux's
+        capture compositor, so pixelflux's keymap overlay and its own selection
+        never reach them."""
+        return self._app_wayland_display() != self._wayland_display_name()
+
     def _get_wl_env(self):
+        # wl-clipboard/wl-paste run against the compositor apps use (the app
+        # compositor), not the capture compositor, so a copy actually reaches the
+        # focused app and a paste reads what it put on its selection.
         env = os.environ.copy()
-        env["WAYLAND_DISPLAY"] = self._wayland_display_name()
+        env["WAYLAND_DISPLAY"] = self._app_wayland_display()
         return env
 
     async def _get_file(self, file_path, target_mime):
@@ -3338,7 +3402,11 @@ class WebRTCInput:
         """Reads clipboard. Native paths first (compositor cache on Wayland, the
         XFixes monitor on X11); wl-paste/xclip forks are the fallback."""
         if self.is_wayland:
-            cached = getattr(self, '_wl_native_last', None)
+            # The compositor callback caches the capture compositor's selection;
+            # with a separate app compositor that cache is the wrong session, so
+            # read the app compositor directly (wl-paste against its socket).
+            cached = (None if self._has_separate_app_compositor()
+                      else getattr(self, '_wl_native_last', None))
             if cached is not None:
                 raw, native_mime = cached
                 if native_mime.startswith('image/'):
@@ -3468,9 +3536,14 @@ class WebRTCInput:
             env['LANG'] = 'C.UTF-8'
 
         if self.is_wayland:
-            # Native first: the compositor (pixelflux) owns the selection directly;
-            # the wl-copy fork below is the fallback for sessions without the API.
-            if self.wayland_input is not None and hasattr(self.wayland_input, 'set_clipboard'):
+            # Native first: the capture compositor (pixelflux) owns the selection
+            # directly; the wl-copy fork below is the fallback for sessions without
+            # the API. A separate app compositor owns its own selection, so the
+            # native call would set the wrong session's clipboard -- skip straight
+            # to wl-copy against the app compositor.
+            if (self.wayland_input is not None
+                    and hasattr(self.wayland_input, 'set_clipboard')
+                    and not self._has_separate_app_compositor()):
                 try:
                     self.wayland_input.set_clipboard(mime_type, input_bytes)
                     return True
@@ -3627,7 +3700,12 @@ class WebRTCInput:
         logger_webrtc_input.info(f"Clipboard monitor running (binary mode: {self.enable_binary_clipboard in ['true', 'out']})")
         self.clipboard_running = True
         x11_monitor = self._ensure_x11_clipboard_monitor()
-        wl_native_queue = self._arm_wayland_native_clipboard() if self.is_wayland else None
+        # The compositor callback watches the capture compositor's selection; with
+        # a separate app compositor the apps' copies land on its selection, so fall
+        # to the wl-paste --watch path (one long-lived process) against it instead.
+        wl_native_queue = (self._arm_wayland_native_clipboard()
+                           if self.is_wayland and not self._has_separate_app_compositor()
+                           else None)
         wl_native_item = None
         # Prime the change signal so the first pass publishes current content once.
         first_pass = True
@@ -3664,7 +3742,7 @@ class WebRTCInput:
                                 changed = True
                         else:
                             changed = await x11_monitor.wait_change(2.0)
-                    elif wl_native_queue is not None:
+                    elif wl_native_queue is not None and not self._has_separate_app_compositor():
                         try:
                             wl_native_item = await asyncio.wait_for(wl_native_queue.get(), 2.0)
                             changed = True
@@ -3956,10 +4034,13 @@ class WebRTCInput:
 
         def native_inject():
             # The keymap owner injects any keysym in order (overlay-bound when
-            # needed), so text needs no batching; the buffer + virtual-keyboard/
-            # clipboard batch survive only for sessions without the compositor
-            # keymap API.
-            return bool(self.wayland_input and hasattr(self.wayland_input, 'set_keymap_string'))
+            # needed) through the capture compositor, so text needs no batching --
+            # but only when that compositor is also where apps run. With a nested
+            # app compositor its overlay never reaches the apps, so fall to the
+            # virtual-keyboard batch, which targets the app compositor directly.
+            return (bool(self.wayland_input
+                         and hasattr(self.wayland_input, 'set_keymap_string'))
+                    and not self._has_separate_app_compositor())
 
         async def flush_buffer():
             if unicode_buffer:

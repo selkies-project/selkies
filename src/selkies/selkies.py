@@ -873,6 +873,7 @@ class DataStreamingServer(BaseStreamingService):
             data_server_instance=self,
             is_wayland=IS_WAYLAND,
             wayland_socket_index=settings.wayland_socket_index,
+            app_wayland_display=settings.app_wayland_display,
         )
 
         self.input_handler.on_clipboard_read = self.app.send_ws_clipboard_data

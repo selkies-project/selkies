@@ -619,6 +619,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Run the Wayland (headless compositor) backend instead of X11 capture/input.",
     },
     {
+        "name": "app_wayland_display",
+        "type": "str",
+        "default": "",
+        "help": "Wayland socket where applications run — the target for input injection and clipboard — when it differs from the pixelflux capture compositor (e.g. a nested labwc/kwin session that pixelflux captures). Empty auto-detects the nested compositor socket in XDG_RUNTIME_DIR, falling back to the capture compositor when nothing is nested.",
+    },
+    {
         "name": "recording_socket",
         "type": "str",
         "default": "",
