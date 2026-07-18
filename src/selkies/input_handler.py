@@ -1379,6 +1379,10 @@ class SelkiesGamepad:
         self.running = False
         self._event_processor_task = None
 
+        # Client controls (is_button, index) currently driven non-neutral, so a
+        # lost association can release exactly what is held (see reset_state).
+        self._held_controls = set()
+
     def set_config(self, client_input_name, client_num_btns, client_num_axes):
         self.mapper = GamepadMapper(STANDARD_XPAD_CONFIG, client_input_name, client_num_btns, client_num_axes)
         
@@ -1658,6 +1662,13 @@ class SelkiesGamepad:
             return
         event_package = self.mapper.get_mapped_events(client_event_idx, client_value, is_button_event)
         if event_package:
+            # Remember non-neutral controls so reset_state can release exactly
+            # what is held if the driving client disappears mid-input.
+            control = (is_button_event, client_event_idx)
+            if client_value:
+                self._held_controls.add(control)
+            else:
+                self._held_controls.discard(control)
             logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: Queuing event: {event_package}")
             try:
                 self.events_queue.put_nowait(event_package)
@@ -1679,6 +1690,13 @@ class SelkiesGamepad:
                     logger_selkies_gamepad.warning(
                         f"Gamepad {self.js_sock_path}: event queue full; dropping event."
                     )
+
+    def reset_state(self):
+        """Emit a neutral value for every control still held non-neutral, so a
+        dropped association leaves no stuck button or off-center axis behind on
+        the app driving this pad."""
+        for is_button_event, client_event_idx in list(self._held_controls):
+            self.send_event(client_event_idx, 0, is_button_event)
 
     async def _process_event_queue(self):
         logger_selkies_gamepad.info(f"Gamepad {self.js_sock_path}: Event processor started.")
@@ -2138,6 +2156,13 @@ class WebRTCInput:
         for idx in indices_to_disassociate:
             if idx in self.client_gamepad_associations:
                 associated_info = self.client_gamepad_associations.pop(idx)
+                # Release anything still held on the persistent pad: an ungraceful
+                # client drop (a tab closed mid-press) would otherwise leave the
+                # in-desktop app with a stuck button or deflected stick until a new
+                # client re-sends state.
+                gamepad = self.gamepad_instances.get(idx)
+                if gamepad is not None:
+                    gamepad.reset_state()
                 logger_webrtc_input.info(
                     f"Client controller '{associated_info.get('client_name', 'Unknown')}' "
                     f"disassociated from persistent virtual gamepad slot {idx}."
