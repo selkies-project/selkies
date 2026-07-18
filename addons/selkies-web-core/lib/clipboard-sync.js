@@ -96,6 +96,10 @@ export async function readLocalClipboard(binaryEnabled) {
  */
 export function createDeferredClipboardWriter() {
     let pending = null;
+    // Monotonic per-write sequence so a failed newer write replaces an older
+    // stash (last-value-wins), while a flushed stash that fails again can never
+    // clobber a write that arrived during its async attempt.
+    let writeSeq = 0;
     // Resolves when the most recent write attempt (immediate or flushed) settles.
     // The paste-ordering hold awaits it so a server->client write LANDS before a
     // paste reads the local clipboard — otherwise the stashed write flushes on the
@@ -120,7 +124,10 @@ export function createDeferredClipboardWriter() {
                 // blurred — Chromium rejects clipboard writes from an unfocused
                 // document): keep it for the next gesture/focus unless something
                 // newer replaced it meanwhile.
-                if (isActivationError(err)) { if (!pending) pending = w; return false; }
+                if (isActivationError(err)) {
+                    if (!pending || pending.seq < w.seq) pending = w;
+                    return false;
+                }
                 if (w.onFailure) w.onFailure(err);
                 return false;
             });
@@ -149,7 +156,7 @@ export function createDeferredClipboardWriter() {
      * write eventually lands; onFailure only for non-activation errors.
      */
     function write(attempt, { onSuccess, onFailure } = {}) {
-        const p = attemptOnce({ attempt, onSuccess, onFailure });
+        const p = attemptOnce({ attempt, onSuccess, onFailure, seq: ++writeSeq });
         track(p);
         return p;
     }
@@ -216,17 +223,22 @@ export function createClipboardSync({ sendRequest }) {
 
     function sig(data, mime) { return sigOf(data, mime).full; }
 
-    /** Change-only gate: true exactly once per distinct content+mime. */
+    /**
+     * Change-only gate: true while this content+mime differs from the last
+     * synced value. Read-only — the caller marks the content synced via
+     * markSynced only after the transfer actually completes, so a failed
+     * transfer never permanently suppresses re-sending the same content.
+     */
     function shouldSend(data, mime) {
         const { full, legacy } = sigOf(data, mime);
         // The legacy compare suppresses echoes of content whose receive-side
         // signature was stored without bytes (size-only form).
-        if (full === lastSyncedSig || (legacy !== null && legacy === lastSyncedSig)) {
-            lastSyncedSig = full;
-            return false;
-        }
-        lastSyncedSig = full;
-        return true;
+        return !(full === lastSyncedSig || (legacy !== null && legacy === lastSyncedSig));
+    }
+
+    /** Record content as synced (call on transfer success). */
+    function markSynced(data, mime) {
+        lastSyncedSig = sig(data, mime);
     }
 
     /**
@@ -276,29 +288,35 @@ export function createClipboardSync({ sendRequest }) {
     }
 
     /**
-     * Request the server clipboard; resolves with the next FRESH value, falling
-     * back to the cached value after 2s so the ClipboardItem promise (and the
-     * browser's transient-activation window) can never hang.
+     * Request the server clipboard; resolves with the next FRESH value. After 2s
+     * the request settles so the ClipboardItem promise (and the browser's
+     * transient-activation window) can never hang: with a cached value that
+     * differs from the baseline recorded at request time it resolves, otherwise
+     * it REJECTS — resolving with the baseline-equal cache would settle the copy
+     * with pre-copy (stale) content exactly when the session-start cache is
+     * empty or stale (first use).
      */
     function request(wantBinary) {
         try { sendRequest(); } catch (_) { /* transport not ready */ }
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
             const req = { wantBinary: !!wantBinary, resolve, settled: false,
                 baselineText: lastText, baselineBlob: lastBlob };
-            const done = (val) => {
+            const settle = (fn, val) => {
                 if (req.settled) return;
                 req.settled = true;
                 const idx = pending.indexOf(req);
                 if (idx !== -1) pending.splice(idx, 1);
-                resolve(val);
+                fn(val);
             };
-            req.resolve = done;
+            req.resolve = (val) => settle(resolve, val);
             pending.push(req);
             setTimeout(() => {
-                if (wantBinary) {
-                    done(lastBlob || new Blob([lastText || ''], { type: 'text/plain' }));
+                if (wantBinary && lastBlob && lastBlob !== req.baselineBlob) {
+                    settle(resolve, lastBlob);
+                } else if (!wantBinary && lastText && lastText !== req.baselineText) {
+                    settle(resolve, lastText);
                 } else {
-                    done(lastText || '');
+                    settle(reject, new Error('Server clipboard request timed out with no fresh value'));
                 }
             }, 2000);
         });
@@ -311,8 +329,10 @@ export function createClipboardSync({ sendRequest }) {
      */
     async function copyViaExecCommand(textPromise) {
         let text = '';
-        try { text = await textPromise; } catch (_) { text = lastText || ''; }
-        if (typeof text !== 'string') text = lastText || '';
+        // A rejected request means no fresh value arrived: writing the stale
+        // cache would clobber the user's local clipboard with pre-copy content.
+        try { text = await textPromise; } catch (_) { return; }
+        if (typeof text !== 'string') return;
         // Don't clobber the user's local clipboard with empty content (slow/empty
         // server response on the first copy of a session).
         if (!text) return;
@@ -340,6 +360,7 @@ export function createClipboardSync({ sendRequest }) {
     return {
         sig,
         shouldSend,
+        markSynced,
         resolveServer,
         captureLocalImageSig,
         request,
@@ -399,6 +420,11 @@ export function createClipboardGestures({
 
     const heldPasteEvents = [];
     let heldPasteReplayPending = false;
+    // Upper bound on how long a paste chord may be held while the clipboard
+    // read/send is still pending. Long enough to survive Chromium's first-use
+    // clipboard-read permission prompt (which keeps the read promise pending
+    // well past 2s); bounded so an abandoned prompt can't hold V forever.
+    const PASTE_HOLD_MAX_MS = 10000;
     function replayHeldPasteEvents() {
         heldPasteReplayPending = false;
         for (const ev of heldPasteEvents.splice(0)) {
@@ -408,6 +434,16 @@ export function createClipboardGestures({
                 window.dispatchEvent(replay);
             } catch (_) { /* never break the key stream */ }
         }
+    }
+    // The in-flight transfer failed or never settled: injecting the held V now
+    // would paste stale content, so drop the held keyDOWNs. The swallowed
+    // keyUPs (V and the chord's modifiers) are still replayed — losing a
+    // modifier keyup would leave it stuck server-side.
+    function dropHeldPasteKeydowns() {
+        for (let i = heldPasteEvents.length - 1; i >= 0; i--) {
+            if (heldPasteEvents[i].type === 'keydown') heldPasteEvents.splice(i, 1);
+        }
+        replayHeldPasteEvents();
     }
     const PASTE_MOD_CODES = ['ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'];
     function holdPasteWhileClipboardInFlight(ev) {
@@ -432,12 +468,31 @@ export function createClipboardGestures({
         heldPasteEvents.push(ev);
         if (!heldPasteReplayPending) {
             heldPasteReplayPending = true;
-            const waitFor = [getSendInFlight() || Promise.resolve()];
-            if (getDeferredWriteInFlight) waitFor.push(getDeferredWriteInFlight() || Promise.resolve());
-            Promise.race([
-                Promise.all(waitFor),
-                new Promise((r) => setTimeout(r, 2000)),
-            ]).then(replayHeldPasteEvents, replayHeldPasteEvents);
+            const holdStart = performance.now();
+            // Wait for the CURRENT in-flight read/send + deferred write, then
+            // re-check: a follow-on transfer may have started while awaiting
+            // (e.g. the deferred write flushed by this very keydown). Replay
+            // only once nothing is pending; on failure or when the bound
+            // expires with work still pending, drop the paste instead of
+            // injecting it with stale content.
+            const awaitClipboardQuiet = () => {
+                const inflight = [];
+                const send = getSendInFlight();
+                if (send) inflight.push(send);
+                const dw = getDeferredWriteInFlight ? getDeferredWriteInFlight() : null;
+                if (dw) inflight.push(dw);
+                if (inflight.length === 0) { replayHeldPasteEvents(); return; }
+                const remaining = PASTE_HOLD_MAX_MS - (performance.now() - holdStart);
+                if (remaining <= 0) { dropHeldPasteKeydowns(); return; }
+                Promise.race([
+                    Promise.all(inflight).then(() => 'settled', () => 'failed'),
+                    new Promise((r) => setTimeout(() => r('timeout'), remaining)),
+                ]).then((outcome) => {
+                    if (outcome === 'settled') awaitClipboardQuiet();
+                    else dropHeldPasteKeydowns();
+                });
+            };
+            awaitClipboardQuiet();
         }
     }
 

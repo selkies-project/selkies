@@ -687,6 +687,9 @@ const clampToggleHandleTopPct = (pct) => {
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
   const [isToggleVisible, setIsToggleVisible] = useState(true);
+  const [isBrowserFullscreen, setIsBrowserFullscreen] = useState(
+    () => typeof document !== "undefined" && !!document.fullscreenElement
+  );
   // Viewer-designated clients (shared/player URL modes, or a server-assigned
   // viewer role) must not see server-wide controls like the transport switch.
   const [isViewerRole, setIsViewerRole] = useState(() => {
@@ -706,7 +709,9 @@ function Sidebar() {
   // pointer lock isn't fighting an open sidebar.
   useEffect(() => {
     const foldOnFullscreen = () => {
-      if (document.fullscreenElement) setIsOpen(false);
+      const fullscreen = !!document.fullscreenElement;
+      setIsBrowserFullscreen(fullscreen);
+      if (fullscreen) setIsOpen(false);
     };
     document.addEventListener("fullscreenchange", foldOnFullscreen);
     return () => document.removeEventListener("fullscreenchange", foldOnFullscreen);
@@ -2526,7 +2531,7 @@ function Sidebar() {
 
   return (
     <>
-      {isToggleVisible && (
+      {isToggleVisible && !isBrowserFullscreen && (
         <div
           className='toggle-handle'
           onClick={onToggleHandleClick}
@@ -4187,7 +4192,7 @@ function Sidebar() {
                         target="_blank"
                         rel="noopener noreferrer"
                       >
-                        {t("sections.shortcuts.citeNotice", "Please cite within your publication for academic usage")}
+                        {t("sections.shortcuts.citeNotice", "Cite our paper academically")}
                         {" ↗"}
                       </a>
                     </div>

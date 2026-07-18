@@ -310,6 +310,35 @@ def _resize_on_display(d, res_str, w_req, h_req):
     return mode_w, mode_h
 
 
+def wayland_output_id(display_id):
+    """Stable compositor output id for a display name, shared by both transports:
+    'primary' -> 0 (the pixelflux primary output), 'displayN' -> N. A secondary
+    name without a numeric suffix falls back to 2 (one secondary is supported)."""
+    if not display_id or display_id == "primary":
+        return 0
+    m = re.search(r"(\d+)$", str(display_id))
+    return int(m.group(1)) if m else 2
+
+
+async def wayland_reposition_primary(module, x, y):
+    """Move the pixelflux primary output (id 0) to a union-layout offset — the
+    Wayland counterpart of laying the primary at a non-origin xrandr position
+    for 'left'/'up' arrangements (and of re-anchoring it at the origin on
+    teardown). The compositor remaps the output, its windows, and the input
+    offset live; the capture follows without a restart. Returns False when the
+    compositor refuses the move or the module lacks the API."""
+    mover = getattr(module, "reposition_output", None) if module else None
+    if mover is None:
+        logger_app_resize.error(
+            "pixelflux lacks reposition_output; cannot move the primary output.")
+        return False
+    try:
+        return bool(await asyncio.to_thread(mover, 0, int(x), int(y)))
+    except Exception as e:
+        logger_app_resize.error(f"Wayland primary reposition to +{x}+{y} failed: {e}")
+        return False
+
+
 def compute_dual_layout(primary_wh, secondary_wh, position):
     """Extended-desktop layout for a primary display plus one secondary placed at
     `position` ("right"/"left"/"up"/"down") — the same placement model the
@@ -429,28 +458,55 @@ def _sync_list_monitors():
             raise
 
 
-def _sync_set_monitor(name, x, y, w, h, take_output):
-    """Blocking RandR 1.5 set-monitor on the module connection. take_output
+def _monitor_info(d, out_id, name, x, y, w, h, take_output):
+    """RRSetMonitor request dict for logical monitor `name`. take_output
     attaches the (single) connected physical output; an output can belong to
     only one logical monitor, so exactly one monitor per layout takes it."""
+    return {
+        "name": d.intern_atom(name),
+        "primary": False,
+        "automatic": False,
+        "x": int(x),
+        "y": int(y),
+        "width_in_pixels": int(w),
+        "height_in_pixels": int(h),
+        "width_in_millimeters": max(1, round(w * 25.4 / 96.0)),
+        "height_in_millimeters": max(1, round(h * 25.4 / 96.0)),
+        "crtcs": [out_id] if take_output else [],
+    }
+
+
+def _verify_monitors_on_display(d, expected):
+    """Raise unless every (name -> (x, y, w, h)) in `expected` matches a defined
+    logical monitor. RRSetMonitor failures (e.g. BadValue for an already-taken
+    name) arrive through the async error handler — printed, never raised — so
+    callers must verify the result instead of trusting the request."""
+    root = d.screen().root
+    reply = randr.get_monitors(root, is_active=False)
+    actual = {}
+    for m in reply.monitors:
+        try:
+            actual[d.get_atom_name(m.name)] = (m.x, m.y, m.width_in_pixels, m.height_in_pixels)
+        except Exception:
+            continue
+    for name, geom in expected.items():
+        if actual.get(name) != geom:
+            raise RuntimeError(
+                f"monitor '{name}' is {actual.get(name)} after define, wanted {geom}"
+            )
+
+
+def _sync_set_monitor(name, x, y, w, h, take_output):
+    """Blocking RandR 1.5 set-monitor on the module connection."""
     with _x11_lock:
         try:
             d = _module_display()
             root, _, out_id, _, _ = _connected_output_state(d)
-            info = {
-                "name": d.intern_atom(name),
-                "primary": False,
-                "automatic": False,
-                "x": int(x),
-                "y": int(y),
-                "width_in_pixels": int(w),
-                "height_in_pixels": int(h),
-                "width_in_millimeters": max(1, round(w * 25.4 / 96.0)),
-                "height_in_millimeters": max(1, round(h * 25.4 / 96.0)),
-                "crtcs": [out_id] if take_output else [],
-            }
-            randr.set_monitor(root, info)
+            randr.set_monitor(root, _monitor_info(d, out_id, name, x, y, w, h, take_output))
             d.sync()
+            _verify_monitors_on_display(
+                d, {name: (int(x), int(y), int(w), int(h))}
+            )
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
@@ -499,10 +555,148 @@ def _sync_grow_screen(w, h):
                 max(1, round(w * 25.4 / 96.0)), max(1, round(h * 25.4 / 96.0)),
             )
             d.sync()
+            geom = root.get_geometry()
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
             raise
+        # SetScreenSize failures (e.g. beyond the server's size range) surface
+        # through the connection's error handler, not as a raise: verify the
+        # root actually reached the requested size. The connection is healthy
+        # here, so this must not drop the module display.
+        if geom.width < w or geom.height < h:
+            raise RuntimeError(f"screen is {geom.width}x{geom.height} after grow to {w}x{h}")
+
+
+def _sync_replace_selkies_monitors(layouts):
+    """Blocking swap of ALL selkies-* logical monitors to exactly `layouts`
+    (display_id -> {x,y,w,h}) under one X server grab.
+
+    Window managers re-read the monitor set whenever the root emits a core
+    ConfigureNotify — which both a screen resize AND deleting/creating the
+    monitor that holds the physical output do (the server swaps an automatic
+    whole-CRTC monitor in and out). RRSetMonitor cannot replace an existing
+    name (BadValue), so a delete gap is unavoidable; the grab makes the swap
+    invisible: every event the WM acts on is delivered after the final set is
+    in place, so it never tiles against a monitor-less or half-defined screen.
+    Foreign (non-selkies) monitors are left untouched."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root, _, out_id, _, _ = _connected_output_state(d)
+            reply = randr.get_monitors(root, is_active=False)
+            stale = []
+            for m in reply.monitors:
+                try:
+                    name = d.get_atom_name(m.name)
+                except Exception:
+                    continue
+                if name.startswith("selkies-"):
+                    stale.append(name)
+            ordered = sorted(layouts.items(), key=lambda kv: kv[0] != "primary")
+            d.grab_server()
+            try:
+                for name in stale:
+                    randr.delete_monitor(root, d.intern_atom(name))
+                take_output = True
+                for display_id, l in ordered:
+                    randr.set_monitor(root, _monitor_info(
+                        d, out_id, f"selkies-{display_id}",
+                        l["x"], l["y"], l["w"], l["h"], take_output,
+                    ))
+                    take_output = False
+                if layouts:
+                    randr.set_output_primary(root, out_id)
+            finally:
+                # Flush the ungrab even when an X error aborts the sequence:
+                # a queued-but-unsent ungrab wedges every other X client until
+                # this process exits.
+                try:
+                    d.ungrab_server()
+                    d.flush()
+                except Exception:
+                    pass
+            d.sync()
+            _verify_monitors_on_display(d, {
+                f"selkies-{did}": (int(l["x"]), int(l["y"]), int(l["w"]), int(l["h"]))
+                for did, l in layouts.items()
+            })
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            raise
+
+
+async def replace_selkies_monitors(layouts, screen_name=None):
+    """Swap the selkies-* logical monitor set to exactly `layouts`: native
+    grab-protected replace first, per-monitor xrandr fallback second (the
+    fallback exposes transient states to the WM, but ends at the same result).
+    Returns True when the final monitor set is in place."""
+    if not layouts:
+        await clear_selkies_monitors()
+        return True
+    try:
+        await asyncio.to_thread(_sync_replace_selkies_monitors, layouts)
+        return True
+    except Exception as e:
+        logger_app_resize.info(f"Native monitor replace failed ({e}); using xrandr fallback.")
+    await clear_selkies_monitors()
+    ok = True
+    take_output = True
+    for display_id, l in sorted(layouts.items(), key=lambda kv: kv[0] != "primary"):
+        ok &= await set_logical_monitor(
+            f"selkies-{display_id}", l["x"], l["y"], l["w"], l["h"],
+            take_output, screen_name=screen_name,
+        )
+        take_output = False
+    await designate_primary_output(screen_name)
+    return ok
+
+
+def _sync_wm_name():
+    """Name of the running EWMH window manager ('' when none): root
+    _NET_SUPPORTING_WM_CHECK -> child window -> _NET_WM_NAME."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root = d.screen().root
+            check_atom = d.intern_atom('_NET_SUPPORTING_WM_CHECK')
+            prop = root.get_full_property(check_atom, 33)  # XA_WINDOW
+            if not prop or not prop.value:
+                return ""
+            wm_win = d.create_resource_object('window', int(prop.value[0]))
+            name_prop = wm_win.get_full_property(
+                d.intern_atom('_NET_WM_NAME'), d.intern_atom('UTF8_STRING'))
+            if name_prop and name_prop.value:
+                v = name_prop.value
+                return v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+            return ""
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            return ""
+
+
+async def current_wm_name():
+    """Name of the running EWMH window manager, '' when undetectable."""
+    return await asyncio.to_thread(_sync_wm_name)
+
+
+async def wait_for_wm(name_substring, timeout=3.0):
+    """Wait until the EWMH window manager reports a name containing
+    `name_substring` (case-insensitive). Returns success. Used after a WM
+    --replace so layout changes are not applied while two window managers
+    hand over the selection (the incoming WM snapshots the monitor set it
+    starts against)."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    want = name_substring.lower()
+    while True:
+        name = await current_wm_name()
+        if want in name.lower():
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.15)
 
 
 async def list_logical_monitors():
@@ -601,7 +795,6 @@ async def apply_extended_layout(layouts, total_w, total_h):
     if not screen_name:
         logger_app_resize.error("Could not determine output name; cannot apply layout.")
         return False
-    await clear_selkies_monitors()
     if total_mode not in (available or []):
         if not await ensure_mode(total_mode):
             try:
@@ -611,21 +804,35 @@ async def apply_extended_layout(layouts, total_w, total_h):
             except Exception as e:
                 logger_app_resize.error(f"Could not create extended mode {total_mode}: {e}")
                 return False
+    # Monitors first, at their final rectangles, swapped under a server grab:
+    # window managers re-tile maximized windows on every root ConfigureNotify,
+    # so no WM-visible stimulus (the swap itself, the resize below) may ever
+    # expose a monitor-less or partial set.
+    if not await replace_selkies_monitors(layouts, screen_name=screen_name):
+        await clear_selkies_monitors()
+        return False
     if (curr_res or "").lower().replace(" ", "") != total_mode:
         if not await resize_display(total_mode):
-            return False
-    # The physical output can belong to only one logical monitor: give it to the
-    # primary; the others attach to none.
-    take_output = True
-    for display_id, layout in sorted(layouts.items(), key=lambda kv: kv[0] != "primary"):
-        await set_logical_monitor(
-            f"selkies-{display_id}", layout["x"], layout["y"], layout["w"], layout["h"],
-            take_output, screen_name=screen_name,
-        )
-        take_output = False
-    # Flag the physical output primary so the WM anchors panels and new windows to the
-    # primary monitor (WebSocket parity).
-    await designate_primary_output(screen_name)
+            # Some servers refuse runtime mode creation/attachment but still
+            # honor a plain framebuffer grow (RRSetScreenSize): the output
+            # keeps its mode while captures and pointer warps address the
+            # enlarged root (websockets-engine parity).
+            if not await grow_framebuffer(total_w, total_h):
+                await clear_selkies_monitors()
+                return False
+            realized, _, _, _, _ = await get_new_res("1x1")
+            try:
+                realized_w, realized_h = (int(v) for v in (realized or "").lower().split("x"))
+            except (ValueError, AttributeError):
+                await clear_selkies_monitors()
+                return False
+            if realized_w < total_w or realized_h < total_h:
+                logger_app_resize.error(
+                    f"Framebuffer grow reached {realized_w}x{realized_h}, short of {total_mode}; "
+                    "extended layout aborted."
+                )
+                await clear_selkies_monitors()
+                return False
     return True
 
 
@@ -1253,10 +1460,33 @@ async def set_dpi(dpi_setting):
 
     return any_method_succeeded
 
+async def _set_xcursor_resource(size):
+    """Merge Xcursor.size into the root resource database. Xcursor-driven
+    consumers (openbox after the multi-monitor WM swap, plain X apps) take
+    their cursor size from here, not from XFCE/GNOME settings daemons."""
+    if not which("xrdb"):
+        return False
+    try:
+        process = await subprocess.create_subprocess_exec(
+            "xrdb", "-merge", "-",
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        await asyncio.wait_for(process.communicate(f"Xcursor.size: {size}\n".encode()), timeout=10)
+        return process.returncode == 0
+    except Exception as e:
+        logger_app_resize.debug(f"xrdb Xcursor.size merge failed: {e}")
+        try:
+            process.kill()
+        except Exception:
+            pass
+        return False
+
+
 async def set_cursor_size(size):
     if not isinstance(size, int) or size <= 0:
         logger_app_resize.error(f"Invalid cursor size: {size}")
         return False
+    xrdb_ok = await _set_xcursor_resource(size)
     if which("xfconf-query"):
         cmd = [
             "xfconf-query",
@@ -1302,6 +1532,8 @@ async def set_cursor_size(size):
             logger_app_resize.warning(
                 f"Error trying to set GNOME cursor size via gsettings: {e}"
             )
+    if xrdb_ok:
+        return True
     logger_app_resize.warning("No supported tool found/worked to set cursor size.")
     return False
 
@@ -1417,16 +1649,21 @@ def format_pixelflux_cursor(msg_type, data_bytes, hot_x, hot_y, size):
             "hotx": 0, "hoty": 0, "handle": 0,
         }
     if msg_type == "png" and data_bytes:
+        # The payload's real pixel size, not the nominal cursor-size setting:
+        # clients scale and place the hotspot against these dimensions, and
+        # cropped/capped shapes are rarely square.
+        width, height = size, size
         try:
             with Image.open(io.BytesIO(data_bytes)) as im:
                 rgba = im.convert("RGBA")
+                width, height = rgba.width, rgba.height
                 handle = cursor_content_handle(
                     rgba.tobytes(), rgba.width, rgba.height, hot_x, hot_y)
         except Exception:
             handle = zlib.crc32(data_bytes) or 1
         return {
             "curdata": base64.b64encode(data_bytes).decode("ascii"),
-            "width": size, "height": size,
+            "width": width, "height": height,
             "hotx": hot_x, "hoty": hot_y,
             "handle": handle,
         }

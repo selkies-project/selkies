@@ -32,10 +32,12 @@ from .display_utils import (
     generate_xrandr_gtf_modeline,
     ensure_mode,
     resize_display,
-    list_logical_monitors,
-    set_logical_monitor,
-    delete_logical_monitor,
-    designate_primary_output,
+    clear_selkies_monitors,
+    replace_selkies_monitors,
+    current_wm_name,
+    wait_for_wm,
+    wayland_output_id,
+    wayland_reposition_primary,
     grow_framebuffer,
     set_dpi,
     set_cursor_size,
@@ -187,6 +189,163 @@ def current_session_tokens():
     """Live control-plane token view — (user_tokens mapping, active mk-token) — as
     provisioned via /api/tokens. Both transports authorize input against this."""
     return user_tokens, active_mk_token
+
+
+async def _poll_pa_object(list_coro, valid_names, poll_interval=0.1, timeout=2.0):
+    """Poll a PulseAudio list coroutine (sink_list/source_list) until an object
+    with one of valid_names appears (PipeWire creates them asynchronously)."""
+    for _ in range(int(timeout / poll_interval)):
+        for obj in await list_coro():
+            if obj.name in valid_names:
+                return obj
+        await asyncio.sleep(poll_interval)
+    return None
+
+
+async def provision_virtual_microphone(pulse, audio_device_name, is_pcmflux_capturing):
+    """Provision the SelkiesVirtualMic control plane shared by both transports.
+
+    Creates the 'input'/'output' null sinks, loads module-virtual-source bridging
+    input.monitor -> a recordable source, and forces the system default sink/source
+    so an app recording the default source hears the client's forwarded mic. The
+    PCM data plane (pcmflux AudioPlayback into the 'input' sink) belongs to the
+    caller; this is the control plane only.
+
+    Idempotent: an existing SelkiesVirtualMic is reused, so the websockets 0x02
+    mic path and the WebRTC 'input' playback never double-load the module when both
+    are live. Returns (module_index, owns_module); owns_module is True only when
+    THIS call loaded the module, so a caller that merely reused an existing source
+    never unloads it out from under the other transport on teardown. Returns
+    (None, False) when the module load could not be verified.
+    """
+    virtual_source_name = "SelkiesVirtualMic"
+    master_monitor = "input.monitor"
+    # PipeWire prepends "output." to virtual sources
+    valid_source_names = [virtual_source_name, f"output.{virtual_source_name}"]
+
+    input_sink = "input"
+    output_sink = audio_device_name.strip().split(".monitor")[0] if audio_device_name else "output"
+    for sink_name in (input_sink, output_sink):
+        sink_exists = any(s.name == sink_name for s in await pulse.sink_list())
+        if not sink_exists:
+            data_logger.info(f"Sink '{sink_name}' not found. Attempting to create...")
+            await pulse.module_load("module-null-sink", f"sink_name={sink_name}")
+            if await _poll_pa_object(pulse.sink_list, [sink_name]):
+                data_logger.info(f"Successfully created and verified sink '{sink_name}'.")
+            else:
+                data_logger.error(f"Loaded module-null-sink for '{sink_name}' but it failed to appear in sink list.")
+        else:
+            data_logger.info(f"Sink '{sink_name}' already exists. Skipping creation.")
+
+    try:
+        await pulse.sink_default_set(output_sink)
+        data_logger.info(f"Set system default sink to '{output_sink}'.")
+    except Exception as e:
+        data_logger.warning(f"Could not set default sink to '{output_sink}': {e}")
+
+    target_device_names = [audio_device_name]
+    if "auto_null.monitor" not in target_device_names:
+        # Pipewire's default virtual sink is auto_null
+        target_device_names.append("auto_null.monitor")
+
+    existing_source_info = None
+    for source_obj in await pulse.source_list():
+        if source_obj.name in valid_source_names:
+            existing_source_info = source_obj
+            break
+
+    module_index = None
+    owns_module = False
+    if existing_source_info:
+        data_logger.info(
+            f"Virtual source '{existing_source_info.name}' (Index: {existing_source_info.index}) already exists."
+        )
+        actual_master = existing_source_info.proplist.get("device.master_device")
+        if actual_master == master_monitor:
+            data_logger.info(f"Existing source correctly linked to '{master_monitor}'.")
+        else:
+            data_logger.warning(
+                f"Existing source '{existing_source_info.name}' linked to '{actual_master}' not '{master_monitor}'. Manual fix may be needed."
+            )
+        module_index = existing_source_info.owner_module
+        try:
+            await pulse.source_default_set(existing_source_info.name)
+        except Exception:
+            pass
+    else:
+        data_logger.info(
+            f"Virtual source '{virtual_source_name}' not found. Attempting to load module..."
+        )
+        load_args = f"source_name={virtual_source_name} master={master_monitor}"
+        module_index = await pulse.module_load("module-virtual-source", load_args)
+        owns_module = True
+        data_logger.info(f"Loaded module-virtual-source with index {module_index} for '{virtual_source_name}'.")
+        new_source_info = await _poll_pa_object(pulse.source_list, valid_source_names)
+        if new_source_info:
+            data_logger.info(
+                f"Successfully verified creation of source '{new_source_info.name}' (Index: {new_source_info.index})."
+            )
+            # Force the system default source to SelkiesVirtualMic so apps record from it
+            try:
+                await pulse.source_default_set(new_source_info.name)
+                data_logger.info(f"Set system default source to '{new_source_info.name}'.")
+            except Exception as e:
+                data_logger.warning(f"Could not set default source via pulsectl_asyncio: {e}")
+        else:
+            data_logger.error(
+                f"Loaded module {module_index} but failed to find source '{virtual_source_name}'."
+            )
+            if module_index is not None:
+                try:
+                    await pulse.module_unload(module_index)
+                except Exception as unload_err:
+                    data_logger.error(f"Failed to unload module {module_index}: {unload_err}")
+            return None, False
+
+    if is_pcmflux_capturing:
+        # pcmflux may attach to the wrong source; move it onto a valid capture target
+        # so the encoded/forwarded audio graph stays intact.
+        try:
+            current_source_list = await pulse.source_list()
+            source_outputs = await pulse.source_output_list()
+            pcmflux_output = None
+            for output in source_outputs:
+                if hasattr(output, 'proplist') and output.proplist.get('application.name') == 'pcmflux':
+                    pcmflux_output = output
+                    break
+            if pcmflux_output:
+                connected_source = None
+                for source in current_source_list:
+                    if source.index == pcmflux_output.source:
+                        connected_source = source
+                        break
+                if connected_source and connected_source.name not in target_device_names:
+                    data_logger.warning(
+                        f"pcmflux connected to wrong source '{connected_source.name}', looking for a valid target in {target_device_names}..."
+                    )
+                    correct_source = None
+                    for source in current_source_list:
+                        if source.name in target_device_names:
+                            correct_source = source
+                            break
+                    if correct_source:
+                        await pulse.source_output_move(pcmflux_output.index, correct_source.index)
+                        data_logger.info(
+                            f"Successfully moved pcmflux from '{connected_source.name}' to '{correct_source.name}'"
+                        )
+                    else:
+                        data_logger.error(
+                            f"Could not find any valid source {target_device_names} to move pcmflux to"
+                        )
+                elif connected_source:
+                    data_logger.info(f"pcmflux correctly connected to '{connected_source.name}'")
+            else:
+                data_logger.debug("Could not find pcmflux in source outputs")
+        except Exception as e:
+            data_logger.error(f"Error checking/fixing pcmflux source: {e}")
+
+    data_logger.info(f"Virtual microphone '{virtual_source_name}' is ready for microphone forwarding.")
+    return module_index, owns_module
 
 
 # Only WS control-text messages at least this large are gzip-wrapped (opcode 0x05)
@@ -385,9 +544,16 @@ class SelkiesStreamingApp:
         self.last_cursor_sent = None
         self.data_streaming_server = data_streaming_server
 
-    async def send_ws_clipboard_data(self, data, mime_type="text/plain"):
+    async def send_ws_clipboard_data(self, data, mime_type="text/plain", reply_to=None):
         """
         Asynchronously sends clipboard data to all clients, handling multipart for large data.
+
+        reply_to: set to the requesting verb (e.g. "cr") when this send answers a
+        client fetch rather than announcing a server-side clipboard change. A
+        "clipboard_reply,<verb>" frame then precedes the payload frames on the
+        same ordered socket, so clients can treat the payload cache-only without
+        time heuristics. Legacy clients route the unknown verb to their input
+        module, which ignores it.
         """
         if not (self.data_streaming_server and self.data_streaming_server.clients):
             data_logger.warning("Cannot send clipboard: no clients or server not ready.")
@@ -399,6 +565,10 @@ class SelkiesStreamingApp:
                     f"Attempted to send binary clipboard data ({mime_type}) but feature is disabled on server."
                 )
                 return
+            if reply_to:
+                await _broadcast_to_clients(
+                    self.data_streaming_server.clients,
+                    f"clipboard_reply,{reply_to}", per_client_timeout=2.0)
             data_bytes = data.encode('utf-8') if not is_binary and isinstance(data, str) else data
             total_size = len(data_bytes)
             if total_size < CLIPBOARD_CHUNK_SIZE:
@@ -580,6 +750,7 @@ class DataStreamingServer(BaseStreamingService):
         # client (viewer or collaborator), not viewers alone. Discarded on
         # disconnect in the ws handler's cleanup and cleared on shutdown.
         self.video_paused_clients = set()
+        self._deferred_viewer_rejoins = {}
         self.allowed_desync_ms = BACKPRESSURE_ALLOWED_DESYNC_MS
         self.latency_threshold_for_adjustment_ms = BACKPRESSURE_LATENCY_THRESHOLD_MS
         self.backpressure_check_interval_s = BACKPRESSURE_CHECK_INTERVAL_S
@@ -597,6 +768,9 @@ class DataStreamingServer(BaseStreamingService):
         # cycles reuse the object so a reconfigure doesn't re-initialise the capture
         # backend (NVENC session/CUDA context, Wayland compositor handle) every time.
         self._persistent_capture_modules = {}
+        # Fallback pixelflux handle for Wayland output management when no
+        # primary capture module exists yet (any handle reaches the shared backend).
+        self._wayland_ctl_module = None
         self._last_keyframe_request = {}  # display_id -> monotonic, rate-limits client IDR requests
 
         # pcmflux audio capture state
@@ -1117,6 +1291,31 @@ class DataStreamingServer(BaseStreamingService):
         else:
             data_logger.warning(f"Backpressure task for '{display_id}' was already running. Not starting a new one.")
 
+    def _schedule_deferred_viewer_rejoin(self, websocket, delay: float):
+        """Rejoin a rapid-resume-throttled viewer once the resume floor passes.
+        The client already believes it resumed, so a silent discard would leave
+        the socket paused until its stall watchdog; at most one deferred rejoin
+        is pending per socket."""
+        if websocket in self._deferred_viewer_rejoins:
+            return
+
+        async def _rejoin():
+            try:
+                await asyncio.sleep(max(0.05, delay))
+                if websocket not in self.clients or websocket not in self.video_paused_clients:
+                    return
+                self.last_start_video_request_times[websocket] = time.monotonic()
+                self.video_paused_clients.discard(websocket)
+                try:
+                    await websocket.send_str("PIPELINE_RESETTING primary")
+                except (ConnectionResetError, OSError, RuntimeError):
+                    return
+                self._schedule_idr_for_display('primary')
+            finally:
+                self._deferred_viewer_rejoins.pop(websocket, None)
+
+        self._deferred_viewer_rejoins[websocket] = asyncio.create_task(_rejoin())
+
     def _schedule_idr_for_display(self, display_id: str):
         """Ask the encoder for a fresh keyframe on this display, off the event loop."""
         instance = self.capture_instances.get(display_id)
@@ -1288,28 +1487,118 @@ class DataStreamingServer(BaseStreamingService):
         return est
 
     async def broadcast_stream_resolution(self):
-        """
-        Broadcasts the primary display's resolution to ALL connected clients.
-        """
+        """Send each display's realized resolution to the socket rendering that
+        display, and the primary's to every remaining socket (shared viewers
+        render the primary stream). The payload names its display: applying the
+        primary's resolution on a secondary page rescales that page's canvas and
+        input mapping, so clicks land at primary-scaled coordinates."""
+        per_socket = {}
+        for did, client in self.display_clients.items():
+            ws = client.get('ws')
+            width, height = client.get('width', 0), client.get('height', 0)
+            if ws is not None and width > 0 and height > 0:
+                per_socket[ws] = json.dumps({
+                    "type": "stream_resolution",
+                    "width": width,
+                    "height": height,
+                    "displayId": did,
+                })
         primary_client = self.display_clients.get('primary')
-        if not primary_client:
-            data_logger.warning("Cannot broadcast stream resolution: No primary client found.")
+        primary_message = per_socket.get(primary_client.get('ws')) if primary_client else None
+        if not per_socket and not primary_message:
+            data_logger.warning("Cannot broadcast stream resolution: no display has realized dimensions.")
             return
 
-        width = primary_client.get('width', 0)
-        height = primary_client.get('height', 0)
-
-        if width > 0 and height > 0 and self.clients:
-            message = {
-                "type": "stream_resolution",
-                "width": width,
-                "height": height,
-            }
-            message_str = json.dumps(message)
-            data_logger.info(f"Broadcasting primary stream resolution to all clients: {message_str}")
+        groups = {}
+        for ws in self.clients:
+            message_str = per_socket.get(ws) or primary_message
+            if message_str:
+                groups.setdefault(message_str, set()).add(ws)
+        for message_str, sockets in groups.items():
+            data_logger.info(f"Broadcasting stream resolution to {len(sockets)} client(s): {message_str}")
             # Bounded: this runs under _reconfigure_lock, and one frozen client
             # must not wedge display control for everyone.
-            await _broadcast_to_clients(self.clients, message_str, per_client_timeout=2.0)
+            dropped = await _broadcast_to_clients(sockets, message_str, per_client_timeout=2.0)
+            # The fan-out ran over a computed group set; mirror removals into
+            # the authoritative registry.
+            for ws in dropped:
+                self.clients.discard(ws)
+
+    async def _sync_wayland_realized_geometry(self, display_id, broadcast=True):
+        """Read back what the pixelflux compositor actually realized on this
+        display's output (it may even-mask dimensions or keep the old mode on a
+        GBM allocation failure), fold it into display state/layouts and
+        broadcast stream_resolution so the client reconciles its canvas and
+        input mapping — the Wayland counterpart of the X11 reconfigure path's
+        realized clamp + broadcast. The read also acts as a barrier: the
+        compositor answers it only after any queued capture (re)start finished.
+        `broadcast=False` defers the fan-out to a caller that broadcasts once
+        for every display (the reconfigure pass)."""
+        if not IS_WAYLAND:
+            return
+        inst = self.capture_instances.get(display_id)
+        module = inst.get('module') if inst else None
+        if module is None or not hasattr(module, 'get_realized_geometry'):
+            return
+        try:
+            w, h, scale = await asyncio.to_thread(
+                module.get_realized_geometry, wayland_output_id(display_id))
+        except Exception as e:
+            data_logger.warning(f"Wayland realized-geometry read failed for '{display_id}': {e}")
+            return
+        if w <= 0 or h <= 0:
+            return
+        client = self.display_clients.get(display_id)
+        if client is not None:
+            client['width'], client['height'] = w, h
+            if scale > 0:
+                client['scale'] = scale
+        layout = getattr(self, 'display_layouts', {}).get(display_id)
+        if layout is not None:
+            layout['w'], layout['h'] = w, h
+        if display_id == 'primary' and self.app is not None:
+            self.app.display_width = w
+            self.app.display_height = h
+        data_logger.info(
+            f"Wayland realized geometry for '{display_id}': {w}x{h} @ scale {scale}")
+        if broadcast:
+            await self.broadcast_stream_resolution()
+
+    async def _apply_wayland_cursor_size(self, dpi):
+        """Wayland counterpart of the X11 per-DPI cursor resize: the compositor
+        reloads its theme cursor (composited overlay and named-cursor delivery
+        both re-render) at the DPI-scaled size, live, no capture restart."""
+        if CURSOR_SIZE <= 0:
+            return
+        module = self._wayland_control_module()
+        setter = getattr(module, 'set_cursor_size', None) if module else None
+        if setter is None:
+            data_logger.warning("Wayland cursor resize unavailable (no set_cursor_size).")
+            return
+        size = cursor_size_for_dpi(dpi, CURSOR_SIZE)
+        try:
+            if await asyncio.to_thread(setter, size):
+                data_logger.info(f"Wayland cursor size set to {size} (DPI {dpi}).")
+            else:
+                data_logger.warning(f"Wayland compositor refused cursor size {size}.")
+        except Exception as e:
+            data_logger.warning(f"Wayland cursor resize failed: {e}")
+
+    def _update_wayland_cursor_cap(self, dpi):
+        """Wayland parity with X11's per-DPI cursor re-derive: track the DPI on
+        the input handler and scale the remote-cursor delivery cap with it, so
+        the next capture (re)start threads the raised cap through
+        CaptureSettings. The compositor's composited cursor follows the output
+        scale on its own (set_cursor_size re-derives its theme pixel size on
+        DPI changes)."""
+        ih = self.input_handler
+        if ih is None:
+            return
+        try:
+            ih.system_dpi = float(dpi)
+            ih.cursor_size_cap = int(ih.max_cursor_size * float(dpi) / 96.0)
+        except Exception as e:
+            data_logger.debug(f"cursor cap update skipped: {e}")
 
     def _parse_settings_payload(self, payload_str: str) -> dict:
         settings_data = json.loads(payload_str)
@@ -1372,6 +1661,9 @@ class DataStreamingServer(BaseStreamingService):
         parsed["force_aligned_resolution"] = get_bool("force_aligned_resolution")
         # Client advertises Opus+RED de-RED capability for the WS audio path.
         parsed["audioRedundancy"] = get_bool("audioRedundancy")
+        # Optional client keyboard-layout hint (e.g. "de", "ch(fr)"): becomes
+        # the compositor's base xkb layout on Wayland, informational on X11.
+        parsed["keyboardLayout"] = get_str("keyboardLayout")
         data_logger.debug(f"Parsed client settings: {parsed}")
         return parsed
 
@@ -1486,6 +1778,9 @@ class DataStreamingServer(BaseStreamingService):
                 if self.input_handler:
                     self.enable_binary_clipboard = sanitize_value("enable_binary_clipboard", settings.get("enable_binary_clipboard"))
                     await self.input_handler.update_binary_clipboard_setting(self.enable_binary_clipboard)
+                    kb_layout = settings.get("keyboardLayout")
+                    if kb_layout:
+                        await self.input_handler.apply_client_keyboard_layout(kb_layout)
                 new_dpi = sanitize_value("scaling_dpi", settings.get("scaling_dpi"))
                 if app_settings._overridden.get("scaling_dpi", False):
                     # An operator-set DPI (CLI/env) governs the desktop: client
@@ -1499,35 +1794,16 @@ class DataStreamingServer(BaseStreamingService):
                     if CURSOR_SIZE > 0 and not IS_WAYLAND:
                         new_cursor_size = cursor_size_for_dpi(new_dpi, CURSOR_SIZE)
                         await set_cursor_size(new_cursor_size)
-               
                     if IS_WAYLAND:
-                        scale_val = float(new_dpi) / 96.0
-                        if which("kwin_wayland"):
-                            display_state['scale'] = scale_val
-                        elif which("wlr-randr") and display_id == 'primary':
-                            cmd = ["wlr-randr", "--output", "WL-1", "--scale", str(scale_val)]
-                            env = os.environ.copy()
-                            wl_idx = getattr(self.cli_args, 'wayland_socket_index', 0)
-                            env["WAYLAND_DISPLAY"] = f"wayland-{wl_idx}"
-                            data_logger.info(f"Wayland Settings: Executing '{' '.join(cmd)}' on wayland-{wl_idx}")
-                            try:
-                                proc = await asyncio.create_subprocess_exec(
-                                    *cmd, env=env,
-                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                                )
-                                # Bounded: this runs under _reconfigure_lock; a wedged
-                                # compositor must not hold it forever.
-                                try:
-                                    await asyncio.wait_for(proc.communicate(), timeout=10.0)
-                                except asyncio.TimeoutError:
-                                    try:
-                                        proc.kill()
-                                    except ProcessLookupError:
-                                        pass
-                                    await proc.wait()
-                                    data_logger.error("wlr-randr timed out in settings apply; killed.")
-                            except Exception as e:
-                                data_logger.error(f"Failed to execute wlr-randr in settings apply: {e}")
+                        # DPI realizes as the pixelflux compositor output scale
+                        # (set_dpi is a no-op on Wayland). Applied unconditionally
+                        # — WebRTC-mode parity; the capture restart below (via the
+                        # scaling_dpi restart trigger) reads it. No compositor
+                        # detection: pixelflux owns the session and implements no
+                        # wlr-output-management, so external tools cannot set it.
+                        display_state['scale'] = float(new_dpi) / 96.0
+                        self._update_wayland_cursor_cap(new_dpi)
+                        await self._apply_wayland_cursor_size(new_dpi)
 
                 display_state["scaling_dpi"] = new_dpi
                 dimensional_change = resolution_actually_changed or position_actually_changed
@@ -1537,7 +1813,7 @@ class DataStreamingServer(BaseStreamingService):
                     'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'video_paintover_crf',
                     'video_paintover_burst_frames', 'use_paint_over_quality', 'rate_control_mode', 'video_bitrate'
                 ]
-                if IS_WAYLAND and which("kwin_wayland"):
+                if IS_WAYLAND:
                     video_params_list.append('scaling_dpi')
 
                 video_params_changed = any(
@@ -1559,6 +1835,10 @@ class DataStreamingServer(BaseStreamingService):
                     # Only structural switches rebuild the encoder session; rate and
                     # per-frame tunables apply to the live capture with no restart.
                     restart_video_params = ['encoder', 'use_cpu', 'video_fullcolor', 'rate_control_mode']
+                    if IS_WAYLAND:
+                        # A compositor scale change reconfigures the output; the
+                        # live-tunables path cannot apply it.
+                        restart_video_params.append('scaling_dpi')
                     video_restart_needed = any(
                         display_state.get(k) != old_settings.get(k) for k in restart_video_params
                     )
@@ -1601,6 +1881,8 @@ class DataStreamingServer(BaseStreamingService):
                             # re-announce the live settings to every client.
                             self._schedule_idr_for_display(display_id)
                             await self._broadcast_live_server_settings(display_id)
+                            if IS_WAYLAND:
+                                await self._sync_wayland_realized_geometry(display_id)
                         else:
                             data_logger.warning(
                                 f"Cannot restart capture for '{display_id}': no layout found. "
@@ -1747,13 +2029,11 @@ class DataStreamingServer(BaseStreamingService):
         mic_disabled_sent = False
         mic_error = False
         pa_module_index = None
+        # Only the caller that loaded module-virtual-source unloads it on teardown
+        # (parity with the WebRTC path): a reused pre-existing source is left for
+        # the other transport.
+        pa_module_owned = False
         pulse = None
-
-        # Define virtual source details
-        virtual_source_name = "SelkiesVirtualMic"
-        master_monitor = "input.monitor"
-        # PipeWire prepends "output." to virtual sources
-        valid_source_names = [virtual_source_name, f"output.{virtual_source_name}"]
 
         # Mic PCM data plane is Rust-owned (pcmflux AudioPlayback): a GIL-released,
         # non-blocking enqueue into a playback stream on its own thread. pulsectl stays
@@ -1905,156 +2185,17 @@ class DataStreamingServer(BaseStreamingService):
                                 "Performing PulseAudio/PipeWire virtual microphone setup check..."
                             )
                             try:
-                                input_sink = "input"
-                                output_sink = self.audio_device_name.strip().split(".monitor")[0] if self.audio_device_name else "output"
-                                # Create required null sinks if they don't exist
-                                required_sinks = [input_sink, output_sink]
-                                for sink_name in required_sinks:
-                                    sink_exists = False
-                                    for sink in await pulse.sink_list():
-                                        if sink.name == sink_name:
-                                            sink_exists = True
-                                            break
-
-                                    if not sink_exists:
-                                        data_logger.info(f"Sink '{sink_name}' not found. Attempting to create...")
-                                        sink_module_index = await pulse.module_load("module-null-sink", f"sink_name={sink_name}")
-
-                                        sink_created = await self._poll_audio_sink(pulse, [sink_name])
-                                        if sink_created:
-                                            data_logger.info(f"Successfully created and verified sink '{sink_name}'.")
-                                        else:
-                                            data_logger.error(f"Loaded module-null-sink for '{sink_name}' but it failed to appear in sink list.")
-                                    else:
-                                        data_logger.info(f"Sink '{sink_name}' already exists. Skipping creation.")
-
-                                # Force the system default sink to output sink
-                                try:
-                                    await pulse.sink_default_set(output_sink)
-                                    data_logger.info(f"Set system default sink to '{output_sink}'.")
-                                except Exception as e:
-                                    data_logger.warning(f"Could not set default sink to '{output_sink}': {e}")
-
-                                target_device_names = [self.audio_device_name]
-                                if "auto_null.monitor" not in target_device_names:
-                                    # Pipewire's default virtual sink is auto_null
-                                    target_device_names.append("auto_null.monitor")
-
-                                existing_source_info = None
-                                source_list = await pulse.source_list()
-                                for source_obj in source_list:
-                                    if source_obj.name in valid_source_names:
-                                        existing_source_info = source_obj
-                                        break
-
-                                if existing_source_info:
-                                    data_logger.info(
-                                        f"Virtual source '{existing_source_info.name}' (Index: {existing_source_info.index}) already exists."
-                                    )
-                                    actual_master = existing_source_info.proplist.get("device.master_device")
-                                    if actual_master == master_monitor:
-                                        data_logger.info(f"Existing source correctly linked to '{master_monitor}'.")
-                                    else:
-                                        data_logger.warning(
-                                            f"Existing source '{existing_source_info.name}' linked to '{actual_master}' not '{master_monitor}'. Manual fix may be needed."
-                                        )
-                                    pa_module_index = existing_source_info.owner_module
-                                    mic_setup_done = True
-
-                                    # Ensure default source is maintained even if it already existed
-                                    try:
-                                        await pulse.source_default_set(existing_source_info.name)
-                                    except Exception:
-                                        pass
-                                else:
-                                    data_logger.info(
-                                        f"Virtual source '{virtual_source_name}' not found. Attempting to load module..."
-                                    )
-                                    load_args = f"source_name={virtual_source_name} master={master_monitor}"
-                                    pa_module_index = await pulse.module_load("module-virtual-source", load_args)
-                                    data_logger.info(f"Loaded module-virtual-source with index {pa_module_index} for '{virtual_source_name}'.")
-
-                                    new_source_info = await self._poll_audio_source(pulse, valid_source_names)
-                                    if new_source_info:
-                                        data_logger.info(
-                                            f"Successfully verified creation of source '{new_source_info.name}' (Index: {new_source_info.index})."
-                                        )
-
-                                        # Force the system default source to SelkiesVirtualMic so apps record from it
-                                        try:
-                                            await pulse.source_default_set(new_source_info.name)
-                                            data_logger.info(f"Set system default source to '{new_source_info.name}'.")
-                                            mic_setup_done = True
-                                        except Exception as e:
-                                            data_logger.warning(f"Could not set default source via pulsectl_asyncio: {e}")
-                                    else:
-                                        data_logger.error(
-                                            f"Loaded module {pa_module_index} but failed to find source '{virtual_source_name}'."
-                                        )
-                                        if pa_module_index is not None:
-                                            try:
-                                                await pulse.module_unload(pa_module_index)
-                                            except Exception as unload_err:
-                                                data_logger.error(f"Failed to unload module {pa_module_index}: {unload_err}")
-                                            pa_module_index = None
-
-                                if mic_setup_done:
-                                    current_source_list = (
-                                        await pulse.source_list()
-                                    )
-                                    if self.is_pcmflux_capturing:
-                                        try:
-                                            source_outputs = await pulse.source_output_list()
-                                            pcmflux_output = None
-                                            
-                                            for output in source_outputs:
-                                                if hasattr(output, 'proplist') and output.proplist.get('application.name') == 'pcmflux':
-                                                    pcmflux_output = output
-                                                    break
-                                            
-                                            if pcmflux_output:
-                                                connected_source = None
-                                                for source in current_source_list:
-                                                    if source.index == pcmflux_output.source:
-                                                        connected_source = source
-                                                        break
-                                                if connected_source and connected_source.name not in target_device_names:
-                                                    data_logger.warning(
-                                                        f"pcmflux connected to wrong source '{connected_source.name}', looking for a valid target in {target_device_names}..."
-                                                    )
-                                                    correct_source = None
-                                                    for source in current_source_list:
-                                                        if source.name in target_device_names:
-                                                            correct_source = source
-                                                            break
-                                                    if correct_source:
-                                                        await pulse.source_output_move(pcmflux_output.index, correct_source.index)
-                                                        data_logger.info(
-                                                            f"Successfully moved pcmflux from '{connected_source.name}' to '{correct_source.name}'"
-                                                        )
-                                                    else:
-                                                        data_logger.error(
-                                                            f"Could not find any valid source {target_device_names} to move pcmflux to"
-                                                        )
-                                                elif connected_source:
-                                                    data_logger.info(f"pcmflux correctly connected to '{connected_source.name}'")
-                                            else:
-                                                data_logger.debug("Could not find pcmflux in source outputs")
-                                                
-                                        except Exception as e:
-                                            data_logger.error(f"Error checking/fixing pcmflux source: {e}")
-                                    
-                                    data_logger.info(
-                                        f"Virtual microphone '{virtual_source_name}' is ready for microphone forwarding."
-                                    )
-
+                                pa_module_index, pa_module_owned = await provision_virtual_microphone(
+                                    pulse, self.audio_device_name, self.is_pcmflux_capturing
+                                )
+                                mic_setup_done = pa_module_index is not None
                             except Exception as e_pa_setup:
                                 data_logger.error(
                                     f"PulseAudio mic setup error: {e_pa_setup}",
                                     exc_info=True,
                                 )
                                 mic_setup_done = False
-                                if pa_module_index is not None:
+                                if pa_module_index is not None and pa_module_owned:
                                     try:
                                         data_logger.info(
                                             f"Attempting to unload module {pa_module_index} due to setup error."
@@ -2064,7 +2205,8 @@ class DataStreamingServer(BaseStreamingService):
                                         data_logger.error(
                                             f"Error unloading module {pa_module_index} after setup failure: {e_unload_err}"
                                         )
-                                    pa_module_index = None
+                                pa_module_index = None
+                                pa_module_owned = False
                                 continue
 
                         if not mic_setup_done or not payload:
@@ -2195,17 +2337,6 @@ class DataStreamingServer(BaseStreamingService):
                                     except (ConnectionResetError, OSError, RuntimeError):
                                         pass
                                     return
-                                if IS_WAYLAND:
-                                    data_logger.warning(
-                                        f"Secondary display '{display_id}' refused: extended displays are X11-only (not supported on Wayland)."
-                                    )
-                                    try:
-                                        await websocket.send_str("KILL Secondary displays are not supported on Wayland.")
-                                        await websocket.close(code=1008, message=b"Secondary display unsupported on Wayland")
-                                    except (ConnectionResetError, OSError, RuntimeError):
-                                        pass
-                                    return
- 
                             client_display_id = display_id
                             if display_id in ['primary', 'display2']:
                                 existing_client_info = self.display_clients.get(display_id)
@@ -2406,12 +2537,23 @@ class DataStreamingServer(BaseStreamingService):
                                 # below) and retries after the floor.
                                 last_req_time = self.last_start_video_request_times.get(websocket, 0)
                                 if now - last_req_time < VIEWER_RESUME_MIN_INTERVAL_S:
-                                    data_logger.warning(f"Throttled rapid resume from viewer {remote_address}. Ignoring.")
+                                    # The client already flipped to "resumed": a
+                                    # silent discard would leave this socket
+                                    # paused until its watchdog. Rejoin after the
+                                    # floor instead of dropping the resume.
+                                    data_logger.warning(f"Throttled rapid resume from viewer {remote_address}; deferring its rejoin.")
+                                    self._schedule_deferred_viewer_rejoin(
+                                        websocket,
+                                        VIEWER_RESUME_MIN_INTERVAL_S - (now - last_req_time),
+                                    )
                                     continue
                                 self.last_start_video_request_times[websocket] = now
                             else:
+                                # Short floor only: a viewer whose stream stalled
+                                # re-requests via its watchdog and must not wait
+                                # tens of seconds for a resync.
                                 last_req_time = self.last_start_video_request_times.get(websocket, 0)
-                                if now - last_req_time < 30.0:
+                                if now - last_req_time < 5.0:
                                     data_logger.warning(f"Throttled START_VIDEO request from viewer {remote_address}. Ignoring.")
                                     continue
                                 self.last_start_video_request_times[websocket] = now
@@ -2433,6 +2575,12 @@ class DataStreamingServer(BaseStreamingService):
                         elif display_entry is not None:
                             data_logger.info(f"Received START_VIDEO for '{client_display_id}'. Starting its stream.")
                             display_state = display_entry
+                            # A resume onto a capture that kept running for the
+                            # shared viewers continues mid-GOP: this socket needs
+                            # the viewer resume contract (decoder reset + IDR).
+                            resumed_onto_live_capture = (
+                                was_paused and client_display_id in self.capture_instances
+                            )
                             # Keep this intent flag write sync-adjacent to the capture start below:
                             # under cooperative asyncio there is no await between them, so the flag
                             # and the lock-serialized capture op stay atomic vs a concurrent
@@ -2454,6 +2602,11 @@ class DataStreamingServer(BaseStreamingService):
                                         await self.reconfigure_displays()
                                     else:
                                         await self._start_backpressure_task_if_needed(client_display_id)
+                                        if resumed_onto_live_capture:
+                                            try:
+                                                await websocket.send_str(f"PIPELINE_RESETTING {client_display_id}")
+                                            except (ConnectionResetError, OSError, RuntimeError):
+                                                pass
                                         await websocket.send_str("VIDEO_STARTED")
                                         # Resend cursor: the client clears its cursor canvas on tab hide.
                                         await self.send_current_cursor(websocket, remote_address)
@@ -2517,9 +2670,27 @@ class DataStreamingServer(BaseStreamingService):
                             except (ConnectionResetError, OSError, RuntimeError):
                                 pass
                         elif stop_entry is not None:
-                            data_logger.info(f"Received STOP_VIDEO for '{client_display_id}'. Stopping stream.")
-                            stop_entry['video_active'] = False
-                            await self._stop_capture_for_display(client_display_id)
+                            # The primary's capture feeds every shared viewer:
+                            # the controller hiding its tab must not stop the
+                            # encoder while viewers still consume the broadcast
+                            # — pause just the controller's socket instead (the
+                            # fan-out already excludes video_paused_clients).
+                            display_sockets = {
+                                info.get('ws') for info in self.display_clients.values()
+                            }
+                            remaining_viewers = (
+                                self.clients - display_sockets - self.video_paused_clients
+                            ) if client_display_id == 'primary' else set()
+                            if remaining_viewers:
+                                data_logger.info(
+                                    f"STOP_VIDEO for 'primary' with {len(remaining_viewers)} shared "
+                                    "viewer(s) attached: pausing the controller, keeping the capture."
+                                )
+                                self.video_paused_clients.add(websocket)
+                            else:
+                                data_logger.info(f"Received STOP_VIDEO for '{client_display_id}'. Stopping stream.")
+                                stop_entry['video_active'] = False
+                                await self._stop_capture_for_display(client_display_id)
                             try:
                                 await websocket.send_str("VIDEO_STOPPED")
                             except (ConnectionResetError, OSError, RuntimeError):
@@ -2670,59 +2841,42 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.error(f"Failed to set DPI to {dpi_value}")
 
                             if IS_WAYLAND and client_display_id:
-                                if which("kwin_wayland"):
-                                    if client_display_id in self.display_clients:
-                                        self.display_clients[client_display_id]['scale'] = scale_val
-                                    data_logger.info(f"KDE Wayland detected. Restarting stream with scale {scale_val} for {client_display_id}")
-                                    await self._stop_capture_for_display(client_display_id)
-                                    if hasattr(self, 'display_layouts') and client_display_id in self.display_layouts:
-                                        layout = self.display_layouts[client_display_id]
-                                        await self._start_capture_for_display(
-                                            display_id=client_display_id,
-                                            width=layout['w'], height=layout['h'],
-                                            x_offset=layout['x'], y_offset=layout['y']
-                                        )
-                                        await self._start_backpressure_task_if_needed(client_display_id)
-                                elif which("wlr-randr"):
-                                    output_name = "WL-1"
-                                    cmd = ["wlr-randr", "--output", output_name, "--scale", str(scale_val)]
-                                    env = os.environ.copy()
-                                    wl_idx = getattr(self.cli_args, 'wayland_socket_index', 0)
-                                    env["WAYLAND_DISPLAY"] = f"wayland-{wl_idx}"
-                                    data_logger.info(f"Wayland: Executing '{' '.join(cmd)}' on wayland-{wl_idx}.")
-                                    try:
-                                        proc = await asyncio.create_subprocess_exec(
-                                            *cmd,
-                                            env=env,
-                                            stdout=asyncio.subprocess.PIPE,
-                                            stderr=asyncio.subprocess.PIPE
-                                        )
-                                        try:
-                                            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-                                        except asyncio.TimeoutError:
-                                            try:
-                                                proc.kill()
-                                            except ProcessLookupError:
-                                                pass
-                                            await proc.wait()
-                                            stdout, stderr = b"", b"timed out after 10s"
-                                        if proc.returncode != 0:
-                                            data_logger.error(f"wlr-randr failed: {stderr.decode().strip()}")
-                                        else:
-                                            data_logger.info(f"wlr-randr success: {stdout.decode().strip()}")
-                                    except Exception as e:
-                                        data_logger.error(f"Failed to execute wlr-randr: {e}")
-                                else:
-                                    data_logger.warning("Wayland scaling requested but 'wlr-randr' binary not found.")
+                                # DPI realizes as the pixelflux compositor output
+                                # scale, always (WebRTC-mode parity): thread it into
+                                # display state and restart the capture so the
+                                # compositor reconfigures its output. (No kwin /
+                                # wlr-randr detection: pixelflux owns the session
+                                # and implements no wlr-output-management, so no
+                                # external tool can apply the scale.)
+                                if client_display_id in self.display_clients:
+                                    self.display_clients[client_display_id]['scale'] = scale_val
+                                self._update_wayland_cursor_cap(dpi_value)
+                                data_logger.info(f"Wayland: restarting stream with scale {scale_val} for {client_display_id}")
+                                await self._stop_capture_for_display(client_display_id)
+                                if hasattr(self, 'display_layouts') and client_display_id in self.display_layouts:
+                                    layout = self.display_layouts[client_display_id]
+                                    await self._start_capture_for_display(
+                                        display_id=client_display_id,
+                                        width=layout['w'], height=layout['h'],
+                                        x_offset=layout['x'], y_offset=layout['y']
+                                    )
+                                    await self._start_backpressure_task_if_needed(client_display_id)
+                                    # Close the realized-geometry loop: the compositor
+                                    # may clamp (even-masking, GBM degrade); the client
+                                    # reconciles from stream_resolution like X11.
+                                    await self._sync_wayland_realized_geometry(client_display_id)
 
                             if CURSOR_SIZE > 0:
-                                new_cursor_size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
-
-                                data_logger.info(f"Attempting to set cursor size to: {new_cursor_size} (based on DPI {dpi_value})")
-                                if await set_cursor_size(new_cursor_size):
-                                    data_logger.info(f"Successfully set cursor size to {new_cursor_size}")
+                                if IS_WAYLAND:
+                                    await self._apply_wayland_cursor_size(dpi_value)
                                 else:
-                                    data_logger.error(f"Failed to set cursor size to {new_cursor_size}")
+                                    new_cursor_size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
+
+                                    data_logger.info(f"Attempting to set cursor size to: {new_cursor_size} (based on DPI {dpi_value})")
+                                    if await set_cursor_size(new_cursor_size):
+                                        data_logger.info(f"Successfully set cursor size to {new_cursor_size}")
+                                    else:
+                                        data_logger.error(f"Failed to set cursor size to {new_cursor_size}")
                             else:
                                 data_logger.warning("CURSOR_SIZE is not positive. Skipping cursor size adjustment based on DPI.")
 
@@ -2797,7 +2951,11 @@ class DataStreamingServer(BaseStreamingService):
                         # maxsplit=1: the gate needs only the verb, and a clipboard chunk can be
                         # WS_MAX_MESSAGE_BYTES (8 MiB) — a full split here (then again in the
                         # dispatcher) would stall the event loop for milliseconds per large paste.
-                        if self.is_secure_mode and message.split(',', 1)[0] in ["kd", "ku", "kh", "kr", "m", "m2", "co", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr", "REQUEST_CLIPBOARD"]:
+                        # 'cr' (read-only clipboard fetch) is exempt: every client sends it at
+                        # connect before it can hold input authority, and the handler itself
+                        # direction-gates it on enable_clipboard (out). Viewer-role drops above
+                        # still apply.
+                        if self.is_secure_mode and message.split(',', 1)[0] in ["kd", "ku", "kh", "kr", "m", "m2", "co", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "REQUEST_CLIPBOARD"]:
                             perms = client_permissions.get(websocket)
                             token = perms.get("token") if perms else None
                             
@@ -2826,6 +2984,9 @@ class DataStreamingServer(BaseStreamingService):
             self.last_start_video_request_times.pop(websocket, None)
             self.last_viewer_keyframe_request_times.pop(websocket, None)
             self.video_paused_clients.discard(websocket)
+            rejoin_task = self._deferred_viewer_rejoins.pop(websocket, None)
+            if rejoin_task is not None:
+                rejoin_task.cancel()
             client_permissions.pop(websocket, None)
             data_logger.info(f"Cleaning up Data WS handler for {raddr} (Display ID: {client_display_id})...")
 
@@ -2963,6 +3124,7 @@ class DataStreamingServer(BaseStreamingService):
                 if (
                     "pa_module_index" in locals()
                     and locals()["pa_module_index"] is not None
+                    and locals().get("pa_module_owned")
                 ):
                     _local_pa_module_index = locals()["pa_module_index"]
                     try:
@@ -3020,28 +3182,6 @@ class DataStreamingServer(BaseStreamingService):
 
             data_logger.info(f"Data WS handler for {raddr} finished all cleanup.")
 
-    async def _poll_audio_source(self, pulse, valid_source_names, poll_interval=0.1, timeout=2.0):
-        """Asynchronous polling loop for PipeWire source"""
-        max_retries = int(timeout / poll_interval)
-        for _ in range(max_retries):
-            source_list_after_load = await pulse.source_list()
-            for source_obj_after in source_list_after_load:
-                if source_obj_after.name in valid_source_names:
-                    return source_obj_after
-            await asyncio.sleep(poll_interval)
-        return None
-    
-    async def _poll_audio_sink(self, pulse, valid_sink_names, poll_interval=0.1, timeout=2.0):
-        """Asynchronous polling loop for PipeWire sink"""
-        sink_retries = int(timeout / poll_interval)
-        for _ in range(sink_retries):
-            for s in await pulse.sink_list():
-                if s.name in valid_sink_names:
-                    return s
-            await asyncio.sleep(poll_interval)
-        return None
-
-
     async def _run_detached_command(self, cmd_list: list, description: str):
         """Runs a command via the shell using 'nohup ... &' to detach it from the server process."""
         quoted_cmd = ' '.join(shlex.quote(c) for c in cmd_list)
@@ -3090,11 +3230,139 @@ class DataStreamingServer(BaseStreamingService):
             log(f"Exception during '{description}': {e}", exc_info=not best_effort)
             return False
 
-    async def _get_current_monitors(self):
-        """Names of all existing logical monitors (native RandR query first,
-        xrandr parse fallback)."""
-        return await list_logical_monitors()
+    def _wayland_control_module(self):
+        """A pixelflux handle for compositor output management (any ScreenCapture
+        reaches the shared Wayland backend); prefers the primary's persistent
+        module so no extra instance exists in the common case."""
+        module = self._persistent_capture_modules.get('primary')
+        if module is not None:
+            return module
+        if ScreenCapture is None:
+            return None
+        if self._wayland_ctl_module is None:
+            self._wayland_ctl_module = ScreenCapture()
+        return self._wayland_ctl_module
 
+    async def _drop_wayland_secondary(self, display_id: str, reason: str):
+        """Refuse a secondary display the compositor cannot realize: destroy its
+        output (if any), stop its capture, unregister it, and kill its client —
+        the Wayland counterpart of the X11 unrealizable-extension drop."""
+        module = self._wayland_control_module()
+        if module is not None:
+            try:
+                await asyncio.to_thread(module.destroy_output, wayland_output_id(display_id))
+            except Exception:
+                pass
+        await self._stop_capture_for_display(display_id)
+        dropped_client = self.display_clients.pop(display_id, None)
+        getattr(self, 'display_layouts', {}).pop(display_id, None)
+        dropped_ws = dropped_client.get('ws') if dropped_client else None
+        data_logger.error(f"Secondary display '{display_id}' dropped on Wayland: {reason}")
+        if dropped_ws is not None:
+            try:
+                await asyncio.wait_for(dropped_ws.send_str(f"KILL {reason}"), timeout=2.0)
+                await asyncio.wait_for(
+                    dropped_ws.close(code=1008, message=b"Secondary display unrealizable"),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                _close_abandoned_ws(dropped_ws)
+            except (ConnectionResetError, OSError, RuntimeError):
+                pass
+
+    async def _reanchor_wayland_primary(self, layouts, keep_ids):
+        """Collapse an unrealizable Wayland arrangement: primary back at the
+        origin (layout + capture rebuild) — the Wayland mirror of the X11
+        re-anchor when the extension does not fit the realized root."""
+        primary_layout = layouts.get('primary')
+        if primary_layout:
+            primary_layout['x'], primary_layout['y'] = 0, 0
+        if 'primary' in keep_ids:
+            keep_ids.discard('primary')
+            await self._stop_capture_for_display('primary')
+
+    async def _apply_wayland_output_layout(self, layouts, keep_ids):
+        """Realize the computed union layout as compositor outputs — the Wayland
+        counterpart of the X11 monitor/framebuffer apply. The primary (output 0)
+        is sized by its capture start and MOVED here to its layout offset
+        ('left'/'up' place it off-origin; teardown re-anchors it at 0,0); each
+        secondary gets a real output at its layout rectangle, created here
+        BEFORE the capture start loop binds a capture to it. Ordering keeps the
+        output rectangles disjoint: moved/stale secondaries are destroyed
+        first, then the primary repositions, then secondaries are created.
+        Mutates `layouts`/`keep_ids` when a display has to be dropped (output
+        creation or the primary move refused), killing its client like the X11
+        path."""
+        module = self._wayland_control_module()
+        if module is None:
+            return
+        try:
+            outputs = {o[0]: o for o in await asyncio.to_thread(module.list_outputs)}
+        except Exception as e:
+            data_logger.error(f"Wayland list_outputs failed: {e}")
+            outputs = {}
+        wanted = {wayland_output_id(did): did for did in layouts if did != 'primary'}
+        for oid in list(outputs):
+            if oid != 0 and oid not in wanted:
+                data_logger.info(f"Destroying stale Wayland output {oid}.")
+                await asyncio.to_thread(module.destroy_output, oid)
+        for oid, did in wanted.items():
+            layout = layouts[did]
+            existing = outputs.get(oid)
+            if existing is not None and (existing[1], existing[2]) != (layout['x'], layout['y']):
+                # A secondary reposition is a destroy + recreate (its capture
+                # dies with the output; the start loop rebuilds it). Destroyed
+                # before the primary moves so their rectangles never overlap.
+                data_logger.info(
+                    f"Wayland output {oid} moves to +{layout['x']}+{layout['y']}; recreating it."
+                )
+                await asyncio.to_thread(module.destroy_output, oid)
+                keep_ids.discard(did)
+                await self._stop_capture_for_display(did)
+                outputs.pop(oid, None)
+        primary_layout = layouts.get('primary')
+        target = (primary_layout['x'], primary_layout['y']) if primary_layout else (0, 0)
+        existing0 = outputs.get(0)
+        current = (existing0[1], existing0[2]) if existing0 is not None else (0, 0)
+        if target != current:
+            if not await wayland_reposition_primary(module, target[0], target[1]):
+                # The primary must stay usable above all else: keep it at the
+                # origin and drop every secondary — the arrangement is void.
+                await self._reanchor_wayland_primary(layouts, keep_ids)
+                for did in [d for d in list(layouts) if d != 'primary']:
+                    del layouts[did]
+                    keep_ids.discard(did)
+                    await self._drop_wayland_secondary(
+                        did, "The compositor cannot move the primary output for this arrangement."
+                    )
+                return
+        for oid, did in wanted.items():
+            if did not in layouts:
+                continue
+            layout = layouts[did]
+            client = self.display_clients.get(did) or {}
+            scale = float(client.get('scale', 1.0) or 1.0)
+            if outputs.get(oid) is not None:
+                continue
+            created = False
+            try:
+                created = bool(await asyncio.to_thread(
+                    module.create_output, oid,
+                    layout['w'], layout['h'], layout['x'], layout['y'], scale,
+                ))
+            except Exception as e:
+                data_logger.error(f"Wayland create_output {oid} failed: {e}")
+            if not created:
+                del layouts[did]
+                keep_ids.discard(did)
+                await self._drop_wayland_secondary(
+                    did, "The compositor cannot create an output for this display."
+                )
+                if target != (0, 0):
+                    # The secondary this arrangement was built around is gone;
+                    # put the primary back at the origin.
+                    await wayland_reposition_primary(module, 0, 0)
+                    await self._reanchor_wayland_primary(layouts, keep_ids)
 
     async def _stop_capture_for_display(self, display_id: str):
         # Serialize against any concurrent start/stop for any display.
@@ -3202,18 +3470,22 @@ class DataStreamingServer(BaseStreamingService):
             else:
                 self._wm_swap_is_supported = False
         if (not IS_WAYLAND and current_display_count > 1 and self._wm_swap_is_supported and not self._is_wm_swapped):
-            data_logger.info("Multi-monitor setup: switching to Openbox with a minimal config.")
-            config_path = "/tmp/openbox_selkies_config.xml"
-            config_content = "<openbox_config></openbox_config>\n"
-            try:
-                async with aiofiles.open(config_path, "w") as f:
-                    await f.write(config_content)
-                data_logger.info(f"Wrote minimal Openbox config to {config_path}")
-                openbox_cmd = ["openbox", "--config-file", config_path, "--replace"]
-            except IOError as e:
-                data_logger.error(f"Could not write Openbox config to {config_path}: {e}. Proceeding without custom config.")
-                openbox_cmd = ["openbox", "--replace"]
-            await self._run_detached_command(openbox_cmd, "switch to openbox")
+            if "openbox" in (await current_wm_name()).lower():
+                data_logger.info("Multi-monitor setup: Openbox already manages the session; no WM swap.")
+            else:
+                data_logger.info("Multi-monitor setup: switching to Openbox.")
+                # Openbox resolves its stock config chain (user/system rc.xml):
+                # a hand-written minimal config would strip the stock <mouse>
+                # bindings (titlebar double-click maximize, middle-click,
+                # menus) that the compiled-in defaults do not cover, leaving
+                # presses on decorations dead.
+                await self._run_detached_command(["openbox", "--replace"], "switch to openbox")
+                # The takeover must finish BEFORE the layout applies: the
+                # incoming WM snapshots the monitor set it starts against, and
+                # a snapshot taken mid-swap re-tiles maximized windows across
+                # the whole framebuffer.
+                if not await wait_for_wm("openbox"):
+                    data_logger.warning("Openbox takeover not confirmed; applying layout anyway.")
             self._is_wm_swapped = True
         if not self.display_clients:
             # Nothing to lay out: stop everything that is still running.
@@ -3224,11 +3496,11 @@ class DataStreamingServer(BaseStreamingService):
                 # X11 only: tear down the xrandr virtual monitors. In Wayland the compositor
                 # output is managed by pixelflux (resized on capture start), so there is nothing
                 # to delmonitor here and running xrandr against the X server is wrong.
-                _, _, _, _, screen_name = await get_new_res("1x1")
-                if screen_name:
-                    current_monitors = await self._get_current_monitors()
-                    for monitor_name in current_monitors:
-                        await delete_logical_monitor(monitor_name)
+                await clear_selkies_monitors()
+            else:
+                # No clients left: retire every secondary compositor output (the
+                # primary output persists; its capture is already stopped above).
+                await self._apply_wayland_output_layout({}, set())
             return
         data_logger.info("Calculating new extended desktop layout from ALL clients...")
         layouts = {}
@@ -3328,9 +3600,6 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.error("CRITICAL: Could not determine screen name from xrandr. Aborting.")
                 await self._signal_all_displays_stopped()
                 return
-            current_monitors = await self._get_current_monitors()
-            for monitor_name in current_monitors:
-                await delete_logical_monitor(monitor_name)
             total_mode_str = f"{total_width}x{total_height}"
             if total_mode_str not in available_resolutions:
                 data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
@@ -3367,6 +3636,14 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.warning(f"Live re-target failed for '{did}' ({e}); restarting it.")
                         keep_ids.discard(did)
                         await self._stop_capture_for_display(did)
+            data_logger.info("Swapping logical monitors to the new layout...")
+            # Monitors go in BEFORE the framebuffer change, at their final
+            # rectangles, swapped under a server grab: window managers re-tile
+            # maximized windows on every root ConfigureNotify (the swap itself
+            # emits one, so does the resize below), and must never observe a
+            # monitor-less or partial set or windows teleport to the primary.
+            # The realized clamp below re-swaps if the server refuses the size.
+            await replace_selkies_monitors(layouts, screen_name=screen_name)
             # Skip the framebuffer/mode-set when the screen is already at the
             # target size. A real xrandr mode change is the dominant cost of a
             # reconfigure — it reprograms the CRTC and forces every client to
@@ -3380,19 +3657,14 @@ class DataStreamingServer(BaseStreamingService):
                 # Native-first mode+framebuffer apply; the realized-size clamp
                 # below reconciles state if the X server refuses it.
                 if not await resize_display(total_mode_str):
-                    data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
-            data_logger.info("Defining logical monitors for the window manager...")
-            # The physical output can belong to only one logical monitor: give
-            # it to the primary; the others attach to none.
-            take_output = True
-            for display_id, layout in sorted(layouts.items(), key=lambda kv: kv[0] != 'primary'):
-                await set_logical_monitor(
-                    f"selkies-{display_id}", layout['x'], layout['y'], layout['w'], layout['h'],
-                    take_output, screen_name=screen_name,
-                )
-                take_output = False
-            if 'primary' in layouts:
-                await designate_primary_output(screen_name)
+                    # Some servers refuse runtime mode creation/attachment but
+                    # still honor a plain framebuffer grow (RRSetScreenSize):
+                    # the output keeps its mode while captures and pointer
+                    # warps address the enlarged root.
+                    if await grow_framebuffer(total_width, total_height):
+                        data_logger.info(f"Mode-set for {total_mode_str} failed; grew the framebuffer instead.")
+                    else:
+                        data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
             # The X server, not the request, is the authority on the realized
             # geometry: a driver can reject the mode or framebuffer size and
             # leave the root at its old dimensions, and a capture region
@@ -3413,7 +3685,64 @@ class DataStreamingServer(BaseStreamingService):
                     f"Realized screen size {realized_w}x{realized_h} differs from target "
                     f"{total_width}x{total_height}; clamping display layouts to it."
                 )
-                for did, layout in layouts.items():
+                # A primary that no longer fits at its offset (secondary placed
+                # left/up on a server that refused the grow — fully outside OR
+                # truncated to a sliver) must stay usable above all else:
+                # re-anchor it at the origin. The arrangement is void then, so
+                # every secondary is dropped below.
+                primary_layout = layouts.get('primary')
+                extension_unrealizable = bool(primary_layout) and (
+                    (primary_layout['x'] > 0 and primary_layout['x'] + primary_layout['w'] > realized_w)
+                    or (primary_layout['y'] > 0 and primary_layout['y'] + primary_layout['h'] > realized_h)
+                )
+                if extension_unrealizable:
+                    data_logger.error(
+                        f"Primary at +{primary_layout['x']}+{primary_layout['y']} does not fit the "
+                        f"realized {realized_w}x{realized_h} root; re-anchoring it at the origin."
+                    )
+                    primary_layout['x'], primary_layout['y'] = 0, 0
+                    if 'primary' in keep_ids:
+                        # The kept capture was re-targeted to the void offset;
+                        # rebuild it at the re-anchored region instead.
+                        keep_ids.discard('primary')
+                        await self._stop_capture_for_display('primary')
+                for did, layout in list(layouts.items()):
+                    if did != 'primary' and (extension_unrealizable
+                                             or layout['x'] >= realized_w
+                                             or layout['y'] >= realized_h):
+                        # The region lies entirely outside the realized root (or
+                        # the arrangement collapsed): no capture can grab it and
+                        # no pointer warp can reach it (clicks would clamp to
+                        # the primary's edge). Refuse the display instead of
+                        # leaving a broken sliver laid out.
+                        data_logger.error(
+                            f"Display '{did}' at +{layout['x']}+{layout['y']} does not fit the "
+                            f"realized {realized_w}x{realized_h} root; dropping it. The X server "
+                            "must allow a framebuffer covering all displays (e.g. a larger Xvfb "
+                            "-screen) for extended layouts."
+                        )
+                        del layouts[did]
+                        keep_ids.discard(did)
+                        await self._stop_capture_for_display(did)
+                        dropped_client = self.display_clients.get(did)
+                        dropped_ws = dropped_client.get('ws') if dropped_client else None
+                        if dropped_ws is not None:
+                            try:
+                                await asyncio.wait_for(
+                                    dropped_ws.send_str(
+                                        "KILL The X server cannot extend the desktop to fit this display."
+                                    ),
+                                    timeout=2.0,
+                                )
+                                await asyncio.wait_for(
+                                    dropped_ws.close(code=1008, message=b"Extended layout unrealizable"),
+                                    timeout=2.0,
+                                )
+                            except asyncio.TimeoutError:
+                                _close_abandoned_ws(dropped_ws)
+                            except (ConnectionResetError, OSError, RuntimeError):
+                                pass
+                        continue
                     clamped_w = max(2, min(layout['w'], realized_w - layout['x']) & ~1)
                     clamped_h = max(2, min(layout['h'], realized_h - layout['y']) & ~1)
                     if (clamped_w, clamped_h) == (layout['w'], layout['h']):
@@ -3446,6 +3775,14 @@ class DataStreamingServer(BaseStreamingService):
                             )
                             keep_ids.discard(did)
                             await self._stop_capture_for_display(did)
+                # One atomic re-swap to the clamped layouts (dropped displays'
+                # monitors disappear with it) — RRSetMonitor cannot redefine an
+                # existing name in place.
+                await replace_selkies_monitors(layouts, screen_name=screen_name)
+        else:
+            # Wayland: realize the layout as compositor outputs before the start
+            # loop binds a capture to each of them.
+            await self._apply_wayland_output_layout(layouts, keep_ids)
         data_logger.info("Starting separate capture instances for each ACTIVE display region...")
         for display_id, layout in layouts.items():
             client_data = self.display_clients.get(display_id)
@@ -3492,6 +3829,29 @@ class DataStreamingServer(BaseStreamingService):
                     )
             else:
                 data_logger.info(f"Client '{display_id}' is connected but not active. Skipping video start.")
+        if IS_WAYLAND:
+            for display_id in list(layouts.keys()):
+                client_data = self.display_clients.get(display_id)
+                if not (client_data and client_data.get('video_active', False)):
+                    continue
+                # Barrier + reconcile: the compositor answers the geometry read
+                # only after the queued capture start finished, so is_capturing
+                # is authoritative afterwards (the broadcast below fans out once).
+                await self._sync_wayland_realized_geometry(display_id, broadcast=False)
+                inst = self.capture_instances.get(display_id)
+                module = inst.get('module') if inst else None
+                capturing = False
+                if module is not None:
+                    try:
+                        capturing = bool(module.is_capturing)
+                    except Exception:
+                        capturing = False
+                if not capturing and display_id != 'primary':
+                    await self._drop_wayland_secondary(
+                        display_id,
+                        "The compositor could not start a capture for this display "
+                        "(encoder session or GPU resources exhausted).",
+                    )
         await self.broadcast_stream_resolution()
         await self.broadcast_display_config()
         data_logger.info("Display reconfiguration finished successfully.")
@@ -3817,6 +4177,9 @@ class DataStreamingServer(BaseStreamingService):
         cs.capture_y = y
         if IS_WAYLAND:
             cs.scale = display_state.get('scale', 1.0)
+            # Binds this capture to its compositor output ('display2' -> output 2);
+            # per-display IDR/rate/tunable calls route through the same id.
+            cs.display_id = wayland_output_id(display_id)
         cs.target_fps = float(display_state.get('framerate', self.app.framerate))
         cs.capture_cursor = self.capture_cursor
         cs.debug_logging = self.cli_args.debug[0]
@@ -4253,7 +4616,16 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
                 current_app_instance.display_width = target_w
                 current_app_instance.display_height = target_h
 
-            if IS_WAYLAND:
+            if IS_WAYLAND and (display_id != 'primary'
+                               or len(data_server_instance.display_clients) > 1):
+                # Extended layout: the resize changes the union arrangement (a
+                # primary resize moves the secondary's output offset), so it
+                # must run the full layout pass, X11-style.
+                logger_app_resize.info(
+                    f"Wayland Resize: '{display_id}' to {target_w}x{target_h} via layout reconfiguration."
+                )
+                await data_server_instance.reconfigure_displays()
+            elif IS_WAYLAND:
                 logger_app_resize.info(f"Wayland Resize: Updating {display_id} to {target_w}x{target_h}.")
                 if display_id in data_server_instance.display_layouts:
                     data_server_instance.display_layouts[display_id]['w'] = target_w
@@ -4279,6 +4651,11 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
                 else:
                     await data_server_instance._stop_capture_for_display(display_id)
                     await data_server_instance._start_capture_for_display(display_id, target_w, target_h, 0, 0)
+                # The compositor may realize something other than the request
+                # (even-masking, GBM failure keeps the old mode): read the live
+                # geometry back and broadcast it, matching the X11 path's
+                # realized clamp + stream_resolution broadcast.
+                await data_server_instance._sync_wayland_realized_geometry(display_id)
             else:
                 logger_app_resize.info(f"Display client '{display_id}' dimensions updated to {target_w}x{target_h}. Triggering reconfiguration.")
                 await data_server_instance.reconfigure_displays()

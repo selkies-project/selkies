@@ -22,6 +22,14 @@ import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-wor
 import {
   createFileUploader
 } from './lib/file-upload.js';
+import { detectKeyboardLayout } from './lib/keyboard-layout.js';
+
+// Best-effort local keyboard layout, resolved once at script init so the value
+// is ready by the time the socket finishes connecting (getLayoutMap resolves in
+// microtask time next to a TCP+WS handshake). If it somehow loses that race the
+// hint simply rides the next full SETTINGS send instead. null = unknown = omit.
+let detectedKeyboardLayout = null;
+detectKeyboardLayout().then((layout) => { detectedKeyboardLayout = layout; });
 
 // Parse an audio frame body into the ordered Opus frames to decode, using RED redundancy
 // to recover frames the sender dropped under backpressure (pcmflux's delivery ring and the
@@ -157,6 +165,11 @@ let isGamepadEnabled;
 let lastReceivedVideoFrameId = -1;
 let mainDecoderHasKeyframe = false;
 let pendingSharedKeyframe = null;
+// Shared full-frame H.264: delta frames that arrived (and were dropped) while
+// the main decoder was still configuring, AFTER the stashed keyframe. Decoding
+// live deltas that reference those dropped frames smears the picture under the
+// infinite GOP, so a fresh IDR is requested when any were lost.
+let sharedDeltasDroppedWhileConfiguring = 0;
 let initializationComplete = false;
 let audioEnabled = true;
 let microphoneEnabled = true;
@@ -190,6 +203,19 @@ let startVideoWatchdogTimer = null;
 let startVideoWatchdogAttempts = 0;
 const START_VIDEO_WATCHDOG_MS = 3000;
 const START_VIDEO_WATCHDOG_MAX_ATTEMPTS = 3;
+// Shared-mode stall watchdog: a shared viewer's stream can silently die
+// mid-session (e.g. the controller's tab-hide stops the broadcast encoder)
+// with no notification, and the one-shot START_VIDEO watchdog above is already
+// cleared by then. While visible+ready+unpaused, a gap in video chunks
+// triggers a START_VIDEO resend (the server both resyncs a live capture and
+// restarts a dead one), retried with exponential backoff so a genuinely
+// static/idle stream isn't spammed.
+let sharedStallWatchdogId = null;
+let lastSharedVideoChunkTime = 0;
+let sharedStallRecoveryAttempts = 0;
+let sharedStallNextRecoveryTime = 0;
+const SHARED_STALL_TIMEOUT_MS = 3000;
+const SHARED_STALL_MAX_BACKOFF_MS = 30000;
 const METRICS_INTERVAL_MS = 500;
 const BACKPRESSURE_INTERVAL_MS = 50;
 // Transport-capacity-derived chunk size: defaults assume aiohttp's stock 4 MiB
@@ -259,6 +285,33 @@ let multipartClipboard = {
     totalSize: 0,
     receivedSize: 0,
     inProgress: false
+};
+// The connect-time 'cr' pull is cache-only: its reply must populate the
+// clipboardSync cache/preview but NEVER be written to the local clipboard —
+// that would clobber whatever the user copied just before connecting
+// (server-wins session start). A tagging server precedes the reply's payload
+// frames with "clipboard_reply,cr" on the same ordered socket, identifying it
+// deterministically; the timed deadline survives only as the fallback for
+// legacy servers that never tag, where a dropped reply (e.g. secure mode) must
+// not swallow a later genuine server push.
+let initClipboardFetchDeadline = 0;
+let serverTagsClipboardReplies = false;
+let pendingTaggedClipboardReply = false;
+const armTaggedClipboardReply = () => {
+    serverTagsClipboardReplies = true;
+    pendingTaggedClipboardReply = true;
+    initClipboardFetchDeadline = 0;
+};
+const consumeInitClipboardFetch = () => {
+    if (pendingTaggedClipboardReply) {
+        pendingTaggedClipboardReply = false;
+        return true;
+    }
+    if (serverTagsClipboardReplies) return false;
+    if (!initClipboardFetchDeadline) return false;
+    const isInit = Date.now() < initClipboardFetchDeadline;
+    initClipboardFetchDeadline = 0;
+    return isInit;
 };
 
 
@@ -584,7 +637,7 @@ videoBitrate = getFloatParam('video_bitrate', videoBitrate);
 if (getStringParam('scaling_dpi', null) === null) {
   const dpr = window.devicePixelRatio || 1;
   const target = Math.round(dpr * 4) * 24;
-  const presets = [120, 144, 168, 192, 216, 240, 288];
+  const presets = [120, 144, 168, 192, 216, 240, 264, 288];
   scalingDPI = (dpr > 1 && presets.includes(target)) ? target : 96;
 } else {
   scalingDPI = getIntParam('scaling_dpi', 96);
@@ -1329,6 +1382,9 @@ function getCurrentSettingsPayload() {
     // derived default and dashboard changes reach the running server; the
     // desktop DPI is independent of the resolution.
     settingsToSend['scaling_dpi'] = scalingDPI;
+    if (detectedKeyboardLayout) {
+        settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
+    }
     if (window.is_manual_resolution_mode && manual_width != null && manual_height != null) {
         settingsToSend['is_manual_resolution_mode'] = true;
         settingsToSend['manual_width'] = alignResolution(manual_width);
@@ -1910,6 +1966,43 @@ function armStartVideoWatchdog() {
   if (startVideoWatchdogTimer !== null) clearTimeout(startVideoWatchdogTimer);
   startVideoWatchdogAttempts = 0;
   startVideoWatchdogTimer = setTimeout(onStartVideoWatchdogTimeout, START_VIDEO_WATCHDOG_MS);
+}
+
+function clearSharedStallWatchdog() {
+  if (sharedStallWatchdogId !== null) {
+    clearInterval(sharedStallWatchdogId);
+    sharedStallWatchdogId = null;
+  }
+  sharedStallRecoveryAttempts = 0;
+  sharedStallNextRecoveryTime = 0;
+}
+
+function armSharedStallWatchdog() {
+  if (!isSharedMode || sharedStallWatchdogId !== null) return;
+  lastSharedVideoChunkTime = performance.now();
+  sharedStallRecoveryAttempts = 0;
+  sharedStallNextRecoveryTime = 0;
+  sharedStallWatchdogId = setInterval(() => {
+    // Hidden/paused/not-ready: this viewer isn't expecting chunks — keep the
+    // clock fresh so the watchdog can't fire the instant those states end.
+    if (document.hidden || sharedVideoPaused || sharedClientState !== 'ready') {
+      lastSharedVideoChunkTime = performance.now();
+      return;
+    }
+    if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+    const now = performance.now();
+    const silence = now - lastSharedVideoChunkTime;
+    if (silence < SHARED_STALL_TIMEOUT_MS) return;
+    if (now < sharedStallNextRecoveryTime) return;
+    sharedStallRecoveryAttempts++;
+    const backoff = Math.min(
+      SHARED_STALL_TIMEOUT_MS * Math.pow(2, sharedStallRecoveryAttempts - 1),
+      SHARED_STALL_MAX_BACKOFF_MS);
+    sharedStallNextRecoveryTime = now + backoff;
+    console.warn(`Shared mode: no video chunk for ${Math.round(silence)}ms; ` +
+      `resending START_VIDEO (attempt ${sharedStallRecoveryAttempts}, next retry in ${backoff}ms).`);
+    try { websocket.send('START_VIDEO'); } catch (_) { /* onclose path recovers */ }
+  }, 1000);
 }
 
 function handleDecodedVncStripeFrame(yPos, frame) {
@@ -2824,19 +2917,28 @@ async function sendClipboardData(data, mimeType = 'text/plain') {
     // protocol and worker offload as WebRTC. Transport specifics: WS send + a
     // bufferedAmount backpressure gate (a burst must not starve uploads/input on
     // the same socket).
+    let transferAborted = false;
     await sendClipboardChunked(dataBytes, mimeType, {
         worker: clipboardWorker,
         send: (m) => websocket.send(m),
         waitDrain: async () => {
             while (websocket.bufferedAmount > 4 * 1024 * 1024) {
                 await new Promise(resolve => setTimeout(resolve, 50));
-                if (websocket.readyState !== WebSocket.OPEN) return false;
+                if (websocket.readyState !== WebSocket.OPEN) {
+                    transferAborted = true;
+                    return false;
+                }
             }
             return true;
         },
         chunkRawBytes: CLIPBOARD_CHUNK_SIZE,
         nextTid: () => ++clipboardTransferCounter,
     });
+    // Only a completed transfer marks the content synced; an aborted one (or a
+    // throw above) leaves it re-sendable on the next copy of the same content.
+    if (!transferAborted && websocket.readyState === WebSocket.OPEN) {
+        clipboardSync.markSynced(data, mimeType);
+    }
 }
 
 function handleSettingsMessage(settings) {
@@ -3101,6 +3203,16 @@ function initWebsockets() {
         } catch (e) {
           initiateFallback(e, 'main_decoder_decode');
         }
+        if (sharedDeltasDroppedWhileConfiguring > 0) {
+          // Deltas following the stashed keyframe were dropped while the
+          // decoder configured; live deltas now reference missing frames and
+          // would smear the picture. Restart from a clean IDR (bypass the
+          // request debounce — this is a known-corrupt state).
+          console.warn(`Shared mode: ${sharedDeltasDroppedWhileConfiguring} delta frame(s) dropped during decoder init; requesting a fresh keyframe.`);
+          sharedDeltasDroppedWhileConfiguring = 0;
+          lastKeyframeRequestTime = 0;
+          requestKeyframe();
+        }
       }
       return true;
     } catch (e) {
@@ -3122,6 +3234,9 @@ function initWebsockets() {
   let clipboardSendInFlight = null;
 
   async function readLocalClipboardAndSend() {
+    // isSecureContext gate (wr-core parity): navigator.clipboard is undefined
+    // on insecure origins — bail cleanly instead of throwing per focus event.
+    if (!window.isSecureContext || !navigator.clipboard) return;
     if (isSharedMode || !window.clipboard_enabled || !clipboard_in_enabled) return;
 
     // Tracked so a paste chord arriving mid read/transfer can be held until the
@@ -3163,6 +3278,23 @@ function initWebsockets() {
   // the Ctrl/Cmd+V keydown and paste-event handlers below.
   if (isChromium) {
     window.addEventListener('focus', () => { readLocalClipboardAndSend(); });
+  }
+
+  // One-shot initial client->server sync (Chromium): a focused tab whose user
+  // just copied something locally gets no 'focus' event after connect, so the
+  // server would keep its stale clipboard until the first alt-tab. Runs once
+  // after server_settings applies the clipboard gates, and only when
+  // clipboard-read is ALREADY granted (must never raise a prompt at load).
+  let initialClipboardSendAttempted = false;
+  async function maybeSendInitialClipboard() {
+    if (initialClipboardSendAttempted) return;
+    initialClipboardSendAttempted = true;
+    if (!isChromium || isSharedMode || !document.hasFocus()) return;
+    if (!navigator.permissions || !navigator.permissions.query) return;
+    try {
+      const st = await navigator.permissions.query({ name: 'clipboard-read' });
+      if (st.state === 'granted') readLocalClipboardAndSend();
+    } catch (_) { /* permission name unsupported (non-Chromium engines) */ }
   }
 
   // Paste-ordering hold + non-Chromium copy/paste gestures live in the shared
@@ -3994,7 +4126,19 @@ function initWebsockets() {
         settingsToSend['initialClientWidth'] = alignResolution(rect.width * dpr);
         settingsToSend['initialClientHeight'] = alignResolution(rect.height * dpr);
       }
- 
+
+      // Seed the DPR-derived scaling_dpi into the very FIRST payload: without
+      // it the server brings the desktop up at its default DPI and the
+      // dashboard's derived correction ~1s later forces a second (Wayland)
+      // capture restart on every HiDPI connect. A user-pinned preset was
+      // already collected from localStorage by the loop above and wins;
+      // scalingDPI itself is stored-else-DPR-derived at init.
+      if (settingsToSend['scaling_dpi'] === undefined) {
+        settingsToSend['scaling_dpi'] = scalingDPI;
+      }
+      if (detectedKeyboardLayout) {
+        settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
+      }
       settingsToSend['useCssScaling'] = useCssScaling;
       settingsToSend['displayId'] = displayId;
       if (displayId === 'display2') {
@@ -4014,8 +4158,9 @@ function initWebsockets() {
     } else {
         console.log("Shared mode: WebSocket opened. Waiting for 'MODE websockets' from server to start identification sequence.");
     }
+    initClipboardFetchDeadline = Date.now() + 5000;
     websocket.send('cr');
-    console.log('[websockets] Sent initial clipboard request (cr) to server.');
+    console.log('[websockets] Sent initial clipboard request (cr) to server (cache-only).');
     isVideoPipelineActive = true;
     isAudioPipelineActive = (displayId === 'primary');
     window.postMessage({
@@ -4092,6 +4237,11 @@ function initWebsockets() {
       if (startVideoWatchdogTimer !== null &&
           (dataTypeByte === 0x03 || dataTypeByte === 0x04)) {
         clearStartVideoWatchdog();
+      }
+      if (isSharedMode && (dataTypeByte === 0x03 || dataTypeByte === 0x04)) {
+        lastSharedVideoChunkTime = performance.now();
+        sharedStallRecoveryAttempts = 0;
+        sharedStallNextRecoveryTime = 0;
       }
 
       if (dataTypeByte === 1) {
@@ -4214,6 +4364,13 @@ function initWebsockets() {
             } else {
                 if (video_frame_type_byte === 0x01) {
                     pendingSharedKeyframe = h264Payload;
+                    // Deltas dropped before this keyframe are superseded by it.
+                    sharedDeltasDroppedWhileConfiguring = 0;
+                } else if (pendingSharedKeyframe) {
+                    // A delta referencing the stashed keyframe (or a successor)
+                    // is being dropped: the stream needs a fresh IDR once the
+                    // decoder comes up (see initializeDecoder).
+                    sharedDeltasDroppedWhileConfiguring++;
                 }
                 if (!decoder || decoder.state === 'closed' || decoder.state === 'unconfigured') {
                     triggerInitializeDecoder();
@@ -4540,6 +4697,7 @@ function initWebsockets() {
         if (isSharedMode) {
             sharedClientState = 'ready';
             console.log("Shared mode: Received 'MODE websockets'. Requesting initial stream with STOP/START_VIDEO. State: ready.");
+            armSharedStallWatchdog();
             // Initialize the decoder now so it is configured before the first keyframe arrives.
             triggerInitializeDecoder();
             if (websocket && websocket.readyState === WebSocket.OPEN) {
@@ -4662,6 +4820,9 @@ function initWebsockets() {
               if (ebc && typeof ebc.value === 'boolean') {
                 enable_binary_clipboard = ebc.locked ? ebc.value : getBoolParam('enable_binary_clipboard', ebc.value);
               }
+              // Clipboard gates are now in place: push the user's pre-copied
+              // local content once so their first paste isn't stale.
+              maybeSendInitialClipboard();
               window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
               if (Object.keys(changes).length > 0) {
                   console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
@@ -4726,7 +4887,15 @@ function initWebsockets() {
               audio: isAudioPipelineActive
             }, window.location.origin);
          } else if (obj.type === 'stream_resolution') {
-           if (isSharedMode) {
+           // A resolution describes exactly one display. Applying another
+           // display's (e.g. the primary's on a #display2 page) rescales this
+           // page's canvas and input mapping to that display's dimensions, so
+           // every click lands at wrongly-scaled coordinates. Servers that
+           // predate the displayId field only ever sent the primary's.
+           const resolutionDisplayId = obj.displayId || 'primary';
+           if (resolutionDisplayId !== displayId) {
+             console.log(`Ignoring stream_resolution for display '${resolutionDisplayId}' (this page renders '${displayId}').`);
+           } else if (isSharedMode) {
              if (sharedClientState === 'error' || sharedClientState === 'idle') {
                console.log(`Shared mode: Received stream_resolution while in state '${sharedClientState}'. Ignoring.`);
              } else {
@@ -4809,6 +4978,11 @@ function initWebsockets() {
           } catch (e) {
             console.error('Error parsing cursor data:', e);
           }
+        } else if (event.data.startsWith('clipboard_reply,')) {
+            // A tagging server marks the NEXT clipboard payload as the answer to
+            // this client's own fetch (currently only 'cr'): cache-only, and the
+            // timed heuristic is retired for the rest of the session.
+            if (event.data.substring(16) === 'cr') armTaggedClipboardReply();
         } else if (event.data.startsWith('clipboard_start,')) {
             const parts = event.data.split(',');
             multipartClipboard.mimeType = parts[1];
@@ -4842,6 +5016,9 @@ function initWebsockets() {
                 } else {
                     try {
                         const blob = new Blob(multipartClipboard.data, { type: multipartClipboard.mimeType });
+                        // The connect-time 'cr' reply is cache-only — never
+                        // written locally (consumed before the async decode).
+                        const isInitClipboardFetch = consumeInitClipboardFetch();
                         if (multipartClipboard.mimeType === 'text/plain') {
                             blob.text().then(text => {
                                 // Cache + settle any pending Ctrl/Cmd+C copy promise.
@@ -4849,7 +5026,7 @@ function initWebsockets() {
                                 // Local write is gated per-direction (server->client = out)
                                 // and retried on the next gesture when the browser
                                 // demands activation.
-                                if (clipboard_out_enabled) {
+                                if (!isInitClipboardFetch && clipboard_out_enabled) {
                                     deferredClipboardWriter.write(
                                         () => navigator.clipboard.writeText(text), {
                                             onFailure: (err) => console.error('Could not copy server clipboard text to local: ' + err),
@@ -4861,16 +5038,18 @@ function initWebsockets() {
                             // Settle any pending Ctrl/Cmd+C copy promise with the image blob.
                             clipboardSync.resolveServer(undefined, blob, multipartClipboard.mimeType, multipartClipboard.data);
                             const mpMime = multipartClipboard.mimeType;
-                            deferredClipboardWriter.write(
-                                () => writeImageToLocalClipboard(blob, mpMime), {
-                                    onSuccess: () => {
-                                        console.log(`Successfully wrote multi-part image (${mpMime}) from server to local clipboard.`);
-                                        clipboardSync.captureLocalImageSig();
-                                        const uiText = `Image (${mpMime}) received from session and copied to clipboard.`;
-                                        window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
-                                    },
-                                    onFailure: (err) => console.error('Failed to write multi-part image to clipboard:', err),
-                                });
+                            if (!isInitClipboardFetch) {
+                                deferredClipboardWriter.write(
+                                    () => writeImageToLocalClipboard(blob, mpMime), {
+                                        onSuccess: () => {
+                                            console.log(`Successfully wrote multi-part image (${mpMime}) from server to local clipboard.`);
+                                            clipboardSync.captureLocalImageSig();
+                                            const uiText = `Image (${mpMime}) received from session and copied to clipboard.`;
+                                            window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
+                                        },
+                                        onFailure: (err) => console.error('Failed to write multi-part image to clipboard:', err),
+                                    });
+                            }
                         }
                     } catch (e) {
                         console.error('Error assembling final clipboard content:', e);
@@ -4906,6 +5085,8 @@ function initWebsockets() {
                 // Settle any pending Ctrl/Cmd+C copy promise with this fresh
                 // image blob (binary requests resolve to the Blob, text to its text()).
                 clipboardSync.resolveServer(undefined, blob, mimeType, bytes);
+                // The connect-time 'cr' reply is cache-only — never written locally.
+                if (consumeInitClipboardFetch()) return;
                 deferredClipboardWriter.write(
                     () => writeImageToLocalClipboard(blob, mimeType), {
                         onSuccess: () => {
@@ -4934,7 +5115,8 @@ function initWebsockets() {
             clipboardSync.resolveServer(decodedText, null, 'text/plain');
             // Local write is gated per-direction (server->client = out) and
             // retried on the next gesture when the browser demands activation.
-            if (clipboard_out_enabled) {
+            // The connect-time 'cr' reply is cache-only — never written locally.
+            if (!consumeInitClipboardFetch() && clipboard_out_enabled) {
                 deferredClipboardWriter.write(
                     () => navigator.clipboard.writeText(decodedText), {
                         onFailure: (err) => console.error('Could not copy server clipboard to local: ' + err),
@@ -5149,6 +5331,7 @@ function initWebsockets() {
     if (isSharedMode) {
         console.log("Shared mode: WebSocket closed. Resetting shared state to 'idle'.");
         sharedClientState = 'idle';
+        clearSharedStallWatchdog();
     }
     if (!superseded && !reconnectIntervalId) {
       reconnectIntervalId = setInterval(() => {
@@ -5558,6 +5741,7 @@ function cleanup() {
     clearInterval(backpressureIntervalId);
     backpressureIntervalId = null;
   }
+  clearSharedStallWatchdog();
   releaseWakeLock();
   if (window.isCleaningUp) return;
   window.isCleaningUp = true;
@@ -5618,6 +5802,7 @@ function performServerInitiatedVideoReset(reason = "unknown") {
   if (isSharedMode) {
     sharedClientHasReceivedKeyframe = false;
     pendingSharedKeyframe = null;
+    sharedDeltasDroppedWhileConfiguring = 0;
     console.log("  Shared mode reset: Gate closed. Waiting for a new keyframe.");
   }
 

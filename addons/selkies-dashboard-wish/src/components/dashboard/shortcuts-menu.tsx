@@ -46,7 +46,7 @@ export function ShortcutsMenu() {
 								rel="noopener noreferrer"
 								href="https://github.com/selkies-project/selkies/blob/main/docs/README.md#citations-in-academic-publications"
 							>
-								<b>{t('shortcuts.citeNotice')}</b>
+								<b>{t('shortcuts.citeNotice')}{" ↗"}</b>
 							</a>
 						</li>
 					</ul>

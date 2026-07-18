@@ -1247,6 +1247,11 @@ export class Input {
         // active: held until the composition the chord terminates has committed,
         // so the shortcut applies AFTER the committed text lands server-side.
         this._pendingChord = null;
+        // Modifiers momentarily pressed around a self-contained chord (they
+        // bypass _keyDownList). Kept briefly so _chordModifierHeld — and thus
+        // the text/composition echo suppression — can still see the chord.
+        this._momentaryChordMods = new Set();
+        this._momentaryChordModsTimer = null;
         this.keyboardInputAssist = document.getElementById('keyboard-input-assist');
 
         this._activeTouches = new Map();
@@ -1319,13 +1324,47 @@ export class Input {
         }
     }
 
+    // cursor image-set() support: 'image-set' | '-webkit-image-set' | null,
+    // probed once — the cursor path is hot, and CSS.supports parses the whole
+    // value, so probing per update with a multi-KB data URL would be wasteful.
+    static _cursorImageSetFn;
+
+    _cursorImageSetFunction() {
+        if (Input._cursorImageSetFn === undefined) {
+            Input._cursorImageSetFn = null;
+            if (typeof CSS !== 'undefined' && CSS.supports) {
+                for (const fn of ['image-set', '-webkit-image-set']) {
+                    if (CSS.supports('cursor', `${fn}(url("data:image/png;base64,") 2x) 0 0, default`)) {
+                        Input._cursorImageSetFn = fn;
+                        break;
+                    }
+                }
+            }
+        }
+        return Input._cursorImageSetFn;
+    }
+
     _updateBrowserCursor() {
         if (!this._cursorBase64Data) {
             this.element.style.setProperty('cursor', 'none', 'important');
             return;
         }
-        const cursorDataUrl = `data:image/png;base64,${this._cursorBase64Data}`;
-        this.element.style.setProperty('cursor', `url("${cursorDataUrl}") ${this._rawHotspotX} ${this._rawHotspotY}, default`, 'important');
+        const cursorUrl = `url("data:image/png;base64,${this._cursorBase64Data}")`;
+        // The PNG arrives in remote device pixels, but CSS cursors render 1
+        // image px = 1 CSS px — at dpr>1 that draws the cursor dpr× oversized.
+        // Declare the image density via image-set and rebase the hotspot into
+        // CSS px, mirroring _drawAndScaleCursor's dpr math; plain url() with
+        // the raw hotspot stays as the fallback for browsers without
+        // image-set-in-cursor support.
+        const dpr = this.useCssScaling ? 1 : (window.devicePixelRatio || 1);
+        let cursorValue = `${cursorUrl} ${this._rawHotspotX} ${this._rawHotspotY}, default`;
+        const imageSetFn = dpr !== 1 ? this._cursorImageSetFunction() : null;
+        if (imageSetFn) {
+            const hotX = Math.round(this._rawHotspotX / dpr);
+            const hotY = Math.round(this._rawHotspotY / dpr);
+            cursorValue = `${imageSetFn}(${cursorUrl} ${dpr}x) ${hotX} ${hotY}, default`;
+        }
+        this.element.style.setProperty('cursor', cursorValue, 'important');
     }
 
     // Decode the base64 cursor PNG inline rather than fetch()ing a data: URL:
@@ -1452,7 +1491,10 @@ export class Input {
         // says is no longer down. Composition events are exempt: IMEs do not
         // report modifier state reliably mid-composition.
         if (typeof event.getModifierState !== 'function') return;
-        if (this.isComposing || event.isComposing || event.keyCode === 229) return;
+        // 'Process' events are IME-touched even when keyCode !== 229 and can
+        // carry stale (unset) modifier flags — never heal from them.
+        if (this.isComposing || event.isComposing || event.keyCode === 229 ||
+            event.key === 'Process') return;
         for (const code in this._keyDownList) {
             const state = MODIFIER_STATE_BY_CODE[code];
             if (state && !event.getModifierState(state)) {
@@ -1552,20 +1594,11 @@ export class Input {
                         // lands as a bare keypress and types the letter. The armed
                         // (deferred) Control counts as missing since it was never
                         // sent, so it is pressed and released with the key here.
-                        const missingMods = [];
-                        if ((event.ctrlKey || armedCtrl) && !this._keysymHeld(KeyTable.XK_Control_L, KeyTable.XK_Control_R)) {
-                            missingMods.push(KeyTable.XK_Control_L);
-                        }
-                        if (event.altKey && !this._keysymHeld(KeyTable.XK_Alt_L, KeyTable.XK_Alt_R)) {
-                            missingMods.push(KeyTable.XK_Alt_L);
-                        }
-                        if (event.metaKey && !this._keysymHeld(KeyTable.XK_Super_L, KeyTable.XK_Super_R,
-                                                               KeyTable.XK_Meta_L, KeyTable.XK_Meta_R)) {
-                            missingMods.push(KeyTable.XK_Super_L);
-                        }
-                        if (event.shiftKey && !this._keysymHeld(KeyTable.XK_Shift_L, KeyTable.XK_Shift_R)) {
-                            missingMods.push(KeyTable.XK_Shift_L);
-                        }
+                        const missingMods = this._missingChordModifiers({
+                            ctrl: event.ctrlKey || armedCtrl, alt: event.altKey,
+                            meta: event.metaKey, shift: event.shiftKey,
+                        });
+                        this._noteMomentaryChordMods(missingMods);
                         for (const m of missingMods) this.send("kd," + m);
                         this._sendMomentaryKey(chordKeysym);
                         for (const m of missingMods.reverse()) this.send("ku," + m);
@@ -1576,7 +1609,11 @@ export class Input {
             return;
         }
 
-        if (!this._isSynth) {
+        // 'Process' marks an IME-touched event whose modifier flags can be
+        // stale (e.g. ctrlKey unset while Control is physically held) — healing
+        // from it would release a genuinely-held modifier and send the chord's
+        // letter bare.
+        if (!this._isSynth && event.key !== 'Process') {
             for (const code in this._keyDownList) {
                 const keysym = this._keyDownList[code];
                 // Heal a stuck modifier by keying off the STORED KEYSYM, not the
@@ -1729,6 +1766,33 @@ export class Input {
             }, 100);
             return;
         }
+        // A chord keydown whose modifier the event reports held but which is
+        // absent from _keyDownList (its keydown was swallowed without a 229
+        // marker, or an earlier heal released it): without a re-press the
+        // letter lands bare and types instead of firing the shortcut — and
+        // stays broken for every following chord until the user physically
+        // re-presses the modifier. Wrap it with the missing modifiers,
+        // mirroring the self-contained IME/229 chord path. Momentary mods are
+        // registered so the text-echo suppression still sees the chord. Meta is
+        // exempt while the macOS Cmd->Ctrl swap is active (Control carries the
+        // chord there).
+        if (keysym !== null && !MODIFIER_STATE_BY_CODE[code] &&
+            (event.ctrlKey || event.altKey || event.metaKey) &&
+            !(event.getModifierState && event.getModifierState('AltGraph'))) {
+            const missingMods = this._missingChordModifiers({
+                ctrl: event.ctrlKey,
+                alt: event.altKey,
+                meta: event.metaKey && !this._macCmdSwapped,
+                shift: event.shiftKey,
+            });
+            if (missingMods.length > 0) {
+                this._noteMomentaryChordMods(missingMods);
+                for (const m of missingMods) this.send("kd," + m);
+                this._sendKeyEvent(keysym, code, true);
+                for (const m of missingMods.reverse()) this.send("ku," + m);
+                return;
+            }
+        }
         this._sendKeyEvent(keysym, code, true);
     }
 
@@ -1851,6 +1915,7 @@ export class Input {
         if (chord.alt) mods.push(KeyTable.XK_Alt_L);
         if (chord.meta) mods.push(KeyTable.XK_Super_L);
         if (chord.shift) mods.push(KeyTable.XK_Shift_L);
+        this._noteMomentaryChordMods(mods);
         for (const m of mods) this.send("kd," + m);
         this.send("kd," + chord.keysym);
         this.send("ku," + chord.keysym);
@@ -1916,6 +1981,7 @@ export class Input {
     }
 
     _chordModifierHeld() {
+        if (this._momentaryChordMods.size > 0) return true;
         for (const code in this._keyDownList) {
             const ks = this._keyDownList[code];
             if (ks === KeyTable.XK_Control_L || ks === KeyTable.XK_Control_R ||
@@ -1926,6 +1992,37 @@ export class Input {
             }
         }
         return false;
+    }
+
+    /**
+     * Chord modifiers the event reports held but which are absent from
+     * _keyDownList (their keydowns were swallowed by an IME/OS grab, or an
+     * earlier heal released them) — these must be re-pressed around the chord
+     * key or it lands as a bare keypress and types the letter.
+     */
+    _missingChordModifiers({ ctrl, alt, meta, shift }) {
+        const missing = [];
+        if (ctrl && !this._keysymHeld(KeyTable.XK_Control_L, KeyTable.XK_Control_R)) {
+            missing.push(KeyTable.XK_Control_L);
+        }
+        if (alt && !this._keysymHeld(KeyTable.XK_Alt_L, KeyTable.XK_Alt_R)) {
+            missing.push(KeyTable.XK_Alt_L);
+        }
+        if (meta && !this._keysymHeld(KeyTable.XK_Super_L, KeyTable.XK_Super_R,
+                                      KeyTable.XK_Meta_L, KeyTable.XK_Meta_R)) {
+            missing.push(KeyTable.XK_Super_L);
+        }
+        if (shift && !this._keysymHeld(KeyTable.XK_Shift_L, KeyTable.XK_Shift_R)) {
+            missing.push(KeyTable.XK_Shift_L);
+        }
+        return missing;
+    }
+
+    /** Register momentary chord modifiers for _chordModifierHeld (short-lived). */
+    _noteMomentaryChordMods(keysyms) {
+        for (const ks of keysyms) this._momentaryChordMods.add(ks);
+        clearTimeout(this._momentaryChordModsTimer);
+        this._momentaryChordModsTimer = setTimeout(() => this._momentaryChordMods.clear(), 250);
     }
 
     /** True when any of the given keysyms is currently held server-side. */

@@ -29,7 +29,8 @@ from abc import ABCMeta, abstractmethod
 from typing import Callable, Awaitable
 
 from .settings import settings as app_settings
-from .display_utils import parse_dri_node_to_index, parse_gpu_id, format_pixelflux_cursor
+from .display_utils import (parse_dri_node_to_index, parse_gpu_id,
+                            format_pixelflux_cursor, wayland_output_id)
 
 # C-API (non-abi3) wheels: a missing/ABI-skewed build raises ImportError or
 # RuntimeError at import. Degrade to None so plain WS mode and module import
@@ -475,6 +476,9 @@ class MediaPipelinePixel(MediaPipeline):
         cs.debug_logging = bool(app_settings.debug[0])
         if cs.use_wayland:
             cs.scale = self.scale
+            # Binds this capture to its compositor output ('display2' -> output 2);
+            # per-display IDR/rate/tunable calls route through the same id.
+            cs.display_id = wayland_output_id(self.display_id)
         # Server-embedded watermark, burned into the frame by pixelflux on both
         # backends. Kept server-side (never broadcast), so it must be set here too.
         watermark_path = str(getattr(app_settings, 'watermark_path', '') or '')
@@ -572,7 +576,10 @@ class MediaPipelinePixel(MediaPipeline):
         (no restart); falls back to a restart when no live capture exists."""
         self.capture_region = (int(x), int(y))
         self.width, self.height = int(w), int(h)
-        if self._is_screen_capturing and self.capture_module is not None:
+        if (self._is_screen_capturing and self.capture_module is not None
+                and not bool(app_settings.wayland[0])):
+            # X11-only live re-target; on Wayland the output IS the capture
+            # region and a start on the live module reconfigures it in place.
             try:
                 await asyncio.to_thread(
                     self.capture_module.update_capture_region, int(x), int(y), int(w), int(h)
@@ -594,6 +601,27 @@ class MediaPipelinePixel(MediaPipeline):
             logger.error(f"Error stopping screen capture: {e}", exc_info=True)
             self.capture_module = None
             self._is_screen_capturing = False
+
+    async def pause_screen_capture(self) -> bool:
+        """Consumer-aware pause: stop only the screen capture (audio and the
+        pipeline's running state survive) once every consumer of this display
+        is hidden; resume_screen_capture restarts it. Returns whether a live
+        capture was actually stopped."""
+        async with self.async_lock:
+            if not self._running or not self._is_screen_capturing:
+                return False
+            await self.stop_screen_capture()
+            return True
+
+    async def resume_screen_capture(self) -> bool:
+        """Restart a capture stopped by pause_screen_capture, at the CURRENT
+        settings (a resize/scale received while paused applies here). Returns
+        whether a stopped capture was actually started."""
+        async with self.async_lock:
+            if not self._running or self._is_screen_capturing:
+                return False
+            await self.start_screen_capture()
+            return True
 
     async def restart_screen_capture(self):
         async with self.async_lock:

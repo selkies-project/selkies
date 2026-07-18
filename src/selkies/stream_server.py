@@ -420,13 +420,26 @@ class CentralizedStreamServer:
         if bool(self.settings.wayland[0]):
             try:
                 from pixelflux import ensure_wayland_display
-                ensure_wayland_display(
+                socket_name = ensure_wayland_display(
                     width=int(self.settings.manual_width or 0),
                     height=int(self.settings.manual_height or 0),
                     render_node=self.settings.render_dri or "",
                     auto_gpu=str(self.settings.auto_gpu or ""),
                     cursor_size=int(self.settings.cursor_size),
                 )
+                if socket_name:
+                    # The compositor auto-picks the first free wayland-N socket;
+                    # mirror its REAL name into os.environ so every child spawned
+                    # with a copied env (wl-copy, app launches, session hooks)
+                    # reaches this compositor. --wayland-socket-index remains only
+                    # a legacy hint for consumers without the pixelflux API.
+                    os.environ["WAYLAND_DISPLAY"] = socket_name
+                    logger.info(f"Wayland compositor socket: {socket_name}")
+                else:
+                    logger.warning(
+                        "Wayland compositor socket did not come up within its "
+                        "startup window; WAYLAND_DISPLAY left unchanged."
+                    )
             except ImportError:
                 logger.warning("pixelflux unavailable; Wayland display not initialized.")
 

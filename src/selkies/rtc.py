@@ -267,6 +267,23 @@ class RTCApp:
 
         self.request_idr_frame = lambda display_id='primary': logger.warning('unhandled request_idr_frame')
 
+        # Per-peer video pause (tab-hide STOP_VIDEO / START_VIDEO over the data
+        # channel) and consumer-set changes (peer close), both display-scoped.
+        # Late-bound by the owning service; left None the messages fall through
+        # to the input dispatcher (which ignores them) — the websockets engine
+        # never binds these.
+        self.on_video_consumer_active = None
+        self.on_consumers_changed = None
+
+        # Provision the shared SelkiesVirtualMic control plane (null sinks +
+        # module-virtual-source + default source) before this transport's mic
+        # playback opens its 'input' stream, so an app recording the default
+        # pulse source hears the client's mic (websockets 0x02 parity). Late-bound
+        # by the owning service, which owns the pulse connection and module
+        # lifetime; None leaves the WebRTC mic playing into 'input' without the
+        # recordable source (pre-parity behavior).
+        self.provision_virtual_mic = None
+
     async def set_sdp(self, sdp_type: str, sdp: str, client_peer_id: str):
         """Sets remote SDP received by peer"""
         if sdp_type != 'answer':
@@ -327,13 +344,21 @@ class RTCApp:
         else:
             raise RTCAppError("ERROR: ice candidate is not an instance of RTCIceCandidate")
 
-    async def send_clipboard_data(self, data: Union[str, bytes], mime_type: str = "text/plain"):
+    async def send_clipboard_data(self, data: Union[str, bytes], mime_type: str = "text/plain",
+                                  reply_to: Optional[str] = None):
         """Sends clipboard data over the data channel in chunks.
 
         Chunk sends are paced against each channel's SCTP queue (see
         drain_data_channel) so a multi-MB clipboard neither buffers unboundedly
         in memory nor starves input/cursor/stats behind it on the one ordered
         stream, and the per-chunk gzip runs off the event loop.
+
+        reply_to: set to the requesting verb (e.g. "cr") when this send answers
+        a client fetch rather than announcing a server-side clipboard change —
+        the websockets "clipboard_reply,<verb>" contract, carried here as an
+        extra field on the clipboard-msg / clipboard-msg-start payload so the
+        client can treat the payload cache-only without time heuristics (old
+        clients ignore the unknown field).
         """
         if not data:
             return
@@ -343,25 +368,25 @@ class RTCApp:
         clipboard_chunk_size = get_adjusted_chunk_size(self.peer_connections)
         if len(data_bytes) <= clipboard_chunk_size:
             b64data = base64.b64encode(data_bytes).decode('utf-8')
-            self.__send_data_channel_message(
-                "clipboard-msg",
-                {
-                    "content": b64data,
-                    "mime_type": mime_type,
-                    "is_binary_data": not is_text,
-                    "total_size": len(data_bytes)
-                }
-            )
+            payload = {
+                "content": b64data,
+                "mime_type": mime_type,
+                "is_binary_data": not is_text,
+                "total_size": len(data_bytes)
+            }
+            if reply_to:
+                payload["reply_to"] = reply_to
+            self.__send_data_channel_message("clipboard-msg", payload)
         else:
             read = 0
-            self.__send_data_channel_message(
-                "clipboard-msg-start",
-                {
-                    "mime_type": mime_type,
-                    "is_binary_data": not is_text,
-                    "total_size": len(data_bytes),
-                }
-            )
+            start_payload = {
+                "mime_type": mime_type,
+                "is_binary_data": not is_text,
+                "total_size": len(data_bytes),
+            }
+            if reply_to:
+                start_payload["reply_to"] = reply_to
+            self.__send_data_channel_message("clipboard-msg-start", start_payload)
             while read < len(data_bytes):
                 chunk = data_bytes[read:read + clipboard_chunk_size]
                 payload = json.dumps({
@@ -538,6 +563,19 @@ class RTCApp:
 
     def send_media_data_over_channel(self, msg_type, data):
         self.__send_data_channel_message(msg_type, data)
+
+    async def close_display_peers(self, display_id: str):
+        """Close every peer attached to `display_id`. Each close is finished by
+        the connection-state handler (channel consumers, media graph, display
+        registration), which runs as its own task."""
+        for peer_obj in [obj for obj in self.peer_connections.values()
+                         if (obj.get("display_id") or "primary") == display_id]:
+            peer_conn = peer_obj.get("peer_conn")
+            if peer_conn is not None:
+                try:
+                    await peer_conn.close()
+                except Exception as e:
+                    logger.warning(f"Error closing a '{display_id}' peer: {e}")
 
     def get_controller_instance(self):
         """Returns the peer connection object for the controller client, if it exists.
@@ -932,7 +970,7 @@ class RTCApp:
             return True
         return int(slot) - 1 != index
 
-    def _on_input_channel_message(self, msg, channel=None, client_type=None, client_token=None, display_id="primary"):
+    def _on_input_channel_message(self, msg, channel=None, client_type=None, client_token=None, display_id="primary", peer_id=None):
         """Decompress gzip'd payloads and intercept the compression handshake before
         the input dispatcher (the late-bound on_data_message) sees the message."""
         if isinstance(msg, (bytes, bytearray)) and bytes(msg[:2]) == b"\x1f\x8b":
@@ -980,6 +1018,12 @@ class RTCApp:
         if isinstance(msg, str) and self._secure_gamepad_denied(msg, client_token):
             logger.warning("Dropping gamepad input for unassigned slot: %s", msg[:32])
             return
+        if msg in ("STOP_VIDEO", "START_VIDEO") and self.on_video_consumer_active is not None:
+            # Tab-visibility pause for THIS peer only (websockets STOP_VIDEO /
+            # START_VIDEO parity); viewer-allowed, so a hidden viewer can pause
+            # its own feed too.
+            return self.on_video_consumer_active(
+                peer_id, display_id or "primary", msg == "START_VIDEO")
         return self.on_data_message(msg, display_id or "primary")
 
     async def on_peer_connection_established(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary"):
@@ -1040,6 +1084,7 @@ class RTCApp:
             await self._stop_mic_playback_state(peer_obj.get("mic_state"))
             if removed is not None and removed.get('client_type') == ClientType.CONTROLLER:
                 await self._teardown_display_graph(display_id)
+            await self._notify_consumers_changed(display_id)
             logger.info("Peer connection closed", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "connecting":
             logger.info("Peer connection is connecting", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
@@ -1147,7 +1192,7 @@ class RTCApp:
         data_channel.on("error", lambda e=None: self.on_data_error(e))
         input_consumer = self._serialize_channel(
             data_channel,
-            lambda msg, ch=data_channel, ct=client_type, tok=client_token, did=display_id: self._on_input_channel_message(msg, ch, ct, tok, did),
+            lambda msg, ch=data_channel, ct=client_type, tok=client_token, did=display_id, pid=client_peer_id: self._on_input_channel_message(msg, ch, ct, tok, did, pid),
         )
 
         peer_connection.on("connectionstatechange", lambda cid=client_peer_id: asyncio.run_coroutine_threadsafe(self.on_connectionstatechange(cid), loop=self.async_event_loop))
@@ -1192,6 +1237,11 @@ class RTCApp:
             # This peer's OWN mic playback state (None when no mic m-line): mic
             # teardown is per-peer, so one peer closing never silences the others.
             "mic_state": mic_state,
+            # Per-peer video pause (tab hide): the sender is the RTP gate — its
+            # _enabled flag drops frames post-recv, so the relay proxy keeps
+            # draining and nothing accumulates while this peer is hidden.
+            "video_sender": rtp_video_sender,
+            "video_paused": False,
         }
 
     def _setup_mic_receiver(self, peer_connection):
@@ -1229,6 +1279,16 @@ class RTCApp:
                         try:
                             if pcmflux is None:
                                 raise RuntimeError("pcmflux is not installed")
+                            # Bring up the recordable SelkiesVirtualMic (idempotent,
+                            # shared with the websockets path) before opening the
+                            # 'input' playback stream, so apps recording the default
+                            # source hear this mic. A provisioning failure must not
+                            # block playback into 'input'.
+                            if self.provision_virtual_mic is not None:
+                                try:
+                                    await self.provision_virtual_mic()
+                                except Exception as e_prov:
+                                    logger.error(f"WebRTC virtual mic provisioning failed: {e_prov}")
                             pb2 = pcmflux.AudioPlayback()
                             ps = pcmflux.AudioPlaybackSettings()
                             ps.device_name = b"input"
@@ -1340,8 +1400,23 @@ class RTCApp:
                 display_id = peer_obj.get('display_id') or 'primary'
                 logger.info(f"Controller peer disconnected, cleaning up media graph of display '{display_id}'")
                 await self._teardown_display_graph(display_id)
+            await self._notify_consumers_changed(peer_obj.get('display_id') or 'primary')
         except Exception as e:
             raise RTCAppError(f"Error stopping pipeline: {e}")
+
+    async def _notify_consumers_changed(self, display_id: str):
+        """A peer left this display's consumer set; the owning service re-checks
+        the all-paused capture stop so a departing unpaused peer cannot leave a
+        capture running for hidden-only consumers."""
+        cb = self.on_consumers_changed
+        if cb is None:
+            return
+        try:
+            result = cb(display_id or "primary")
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:
+            logger.debug(f"consumers-changed notification failed: {e}")
 
     async def _teardown_display_graph(self, display_id: str):
         """Drop one display's media graph, reaping its relay workers.

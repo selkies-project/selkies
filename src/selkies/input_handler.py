@@ -244,6 +244,56 @@ class _WaylandKeymapOwner:
         self._input.set_keymap_string(self._overlay_text())
         return kc
 
+    def _bind_via_compositor(self, keysyms):
+        """Batch-resolve keysyms through the compositor's keymap policy
+        (bind_keysyms): unmapped ones are overlay-bound in ONE keymap swap.
+        Successful resolutions are cached in _map (compositor overlay binds keep
+        their keycodes across base swaps). Returns None when the API is absent,
+        else the list of (keycode, level) pairs ((0, 0) = unbindable)."""
+        binder = getattr(self._input, 'bind_keysyms', None)
+        if binder is None:
+            return None
+        pairs = binder(list(keysyms))
+        for ks, pair in zip(keysyms, pairs):
+            if pair[0]:
+                self._map[ks] = (pair[0], pair[1])
+        return pairs
+
+    def _tap(self, kc, mods):
+        """Momentary press+release with refcounted modifier synthesis."""
+        for m in mods:
+            self._mod_refs[m] = self._mod_refs.get(m, 0) + 1
+            if self._mod_refs[m] == 1:
+                self._input.inject_key(m, 1)
+        self._input.inject_key(kc, 1)
+        self._input.inject_key(kc, 0)
+        for m in reversed(mods):
+            refs = self._mod_refs.get(m, 0) - 1
+            if refs <= 0:
+                self._mod_refs.pop(m, None)
+                self._input.inject_key(m, 0)
+            else:
+                self._mod_refs[m] = refs
+
+    def type_text(self, text):
+        """Type text as momentary taps, resolving every missing keysym through
+        the compositor in ONE keymap swap (no per-char swap storm). Returns False
+        — having typed nothing — when a char cannot be bound or the batch API is
+        unavailable, so the caller can fall back."""
+        keysyms = []
+        for ch in text:
+            cp = ord(ch)
+            keysyms.append(cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp))
+        missing = [ks for ks in dict.fromkeys(keysyms) if ks not in self._map]
+        if missing:
+            pairs = self._bind_via_compositor(missing)
+            if pairs is None or any(not p[0] for p in pairs):
+                return False
+        for ks in keysyms:
+            kc, level = self._map[ks]
+            self._tap(kc, self._mods_for_level(level))
+        return True
+
     def press(self, keysym):
         held = self._pressed.get(keysym)
         if held is not None:
@@ -252,6 +302,13 @@ class _WaylandKeymapOwner:
             self._input.inject_key(held[0], 1)
             return
         resolved = self._map.get(keysym)
+        if resolved is None:
+            # Compositor-side bind first (one keymap swap, held keycodes never
+            # rebound); the legacy full-keymap-text overlay is the fallback for
+            # backends without bind_keysyms.
+            pairs = self._bind_via_compositor([keysym])
+            if pairs is not None and pairs[0][0]:
+                resolved = self._map[keysym]
         if resolved is not None:
             kc, level = resolved
             mods = self._mods_for_level(level)
@@ -667,7 +724,11 @@ class _XTestKeyboard:
     # lacks (Unicode, exotic symbols) so they inject in-process via XTEST instead of
     # forking xdotool. Round-robin recycled; the reverse of TigerVNC/x0vncserver's
     # XkbAddKeyKeysym, done through core ChangeKeyboardMapping.
-    _OVERLAY_SLOTS = 16
+
+    # Settle after rebinding a RECYCLED keycode: the server applies the mapping
+    # synchronously (sync()), but xcb-class toolkits refetch keymaps
+    # asynchronously and could translate the queued press with the old symbol.
+    _RECYCLE_SETTLE_S = 0.01
 
     def __init__(self, xdisplay):
         self._d = xdisplay
@@ -692,17 +753,34 @@ class _XTestKeyboard:
         self._pressed_kc = {}       # keysym -> keycode injected at press
 
     def _find_spare_keycodes(self):
-        """Keycodes whose every level is NoSymbol — free to repurpose."""
+        """Every keycode whose every level is NoSymbol — free to repurpose. The
+        full range is scanned (not a fixed cap): more slots make recycling — the
+        only case where a slow app can mistranslate a rebound keycode — rare."""
         info = self._d.display.info
         lo, hi = info.min_keycode, info.max_keycode
         mapping = self._d.get_keyboard_mapping(lo, hi - lo + 1)
-        spares = []
-        for i, syms in enumerate(mapping):
-            if all(s == 0 for s in syms):
-                spares.append(lo + i)
-            if len(spares) >= self._OVERLAY_SLOTS:
-                break
-        return spares
+        return [lo + i for i, syms in enumerate(mapping)
+                if all(s == 0 for s in syms)]
+
+    def _free_spares(self):
+        used = set(self._overlay.values())
+        return [kc for kc in self._spare_keycodes if kc not in used]
+
+    def _alloc_overlay_keycode(self, keysym):
+        """Reserve a spare keycode for keysym (recycling the oldest binding when
+        full) and record the binding. Returns (keycode, recycled) — the mapping
+        request itself is the caller's (single vs batched)."""
+        free = self._free_spares()
+        if free:
+            kc = free[0]
+            recycled = False
+        else:
+            oldest = self._overlay_order.pop(0)
+            kc = self._overlay.pop(oldest)
+            recycled = True
+        self._overlay[keysym] = kc
+        self._overlay_order.append(keysym)
+        return kc, recycled
 
     def _overlay_keycode(self, keysym):
         """Bind an unmapped keysym to a spare keycode (recycling the oldest) and
@@ -713,17 +791,99 @@ class _XTestKeyboard:
             self._spare_keycodes = self._find_spare_keycodes()
         if not self._spare_keycodes:
             return None
-        if len(self._overlay) >= len(self._spare_keycodes):
-            oldest = self._overlay_order.pop(0)
-            kc = self._overlay.pop(oldest)
-        else:
-            kc = self._spare_keycodes[len(self._overlay)]
+        kc, recycled = self._alloc_overlay_keycode(keysym)
         # Assign the keysym at levels 0 and 1 so an accidental Shift can't change it.
         self._d.change_keyboard_mapping(kc, [[keysym, keysym]])
         self._d.sync()
-        self._overlay[keysym] = kc
-        self._overlay_order.append(keysym)
+        if recycled:
+            time.sleep(self._RECYCLE_SETTLE_S)
         return kc
+
+    def prebind(self, keysyms):
+        """Overlay-bind every unmapped keysym in as few ChangeKeyboardMapping
+        requests as possible — one per contiguous spare-keycode run, one sync —
+        so a CJK composition commit broadcasts O(1) MappingNotify events instead
+        of one per new char. Returns False (nothing bound) when the batch cannot
+        fully resolve, so the caller can fall back without partial typing."""
+        d = self._d
+        missing = []
+        for ks in dict.fromkeys(keysyms):
+            if ks not in self._overlay and not d.keysym_to_keycode(ks):
+                missing.append(ks)
+        if not missing:
+            return True
+        if self._spare_keycodes is None:
+            self._spare_keycodes = self._find_spare_keycodes()
+        # More new keysyms than slots would recycle bindings made earlier in this
+        # very batch, corrupting the text; let the caller fall back instead.
+        if len(missing) > len(self._spare_keycodes):
+            return False
+        # Allocate from the LONGEST contiguous free runs first: each contiguous
+        # run binds with one ChangeKeyboardMapping, so this minimizes the
+        # MappingNotify broadcasts a large commit produces.
+        free = self._free_spares()
+        runs = []
+        i = 0
+        while i < len(free):
+            j = i
+            while j + 1 < len(free) and free[j + 1] == free[j] + 1:
+                j += 1
+            runs.append(free[i:j + 1])
+            i = j + 1
+        runs.sort(key=len, reverse=True)
+        picked = []
+        for run in runs:
+            if len(picked) >= len(missing):
+                break
+            picked.extend(run[:len(missing) - len(picked)])
+        recycled_any = False
+        while len(picked) < len(missing):
+            oldest = self._overlay_order.pop(0)
+            picked.append(self._overlay.pop(oldest))
+            recycled_any = True
+        assigns = []
+        for ks, kc in zip(missing, picked):
+            self._overlay[ks] = kc
+            self._overlay_order.append(ks)
+            assigns.append((kc, ks))
+        assigns.sort()
+        i = 0
+        while i < len(assigns):
+            j = i
+            while j + 1 < len(assigns) and assigns[j + 1][0] == assigns[j][0] + 1:
+                j += 1
+            d.change_keyboard_mapping(
+                assigns[i][0], [[ks, ks] for _kc, ks in assigns[i:j + 1]])
+            i = j + 1
+        d.sync()
+        if recycled_any:
+            time.sleep(self._RECYCLE_SETTLE_S)
+        return True
+
+    def owns_mapping_range(self, first_keycode, count):
+        """True when a MappingNotify range covers only our overlay spares — a
+        self-inflicted bind, which must not invalidate the overlay it created."""
+        spares = self._spare_keycodes
+        if not spares:
+            return False
+        spare_set = set(spares)
+        return all(kc in spare_set
+                   for kc in range(first_keycode, first_keycode + count))
+
+    def invalidate_mapping(self):
+        """A foreign keymap change (setxkbmap, desktop layout switcher) wiped
+        our overlay bindings and may have moved modifier keycodes: drop the
+        overlay bookkeeping, rediscover spares lazily and re-resolve the
+        modifier keycodes from the (already refreshed) cache. Held keys are kept:
+        release replays the exact press-time keycode."""
+        self._overlay.clear()
+        self._overlay_order.clear()
+        self._spare_keycodes = None
+        d = self._d
+        self._shift_kc = d.keysym_to_keycode(0xffe1)
+        self._shift_r_kc = d.keysym_to_keycode(0xffe2)
+        self._altgr_kc = (d.keysym_to_keycode(0xfe03)
+                          or d.keysym_to_keycode(0xff7e))
 
     def _resolve(self, keysym):
         """Return (keycode, modifier_keycodes) to inject this keysym. The modifiers are
@@ -1740,6 +1900,8 @@ class WebRTCInput:
         self.on_update_settings = lambda settings_json, display_id="primary": logger_webrtc_input.warning("unhandled update_settings")
         self.is_wayland = is_wayland
         self.wayland_input = None
+        # Last applied client keyboardLayout hint (SETTINGS), both transports.
+        self._client_kb_layout = None
         # Keysym policy lives here, not in the compositor: built lazily from the
         # compositor's keymap, retried on a cooldown if that read fails.
         self._wl_keymap_owner = None
@@ -1800,6 +1962,9 @@ class WebRTCInput:
         self.key_repeat_heartbeat_grace = 0.3
         self.key_repeat_state = {}         # keysym -> monotonic time of next due repeat
         self.key_repeat_task = None
+        # MappingNotify consumer for sessions where the cursor monitor (the
+        # normal X event consumer) is disabled.
+        self.keymap_watch_task = None
         self.on_update_rate_control_mode = lambda mode, display_id="primary": logger_webrtc_input.warning("unhandled on_update_rate_control_mode")
         self.on_update_crf = lambda value, display_id="primary": logger_webrtc_input.warning("unhandled on_update_crf")
 
@@ -2024,10 +2189,13 @@ class WebRTCInput:
 
         if self.is_wayland:
             self.keyboard_worker_task = asyncio.create_task(self._keyboard_worker())
+            await self._push_wayland_base_layout()
         if self.key_sweep_task is None:
             self.key_sweep_task = asyncio.create_task(self._key_stale_sweep())
         if self.key_repeat_enabled and self.key_repeat_task is None:
             self.key_repeat_task = asyncio.create_task(self._key_repeat_loop())
+        if self.xdisplay is not None and self.keymap_watch_task is None:
+            self.keymap_watch_task = asyncio.create_task(self._keymap_watch_loop())
 
     async def _initialize_persistent_gamepads(self):
         logger_webrtc_input.info(f"Initializing {self.num_gamepads} persistent gamepad instances...")
@@ -2093,6 +2261,9 @@ class WebRTCInput:
         if self.key_repeat_task:
             self.key_repeat_task.cancel()
             self.key_repeat_task = None
+        if self.keymap_watch_task:
+            self.keymap_watch_task.cancel()
+            self.keymap_watch_task = None
         self.pressed_keys.clear()
         self.reaped_atomic_keys.clear()
         self.key_repeat_state.clear()
@@ -2523,6 +2694,10 @@ class WebRTCInput:
             cp = ord(ch)
             keysyms.append(cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp))
         try:
+            # One batched bind for every unmapped char (O(1) MappingNotify
+            # broadcasts instead of one per char); nothing typed on failure.
+            if not self.keyboard.prebind(keysyms):
+                return False
             for ks in keysyms:
                 self.keyboard.press(ks)
                 self.keyboard.release(ks)
@@ -2544,6 +2719,83 @@ class WebRTCInput:
 
         task.add_done_callback(_done)
         return task
+
+    async def _push_wayland_base_layout(self):
+        """Set the compositor seat's BASE xkb layout at session start from the
+        deployment's XKB env config (XKB_DEFAULT_LAYOUT et al.), so common
+        non-US keysyms resolve as base keys instead of overlay binds. The
+        compositor re-splices its overlay binds on top with unchanged keycodes;
+        the keymap owner is dropped so it rebuilds from the new base."""
+        layout = os.environ.get("XKB_DEFAULT_LAYOUT", "")
+        setter = getattr(self.wayland_input, 'set_xkb_layout', None)
+        if not layout or setter is None:
+            return
+        variant = os.environ.get("XKB_DEFAULT_VARIANT", "")
+        options = os.environ.get("XKB_DEFAULT_OPTIONS", "")
+        model = os.environ.get("XKB_DEFAULT_MODEL", "")
+        rules = os.environ.get("XKB_DEFAULT_RULES", "")
+        try:
+            ok = await asyncio.to_thread(
+                setter, layout, variant, options, model, rules)
+        except Exception as e:
+            logger_webrtc_input.warning(f"Wayland base layout push failed: {e}")
+            return
+        if ok:
+            self._wl_keymap_owner = None
+            logger_webrtc_input.info(
+                f"Wayland base layout set to '{layout}'"
+                + (f" ({variant})" if variant else ""))
+        else:
+            logger_webrtc_input.warning(
+                f"Wayland base layout '{layout}' rejected by the compositor; "
+                "keeping the default.")
+
+    async def apply_client_keyboard_layout(self, layout_hint):
+        """Client SETTINGS 'keyboardLayout' hint ("de", "ch(fr)", ...). On
+        pixelflux Wayland it becomes the compositor seat's BASE xkb layout
+        (set_xkb_layout), so the client's physical layout resolves as base keys
+        instead of per-keysym overlay binds; on X11 it is informational only
+        (the X keymap is deployment-owned). Idempotent per value — clients
+        re-assert SETTINGS on reconnects and broadcasts."""
+        hint = str(layout_hint or "").strip()
+        m = re.fullmatch(r"([A-Za-z0-9_,\- ]{1,32})(?:\(([A-Za-z0-9_,\- ]{1,32})\))?", hint)
+        if not m:
+            if hint:
+                logger_webrtc_input.warning(
+                    f"Ignoring malformed keyboardLayout hint: {hint[:48]!r}")
+            return
+        if hint == self._client_kb_layout:
+            return
+        layout, variant = m.group(1).strip(), (m.group(2) or "").strip()
+        if not self.is_wayland:
+            self._client_kb_layout = hint
+            logger_webrtc_input.info(
+                f"Client keyboard layout hint '{hint}' noted (X11 keymap is "
+                "deployment-owned; not applied).")
+            return
+        setter = getattr(self.wayland_input, 'set_xkb_layout', None) if self.wayland_input else None
+        if setter is None:
+            logger_webrtc_input.warning(
+                f"Client keyboard layout '{hint}' not applied: compositor "
+                "keymap control unavailable.")
+            return
+        try:
+            ok = await asyncio.to_thread(setter, layout, variant, "", "", "")
+        except Exception as e:
+            logger_webrtc_input.warning(f"Wayland base layout push failed: {e}")
+            return
+        if ok:
+            self._client_kb_layout = hint
+            # The keymap owner caches keycode resolution against the old base;
+            # drop it so it rebuilds from the new one.
+            self._wl_keymap_owner = None
+            logger_webrtc_input.info(
+                f"Wayland base layout set to '{layout}'"
+                + (f" ({variant})" if variant else "") + " from client hint")
+        else:
+            logger_webrtc_input.warning(
+                f"Wayland base layout '{hint}' rejected by the compositor; "
+                "keeping the current layout.")
 
     async def _ensure_wayland_keymap_owner(self):
         """Get-or-build the keymap owner. Reading the compositor keymap blocks
@@ -2586,7 +2838,7 @@ class WebRTCInput:
                     raise WaylandVirtualKeyboardUnavailable(
                         "compositor does not advertise zwp_virtual_keyboard_manager_v1"
                         " (retry pending)")
-                display = f"wayland-{self.wayland_socket_index}"
+                display = self._wayland_display_name()
                 try:
                     self._wl_typer = await WaylandVirtualKeyboard.connect(
                         display=display)
@@ -2785,10 +3037,21 @@ class WebRTCInput:
             offset_x = 0
             offset_y = 0
             if self.data_server_instance and hasattr(self.data_server_instance, 'display_layouts'):
-                layout = self.data_server_instance.display_layouts.get(display_id) 
+                # Sockets with no registered display (shared viewers, input
+                # handoff) render the primary stream: map them with the
+                # primary's offset, which is non-zero in left/up arrangements.
+                lookup_id = display_id or 'primary'
+                layout = self.data_server_instance.display_layouts.get(lookup_id)
                 if layout:
-                    offset_x = layout.get('x', 0) 
+                    offset_x = layout.get('x', 0)
                     offset_y = layout.get('y', 0)
+                elif lookup_id != 'primary':
+                    # A secondary with no laid-out region (layout pending, or the
+                    # extension was refused) must not inject at a zero offset:
+                    # its clicks would land on the primary's region instead. A
+                    # button it left held self-heals on the next mask diff from
+                    # any other display's mouse message.
+                    return
             final_x = x + offset_x
             final_y = y + offset_y
 
@@ -2859,7 +3122,10 @@ class WebRTCInput:
             return
         if relative:
             self.send_mouse(MOUSE_MOVE, (x, y))
-        elif position_changed:
+        elif position_changed or button_mask != self.button_mask:
+            # Button transitions warp unconditionally: the X pointer may have
+            # been moved by an application/tool since the last event, and a
+            # press must land where the client aims, not where the pointer sits.
             self.send_mouse(MOUSE_POSITION, (final_x, final_y))
         self.last_x = final_x
         self.last_y = final_y
@@ -2959,9 +3225,24 @@ class WebRTCInput:
                 except asyncio.CancelledError:
                     pass
                 self.clipboard_monitor_task = asyncio.create_task(self.start_clipboard())
+    def _wayland_display_name(self):
+        """The compositor's REAL socket name. The pixelflux compositor auto-picks
+        the first free wayland-N socket, so the running backend is authoritative;
+        the process env is next (stream_server mirrors the name there at bring-up)
+        and --wayland-socket-index survives only as a legacy hint."""
+        try:
+            from pixelflux import get_wayland_display_name
+            name = get_wayland_display_name()
+            if name:
+                return name
+        except Exception:
+            pass
+        return (os.environ.get("WAYLAND_DISPLAY")
+                or f"wayland-{self.wayland_socket_index}")
+
     def _get_wl_env(self):
         env = os.environ.copy()
-        env["WAYLAND_DISPLAY"] = f"wayland-{self.wayland_socket_index}"
+        env["WAYLAND_DISPLAY"] = self._wayland_display_name()
         return env
 
     async def _get_file(self, file_path, target_mime):
@@ -3438,6 +3719,54 @@ class WebRTCInput:
         logger_webrtc_input.info("Stopping clipboard monitor")
 
 
+    def _handle_mapping_notify(self, event):
+        """Keep the python-xlib keymap cache and the XTEST overlay coherent with
+        server-side keymap changes. Every in-session layout switch (setxkbmap,
+        desktop layout applets, fcitx-xkb) lands here as a MappingNotify; without
+        the refresh, keysym_to_keycode resolves against the dead layout and the
+        overlay trusts bindings the switch wiped."""
+        if event.request == X.MappingPointer:
+            return
+        try:
+            if event.request == X.MappingKeyboard:
+                self.xdisplay.refresh_keyboard_mapping(event)
+        except Exception as e:
+            logger_webrtc_input.warning(f"keymap cache refresh failed: {e}")
+        kb = self.keyboard
+        if kb is None:
+            return
+        if (event.request == X.MappingKeyboard
+                and kb.owns_mapping_range(event.first_keycode, event.count)):
+            # Our own overlay bind: the refreshed cache now resolves the bound
+            # keysym; the overlay bookkeeping is authoritative, keep it.
+            return
+        logger_webrtc_input.info(
+            "Foreign keymap change detected (request=%d, keycodes %d+%d): "
+            "invalidating XTEST overlay state.",
+            event.request, event.first_keycode, event.count)
+        kb.invalidate_mapping()
+
+    async def _keymap_watch_loop(self):
+        """Drain X events for MappingNotify when the cursor monitor is not the
+        event consumer (pixelflux delivers cursors natively then). Two consumers
+        must never race next_event(), so this loop idles while cursors_running."""
+        while True:
+            await asyncio.sleep(0.5)
+            if self.cursors_running or self.xdisplay is None:
+                continue
+            try:
+                while self.xdisplay.pending_events():
+                    event = self.xdisplay.next_event()
+                    if event.type == X.MappingNotify:
+                        self._handle_mapping_notify(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if self._is_x_conn_closed(e):
+                    self._reconnect_xdisplay()
+                else:
+                    logger_webrtc_input.debug(f"keymap watch: {e}")
+
     async def start_cursor_monitor(self):
         if self.is_wayland:
             logger_webrtc_input.info("Wayland mode: Cursor monitor disabled (handled by compositor callback).")
@@ -3486,6 +3815,9 @@ class WebRTCInput:
                 continue
 
             event = self.xdisplay.next_event()
+            if event.type == X.MappingNotify:
+                self._handle_mapping_notify(event)
+                continue
             if (event.type, 0) == self.xdisplay.extension_event.DisplayCursorNotify:
                 try:
                     cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
@@ -3549,8 +3881,11 @@ class WebRTCInput:
             }
         cropped_im = im.crop(bbox)
         left, upper, right, lower = bbox
-        new_hotx = cursor.xhot - left
-        new_hoty = cursor.yhot - upper
+        # The hotspot can precede the visible bbox; browsers clamp negative
+        # CSS cursor hotspots to 0 silently, so clamp here where the crop
+        # rebase happens and both renderers agree.
+        new_hotx = max(0, cursor.xhot - left)
+        new_hoty = max(0, cursor.yhot - upper)
         if cropped_im.width > self.cursor_size_cap or cropped_im.height > self.cursor_size_cap:
             if self.cursor_debug:
                 logger_webrtc_input.info(f"Cursor ({cropped_im.width}x{cropped_im.height}) exceeds cap ({self.cursor_size_cap}x{self.cursor_size_cap}). Resizing.")
@@ -3561,8 +3896,8 @@ class WebRTCInput:
             cropped_im = cropped_im.resize(
                 (new_width, new_height), resample=Image.Resampling.LANCZOS
             )
-            new_hotx = int(new_hotx * scale_factor)
-            new_hoty = int(new_hoty * scale_factor)
+            new_hotx = min(round(new_hotx * scale_factor), max(0, new_width - 1))
+            new_hoty = min(round(new_hoty * scale_factor), max(0, new_height - 1))
         # XFixes pixels are premultiplied; straighten only after any resize
         # (resampling is linear per channel in premultiplied space), matching
         # the pixelflux monitor's pipeline.
@@ -3674,12 +4009,27 @@ class WebRTCInput:
 
                     elif msg_type == "co_end":
                         if native_inject():
-                            # Ordered per-char injection through the compositor channel.
-                            for ch in data:
-                                cp = ord(ch)
-                                ks = cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp)
-                                await self.send_x11_keypress(ks, down=True)
-                                await self.send_x11_keypress(ks, down=False)
+                            # One batch: every missing keysym binds in a single
+                            # compositor keymap swap (bind_keysyms), then the taps
+                            # flow ordered through the compositor channel. The
+                            # per-char path below is the fallback when the batch
+                            # API is missing or a char is unbindable.
+                            typed = False
+                            owner = await self._ensure_wayland_keymap_owner()
+                            if owner is not None:
+                                try:
+                                    typed = await asyncio.to_thread(
+                                        owner.type_text, data)
+                                except Exception as e:
+                                    logger_webrtc_input.warning(
+                                        f"Batched Wayland composition type failed; "
+                                        f"falling back per-char: {e}")
+                            if not typed:
+                                for ch in data:
+                                    cp = ord(ch)
+                                    ks = cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp)
+                                    await self.send_x11_keypress(ks, down=True)
+                                    await self.send_x11_keypress(ks, down=False)
                         else:
                             unicode_buffer.append(data)
 
@@ -3980,7 +4330,20 @@ class WebRTCInput:
             if self.enable_clipboard in ["true", "out"]:
                 data, mime_type = await self.read_clipboard(use_binary=self.enable_binary_clipboard in ["true", "out"])
                 if data:
-                    await self.on_clipboard_read(data, mime_type)
+                    if getattr(self.rtc_app, "mode", None) == "websockets":
+                        # Tag the reply as a client-requested fetch: the payload
+                        # frames are preceded by "clipboard_reply,cr" so clients
+                        # can treat it cache-only without the connect-time 5s
+                        # heuristic (old clients route the unknown verb to the
+                        # input no-op path and keep the heuristic).
+                        await self.rtc_app.send_ws_clipboard_data(
+                            data, mime_type, reply_to="cr")
+                    else:
+                        # Same contract over WebRTC: the clipboard-msg carries a
+                        # reply_to field (old clients ignore the extra field and
+                        # keep their heuristic).
+                        await self.rtc_app.send_clipboard_data(
+                            data, mime_type, reply_to="cr")
                 else: logger_webrtc_input.debug("No clipboard content to send on request")
             else: logger_webrtc_input.warning("Rejecting clipboard read: outbound clipboard disabled.")
         elif msg_type == "REQUEST_CLIPBOARD":
@@ -4010,6 +4373,20 @@ class WebRTCInput:
                         # dispatch loop; reuse the on_clipboard_read send path.
                         try:
                             data, mime_type = await self.read_clipboard(use_binary=use_binary)
+                            data_bytes = (data.encode('utf-8')
+                                          if isinstance(data, str) else data)
+                            if data_bytes is not None and data_bytes == self._clipboard_last_bytes:
+                                # This read races the injected Ctrl+C: the app has
+                                # not published the new selection yet, and pushing
+                                # the pre-copy content settles the client's pending
+                                # copy with stale data. Wait briefly for the
+                                # selection-owner change, then re-read.
+                                monitor = self._x11_clipboard_monitor
+                                if monitor is not None and monitor.alive():
+                                    await monitor.wait_change(0.15)
+                                else:
+                                    await asyncio.sleep(0.15)
+                                data, mime_type = await self.read_clipboard(use_binary=use_binary)
                             if data:
                                 await self.on_clipboard_read(data, mime_type)
                             else:

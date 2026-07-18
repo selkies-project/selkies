@@ -63,7 +63,7 @@ const en = {
         clearImage: "Clear Image",
         previewAlt: "Clipboard preview",
     },
-    shortcuts: { citeNotice: "Please cite within your publication for academic usage" },
+    shortcuts: { citeNotice: "Cite our paper academically" },
     gamepads: {
         loadingGamepad: "Loading Gamepad {index}...",
         gamepadTitle: "Gamepad {index}",
@@ -127,7 +127,7 @@ const es = {
         clearImage: "Quitar imagen",
         previewAlt: "Vista previa del portapapeles",
     },
-    shortcuts: { citeNotice: "Cite esta obra en su publicación para uso académico" },
+    shortcuts: { citeNotice: "Cita nuestro artículo académicamente" },
     gamepads: {
         loadingGamepad: "Cargando mando {index}...",
         gamepadTitle: "Mando {index}",
@@ -191,7 +191,7 @@ const zh = {
         clearImage: "清除图片",
         previewAlt: "剪贴板预览",
     },
-    shortcuts: { citeNotice: "学术用途请在您的出版物中引用" },
+    shortcuts: { citeNotice: "学术引用我们的论文" },
     gamepads: {
         loadingGamepad: "正在加载手柄 {index}...",
         gamepadTitle: "手柄 {index}",
@@ -255,7 +255,7 @@ const hi = {
         clearImage: "छवि हटाएँ",
         previewAlt: "क्लिपबोर्ड पूर्वावलोकन",
     },
-    shortcuts: { citeNotice: "अकादमिक उपयोग हेतु कृपया अपने प्रकाशन में उद्धृत करें" },
+    shortcuts: { citeNotice: "हमारे शोधपत्र को अकादमिक रूप से उद्धृत करें" },
     gamepads: {
         loadingGamepad: "गेमपैड {index} लोड हो रहा है...",
         gamepadTitle: "गेमपैड {index}",
@@ -319,7 +319,7 @@ const pt = {
         clearImage: "Limpar imagem",
         previewAlt: "Prévia da área de transferência",
     },
-    shortcuts: { citeNotice: "Cite esta obra em sua publicação para uso acadêmico" },
+    shortcuts: { citeNotice: "Cite nosso artigo academicamente" },
     gamepads: {
         loadingGamepad: "Carregando gamepad {index}...",
         gamepadTitle: "Gamepad {index}",
@@ -383,7 +383,7 @@ const fr = {
         clearImage: "Effacer l'image",
         previewAlt: "Aperçu du presse-papiers",
     },
-    shortcuts: { citeNotice: "Veuillez citer cette œuvre dans votre publication pour un usage académique" },
+    shortcuts: { citeNotice: "Citez notre article académiquement" },
     gamepads: {
         loadingGamepad: "Chargement de la manette {index}...",
         gamepadTitle: "Manette {index}",
@@ -447,7 +447,7 @@ const ru = {
         clearImage: "Очистить изображение",
         previewAlt: "Предпросмотр буфера обмена",
     },
-    shortcuts: { citeNotice: "Для академического использования просьба сослаться в публикации" },
+    shortcuts: { citeNotice: "Цитируйте нашу статью в научных работах" },
     gamepads: {
         loadingGamepad: "Загрузка геймпада {index}...",
         gamepadTitle: "Геймпад {index}",
@@ -511,7 +511,7 @@ const de = {
         clearImage: "Bild entfernen",
         previewAlt: "Zwischenablage-Vorschau",
     },
-    shortcuts: { citeNotice: "Für akademische Nutzung bitte in Ihrer Publikation zitieren" },
+    shortcuts: { citeNotice: "Zitieren Sie unser Paper wissenschaftlich" },
     gamepads: {
         loadingGamepad: "Gamepad {index} wird geladen...",
         gamepadTitle: "Gamepad {index}",
@@ -575,7 +575,7 @@ const tr = {
         clearImage: "Görseli temizle",
         previewAlt: "Pano önizlemesi",
     },
-    shortcuts: { citeNotice: "Akademik kullanım için lütfen yayınınızda atıf yapın" },
+    shortcuts: { citeNotice: "Makalemize akademik atıfta bulunun" },
     gamepads: {
         loadingGamepad: "Oyun kolu {index} yükleniyor...",
         gamepadTitle: "Oyun kolu {index}",
@@ -639,7 +639,7 @@ const it = {
         clearImage: "Rimuovi immagine",
         previewAlt: "Anteprima degli appunti",
     },
-    shortcuts: { citeNotice: "Per uso accademico si prega di citare nella propria pubblicazione" },
+    shortcuts: { citeNotice: "Cita il nostro articolo accademicamente" },
     gamepads: {
         loadingGamepad: "Caricamento gamepad {index}...",
         gamepadTitle: "Gamepad {index}",
@@ -703,7 +703,7 @@ const nl = {
         clearImage: "Afbeelding wissen",
         previewAlt: "Klembordvoorbeeld",
     },
-    shortcuts: { citeNotice: "Citeer dit werk in uw publicatie voor academisch gebruik" },
+    shortcuts: { citeNotice: "Citeer ons artikel academisch" },
     gamepads: {
         loadingGamepad: "Gamepad {index} wordt geladen...",
         gamepadTitle: "Gamepad {index}",
@@ -767,7 +767,7 @@ const ar = {
         clearImage: "مسح الصورة",
         previewAlt: "معاينة الحافظة",
     },
-    shortcuts: { citeNotice: "للاستخدام الأكاديمي، يُرجى الاستشهاد بهذا العمل في منشورك" },
+    shortcuts: { citeNotice: "استشهد بورقتنا البحثية أكاديميًا" },
     gamepads: {
         loadingGamepad: "جارٍ تحميل ذراع التحكم {index}...",
         gamepadTitle: "ذراع التحكم {index}",
@@ -831,7 +831,7 @@ const ko = {
         clearImage: "이미지 지우기",
         previewAlt: "클립보드 미리보기",
     },
-    shortcuts: { citeNotice: "학술적 이용 시 출판물에 인용해 주세요" },
+    shortcuts: { citeNotice: "논문을 학술적으로 인용하기" },
     gamepads: {
         loadingGamepad: "게임패드 {index} 불러오는 중...",
         gamepadTitle: "게임패드 {index}",
@@ -895,7 +895,7 @@ const ja = {
         clearImage: "画像をクリア",
         previewAlt: "クリップボードのプレビュー",
     },
-    shortcuts: { citeNotice: "学術利用の際は出版物での引用をお願いします" },
+    shortcuts: { citeNotice: "論文の学術的引用はこちら" },
     gamepads: {
         loadingGamepad: "ゲームパッド {index} を読み込み中...",
         gamepadTitle: "ゲームパッド {index}",
@@ -959,7 +959,7 @@ const vi = {
         clearImage: "Xóa ảnh",
         previewAlt: "Xem trước bảng nhớ tạm",
     },
-    shortcuts: { citeNotice: "Vui lòng trích dẫn trong ấn phẩm của bạn khi sử dụng cho mục đích học thuật" },
+    shortcuts: { citeNotice: "Trích dẫn học thuật bài báo của chúng tôi" },
     gamepads: {
         loadingGamepad: "Đang tải tay cầm {index}...",
         gamepadTitle: "Tay cầm {index}",
@@ -1023,7 +1023,7 @@ const th = {
         clearImage: "ล้างรูปภาพ",
         previewAlt: "ตัวอย่างคลิปบอร์ด",
     },
-    shortcuts: { citeNotice: "โปรดอ้างอิงในสิ่งพิมพ์ของคุณสำหรับการใช้งานเชิงวิชาการ" },
+    shortcuts: { citeNotice: "อ้างอิงบทความของเราเชิงวิชาการ" },
     gamepads: {
         loadingGamepad: "กำลังโหลดเกมแพด {index}...",
         gamepadTitle: "เกมแพด {index}",
@@ -1087,7 +1087,7 @@ const fil = {
         clearImage: "I-clear ang larawan",
         previewAlt: "Preview ng clipboard",
     },
-    shortcuts: { citeNotice: "Mangyaring banggitin sa iyong publikasyon para sa akademikong paggamit" },
+    shortcuts: { citeNotice: "Banggitin ang aming papel nang akademiko" },
     gamepads: {
         loadingGamepad: "Nilo-load ang gamepad {index}...",
         gamepadTitle: "Gamepad {index}",
@@ -1151,7 +1151,7 @@ const da = {
         clearImage: "Ryd billede",
         previewAlt: "Forhåndsvisning af udklipsholder",
     },
-    shortcuts: { citeNotice: "Citér venligst i din publikation ved akademisk brug" },
+    shortcuts: { citeNotice: "Citér vores artikel akademisk" },
     gamepads: {
         loadingGamepad: "Indlæser gamepad {index}...",
         gamepadTitle: "Gamepad {index}",
