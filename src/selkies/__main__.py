@@ -35,6 +35,13 @@ async def run():
     # same directory selkies uses, regardless of how the setting was configured.
     os.environ["SELKIES_JS_SOCKET_PATH"] = settings.js_socket_path
 
+    if settings.computer_use_bind:
+        try:
+            from pixelflux import start_computer_use
+            start_computer_use(settings.computer_use_bind)
+        except Exception as e:
+            logger.warning(f"Computer-Use server not started: {e}")
+
     await wait_for_app_ready(settings.app_ready_file, settings.app_wait_ready[0])
 
     # Create the centralised server with settings

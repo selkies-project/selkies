@@ -2727,8 +2727,6 @@ function Sidebar() {
         )}
         
         {(isMobile || hasDetectedTouch) && (renderableSettings.softButtons ?? true) && (
-          <>
-            <div className="sidebar-section-divider"></div>
             <div className="sidebar-mobile-key-actions">
               <button
                 className={`mobile-key-button ${heldKeys.Control ? "active" : ""}`}
@@ -2772,7 +2770,6 @@ function Sidebar() {
                 <KeyboardIcon />
               </button>
             </div>
-          </>
         )}
 
         {/* Viewers can't apply stream settings (the server ignores their

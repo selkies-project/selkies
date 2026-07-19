@@ -265,7 +265,7 @@
    Distributes buttons evenly. Adds space and a separator. */
 .sidebar-action-buttons {
     display: flex;
-    justify-content: space-around;
+    justify-content: space-between;
     align-items: center;
     margin-bottom: 20px;
     padding: 10px 0;
@@ -1758,13 +1758,6 @@ a.cite-link:active {
 }
 
 /* --- Mobile Key Action Buttons --- */
-/* A horizontal rule used as a visual separator. */
-.sidebar-section-divider {
-    border: 0;
-    height: 1px;
-    background-color: var(--sidebar-border);
-    margin: 0 0 15px 0;
-}
 
 /* Container for touch-specific keyboard action buttons. */
 .sidebar-mobile-key-actions {

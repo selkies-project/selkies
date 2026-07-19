@@ -625,6 +625,18 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Wayland socket where applications run — the target for input injection and clipboard — when it differs from the pixelflux capture compositor (e.g. a nested labwc/kwin session that pixelflux captures). Empty auto-detects the nested compositor socket in XDG_RUNTIME_DIR, falling back to the capture compositor when nothing is nested.",
     },
     {
+        "name": "computer_use_bind",
+        "type": "str",
+        "default": "",
+        "help": "Start pixelflux's Computer-Use HTTP server: a bare port listens on all interfaces, host:port scopes it (e.g. 127.0.0.1:9500). Empty leaves it off; the PIXELFLUX_CU environment variable remains the standalone fallback.",
+    },
+    {
+        "name": "wayland_host_display",
+        "type": "str",
+        "default": "",
+        "help": "Wayland socket of an EXTERNAL compositor (e.g. labwc started with WLR_BACKENDS=headless) that pixelflux captures and injects into as a client, instead of compositing its own. Frames arrive by screencopy into pixelflux-allocated GPU buffers (zero-copy into the encoder); input rides virtual-keyboard/pointer devices. Empty keeps the built-in compositor.",
+    },
+    {
         "name": "recording_socket",
         "type": "str",
         "default": "",

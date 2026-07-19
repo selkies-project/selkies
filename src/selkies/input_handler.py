@@ -20,7 +20,6 @@
 import ctypes
 import logging
 import select
-import shutil
 import struct
 import threading
 import time
@@ -45,10 +44,11 @@ from .display_utils import (
 )
 from .media_pipeline import RateControlMode
 from .settings import settings, WS_MAX_MESSAGE_BYTES
-from .wayland_typer import (
-    WaylandVirtualKeyboard,
-    WaylandVirtualKeyboardUnavailable,
-)
+try:
+    from pixelflux import VirtualKeyboardUnavailable as PixelfluxVkUnavailable
+except Exception:
+    class PixelfluxVkUnavailable(RuntimeError):
+        """Stand-in when pixelflux predates the typed exception."""
 try:
     libxkb = ctypes.CDLL("libxkbcommon.so.0")
     libxkb.xkb_keysym_to_utf8.argtypes = [ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t]
@@ -862,30 +862,43 @@ class _XTestKeyboard:
             time.sleep(self._RECYCLE_SETTLE_S)
         return True
 
-    def owns_mapping_range(self, first_keycode, count):
-        """True when a MappingNotify range covers only our overlay spares — a
-        self-inflicted bind, which must not invalidate the overlay it created."""
-        spares = self._spare_keycodes
-        if not spares:
+    def bindings_intact(self):
+        """True when every overlay binding still resolves to its keysym in the
+        server's map. Distinguishes our own MappingNotify from a foreign layout
+        change by SEMANTICS: servers vary in how many notifies one
+        ChangeKeyboardMapping emits and report the full keycode range, so
+        neither counting nor range matching works — but a self-bind leaves the
+        bindings intact and a foreign change wipes them."""
+        if not self._overlay:
+            return True
+        try:
+            for ks, kc in self._overlay.items():
+                syms = self._d.get_keyboard_mapping(kc, 1)[0]
+                if not len(syms) or syms[0] != ks:
+                    return False
+            return True
+        except Exception:
             return False
-        spare_set = set(spares)
-        return all(kc in spare_set
-                   for kc in range(first_keycode, first_keycode + count))
 
-    def invalidate_mapping(self):
-        """A foreign keymap change (setxkbmap, desktop layout switcher) wiped
-        our overlay bindings and may have moved modifier keycodes: drop the
-        overlay bookkeeping, rediscover spares lazily and re-resolve the
-        modifier keycodes from the (already refreshed) cache. Held keys are kept:
-        release replays the exact press-time keycode."""
-        self._overlay.clear()
-        self._overlay_order.clear()
-        self._spare_keycodes = None
+    def refresh_modifier_keycodes(self):
+        """Re-resolve the synth-modifier keycodes from the (already refreshed)
+        cache — a modifier remap moves them without touching the overlay."""
         d = self._d
         self._shift_kc = d.keysym_to_keycode(0xffe1)
         self._shift_r_kc = d.keysym_to_keycode(0xffe2)
         self._altgr_kc = (d.keysym_to_keycode(0xfe03)
                           or d.keysym_to_keycode(0xff7e))
+
+    def invalidate_mapping(self):
+        """A foreign keymap change (setxkbmap, desktop layout switcher) wiped
+        our overlay bindings and may have moved modifier keycodes: drop the
+        overlay bookkeeping, rediscover spares lazily and re-resolve the
+        modifier keycodes. Held keys are kept: release replays the exact
+        press-time keycode."""
+        self._overlay.clear()
+        self._overlay_order.clear()
+        self._spare_keycodes = None
+        self.refresh_modifier_keycodes()
 
     def _resolve(self, keysym):
         """Return (keycode, modifier_keycodes) to inject this keysym. The modifiers are
@@ -1831,6 +1844,14 @@ class WebRTCInput:
         # a nested session (labwc/kwin) comes up after this process.
         self.app_wayland_display = app_wayland_display
         self._app_wl_display_cached = None
+        # Negative cache: the auto-detect sweep stays uncached until a distinct app
+        # compositor appears, and it is consulted from per-key native_inject, so a
+        # TTL floors the directory relist until then.
+        self._app_wl_negcache = None
+        self._app_wl_negcache_at = 0.0
+        # True once a resolved app compositor is confirmed distinct from the capture
+        # compositor; lets _has_separate_app_compositor answer without re-resolving.
+        self._app_wl_is_separate = False
         self.active_shortcut_modifiers = set()
         self.SHORTCUT_MODIFIER_XKEY_NAMES = {
             'Control_L', 'Control_R', 
@@ -1933,27 +1954,21 @@ class WebRTCInput:
         self._wl_keymap_owner = None
         self._wl_keymap_owner_lock = asyncio.Lock()
         self._wl_keymap_retry_at = 0.0
-        self.use_clipboard_fallback = False
-        # In-process zwp_virtual_keyboard_v1 client for compositors without
-        # the pixelflux keymap API; built lazily on first non-layout text. A
-        # compositor that lacks the protocol is re-probed on a cooldown only,
-        # so per-keystroke fallbacks stay cheap.
-        self._wl_typer = None
+        # One-shot zwp_virtual_keyboard_v1 injection via pixelflux, serialized so
+        # text commits keep their order. A compositor that lacks the protocol is
+        # re-probed on a cooldown only, so per-keystroke fallbacks stay cheap.
         self._wl_typer_lock = asyncio.Lock()
         self._wl_typer_retry_at = 0.0
-        self.clipboard_paused = False
         # Change-detection baseline shared by the monitor AND write_clipboard: content
         # this server just wrote must never be re-broadcast (client<->server echo loop),
         # and the baseline survives client reconnects so nothing is resent unchanged.
         self._clipboard_last_bytes = None
         self._x11_clipboard_monitor = None
-        self._wl_clipboard_watch_proc = None
-        # Debounce REQUEST_CLIPBOARD (Ctrl/Cmd+C): coalesce bursts so we don't spawn
-        # an xclip/wl-paste read per keypress (fork storm). Keyed per requesting
-        # connection so one client's copy can't suppress another client's read.
+        # Debounce REQUEST_CLIPBOARD (Ctrl/Cmd+C): coalesce bursts so a keypress
+        # storm can't stack clipboard reads. Keyed per requesting connection so
+        # one client's copy can't suppress another client's read.
         self._last_clipboard_request_ts = {}  # conn key -> last request (monotonic)
         self._clipboard_request_debounce = 0.25  # seconds
-        self.clipboard_injection_lock = asyncio.Lock()
         # Strong refs for fire-and-forget tasks: asyncio only weakly references
         # running tasks, so an unreferenced one can be garbage-collected mid-flight.
         self._bg_tasks = set()
@@ -1995,10 +2010,6 @@ class WebRTCInput:
         self.on_update_crf = lambda value, display_id="primary": logger_webrtc_input.warning("unhandled on_update_crf")
 
         if self.is_wayland:
-            if shutil.which("kwin_wayland"):
-                self.use_clipboard_fallback = True
-                logger_webrtc_input.info("kwin_wayland detected: enabling Clipboard-Input fallback for Unicode.")
-
             try:
                 if ScreenCapture is None:
                     raise RuntimeError("pixelflux is not installed")
@@ -2300,9 +2311,6 @@ class WebRTCInput:
         self.pressed_keys.clear()
         self.reaped_atomic_keys.clear()
         self.key_repeat_state.clear()
-        if self._wl_typer is not None:
-            typer, self._wl_typer = self._wl_typer, None
-            typer.close()
         # Drop any half-received multipart clipboard so a new connection can't inherit it.
         self._reset_multipart_clipboard()
 
@@ -2681,6 +2689,17 @@ class WebRTCInput:
                         )
                         self.xdisplay.flush()
                         return
+                    if self.keyboard:
+                        # In the map but not in the current layout (e.g. Cyrillic
+                        # keysyms on a US keymap): the shim overlay-binds it once
+                        # and reuses the binding — never a per-key xdotool fork,
+                        # whose transient rebind floods MappingNotify and lags
+                        # the whole input queue behind real typing.
+                        if down:
+                            self.keyboard.press(keysym)
+                        else:
+                            self.keyboard.release(keysym)
+                        return
                 except Exception as e:
                     logger_webrtc_input.debug(
                         f"XTEST inject failed for keysym {keysym}; falling back to xdotool: {e}"
@@ -2692,6 +2711,8 @@ class WebRTCInput:
                 await self._communicate_or_kill(process, 0.5, "xdotool key")
                 if process.returncode == 0:
                     return
+                logger_webrtc_input.warning(
+                    f"xdotool {action} failed (rc={process.returncode}) for keysym {keysym}")
             except Exception:
                 pass
 
@@ -2859,31 +2880,28 @@ class WebRTCInput:
             return self._wl_keymap_owner
 
     async def _wl_type_text(self, text):
-        """Inject text through the compositor's zwp_virtual_keyboard_manager_v1
-        (the in-process wtype equivalent). The client connection persists across
-        calls so the overlay keymap accumulates; a failed connection is dropped
-        and the next call reconnects. Raises when the compositor lacks the
-        protocol or the injection fails, so callers can degrade the same way
-        they would on any injection error."""
+        """Inject text through the app compositor's zwp_virtual_keyboard_manager_v1
+        via pixelflux's one-shot client (the in-process wtype equivalent). Raises
+        when the compositor lacks the protocol or the injection fails, so callers
+        can degrade the same way they would on any injection error."""
         async with self._wl_typer_lock:
-            if self._wl_typer is None:
-                if time.monotonic() < self._wl_typer_retry_at:
-                    raise WaylandVirtualKeyboardUnavailable(
-                        "compositor does not advertise zwp_virtual_keyboard_manager_v1"
-                        " (retry pending)")
-                display = self._app_wayland_display()
-                try:
-                    self._wl_typer = await WaylandVirtualKeyboard.connect(
-                        display=display)
-                except WaylandVirtualKeyboardUnavailable:
-                    self._wl_typer_retry_at = time.monotonic() + 30.0
-                    raise
-            typer = self._wl_typer
+            if time.monotonic() < self._wl_typer_retry_at:
+                raise RuntimeError(
+                    "compositor does not advertise zwp_virtual_keyboard_manager_v1"
+                    " (retry pending)")
+            display = self._app_wayland_display()
             try:
-                await typer.type_text(text)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, self.wayland_input.type_text_wayland, display, text)
+            except PixelfluxVkUnavailable:
+                self._wl_typer_retry_at = time.monotonic() + 30.0
+                raise
             except Exception:
-                self._wl_typer = None
-                typer.close()
+                if self._app_wl_is_separate:
+                    # The socket is unreachable (an auto-detected app compositor
+                    # died or restarted on a different name); re-detect next time
+                    # rather than keep aiming at a dead socket.
+                    self._invalidate_app_wl_display()
                 raise
 
     async def _xdotool_fallback(self, keysym_number, down=True):
@@ -2924,9 +2942,6 @@ class WebRTCInput:
                         pass
 
             if char_to_type:
-                if getattr(self, 'use_clipboard_fallback', False):
-                    await self._inject_unicode_via_clipboard(char_to_type)
-                    return
                 try:
                     await self._wl_type_text(char_to_type)
                 except Exception as e:
@@ -3010,52 +3025,6 @@ class WebRTCInput:
                         pass
         except (FileNotFoundError, asyncio.TimeoutError, Exception):
             pass
-
-    async def _inject_unicode_via_clipboard(self, text_to_type):
-        async with self.clipboard_injection_lock:
-            self.clipboard_paused = True
-            KEY_SHIFT_L = 0xFFE1
-            KEY_INSERT  = 0xFF63
-
-            currently_active_mods = list(self.active_modifiers)
-
-            try:
-                for mod_keysym in currently_active_mods:
-                    await self.send_x11_keypress(mod_keysym, down=False)
-
-                old_data, old_mime = await self.read_clipboard(use_binary=True)
-
-                mime_to_use = "UTF8_STRING" if not self.is_wayland else "text/plain"
-                await self.write_clipboard(text_to_type, mime_type=mime_to_use)
-                await asyncio.sleep(0.02)
-
-                await self.send_x11_keypress(KEY_SHIFT_L, down=True)
-                await self.send_x11_keypress(KEY_INSERT, down=True)
-                await self.send_x11_keypress(KEY_INSERT, down=False)
-                await self.send_x11_keypress(KEY_SHIFT_L, down=False)
-                await asyncio.sleep(0.05)
-
-                if old_data is not None:
-                    await self.write_clipboard(old_data, mime_type=old_mime or "text/plain")
-                elif self.is_wayland:
-                    try:
-                        proc = await subprocess.create_subprocess_exec(
-                            "wl-copy", "--clear",
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            env=self._get_wl_env()
-                        )
-                        await self._communicate_or_kill(proc, 1.0, "wl-copy --clear")
-                    except Exception:
-                        pass
-
-            except Exception as e:
-                logger_webrtc_input.error(f"Error during clipboard injection: {e}", exc_info=True)
-            finally:
-                for mod_keysym in currently_active_mods:
-                    if mod_keysym in self.active_modifiers:
-                        await self.send_x11_keypress(mod_keysym, down=True)
-
-                self.clipboard_paused = False
 
     async def send_x11_mouse(self, x, y, button_mask, scroll_magnitude, relative=False, display_id='primary'):
         # Clamp client-controlled magnitude so the X11 scroll loop can't block the event loop (DoS).
@@ -3281,10 +3250,16 @@ class WebRTCInput:
         the capture compositor never reach them. Resolution order: the explicit
         app_wayland_display setting; else the single other wayland-* socket in
         XDG_RUNTIME_DIR besides the capture compositor's; else the capture socket.
-        A distinct result is cached; the capture fallback is not, so a nested
-        compositor that appears after startup is picked up on a later call."""
+        A distinct result is cached permanently; the capture fallback is negative-
+        cached with a short TTL, so a nested compositor that appears after startup
+        is still picked up within a couple seconds without relisting per call."""
         if self._app_wl_display_cached is not None:
             return self._app_wl_display_cached
+        now = time.monotonic()
+        if (self._app_wl_negcache is not None
+                and (now - self._app_wl_negcache_at) < 2.0):
+            return self._app_wl_negcache
+        self._app_wl_negcache_at = now
         capture = self._wayland_display_name()
         override = (self.app_wayland_display or "").strip()
         if override:
@@ -3300,6 +3275,11 @@ class WebRTCInput:
                     if n.startswith("wayland-") and not n.endswith(".lock")
                     and n != cap_base
                     and _stat.S_ISSOCK(os.stat(os.path.join(runtime, n)).st_mode))
+                # Only a socket that actually accepts a connection qualifies: a stale
+                # wayland-* file left by a dead compositor would otherwise be adopted
+                # and silently break clipboard + input in an ordinary session.
+                others = [n for n in others
+                          if self._wl_socket_live(os.path.join(runtime, n))]
                 if len(others) == 1:
                     resolved = others[0]
                 elif len(others) > 1:
@@ -3311,7 +3291,23 @@ class WebRTCInput:
             logger_webrtc_input.debug(f"App-compositor autodetect failed: {e}")
         if resolved and resolved != capture:
             return self._adopt_app_wl_display(resolved, capture, "auto-detected")
+        self._app_wl_negcache = capture
         return capture
+
+    @staticmethod
+    def _wl_socket_live(path):
+        """True if a Wayland socket accepts a connection right now (rejecting a
+        stale socket file with no listener)."""
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.2)
+            try:
+                s.connect(path)
+                return True
+            finally:
+                s.close()
+        except OSError:
+            return False
 
     def _adopt_app_wl_display(self, resolved, capture, how):
         """Cache the resolved app compositor and, when it is distinct from the
@@ -3320,32 +3316,40 @@ class WebRTCInput:
         PIXELFLUX_APP_WAYLAND_DISPLAY / SELKIES_APP_WAYLAND_DISPLAY env fallback
         for standalone use without selkies."""
         self._app_wl_display_cached = resolved
-        if resolved != capture:
+        self._app_wl_negcache = None
+        self._app_wl_is_separate = resolved != capture
+        if self._app_wl_is_separate:
             logger_webrtc_input.info(
                 f"Wayland app compositor '{resolved}' ({how}); routing input + "
                 f"clipboard there, capture stays on '{capture}'.")
-            setter = getattr(self.wayland_input, "set_app_wayland_display", None)
-            if setter is not None:
-                try:
-                    setter(resolved)
-                except Exception as e:
-                    logger_webrtc_input.debug(
-                        f"pixelflux set_app_wayland_display failed: {e}")
+            try:
+                self.wayland_input.set_app_wayland_display(resolved)
+            except Exception as e:
+                logger_webrtc_input.debug(
+                    f"pixelflux set_app_wayland_display failed: {e}")
         return resolved
 
-    def _has_separate_app_compositor(self):
-        """True when apps live under a compositor distinct from pixelflux's
-        capture compositor, so pixelflux's keymap overlay and its own selection
-        never reach them."""
-        return self._app_wayland_display() != self._wayland_display_name()
+    def _invalidate_app_wl_display(self):
+        """Drop the cached app-compositor resolution so the next call re-detects
+        it — used when a connection to it fails (a nested compositor that died or
+        restarted on a different socket name)."""
+        if self._app_wl_display_cached:
+            try:
+                self.wayland_input.clipboard_unwatch_app(self._app_wl_display_cached)
+            except Exception:
+                pass
+        self._app_wl_display_cached = None
+        self._app_wl_is_separate = False
+        self._app_wl_negcache = None
+        self._app_wl_negcache_at = 0.0
 
-    def _get_wl_env(self):
-        # wl-clipboard/wl-paste run against the compositor apps use (the app
-        # compositor), not the capture compositor, so a copy actually reaches the
-        # focused app and a paste reads what it put on its selection.
-        env = os.environ.copy()
-        env["WAYLAND_DISPLAY"] = self._app_wayland_display()
-        return env
+    def _has_separate_app_compositor(self):
+        """True when apps live under a compositor distinct from pixelflux's own,
+        so pixelflux's keymap overlay and its selection never reach them. Resolves
+        (throttled) then reads the cached flag, so it costs no per-call FFI once
+        settled."""
+        self._app_wayland_display()
+        return self._app_wl_is_separate
 
     async def _get_file(self, file_path, target_mime):
         max_clipboard_file_size = 10 * 1024 * 1024
@@ -3409,13 +3413,41 @@ class WebRTCInput:
         server = self.data_server_instance or getattr(self.rtc_app, "data_streaming_server", None)
         return bool(server and getattr(server, "clients", None))
 
+    async def _app_clipboard_read(self, use_binary):
+        """Read the selection of the compositor the apps use over the pixelflux
+        data-control ABI; (None, None) when it is empty or unreadable."""
+        display = self._app_wayland_display()
+        read_fn = self.wayland_input.clipboard_read_app
+        loop = asyncio.get_running_loop()
+        try:
+            available_types = await loop.run_in_executor(
+                None, self.wayland_input.clipboard_types_app, display)
+            if use_binary:
+                image_mimes = ['image/png', 'image/jpeg', 'image/bmp', 'image/webp']
+                target_mime = next((m for m in image_mimes if m in available_types), None)
+                if target_mime:
+                    data = await loop.run_in_executor(
+                        None, read_fn, display, target_mime)
+                    if data:
+                        return bytes(data), target_mime
+            text_mimes = ['text/plain;charset=utf-8', 'text/plain',
+                          'UTF8_STRING', 'STRING', 'TEXT']
+            source_mime = next((m for m in text_mimes if m in available_types), None)
+            if source_mime:
+                data = await loop.run_in_executor(None, read_fn, display, source_mime)
+                if data is not None:
+                    return data.decode('utf-8', errors='replace'), 'text/plain'
+        except Exception as e:
+            logger_webrtc_input.warning(f"data-control clipboard read failed: {e}")
+        return None, None
+
     async def read_clipboard(self, use_binary=False):
-        """Reads clipboard. Native paths first (compositor cache on Wayland, the
-        XFixes monitor on X11); wl-paste/xclip forks are the fallback."""
+        """Reads clipboard. Wayland is fully native (compositor cache, else the
+        data-control client); X11 uses the XFixes monitor with an xclip fallback."""
         if self.is_wayland:
             # The compositor callback caches the capture compositor's selection;
             # with a separate app compositor that cache is the wrong session, so
-            # read the app compositor directly (wl-paste against its socket).
+            # the data-control client reads whichever socket the apps use.
             cached = (None if self._has_separate_app_compositor()
                       else getattr(self, '_wl_native_last', None))
             if cached is not None:
@@ -3425,47 +3457,7 @@ class WebRTCInput:
                         return bytes(raw), native_mime
                 else:
                     return bytes(raw).decode('utf-8', errors='replace'), 'text/plain'
-            try:
-                proc_types = await subprocess.create_subprocess_exec(
-                    "wl-paste", "--list-types",
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    env=self._get_wl_env()
-                )
-                stdout_types, _ = await self._communicate_or_kill(proc_types, 1.0, "wl-paste --list-types")
-                
-                if proc_types.returncode != 0:
-                    return None, None
-
-                available_types = stdout_types.decode().strip().split('\n')
-
-                if use_binary:
-                    image_mimes = ['image/png', 'image/jpeg', 'image/bmp', 'image/webp']
-                    target_mime = next((m for m in image_mimes if m in available_types), None)
-                    if target_mime:
-                        proc_data = await subprocess.create_subprocess_exec(
-                            "wl-paste", "--type", target_mime,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            env=self._get_wl_env()
-                        )
-                        stdout_data, _ = await self._communicate_or_kill(proc_data, 2.0, f"wl-paste --type {target_mime}")
-                        if proc_data.returncode == 0 and stdout_data:
-                            return stdout_data, target_mime
-                text_mimes = ['text/plain', 'text/plain;charset=utf-8', 'UTF8_STRING', 'STRING']
-                if any(t in available_types for t in text_mimes):
-                    proc_text = await subprocess.create_subprocess_exec(
-                        "wl-paste", "--no-newline", # Ensure exact content
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        env=self._get_wl_env()
-                    )
-                    stdout_text, _ = await self._communicate_or_kill(proc_text, 1.0, "wl-paste --no-newline")
-                    if proc_text.returncode == 0:
-                        return stdout_text.decode('utf-8', errors='replace'), 'text/plain'
-
-                return None, None
-
-            except Exception as e:
-                logger_webrtc_input.warning(f"Error reading Wayland clipboard: {e}")
-                return None, None
+            return await self._app_clipboard_read(use_binary)
         monitor = self._ensure_x11_clipboard_monitor()
         if monitor is not None:
             try:
@@ -3542,46 +3534,36 @@ class WebRTCInput:
         # client just sent is the echo loop that saturates the transport.
         self._clipboard_last_bytes = input_bytes
 
-        env = self._get_wl_env() if self.is_wayland else os.environ.copy()
-        if 'LANG' not in env or env['LANG'] == 'C':
-            env['LANG'] = 'C.UTF-8'
-
         if self.is_wayland:
-            # Native first: the capture compositor (pixelflux) owns the selection
-            # directly; the wl-copy fork below is the fallback for sessions without
-            # the API. A separate app compositor owns its own selection, so the
-            # native call would set the wrong session's clipboard -- skip straight
-            # to wl-copy against the app compositor.
-            if (self.wayland_input is not None
-                    and hasattr(self.wayland_input, 'set_clipboard')
-                    and not self._has_separate_app_compositor()):
+            # pixelflux's own selection is set in-process; a separate app
+            # compositor's through the data-control client.
+            if not self._has_separate_app_compositor():
                 try:
                     self.wayland_input.set_clipboard(mime_type, input_bytes)
                     return True
                 except Exception as e:
-                    logger_webrtc_input.warning(f"native wayland clipboard set failed, using wl-copy: {e}")
-            try:
-                cmd = ["wl-copy", "--type", mime_type]
-                process = await subprocess.create_subprocess_exec(
-                    *cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=env
-                )
-                if process.stdin:
-                    process.stdin.write(input_bytes)
-                    await process.stdin.drain()
-                    process.stdin.close()
-                await self._communicate_or_kill(process, 2.0, f"wl-copy --type {mime_type}")
-                if process.returncode == 0:
-                    return True
-                else:
-                    logger_webrtc_input.warning(f"wl-copy failed code: {process.returncode}")
+                    logger_webrtc_input.warning(f"native wayland clipboard set failed: {e}")
                     return False
+            # Apps paste whichever mime they prefer, so text is offered under
+            # every conventional text target.
+            if mime_type == "text/plain":
+                entries = [(m, input_bytes) for m in (
+                    "text/plain;charset=utf-8", "text/plain",
+                    "UTF8_STRING", "STRING", "TEXT")]
+            else:
+                entries = [(mime_type, input_bytes)]
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, self.wayland_input.clipboard_write_app,
+                    self._app_wayland_display(), entries)
+                return True
             except Exception as e:
-                logger_webrtc_input.warning(f"wl-copy exception: {e}")
+                logger_webrtc_input.warning(f"data-control clipboard write failed: {e}")
                 return False
+
+        env = os.environ.copy()
+        if 'LANG' not in env or env['LANG'] == 'C':
+            env['LANG'] = 'C.UTF-8'
         # Native first: own the selection on the monitor's connection; the xclip -i
         # fork below is the fallback (e.g. unsupported mime, monitor unavailable).
         monitor = self._ensure_x11_clipboard_monitor()
@@ -3633,33 +3615,6 @@ class WebRTCInput:
             self._x11_clipboard_monitor = None
         return self._x11_clipboard_monitor
 
-    async def _wait_wayland_clipboard_change(self, timeout):
-        """One long-lived `wl-paste --watch` process emits a line per selection
-        change; await one line (True) or timeout (False). Falls back to a plain
-        sleep (poll cadence) if wl-paste is missing."""
-        proc = self._wl_clipboard_watch_proc
-        if proc is None or proc.returncode is not None:
-            try:
-                proc = await subprocess.create_subprocess_exec(
-                    "wl-paste", "--watch", "echo", "1",
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    env=self._get_wl_env())
-                self._wl_clipboard_watch_proc = proc
-            except Exception:
-                self._wl_clipboard_watch_proc = None
-                await asyncio.sleep(timeout)
-                return True  # no watcher: behave like the old poll
-        try:
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout)
-            if line == b"":  # watcher died; retry next cycle
-                self._wl_clipboard_watch_proc = None
-                return False
-            # Coalesce bursts (wl-paste emits once per offer; apps can re-offer).
-            await asyncio.sleep(0.05)
-            return True
-        except asyncio.TimeoutError:
-            return False
-
     def _arm_wayland_native_clipboard(self):
         """Register the compositor clipboard callback (fork-free watch+read);
         returns the delivery queue, or None when the API is unavailable."""
@@ -3672,7 +3627,7 @@ class WebRTCInput:
 
             def _on_clip(mime, data):
                 # Cache for on-demand reads (cr/REQUEST_CLIPBOARD): the compositor
-                # already handed us the current selection, no wl-paste fork needed.
+                # already handed us the current selection.
                 self._wl_native_last = (bytes(data), mime)
 
                 def _put():
@@ -3688,7 +3643,32 @@ class WebRTCInput:
             logger_webrtc_input.info("Wayland clipboard: native compositor callback active (no polling).")
             return queue
         except Exception as e:
-            logger_webrtc_input.info(f"Wayland clipboard: native callback unavailable ({e}); using wl-paste watch.")
+            logger_webrtc_input.warning(f"Wayland clipboard: native callback failed to arm ({e}).")
+            return None
+
+    def _arm_app_compositor_watch(self):
+        """Selection-change signals from the app compositor over the pixelflux
+        data-control ABI (fork-free); returns the signal queue, or None when
+        arming failed (retried by the monitor loop)."""
+        watch_fn = self.wayland_input.clipboard_watch_app
+        try:
+            loop = asyncio.get_running_loop()
+            queue = asyncio.Queue(maxsize=4)
+
+            def _on_change(mimes):
+                def _put():
+                    if queue.full():
+                        queue.get_nowait()
+                    queue.put_nowait(mimes)
+                loop.call_soon_threadsafe(_put)
+
+            watch_fn(self._app_wayland_display(), _on_change)
+            logger_webrtc_input.info(
+                "Wayland clipboard: app-compositor data-control watch active (no forks).")
+            return queue
+        except Exception as e:
+            logger_webrtc_input.warning(
+                f"Wayland clipboard: app-compositor watch failed to arm ({e}).")
             return None
 
     async def start_clipboard(self):
@@ -3712,21 +3692,37 @@ class WebRTCInput:
         self.clipboard_running = True
         x11_monitor = self._ensure_x11_clipboard_monitor()
         # The compositor callback watches the capture compositor's selection; with
-        # a separate app compositor the apps' copies land on its selection, so fall
-        # to the wl-paste --watch path (one long-lived process) against it instead.
+        # a separate app compositor the apps' copies land on its selection, watched
+        # through the data-control client instead.
         wl_native_queue = (self._arm_wayland_native_clipboard()
                            if self.is_wayland and not self._has_separate_app_compositor()
                            else None)
         wl_native_item = None
+        # Data-control watch on the app compositor; (re)armed inside the loop so a
+        # nested session appearing after startup — or restarting on a new socket —
+        # is picked up.
+        app_watch_queue = None
+        app_watch_display = None
         # Prime the change signal so the first pass publishes current content once.
         first_pass = True
+        had_consumers = False
         try:
             while self.clipboard_running:
                 try:
-                    # Event-driven wait (XFixes / compositor callback / wl-paste
-                    # --watch); the timeout only re-checks liveness flags. Polling
+                    # Event-driven wait (XFixes / compositor callback / data-control
+                    # watch); the timeout only re-checks liveness flags. Polling
                     # remains as the last fallback.
                     wl_native_item = None
+                    if self.is_wayland and self._has_separate_app_compositor():
+                        disp = self._app_wayland_display()
+                        if app_watch_queue is None or disp != app_watch_display:
+                            q = self._arm_app_compositor_watch()
+                            if q is not None:
+                                app_watch_queue, app_watch_display = q, disp
+                    elif self.is_wayland and wl_native_queue is None:
+                        # Direct mode reached only now (a nested compositor died
+                        # or never appeared): arm the compositor callback late.
+                        wl_native_queue = self._arm_wayland_native_clipboard()
                     if first_pass:
                         changed = True
                         first_pass = False
@@ -3768,19 +3764,33 @@ class WebRTCInput:
                                     self._wl_native_deliver)
                             except Exception:
                                 pass
+                    elif app_watch_queue is not None:
+                        try:
+                            await asyncio.wait_for(app_watch_queue.get(), 2.0)
+                            changed = True
+                        except asyncio.TimeoutError:
+                            changed = False
                     elif self.is_wayland:
-                        changed = await self._wait_wayland_clipboard_change(2.0)
+                        # Neither watch armed yet (compositor briefly absent);
+                        # the arming above retries on the next tick.
+                        await asyncio.sleep(0.5)
+                        changed = False
                     else:
                         await asyncio.sleep(0.5)
                         changed = True  # poll cadence: read + compare below
 
+                    has_consumers = self._clipboard_has_consumers()
+                    if has_consumers and not had_consumers:
+                        # First consumer after a consumer-less stretch: publish the
+                        # current selection once, since change events during that
+                        # stretch were skipped (a copy made before any client
+                        # connected would otherwise never arrive). The baseline
+                        # compare below still suppresses unchanged re-sends.
+                        changed = True
+                    had_consumers = has_consumers
                     if not changed:
                         continue
-                    if not self._clipboard_has_consumers():
-                        # Keep the baseline: reconnecting clients must not trigger a
-                        # re-broadcast of unchanged content.
-                        continue
-                    if getattr(self, 'clipboard_paused', False):
+                    if not has_consumers:
                         continue
 
                     use_binary = self.enable_binary_clipboard in ["true", "out"]
@@ -3817,12 +3827,6 @@ class WebRTCInput:
         finally:
             self.clipboard_running = False
             self._clipboard_monitor_active = False
-            if self._wl_clipboard_watch_proc is not None:
-                try:
-                    self._wl_clipboard_watch_proc.kill()
-                except ProcessLookupError:
-                    pass
-                self._wl_clipboard_watch_proc = None
             logger_webrtc_input.info("Clipboard monitor stopped")
 
     def stop_clipboard(self):
@@ -3841,20 +3845,26 @@ class WebRTCInput:
         desktop layout applets, fcitx-xkb) lands here as a MappingNotify; without
         the refresh, keysym_to_keycode resolves against the dead layout and the
         overlay trusts bindings the switch wiped."""
-        if event.request == X.MappingPointer:
+        kb = self.keyboard
+        if event.request == X.MappingModifier:
+            # A modifier remap moves Shift/AltGr keycodes but not the overlay;
+            # our own overlay binds also surface as Modifier notifies on some
+            # servers, so clearing the overlay here would loop bind->notify->
+            # clear forever.
+            if kb is not None:
+                kb.refresh_modifier_keycodes()
+            return
+        if event.request != X.MappingKeyboard:
             return
         try:
-            if event.request == X.MappingKeyboard:
-                self.xdisplay.refresh_keyboard_mapping(event)
+            self.xdisplay.refresh_keyboard_mapping(event)
         except Exception as e:
             logger_webrtc_input.warning(f"keymap cache refresh failed: {e}")
-        kb = self.keyboard
         if kb is None:
             return
-        if (event.request == X.MappingKeyboard
-                and kb.owns_mapping_range(event.first_keycode, event.count)):
-            # Our own overlay bind: the refreshed cache now resolves the bound
-            # keysym; the overlay bookkeeping is authoritative, keep it.
+        if kb.bindings_intact():
+            # Our own overlay bind (or a change that left the overlay alone):
+            # the bookkeeping is authoritative, keep it.
             return
         logger_webrtc_input.info(
             "Foreign keymap change detected (request=%d, keycodes %d+%d): "
@@ -4059,17 +4069,13 @@ class WebRTCInput:
                 unicode_buffer.clear()
 
                 # Buffered text is, by construction, the non-layout-representable keysyms
-                # (Latin-1 accents, Euro, Unicode plane) and IME composition strings. Inject
-                # it as text — clipboard paste under KWin, zwp_virtual_keyboard under
-                # wlroots — never through the keymap, whose overlay swap is a non-op
-                # outside the English layout.
-                if getattr(self, 'use_clipboard_fallback', False):
-                    await self._inject_unicode_via_clipboard(combined_text)
-                else:
-                    try:
-                        await self._wl_type_text(combined_text)
-                    except Exception as e:
-                        logger_webrtc_input.warning(f"Batched virtual-keyboard injection failed: {e}")
+                # (Latin-1 accents, Euro, Unicode plane) and IME composition strings.
+                # Inject it as text through zwp_virtual_keyboard — never through the
+                # keymap, whose overlay swap is a non-op outside the English layout.
+                try:
+                    await self._wl_type_text(combined_text)
+                except Exception as e:
+                    logger_webrtc_input.warning(f"Batched virtual-keyboard injection failed: {e}")
 
         while True:
             try:
@@ -4089,8 +4095,14 @@ class WebRTCInput:
                         is_unicode_fallback = (0xA0 <= keysym <= 0xFF) or keysym == 0x20AC or ((keysym & 0xFF000000) == 0x01000000)
 
                     if msg_type == "kd":
-                        if (is_unicode_fallback and not self.active_modifiers
-                                and not native_inject()):
+                        # Modifier-held unicode normally goes through the seat so
+                        # the app sees the chord — but a nested app compositor
+                        # never resolves seat-overlay keysyms, so there the text
+                        # is typed anyway (plain, via the virtual keyboard)
+                        # rather than vanishing.
+                        if (is_unicode_fallback and not native_inject()
+                                and (not self.active_modifiers
+                                     or self._has_separate_app_compositor())):
                             unicode_codepoint = keysym & 0x00FFFFFF if (keysym & 0xFF000000) == 0x01000000 else keysym
                             try:
                                 char_to_type = chr(unicode_codepoint)

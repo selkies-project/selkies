@@ -470,6 +470,7 @@ class MediaPipelinePixel(MediaPipeline):
         # environment itself).
         cs.use_wayland = bool(app_settings.wayland[0])
         cs.recording_socket = str(getattr(app_settings, 'recording_socket', '') or '')
+        cs.wayland_host_display = str(getattr(app_settings, 'wayland_host_display', '') or '')
         cs.cursor_size = int(getattr(app_settings, 'cursor_size', -1))
         cap = int(self.get_cursor_size_cap() or 0)
         cs.cursor_size_cap = cap if cap > 0 else max(32, cs.cursor_size)

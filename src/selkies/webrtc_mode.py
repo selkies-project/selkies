@@ -322,7 +322,8 @@ class WebRTCService(BaseStreamingService):
             cursor_debug=self.args.debug_cursors,
             upload_dir=self.args.file_manager_path,
             is_wayland=IS_WAYLAND,
-            app_wayland_display=getattr(self.args, "app_wayland_display", ""),
+            app_wayland_display=(getattr(self.args, "app_wayland_display", "")
+                                 or getattr(self.args, "wayland_host_display", "")),
             # Duck-typed layout source: send_x11_mouse offsets a secondary
             # display's coordinates by display_layouts[display_id].
             data_server_instance=self,

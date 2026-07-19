@@ -873,7 +873,8 @@ class DataStreamingServer(BaseStreamingService):
             data_server_instance=self,
             is_wayland=IS_WAYLAND,
             wayland_socket_index=settings.wayland_socket_index,
-            app_wayland_display=settings.app_wayland_display,
+            app_wayland_display=(settings.app_wayland_display
+                                 or settings.wayland_host_display),
         )
 
         self.input_handler.on_clipboard_read = self.app.send_ws_clipboard_data
@@ -1311,7 +1312,13 @@ class DataStreamingServer(BaseStreamingService):
                     await websocket.send_str("PIPELINE_RESETTING primary")
                 except (ConnectionResetError, OSError, RuntimeError):
                     return
-                self._schedule_idr_for_display('primary')
+                # A controller tab-hide can tear the shared capture down while this
+                # viewer is mid-resume; an IDR request is then a no-op and the client,
+                # decoder freshly reset, would wait on its keyframe gate forever.
+                if 'primary' in self.capture_instances:
+                    self._schedule_idr_for_display('primary')
+                else:
+                    await self._ensure_viewer_capture()
             finally:
                 self._deferred_viewer_rejoins.pop(websocket, None)
 
@@ -2679,8 +2686,14 @@ class DataStreamingServer(BaseStreamingService):
                             display_sockets = {
                                 info.get('ws') for info in self.display_clients.values()
                             }
+                            # A viewer with a deferred rejoin pending is still in
+                            # video_paused_clients; counting it keeps the capture alive
+                            # under a waking viewer, while genuinely hidden viewers still
+                            # let an all-tabs-hidden session stop encoding.
+                            waking = set(self._deferred_viewer_rejoins)
                             remaining_viewers = (
-                                self.clients - display_sockets - self.video_paused_clients
+                                self.clients - display_sockets
+                                - (self.video_paused_clients - waking)
                             ) if client_display_id == 'primary' else set()
                             if remaining_viewers:
                                 data_logger.info(
@@ -4239,6 +4252,7 @@ class DataStreamingServer(BaseStreamingService):
         cs.auto_gpu = getattr(self.cli_args, 'auto_gpu', '') or ''
         cs.use_wayland = IS_WAYLAND
         cs.recording_socket = getattr(self.cli_args, 'recording_socket', '') or ''
+        cs.wayland_host_display = getattr(self.cli_args, 'wayland_host_display', '') or ''
         # Wayland compositor cursor-theme size (X11 cursor size is set on the X
         # server itself); <=0 keeps the theme default.
         cs.cursor_size = int(getattr(self.cli_args, 'cursor_size', -1))

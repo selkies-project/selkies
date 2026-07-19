@@ -430,10 +430,13 @@ class CentralizedStreamServer:
                 if socket_name:
                     # The compositor auto-picks the first free wayland-N socket;
                     # mirror its REAL name into os.environ so every child spawned
-                    # with a copied env (wl-copy, app launches, session hooks)
-                    # reaches this compositor. --wayland-socket-index remains only
-                    # a legacy hint for consumers without the pixelflux API.
-                    os.environ["WAYLAND_DISPLAY"] = socket_name
+                    # with a copied env (app launches, session hooks) reaches this
+                    # compositor. --wayland-socket-index remains only a legacy
+                    # hint for consumers without the pixelflux API. In host-capture
+                    # mode the apps live on the EXTERNAL compositor instead.
+                    host_display = str(
+                        getattr(self.settings, "wayland_host_display", "") or "")
+                    os.environ["WAYLAND_DISPLAY"] = host_display or socket_name
                     logger.info(f"Wayland compositor socket: {socket_name}")
                 else:
                     logger.warning(
