@@ -360,7 +360,9 @@ class RTCApp:
         client can treat the payload cache-only without time heuristics (old
         clients ignore the unknown field).
         """
-        if not data:
+        # An empty payload is only meaningful as a tagged reply (settling a
+        # client fetch against an empty server clipboard).
+        if not data and not reply_to:
             return
 
         is_text = mime_type == "text/plain"

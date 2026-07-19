@@ -6,6 +6,7 @@ import base64
 import io
 import re
 import os
+import signal
 import struct
 import time
 import sys
@@ -1181,8 +1182,8 @@ async def _run_xrdb(dpi_value, logger):
             f.write(config_content)
         logger.info(f"Wrote font and DPI settings to {xsettingsd_config_path}.")
 
-        if not which("pgrep") or not which("kill"):
-            logger.debug("pgrep or kill not found. Skipping xsettingsd reload.")
+        if not which("pgrep"):
+            logger.debug("pgrep not found. Skipping xsettingsd reload.")
         else:
             pgrep_proc = await subprocess.create_subprocess_exec(
                 "pgrep", "xsettingsd",
@@ -1193,17 +1194,12 @@ async def _run_xrdb(dpi_value, logger):
             if pgrep_proc.returncode == 0:
                 pid_output = pgrep_stdout.decode().strip()
                 if pid_output:
-                    pid = pid_output.splitlines()[0]
-                    logger.info(f"Found xsettingsd process with PID: {pid}.")
-                    kill_proc = await subprocess.create_subprocess_exec(
-                        "kill", "-1", pid,
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                    )
-                    _, kill_stderr = await _communicate_or_kill(kill_proc)
-                    if kill_proc.returncode == 0:
+                    pid = int(pid_output.splitlines()[0])
+                    try:
+                        os.kill(pid, signal.SIGHUP)
                         logger.info(f"Sent SIGHUP to xsettingsd process {pid} to reload config.")
-                    else:
-                        logger.warning(f"Failed to send SIGHUP to xsettingsd process {pid}. Error: {kill_stderr.decode().strip()}")
+                    except OSError as e:
+                        logger.warning(f"Failed to send SIGHUP to xsettingsd process {pid}: {e}")
             else:
                 logger.info("xsettingsd process not found. Skipping reload.")
         
@@ -1589,6 +1585,102 @@ def parse_dri_node_to_index(node_path: str) -> int:
     except (ValueError, IndexError) as e:
         logger.warning(f"Could not parse DRI node path '{node_path}': {e}. VA-API will be disabled.")
         return -1
+
+
+def apply_common_capture_settings(
+    cs,
+    server,
+    *,
+    is_wayland,
+    display_name,
+    scale,
+    framerate,
+    encoder,
+    use_cpu,
+    cbr,
+    bitrate_mbps,
+    crf,
+    paintover_crf,
+    paintover_burst,
+    fullcolor,
+    streaming,
+    use_paint_over_quality,
+    capture_cursor,
+    cursor_size_cap_hint=0,
+):
+    """Every CaptureSettings field the WebSocket and WebRTC paths share is
+    assigned here, once — a knob plumbed into only one path is a parity bug.
+    Callers keep the per-mode fields (geometry, output/JPEG mode, stripe-header
+    framing); `server` is the parsed Settings object for the global knobs, the
+    keyword arguments are the per-display ones each path resolves from its own
+    client state."""
+    cs.target_fps = float(framerate)
+    cs.capture_cursor = capture_cursor
+    cs.debug_logging = bool(server.debug[0])
+
+    cs.video_crf = crf
+    cs.video_paintover_crf = paintover_crf
+    cs.video_paintover_burst_frames = paintover_burst
+    cs.video_fullcolor = fullcolor
+    cs.video_streaming_mode = streaming
+    cs.video_fullframe = encoder in ("h264enc", "openh264enc")
+    cs.use_openh264 = encoder == "openh264enc"
+    cs.video_cbr_mode = cbr
+    cs.video_bitrate_kbps = int(round(float(bitrate_mbps) * 1000))
+    # 0 = infinite GOP (on-demand keyframes only).
+    cs.keyframe_interval_s = float(getattr(server, "keyframe_interval", 0) or 0)
+    # CBR QP clamp (0 = encoder default).
+    cs.video_min_qp = int(getattr(server, "video_min_qp", 0) or 0)
+    cs.video_max_qp = int(getattr(server, "video_max_qp", 0) or 0)
+    cs.use_cpu = bool(use_cpu) or encoder == "openh264enc"
+
+    cs.use_paint_over_quality = use_paint_over_quality
+    cs.paint_over_trigger_frames = 15
+    cs.damage_block_threshold = 10
+    cs.damage_block_duration = 20
+
+    # Forward explicit --encode-dri as an authoritative PATH; --gpu-id picks the
+    # encoder device by index when no path is given. Unset, pixelflux defaults to
+    # ID 0 — the first GPU — unless AUTO_GPU affinity aims it elsewhere.
+    dri_node = str(getattr(server, "encode_dri", "") or "")
+    gid = parse_gpu_id(getattr(server, "gpu_id", ""))
+    if dri_node:
+        cs.encode_node_path = dri_node.encode("utf-8")
+        cs.encode_node_index = parse_dri_node_to_index(dri_node)
+    elif gid is not None:
+        # >= 0 picks the device; -1 requests software encoding.
+        cs.encode_node_index = gid
+    # Compositor render node, distinct from the encoder node above: an explicit
+    # --render-dri wins; otherwise pixelflux resolves --auto-gpu ("true" or a
+    # vendor/driver/DT-prefix/PCI-id token) against the machine itself.
+    render_dri = str(getattr(server, "render_dri", "") or "")
+    if render_dri:
+        cs.render_node_path = render_dri.encode("utf-8")
+    cs.auto_gpu = str(getattr(server, "auto_gpu", "") or "")
+
+    cs.use_wayland = is_wayland
+    cs.recording_socket = str(getattr(server, "recording_socket", "") or "")
+    cs.wayland_host_display = str(getattr(server, "wayland_host_display", "") or "")
+    # Wayland compositor cursor-theme size (X11 cursor size is set on the X
+    # server itself); <=0 keeps the theme default. The cap tracks the input
+    # handler's DPI-scaled value so pixelflux's XFixes monitor caps like the
+    # python monitor did.
+    cs.cursor_size = int(getattr(server, "cursor_size", -1))
+    cap = int(cursor_size_cap_hint or 0)
+    cs.cursor_size_cap = cap if cap > 0 else max(32, cs.cursor_size)
+    if is_wayland:
+        cs.scale = scale
+        # Binds this capture to its compositor output ('display2' -> output 2);
+        # per-display IDR/rate/tunable calls route through the same id.
+        cs.display_id = wayland_output_id(display_name)
+
+    # Server-embedded watermark, burned into the frame by pixelflux on every
+    # backend. Kept server-side (never broadcast).
+    watermark_path = str(getattr(server, "watermark_path", "") or "")
+    if watermark_path and os.path.exists(watermark_path):
+        cs.watermark_path = watermark_path.encode("utf-8")
+        cs.watermark_location_enum = int(getattr(server, "watermark_location", -1))
+    return cs
 
 
 def unpremultiply_rgba(im):

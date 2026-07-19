@@ -4475,7 +4475,18 @@ class WebRTCInput:
                         # keep their heuristic).
                         await self.rtc_app.send_clipboard_data(
                             data, mime_type, reply_to="cr")
-                else: logger_webrtc_input.debug("No clipboard content to send on request")
+                else:
+                    # Reply even when empty: the tag settles the client's
+                    # connect-time fetch AND switches it to tagged replies, so a
+                    # real clipboard change seconds after connect is never
+                    # mistaken for the init snapshot and dropped.
+                    logger_webrtc_input.debug("No clipboard content; sending empty tagged reply")
+                    if getattr(self.rtc_app, "mode", None) == "websockets":
+                        await self.rtc_app.send_ws_clipboard_data(
+                            "", "text/plain", reply_to="cr")
+                    else:
+                        await self.rtc_app.send_clipboard_data(
+                            "", "text/plain", reply_to="cr")
             else: logger_webrtc_input.warning("Rejecting clipboard read: outbound clipboard disabled.")
         elif msg_type == "REQUEST_CLIPBOARD":
             # Client sends REQUEST_CLIPBOARD on Ctrl/Cmd+C and awaits the next

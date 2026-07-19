@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import time
 from asyncio import subprocess
 from collections import OrderedDict, deque
@@ -25,7 +24,7 @@ from aiohttp import web, WSMsgType
 from . import audio_config
 from . import gpu_stats
 from .display_utils import (
-    parse_dri_node_to_index,
+    apply_common_capture_settings,
     parse_gpu_id,
     format_pixelflux_cursor,
     get_new_res,
@@ -42,6 +41,7 @@ from .display_utils import (
     set_dpi,
     set_cursor_size,
     clamp_primary_feedback,
+    compute_dual_layout,
     parse_resize_dims,
     cursor_size_for_dpi,
     align_dims_16,
@@ -3197,18 +3197,19 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.info(f"Data WS handler for {raddr} finished all cleanup.")
 
     async def _run_detached_command(self, cmd_list: list, description: str):
-        """Runs a command via the shell using 'nohup ... &' to detach it from the server process."""
-        quoted_cmd = ' '.join(shlex.quote(c) for c in cmd_list)
-        shell_command = f"nohup {quoted_cmd} &"
-        data_logger.info(f"Running detached command ({description}): {shell_command}")
+        """Runs a command detached from the server process: its own session
+        (start_new_session) survives our exit and our signals, with no shell in
+        between."""
+        data_logger.info(f"Running detached command ({description}): {' '.join(cmd_list)}")
         try:
-            await asyncio.create_subprocess_shell(
-                shell_command,
+            await asyncio.create_subprocess_exec(
+                *cmd_list,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
             )
         except Exception as e:
-            data_logger.error(f"Failed to run detached command '{shell_command}': {e}")
+            data_logger.error(f"Failed to run detached command ({description}): {e}")
 
     async def _run_command(self, cmd, description, best_effort=False):
         """Helper to run a shell command and log its output/errors. best_effort=True
@@ -3545,30 +3546,18 @@ class DataStreamingServer(BaseStreamingService):
                 (p_w, p_h), getattr(self, 'display_layouts', None), position
             )
             if p_w > 0 and p_h > 0 and s_w > 0 and s_h > 0:
-                if position == 'right':
-                    layouts['primary'] = {'x': 0, 'y': 0, 'w': p_w, 'h': p_h}
-                    layouts[secondary_id] = {'x': p_w, 'y': 0, 'w': s_w, 'h': s_h}
-                    total_width, total_height = p_w + s_w, max(p_h, s_h)
-                elif position == 'left':
-                    layouts[secondary_id] = {'x': 0, 'y': 0, 'w': s_w, 'h': s_h}
-                    layouts['primary'] = {'x': s_w, 'y': 0, 'w': p_w, 'h': p_h}
-                    total_width, total_height = p_w + s_w, max(p_h, s_h)
-                elif position == 'down':
-                    layouts['primary'] = {'x': 0, 'y': 0, 'w': p_w, 'h': p_h}
-                    layouts[secondary_id] = {'x': 0, 'y': p_h, 'w': s_w, 'h': s_h}
-                    total_width, total_height = max(p_w, s_w), p_h + s_h
-                elif position == 'up':
-                    layouts[secondary_id] = {'x': 0, 'y': 0, 'w': s_w, 'h': s_h}
-                    layouts['primary'] = {'x': 0, 'y': s_h, 'w': p_w, 'h': p_h}
-                    total_width, total_height = max(p_w, s_w), p_h + s_h
+                computed, total_width, total_height = compute_dual_layout(
+                    (p_w, p_h), (s_w, s_h), position
+                )
+                layouts['primary'] = computed['primary']
+                layouts[secondary_id] = computed['secondary']
         if total_width == 0 or total_height == 0:
             data_logger.error("Calculated total display size is zero. Aborting reconfiguration.")
             await self._signal_all_displays_stopped()
             return
-        aligned_total_width = (total_width + 7) & ~7
-        if aligned_total_width != total_width:
-            data_logger.info(f"Aligned total width from {total_width} to {aligned_total_width} for xrandr.")
-            total_width = aligned_total_width
+        # Dual layouts come back pre-aligned; the single-display total still
+        # needs the xrandr framebuffer alignment.
+        total_width = (total_width + 7) & ~7
         self.display_layouts = layouts
         data_logger.info(f"Layout calculated: Total Size={total_width}x{total_height}. Layouts: {layouts}")
 
@@ -4189,83 +4178,37 @@ class DataStreamingServer(BaseStreamingService):
         cs.capture_height = height
         cs.capture_x = x
         cs.capture_y = y
-        if IS_WAYLAND:
-            cs.scale = display_state.get('scale', 1.0)
-            # Binds this capture to its compositor output ('display2' -> output 2);
-            # per-display IDR/rate/tunable calls route through the same id.
-            cs.display_id = wayland_output_id(display_id)
-        cs.target_fps = float(display_state.get('framerate', self.app.framerate))
-        cs.capture_cursor = self.capture_cursor
-        cs.debug_logging = self.cli_args.debug[0]
-        
         encoder = display_state.get('encoder', self.app.encoder)
         if encoder == "jpeg":
             cs.output_mode = 0
             cs.jpeg_quality = display_state.get('jpeg_quality', self._initial_jpeg_quality)
             cs.paint_over_jpeg_quality = display_state.get('paint_over_jpeg_quality', self._initial_paint_over_jpeg_quality)
-        else: # H.264 modes
+        else:
             cs.output_mode = 1
-            cs.video_crf = display_state.get('video_crf', self._initial_video_crf)
-            cs.video_paintover_crf = display_state.get('video_paintover_crf', self._initial_video_paintover_crf)
-            cs.video_paintover_burst_frames = display_state.get('video_paintover_burst_frames', self._initial_video_paintover_burst_frames)
-            cs.video_fullcolor = display_state.get('video_fullcolor', self._initial_video_fullcolor)
-            cs.video_streaming_mode = display_state.get('video_streaming_mode', self._initial_video_streaming_mode)
-            cs.video_fullframe = (encoder in ("h264enc", "openh264enc"))
-            cs.use_openh264 = (encoder == "openh264enc")
-            rc_mode = display_state.get('rate_control_mode', settings.rate_control_mode)
-            cs.video_cbr_mode = (rc_mode == 'cbr')
-            video_bitrate = display_state.get('video_bitrate', self._initial_video_bitrate)
-            cs.video_bitrate_kbps = int(round(float(video_bitrate) * 1000))  # Convert Mbps to kbps
-            # 0 = infinite GOP (on-demand keyframes only).
-            cs.keyframe_interval_s = float(getattr(settings, 'keyframe_interval', 0) or 0)
-            # CBR QP clamp (0 = encoder default).
-            cs.video_min_qp = int(getattr(settings, 'video_min_qp', 0) or 0)
-            cs.video_max_qp = int(getattr(settings, 'video_max_qp', 0) or 0)
-
-        cs.use_paint_over_quality = display_state.get('use_paint_over_quality', self._initial_use_paint_over_quality)
-        cs.paint_over_trigger_frames = 15
-        cs.damage_block_threshold = 10
-        cs.damage_block_duration = 20
-        cs.use_cpu = display_state.get('use_cpu', self._initial_use_cpu)
         # Zero-copy delivery: aiohttp may retain a memoryview of the encoded buffer past
         # send_bytes, so we keep the owning StripeFrame alive behind any live view/slice; it
         # frees the buffer once the last reference drops. pixelflux frames always own their
         # buffer (JPEG emits its 0x03 wire header natively like H.264), so every mode is zero-copy.
-
-        # Forward explicit --encode-dri as an authoritative PATH; --gpu-id picks the
-        # encoder device by index when no path is given. Unset, pixelflux defaults to
-        # ID 0 — the first GPU — unless AUTO_GPU affinity aims it elsewhere.
-        dri_node = self.cli_args.encode_dri
-        gid = parse_gpu_id(getattr(self.cli_args, 'gpu_id', ''))
-        if dri_node:
-            cs.encode_node_path = dri_node.encode('utf-8')
-            cs.encode_node_index = parse_dri_node_to_index(dri_node)
-        elif gid is not None:
-            # >= 0 picks the device; -1 requests software encoding.
-            cs.encode_node_index = gid
-        # Compositor render node, distinct from the encoder node above: an explicit
-        # --render-dri wins; otherwise pixelflux resolves --auto-gpu ("true" or a
-        # vendor/driver/DT-prefix/PCI-id token) against the machine itself.
-        render_dri = getattr(self.cli_args, 'render_dri', '') or ''
-        if render_dri:
-            cs.render_node_path = render_dri.encode('utf-8')
-        cs.auto_gpu = getattr(self.cli_args, 'auto_gpu', '') or ''
-        cs.use_wayland = IS_WAYLAND
-        cs.recording_socket = getattr(self.cli_args, 'recording_socket', '') or ''
-        cs.wayland_host_display = getattr(self.cli_args, 'wayland_host_display', '') or ''
-        # Wayland compositor cursor-theme size (X11 cursor size is set on the X
-        # server itself); <=0 keeps the theme default.
-        cs.cursor_size = int(getattr(self.cli_args, 'cursor_size', -1))
-        # Out-of-band delivery cap: track the input handler's DPI-scaled value
-        # so pixelflux's XFixes monitor caps like the python monitor did.
         ih = getattr(self, 'input_handler', None)
-        cs.cursor_size_cap = int(getattr(ih, 'cursor_size_cap', 0) or 0) or max(32, cs.cursor_size)
-
-        watermark_path_str = self.cli_args.watermark_path
-        if watermark_path_str and os.path.exists(watermark_path_str):
-            cs.watermark_path = watermark_path_str.encode('utf-8')
-            cs.watermark_location_enum = self.cli_args.watermark_location
-        
+        apply_common_capture_settings(
+            cs, self.cli_args,
+            is_wayland=IS_WAYLAND,
+            display_name=display_id,
+            scale=display_state.get('scale', 1.0),
+            framerate=display_state.get('framerate', self.app.framerate),
+            encoder=encoder,
+            use_cpu=display_state.get('use_cpu', self._initial_use_cpu),
+            cbr=display_state.get('rate_control_mode', settings.rate_control_mode) == 'cbr',
+            bitrate_mbps=display_state.get('video_bitrate', self._initial_video_bitrate),
+            crf=display_state.get('video_crf', self._initial_video_crf),
+            paintover_crf=display_state.get('video_paintover_crf', self._initial_video_paintover_crf),
+            paintover_burst=display_state.get('video_paintover_burst_frames', self._initial_video_paintover_burst_frames),
+            fullcolor=display_state.get('video_fullcolor', self._initial_video_fullcolor),
+            streaming=display_state.get('video_streaming_mode', self._initial_video_streaming_mode),
+            use_paint_over_quality=display_state.get('use_paint_over_quality', self._initial_use_paint_over_quality),
+            capture_cursor=self.capture_cursor,
+            cursor_size_cap_hint=int(getattr(ih, 'cursor_size_cap', 0) or 0),
+        )
         return cs
     
     async def run(self):

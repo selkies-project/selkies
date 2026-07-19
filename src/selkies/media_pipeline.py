@@ -29,8 +29,7 @@ from abc import ABCMeta, abstractmethod
 from typing import Callable, Awaitable
 
 from .settings import settings as app_settings
-from .display_utils import (parse_dri_node_to_index, parse_gpu_id,
-                            format_pixelflux_cursor, wayland_output_id)
+from .display_utils import apply_common_capture_settings, format_pixelflux_cursor
 
 # C-API (non-abi3) wheels: a missing/ABI-skewed build raises ImportError or
 # RuntimeError at import. Degrade to None so plain WS mode and module import
@@ -409,83 +408,31 @@ class MediaPipelinePixel(MediaPipeline):
             cs.capture_x = 0
             cs.capture_y = 0
             cs.auto_adjust_screen_capture_size = True
-        cs.target_fps = float(self.framerate)
-        cs.capture_cursor = self.capture_cursor
         cs.output_mode = 1
         # WebRTC has its own RTP framing; omit pixelflux's per-stripe header on both
         # backends (the Wayland backend now supports omission) so there's no Python
         # strip. frame_id comes from the frame attribute, not the header.
         self._omit_stripe_headers = True
         cs.omit_stripe_headers = self._omit_stripe_headers
-
-        if self.encoder_rtc in ["h264enc", "openh264enc"]:
-            cs.video_streaming_mode = self.video_streaming_mode
-            cs.video_fullframe = True
-            cs.video_crf = self.video_crf
-            # 4:4:4 rides the same policy as the WS path: NVENC/x264 honor it,
-            # VAAPI falls back to software x264, OpenH264 surfaces 4:2:0-only.
-            cs.video_fullcolor = self.video_fullcolor
-            # Paint-over quality (static-scene refinement); applied live like CRF.
-            cs.use_paint_over_quality = self.use_paint_over_quality
-            cs.video_paintover_crf = self.video_paintover_crf
-            cs.video_paintover_burst_frames = self.video_paintover_burst_frames
-            # Setting video_cbr_mode to True will make the encoder ignore the crf value
-            cs.video_cbr_mode = self.rc_mode == RateControlMode.CBR
-            cs.video_bitrate_kbps = int(round(float(self.video_bitrate) * 1000))  # Convert Mbps to kbps
-            if self.encoder_rtc == "openh264enc":
-                cs.use_cpu = True
-                cs.use_openh264 = True
-            elif self.use_cpu:
-                # Honor use_cpu for h264enc too (parity with the WS path): force
-                # software x264 instead of selecting a hardware encoder node.
-                cs.use_cpu = True
-            else:
-                # h264enc is hardware-first like the WS path — pixelflux picks NVENC
-                # or VA-API when present and falls back to software x264 otherwise.
-                # --gpu-id picks the device by index when no --encode-dri path is given.
-                dri_node = str(getattr(app_settings, 'encode_dri', '') or '')
-                gid = parse_gpu_id(getattr(app_settings, 'gpu_id', ''))
-                if dri_node:
-                    cs.encode_node_path = dri_node.encode('utf-8')
-                    cs.encode_node_index = parse_dri_node_to_index(dri_node)
-                elif gid is not None:
-                    # >= 0 picks the device; -1 requests software encoding.
-                    cs.encode_node_index = gid
-            # 0 = infinite GOP; recovery IDRs come on demand (PLI -> dynamic IDR).
-            cs.keyframe_interval_s = float(
-                getattr(app_settings, 'keyframe_interval', 0) or 0
-            )
-            # CBR QP clamp (0 = encoder default).
-            cs.video_min_qp = int(getattr(app_settings, 'video_min_qp', 0) or 0)
-            cs.video_max_qp = int(getattr(app_settings, 'video_max_qp', 0) or 0)
-            # Compositor render node, distinct from the encoder node above: an
-            # explicit --render-dri wins; otherwise pixelflux resolves --auto-gpu
-            # ("true" or a vendor/driver/DT-prefix/PCI-id token) itself.
-            render_dri = str(getattr(app_settings, 'render_dri', '') or '')
-            if render_dri:
-                cs.render_node_path = render_dri.encode('utf-8')
-            cs.auto_gpu = str(getattr(app_settings, 'auto_gpu', '') or '')
-        # Backend choice, the H.264 recording tap, and the compositor cursor-theme
-        # size ride the settings pipeline into pixelflux (it reads no SELKIES_*
-        # environment itself).
-        cs.use_wayland = bool(app_settings.wayland[0])
-        cs.recording_socket = str(getattr(app_settings, 'recording_socket', '') or '')
-        cs.wayland_host_display = str(getattr(app_settings, 'wayland_host_display', '') or '')
-        cs.cursor_size = int(getattr(app_settings, 'cursor_size', -1))
-        cap = int(self.get_cursor_size_cap() or 0)
-        cs.cursor_size_cap = cap if cap > 0 else max(32, cs.cursor_size)
-        cs.debug_logging = bool(app_settings.debug[0])
-        if cs.use_wayland:
-            cs.scale = self.scale
-            # Binds this capture to its compositor output ('display2' -> output 2);
-            # per-display IDR/rate/tunable calls route through the same id.
-            cs.display_id = wayland_output_id(self.display_id)
-        # Server-embedded watermark, burned into the frame by pixelflux on both
-        # backends. Kept server-side (never broadcast), so it must be set here too.
-        watermark_path = str(getattr(app_settings, 'watermark_path', '') or '')
-        if watermark_path and os.path.exists(watermark_path):
-            cs.watermark_path = watermark_path.encode('utf-8')
-            cs.watermark_location_enum = int(getattr(app_settings, 'watermark_location', -1))
+        apply_common_capture_settings(
+            cs, app_settings,
+            is_wayland=bool(app_settings.wayland[0]),
+            display_name=self.display_id,
+            scale=self.scale,
+            framerate=self.framerate,
+            encoder=self.encoder_rtc,
+            use_cpu=self.use_cpu,
+            cbr=self.rc_mode == RateControlMode.CBR,
+            bitrate_mbps=self.video_bitrate,
+            crf=self.video_crf,
+            paintover_crf=self.video_paintover_crf,
+            paintover_burst=self.video_paintover_burst_frames,
+            fullcolor=self.video_fullcolor,
+            streaming=self.video_streaming_mode,
+            use_paint_over_quality=self.use_paint_over_quality,
+            capture_cursor=self.capture_cursor,
+            cursor_size_cap_hint=int(self.get_cursor_size_cap() or 0),
+        )
         return cs
 
     def _screen_capture_callback(self, frame):

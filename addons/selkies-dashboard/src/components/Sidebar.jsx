@@ -2180,6 +2180,10 @@ function Sidebar() {
 
   useEffect(() => {
     const readStats = () => {
+      // The stats only render inside the open sidebar; skip the ~15 setState
+      // calls (each a full Sidebar re-render) while it is closed or the tab
+      // is hidden.
+      if (!isOpen || document.hidden) return;
       const cs = window.system_stats,
         su = cs?.mem_used ?? null,
         st = cs?.mem_total ?? null;

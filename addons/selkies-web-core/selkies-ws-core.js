@@ -286,6 +286,13 @@ let multipartClipboard = {
     receivedSize: 0,
     inProgress: false
 };
+// Decoded byte length of a base64 string (length + padding arithmetic), so
+// multipart progress tracks without decoding anything on the main thread.
+const base64DecodedSize = (b64) => {
+    if (!b64) return 0;
+    const pad = b64.endsWith('==') ? 2 : (b64.endsWith('=') ? 1 : 0);
+    return (b64.length / 4) * 3 - pad;
+};
 // The connect-time 'cr' pull is cache-only: its reply must populate the
 // clipboardSync cache/preview but NEVER be written to the local clipboard —
 // that would clobber whatever the user copied just before connecting
@@ -4994,15 +5001,12 @@ function initWebsockets() {
         } else if (event.data.startsWith('clipboard_data,')) {
             if (multipartClipboard.inProgress) {
                 try {
+                    // Accumulate base64 as-is; one worker decode at finish keeps
+                    // every per-chunk atob + byte copy off the main thread
+                    // (mirrors the WebRTC core).
                     const base64Chunk = event.data.substring(15);
-                    const binaryString = atob(base64Chunk);
-                    const len = binaryString.length;
-                    const bytes = new Uint8Array(len);
-                    for (let i = 0; i < len; i++) {
-                        bytes[i] = binaryString.charCodeAt(i);
-                    }
-                    multipartClipboard.data.push(bytes);
-                    multipartClipboard.receivedSize += bytes.byteLength;
+                    multipartClipboard.data.push(base64Chunk);
+                    multipartClipboard.receivedSize += base64DecodedSize(base64Chunk);
                 } catch (e) {
                     console.error('Error processing multi-part clipboard chunk:', e);
                     multipartClipboard.inProgress = false;
@@ -5014,30 +5018,32 @@ function initWebsockets() {
                 if (multipartClipboard.receivedSize !== multipartClipboard.totalSize) {
                     console.error('Multipart clipboard size mismatch. Aborting.');
                 } else {
-                    try {
-                        const blob = new Blob(multipartClipboard.data, { type: multipartClipboard.mimeType });
-                        // The connect-time 'cr' reply is cache-only — never
-                        // written locally (consumed before the async decode).
-                        const isInitClipboardFetch = consumeInitClipboardFetch();
-                        if (multipartClipboard.mimeType === 'text/plain') {
-                            blob.text().then(text => {
-                                // Cache + settle any pending Ctrl/Cmd+C copy promise.
-                                clipboardSync.resolveServer(text, null, 'text/plain');
-                                // Local write is gated per-direction (server->client = out)
-                                // and retried on the next gesture when the browser
-                                // demands activation.
-                                if (!isInitClipboardFetch && clipboard_out_enabled) {
-                                    deferredClipboardWriter.write(
-                                        () => navigator.clipboard.writeText(text), {
-                                            onFailure: (err) => console.error('Could not copy server clipboard text to local: ' + err),
-                                        });
-                                }
-                                window.postMessage(clipboardPreviewMessage(text), window.location.origin);
-                            });
+                    // The connect-time 'cr' reply is cache-only — never written
+                    // locally (consumed before the async decode so message order
+                    // still defines which payload settles the fetch).
+                    const isInitClipboardFetch = consumeInitClipboardFetch();
+                    const mpMime = multipartClipboard.mimeType;
+                    const fullBase64 = multipartClipboard.data.join('');
+                    clipboardWorker.decode(fullBase64, mpMime).then(({ result }) => {
+                        if (mpMime === 'text/plain') {
+                            const text = result;
+                            // Cache + settle any pending Ctrl/Cmd+C copy promise.
+                            clipboardSync.resolveServer(text, null, 'text/plain');
+                            // Local write is gated per-direction (server->client = out)
+                            // and retried on the next gesture when the browser
+                            // demands activation.
+                            if (!isInitClipboardFetch && clipboard_out_enabled) {
+                                deferredClipboardWriter.write(
+                                    () => navigator.clipboard.writeText(text), {
+                                        onFailure: (err) => console.error('Could not copy server clipboard text to local: ' + err),
+                                    });
+                            }
+                            window.postMessage(clipboardPreviewMessage(text), window.location.origin);
                         } else if (clipboard_out_enabled) {
+                            const bytes = result;
+                            const blob = new Blob([bytes], { type: mpMime });
                             // Settle any pending Ctrl/Cmd+C copy promise with the image blob.
-                            clipboardSync.resolveServer(undefined, blob, multipartClipboard.mimeType, multipartClipboard.data);
-                            const mpMime = multipartClipboard.mimeType;
+                            clipboardSync.resolveServer(undefined, blob, mpMime, bytes);
                             if (!isInitClipboardFetch) {
                                 deferredClipboardWriter.write(
                                     () => writeImageToLocalClipboard(blob, mpMime), {
@@ -5051,9 +5057,9 @@ function initWebsockets() {
                                     });
                             }
                         }
-                    } catch (e) {
+                    }).catch((e) => {
                         console.error('Error assembling final clipboard content:', e);
-                    }
+                    });
                 }
                 multipartClipboard.inProgress = false;
                 multipartClipboard.data = [];
@@ -5075,55 +5081,59 @@ function initWebsockets() {
                 }
                 const mimeType = parts[1];
                 const base64Data = parts[2];
-                const binaryString = atob(base64Data);
-                const len = binaryString.length;
-                const bytes = new Uint8Array(len);
-                for (let i = 0; i < len; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
-                const blob = new Blob([bytes], { type: mimeType });
-                // Settle any pending Ctrl/Cmd+C copy promise with this fresh
-                // image blob (binary requests resolve to the Blob, text to its text()).
-                clipboardSync.resolveServer(undefined, blob, mimeType, bytes);
-                // The connect-time 'cr' reply is cache-only — never written locally.
-                if (consumeInitClipboardFetch()) return;
-                deferredClipboardWriter.write(
-                    () => writeImageToLocalClipboard(blob, mimeType), {
-                        onSuccess: () => {
-                            console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
-                            clipboardSync.captureLocalImageSig();
-                            const uiText = `Image (${mimeType}) received from session and copied to clipboard.`;
-                            window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
-                        },
-                        onFailure: (err) => console.error('Failed to write image to clipboard:', err),
-                    });
+                // The connect-time 'cr' reply is cache-only — never written
+                // locally (consumed before the async decode); the base64 decode
+                // itself runs in the worker so a multi-MB image never stalls
+                // the main thread.
+                const isInitClipboardFetch = consumeInitClipboardFetch();
+                clipboardWorker.decode(base64Data, mimeType).then(({ result }) => {
+                    const bytes = result;
+                    const blob = new Blob([bytes], { type: mimeType });
+                    // Settle any pending Ctrl/Cmd+C copy promise with this fresh
+                    // image blob (binary requests resolve to the Blob, text to its text()).
+                    clipboardSync.resolveServer(undefined, blob, mimeType, bytes);
+                    if (isInitClipboardFetch) return;
+                    deferredClipboardWriter.write(
+                        () => writeImageToLocalClipboard(blob, mimeType), {
+                            onSuccess: () => {
+                                console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
+                                clipboardSync.captureLocalImageSig();
+                                const uiText = `Image (${mimeType}) received from session and copied to clipboard.`;
+                                window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
+                            },
+                            onFailure: (err) => console.error('Failed to write image to clipboard:', err),
+                        });
+                }).catch((e) => {
+                    console.error('Error processing binary clipboard data from server:', e);
+                });
             } catch (e) {
                 console.error('Error processing binary clipboard data from server:', e);
             }
         } else if (event.data.startsWith('clipboard,')) {
           try {
             const base64Payload = event.data.substring(10);
-            const binaryString = atob(base64Payload);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            const decodedText = new TextDecoder().decode(bytes);
-            // Cache + settle any pending Ctrl/Cmd+C copy promise with this fresh
-            // text (resolves the ClipboardItem created in the keydown handler).
-            clipboardSync.resolveServer(decodedText, null, 'text/plain');
-            // Local write is gated per-direction (server->client = out) and
-            // retried on the next gesture when the browser demands activation.
-            // The connect-time 'cr' reply is cache-only — never written locally.
-            if (!consumeInitClipboardFetch() && clipboard_out_enabled) {
-                deferredClipboardWriter.write(
-                    () => navigator.clipboard.writeText(decodedText), {
-                        onFailure: (err) => console.error('Could not copy server clipboard to local: ' + err),
-                    });
-            }
-            window.postMessage(clipboardPreviewMessage(decodedText), window.location.origin);
-
+            // Gate decisions happen synchronously (message order defines the
+            // connect-time fetch); the base64 decode runs in the worker so a
+            // multi-MB paste never stalls the main thread.
+            const writeLocal = !consumeInitClipboardFetch() && clipboard_out_enabled;
+            clipboardWorker.decode(base64Payload, 'text/plain').then(({ result }) => {
+                const decodedText = result;
+                // Cache + settle any pending Ctrl/Cmd+C copy promise with this fresh
+                // text (resolves the ClipboardItem created in the keydown handler).
+                clipboardSync.resolveServer(decodedText, null, 'text/plain');
+                // Local write is gated per-direction (server->client = out) and
+                // retried on the next gesture when the browser demands activation.
+                // The connect-time 'cr' reply is cache-only — never written locally.
+                if (writeLocal) {
+                    deferredClipboardWriter.write(
+                        () => navigator.clipboard.writeText(decodedText), {
+                            onFailure: (err) => console.error('Could not copy server clipboard to local: ' + err),
+                        });
+                }
+                window.postMessage(clipboardPreviewMessage(decodedText), window.location.origin);
+            }).catch((e) => {
+                console.error('Error processing clipboard data:', e);
+            });
           } catch (e) {
             console.error('Error processing clipboard data:', e);
           }
