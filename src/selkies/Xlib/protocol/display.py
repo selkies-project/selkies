@@ -68,7 +68,7 @@ class Display(object):
     error_classes = error.xerror_class.copy()
     event_classes = event.event_class.copy()
 
-    def __init__(self, display = None):
+    def __init__(self, display = None, blocking_timeout = None):
         name, protocol, host, displayno, screenno = connect.get_display(display)
 
         self.display_name = name
@@ -93,8 +93,10 @@ class Display(object):
         # freezing the caller. Event waits are never bounded — a quiet server
         # sending no events is not an error. socket.settimeout does not help
         # here: the blocking wait is a select(), which settimeout does not
-        # affect.
-        self.blocking_timeout = None
+        # affect. Set before the connection setup below so the bound covers the
+        # setup handshake too — a server hung under another client's grab
+        # otherwise blocks construction indefinitely.
+        self.blocking_timeout = blocking_timeout
 
         # Event queue
         self.event_queue_read_lock = lock.allocate_lock()

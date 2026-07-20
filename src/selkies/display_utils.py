@@ -105,18 +105,15 @@ def _module_display():
     the process lifetime and retains its resources past disconnect."""
     global _x11_conn
     if _x11_conn is None:
-        conn = x11_display.Display()
+        # An alive-but-unresponsive X server (driver hang, a foreign client's
+        # server grab) would otherwise block these helpers forever — first in
+        # the connection handshake, then in any reply wait — while they hold
+        # _x11_lock, and every retry then parks another executor thread behind
+        # that lock. The bound makes both raise ConnectionClosedError instead;
+        # the helpers drop this connection and fall back to their subprocess
+        # paths.
+        conn = x11_display.Display(blocking_timeout=15.0)
         conn.set_close_down_mode(x11_X.RetainPermanent)
-        try:
-            # An alive-but-unresponsive X server (driver hang, a foreign
-            # client's server grab) would otherwise block these helpers forever
-            # waiting for a reply while they hold _x11_lock — and every retry
-            # then parks another executor thread behind that lock. Bound the
-            # reply wait so it raises ConnectionClosedError instead; the helpers
-            # drop this connection and fall back to their subprocess paths.
-            conn.display.blocking_timeout = 15.0
-        except Exception:
-            pass
         conn.sync()
         _x11_conn = conn
     return _x11_conn

@@ -3003,6 +3003,14 @@ class DataStreamingServer(BaseStreamingService):
                 rejoin_task.cancel()
             client_permissions.pop(websocket, None)
             data_logger.info(f"Cleaning up Data WS handler for {raddr} (Display ID: {client_display_id})...")
+            # Release gamepad slots this connection associated: a tab that dies
+            # mid-press never sends 'js,d', and a held button would stay stuck on
+            # the virtual pad until some future client re-drove it.
+            if self.input_handler and hasattr(self.input_handler, "release_gamepads_for_conn"):
+                try:
+                    await self.input_handler.release_gamepads_for_conn(id(websocket))
+                except Exception as e:
+                    data_logger.warning(f"Gamepad release on disconnect failed: {e}")
 
             self.clients.discard(websocket)
             if self.data_ws is websocket:

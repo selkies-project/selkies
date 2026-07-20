@@ -473,6 +473,7 @@ class WebRTCService(BaseStreamingService):
         self.rtc_app.on_data_close = lambda: logger.info("Data channel closed")
         self.rtc_app.on_data_error = lambda e: logger.error(f"Data channel error: {e}")
         self.rtc_app.on_data_message = self.input_handler.on_message
+        self.rtc_app.on_peer_gone = self.input_handler.release_gamepads_for_conn
         self.input_handler.on_request_keyframe = self.request_idr_for_display
 
         # Input handler callbacks

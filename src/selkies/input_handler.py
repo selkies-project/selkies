@@ -372,7 +372,10 @@ class _X11ClipboardMonitor:
     _WRITE_CHUNK = 240 * 1024
 
     def __init__(self, display_name=None):
-        self._d = display.Display(display_name)
+        # Bounded handshake + reply waits: the monitor is (re)built from the event
+        # loop, sometimes while the server is disrupted — the exact moment an
+        # unbounded connection setup would freeze the loop.
+        self._d = display.Display(display_name, blocking_timeout=INPUT_X_REPLY_TIMEOUT_S)
         if not self._d.has_extension('XFIXES'):
             self._d.close()
             raise RuntimeError("XFixes not available")
@@ -660,7 +663,9 @@ class _X11ClipboardMonitor:
                 if 0 < os.path.getsize(path) <= self._URI_FILE_MAX_BYTES:
                     with open(path, 'rb') as f:
                         return f.read(self._URI_FILE_MAX_BYTES), mime
-            except OSError:
+            except (OSError, ValueError):
+                # ValueError: urlparse rejects malformed bracketed authorities;
+                # one bad line must not kill the whole clipboard read.
                 continue
         return None
 
@@ -1395,6 +1400,10 @@ class SelkiesGamepad:
         # Client controls (is_button, index) currently driven non-neutral, so a
         # lost association can release exactly what is held (see reset_state).
         self._held_controls = set()
+        # Last queued js value per internal control (ev_type, number) — the
+        # source for init_state_burst. Updated at queue time, so the snapshot
+        # stays truthful even for events the bounded queue drops.
+        self._js_state = {}
 
     def set_config(self, client_input_name, client_num_btns, client_num_axes):
         self.mapper = GamepadMapper(STANDARD_XPAD_CONFIG, client_input_name, client_num_btns, client_num_axes)
@@ -1581,7 +1590,6 @@ class SelkiesGamepad:
             logger_selkies_gamepad.info(f"{log_prefix} Preparing to send config payload. Length: {len(self.config_payload_cache)}, Expected C size: {EXPECTED_C_STRUCT_SIZE}, First 16 bytes: {self.config_payload_cache[:16].hex()}")
             writer.write(self.config_payload_cache)
             await writer.drain()
-            await asyncio.sleep(1)
             logger_selkies_gamepad.debug(f"{log_prefix} Sent config payload.")
 
             # 2. Read 1-byte architecture specifier
@@ -1589,8 +1597,17 @@ class SelkiesGamepad:
             client_sizeof_long = struct.unpack("=B", arch_byte)[0]
             client_arch_bits = client_sizeof_long * 8
             logger_selkies_gamepad.info(f"{log_prefix} Received arch specifier: {client_sizeof_long} bytes ({client_arch_bits}-bit).")
-            
+
+            if not is_evdev_socket:
+                # joydev semantics: replay current state as INIT events, then
+                # register — snapshot, write, and registration share one loop
+                # step, so no broadcast can interleave and the client's first
+                # live event strictly follows its snapshot. (evdev has no
+                # in-band INIT; those clients poll state via the interposer's
+                # ioctl emulation.)
+                writer.write(self.init_state_burst())
             clients_dict[writer] = {'arch_bits': client_arch_bits}
+            await writer.drain()
             logger_selkies_gamepad.info(f"{log_prefix} Added to active list. Total {socket_type_str} clients: {len(clients_dict)}.")
 
             # Keep connection alive
@@ -1682,6 +1699,10 @@ class SelkiesGamepad:
                 self._held_controls.add(control)
             else:
                 self._held_controls.discard(control)
+            js_data = event_package.get('js_event_data')
+            if js_data:
+                _, value, ev_type, number = struct.unpack("=IhBB", js_data)
+                self._js_state[(ev_type, number)] = value
             logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: Queuing event: {event_package}")
             try:
                 self.events_queue.put_nowait(event_package)
@@ -1710,6 +1731,29 @@ class SelkiesGamepad:
         the app driving this pad."""
         for is_button_event, client_event_idx in list(self._held_controls):
             self.send_event(client_event_idx, 0, is_button_event)
+
+    def init_state_burst(self):
+        """joydev-parity state replay for a newly connected JS client: every
+        control's current value as JS_EVENT_INIT-flagged events, so an app
+        opening the pad mid-hold starts from the true state (and input during
+        the connect handshake is covered as state, not lost edges). Buttons
+        rest at 0, stick/hat axes at center, triggers at the mapper's released
+        value."""
+        mapping = STANDARD_XPAD_CONFIG["mapping"]
+        parts = []
+        for idx in range(len(STANDARD_XPAD_CONFIG["btn_map"])):
+            value = self._js_state.get((JS_EVENT_BUTTON, idx), 0)
+            parts.append(get_js_event_packed(JS_EVENT_BUTTON | JS_EVENT_INIT, idx, value))
+        for idx in range(len(STANDARD_XPAD_CONFIG["axes_map"])):
+            rest = normalize_axis_value(
+                0,
+                idx in mapping["trigger_internal_abstract_axis_indices"],
+                idx in mapping["hat_internal_abstract_axis_indices"],
+                for_js_event=True,
+            )
+            value = self._js_state.get((JS_EVENT_AXIS, idx), rest)
+            parts.append(get_js_event_packed(JS_EVENT_AXIS | JS_EVENT_INIT, idx, value))
+        return b"".join(parts)
 
     async def _process_event_queue(self):
         logger_selkies_gamepad.info(f"Gamepad {self.js_sock_path}: Event processor started.")
@@ -1844,6 +1888,8 @@ class WebRTCInput:
         # a nested session (labwc/kwin) comes up after this process.
         self.app_wayland_display = app_wayland_display
         self._app_wl_display_cached = None
+        self._x_reconnect_thread = None
+        self._x11_monitor_build_lock = asyncio.Lock()
         # Negative cache: the auto-detect sweep stays uncached until a distinct app
         # compositor appears, and it is consulted from per-key native_inject, so a
         # TTL floors the directory relist until then.
@@ -2051,25 +2097,57 @@ class WebRTCInput:
 
     def _reconnect_xdisplay(self):
         """Rebuild the input X connection after a bounded reply-wait closed it.
-        Every consumer (keyboard, mouse, cursor monitor) shares this connection
-        on the event loop, so no other thread can be mid-call — this is race-free.
-        Best effort: leaves xdisplay None on failure and input degrades until a
-        later reconnect succeeds. Returns True when reconnected."""
+        Fire-and-forget: the rebuild runs on a worker thread and installs via the
+        loop (_install_reconnected_xdisplay), so xdisplay stays None — and input
+        degraded (xdotool fallbacks) — until the attempt lands. Callers just
+        continue; the next X failure retries."""
+        if self._x_reconnect_thread is not None and self._x_reconnect_thread.is_alive():
+            return
         old = self.xdisplay
         self.xdisplay = None
         self.keyboard = None
         self.mouse = None
-        try:
-            if old is not None:
-                old.close()
-        except Exception:
-            pass
-        try:
-            self.xdisplay = display.Display()
-        except Exception as e:
-            logger_webrtc_input.error(f"Could not reconnect input X display: {e}")
-            self.xdisplay = None
-            return False
+
+        def _attempt():
+            # Worker thread: every caller sits on the event loop, and against a
+            # server hung under another client's grab — the main condition this
+            # reconnect exists to survive — close() and the connection setup would
+            # otherwise freeze the loop for the whole outage. The handshake itself
+            # is bounded so a permanently dead server can't pin this thread forever.
+            try:
+                if old is not None:
+                    try:
+                        old.close()
+                    except Exception:
+                        pass
+                disp = display.Display(blocking_timeout=INPUT_X_REPLY_TIMEOUT_S)
+            except Exception as e:
+                logger_webrtc_input.error(f"Could not reconnect input X display: {e}")
+                return
+            try:
+                self.loop.call_soon_threadsafe(self._install_reconnected_xdisplay, disp)
+            except RuntimeError:
+                try:
+                    disp.close()
+                except Exception:
+                    pass
+
+        self._x_reconnect_thread = threading.Thread(
+            target=_attempt, name="x-input-reconnect", daemon=True
+        )
+        self._x_reconnect_thread.start()
+
+    def _install_reconnected_xdisplay(self, disp):
+        """Loop-side half of _reconnect_xdisplay: wire the fresh connection into
+        every consumer in one step so nothing observes a half-initialized display."""
+        if self.xdisplay is not None:
+            # An earlier attempt already landed; keep it and drop this connection.
+            try:
+                disp.close()
+            except Exception:
+                pass
+            return
+        self.xdisplay = disp
         self._apply_input_x_reply_bound()
         self.__keyboard_connect()
         if not self.is_wayland:
@@ -2083,7 +2161,6 @@ class WebRTCInput:
             except Exception as e:
                 logger_webrtc_input.warning(f"Could not re-arm cursor monitor after reconnect: {e}")
         logger_webrtc_input.warning("Input X connection was unresponsive; reconnected.")
-        return True
 
     def _is_x_conn_closed(self, exc):
         """True if `exc` is the connection-closed error the reply bound raises."""
@@ -2135,7 +2212,7 @@ class WebRTCInput:
             data = msgpack.packb(cmd, use_bin_type=True)
             self.uinput_mouse_socket.sendto(data, self.uinput_mouse_socket_path)
 
-    async def __gamepad_connect(self, gamepad_idx, client_name, client_num_btns, client_num_axes):
+    async def __gamepad_connect(self, gamepad_idx, client_name, client_num_btns, client_num_axes, conn_id=None):
         if not (0 <= gamepad_idx < self.num_gamepads):
             logger_webrtc_input.error(f"Client association: Gamepad index {gamepad_idx} out of range (0-{self.num_gamepads-1}).")
             return
@@ -2152,13 +2229,25 @@ class WebRTCInput:
             f"Client controller '{client_name}' ({client_num_btns}b, {client_num_axes}a) "
             f"is now associated with persistent virtual gamepad slot {gamepad_idx}."
         )
-        
+
         self.client_gamepad_associations[gamepad_idx] = {
             "client_name": client_name,
             "client_num_btns": client_num_btns,
             "client_num_axes": client_num_axes,
-            "association_time": time.time()
+            "association_time": time.time(),
+            "conn_id": conn_id,
         }
+
+    async def release_gamepads_for_conn(self, conn_id):
+        """Disassociate (and neutralize, via reset_state) every gamepad slot whose
+        association was made by this transport connection. This is the ungraceful
+        path — a tab that dies mid-press never sends 'js,d', and only the transport
+        knows the connection is gone."""
+        if conn_id is None:
+            return
+        for idx, info in list(self.client_gamepad_associations.items()):
+            if info.get("conn_id") == conn_id:
+                await self.__gamepad_disconnect(idx)
 
     async def __gamepad_disconnect(self, gamepad_idx=None):
         if gamepad_idx is None: # Disassociate all if no specific index
@@ -2201,7 +2290,9 @@ class WebRTCInput:
             
     async def connect(self):
         if not self.is_wayland and X11_LIBS_AVAILABLE:
-            try: self.xdisplay = display.Display()
+            # Bounded handshake: a server hung under another client's grab at
+            # startup must surface as a failure, not freeze the loop.
+            try: self.xdisplay = display.Display(blocking_timeout=INPUT_X_REPLY_TIMEOUT_S)
             except Exception as e: logger_webrtc_input.error(f"Failed to connect to X display: {e}"); self.xdisplay = None
             self._apply_input_x_reply_bound()
         if self.xdisplay:
@@ -3313,8 +3404,8 @@ class WebRTCInput:
         """Cache the resolved app compositor and, when it is distinct from the
         capture compositor, hand it to pixelflux over the Python ABI so its
         Computer-Use backend targets the same session. pixelflux keeps its own
-        PIXELFLUX_APP_WAYLAND_DISPLAY / SELKIES_APP_WAYLAND_DISPLAY env fallback
-        for standalone use without selkies."""
+        PIXELFLUX_APP_WAYLAND_DISPLAY env fallback for standalone use without
+        selkies."""
         self._app_wl_display_cached = resolved
         self._app_wl_negcache = None
         self._app_wl_is_separate = resolved != capture
@@ -3458,7 +3549,7 @@ class WebRTCInput:
                 else:
                     return bytes(raw).decode('utf-8', errors='replace'), 'text/plain'
             return await self._app_clipboard_read(use_binary)
-        monitor = self._ensure_x11_clipboard_monitor()
+        monitor = await self._ensure_x11_clipboard_monitor_async()
         if monitor is not None:
             try:
                 loop = asyncio.get_running_loop()
@@ -3566,7 +3657,7 @@ class WebRTCInput:
             env['LANG'] = 'C.UTF-8'
         # Native first: own the selection on the monitor's connection; the xclip -i
         # fork below is the fallback (e.g. unsupported mime, monitor unavailable).
-        monitor = self._ensure_x11_clipboard_monitor()
+        monitor = await self._ensure_x11_clipboard_monitor_async()
         if monitor is not None:
             try:
                 loop = asyncio.get_running_loop()
@@ -3614,6 +3705,18 @@ class WebRTCInput:
             logger_webrtc_input.info(f"X11 clipboard: XFixes monitor unavailable ({e}); falling back to polling.")
             self._x11_clipboard_monitor = None
         return self._x11_clipboard_monitor
+
+    async def _ensure_x11_clipboard_monitor_async(self):
+        """Off-loop get-or-create: construction opens its own X connection, and a
+        server disrupted mid-session (the respawn case) would stall the event loop
+        for the whole bounded handshake. The lock keeps concurrent callers from
+        racing two monitors into existence."""
+        if self._x11_clipboard_monitor is not None:
+            return self._x11_clipboard_monitor
+        async with self._x11_monitor_build_lock:
+            if self._x11_clipboard_monitor is not None:
+                return self._x11_clipboard_monitor
+            return await asyncio.to_thread(self._ensure_x11_clipboard_monitor)
 
     def _arm_wayland_native_clipboard(self):
         """Register the compositor clipboard callback (fork-free watch+read);
@@ -3690,7 +3793,7 @@ class WebRTCInput:
 
         logger_webrtc_input.info(f"Clipboard monitor running (binary mode: {self.enable_binary_clipboard in ['true', 'out']})")
         self.clipboard_running = True
-        x11_monitor = self._ensure_x11_clipboard_monitor()
+        x11_monitor = await self._ensure_x11_clipboard_monitor_async()
         # The compositor callback watches the capture compositor's selection; with
         # a separate app compositor the apps' copies land on its selection, watched
         # through the data-control client instead.
@@ -3739,7 +3842,7 @@ class WebRTCInput:
                             except Exception:
                                 pass
                             self._x11_clipboard_monitor = None
-                            x11_monitor = self._ensure_x11_clipboard_monitor()
+                            x11_monitor = await self._ensure_x11_clipboard_monitor_async()
                             if x11_monitor is None:
                                 await asyncio.sleep(0.5)
                                 changed = False
@@ -3930,12 +4033,18 @@ class WebRTCInput:
             self.on_cursor_change(cursor_data)
         except Exception as e:
             logger_webrtc_input.warning("exception from fetching initial cursor image: %s", e)
-            if self._is_x_conn_closed(e) and self._reconnect_xdisplay():
-                # Rebind to the reconnected connection (the old screen's Display
-                # is closed); xfixes cursor input was re-armed by the reconnect.
-                screen = self.xdisplay.screen()
+            if self._is_x_conn_closed(e):
+                self._reconnect_xdisplay()
 
         while self.cursors_running:
+            if self.xdisplay is None:
+                # A background reconnect is in flight (or failed); wait for the
+                # fresh connection — its xfixes arm happened at install — and
+                # rebind our screen to it.
+                await asyncio.sleep(0.5)
+                if self.xdisplay is not None:
+                    screen = self.xdisplay.screen()
+                continue
             if self.xdisplay.pending_events() == 0:
                 await asyncio.sleep(0.02)
                 continue
@@ -3953,10 +4062,10 @@ class WebRTCInput:
                     logger_webrtc_input.warning(
                         "exception from fetching cursor image on change: %s", e
                     )
-                    if self._is_x_conn_closed(e) and self._reconnect_xdisplay():
-                        # Rebind screen to the reconnected connection; the loop
-                        # below polls/reads events on the new self.xdisplay.
-                        screen = self.xdisplay.screen()
+                    if self._is_x_conn_closed(e):
+                        # The None-guard at the top of the loop rebinds screen
+                        # once the background reconnect lands.
+                        self._reconnect_xdisplay()
         logger_webrtc_input.info("cursor monitor stopped")
 
     def stop_cursor_monitor(self):
@@ -4344,7 +4453,7 @@ class WebRTCInput:
                 except Exception as e: client_name_decoded = f"ClientGamepad{gamepad_idx}"; logger_webrtc_input.warning(f"Error decoding client gamepad name: {e}")
                 client_num_axes, client_num_btns = int(toks[4]), int(toks[5])
                 
-                await self.__gamepad_connect(gamepad_idx, client_name_decoded, client_num_btns, client_num_axes)
+                await self.__gamepad_connect(gamepad_idx, client_name_decoded, client_num_btns, client_num_axes, conn_id=conn_id)
 
             elif cmd == "d": 
                 await self.__gamepad_disconnect(gamepad_idx)

@@ -85,8 +85,8 @@ class _BaseDisplay(protocol_display.Display):
 
 
 class Display(object):
-    def __init__(self, display = None):
-        self.display = _BaseDisplay(display)
+    def __init__(self, display = None, blocking_timeout = None):
+        self.display = _BaseDisplay(display, blocking_timeout = blocking_timeout)
 
         # Create the keymap cache
         self._keymap_codes = [()] * 256

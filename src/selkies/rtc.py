@@ -259,7 +259,11 @@ class RTCApp:
         self.on_data_open = lambda channel=None: logger.warning('unhandled on_data_open')
         self.on_data_close = lambda: logger.warning('unhandled on_data_close')
         self.on_data_error = lambda e=None: logger.warning('unhandled on_data_error')
-        self.on_data_message = lambda msg, display_id='primary': logger.warning('unhandled on_data_message')
+        self.on_data_message = lambda msg, display_id='primary', conn_id=None: logger.warning('unhandled on_data_message')
+        # Late-bound async hook fired when a peer reaches 'closed'; carries the
+        # peer id so per-connection input state (gamepad associations) can be
+        # released even when the client never sent a graceful disconnect.
+        self.on_peer_gone = None
 
         # WebRTC ICE and SDP events
         self.on_ice = lambda ice, client_peer_id: logger.warning('unhandled ice event')
@@ -1036,7 +1040,9 @@ class RTCApp:
             # its own feed too.
             return self.on_video_consumer_active(
                 peer_id, display_id or "primary", msg == "START_VIDEO")
-        return self.on_data_message(msg, display_id or "primary")
+        # peer_id doubles as the connection id so per-connection input state
+        # (gamepad associations) can be traced to this peer.
+        return self.on_data_message(msg, display_id or "primary", conn_id=peer_id)
 
     async def on_peer_connection_established(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary"):
         if client_type == ClientType.CONTROLLER:
@@ -1088,6 +1094,14 @@ class RTCApp:
             removed = None
             if self.peer_connections.get(client_peer_id) is peer_obj:
                 removed = self.peer_connections.pop(client_peer_id, None)
+            if removed is not None and self.on_peer_gone is not None:
+                # Identity-gated like the pop above: when a reconnect re-registered
+                # this client_peer_id, the id's input state (gamepad associations)
+                # belongs to the successor and must survive the old peer's close.
+                try:
+                    await self.on_peer_gone(client_peer_id)
+                except Exception:
+                    logger.exception("on_peer_gone hook failed")
             # This peer is done either way; its never-established channels emit
             # no 'close', so stop their consumers here.
             await self._cancel_channel_consumers(peer_obj)
@@ -1328,8 +1342,24 @@ class RTCApp:
                 else:
                     # Plain Opus (RED off): decode directly -- no de-framing, dedup, or alloc.
                     pb.write(data)
-            except Exception:
-                pass
+            except Exception as e:
+                # Websockets-path parity: pcmflux raises once its playback worker
+                # dies (e.g. PulseAudio restarted mid-run). Drop this chunk and tear
+                # the stream down so the next packet reopens a fresh one -- swallowing
+                # the error here would leave this peer's mic silent forever.
+                logger.error(f"WebRTC mic playback write failed: {e}")
+                state["pb"] = None
+                state["starting"] = False
+
+                def _teardown(dead=pb):
+                    async def _t():
+                        try:
+                            await asyncio.to_thread(dead.stop)
+                        except Exception:
+                            pass
+                    asyncio.ensure_future(_t())
+
+                loop.call_soon_threadsafe(_teardown)
 
         mic_tx.receiver._encoded_audio_sink = sink
         return state
