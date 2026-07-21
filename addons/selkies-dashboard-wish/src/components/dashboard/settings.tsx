@@ -575,13 +575,35 @@ export function Settings() {
         // set first or the active core surfaces a spurious "Server disconnected" alert.
         window.__selkiesModeSwitching = true;
         try {
-            const response = await fetch(`${getRoutePrefix()}/api/switch`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                credentials: "same-origin",
-                body: JSON.stringify({ mode }),
-            });
+            // /switch is gated on the master token (Bearer) when set, or Basic creds via
+            // same-origin. With Basic Auth off, the Bearer is required but the dashboard
+            // isn't given it: on a 401 prompt once, keep it in sessionStorage, and retry.
+            const MASTER_TOKEN_KEY = "selkies_master_token";
+            const doSwitch = () => {
+                const headers: Record<string, string> = { "Content-Type": "application/json" };
+                let storedToken: string | null = null;
+                try { storedToken = sessionStorage.getItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ }
+                if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;
+                return fetch(`${getRoutePrefix()}/api/switch`, {
+                    method: "POST",
+                    headers,
+                    credentials: "same-origin",
+                    body: JSON.stringify({ mode }),
+                });
+            };
+            let response = await doSwitch();
+            if (response.status === 401) {
+                const entered = (typeof window !== "undefined" && window.prompt)
+                    ? window.prompt("Switching the stream mode requires the Selkies master token:")
+                    : null;
+                if (entered && entered.trim()) {
+                    try { sessionStorage.setItem(MASTER_TOKEN_KEY, entered.trim()); } catch { /* sessionStorage unavailable */ }
+                    response = await doSwitch();
+                }
+            }
             if (!response.ok) {
+                // Drop a stale token on 401 so the next attempt re-prompts.
+                if (response.status === 401) { try { sessionStorage.removeItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ } }
                 throw new Error(`Request failed with status ${response.status}`);
             }
             setStreamMode(mode);
@@ -822,6 +844,30 @@ export function Settings() {
                 {showResolutionTab && (
                 <TabsContent value="resolution">
                     <CardContent className="space-y-4">
+                        {/* Per-display capable settings (the core routes them with a
+                            _display2 suffix): available on secondary displays too. */}
+                        <div className="flex items-center justify-between">
+                            <div className="space-y-0.5">
+                                <label className="text-sm font-medium">{t('sections.screen.antiAliasingLabel')}</label>
+                            </div>
+                            <Switch
+                                checked={antiAliasing}
+                                onCheckedChange={handleAntiAliasingToggle}
+                            />
+                        </div>
+
+                        {(renderableSettings.useBrowserCursors ?? true) && (
+                            <div className="flex items-center justify-between">
+                                <div className="space-y-0.5">
+                                    <label className="text-sm font-medium">{t('sections.screen.useNativeCursorStylesLabel')}</label>
+                                </div>
+                                <Switch
+                                    checked={effectiveCursor !== null ? effectiveCursor : useBrowserCursors}
+                                    onCheckedChange={handleUseBrowserCursorsToggle}
+                                />
+                            </div>
+                        )}
+
                         {!isSecondaryDisplay && (
                             <>
                                 {(renderableSettings.hidpi ?? true) && (
@@ -836,17 +882,6 @@ export function Settings() {
                                     </div>
                                 )}
 
-                                {/* Anti-aliasing Toggle */}
-                                <div className="flex items-center justify-between">
-                                    <div className="space-y-0.5">
-                                        <label className="text-sm font-medium">{t('sections.screen.antiAliasingLabel')}</label>
-                                    </div>
-                                    <Switch
-                                        checked={antiAliasing}
-                                        onCheckedChange={handleAntiAliasingToggle}
-                                    />
-                                </div>
-
                                 {(renderableSettings.forceAlignedResolution ?? true) && (
                                     <div className="flex items-center justify-between">
                                         <div className="space-y-0.5">
@@ -855,18 +890,6 @@ export function Settings() {
                                         <Switch
                                             checked={forceAlignedResolution}
                                             onCheckedChange={handleForceAlignedResolutionToggle}
-                                        />
-                                    </div>
-                                )}
-
-                                {(renderableSettings.useBrowserCursors ?? true) && (
-                                    <div className="flex items-center justify-between">
-                                        <div className="space-y-0.5">
-                                            <label className="text-sm font-medium">{t('sections.screen.useNativeCursorStylesLabel')}</label>
-                                        </div>
-                                        <Switch
-                                            checked={effectiveCursor !== null ? effectiveCursor : useBrowserCursors}
-                                            onCheckedChange={handleUseBrowserCursorsToggle}
                                         />
                                     </div>
                                 )}
@@ -1282,12 +1305,12 @@ export function Settings() {
                             <div className="flex items-center gap-2">
                                 <Slider
                                     min={0}
-                                    max={audioBitrateOptions.length - 1}
+                                    max={audioBitrateChoices.length - 1}
                                     step={1}
-                                    value={[audioBitrateOptions.indexOf(audioBitRate)]}
+                                    value={[Math.max(0, audioBitrateChoices.indexOf(audioBitRate))]}
                                     onValueChange={(value) => {
                                         const index = value[0];
-                                        const selectedBitrate = audioBitrateOptions[index];
+                                        const selectedBitrate = audioBitrateChoices[index];
                                         if (selectedBitrate !== undefined) {
                                             setAudioBitRate(selectedBitrate);
                                             localStorage.setItem(getPrefixedKey('audio_bitrate'), selectedBitrate.toString());

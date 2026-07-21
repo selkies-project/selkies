@@ -937,6 +937,24 @@ class RTCApp:
         channel.on("close", lambda: consumer.cancel())
         return consumer
 
+    def _send_collab_state(self, channel, client_type, client_token):
+        """Send a viewer its mk-token collab verdict over the data channel as a
+        `system` action (the channel is JSON-typed): `mk_access,1` attaches the
+        client's input context, `mk_access,0` detaches it. No-op outside secure
+        mode and for controllers (websockets MK_ACCESS parity). Gated on secure
+        mode itself, NOT on an mk token existing — an mk handoff that clears the
+        token must still push the 0 that detaches the previous holder."""
+        if client_type is not ClientType.VIEWER:
+            return
+        if not app_settings.master_token:
+            return
+        granted = self._viewer_is_collaborator(client_token)
+        try:
+            channel.send(json.dumps(
+                {"type": "system", "data": {"action": f"mk_access,{1 if granted else 0}"}}))
+        except Exception:
+            logger.debug("collab-state send failed (channel closing)", exc_info=True)
+
     def _viewer_is_collaborator(self, client_token):
         """A viewer holding the active mk (mouse+keyboard) token is a read-write
         collaborator — mirrors the WS mk-token path — but only while enable_collab
@@ -1214,6 +1232,10 @@ class RTCApp:
         # close/error are late-bound (setup_callbacks reassigns the handlers).
         # open passes the channel so the greeting goes to the peer that joined.
         data_channel.on("open", lambda ch=data_channel: self.on_data_open(ch))
+        # Secure-mode viewers learn their input authority at channel-open the way
+        # websockets clients do (MK_ACCESS on connect).
+        data_channel.on("open", lambda ch=data_channel, ct=client_type, tok=client_token:
+                        self._send_collab_state(ch, ct, tok))
         data_channel.on("close", lambda: self.on_data_close())
         data_channel.on("error", lambda e=None: self.on_data_error(e))
         input_consumer = self._serialize_channel(
@@ -1268,7 +1290,15 @@ class RTCApp:
             # draining and nothing accumulates while this peer is hidden.
             "video_sender": rtp_video_sender,
             "video_paused": False,
+            # Authority reconciliation on /api/tokens updates needs the token a
+            # peer connected with (per-message checks read the live store, but
+            # revocation/handoff must find the affected peers).
+            "client_token": client_token,
         }
+        # A joining consumer must re-open a capture stopped by the all-consumers-
+        # paused rule (websockets parity: a joining shared viewer always restarts
+        # a stopped capture) — the owning service re-evaluates the consumer set.
+        await self._notify_consumers_changed(display_id)
 
     def _setup_mic_receiver(self, peer_connection):
         """Add a recvonly mic transceiver in the bundled session and route its encoded

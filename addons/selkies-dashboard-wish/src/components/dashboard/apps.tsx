@@ -134,21 +134,22 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         setSelectedApp(null);
     };
 
+    // Unified apps command contract (both dashboards): the /selkies-proot wrapper.
     const handleInstall = (appName: string) => {
         console.log(`Install app: ${appName}`);
-        window.postMessage({ type: 'command', value: `st ~/.local/bin/proot-apps install ${appName}` }, window.location.origin);
+        window.postMessage({ type: 'command', value: `/selkies-proot install ${appName}` }, window.location.origin);
         setInstalledApps(prev => prev.includes(appName) ? prev : [...prev, appName]);
     };
 
     const handleRemove = (appName: string) => {
         console.log(`Remove app: ${appName}`);
-        window.postMessage({ type: 'command', value: `st ~/.local/bin/proot-apps remove ${appName}` }, window.location.origin);
+        window.postMessage({ type: 'command', value: `/selkies-proot remove ${appName}` }, window.location.origin);
         setInstalledApps(prev => prev.filter(name => name !== appName));
     };
 
     const handleUpdate = (appName: string) => {
         console.log(`Update app: ${appName}`);
-        window.postMessage({ type: 'command', value: `st ~/.local/bin/proot-apps update ${appName}` }, window.location.origin);
+        window.postMessage({ type: 'command', value: `/selkies-proot update ${appName}` }, window.location.origin);
     };
 
     const handleLaunch = (appName: string) => {

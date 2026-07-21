@@ -382,13 +382,22 @@ export class WebRTCClient {
 	/**
 	 * Enable/disable the microphone: attach a getUserMedia track to the reserved sendonly
 	 * transceiver (the browser encodes Opus over RTP), or detach and stop it.
+	 * deviceId (optional) selects the capture device.
 	 */
-	async setMicrophone(enabled) {
+	async setMicrophone(enabled, deviceId = null) {
 		if (enabled) {
+			// No transceiver means the server withheld the mic m-line (microphone
+			// administratively disabled): fail before prompting for permission so
+			// the UI never claims an active mic that streams nothing.
+			if (!this._micTransceiver) {
+				throw new Error('Microphone is disabled on this server.');
+			}
 			if (this._micStream) return true;
 			if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+			const audio = { channelCount: 1, sampleRate: 24000, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+			if (deviceId) audio.deviceId = { exact: deviceId };
 			this._micStream = await navigator.mediaDevices.getUserMedia({
-				audio: { channelCount: 1, sampleRate: 24000, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+				audio,
 				video: false
 			});
 			const track = this._micStream.getAudioTracks()[0];

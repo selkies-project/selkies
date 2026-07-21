@@ -141,6 +141,12 @@ let videoFrameWriter = null;
 let videoTrack = null;
 let mstgActive = false;
 let mstgLastGeom = null;
+// A generator whose consumer stopped pulling (e.g. across a hide/resume starve)
+// stays backpressured forever, and the desiredSize drop in the present paths
+// would silently discard every frame from then on. Count consecutive drops and
+// rebuild the sink once it is clearly stalled; any successful write resets it.
+let mstgConsecutiveDrops = 0;
+const SINK_STALL_DROP_LIMIT = 30;
 // Handoff gate: only hide the main canvas once the takeover sink has provably
 // rendered a frame (requestVideoFrameCallback for a <video>, a one-time
 // 'presented' message for the worker's OffscreenCanvas). Hiding it on the first
@@ -759,13 +765,19 @@ const VIDEO_WORKER_SRC = `
 // supported as a fallback during decoder warm-up.
 let mode = null, oc = null, ctx = null, writer = null, closed = false, presented = false;
 let dec = null, decKey = false, decNeedKey = false;
+let sinkDrops = 0;   // consecutive backpressure drops; a stalled consumer never resumes on its own
 const OVERLOAD_QUEUE = 24;   // decode backlog (frames) that triggers a keyframe resync
 const ack = () => self.postMessage({ ack: true });
 
 // Present one decoded VideoFrame on the active sink. Consumes/closes the frame.
 function present(f) {
   if (mode === 'vtg' && writer && !closed) {
-    if (writer.desiredSize !== null && writer.desiredSize <= 0) { f.close(); return; }  // drop on sink backpressure
+    if (writer.desiredSize !== null && writer.desiredSize <= 0) {   // drop on sink backpressure
+      f.close();
+      if (++sinkDrops >= 30) { closed = true; self.postMessage({ type: 'error' }); }
+      return;
+    }
+    sinkDrops = 0;
     // write() consumes/closes f on success; on reject (writable errored) it does NOT, so close it here to avoid leaking the frame.
     writer.write(f).catch(() => { try { f.close(); } catch (_) {} closed = true; self.postMessage({ type: 'error' }); });
     return;
@@ -924,8 +936,13 @@ function presentFrameToVideo(frame) {
   // Drop a frame if the sink can't keep up, to keep latency low.
   if (videoFrameWriter.desiredSize !== null && videoFrameWriter.desiredSize <= 0) {
     frame.close();
+    if (++mstgConsecutiveDrops >= SINK_STALL_DROP_LIMIT) {
+      console.warn(`Video track sink stalled (${mstgConsecutiveDrops} consecutive drops); rebuilding it.`);
+      deactivateMstg();
+    }
     return true;
   }
+  mstgConsecutiveDrops = 0;
   const activeWriter = videoFrameWriter;
   videoFrameWriter.write(frame).catch(() => {
     try { frame.close(); } catch (e) {}
@@ -1111,6 +1128,7 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec) {
 function deactivateMstg() {
   if (!mstgActive) return;
   mstgActive = false;
+  mstgConsecutiveDrops = 0;
   mstgRendered = false; sinkRevealGen++;
   if (videoElement) videoElement.style.display = 'none';
   if (canvas) canvas.style.display = '';

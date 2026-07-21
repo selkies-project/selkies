@@ -56,6 +56,7 @@ from .input_handler import (
 from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, inflate_gz_bounded, sanitize_client_setting
 from .settings import settings as app_settings
 from .stream_server import BaseStreamingService
+from .webrtc_utils import Metrics
 
 # Constants
 BACKPRESSURE_ALLOWED_DESYNC_MS = 2000
@@ -189,6 +190,12 @@ def current_session_tokens():
     """Live control-plane token view — (user_tokens mapping, active mk-token) — as
     provisioned via /api/tokens. Both transports authorize input against this."""
     return user_tokens, active_mk_token
+
+
+# Set by the WebRTC service at init so a token update also reconciles LIVE
+# WebRTC peers (revocation closes them; mk handoffs push over the data
+# channel). reconcile_clients() itself only walks websockets sockets.
+webrtc_reconcile_hook = None
 
 
 async def _poll_pa_object(list_coro, valid_names, poll_interval=0.1, timeout=2.0):
@@ -663,7 +670,6 @@ class DataStreamingServer(BaseStreamingService):
         self._latest_client_render_fps = 0.0
         self._last_time_client_ok = 0.0
         self._client_acknowledged_frame_id = -1
-        self._frame_backpressure_task = None
         self._last_client_acknowledged_frame_id_update_time = 0.0
         self._previous_ack_id_for_stall_check = -1
         self._previous_sent_id_for_stall_check = -1
@@ -756,7 +762,6 @@ class DataStreamingServer(BaseStreamingService):
         self.backpressure_check_interval_s = BACKPRESSURE_CHECK_INTERVAL_S
         # Per-stream video/audio queue depth (frames dropped past this under backpressure).
         self.BACKPRESSURE_QUEUE_SIZE = getattr(settings, 'backpressure_queue_size', 120)
-        self._backpressure_send_frames_enabled = True
         self._last_client_frame_id_report_time = 0.0
         self.capture_loop = None
 
@@ -883,6 +888,20 @@ class DataStreamingServer(BaseStreamingService):
         self.input_handler.on_set_fps = (
             lambda fps, display_id='primary': self.app.set_framerate(fps)
         )
+        # Prometheus (WebRTC-mode parity): the registry-global gauges otherwise
+        # exist but never move in websockets mode. Primary feeds are server-side
+        # (ACK-derived client fps + smoothed RTT from the backpressure loop, GPU
+        # from the stats collector); the shared '_f,'/'_l,' verbs feed the same
+        # gauges when a client reports directly.
+        self.metrics = None
+        if settings.enable_metrics_http[0]:
+            self.metrics = Metrics()
+            self.input_handler.on_client_fps = (
+                lambda fps: self.metrics.set_fps(fps) if self.metrics else None
+            )
+            self.input_handler.on_client_latency = (
+                lambda latency: self.metrics.set_latency(latency) if self.metrics else None
+            )
         # The shared input protocol's pointer-visibility toggle ("p,N") is the
         # same tunable as SET_NATIVE_CURSOR_RENDERING (both fire on pointer lock).
         self.input_handler.on_mouse_pointer_visible = self.set_native_cursor_rendering
@@ -1189,11 +1208,14 @@ class DataStreamingServer(BaseStreamingService):
                     pass
         logger.info("Unified pipeline shutdown complete.")
 
-    async def _ensure_backpressure_task_is_stopped(self, display_id: str):
-        """Safely cancels and cleans up the backpressure task for a specific display."""
+    async def _ensure_backpressure_task_is_stopped(self, display_id: str, notify: bool = True):
+        """Safely cancels and cleans up the backpressure task for a specific display.
+        Returns whether the pipeline-reset notification was sent, so callers that
+        must guarantee a reset (capture stop) can send it exactly once themselves
+        when no task was running."""
         display_state = self.display_clients.get(display_id)
         if not display_state:
-            return
+            return False
 
         task_was_running = False
         task = display_state.get('backpressure_task')
@@ -1209,12 +1231,14 @@ class DataStreamingServer(BaseStreamingService):
             except Exception as e_cancel:
                 data_logger.error(f"Error awaiting cancellation for '{display_id}' backpressure task: {e_cancel}")
             display_state['backpressure_task'] = None
-        
+
         display_state['backpressure_enabled'] = True
 
-        if task_was_running:
+        if task_was_running and notify:
             data_logger.info(f"Backpressure task for '{display_id}' was stopped. Resetting its frame IDs.")
             await self._reset_frame_ids_and_notify(display_id)
+            return True
+        return False
 
     async def _reset_frame_ids_and_notify(self, display_id: str):
         """
@@ -1273,17 +1297,17 @@ class DataStreamingServer(BaseStreamingService):
         display_state['last_ack_update_time'] = time.monotonic()
 
     async def _start_backpressure_task_if_needed(self, display_id: str):
-        """Starts the backpressure task for a specific display if not already running."""
-        # --- Disable for wayland mode ---
-        if IS_WAYLAND:
-            return
-
+        """Starts the backpressure task for a specific display if not already running.
+        Backend-agnostic: frame ids, ACKs, and RTT flow identically on Wayland."""
         display_state = self.display_clients.get(display_id)
         if not display_state:
             data_logger.error(f"Cannot start backpressure task: display '{display_id}' not found.")
             return
 
-        await self._ensure_backpressure_task_is_stopped(display_id)
+        # A task restart is not a pipeline death: the capture (re)start handles
+        # stream freshness, and the client reset belongs to the capture-STOP path
+        # (single owner) — so never notify from here.
+        await self._ensure_backpressure_task_is_stopped(display_id, notify=False)
 
         task = display_state.get('backpressure_task')
         if not task or task.done():
@@ -1416,6 +1440,12 @@ class DataStreamingServer(BaseStreamingService):
                 client_fps = self._estimate_client_fps(
                     display_state, last_client_acked_frame_id, configured_fps, time.monotonic()
                 )
+                if display_id == 'primary' and getattr(self, 'metrics', None) is not None:
+                    # Prometheus feed (WebRTC-mode parity): ACK cadence IS the
+                    # client's consumed-frame rate, and smoothed_rtt the observed
+                    # latency — no client-side reporting needed.
+                    self.metrics.set_fps(client_fps)
+                    self.metrics.set_latency(display_state.get('smoothed_rtt', 0.0))
 
                 server_id, client_id = current_server_frame_id, last_client_acked_frame_id
 
@@ -1957,6 +1987,23 @@ class DataStreamingServer(BaseStreamingService):
                         slot = slot_num
                 except (ValueError, TypeError):
                     pass
+            # The sharing enables are enforcement, not just link visibility (the
+            # WebRTC signaling server refuses these connections outright): a
+            # disabled shared/player page that knows the URL must be refused
+            # here too, or the flags differ in meaning per transport.
+            refusal = None
+            if role == "viewer" and slot is None and not getattr(self.cli_args, 'enable_shared', (True,))[0]:
+                refusal = "Strict shared clients are not enabled."
+            elif slot is not None and not getattr(self.cli_args, f'enable_player{slot}', (True,))[0]:
+                refusal = f"Player slot {slot} is not enabled."
+            if refusal:
+                data_logger.warning(f"Refusing legacy client {remote_address}: {refusal}")
+                try:
+                    await websocket.send_str(f"KILL {refusal}")
+                    await websocket.close(code=1008, message=refusal.encode())
+                except (ConnectionResetError, OSError, RuntimeError):
+                    pass
+                return
             client_permissions[websocket] = {"token": None, "role": role, "slot": slot, "remote_address": remote_address}
             data_logger.info(f"Legacy client {remote_address} connected. Role: {role}, Slot: {slot}")
 
@@ -2023,8 +2070,6 @@ class DataStreamingServer(BaseStreamingService):
         self._previous_ack_id_for_stall_check = -1
         self._previous_sent_id_for_stall_check = -1
         self._last_client_stable_report_time = time.monotonic()
-
-        self._backpressure_send_frames_enabled = True
         # Per-connection stats sender; the system/gpu/network collectors it reads
         # from are instance-wide singletons created/torn down on self.
         stats_sender_task_ws = None
@@ -2098,6 +2143,7 @@ class DataStreamingServer(BaseStreamingService):
                         self._shared_stats_ws,
                         gpu_id=gpu_id_for_stats,
                         dri_node=dri_node_for_stats,
+                        metrics=getattr(self, 'metrics', None),
                     )
                 )
             stats_sender_task_ws = asyncio.create_task(
@@ -2583,11 +2629,13 @@ class DataStreamingServer(BaseStreamingService):
                         elif display_entry is not None:
                             data_logger.info(f"Received START_VIDEO for '{client_display_id}'. Starting its stream.")
                             display_state = display_entry
-                            # A resume onto a capture that kept running for the
-                            # shared viewers continues mid-GOP: this socket needs
-                            # the viewer resume contract (decoder reset + IDR).
+                            # A START_VIDEO landing on a capture that kept running
+                            # (shared-viewer pause, or a watchdog retry after the
+                            # first resume already consumed was_paused) continues
+                            # mid-GOP: this socket needs the resume contract
+                            # (decoder reset + IDR) regardless of pause state.
                             resumed_onto_live_capture = (
-                                was_paused and client_display_id in self.capture_instances
+                                client_display_id in self.capture_instances
                             )
                             # Keep this intent flag write sync-adjacent to the capture start below:
                             # under cooperative asyncio there is no await between them, so the flag
@@ -3115,21 +3163,6 @@ class DataStreamingServer(BaseStreamingService):
                     except asyncio.CancelledError:
                         pass
 
-            if (
-                self._frame_backpressure_task
-                and not self._frame_backpressure_task.done()
-            ):
-                if (
-                    not self.clients
-                ):
-                    data_logger.info(
-                        f"Last client ({raddr}) disconnected. Cancelling frame backpressure task."
-                    )
-                else:
-                    data_logger.info(
-                        f"Client {raddr} disconnected, but other clients remain. Frame backpressure task continues."
-                    )
-
             # Rust mic playback (if used) owns its PA stream on a worker thread; stop()
             # joins it and releases the sink deterministically (UAF-safe internally).
             # Offload the join so a slow PA disconnect can't block the event loop.
@@ -3267,9 +3300,9 @@ class DataStreamingServer(BaseStreamingService):
         return self._wayland_ctl_module
 
     async def _drop_wayland_secondary(self, display_id: str, reason: str):
-        """Refuse a secondary display the compositor cannot realize: destroy its
-        output (if any), stop its capture, unregister it, and kill its client —
-        the Wayland counterpart of the X11 unrealizable-extension drop."""
+        """Refuse a secondary display that cannot stream: destroy its compositor
+        output (Wayland; no-op on X11 where the control module is absent), stop
+        its capture, unregister it, and kill its client with the reason."""
         module = self._wayland_control_module()
         if module is not None:
             try:
@@ -3395,7 +3428,7 @@ class DataStreamingServer(BaseStreamingService):
     async def _stop_capture_for_display_impl(self, display_id: str):
         """Stops the capture, sender, and backpressure tasks for a single, specific display."""
         data_logger.info(f"Stopping all streams for display '{display_id}'...")
-        await self._ensure_backpressure_task_is_stopped(display_id)
+        reset_sent = await self._ensure_backpressure_task_is_stopped(display_id)
         capture_info = self.capture_instances.pop(display_id, None)
         if capture_info:
             capture_module = capture_info.get('module')
@@ -3405,6 +3438,13 @@ class DataStreamingServer(BaseStreamingService):
             if sender_task and not sender_task.done():
                 sender_task.cancel()
         self.video_chunk_queues.pop(display_id, None)
+        if capture_info and not reset_sent:
+            # Clients rebuild their video sinks/decoders only on PIPELINE_RESETTING;
+            # every real capture stop must send exactly one, including when no
+            # backpressure task ran (viewer-only captures, stops before the task
+            # armed) — without it a resumed stream plays into the stale sink and
+            # freezes silently.
+            await self._reset_frame_ids_and_notify(display_id)
 
         data_logger.info(f"Successfully stopped all streams for display '{display_id}'.")
  
@@ -3840,29 +3880,32 @@ class DataStreamingServer(BaseStreamingService):
                     )
             else:
                 data_logger.info(f"Client '{display_id}' is connected but not active. Skipping video start.")
-        if IS_WAYLAND:
-            for display_id in list(layouts.keys()):
-                client_data = self.display_clients.get(display_id)
-                if not (client_data and client_data.get('video_active', False)):
-                    continue
+        for display_id in list(layouts.keys()):
+            client_data = self.display_clients.get(display_id)
+            if not (client_data and client_data.get('video_active', False)):
+                continue
+            if IS_WAYLAND:
                 # Barrier + reconcile: the compositor answers the geometry read
                 # only after the queued capture start finished, so is_capturing
                 # is authoritative afterwards (the broadcast below fans out once).
                 await self._sync_wayland_realized_geometry(display_id, broadcast=False)
-                inst = self.capture_instances.get(display_id)
-                module = inst.get('module') if inst else None
-                capturing = False
-                if module is not None:
-                    try:
-                        capturing = bool(module.is_capturing)
-                    except Exception:
-                        capturing = False
-                if not capturing and display_id != 'primary':
-                    await self._drop_wayland_secondary(
-                        display_id,
-                        "The compositor could not start a capture for this display "
-                        "(encoder session or GPU resources exhausted).",
-                    )
+            inst = self.capture_instances.get(display_id)
+            module = inst.get('module') if inst else None
+            capturing = False
+            if module is not None:
+                try:
+                    capturing = bool(module.is_capturing)
+                except Exception:
+                    capturing = False
+            # A secondary whose capture did not come up must get a fatal verdict,
+            # not a page stuck on "Waiting for stream" (X11 parity with the
+            # Wayland drop; the output-destroy step inside no-ops on X11).
+            if not capturing and display_id != 'primary':
+                await self._drop_wayland_secondary(
+                    display_id,
+                    "The capture pipeline could not start for this display "
+                    "(encoder session or GPU resources exhausted).",
+                )
         await self.broadcast_stream_resolution()
         await self.broadcast_display_config()
         data_logger.info("Display reconfiguration finished successfully.")
@@ -4424,7 +4467,7 @@ async def _collect_system_stats_ws(shared_data, interval_seconds=1):
         data_logger.error(f"System monitor (WS) error: {e}", exc_info=True)
 
 
-async def _collect_gpu_stats_ws(shared_data, gpu_id=0, interval_seconds=1, dri_node=""):
+async def _collect_gpu_stats_ws(shared_data, gpu_id=0, interval_seconds=1, dri_node="", metrics=None):
     data_logger.debug(
         f"GPU monitor loop (WS mode) for GPU {gpu_id} (node {dri_node or 'any'}), "
         f"interval: {interval_seconds}s"
@@ -4464,6 +4507,8 @@ async def _collect_gpu_stats_ws(shared_data, gpu_id=0, interval_seconds=1, dri_n
                     "memory_total": gpu.memoryTotal * 1024 * 1024,
                     "memory_used": gpu.memoryUsed * 1024 * 1024,
                 }
+                if metrics is not None:
+                    metrics.set_gpu_utilization(gpu.load * 100)
             except asyncio.CancelledError:
                 raise
             except Exception as e_gpu_stat:
@@ -4693,3 +4738,8 @@ async def reconcile_clients():
                     await data_server.send_current_cursor(ws, remote_address)
         except (ConnectionResetError, OSError, RuntimeError):
             pass
+    if webrtc_reconcile_hook is not None:
+        try:
+            await webrtc_reconcile_hook()
+        except Exception:
+            data_logger.exception("WebRTC peer reconcile failed")

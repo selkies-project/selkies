@@ -52,17 +52,17 @@ import { SelkiesLogo } from "@/components/logo";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, isSecondaryDisplay } from "@/utils";
 import { t } from "@/i18n";
 
-const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
-
 interface TopMenuProps {
   isVideoActive: boolean;
   isAudioActive: boolean;
   isMicrophoneActive: boolean;
   isGamepadEnabled: boolean;
+  isTouchGamepadActive: boolean;
   onVideoToggle: () => void;
   onAudioToggle: () => void;
   onMicrophoneToggle: () => void;
   onGamepadToggle: () => void;
+  onToggleTouchGamepad: () => void;
   toggleStats: () => void;
 }
 
@@ -71,10 +71,12 @@ export function TopMenu({
   isAudioActive,
   isMicrophoneActive,
   isGamepadEnabled,
+  isTouchGamepadActive,
   onVideoToggle,
   onAudioToggle,
   onMicrophoneToggle,
-  onGamepadToggle }: TopMenuProps) {
+  onGamepadToggle,
+  onToggleTouchGamepad }: TopMenuProps) {
 
   const [activePanel, setActivePanel] = React.useState<string | null>(null);
   const [showAppsModal, setShowAppsModal] = React.useState(false);
@@ -102,10 +104,6 @@ export function TopMenu({
   const [isMobile, setIsMobile] = React.useState(false);
   const [hasDetectedTouch, setHasDetectedTouch] = React.useState(false);
   const [isTrackpadModeActive, setIsTrackpadModeActive] = React.useState(false);
-
-  // --- Touch Gamepad ---
-  const [isTouchGamepadActive, setIsTouchGamepadActive] = React.useState(false);
-  const [isTouchGamepadSetup, setIsTouchGamepadSetup] = React.useState(false);
 
   // --- Second Screen Support ---
   const [availablePlacements, setAvailablePlacements] = React.useState<any>(null);
@@ -149,9 +147,15 @@ export function TopMenu({
   }, []);
 
   // Let the core react to panels opening/closing (e.g. input focus handling).
+  // System Monitoring counts as open UI: the websockets core only recomputes
+  // window.fps while it believes the sidebar is visible, and the monitoring
+  // overlay is not an activePanel.
   React.useEffect(() => {
-    window.postMessage({ type: 'sidebarVisibilityChanged', isOpen: !!activePanel }, window.location.origin);
-  }, [activePanel]);
+    window.postMessage(
+      { type: 'sidebarVisibilityChanged', isOpen: !!activePanel || showSystemMonitoring },
+      window.location.origin
+    );
+  }, [activePanel, showSystemMonitoring]);
 
   // Entering fullscreen (button, Ctrl+Shift+F, or browser UI) folds the dashboard so
   // pointer lock isn't fighting an open panel.
@@ -370,42 +374,8 @@ export function TopMenu({
     }
   };
 
-  const handleToggleTouchGamepad = React.useCallback(() => {
-    const newActiveState = !isTouchGamepadActive;
-    setIsTouchGamepadActive(newActiveState);
-
-    if (newActiveState && !isTouchGamepadSetup) {
-      window.postMessage(
-        {
-          type: "TOUCH_GAMEPAD_SETUP",
-          payload: { targetDivId: TOUCH_GAMEPAD_HOST_DIV_ID, visible: true },
-        },
-        window.location.origin
-      );
-      setIsTouchGamepadSetup(true);
-      console.log(
-        "Dashboard: Touch Gamepad SETUP sent, targetDivId:",
-        TOUCH_GAMEPAD_HOST_DIV_ID,
-        "visible: true"
-      );
-    } else if (isTouchGamepadSetup) {
-      window.postMessage(
-        {
-          type: "TOUCH_GAMEPAD_VISIBILITY",
-          payload: {
-            visible: newActiveState,
-            targetDivId: TOUCH_GAMEPAD_HOST_DIV_ID,
-          },
-        },
-        window.location.origin
-      );
-      console.log(
-        `Dashboard: Touch Gamepad VISIBILITY sent, targetDivId:`,
-        TOUCH_GAMEPAD_HOST_DIV_ID,
-        `visible: ${newActiveState}`
-      );
-    }
-  }, [isTouchGamepadActive, isTouchGamepadSetup]);
+  // Touch-gamepad toggle lives in DashboardOverlay (Ctrl+Shift+G must work
+  // while this menu is unmounted); the menu only invokes onToggleTouchGamepad.
 
   const handleToggleTrackpadMode = React.useCallback(() => {
     const newActiveState = !isTrackpadModeActive;
@@ -780,7 +750,7 @@ export function TopMenu({
                     <MenubarLabel>{t('topMenu.touchControls')}</MenubarLabel>
 
                     {!isSecondaryDisplay && (
-                      <MenubarItem onClick={handleToggleTouchGamepad}>
+                      <MenubarItem onClick={onToggleTouchGamepad}>
                         <Gamepad2 className="h-4 w-4 mr-2" />
                         <span className="flex-1">{t('topMenu.touchGamepad')}</span>
                         <span className="text-xs text-muted-foreground ml-auto">

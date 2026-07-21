@@ -453,6 +453,7 @@ function AppsModal({ isOpen, onClose, t }) {
   const handleAppClick = (app) => setSelectedApp(app);
   const handleBackToGrid = () => setSelectedApp(null);
 
+  // Unified apps command contract (both dashboards): the /selkies-proot wrapper.
   const handleInstall = (appName) => {
     console.log(`Install app: ${appName}`);
     window.postMessage(
@@ -483,6 +484,16 @@ function AppsModal({ isOpen, onClose, t }) {
       {
         type: "command",
         value: `/selkies-proot update ${appName}`,
+      },
+      window.location.origin
+    );
+  };
+  const handleLaunch = (appName) => {
+    console.log(`Launch app: ${appName}`);
+    window.postMessage(
+      {
+        type: "command",
+        value: `st ~/.local/bin/${appName}-pa`,
       },
       window.location.origin
     );
@@ -552,6 +563,13 @@ function AppsModal({ isOpen, onClose, t }) {
                 <div className="app-action-buttons">
                   {isAppInstalled(selectedApp.name) ? (
                     <>
+                      <button
+                        onClick={() => handleLaunch(selectedApp.name)}
+                        className="app-action-button install"
+                      >
+                        {t("appsModal.launchButton", "Launch")}{" "}
+                        {selectedApp.name}
+                      </button>
                       <button
                         onClick={() => handleUpdate(selectedApp.name)}
                         className="app-action-button update"
@@ -769,7 +787,10 @@ function Sidebar() {
     newRenderable.screenSettings = s.ui_sidebar_show_screen_settings?.value ?? true;
     newRenderable.audioSettings = s.ui_sidebar_show_audio_settings?.value ?? true;
     newRenderable.stats = s.ui_sidebar_show_stats?.value ?? true;
-    newRenderable.clipboard = s.ui_sidebar_show_clipboard?.value ?? true;
+    // Couple with the server clipboard enable (wish parity): with clipboard off
+    // the core drops writes, so the section would render as a dead textarea.
+    newRenderable.clipboard = (s.ui_sidebar_show_clipboard?.value ?? true)
+      && (s.clipboard_enabled?.value ?? true);
     newRenderable.files = s.ui_sidebar_show_files?.value ?? true;
     newRenderable.apps = s.ui_sidebar_show_apps?.value ?? true;
     newRenderable.sharing = s.ui_sidebar_show_sharing?.value ?? true;
@@ -795,7 +816,8 @@ function Sidebar() {
     newRenderable.videoFullColor = isRenderable('video_fullcolor');
     newRenderable.use_cpu = isRenderable('use_cpu');
     newRenderable.uiScaling = isRenderable('scaling_dpi');
-    newRenderable.binaryClipboard = isRenderable('enable_binary_clipboard');
+    newRenderable.binaryClipboard = isRenderable('enable_binary_clipboard')
+      && (s.clipboard_enabled?.value ?? true);
     newRenderable.use_browser_cursors = isRenderable('use_browser_cursors');
     newRenderable.video_bitrate = isRenderable('video_bitrate');
     newRenderable.audio_bitrate = isRenderable('audio_bitrate');
@@ -1976,6 +1998,21 @@ function Sidebar() {
   };
   const handleClipboardChange = (event) =>
     setDashboardClipboardContent(event.target.value);
+  const clipboardImageInputRef = useRef(null);
+  const handleClipboardImageUpload = (event) => {
+    // Same contract as dashboard-wish: hand the picked image to the core's
+    // clipboardImageUpdate path (a File is a Blob), which sends it through the
+    // binary clipboard exactly like a focus-synced local clipboard image.
+    const file = event.target.files && event.target.files[0];
+    if (file && file.type.startsWith("image/")) {
+      window.postMessage(
+        { type: "clipboardImageUpdate", imageBlob: file },
+        window.location.origin
+      );
+    }
+    // Allow re-uploading the same file.
+    event.target.value = "";
+  };
   const handleClipboardBlur = (event) => {
     if (dashboardClipboardTruncated) return;
     window.postMessage(
@@ -3883,6 +3920,24 @@ function Sidebar() {
                         placeholder={t("sections.clipboard.placeholder")}
                       />
                     </div>
+                    {(renderableSettings.binaryClipboard ?? true) &&
+                      enableBinaryClipboard && (
+                        <div className="dashboard-clipboard-item">
+                          <button
+                            className="app-action-button install"
+                            onClick={() => clipboardImageInputRef.current?.click()}
+                          >
+                            {t("clipboard.uploadImage", "Upload Image")}
+                          </button>
+                          <input
+                            ref={clipboardImageInputRef}
+                            type="file"
+                            accept="image/*"
+                            onChange={handleClipboardImageUpload}
+                            style={{ display: "none" }}
+                          />
+                        </div>
+                      )}
                   </div>
                 )}
               </div>

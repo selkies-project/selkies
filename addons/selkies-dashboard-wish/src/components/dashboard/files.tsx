@@ -70,6 +70,11 @@ export function Files({}: FilesProps = {}) {
                     toast.error(t('uploads.uploadFailedFile', { fileName, errorMessage }), {
                         id: fileName,
                     });
+                } else if (status === 'warning') {
+                    // e.g. a second upload started while one is in flight.
+                    toast.warning(errMsg || t('notifications.unknownError'), {
+                        id: fileName,
+                    });
                 }
             }
         };

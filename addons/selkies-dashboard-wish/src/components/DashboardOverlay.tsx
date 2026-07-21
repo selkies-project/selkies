@@ -16,9 +16,15 @@ interface DashboardOverlayProps {
   container: Element | null;
 }
 
+const TOUCH_GAMEPAD_HOST_DIV_ID = 'touch-gamepad-host';
+
 function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElement | null {
   const [isGamepadEnabled, setIsGamepadEnabled] = useState<boolean>(true);
   const [showStats, setShowStats] = useState<boolean>(true);
+  // Touch-gamepad state lives here (not in TopMenu) so the Ctrl+Shift+G hotkey
+  // works even while the menu is unmounted (hidden UI, viewers).
+  const [isTouchGamepadActive, setIsTouchGamepadActive] = useState<boolean>(false);
+  const [isTouchGamepadSetup, setIsTouchGamepadSetup] = useState<boolean>(false);
   const [isVideoActive, setIsVideoActive] = useState<boolean>(true);
   const [isAudioActive, setIsAudioActive] = useState<boolean>(true);
   const [isMicrophoneActive, setIsMicrophoneActive] = useState<boolean>(false);
@@ -57,26 +63,49 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
     return () => window.removeEventListener('message', handleWindowMessage);
   }, []);
 
-  // Add handlers for button clicks
+  // Pipeline toggles post the request and let the core's status echoes
+  // (pipelineStatusUpdate / sidebarButtonStatusUpdate) flip the state, so the
+  // menu never claims a change the active transport didn't perform (WebRTC
+  // ignores video/audio pipelineControl).
   const handleVideoToggle = () => {
     window.postMessage({ type: 'pipelineControl', pipeline: 'video', enabled: !isVideoActive }, window.location.origin);
-    setIsVideoActive(!isVideoActive);
   };
 
   const handleAudioToggle = () => {
     window.postMessage({ type: 'pipelineControl', pipeline: 'audio', enabled: !isAudioActive }, window.location.origin);
-    setIsAudioActive(!isAudioActive);
   };
 
   const handleMicrophoneToggle = () => {
     window.postMessage({ type: 'pipelineControl', pipeline: 'microphone', enabled: !isMicrophoneActive }, window.location.origin);
-    setIsMicrophoneActive(!isMicrophoneActive);
   };
 
   const handleGamepadToggle = () => {
     window.postMessage({ type: 'gamepadControl', enabled: !isGamepadEnabled }, window.location.origin);
     setIsGamepadEnabled(!isGamepadEnabled);
   };
+
+  const handleToggleTouchGamepad = React.useCallback(() => {
+    const newActiveState = !isTouchGamepadActive;
+    setIsTouchGamepadActive(newActiveState);
+    if (newActiveState && !isTouchGamepadSetup) {
+      window.postMessage(
+        {
+          type: 'TOUCH_GAMEPAD_SETUP',
+          payload: { targetDivId: TOUCH_GAMEPAD_HOST_DIV_ID, visible: true },
+        },
+        window.location.origin
+      );
+      setIsTouchGamepadSetup(true);
+    } else if (isTouchGamepadSetup) {
+      window.postMessage(
+        {
+          type: 'TOUCH_GAMEPAD_VISIBILITY',
+          payload: { visible: newActiveState, targetDivId: TOUCH_GAMEPAD_HOST_DIV_ID },
+        },
+        window.location.origin
+      );
+    }
+  }, [isTouchGamepadActive, isTouchGamepadSetup]);
 
   React.useEffect(() => {
     // Core-owned chords (Ctrl+Shift+M / Ctrl+Shift+G; fullscreen is handled by
@@ -88,13 +117,13 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
       if (message.type === "toggleDashboard") {
         setShowStats((prev) => !prev);
       } else if (message.type === "toggleTouchGamepad") {
-        handleGamepadToggle();
+        handleToggleTouchGamepad();
       }
     };
 
     window.addEventListener("message", handleHotkeyMessage);
     return () => window.removeEventListener("message", handleHotkeyMessage);
-  }, [handleGamepadToggle]);
+  }, [handleToggleTouchGamepad]);
 
   if (!container) {
     return null;
@@ -114,12 +143,16 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
             onAudioToggle={handleAudioToggle}
             onMicrophoneToggle={handleMicrophoneToggle}
             onGamepadToggle={handleGamepadToggle}
+            isTouchGamepadActive={isTouchGamepadActive}
+            onToggleTouchGamepad={handleToggleTouchGamepad}
             toggleStats={() => setShowStats(false)}
           />
         )}
-        
-        {/* Gamepad component (input is owned by the primary display) */}
-        {isGamepadEnabled && !isSecondaryDisplay && (
+
+        {/* Gamepad component (input is owned by the primary display); follows
+            the same chrome gates as the menu so hidden-UI and viewer sessions
+            don't get a floating card over the stream. */}
+        {isGamepadEnabled && !isSecondaryDisplay && showStats && !isViewer && showSidebar && (
           <Gamepad isGamepadEnabled={isGamepadEnabled} onGamepadToggle={setIsGamepadEnabled} />
         )}
       </div>

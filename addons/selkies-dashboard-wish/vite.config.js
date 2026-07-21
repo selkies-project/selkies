@@ -26,8 +26,10 @@ export default ({ mode }) => {
       },
     },
     server: {
-      host: "0.0.0.0",
-      allowedHosts: ['.trycloudflare.com'],
+      // Dev-server exposure is opt-in: bind loopback unless SELKIES_VITE_HOST is set
+      // (parity with selkies-dashboard / selkies-web-core).
+      host: process.env.SELKIES_VITE_HOST || '127.0.0.1',
+      allowedHosts: process.env.SELKIES_VITE_HOST ? true : undefined,
       // main.jsx imports the touch-gamepad addon from its sibling package.
       fs: { allow: ['.', '../universal-touch-gamepad', '../selkies-dashboard'] },
     },

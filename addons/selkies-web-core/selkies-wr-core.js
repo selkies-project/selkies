@@ -207,6 +207,7 @@ export default function webrtc() {
 	// Screen Wake Lock sentinel + preferred audio output device (parity with the WS core).
 	let wakeLockSentinel = null;
 	let preferredOutputDeviceId = null;
+	let preferredInputDeviceId = null;
 	let serverLatency = 0;
 	let resizeRemote = false;
 	let scaleLocal = false;
@@ -351,6 +352,9 @@ export default function webrtc() {
 
 	const isSharedMode = detectedSharedModeType !== null;
 	const isStrictViewer = detectedSharedModeType === "shared";
+	// Secure-mode collab: an mk-token viewer is granted the full input context
+	// via the server's mk_access system action (websockets MK_ACCESS parity).
+	let collabInputGranted = false;
 
 	// Set storage key based on URL
 	// Origin + pathname only (NOT the full URL): a per-session ?token=... must not mint
@@ -704,13 +708,14 @@ export default function webrtc() {
 		const knownSettings = [
 			'framerate', 'encoder_rtc', 'is_manual_resolution_mode',
 			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
-			'rate_control_mode', 'video_crf', 'use_cpu',
+			'rate_control_mode', 'video_crf', 'use_cpu', 'force_aligned_resolution',
 			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality',
 			'video_paintover_crf', 'video_paintover_burst_frames'
 		];
 		const booleanSettingKeys = [
 			'is_manual_resolution_mode', 'enable_binary_clipboard', 'use_cpu',
-			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality'
+			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality',
+			'force_aligned_resolution'
 		];
 		const integerSettingKeys = [
 			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_crf',
@@ -967,9 +972,15 @@ export default function webrtc() {
 			return;
 		}
 		// Sync the remote desktop DPI to the local display scaling on connect (server applies via
-		// handle_scaling -> set_dpi). scaling_dpi is not in the WebRTC settings allow-list, so the
-		// s, path is required. This is the desktop-font sync, unrelated to the resolution.
+		// handle_scaling -> set_dpi; the initial SETTINGS payload's scaling_dpi seed goes through
+		// the same idempotent path, so whichever lands first wins and the other no-ops). This is
+		// the desktop-font sync, unrelated to the resolution.
 		if (webrtc) { try { webrtc.sendDataChannelMessage(`s,${scalingDPI}`); } catch (_) {} }
+		// Re-assert persisted trackpad mode's cursor compositing (websockets parity:
+		// touch has no hover cursor, so the pointer must be baked into the video).
+		if (trackpadMode && webrtc) {
+			try { webrtc.sendDataChannelMessage('SET_NATIVE_CURSOR_RENDERING,1'); } catch (_) {}
+		}
 		// Preset the video element to last session resolution
 		if (window.isManualResolutionMode && manualWidth && manualHeight) {
 			console.log(`Applying manual resolution: ${manualWidth}x${manualHeight}`);
@@ -1126,11 +1137,9 @@ export default function webrtc() {
 				}
 				break;
 			case 'pipelineControl':
-				// The only pipeline the WebRTC client toggles is the microphone (video and
-				// audio stay negotiated for the session); attach/detach the mic track.
 				if (message.pipeline === 'microphone' && webrtc && typeof webrtc.setMicrophone === 'function') {
 					const micOn = !!message.enabled;
-					webrtc.setMicrophone(micOn).then(() => {
+					webrtc.setMicrophone(micOn, preferredInputDeviceId).then(() => {
 						isMicrophoneActive = micOn;
 						postSidebarButtonUpdate();
 					}).catch((e) => {
@@ -1138,6 +1147,27 @@ export default function webrtc() {
 						isMicrophoneActive = false;
 						postSidebarButtonUpdate();
 					});
+				} else if (message.pipeline === 'video' && webrtc) {
+					// Same per-peer server gate the tab-hide pause uses: the sender
+					// stops RTP for THIS peer, capture stops when every consumer is
+					// paused, and resume comes back with an IDR.
+					const videoOn = !!message.enabled;
+					try {
+						webrtc.sendDataChannelMessage(videoOn ? 'START_VIDEO' : 'STOP_VIDEO');
+						isVideoPipelineActive = videoOn;
+						window.postMessage({ type: 'pipelineStatusUpdate', video: videoOn }, window.location.origin);
+						postSidebarButtonUpdate();
+					} catch (e) {
+						console.error('Video toggle failed:', e);
+					}
+				} else if (message.pipeline === 'audio' && videoElement) {
+					// Audio stays negotiated for the session; the toggle is a local
+					// element mute (the bundled <video> carries the audio track).
+					const audioOn = !!message.enabled;
+					videoElement.muted = !audioOn;
+					isAudioPipelineActive = audioOn;
+					window.postMessage({ type: 'pipelineStatusUpdate', audio: audioOn }, window.location.origin);
+					postSidebarButtonUpdate();
 				}
 				break;
 			case 'gamepadControl':
@@ -1179,11 +1209,21 @@ export default function webrtc() {
 				}
 				break;
 			case 'audioDeviceSelected':
-				// Output-device routing (setSinkId); mic-input device selection is not
-				// plumbed on the WebRTC mic path, so only 'output' is honored here.
 				if (message.context === 'output' && message.deviceId) {
 					preferredOutputDeviceId = message.deviceId;
 					applyOutputDevice();
+				} else if (message.context === 'input' && message.deviceId) {
+					preferredInputDeviceId = message.deviceId;
+					// A live mic must move to the new device: cycle the track.
+					if (isMicrophoneActive && webrtc && typeof webrtc.setMicrophone === 'function') {
+						webrtc.setMicrophone(false).then(() =>
+							webrtc.setMicrophone(true, preferredInputDeviceId)
+						).catch((e) => {
+							console.error('Microphone device switch failed:', e);
+							isMicrophoneActive = false;
+							postSidebarButtonUpdate();
+						});
+					}
 				}
 				break;
 			case 'requestFullscreen':
@@ -1240,6 +1280,11 @@ export default function webrtc() {
 					trackpadMode = true;
 					setBoolParam('trackpadMode', true);
 					input.setTrackpadMode(true);
+					// Touch has no hover cursor: composite the pointer into the
+					// video (websockets parity).
+					if (webrtc) {
+						try { webrtc.sendDataChannelMessage('SET_NATIVE_CURSOR_RENDERING,1'); } catch (_) {}
+					}
 				}
 				break;
 			case 'touchinput:touch':
@@ -1247,6 +1292,9 @@ export default function webrtc() {
 					trackpadMode = false;
 					setBoolParam('trackpadMode', false);
 					input.setTrackpadMode(false);
+					if (webrtc) {
+						try { webrtc.sendDataChannelMessage('SET_NATIVE_CURSOR_RENDERING,0'); } catch (_) {}
+					}
 				}
 				break;
 			default:
@@ -1907,7 +1955,7 @@ export default function webrtc() {
 			};
 			webrtc = new WebRTCClient(signaling, videoElement, 1, isSharedMode);
 			const send = (data) => {
-				if (isSharedMode && isStrictViewer) return;
+				if (isSharedMode && isStrictViewer && !collabInputGranted) return;
 				webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
@@ -2191,6 +2239,42 @@ export default function webrtc() {
 						// trigger webrtc.reset() by disconnecting from the signaling server.
 						signaling.disconnect();
 					}, 700);
+				} else if (action.startsWith('mk_access,')) {
+					// Secure-mode collab verdict (websockets MK_ACCESS parity):
+					// grant attaches the full input context; revocation detaches
+					// it and re-closes the strict-viewer send gate.
+					const granted = action.slice('mk_access,'.length) === '1';
+					collabInputGranted = granted;
+					if (input) {
+						if (granted) {
+							if (!input.isInputAttached()) {
+								console.log('Collab access granted: attaching input context.');
+								input.attach_context();
+							}
+						} else {
+							console.log('Collab access revoked: detaching input context.');
+							input.detach_context();
+						}
+					}
+				} else if (action.startsWith('resolution,')) {
+					// Realized-size reconciliation (websockets stream_resolution
+					// parity): the server may snap or clamp a request (16-px
+					// alignment, compositor refusal), so manual-mode bookkeeping
+					// must follow what was actually realized — otherwise the UI
+					// keeps advertising, and re-requesting, a size the server
+					// cannot produce. The <video> itself follows the RTP track's
+					// intrinsic size either way.
+					const dims = action.slice('resolution,'.length).split('x');
+					const rw = parseInt(dims[0], 10);
+					const rh = parseInt(dims[1], 10);
+					if (rw > 0 && rh > 0 && window.isManualResolutionMode &&
+						(manualWidth !== rw || manualHeight !== rh)) {
+						manualWidth = rw;
+						manualHeight = rh;
+						setIntParam('manual_width', rw);
+						setIntParam('manual_height', rh);
+						applyManualStyle(manualWidth, manualHeight, scaleLocal);
+					}
 				} else {
 					webrtc._setStatus('Server sent acknowledgement for ' + action);
 				}

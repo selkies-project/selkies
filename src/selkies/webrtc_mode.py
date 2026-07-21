@@ -20,6 +20,7 @@
 #   limitations under the License.
 
 import sys
+import time
 import logging
 import asyncio
 import argparse
@@ -28,7 +29,9 @@ import shutil
 from aiohttp import web
 from typing import Any, Dict, List, Optional
 
-from .rtc import RTCApp
+from .rtc import RTCApp, ClientType
+from . import selkies as selkies_module
+from .selkies import current_session_tokens
 from .media_pipeline import (MediaPipeline, MediaPipelinePixel, RateControlMode,
                              ScreenCapture as PixelfluxScreenCapture)
 from .webrtc.codecs import configure_multiopus
@@ -165,6 +168,7 @@ class WebRTCService(BaseStreamingService):
         self.display_clients: Dict[str, Dict[str, Any]] = {}
         self.display_layouts: Dict[str, Dict[str, int]] = {}
         self.display_pipelines: Dict[str, MediaPipeline] = {}
+        self._last_idr_request_times: Dict[str, float] = {}
         self._display_lock = asyncio.Lock()
         self._primary_dims: Optional[tuple] = None
         # Fallback pixelflux handle for Wayland output management when the
@@ -390,6 +394,12 @@ class WebRTCService(BaseStreamingService):
                         "Secondary display '%s' refused: second screens are disabled by server settings.",
                         display_id,
                     )
+                    # Fatal verdict: a bare return leaves the signaling socket
+                    # open and the page on "Connecting..." forever.
+                    await self._close_peer_signaling_ws(
+                        session_peer_id, 4000,
+                        b"Second screens are disabled on this server.",
+                    )
                     return
                 # Dimensions arrive through the client's first resize message.
                 entry = self.display_clients.setdefault(display_id, {"width": 0, "height": 0})
@@ -518,6 +528,9 @@ class WebRTCService(BaseStreamingService):
         # and the consumer-set re-check on peer departure.
         self.rtc_app.on_video_consumer_active = self.handle_video_consumer_active
         self.rtc_app.on_consumers_changed = self.handle_consumers_changed
+        # Token updates (/api/tokens) must reconcile LIVE WebRTC peers too:
+        # revocation closes them, mk handoffs push over the data channel.
+        selkies_module.webrtc_reconcile_hook = self.reconcile_webrtc_peers
 
         # DPI scaling is independent of enable_resize, which gates only dynamic
         # resolution changes. The WebSocket transport applies scaling through the
@@ -725,6 +738,11 @@ class WebRTCService(BaseStreamingService):
                 self.media_pipeline.height = realized_h
                 self.media_pipeline.last_resize_success = True
                 self._last_resize_request = (target_w, target_h)
+                if self.rtc_app is not None:
+                    # Wayland-branch parity: X snapping (xrandr mode pick) can
+                    # realize a different size than requested, and the client's
+                    # manual-mode bookkeeping must follow the realized one.
+                    self.rtc_app.send_remote_resolution(f"{realized_w}x{realized_h}")
             else:
                 logger.error(
                     f"resize_display('{target_w}x{target_h}') reported failure"
@@ -739,7 +757,17 @@ class WebRTCService(BaseStreamingService):
                 self.media_pipeline.last_resize_success = False
 
     async def request_idr_for_display(self, display_id: str = "primary") -> None:
-        pipeline = self.display_pipelines.get(display_id or "primary")
+        display_id = display_id or "primary"
+        # Per-display floor (websockets REQUEST_KEYFRAME parity): any number of
+        # viewers share one encoder, and an unthrottled data-channel request or
+        # PLI storm would let a single client force keyframe bursts for every
+        # consumer. A request landing inside the floor is satisfied by the IDR
+        # the previous request already scheduled.
+        now = time.monotonic()
+        if now - self._last_idr_request_times.get(display_id, 0.0) < 0.25:
+            return
+        self._last_idr_request_times[display_id] = now
+        pipeline = self.display_pipelines.get(display_id)
         if pipeline is not None:
             await pipeline.dynamic_idr_frame()
 
@@ -1019,33 +1047,103 @@ class WebRTCService(BaseStreamingService):
         if pipeline is None:
             return
         if active:
-            try:
-                if await pipeline.resume_screen_capture():
-                    logger.info(f"Display '{display_id}': capture restarted on consumer resume.")
-            except Exception as e:
-                logger.error(f"Display '{display_id}': capture resume failed: {e}")
-            await self.request_idr_for_display(display_id)
+            # IDR unconditionally: the resuming peer's decoder needs a resync
+            # even when the capture kept running for other consumers.
+            await self._resume_display_capture(display_id, pipeline,
+                                               "consumer resume", idr_always=True)
         elif all(p.get("video_paused", False) for p in self._display_consumers(display_id)):
             if await pipeline.pause_screen_capture():
                 logger.info(
                     f"All consumers of display '{display_id}' are paused; capture stopped."
                 )
 
+    async def _close_peer_signaling_ws(self, peer_id: str, code: int, message: bytes) -> None:
+        """Fatal verdict on ONE peer's signaling socket (websockets KILL parity);
+        bounded so a wedged socket cannot stall the caller."""
+        if self.peer_manager is None:
+            return
+        async with self.peer_manager.lock:
+            peer = self.peer_manager.peers.get(peer_id)
+            peer_ws = getattr(peer, "ws", None) if peer is not None else None
+        if peer_ws is not None and not peer_ws.closed:
+            try:
+                await asyncio.wait_for(peer_ws.close(code=code, message=message), timeout=2.0)
+            except Exception:
+                pass
+
+    async def reconcile_webrtc_peers(self) -> None:
+        """Token-update reconciliation for LIVE WebRTC peers (websockets
+        reconcile_clients parity): a revoked or role-changed token closes the
+        peer (signaling verdict 4002 + pipeline stop); an mk-token handoff
+        pushes the new collab verdict to every viewer over its data channel.
+        Per-message input authority already reads the live store — this covers
+        the media stream and the client-side grant, which otherwise persist
+        until the peer disconnects itself."""
+        if self.rtc_app is None:
+            return
+        tokens, mk = current_session_tokens()
+        for peer_id, peer in list(self.rtc_app.peer_connections.items()):
+            token = peer.get("client_token")
+            if not token:
+                continue  # legacy (token-less) peer: governed by its URL role only
+            ctype = peer.get("client_type")
+            role_now = "controller" if ctype == ClientType.CONTROLLER else "viewer"
+            new_perms = tokens.get(token)
+            if not new_perms or (new_perms.get("role") or "controller") != role_now:
+                reason = "Token revoked" if not new_perms else "Permissions changed significantly"
+                logger.info(f"Disconnecting WebRTC peer {peer_id}: {reason}")
+                await self._close_peer_signaling_ws(peer_id, 4002, reason.encode())
+                try:
+                    await self.rtc_app.stop_rtc_connection(peer_id, role_now)
+                except Exception:
+                    logger.warning(f"stop_rtc_connection failed for {peer_id}", exc_info=True)
+                continue
+            if ctype == ClientType.VIEWER:
+                self.rtc_app._send_collab_state(
+                    peer.get("data_channel"), ClientType.VIEWER, token
+                )
+
     async def handle_consumers_changed(self, display_id: str) -> None:
-        """A peer left a display's consumer set: re-evaluate the all-paused
-        stop, so a departing unpaused peer cannot leave the capture running
-        for hidden-only consumers. (A departing controller's pipeline is torn
-        down elsewhere; pause_screen_capture no-ops on a stopped pipeline.)"""
+        """A peer joined or left a display's consumer set: re-evaluate the
+        all-paused stop in both directions — a departing unpaused peer cannot
+        leave the capture running for hidden-only consumers, and a JOINING
+        unpaused peer must re-open a capture the rule stopped (else a viewer
+        arriving while every prior consumer is hidden gets a permanently black
+        stream: a paused capture emits no RTP, so the browser never even PLIs).
+        (A departing controller's pipeline is torn down elsewhere; both
+        pause_screen_capture and resume_screen_capture no-op on a stopped
+        pipeline.)"""
         display_id = display_id or "primary"
         pipeline = self.display_pipelines.get(display_id)
         if pipeline is None:
             return
         consumers = self._display_consumers(display_id)
-        if consumers and all(p.get("video_paused", False) for p in consumers):
+        if not consumers:
+            return
+        if all(p.get("video_paused", False) for p in consumers):
             if await pipeline.pause_screen_capture():
                 logger.info(
                     f"All remaining consumers of display '{display_id}' are paused; capture stopped."
                 )
+        else:
+            # IDR only on an actual restart: with the capture already live, RTP
+            # flows and the joining browser's own PLI covers its resync.
+            await self._resume_display_capture(display_id, pipeline, "joining consumer")
+
+    async def _resume_display_capture(self, display_id: str, pipeline,
+                                      why: str, idr_always: bool = False) -> None:
+        """Resume a capture stopped by the all-consumers-paused rule (no-op on a
+        live or fully-stopped pipeline) and request the resync IDR — always, or
+        only when the resume actually restarted the capture."""
+        restarted = False
+        try:
+            restarted = await pipeline.resume_screen_capture()
+            if restarted:
+                logger.info(f"Display '{display_id}': capture restarted ({why}).")
+        except Exception as e:
+            logger.error(f"Display '{display_id}': capture resume failed ({why}): {e}")
+        if idr_always or restarted:
+            await self.request_idr_for_display(display_id)
 
     async def _drop_wayland_secondary(self, did: str, reason: str) -> None:
         """Refuse a secondary display the compositor cannot realize: unregister
@@ -1490,6 +1588,18 @@ class WebRTCService(BaseStreamingService):
         kb_layout = settings_json.get("keyboardLayout")
         if kb_layout and self.input_handler is not None:
             await self.input_handler.apply_client_keyboard_layout(kb_layout)
+
+        dpi_val = settings_json.get("scaling_dpi")
+        if dpi_val is not None and display_id == "primary":
+            # Websockets parity: the client seeds its DPR-derived scaling_dpi into
+            # the very first SETTINGS payload; honoring it through the same guarded
+            # path as 's,' applies the right scale on the first sync instead of
+            # waiting for the dashboard's later correction (one fewer interval at
+            # the wrong scale; handle_scaling is idempotent for the later 's,').
+            try:
+                await self.handle_scaling(float(dpi_val))
+            except (TypeError, ValueError):
+                logger.warning(f"Ignoring malformed scaling_dpi in SETTINGS: {dpi_val!r}")
 
         def sanitize_value(name: str, client_value: Any) -> Any:
             """One-transport wrapper over the shared sanitizer (settings.py)."""

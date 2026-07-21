@@ -7,6 +7,7 @@
     "dev": "vite",
     "serve": "vite",
     "build": "vite build",
+    "postbuild": "node copy-jsdb.js",
     "lint": "eslint .",
     "preview": "vite preview"
   },

@@ -32,7 +32,6 @@ RUN \
   npm run build && \
   mkdir -p dist/src dist/assets && \
   cp ../selkies-web-core/dist/selkies-core.js dist/src/ && \
-  cp ../selkies-web-core/dist/clipboard-worker* dist/assets && \
   cp ../universal-touch-gamepad/universalTouchGamepad.js dist/src/ && \
   cp -r ../selkies-web-core/dist/jsdb dist/ && \
   mkdir -p /usr/share/nginx/html && \
