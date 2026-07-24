@@ -77,11 +77,28 @@ FRAME_ID_SUSPICIOUS_GAP_THRESHOLD = (
     MAX_UINT16_FRAME_ID // 2
 )
 STALLED_CLIENT_TIMEOUT_SECONDS = 4.0
-# Per-client send bound for the shared audio/video fan-out (20ms/frame-cadence
-# streams): a socket that cannot take a frame for this long is dropped so one
-# black-holed client cannot freeze the broadcast; backlog stays under the
-# BACKPRESSURE_QUEUE_SIZE the producers drop against.
+# Liveness bound for one websocket send on the shared audio fan-out and the
+# per-client video relays. Backlogs are bounded upstream (audio queue depth,
+# the video relay byte budget), so a send that cannot finish in this long
+# means a dead or black-holed socket — and the cancelled write left a torn
+# websocket frame behind, so the socket is dropped, never reused.
 SHARED_STREAM_SEND_TIMEOUT_SECONDS = 1.0
+# Per-client video backlog bound: past it, a relay drops its backlog and the
+# client skips ahead to the next keyframe instead of backing encoded frames up
+# into the shared pipeline or the socket transport (whose freed burst peaks
+# the allocator retains — the issue #282 RSS ratchet). The bound is
+# VIDEO_RELAY_BUDGET_SECONDS of stream at the capture's configured bitrate —
+# backlog is latency debt, so the skip-ahead threshold must track the stream
+# rate, not a fixed byte count — floored so low-bitrate streams keep absorbing
+# transport jitter. Keyframes are exempt (a keyframe is indivisible: part of
+# one is useless), so the true per-client bound is budget + one keyframe burst.
+VIDEO_RELAY_BUDGET_SECONDS = 2.0
+VIDEO_RELAY_BUDGET_MIN_BYTES = 4 * 1024 * 1024
+# Floor between one relay's keyframe (re)requests while it waits for a sync
+# point. pixelflux collapses concurrent requests into a single per-frame flag,
+# so this only bounds how much keyframe bitrate a hopelessly slow client can
+# add to the shared stream (~1 IDR/s worst case).
+VIDEO_RELAY_SYNC_FLOOR_SECONDS = 1.0
 RTT_SMOOTHING_SAMPLES = 20
 # RFC 2198 RED redundancy depth (distance=2) for the shared Opus audio stream.
 AUDIO_RED_DISTANCE = 2
@@ -508,6 +525,153 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
         clients -= closed_clients
     return closed_clients
 
+
+class _VideoRelay:
+    """Bounded video delivery for one (client, display) pair.
+
+    The fan-out offers every encoded chunk synchronously and never awaits a
+    socket; each relay's own task drains its backlog. One slow client can
+    therefore neither pace the other clients nor back frames up into the
+    shared pipeline or its socket transport: past its byte budget (~
+    VIDEO_RELAY_BUDGET_SECONDS of stream at the configured bitrate) it drops
+    its backlog and skips ahead to the next keyframe, the standard
+    broadcast-video contract.
+
+    H.264 chain safety is tracked per stripe ROW (wire-header y_start, bytes
+    4:6): one capture frame can mix IDR and delta stripes (a lone stripe
+    encoder re-init IDRs only its own row), so after any drop a row's delta
+    chunks stay gated until that row's own IDR arrives — a delivered delta
+    otherwise decodes against a reference the client never received. The
+    wire type byte (offset 1) is stamped from the encoder's ACTUAL output
+    picture type on every backend, and a requested recovery IDR covers every
+    row (force_idr_all), so gated rows converge on the next request. JPEG
+    chunks (0x03) have no reference chain: never gated, and a drop only
+    costs a repaint request. A fresh relay starts fully gated, so a joining
+    client waits for a keyframe instead of decoding mid-GOP garbage.
+    """
+
+    __slots__ = ('server', 'display_id', 'ws', 'budget', 'backlog',
+                 'backlog_bytes', 'live_rows', 'stopped', '_wake', '_task',
+                 '_next_sync_req')
+
+    def __init__(self, server, display_id, ws, budget):
+        self.server = server
+        self.display_id = display_id
+        self.ws = ws
+        self.budget = budget
+        self.backlog = deque()
+        self.backlog_bytes = 0
+        # Rows whose IDR was accepted into the current (uncleared) backlog:
+        # only their delta chunks are chain-continuous for this client.
+        self.live_rows = set()
+        self.stopped = False
+        self._wake = asyncio.Event()
+        self._task = None
+        self._next_sync_req = 0.0
+
+    def start(self):
+        self._task = asyncio.create_task(
+            self._run(), name=f"VideoRelay:{self.display_id}")
+
+    def stop(self):
+        """Graceful: an in-flight send completes — cancelling mid-frame would
+        tear the websocket framing on a socket that stays open for control."""
+        self.stopped = True
+        self.backlog.clear()
+        self.backlog_bytes = 0
+        self._wake.set()
+
+    def flush_for_gate(self):
+        """ACK backpressure engaged: drop the undrained backlog and gate every
+        row, so the client resumes only at the IDR that
+        _set_backpressure_enabled requests when the gate lifts."""
+        if self.backlog or self.live_rows:
+            self.backlog.clear()
+            self.backlog_bytes = 0
+            self.live_rows.clear()
+
+    def _want_sync(self):
+        now = time.monotonic()
+        if now >= self._next_sync_req:
+            self._next_sync_req = now + VIDEO_RELAY_SYNC_FLOOR_SECONDS
+            return True
+        return False
+
+    def offer(self, item):
+        """Accept, drop, or gate one encoded chunk. Runs on the event loop and
+        never awaits. Returns True when the caller should request a keyframe
+        (data was dropped that only a sync point recovers)."""
+        data = item['data']
+        size = len(data)
+        is_h264 = size >= 10 and data[0] == 0x04
+        is_idr = is_h264 and data[1] == 0x01
+        dropped = False
+        if (not is_idr and self.backlog
+                and self.backlog_bytes + size > self.budget):
+            self.backlog.clear()
+            self.backlog_bytes = 0
+            self.live_rows.clear()
+            dropped = True
+        deliver = True
+        if is_h264:
+            row = (data[4] << 8) | data[5]
+            if is_idr:
+                self.live_rows.add(row)
+            elif row not in self.live_rows:
+                deliver = False
+                dropped = True
+        if deliver:
+            self.backlog.append(item)
+            self.backlog_bytes += size
+            self._wake.set()
+        return dropped and self._want_sync()
+
+    async def _run(self):
+        try:
+            while True:
+                if self.stopped:
+                    return
+                if not self.backlog:
+                    self._wake.clear()
+                    await self._wake.wait()
+                    continue
+                item = self.backlog.popleft()
+                data = item['data']
+                self.backlog_bytes -= len(data)
+                # Stamp the send time BEFORE the await and only when this
+                # socket is the display's registered client, matching what the
+                # ACK RTT math has always measured.
+                ds = self.server.display_clients.get(self.display_id)
+                if ds is not None and ds.get('ws') is self.ws:
+                    fid = item['frame_id']
+                    ds['sent_timestamps'][fid] = time.monotonic()
+                    ds['last_sent_frame_id'] = fid
+                    ds['has_sent_any_frame'] = True
+                    if len(ds['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
+                        ds['sent_timestamps'].popitem(last=False)
+                try:
+                    await asyncio.wait_for(
+                        self.ws.send_bytes(data),
+                        timeout=SHARED_STREAM_SEND_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    # Checked before OSError: on 3.11+ TimeoutError subclasses it.
+                    data_logger.warning(
+                        f"Video relay for '{self.display_id}' send stalled past "
+                        f"{SHARED_STREAM_SEND_TIMEOUT_SECONDS}s; dropping client.")
+                    self.server.clients.discard(self.ws)
+                    _close_abandoned_ws(self.ws)
+                    return
+                except (ConnectionResetError, OSError, RuntimeError):
+                    self.server.clients.discard(self.ws)
+                    return
+                self.server._bytes_sent_in_interval += len(data)
+        finally:
+            group = self.server.video_relay_groups.get(self.display_id)
+            if group is not None and group.get(self.ws) is self:
+                del group[self.ws]
+
+
 class SelkiesAppError(Exception):
     pass
 
@@ -760,13 +924,17 @@ class DataStreamingServer(BaseStreamingService):
         self.allowed_desync_ms = BACKPRESSURE_ALLOWED_DESYNC_MS
         self.latency_threshold_for_adjustment_ms = BACKPRESSURE_LATENCY_THRESHOLD_MS
         self.backpressure_check_interval_s = BACKPRESSURE_CHECK_INTERVAL_S
-        # Per-stream video/audio queue depth (frames dropped past this under backpressure).
+        # Audio queue depth (chunks dropped past this under backpressure);
+        # video is bounded per client by the _VideoRelay byte budget instead.
         self.BACKPRESSURE_QUEUE_SIZE = getattr(settings, 'backpressure_queue_size', 120)
         self._last_client_frame_id_report_time = 0.0
         self.capture_loop = None
 
         self.display_clients = {}
-        self.video_chunk_queues = {}
+        # display_id -> {ws: _VideoRelay}. The dict's presence marks the
+        # display's capture as delivering; relays are created lazily by the
+        # fan-out and each one bounds a single client's video backlog.
+        self.video_relay_groups = {}
         self.capture_instances = {}
         self.display_layouts = {}
         # One ScreenCapture per display_id, kept for the server's lifetime: start/stop
@@ -1347,6 +1515,30 @@ class DataStreamingServer(BaseStreamingService):
                 self._deferred_viewer_rejoins.pop(websocket, None)
 
         self._deferred_viewer_rejoins[websocket] = asyncio.create_task(_rejoin())
+
+    def _video_relay_budget(self, display_id: str, fallback: int) -> int:
+        """Skip-ahead byte budget for one client's video relay:
+        VIDEO_RELAY_BUDGET_SECONDS of stream at the display's CURRENT
+        configured bitrate (1 kbps = 125 B/s), floored so low-bitrate streams
+        keep absorbing transport jitter. Read from the live capture settings
+        at relay creation so in-place restarts (settings changes that reuse
+        the capture callback) are honored; `fallback` covers the start window
+        before capture_instances is registered."""
+        inst = self.capture_instances.get(display_id)
+        cs = inst.get('settings') if inst else None
+        if cs is None:
+            return fallback
+        kbps = int(getattr(cs, 'video_bitrate_kbps', 0) or 0)
+        return max(VIDEO_RELAY_BUDGET_MIN_BYTES,
+                   int(kbps * 125 * VIDEO_RELAY_BUDGET_SECONDS))
+
+    def _close_video_relays(self, display_id: str):
+        """Stop every per-client video relay for this display. Graceful: each
+        relay finishes its in-flight send and its task removes itself."""
+        group = self.video_relay_groups.pop(display_id, None)
+        if group:
+            for relay in list(group.values()):
+                relay.stop()
 
     def _schedule_idr_for_display(self, display_id: str):
         """Ask the encoder for a fresh keyframe on this display, off the event loop."""
@@ -3061,6 +3253,14 @@ class DataStreamingServer(BaseStreamingService):
                     data_logger.warning(f"Gamepad release on disconnect failed: {e}")
 
             self.clients.discard(websocket)
+            # Drop this socket's video relays now rather than at the next
+            # fan-out: with an idle capture (JPEG / streaming mode off) no
+            # chunk flows to prune them, and a dead relay would pin its
+            # backlog buffers until the next frame or capture stop.
+            for relay_group in self.video_relay_groups.values():
+                stale_relay = relay_group.pop(websocket, None)
+                if stale_relay is not None:
+                    stale_relay.stop()
             if self.data_ws is websocket:
                 self.data_ws = None
             # Drop this client's RED capability and re-gate: a departing
@@ -3426,7 +3626,7 @@ class DataStreamingServer(BaseStreamingService):
             await self._stop_capture_for_display_impl(display_id)
 
     async def _stop_capture_for_display_impl(self, display_id: str):
-        """Stops the capture, sender, and backpressure tasks for a single, specific display."""
+        """Stops the capture, relays, and backpressure tasks for a single, specific display."""
         data_logger.info(f"Stopping all streams for display '{display_id}'...")
         reset_sent = await self._ensure_backpressure_task_is_stopped(display_id)
         capture_info = self.capture_instances.pop(display_id, None)
@@ -3434,10 +3634,7 @@ class DataStreamingServer(BaseStreamingService):
             capture_module = capture_info.get('module')
             if capture_module:
                 await asyncio.to_thread(capture_module.stop_capture)
-            sender_task = capture_info.get('sender_task')
-            if sender_task and not sender_task.done():
-                sender_task.cancel()
-        self.video_chunk_queues.pop(display_id, None)
+        self._close_video_relays(display_id)
         if capture_info and not reset_sent:
             # Clients rebuild their video sinks/decoders only on PIPELINE_RESETTING;
             # every real capture stop must send exactly one, including when no
@@ -3911,117 +4108,6 @@ class DataStreamingServer(BaseStreamingService):
         data_logger.info("Display reconfiguration finished successfully.")
 
 
-    async def _video_chunk_sender(self, display_id: str):
-        """
-        Pulls data from a specific queue, records send timestamp, and sends to the correct client(s).
-        """
-        data_logger.info(f"Video chunk sender started for display '{display_id}'.")
-        queue = self.video_chunk_queues.get(display_id)
-        if not queue:
-            data_logger.error(f"Cannot start sender for '{display_id}': Queue not found.")
-            return
-
-        try:
-            while True:
-                chunk_info = await queue.get()
-                data_chunk = chunk_info['data']
-                frame_id = chunk_info['frame_id']
-                if display_id == 'primary':
-                    secondary_websockets = {
-                        client_info.get('ws')
-                        for did, client_info in self.display_clients.items()
-                        if did != 'primary' and client_info.get('ws')
-                    }
-                    # Hidden-tab clients (STOP_VIDEO) are excluded from the VIDEO
-                    # broadcast only; they stay connected for control/cursor/audio
-                    # and rejoin on START_VIDEO with a reset + IDR. (The audio
-                    # sender deliberately does NOT subtract this set.)
-                    primary_viewers = (self.clients - secondary_websockets
-                                       - self.video_paused_clients)
-
-                    if not primary_viewers:
-                        queue.task_done()
-                        continue
-                    # Backpressure throttles the primary CONTROLLER only; shared viewers must
-                    # keep receiving frames (don't starve them on one backed-up client). Drop
-                    # just the controller from the send set when it's backed up; skip entirely
-                    # only when nothing is left to send to.
-                    primary_state = self.display_clients.get('primary')
-                    pc_ws = primary_state.get('ws') if primary_state is not None else None
-                    controller_backed_up = (primary_state is not None
-                                            and not primary_state.get('backpressure_enabled', True))
-                    if controller_backed_up:
-                        send_targets = {ws for ws in primary_viewers if ws is not pc_ws}
-                    else:
-                        send_targets = primary_viewers
-                    if not send_targets:
-                        queue.task_done()
-                        continue
-                    now = time.monotonic()
-                    # Only the 'primary' entry feeds the backpressure task; record only when the
-                    # controller actually receives this frame (O(1), no scan).
-                    if pc_ws is not None and pc_ws in send_targets:
-                        primary_state['sent_timestamps'][frame_id] = now
-                        primary_state['last_sent_frame_id'] = frame_id
-                        primary_state['has_sent_any_frame'] = True
-                        if len(primary_state['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
-                            primary_state['sent_timestamps'].popitem(last=False)
-                    try:
-                        # Bounded sends: a stalled shared viewer must not freeze
-                        # primary video for the controller and other viewers.
-                        dropped = await _broadcast_to_clients(
-                            send_targets, data_chunk,
-                            per_client_timeout=SHARED_STREAM_SEND_TIMEOUT_SECONDS,
-                        )
-                        self._bytes_sent_in_interval += len(data_chunk) * len(send_targets)
-                        if dropped:
-                            # send_targets is a per-frame temporary: propagate the
-                            # drop to the authoritative registry, or the dead socket
-                            # re-enters the fan-out on the very next frame.
-                            self.clients -= dropped
-                    except Exception as e:
-                        data_logger.error(f"Error during primary broadcast: {e}")
-
-                else:
-                    client_info = self.display_clients.get(display_id)
-                    if not client_info or not client_info.get('ws') or not client_info.get('backpressure_enabled', True):
-                        queue.task_done()
-                        continue
-                    websocket = client_info['ws']
-                    now = time.monotonic()
-                    client_info['sent_timestamps'][frame_id] = now
-                    client_info['last_sent_frame_id'] = frame_id
-                    client_info['has_sent_any_frame'] = True
-                    if len(client_info['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
-                        client_info['sent_timestamps'].popitem(last=False)
-                    try:
-                        # Bounded send, matching the primary path: a wedged secondary
-                        # socket must not pin this sender inside the await, where the
-                        # backpressure gate (checked only at loop top) can never
-                        # preempt it. A cancelled send may leave a half-written
-                        # frame, so the socket is dropped and closed, not reused.
-                        await asyncio.wait_for(
-                            websocket.send_bytes(data_chunk),
-                            timeout=SHARED_STREAM_SEND_TIMEOUT_SECONDS,
-                        )
-                        self._bytes_sent_in_interval += len(data_chunk)
-                    except asyncio.TimeoutError:
-                        # Checked before OSError: on 3.11+ TimeoutError subclasses it.
-                        data_logger.warning(
-                            f"Client for '{display_id}' send stalled past "
-                            f"{SHARED_STREAM_SEND_TIMEOUT_SECONDS}s; dropping."
-                        )
-                        _close_abandoned_ws(websocket)
-                        break
-                    except (ConnectionResetError, OSError, RuntimeError):
-                        data_logger.warning(f"Client for '{display_id}' connection closed during send.")
-                        break
-                queue.task_done()
-        except asyncio.CancelledError:
-            data_logger.info(f"Video chunk sender for '{display_id}' cancelled.")
-        finally:
-            data_logger.info(f"Video chunk sender for '{display_id}' finished.")
-
     async def _ensure_viewer_capture(self):
         """Start the primary capture for a shared/player viewer when no display-
         owning client is connected (fresh server, or the controller left): the
@@ -4106,9 +4192,18 @@ class DataStreamingServer(BaseStreamingService):
             f"Res={width}x{height}, Offset={x_offset}x{y_offset}"
         )
 
-        sender_task = None
         try:
             settings = self._get_capture_settings(display_id, width, height, x_offset, y_offset)
+
+            # Fallback skip-ahead budget for relays created in the window
+            # before capture_instances registers this display; after that,
+            # _video_relay_budget reads the LIVE settings so in-place restarts
+            # (callback-reusing settings changes) update the budget too.
+            relay_budget = max(
+                VIDEO_RELAY_BUDGET_MIN_BYTES,
+                int(int(getattr(settings, 'video_bitrate_kbps', 0) or 0)
+                    * 125 * VIDEO_RELAY_BUDGET_SECONDS),
+            )
 
             def queue_data_for_display(frame):
                 if frame is None:
@@ -4116,42 +4211,87 @@ class DataStreamingServer(BaseStreamingService):
                 try:
                     if not len(frame):
                         return
+                    if len(frame) > WS_MESSAGE_SIZE_HARD_CAP:
+                        # An oversized chunk is an upstream bug; emitting it
+                        # would trip proxy/WS-stack frame limits and stall the
+                        # socket. Refuse loudly instead of relaying.
+                        data_logger.error(
+                            f"Refusing to relay a {len(frame)}-byte video chunk "
+                            f"(hard cap {WS_MESSAGE_SIZE_HARD_CAP} bytes); chunk dropped.")
+                        return
 
-                    # Zero-copy: the frame owns its native buffer and frees it once the
-                    # last view/reference drops. Keep the frame itself as `owner` so every
-                    # later return/exception (and the WS transport) frees it by dropping it.
-                    queue = self.video_chunk_queues.get(display_id)
-                    if not queue:
-                        return  # frame drops here -> buffer freed
-                    # memoryview(frame) is a zero-copy view; it (and the frame) stay alive
-                    # until the queue item and every WS transport release them.
-                    item_to_queue = {'data': memoryview(frame), 'owner': frame,
-                                     # Only the low 16 bits go on the wire (uint16), which
-                                     # is what the client ACKs; mask here so sent_timestamps
-                                     # RTT lookups and the uint16 circular-distance
-                                     # backpressure math keep matching past frame 65535.
-                                     'frame_id': frame.frame_id & 0xFFFF}
+                    # Zero-copy: the frame owns its native buffer and frees it
+                    # once the last view/reference drops. Every relay backlog
+                    # shares this one item; the buffer is freed when the last
+                    # relay (and the WS transport) releases it.
+                    item = {'data': memoryview(frame), 'owner': frame,
+                            # Only the low 16 bits go on the wire (uint16), which
+                            # is what the client ACKs; mask here so sent_timestamps
+                            # RTT lookups and the uint16 circular-distance
+                            # backpressure math keep matching past frame 65535.
+                            'frame_id': frame.frame_id & 0xFFFF}
 
-                    def do_put():
-                        try:
-                            queue.put_nowait(item_to_queue)
-                        except asyncio.QueueFull:
-                            # Dropping ANY frame breaks the delta reference chain, and
-                            # dropping the newest wedges the stream on stale backlog.
-                            # Drain it, keep the fresh frame, and resync with an IDR
-                            # so the client never renders against lost references.
-                            try:
-                                while True:
-                                    queue.get_nowait()  # dropped item -> buffer freed
-                            except asyncio.QueueEmpty:
-                                pass
-                            try:
-                                queue.put_nowait(item_to_queue)
-                            except asyncio.QueueFull:
-                                pass
+                    def do_fanout():
+                        group = self.video_relay_groups.get(display_id)
+                        if group is None:
+                            return  # capture stopping -> chunk drops, buffer freed
+                        pc_ws = None
+                        if display_id == 'primary':
+                            secondary_ws = {
+                                ci.get('ws')
+                                for did, ci in self.display_clients.items()
+                                if did != 'primary' and ci.get('ws')
+                            }
+                            # Hidden-tab clients (STOP_VIDEO) are excluded from
+                            # the VIDEO fan-out only; they stay connected for
+                            # control/cursor/audio and rejoin on START_VIDEO.
+                            targets = (self.clients - secondary_ws
+                                       - self.video_paused_clients)
+                            keep = set(targets)
+                            ps = self.display_clients.get('primary')
+                            pc_ws = ps.get('ws') if ps else None
+                            if (pc_ws is not None and pc_ws in targets
+                                    and not ps.get('backpressure_enabled', True)):
+                                # ACK backpressure throttles the CONTROLLER only;
+                                # its relay stays warm but gated, so it resumes
+                                # exactly at the IDR the gate lift requests.
+                                targets.discard(pc_ws)
+                                relay = group.get(pc_ws)
+                                if relay is not None:
+                                    relay.flush_for_gate()
+                        else:
+                            ci = self.display_clients.get(display_id)
+                            ws = ci.get('ws') if ci else None
+                            keep = {ws} if ws is not None else set()
+                            if ws is not None and ci.get('backpressure_enabled', True):
+                                targets = {ws}
+                            else:
+                                targets = set()
+                                relay = group.get(ws) if ws is not None else None
+                                if relay is not None:
+                                    relay.flush_for_gate()
+                        # A socket gone from the fan-out for good (disconnect,
+                        # pause, demotion to secondary) takes its relay with
+                        # it; gated sockets stay in `keep`. Membership churn
+                        # settles within one chunk, so the size check is safe.
+                        if len(group) > len(keep):
+                            for ws in [w for w in group if w not in keep]:
+                                group.pop(ws).stop()
+                        need_sync = False
+                        for ws in targets:
+                            relay = group.get(ws)
+                            if relay is None:
+                                relay = _VideoRelay(
+                                    self, display_id, ws,
+                                    self._video_relay_budget(display_id, relay_budget))
+                                group[ws] = relay
+                                relay.start()
+                            if relay.offer(item):
+                                need_sync = True
+                        if need_sync:
                             self._schedule_idr_for_display(display_id)
 
-                    self.capture_loop.call_soon_threadsafe(do_put)
+                    self.capture_loop.call_soon_threadsafe(do_fanout)
 
                 except Exception as e:
                     data_logger.error(f"Error in capture callback for {display_id}: {e}", exc_info=False)
@@ -4165,10 +4305,12 @@ class DataStreamingServer(BaseStreamingService):
                 except Exception as e:
                     data_logger.error(f"Error handling pixelflux cursor: {e}")
 
-            queue_size = getattr(self, 'BACKPRESSURE_QUEUE_SIZE', 120)
-            self.video_chunk_queues[display_id] = asyncio.Queue(maxsize=queue_size)
-            sender_task = asyncio.create_task(self._video_chunk_sender(display_id))
-            
+            self.video_relay_groups[display_id] = {}
+            data_logger.info(
+                f"Video relays for '{display_id}': skip-ahead budget "
+                f"{relay_budget} bytes/client.")
+
+
             capture_module = self._persistent_capture_modules.get(display_id)
             if capture_module is None:
                 capture_module = ScreenCapture()
@@ -4194,7 +4336,6 @@ class DataStreamingServer(BaseStreamingService):
 
             self.capture_instances[display_id] = {
                 'module': capture_module,
-                'sender_task': sender_task,
                 # Retained for live geometry changes: a resize re-targets the running
                 # module (X11 region update / Wayland live re-start) instead of
                 # rebuilding it, and the settings tell reconfigure whether the running
@@ -4207,10 +4348,7 @@ class DataStreamingServer(BaseStreamingService):
 
         except Exception as e:
             data_logger.error(f"Failed to start capture for '{display_id}': {e}", exc_info=True)
-            if display_id in self.video_chunk_queues:
-                del self.video_chunk_queues[display_id]
-            if sender_task is not None and not sender_task.done():
-                sender_task.cancel()
+            self._close_video_relays(display_id)
             return False  # signal failure so callers don't report a false VIDEO_STARTED
 
     def _get_capture_settings(self, display_id, width, height, x, y):
