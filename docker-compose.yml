@@ -56,6 +56,9 @@ services:
       # Additional server-side settings.
       SELKIES_ENABLE_RESIZE: ${SELKIES_ENABLE_RESIZE}
 
+      # Opt-in: disable screen blanking, DPMS, and screen lockers (default off), see issue #174.
+      SELKIES_DISABLE_SCREEN_BLANKING: ${SELKIES_DISABLE_SCREEN_BLANKING:-false}
+
       # DEBUG remote cursors
       SELKIES_DEBUG_CURSORS: ${SELKIES_DEBUG_CURSORS:-false}
 

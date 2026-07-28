@@ -51,6 +51,21 @@ echo 'Waiting for X Socket' && until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do 
 # Preset the resolution
 selkies-resize 1920x1080
 
+# Opt-in: disable screen blanking, DPMS, and screen lockers so a locked/blanked
+# session does not stop framebuffer capture (default off, current behavior unchanged).
+# See https://github.com/selkies-project/selkies/issues/174
+if [ "${SELKIES_DISABLE_SCREEN_BLANKING:-false}" = "1" ] || [ "$(echo "${SELKIES_DISABLE_SCREEN_BLANKING:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+  # Turn off the built-in X screen saver, screen blanking, and DPMS power management
+  xset s off || true
+  xset s noblank || true
+  xset -dpms || true
+  # Prevent common desktop screen lockers from autostarting and blanking the framebuffer on lock
+  mkdir -p "${HOME}/.config/autostart"
+  for locker in light-locker xscreensaver xfce4-screensaver gnome-screensaver mate-screensaver xss-lock; do
+    printf '[Desktop Entry]\nType=Application\nName=%s\nHidden=true\nX-GNOME-Autostart-enabled=false\n' "${locker}" > "${HOME}/.config/autostart/${locker}.desktop"
+  done
+fi
+
 # Start Xfce4 Desktop session
 [ "${START_XFCE4:-true}" = "true" ] && rm -rf ~/.config/xfce4 && vglrun -d "${VGL_DISPLAY:-egl}" /usr/bin/dbus-launch --exit-with-session /usr/bin/xfce4-session &
 
