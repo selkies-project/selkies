@@ -378,6 +378,11 @@ async def provision_virtual_microphone(pulse, audio_device_name, is_pcmflux_capt
 # Matches the WebRTC DataChannel threshold so both transports behave identically.
 WS_GZIP_MIN_BYTES = 512
 
+# Messages at least this large compress on an executor thread instead of the
+# event loop: level-6 gzip of a multi-MB clipboard would stall every co-resident
+# coroutine for tens of milliseconds, while a thread hop costs microseconds.
+WS_GZIP_OFFLOAD_BYTES = 512 * 1024
+
 
 def _path_is_within(directory, target):
     """Return True if `target` is `directory` itself or strictly inside it.
@@ -438,8 +443,15 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
     # at most once per broadcast instead of once per client (a large clipboard
     # payload compressed N times stalls the loop N times). The check-and-set is
     # synchronous — no await between the None test and the assignment — so
-    # concurrent _send_one coroutines never double-compress.
+    # concurrent _send_one coroutines never double-compress. The holder carries
+    # either ready bytes or one shared executor future: multi-MB compression runs
+    # off the event loop, while small frames compress inline (a thread hop would
+    # cost more than the work).
     gz_frame_holder = []
+    loop = asyncio.get_running_loop()
+
+    def _gzip_frame():
+        return b"\x05" + gzip.compress(message.encode("utf-8"), 6)
 
     async def _send_one(client):
         if isinstance(message, (bytes, bytearray, memoryview)):
@@ -452,8 +464,15 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
             # latency-critical messages (input, status verbs) stay raw text —
             # they are below the threshold, so compression never touches them.
             if not gz_frame_holder:
-                gz_frame_holder.append(b"\x05" + gzip.compress(message.encode("utf-8"), 6))
-            await client.send_bytes(gz_frame_holder[0])
+                if len(message) >= WS_GZIP_OFFLOAD_BYTES:
+                    gz_frame_holder.append(loop.run_in_executor(None, _gzip_frame))
+                else:
+                    gz_frame_holder.append(_gzip_frame())
+            frame = gz_frame_holder[0]
+            if asyncio.isfuture(frame):
+                frame = await frame
+                gz_frame_holder[0] = frame
+            await client.send_bytes(frame)
         else:
             await client.send_str(message)
 

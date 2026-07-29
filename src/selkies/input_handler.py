@@ -1890,6 +1890,11 @@ class WebRTCInput:
         self._app_wl_display_cached = None
         self._x_reconnect_thread = None
         self._x11_monitor_build_lock = asyncio.Lock()
+        # Event-driven wake for X consumers (cursor monitor, keymap watch): a
+        # loop reader on the input connection's fd sets this Event, so those
+        # loops block with zero wakeups instead of polling the socket.
+        self._x_event_wake = None
+        self._x_watcher_fd = None
         # Negative cache: the auto-detect sweep stays uncached until a distinct app
         # compositor appears, and it is consulted from per-key native_inject, so a
         # TTL floors the directory relist until then.
@@ -2018,7 +2023,7 @@ class WebRTCInput:
         # Strong refs for fire-and-forget tasks: asyncio only weakly references
         # running tasks, so an unreferenced one can be garbage-collected mid-flight.
         self._bg_tasks = set()
-        self.keyboard_queue = asyncio.Queue()
+        self.keyboard_queue = asyncio.Queue(maxsize=4096)
         self.keyboard_worker_task = None
         # Stuck-key recovery: client heartbeats each held key ('kh'); the sweep
         # auto-releases any key whose heartbeat stops (key-up lost to congestion).
@@ -2095,12 +2100,63 @@ class WebRTCInput:
         except Exception:
             pass
 
+    def _arm_x_event_watcher(self):
+        """(Re)register the event-loop reader that wakes X consumers when the
+        input connection's socket goes readable. Idempotent; re-arms when the fd
+        changes under us (reconnect)."""
+        if self._x_event_wake is None:
+            return
+        fd = None
+        if self.xdisplay is not None:
+            try:
+                fd = self.xdisplay.fileno()
+            except Exception:
+                fd = None
+        if fd is not None and fd < 0:
+            fd = None
+        if fd == self._x_watcher_fd:
+            return
+        if self._x_watcher_fd is not None:
+            try:
+                self.loop.remove_reader(self._x_watcher_fd)
+            except Exception:
+                pass
+        self._x_watcher_fd = fd
+        if fd is not None:
+            try:
+                self.loop.add_reader(fd, self._x_event_wake.set)
+            except Exception as e:
+                logger_webrtc_input.debug(f"X event watcher unavailable ({e}); consumers poll.")
+                self._x_watcher_fd = None
+
+    def _disarm_x_event_watcher(self):
+        if self._x_watcher_fd is not None:
+            try:
+                self.loop.remove_reader(self._x_watcher_fd)
+            except Exception:
+                pass
+            self._x_watcher_fd = None
+
+    async def _wait_x_event(self, timeout=1.0):
+        """Sleep until the X socket signals readability or the failsafe elapses.
+        Callers clear the Event BEFORE re-checking event availability, so an
+        event arriving between the check and the wait is never lost."""
+        wake = self._x_event_wake
+        if wake is None:
+            await asyncio.sleep(timeout)
+            return
+        try:
+            await asyncio.wait_for(wake.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+
     def _reconnect_xdisplay(self):
         """Rebuild the input X connection after a bounded reply-wait closed it.
         Fire-and-forget: the rebuild runs on a worker thread and installs via the
         loop (_install_reconnected_xdisplay), so xdisplay stays None — and input
         degraded (xdotool fallbacks) — until the attempt lands. Callers just
         continue; the next X failure retries."""
+        self._disarm_x_event_watcher()
         if self._x_reconnect_thread is not None and self._x_reconnect_thread.is_alive():
             return
         old = self.xdisplay
@@ -2149,6 +2205,7 @@ class WebRTCInput:
             return
         self.xdisplay = disp
         self._apply_input_x_reply_bound()
+        self._arm_x_event_watcher()
         self.__keyboard_connect()
         if not self.is_wayland:
             self.mouse = _XTestMouse(self.xdisplay)
@@ -2295,6 +2352,9 @@ class WebRTCInput:
             try: self.xdisplay = display.Display(blocking_timeout=INPUT_X_REPLY_TIMEOUT_S)
             except Exception as e: logger_webrtc_input.error(f"Failed to connect to X display: {e}"); self.xdisplay = None
             self._apply_input_x_reply_bound()
+            if self._x_event_wake is None:
+                self._x_event_wake = asyncio.Event()
+            self._arm_x_event_watcher()
         if self.xdisplay:
             try:
                 screen = self.xdisplay.screen()
@@ -2385,6 +2445,7 @@ class WebRTCInput:
         await self.__gamepad_disconnect()
         self.gamepad_instances = {}
         self.__mouse_disconnect()
+        self._disarm_x_event_watcher()
         if self.xdisplay: self.xdisplay = None
         
         if self.keyboard_worker_task:
@@ -2440,7 +2501,7 @@ class WebRTCInput:
                             # no shared X11 state is touched across an await here.
                             self.active_modifiers.discard(keysym)
                             self.atomically_typed_keys.discard(keysym)
-                            self.keyboard_queue.put_nowait(("ku", keysym))
+                            self._keyboard_enqueue(("ku", keysym))
                         else:
                             # X11 injection isn't queue-serialized: defer the modifier/atomic
                             # state discard until after the release so a concurrent kd still
@@ -3484,16 +3545,9 @@ class WebRTCInput:
                 getattr(proc, "pid", "unknown"),
             )
 
-    async def _communicate_or_kill(self, proc, timeout, description):
+    async def _communicate_or_kill(self, proc, timeout, description, input=None):
         try:
-            return await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            await self._kill_and_reap_process(proc, description)
-            raise
-
-    async def _wait_or_kill(self, proc, timeout, description):
-        try:
-            return await asyncio.wait_for(proc.wait(), timeout=timeout)
+            return await asyncio.wait_for(proc.communicate(input=input), timeout=timeout)
         except asyncio.TimeoutError:
             await self._kill_and_reap_process(proc, description)
             raise
@@ -3676,11 +3730,11 @@ class WebRTCInput:
                 stderr=subprocess.DEVNULL,
                 env=env
             )
-            if process.stdin:
-                process.stdin.write(input_bytes)
-                await process.stdin.drain()
-                process.stdin.close()
-            return_code = await self._wait_or_kill(process, 2.0, f"xclip -i {target_mime}")
+            # communicate() under one deadline: writing a payload larger than the
+            # pipe buffer must not pend forever on drain() while xclip stalls.
+            await self._communicate_or_kill(
+                process, 2.0, f"xclip -i {target_mime}", input_bytes)
+            return_code = process.returncode
             if return_code == 0:
                 return True
             else:
@@ -3980,7 +4034,17 @@ class WebRTCInput:
         event consumer (pixelflux delivers cursors natively then). Two consumers
         must never race next_event(), so this loop idles while cursors_running."""
         while True:
-            await asyncio.sleep(0.5)
+            if self.cursors_running or self.xdisplay is None:
+                # Idle poll only: the event wake is not armed for this consumer
+                # when nothing drives it, and a foreign remap is not urgent here.
+                await asyncio.sleep(0.5)
+                continue
+            wake = self._x_event_wake
+            if wake is not None:
+                wake.clear()
+            if self.xdisplay.pending_events() == 0:
+                self._arm_x_event_watcher()
+                await self._wait_x_event(timeout=2.0)
             if self.cursors_running or self.xdisplay is None:
                 continue
             try:
@@ -4045,8 +4109,14 @@ class WebRTCInput:
                 if self.xdisplay is not None:
                     screen = self.xdisplay.screen()
                 continue
+            wake = self._x_event_wake
+            if wake is not None:
+                wake.clear()
             if self.xdisplay.pending_events() == 0:
-                await asyncio.sleep(0.02)
+                # Event-driven idle: block on socket readability (a 1s failsafe
+                # covers a watcher lost to reconnect) instead of 50Hz polling.
+                self._arm_x_event_watcher()
+                await self._wait_x_event(timeout=1.0)
                 continue
 
             event = self.xdisplay.next_event()
@@ -4158,6 +4228,23 @@ class WebRTCInput:
     async def stop_gamepad_servers(self):
         logger_webrtc_input.info("Stopping all gamepad instances.")
         await self.__gamepad_disconnect()
+
+    def _keyboard_enqueue(self, item):
+        """Enqueue input for the keyboard worker, evicting the oldest entry on
+        overflow so a message flood can't grow the queue without bound. A held
+        key orphaned by an evicted release is recovered by the stale sweep."""
+        try:
+            self.keyboard_queue.put_nowait(item)
+        except asyncio.QueueFull:
+            try:
+                self.keyboard_queue.get_nowait()
+                self.keyboard_queue.task_done()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                self.keyboard_queue.put_nowait(item)
+            except asyncio.QueueFull:
+                logger_webrtc_input.warning("keyboard queue full; dropping input event.")
 
     async def _keyboard_worker(self):
         unicode_buffer = []
@@ -4326,7 +4413,7 @@ class WebRTCInput:
             # so its next 'ku' is honored normally (not swallowed as a stale reap).
             self.reaped_atomic_keys.discard(keysym)
             if self.is_wayland:
-                self.keyboard_queue.put_nowait(("kd", keysym))
+                self._keyboard_enqueue(("kd", keysym))
             else:
                 is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
                 if keysym in self.MODIFIER_KEYSYMS:
@@ -4360,7 +4447,7 @@ class WebRTCInput:
             self.pressed_keys.pop(keysym, None)
             self.key_repeat_state.pop(keysym, None)
             if self.is_wayland:
-                self.keyboard_queue.put_nowait(("ku", keysym))
+                self._keyboard_enqueue(("ku", keysym))
             else:
                 if keysym in self.MODIFIER_KEYSYMS:
                     self.active_modifiers.discard(keysym)
@@ -4377,7 +4464,7 @@ class WebRTCInput:
                     await self.send_x11_keypress(keysym, down=False)
         elif msg_type == "kr":
             if self.is_wayland:
-                self.keyboard_queue.put_nowait(("kr", None))
+                self._keyboard_enqueue(("kr", None))
             else:
                 await self.reset_keyboard()
         elif msg_type == "kh":
@@ -4742,7 +4829,7 @@ class WebRTCInput:
             try:
                 text_to_type = msg[7:]
                 if self.is_wayland:
-                    self.keyboard_queue.put_nowait(("co_end", text_to_type))
+                    self._keyboard_enqueue(("co_end", text_to_type))
                 elif self._type_text_xtest(text_to_type):
                     # Injected in-process via XTEST (mapped chars with shift synthesis,
                     # unmapped Unicode via the spare-keycode overlay) — no per-char

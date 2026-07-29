@@ -479,7 +479,16 @@ class CentralizedStreamServer:
         name = "run_after_connect" if present else "run_after_disconnect"
         try:
             proc = await asyncio.create_subprocess_shell(cmd)
-            returncode = await proc.wait()
+            try:
+                returncode = await asyncio.wait_for(proc.wait(), timeout=300)
+            except asyncio.TimeoutError:
+                # A wedged hook must not pin its task (and the process) forever.
+                logger.warning(f"{name} command timed out after 300s; killing: {cmd}")
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                returncode = await proc.wait()
             if returncode != 0:
                 logger.warning(f"{name} command exited with status {returncode}: {cmd}")
         except OSError as e:

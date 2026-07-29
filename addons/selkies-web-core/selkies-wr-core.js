@@ -28,7 +28,7 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, clipboardPreviewMessage, readLocalClipboard } from "./lib/clipboard-sync.js";
+import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 // Inline (base64 blob) so the worker travels inside selkies-core.js itself —
 // no separate hashed file to place next to whichever chunk references it.
@@ -279,41 +279,13 @@ export default function webrtc() {
 	let force_aligned_resolution = false;
 
 	let enable_binary_clipboard = true;
-	let multipartClipboard = {
-		chunks: [],
-		mimeType: '',
-		totalSize: 0,
-		inProgress: false
-	};
+	// Multipart download state + connect-time cache-only fetch ('cr') tracking:
+	// shared factories (lib/clipboard-sync.js), identical in the WebSocket core.
+	let multipartClipboard = createMultipartClipboardState();
 	let clipboardWorker = new ClipboardWorkerBridge();
-	let lastClipboardText = "";
-	// The connect-time 'cr' pull is cache-only: its reply must populate the
-	// clipboardSync cache/preview but NEVER be written to the local clipboard —
-	// that would clobber whatever the user copied just before connecting
-	// (server-wins session start). A tagging server marks the reply's
-	// clipboard-msg / clipboard-msg-start payload with reply_to='cr',
-	// identifying it deterministically; the timed deadline survives only as the
-	// fallback for legacy servers that never tag, where a dropped reply can't
-	// swallow a later genuine server push.
-	let initClipboardFetchDeadline = 0;
-	let serverTagsClipboardReplies = false;
-	let pendingTaggedClipboardReply = false;
-	const armTaggedClipboardReply = () => {
-		serverTagsClipboardReplies = true;
-		pendingTaggedClipboardReply = true;
-		initClipboardFetchDeadline = 0;
-	};
-	const consumeInitClipboardFetch = () => {
-		if (pendingTaggedClipboardReply) {
-			pendingTaggedClipboardReply = false;
-			return true;
-		}
-		if (serverTagsClipboardReplies) return false;
-		if (!initClipboardFetchDeadline) return false;
-		const isInit = Date.now() < initClipboardFetchDeadline;
-		initClipboardFetchDeadline = 0;
-		return isInit;
-	};
+	const taggedClipboardFetch = createTaggedClipboardFetch();
+	const armTaggedClipboardReply = () => taggedClipboardFetch.arm();
+	const consumeInitClipboardFetch = () => taggedClipboardFetch.consume();
 	// Server-clipboard cache + change-only sync + Ctrl/Cmd+C request queue
 	// (see lib/clipboard-sync.js). The send hook late-binds `webrtc`.
 	const clipboardSync = createClipboardSync({
@@ -496,7 +468,7 @@ export default function webrtc() {
 				});
 				console.log('Screen Wake Lock is active.');
 			} catch (err) {
-				console.error(`Could not acquire Wake Lock: ${err.name}, ${err.message}`);
+				console.warn(`Could not acquire Wake Lock: ${err.name}, ${err.message}`);
 			}
 		} else {
 			console.warn('Wake Lock API is not supported by this browser.');
@@ -1432,7 +1404,12 @@ export default function webrtc() {
 		var statsStart = new Date().getTime() / 1000;
 		if (statsLoopId !== null) return; // already running; non-racy gate
 		statWatchEnabled = true; // set synchronously before async work
+		let statsTickBusy = false;
 		statsLoopId = setInterval(async () => {
+			// Skip a tick whose predecessor still awaits getStats() (busy pc, GC
+			// pause): overlapping ticks would double-update the byte baselines.
+			if (statsTickBusy) return;
+			statsTickBusy = true;
 			var now = new Date().getTime() / 1000;
 			try {
 				const stats = await webrtc.getConnectionStats();
@@ -1501,62 +1478,26 @@ export default function webrtc() {
 				// Don't re-anchor statsStart here: on error the byte baselines are NOT updated,
 				// so advancing only the time window would inflate the next tick's bitrate.
 				if (webrtc !== null) console.warn("Error collecting connection stats:", e);
+			} finally {
+				statsTickBusy = false;
 			}
 		// Stats refresh interval (1000 ms)
 		}, 1000);
 	}
 
-	// Settles when the in-flight local-clipboard read+send completes; null when idle.
-	let clipboardSendInFlight = null;
-
-	async function readLocalClipboardAndSend() {
-		if (!window.isSecureContext || isSharedMode || clipboardStatus !== "enabled" || !clipboard_in_enabled) return;
-
-		let settleClipboardSend;
-		const clipboardSendTracker = new Promise((resolve) => { settleClipboardSend = resolve; });
-		clipboardSendInFlight = clipboardSendTracker;
-		try {
-			// Shared reader (lib/clipboard-sync.js): text/image-normalized, with the
-			// DataError->readText() fallback for large text living in one place.
-			const res = await readLocalClipboard(enable_binary_clipboard);
-			if (res) {
-				if (res.kind === 'image') {
-					const arrayBuffer = await res.blob.arrayBuffer();
-					await sendClipboardData(arrayBuffer, res.mime);
-					console.log(`Sent binary clipboard on focus via sendClipboardData: ${res.mime}, size: ${res.blob.size} bytes`);
-				} else if (res.text !== lastClipboardText) {
-					await sendClipboardData(res.text);
-					lastClipboardText = res.text;
-					console.log("Sent clipboard text on focus via sendClipboardData");
-				}
-			}
-		} catch (err) {
-			if (err.name !== 'NotFoundError' && err.name !== 'DataError' && err.name !== 'NotAllowedError'
-				&& !(err.message && err.message.includes('not focused'))) {
-				console.warn(`Clipboard read error: ${err.name}`);
-			}
-		} finally {
-			settleClipboardSend();
-			if (clipboardSendInFlight === clipboardSendTracker) clipboardSendInFlight = null;
-		}
-	}
-
-	// One-shot initial client->server sync (Chromium): a focused tab whose user
-	// just copied something locally gets no 'focus' event after connect, so the
-	// server would keep its stale clipboard until the first alt-tab. Runs once
-	// after server_settings applies the clipboard gates, and only when
-	// clipboard-read is ALREADY granted (must never raise a prompt at load).
-	let initialClipboardSendAttempted = false;
-	async function maybeSendInitialClipboard() {
-		if (initialClipboardSendAttempted) return;
-		initialClipboardSendAttempted = true;
-		if (!isChromium || isSharedMode || !document.hasFocus()) return;
-		if (!navigator.permissions || !navigator.permissions.query) return;
-		try {
-			const st = await navigator.permissions.query({ name: 'clipboard-read' });
-			if (st.state === 'granted') readLocalClipboardAndSend();
-		} catch (_) { /* permission name unsupported (non-Chromium engines) */ }
-	}
+	// Focus/gesture local->server sync (lib/clipboard-sync.js), identical in the
+	// WebSocket core; text re-sends are deduped here client-side.
+	const localClipboardSender = createLocalClipboardSender({
+		isChromium,
+		isSharedMode: () => isSharedMode,
+		canSync: () => clipboardStatus === "enabled",
+		canRead: () => !!clipboard_in_enabled,
+		binaryEnabled: () => !!enable_binary_clipboard,
+		sendClipboardData: (data, mime) => sendClipboardData(data, mime),
+		dedupeText: true,
+	});
+	const readLocalClipboardAndSend = () => localClipboardSender.readAndSend();
+	const maybeSendInitialClipboard = () => localClipboardSender.maybeInitial();
 
 	// Paste-ordering hold + non-Chromium copy/paste gestures live in the shared
 	// factory (see lib/clipboard-sync.js); only the gates and the transport's
@@ -1569,7 +1510,7 @@ export default function webrtc() {
 		canRead: () => !!clipboard_in_enabled,
 		canWrite: () => !!clipboard_out_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
-		getSendInFlight: () => clipboardSendInFlight,
+		getSendInFlight: () => localClipboardSender.getSendInFlight(),
 		getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
 	});
 
@@ -1652,38 +1593,6 @@ export default function webrtc() {
 		}
 	}
 
-	// Most browsers have limitations on the types of images
-	// for clipboard so convert them to widely supported png
-	async function convertImageToPngBlob(blob) {
-		return new Promise((resolve, reject) => {
-			const img = new Image();
-			const url = URL.createObjectURL(blob);
-			img.onload = () => {
-				URL.revokeObjectURL(url);
-				const canvas = document.createElement('canvas');
-				canvas.width = img.width;
-				canvas.height = img.height;
-				const ctx = canvas.getContext('2d');
-				ctx.drawImage(img, 0, 0);
-				canvas.toBlob((pngBlob) => {
-					resolve(pngBlob);
-				}, 'image/png');
-			};
-			img.onerror = (err) => {
-				URL.revokeObjectURL(url);
-				reject(new Error("Failed to load image for PNG conversion"));
-			};
-			img.src = url;
-		});
-	}
-
-	const cleanupMultipartClipboard = () => {
-		multipartClipboard.mimeType = null;
-		multipartClipboard.chunks = [];
-		multipartClipboard.totalSize = 0;
-		multipartClipboard.inProgress = false;
-	};
-
 	async function handleClipboardData(msg) {
 		if (!msg.data) {
 			console.warn("Received clipboard message with null data");
@@ -1704,8 +1613,9 @@ export default function webrtc() {
 					}
 					blob = new Blob([result], { type: mimeType });
 					if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
-						blob = await convertImageToPngBlob(blob);
-						if (!blob) return { isMultipart, mimeType, content: null };
+						// ClipboardItem accepts only image/png on write (shared
+						// re-encode; see lib/clipboard-sync.js).
+						blob = await reencodeBlobAsPng(blob);
 						mimeType = 'image/png';
 					}
 				} catch (err) {
@@ -1716,28 +1626,23 @@ export default function webrtc() {
 				if (typeof ClipboardItem === 'undefined') return { isMultipart, mimeType, content: null };
 				return { isMultipart, mimeType, content: new ClipboardItem({ [mimeType]: blob }) };
 			case "clipboard-msg-start":
-				multipartClipboard.chunks = [];
-				multipartClipboard.mimeType = mimeType;
-				multipartClipboard.totalSize = msg.data.total_size;
-				multipartClipboard.inProgress = true;
+				multipartClipboard.begin(mimeType, msg.data.total_size);
 				console.log(`Starting multi-part download: ${mimeType}, expected raw size: ${msg.data.total_size}`);
 				return { isMultipart: true, mimeType, content: null };
 			case "clipboard-msg-data":
-				if (multipartClipboard.inProgress) {
-					multipartClipboard.chunks.push(msg.data.content);
-				}
+				multipartClipboard.push(msg.data.content);
 				return { isMultipart: true, mimeType, content: null };
 			case "clipboard-msg-end":
 				if (!multipartClipboard.inProgress) {
 					return { isMultipart: false, mimeType, content: null };
 				}
-				const fullBase64 = multipartClipboard.chunks.join("");
-				mimeType = multipartClipboard.mimeType;
+				const assembled = multipartClipboard.assemble();
+				mimeType = assembled.mimeType;
+				const fullBase64 = assembled.base64;
 				try {
 					const { result, byteLength } = await clipboardWorker.decode(fullBase64, mimeType);
-					if (byteLength !== multipartClipboard.totalSize) {
-						console.warn(`Size mismatch! Expected ${multipartClipboard.totalSize}, got ${byteLength}`);
-						cleanupMultipartClipboard();
+					if (byteLength !== assembled.totalSize) {
+						console.warn(`Size mismatch! Expected ${assembled.totalSize}, got ${byteLength}`);
 						return { isMultipart: false, mimeType, content: null };
 					}
 					if (mimeType === 'text/plain') {
@@ -1748,11 +1653,7 @@ export default function webrtc() {
 					} else {
 						let blob = new Blob([result], { type: mimeType });
 						if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
-							blob = await convertImageToPngBlob(blob);
-							if (!blob) {
-								cleanupMultipartClipboard();
-								return { isMultipart: false, mimeType, content: null };
-							}
+							blob = await reencodeBlobAsPng(blob);
 							mimeType = 'image/png';
 						}
 						content = new ClipboardItem({ [mimeType]: blob });
@@ -1760,7 +1661,6 @@ export default function webrtc() {
 				} catch (err) {
 					console.error("Worker decoding failed:", err);
 				}
-				cleanupMultipartClipboard();
 				return { isMultipart: false, mimeType, content };
 			default:
 				console.warn("Unknown clipboard cmd received");
@@ -2101,7 +2001,7 @@ export default function webrtc() {
 				// server-side change. The server silently drops a viewer's 'cr',
 				// so this is safe in shared mode too.
 				try {
-					initClipboardFetchDeadline = Date.now() + 5000;
+					taggedClipboardFetch.armLegacyWindow(5000);
 					webrtc.sendDataChannelMessage('cr');
 				} catch (e) {
 					console.warn('Failed to send initial clipboard request (cr):', e);

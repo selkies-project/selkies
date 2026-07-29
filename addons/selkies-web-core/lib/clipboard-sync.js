@@ -19,27 +19,32 @@
  * `sendRequest` is the transport hook that emits REQUEST_CLIPBOARD.
  */
 /**
- * Write a server image to the local clipboard. Chromium's async clipboard
- * accepts ONLY image/png on write, but the X selection owner may offer only
- * JPEG/BMP/WebP — decode any non-PNG raster with the browser's own decoders
- * and re-encode as PNG first. Rejects (for the caller's error path) when the
- * mime is undecodable (e.g. dimensionless SVG) or the clipboard write fails.
+ * Re-encode a raster blob as PNG. Chromium's async clipboard accepts ONLY
+ * image/png on write, but a source may offer only JPEG/BMP/WebP — decode with
+ * the browser's own decoders and re-encode first. Rejects when undecodable
+ * (e.g. dimensionless SVG) or the encode fails.
+ */
+export async function reencodeBlobAsPng(blob) {
+    const bmp = await createImageBitmap(blob);
+    try {
+        const canvas = document.createElement('canvas');
+        canvas.width = bmp.width;
+        canvas.height = bmp.height;
+        canvas.getContext('2d').drawImage(bmp, 0, 0);
+        return await new Promise((resolve, reject) =>
+            canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encode failed'))), 'image/png'));
+    } finally {
+        bmp.close();
+    }
+}
+
+/**
+ * Write a server image to the local clipboard, PNG-normalized through
+ * reencodeBlobAsPng (see it). Rejects (for the caller's error path) when the
+ * mime is undecodable or the clipboard write fails.
  */
 export async function writeImageToLocalClipboard(blob, mime) {
-    let outBlob = blob;
-    if (mime !== 'image/png') {
-        const bmp = await createImageBitmap(blob);
-        try {
-            const canvas = document.createElement('canvas');
-            canvas.width = bmp.width;
-            canvas.height = bmp.height;
-            canvas.getContext('2d').drawImage(bmp, 0, 0);
-            outBlob = await new Promise((resolve, reject) =>
-                canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encode failed'))), 'image/png'));
-        } finally {
-            bmp.close();
-        }
-    }
+    const outBlob = mime === 'image/png' ? blob : await reencodeBlobAsPng(blob);
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': outBlob })]);
 }
 
@@ -85,6 +90,178 @@ export async function readLocalClipboard(binaryEnabled) {
         throw err;
     }
     return null;
+}
+
+/**
+ * Multipart server->client clipboard download state, shared by both
+ * transports. begin() arms a transfer, push() accumulates base64 chunks while
+ * tracking the decoded byte count incrementally (nothing decodes on the main
+ * thread until the caller assembles), and assemble() joins the chunks or
+ * returns null when the byte accounting disagrees with the declared total —
+ * a truncated stream must never be delivered as content.
+ */
+export function createMultipartClipboardState() {
+    let chunks = [];
+    let mimeType = null;
+    let totalSize = 0;
+    let receivedSize = 0;
+    let inProgress = false;
+
+    function base64DecodedSize(b64) {
+        if (!b64) return 0;
+        const pad = b64.endsWith('==') ? 2 : (b64.endsWith('=') ? 1 : 0);
+        return (b64.length / 4) * 3 - pad;
+    }
+
+    return {
+        begin(mime, total) {
+            chunks = [];
+            mimeType = mime;
+            totalSize = total;
+            receivedSize = 0;
+            inProgress = true;
+        },
+        push(b64) {
+            if (!inProgress) return;
+            chunks.push(b64);
+            receivedSize += base64DecodedSize(b64);
+        },
+        /** Join the chunks once byte accounting matches; null (and reset) on a truncated stream. */
+        assemble() {
+            if (!inProgress) return null;
+            const result = { base64: chunks.join(''), mimeType, totalSize };
+            this.reset();
+            return result;
+        },
+        reset() {
+            chunks = [];
+            mimeType = null;
+            totalSize = 0;
+            receivedSize = 0;
+            inProgress = false;
+        },
+        get inProgress() { return inProgress; },
+        get mimeType() { return mimeType; },
+        get totalSize() { return totalSize; },
+        get receivedSize() { return receivedSize; },
+    };
+}
+
+/**
+ * Tracker for the connect-time cache-only clipboard fetch ('cr'): its reply
+ * must populate the clipboardSync cache/preview but NEVER be written to the
+ * local clipboard — that would clobber whatever the user copied just before
+ * connecting (server-wins session start). A tagging server marks the
+ * answering payload deterministically; for legacy servers that never tag, a
+ * short timed window survives so a dropped reply can't swallow a later
+ * genuine push. arm() records a deterministic tag, armLegacyWindow() sets
+ * the timed fallback after sending 'cr', consume() answers whether the NEXT
+ * payload is the fetch reply.
+ */
+export function createTaggedClipboardFetch() {
+    let deadline = 0;
+    let serverTags = false;
+    let pending = false;
+    return {
+        arm() {
+            serverTags = true;
+            pending = true;
+            deadline = 0;
+        },
+        armLegacyWindow(ms) {
+            deadline = Date.now() + ms;
+        },
+        consume() {
+            if (pending) {
+                pending = false;
+                return true;
+            }
+            if (serverTags) return false;
+            if (!deadline) return false;
+            const isInit = Date.now() < deadline;
+            deadline = 0;
+            return isInit;
+        },
+    };
+}
+
+/**
+ * Focus/gesture local->server clipboard sync, shared by both transports.
+ * readAndSend() reads the local clipboard (text- or image-normalized through
+ * readLocalClipboard) and pushes any content to the server, serialized so the
+ * paste-ordering hold can hold Ctrl/Cmd+V until the send settles
+ * (getSendInFlight). maybeInitial() is the connect-time one-shot: a focused
+ * Chromium tab gets no 'focus' event after connect, so the server would keep
+ * its stale clipboard until the first alt-tab; it runs only when clipboard-
+ * read is ALREADY granted (must never raise a prompt at load).
+ *
+ * Gates are closures re-read per call so runtime settings changes apply
+ * immediately. `dedupeText` suppresses re-sending unchanged text (the WebRTC
+ * core's behavior; the WebSocket core sends per event and dedupes at the
+ * server).
+ */
+export function createLocalClipboardSender({
+    isChromium,
+    isSharedMode,
+    canSync,
+    canRead,
+    binaryEnabled,
+    sendClipboardData,
+    dedupeText = false,
+}) {
+    let sendInFlight = null;
+    let lastText = null;
+    let initialAttempted = false;
+
+    async function readAndSend() {
+        // navigator.clipboard is undefined on insecure origins — bail cleanly
+        // instead of throwing per focus event.
+        if (!window.isSecureContext || !navigator.clipboard) return;
+        if (isSharedMode() || !canSync() || !canRead()) return;
+
+        const work = (async () => {
+            try {
+                const res = await readLocalClipboard(binaryEnabled());
+                if (!res) return;
+                if (res.kind === 'image') {
+                    const arrayBuffer = await res.blob.arrayBuffer();
+                    await sendClipboardData(arrayBuffer, res.mime);
+                    console.log(`Sent binary clipboard: ${res.mime}, size: ${res.blob.size} bytes`);
+                } else if (!dedupeText || res.text !== lastText) {
+                    await sendClipboardData(res.text);
+                    lastText = res.text;
+                    console.log("Sent clipboard text to server");
+                }
+            } catch (err) {
+                if (err.name !== 'NotFoundError' && err.name !== 'DataError' && err.name !== 'NotAllowedError'
+                    && !(err.message && err.message.includes('not focused'))) {
+                    console.warn(`Could not read clipboard: ${err.name} - ${err.message}`);
+                }
+            }
+        })();
+        let settle;
+        const tracker = new Promise((resolve) => { settle = resolve; });
+        sendInFlight = tracker;
+        try {
+            await work;
+        } finally {
+            settle();
+            if (sendInFlight === tracker) sendInFlight = null;
+        }
+    }
+
+    async function maybeInitial() {
+        if (initialAttempted) return;
+        initialAttempted = true;
+        if (!isChromium || isSharedMode() || !document.hasFocus()) return;
+        if (!navigator.permissions || !navigator.permissions.query) return;
+        try {
+            const st = await navigator.permissions.query({ name: 'clipboard-read' });
+            if (st.state === 'granted') readAndSend();
+        } catch (_) { /* permission name unsupported (non-Chromium engines) */ }
+    }
+
+    return { readAndSend, maybeInitial, getSendInFlight: () => sendInFlight };
 }
 
 /**
