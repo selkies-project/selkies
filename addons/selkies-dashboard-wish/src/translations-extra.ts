@@ -39,7 +39,7 @@ const en = {
     files: { subtitle: "Download and manage files" },
     uploads: {
         uploadingFile: "Uploading {fileName}...",
-        uploadingFileProgress: "Uploading {fileName}: {progress}%",
+        uploadingFileProgress: "Uploading {fileName}: {progress} %",
         uploadSuccessFile: "Successfully uploaded {fileName}",
         uploadFailedFile: "Failed to upload {fileName}: {errorMessage}",
     },
@@ -103,7 +103,7 @@ const es = {
     files: { subtitle: "Descarga y administra archivos" },
     uploads: {
         uploadingFile: "Subiendo {fileName}...",
-        uploadingFileProgress: "Subiendo {fileName}: {progress}%",
+        uploadingFileProgress: "Subiendo {fileName}: {progress} %",
         uploadSuccessFile: "{fileName} subido correctamente",
         uploadFailedFile: "Error al subir {fileName}: {errorMessage}",
     },
@@ -167,7 +167,7 @@ const zh = {
     files: { subtitle: "下载和管理文件" },
     uploads: {
         uploadingFile: "正在上传 {fileName}...",
-        uploadingFileProgress: "正在上传 {fileName}：{progress}%",
+        uploadingFileProgress: "正在上传 {fileName}：{progress} %",
         uploadSuccessFile: "{fileName} 上传成功",
         uploadFailedFile: "上传 {fileName} 失败：{errorMessage}",
     },
@@ -231,7 +231,7 @@ const hi = {
     files: { subtitle: "फ़ाइलें डाउनलोड और प्रबंधित करें" },
     uploads: {
         uploadingFile: "{fileName} अपलोड हो रही है...",
-        uploadingFileProgress: "{fileName} अपलोड हो रही है: {progress}%",
+        uploadingFileProgress: "{fileName} अपलोड हो रही है: {progress} %",
         uploadSuccessFile: "{fileName} सफलतापूर्वक अपलोड हुई",
         uploadFailedFile: "{fileName} अपलोड विफल: {errorMessage}",
     },
@@ -295,7 +295,7 @@ const pt = {
     files: { subtitle: "Baixe e gerencie arquivos" },
     uploads: {
         uploadingFile: "Enviando {fileName}...",
-        uploadingFileProgress: "Enviando {fileName}: {progress}%",
+        uploadingFileProgress: "Enviando {fileName}: {progress} %",
         uploadSuccessFile: "{fileName} enviado com sucesso",
         uploadFailedFile: "Falha ao enviar {fileName}: {errorMessage}",
     },
@@ -359,7 +359,7 @@ const fr = {
     files: { subtitle: "Téléchargez et gérez des fichiers" },
     uploads: {
         uploadingFile: "Envoi de {fileName}...",
-        uploadingFileProgress: "Envoi de {fileName} : {progress}%",
+        uploadingFileProgress: "Envoi de {fileName} : {progress} %",
         uploadSuccessFile: "{fileName} envoyé avec succès",
         uploadFailedFile: "Échec de l'envoi de {fileName} : {errorMessage}",
     },
@@ -423,7 +423,7 @@ const ru = {
     files: { subtitle: "Загрузка и управление файлами" },
     uploads: {
         uploadingFile: "Отправка {fileName}...",
-        uploadingFileProgress: "Отправка {fileName}: {progress}%",
+        uploadingFileProgress: "Отправка {fileName}: {progress} %",
         uploadSuccessFile: "{fileName} успешно отправлен",
         uploadFailedFile: "Не удалось отправить {fileName}: {errorMessage}",
     },
@@ -487,7 +487,7 @@ const de = {
     files: { subtitle: "Dateien herunterladen und verwalten" },
     uploads: {
         uploadingFile: "{fileName} wird hochgeladen...",
-        uploadingFileProgress: "{fileName} wird hochgeladen: {progress}%",
+        uploadingFileProgress: "{fileName} wird hochgeladen: {progress} %",
         uploadSuccessFile: "{fileName} erfolgreich hochgeladen",
         uploadFailedFile: "Hochladen von {fileName} fehlgeschlagen: {errorMessage}",
     },
@@ -615,7 +615,7 @@ const it = {
     files: { subtitle: "Scarica e gestisci file" },
     uploads: {
         uploadingFile: "Caricamento di {fileName}...",
-        uploadingFileProgress: "Caricamento di {fileName}: {progress}%",
+        uploadingFileProgress: "Caricamento di {fileName}: {progress} %",
         uploadSuccessFile: "{fileName} caricato con successo",
         uploadFailedFile: "Caricamento di {fileName} non riuscito: {errorMessage}",
     },
@@ -679,7 +679,7 @@ const nl = {
     files: { subtitle: "Bestanden downloaden en beheren" },
     uploads: {
         uploadingFile: "{fileName} wordt geüpload...",
-        uploadingFileProgress: "{fileName} wordt geüpload: {progress}%",
+        uploadingFileProgress: "{fileName} wordt geüpload: {progress} %",
         uploadSuccessFile: "{fileName} is geüpload",
         uploadFailedFile: "Uploaden van {fileName} mislukt: {errorMessage}",
     },
@@ -743,7 +743,7 @@ const ar = {
     files: { subtitle: "تنزيل الملفات وإدارتها" },
     uploads: {
         uploadingFile: "جارٍ رفع {fileName}...",
-        uploadingFileProgress: "جارٍ رفع {fileName}: {progress}%",
+        uploadingFileProgress: "جارٍ رفع {fileName}: {progress} %",
         uploadSuccessFile: "تم رفع {fileName} بنجاح",
         uploadFailedFile: "فشل رفع {fileName}: {errorMessage}",
     },
@@ -807,7 +807,7 @@ const ko = {
     files: { subtitle: "파일 다운로드 및 관리" },
     uploads: {
         uploadingFile: "{fileName} 업로드 중...",
-        uploadingFileProgress: "{fileName} 업로드 중: {progress}%",
+        uploadingFileProgress: "{fileName} 업로드 중: {progress} %",
         uploadSuccessFile: "{fileName} 업로드 완료",
         uploadFailedFile: "{fileName} 업로드 실패: {errorMessage}",
     },
@@ -871,7 +871,7 @@ const ja = {
     files: { subtitle: "ファイルのダウンロードと管理" },
     uploads: {
         uploadingFile: "{fileName} をアップロード中...",
-        uploadingFileProgress: "{fileName} をアップロード中: {progress}%",
+        uploadingFileProgress: "{fileName} をアップロード中: {progress} %",
         uploadSuccessFile: "{fileName} のアップロードが完了しました",
         uploadFailedFile: "{fileName} のアップロードに失敗しました: {errorMessage}",
     },
@@ -935,7 +935,7 @@ const vi = {
     files: { subtitle: "Tải xuống và quản lý tệp" },
     uploads: {
         uploadingFile: "Đang tải lên {fileName}...",
-        uploadingFileProgress: "Đang tải lên {fileName}: {progress}%",
+        uploadingFileProgress: "Đang tải lên {fileName}: {progress} %",
         uploadSuccessFile: "Đã tải lên {fileName} thành công",
         uploadFailedFile: "Tải lên {fileName} thất bại: {errorMessage}",
     },
@@ -999,7 +999,7 @@ const th = {
     files: { subtitle: "ดาวน์โหลดและจัดการไฟล์" },
     uploads: {
         uploadingFile: "กำลังอัปโหลด {fileName}...",
-        uploadingFileProgress: "กำลังอัปโหลด {fileName}: {progress}%",
+        uploadingFileProgress: "กำลังอัปโหลด {fileName}: {progress} %",
         uploadSuccessFile: "อัปโหลด {fileName} สำเร็จ",
         uploadFailedFile: "อัปโหลด {fileName} ล้มเหลว: {errorMessage}",
     },
@@ -1063,7 +1063,7 @@ const fil = {
     files: { subtitle: "Mag-download at mag-manage ng mga file" },
     uploads: {
         uploadingFile: "Ina-upload ang {fileName}...",
-        uploadingFileProgress: "Ina-upload ang {fileName}: {progress}%",
+        uploadingFileProgress: "Ina-upload ang {fileName}: {progress} %",
         uploadSuccessFile: "Matagumpay na na-upload ang {fileName}",
         uploadFailedFile: "Nabigong i-upload ang {fileName}: {errorMessage}",
     },
@@ -1127,7 +1127,7 @@ const da = {
     files: { subtitle: "Download og administrer filer" },
     uploads: {
         uploadingFile: "Uploader {fileName}...",
-        uploadingFileProgress: "Uploader {fileName}: {progress}%",
+        uploadingFileProgress: "Uploader {fileName}: {progress} %",
         uploadSuccessFile: "{fileName} blev uploadet",
         uploadFailedFile: "Upload af {fileName} mislykkedes: {errorMessage}",
     },

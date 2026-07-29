@@ -87,11 +87,12 @@ const FRAMERATE_STEPS = [8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144, 1
 
 const videoCRFOptions = [50, 45, 40, 35, 30, 25, 20, 10, 1];
 
-// Sub-Mbps CBR stops for constrained links, ahead of the whole-Mbps range.
-const SUB_MBPS_BITRATE_STEPS = [0.1, 0.25, 0.5, 0.75];
-// Above 100 Mbps the slider coarsens to these stops; per-Mbps granularity
+// Sub-Mbps CBR stops (kbps) for constrained links, ahead of the whole-Mbps
+// range (1000-kbps steps).
+const SUB_MBPS_BITRATE_STEPS = [100, 250, 500, 750];
+// Above 100000 kbps the slider coarsens to these stops; per-1000 granularity
 // stops mattering there and a 1000-position slider would be unusable.
-const COARSE_MBPS_BITRATE_STEPS = [150, 200, 300, 400, 500, 750, 1000];
+const COARSE_MBPS_BITRATE_STEPS = [150000, 200000, 300000, 400000, 500000, 750000, 1000000];
 
 const readStored = (key: string) => localStorage.getItem(getPrefixedKey(key));
 
@@ -122,7 +123,7 @@ const RATE_CONTROL_CBR_DEFAULT_SPEC = {
     conditional: () => "cbr",
     fallback: "cbr",
 };
-const DEFAULT_VIDEO_BITRATE = 8;
+const DEFAULT_VIDEO_BITRATE = 8000;   // in kbps
 
 const roundDownToEven = (num: number) => {
     const n = parseInt(num.toString(), 10);
@@ -186,11 +187,8 @@ export function Settings() {
 
     // Video and Audio Settings State
     const [videoBitRate, setVideoBitRate] = useState(() => {
-        // Normalize legacy values stored in kbps down to Mbps (pure read;
-        // the normalized value is re-persisted on the next change).
-        // Fractional Mbps values are legal (sub-Mbps stops).
-        const parsed = parseFloat(localStorage.getItem(getPrefixedKey("video_bitrate")));
-        if (!isNaN(parsed) && parsed > 1000) return Math.round(parsed / 1000);
+        // kbps on the wire and in storage.
+        const parsed = parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10);
         return !isNaN(parsed) ? parsed : DEFAULT_VIDEO_BITRATE;
     });
     const [audioBitRate, setAudioBitRate] = useState(() =>
@@ -385,10 +383,10 @@ export function Settings() {
             setFramerate(final);
         }
 
-        // Clamp the CBR bitrate (Mbps, fractional allowed) to the server range
+        // Clamp the CBR bitrate (kbps) to the server range
         const s_video_bitrate = serverSettings.video_bitrate;
         if (s_video_bitrate) {
-            const stored = parseFloat(localStorage.getItem(getPrefixedKey("video_bitrate")));
+            const stored = parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10);
             const final = !isNaN(stored)
                 ? Math.max(s_video_bitrate.min, Math.min(s_video_bitrate.max, stored))
                 : s_video_bitrate.default;
@@ -660,7 +658,7 @@ export function Settings() {
     const handleVideoBitRateChange = (selectedBitRate: number) => {
         setVideoBitRate(selectedBitRate);
         localStorage.setItem(getPrefixedKey('video_bitrate'), selectedBitRate.toString());
-        // video_bitrate is Mbps on the wire; the slider works in Mbps.
+        // video_bitrate is kbps on the wire; the slider works in kbps.
         debouncedPostSetting({ video_bitrate: selectedBitRate });
     };
 
@@ -782,13 +780,13 @@ export function Settings() {
         resetDpiToDerivedDefault();
     };
 
-    // CBR stops: sub-Mbps steps for constrained links, whole Mbps to 100, then
-    // the coarse steps to 1000.
+    // CBR stops: sub-Mbps kbps steps for constrained links, whole-Mbps steps
+    // to 100000, then the coarse steps to 1000000.
     const videoBitrateOptions = (() => {
-        const min = serverSettings?.video_bitrate?.min ?? 0.1;
-        const max = serverSettings?.video_bitrate?.max ?? 100;
+        const min = serverSettings?.video_bitrate?.min ?? 100;
+        const max = serverSettings?.video_bitrate?.max ?? 100000;
         const stops = SUB_MBPS_BITRATE_STEPS.filter(v => v >= min && v <= max);
-        for (let v = Math.max(1, Math.ceil(min)); v <= Math.min(100, Math.floor(max)); v++) stops.push(v);
+        for (let v = Math.max(1000, Math.ceil(min / 1000) * 1000); v <= Math.min(100000, Math.floor(max / 1000) * 1000); v += 1000) stops.push(v);
         stops.push(...COARSE_MBPS_BITRATE_STEPS.filter(v => v >= min && v <= max));
         return stops.length ? stops : [min];
     })();
@@ -812,9 +810,12 @@ export function Settings() {
         const above = videoBitrateOptions.findIndex(v => v >= videoBitRate);
         return above >= 0 ? above : videoBitrateOptions.length - 1;
     })();
-    const formatBitrate = (v: number) => v < 1 ? `${Math.round(v * 1000)} Kbps` : `${v} Mbps`;
+    const formatBitrate = (v: number) => `${v / 1000} Mbps`;
 
     // --- Render Gating ---
+    // Audio stops come from the server enum when connected (Opus enum list);
+    // the static fallback covers the no-server-settings window.
+    const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v: string) => parseInt(v, 10))) || audioBitrateOptions;
     const activeEncoder = isWebrtc ? encoderRTC : encoder;
     const isH264 = H264_ENCODERS.includes(activeEncoder);
     const showJpegOptions = !isWebrtc && activeEncoder === 'jpeg';

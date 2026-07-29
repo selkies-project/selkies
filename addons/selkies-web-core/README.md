@@ -104,7 +104,7 @@ All messages sent to the client must be JavaScript objects with a `type` propert
     *   **Supported `settings` properties:**
         *   `framerate` (Number): Target FPS (e.g., 60).
         *   `rate_control_mode` (String): `'crf'` or `'cbr'`.
-        *   `video_bitrate` (Number): Target bitrate in Mbps (used if CBR).
+        *   `video_bitrate` (Number): Target bitrate in kbps (used if CBR; e.g. `8000` for 8 Mbps).
         *   `video_crf` (Number): Constant Rate Factor for H.264 (used if CRF).
         *   `encoder` (String): Video encoder (e.g., `'h264enc'`, `'jpeg'`, `'h264enc-striped'`).
         *   `audio_bitrate` (Number): Audio bitrate in bps (e.g., 320000).

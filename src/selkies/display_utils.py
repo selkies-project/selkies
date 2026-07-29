@@ -1595,7 +1595,7 @@ def apply_common_capture_settings(
     encoder,
     use_cpu,
     cbr,
-    bitrate_mbps,
+    bitrate_kbps,
     crf,
     paintover_crf,
     paintover_burst,
@@ -1623,7 +1623,7 @@ def apply_common_capture_settings(
     cs.video_fullframe = encoder in ("h264enc", "openh264enc")
     cs.use_openh264 = encoder == "openh264enc"
     cs.video_cbr_mode = cbr
-    cs.video_bitrate_kbps = int(round(float(bitrate_mbps) * 1000))
+    cs.video_bitrate_kbps = int(round(float(bitrate_kbps)))
     # 0 = infinite GOP (on-demand keyframes only).
     cs.keyframe_interval_s = float(getattr(server, "keyframe_interval", 0) or 0)
     # CBR QP clamp (0 = encoder default).

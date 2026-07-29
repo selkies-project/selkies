@@ -442,7 +442,7 @@ class RTCApp:
         self.__send_data_channel_message(
             "system", {"action": "videoFramerate," + str(framerate)})
 
-    def send_video_bitrate(self, bitrate: float):
+    def send_video_bitrate(self, bitrate: int):
         """Sends the current video bitrate to the data channel"""
         logger.info("sending video bitrate")
         self.__send_data_channel_message(

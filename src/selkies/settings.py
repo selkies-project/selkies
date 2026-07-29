@@ -137,9 +137,9 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "video_bitrate",
         "type": "range",
-        "default": "0.1-1000",
-        "meta": {"default_value": 8},
-        "help": 'Video bitrate aka CBR, in Megabits per second (Mbps): allowed range (e.g., "0.1-1000"), initial value (e.g., "8" for 8 Mbps, "0.25" for 250 Kbps), or both ("8,0.1-1000"); "8-8" locks.',
+        "default": "100-1000000",
+        "meta": {"default_value": 8000},
+        "help": 'Video bitrate aka CBR, in kilobits per second (kbps): allowed range (e.g., "100-1000000"), initial value (e.g., "8000" for 8 Mbps, "250" for 250 kbps), or both ("8000,100-1000000"); "8000-8000" locks.',
     },
     {
         "name": "rate_control_mode",
@@ -931,8 +931,8 @@ for _setting_def in SETTING_DEFINITIONS:
 
 
 def _range_number(text):
-    """A range-setting number: int when integral, float otherwise (so
-    sub-unit values like a 0.25 Mbps bitrate are representable)."""
+    """A range-setting number: int when integral, float otherwise (kept
+    generic so a fractional span bound stays representable)."""
     value = float(text)
     return int(value) if value.is_integer() else value
 
@@ -1323,7 +1323,7 @@ def sanitize_client_setting(name, client_value, source, log):
     sanitized value, or None when the setting is unknown.
 
     Rules: ranges clamp into the server min/max (fractional values are legal —
-    sub-Mbps bitrates — and integral values stay ints); enums fall back to the
+    integral values stay ints); enums fall back to the
     server default when not allowed; ints/floats clamp into declared bounds
     (top-level min/max win over meta so declared bounds aren't loosened by the
     sentinel-safe negative fallback); locked bools keep the server value. A

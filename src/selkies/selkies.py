@@ -1839,7 +1839,7 @@ class DataStreamingServer(BaseStreamingService):
             return int(v) if v is not None else None
 
         def get_number(k):
-            # int when integral, float otherwise (sub-Mbps bitrates).
+            # int when integral, float otherwise.
             v = settings_data.get(k)
             if v is None:
                 return None
@@ -2081,7 +2081,7 @@ class DataStreamingServer(BaseStreamingService):
                                 'x': 0, 'y': 0,
                             }
                             module.update_framerate(float(display_state.get('framerate') or self.app.framerate))
-                            module.update_video_bitrate(int(round(float(display_state.get('video_bitrate') or 0) * 1000)))
+                            module.update_video_bitrate(int(round(float(display_state.get('video_bitrate') or 0))))
                             module.update_tunables(self._get_capture_settings(
                                 display_id, layout['w'], layout['h'], layout['x'], layout['y']
                             ))
@@ -4388,7 +4388,7 @@ class DataStreamingServer(BaseStreamingService):
             encoder=encoder,
             use_cpu=display_state.get('use_cpu', self._initial_use_cpu),
             cbr=display_state.get('rate_control_mode', settings.rate_control_mode) == 'cbr',
-            bitrate_mbps=display_state.get('video_bitrate', self._initial_video_bitrate),
+            bitrate_kbps=display_state.get('video_bitrate', self._initial_video_bitrate),
             crf=display_state.get('video_crf', self._initial_video_crf),
             paintover_crf=display_state.get('video_paintover_crf', self._initial_video_paintover_crf),
             paintover_burst=display_state.get('video_paintover_burst_frames', self._initial_video_paintover_burst_frames),

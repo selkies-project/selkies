@@ -423,7 +423,7 @@ let video_paintover_crf = 18;
 let video_paintover_burst_frames = 5;
 let use_paint_over_quality = true;
 let audio_bitrate = 320000;
-let videoBitrate = 8;
+let videoBitrate = 8000;
 let force_aligned_resolution = false;
 let showStart = true;
 let status = 'connecting';
@@ -470,7 +470,7 @@ const getIntParam = (key, default_value) => {
   const value = window.localStorage.getItem(finalKey);
   return (value === null || value === undefined) ? default_value : parseInt(value);
 };
-// Fraction-preserving variant for values with sub-unit steps (Mbps bitrate).
+// Fraction-preserving variant: range bounds stay float-capable.
 const getFloatParam = (key, default_value) => {
   const prefixedKey = `${storageAppName}_${key}`;
   let finalKey = prefixedKey;
@@ -559,7 +559,7 @@ function sanitizeAndStoreSettings(serverSettings) {
     const wasUnset = window.localStorage.getItem(finalKey) === null;
 
     if (setting.min !== undefined && setting.max !== undefined) {
-      // Float-aware: fractional ranges (sub-Mbps bitrate) must not be parsed as
+      // Float-aware: fractional ranges must not be parsed as
       // ints — that reads "0.5" as 0, flags it out of range, and wipes the pick
       // back to the server default on every connect. In-range stored values are
       // kept verbatim (no write-back), so fractions survive untruncated.
@@ -646,7 +646,7 @@ isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
 useCssScaling = getBoolParam('useCssScaling', false);
 trackpadMode = getBoolParam('trackpadMode', false);
 rateControlMode = getStringParam('rate_control_mode', rateControlMode);
-videoBitrate = getFloatParam('video_bitrate', videoBitrate);
+videoBitrate = getIntParam('video_bitrate', videoBitrate);
 if (getStringParam('scaling_dpi', null) === null) {
   const dpr = window.devicePixelRatio || 1;
   const target = Math.round(dpr * 4) * 24;
@@ -1395,7 +1395,7 @@ function getCurrentSettingsPayload() {
         ['scaling_dpi', () => getIntParam('scaling_dpi', 96)],
         ['enable_binary_clipboard', () => getBoolParam('enable_binary_clipboard', false)],
         ['rate_control_mode', () => getStringParam('rate_control_mode', 'crf')],
-        ['video_bitrate', () => getFloatParam('video_bitrate', 8)],
+        ['video_bitrate', () => getIntParam('video_bitrate', 8000)],
         ['force_aligned_resolution', () => getBoolParam('force_aligned_resolution', false)],
     ];
     for (const [key, read] of storedEntries) {
@@ -3109,7 +3109,7 @@ function handleSettingsMessage(settings) {
     settingsChanged = true;
   }
   if (settings.video_bitrate !== undefined) {
-    videoBitrate = parseFloat(settings.video_bitrate);
+    videoBitrate = parseInt(settings.video_bitrate, 10);
     setIntParam('video_bitrate', videoBitrate);
     settingsChanged = true;
   }
@@ -3130,7 +3130,7 @@ function handleSettingsMessage(settings) {
 
 function fetchLatestRCvalue(newMode) {
   if (newMode === "cbr") {
-    videoBitrate = getFloatParam('video_bitrate', videoBitrate);
+    videoBitrate = getIntParam('video_bitrate', videoBitrate);
   } else if (newMode === "crf") {
     video_crf = getIntParam('video_crf', video_crf);
   }
@@ -4099,11 +4099,8 @@ function initWebsockets() {
       const integerSettingKeys = [
         'framerate', 'video_crf', 'audio_bitrate', 'jpeg_quality',
         'paint_over_jpeg_quality', 'video_paintover_crf',
-        'video_paintover_burst_frames', 'scaling_dpi'
+        'video_paintover_burst_frames', 'scaling_dpi', 'video_bitrate'
       ];
-      // video_bitrate (Mbps) allows sub-Mbps fractions (e.g. 0.25 = 250 Kbps);
-      // an integer parse here would truncate it to 0 on a full settings resend.
-      const floatSettingKeys = ['video_bitrate'];
 
       for (const key in localStorage) {
         if (Object.hasOwnProperty.call(localStorage, key) && key.startsWith(settingsPrefix)) {
@@ -4122,9 +4119,6 @@ function initWebsockets() {
             let value = localStorage.getItem(key);
             if (booleanSettingKeys.includes(baseKey)) {
               value = (value === 'true');
-            } else if (floatSettingKeys.includes(baseKey)) {
-              value = parseFloat(value);
-              if (isNaN(value)) continue;
             } else if (integerSettingKeys.includes(baseKey)) {
               value = parseInt(value, 10);
               if (isNaN(value)) continue;

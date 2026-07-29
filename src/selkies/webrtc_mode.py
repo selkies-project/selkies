@@ -257,9 +257,8 @@ class WebRTCService(BaseStreamingService):
             async_event_loop=asyncio.get_running_loop(),
             encoder_rtc=self.args.encoder_rtc,
             framerate=int(self.args.framerate),
-            # Mbps; fractional for sub-Mbps targets (kbps conversion happens
-            # at the capture-settings boundary).
-            video_bitrate=float(self.args.video_bitrate),
+            # kbps, as consumed by pixelflux.
+            video_bitrate=int(self.args.video_bitrate),
             audio_bitrate=int(self.args.audio_bitrate),
             audio_channels=int(self.args.audio_channels),
             audio_enabled=self.args.audio_enabled,
@@ -599,7 +598,7 @@ class WebRTCService(BaseStreamingService):
             if pipeline is not None:
                 await pipeline.set_pointer_visible(visible)
 
-    async def handle_video_bitrate_change(self, bitrate: float, display_id: str = "primary") -> None:
+    async def handle_video_bitrate_change(self, bitrate: int, display_id: str = "primary") -> None:
         """Video bitrate change for the display whose page sent it."""
         await self._apply_display_setting(display_id or "primary", "video_bitrate", bitrate)
 
@@ -1332,7 +1331,7 @@ class WebRTCService(BaseStreamingService):
                     async_event_loop=asyncio.get_running_loop(),
                     encoder_rtc=str(setting("encoder_rtc")),
                     framerate=int(setting("framerate")),
-                    video_bitrate=float(setting("video_bitrate")),
+                    video_bitrate=int(setting("video_bitrate")),
                     audio_enabled=False,
                     width=s["w"],
                     height=s["h"],
@@ -1655,9 +1654,9 @@ class WebRTCService(BaseStreamingService):
         headroom, back off multiplicatively on loss, and retarget that display's
         encoder within the allowed video_bitrate range — one display's congested
         link never steers another's stream. Only CBR mode has a target to steer."""
-        lo_mbps, hi_mbps = settings.video_bitrate
+        lo_kbps, hi_kbps = settings.video_bitrate
         logger.info(
-            f"Congestion control loop started (CBR only, range {lo_mbps}-{hi_mbps} Mbps)."
+            f"Congestion control loop started (CBR only, range {lo_kbps}-{hi_kbps} kbps)."
         )
         while True:
             await asyncio.sleep(1.0)
@@ -1691,11 +1690,11 @@ class WebRTCService(BaseStreamingService):
                 current = float(pipeline.video_bitrate)
                 # The user-selected bitrate is the CEILING: congestion control only
                 # backs off below it and recovers up to it. Clamping to the allowed
-                # RANGE instead let a fast local segment ramp an 8 Mbps session to
-                # 80+ Mbps, saturating the real path (TURN/WAN) with queuing lag and
+                # RANGE instead let a fast local segment ramp an 8000 kbps session to
+                # 80000+ kbps, saturating the real path (TURN/WAN) with queuing lag and
                 # loss-corrupted frames.
-                ceiling = float(self._display_setting(did, "video_bitrate") or hi_mbps)
-                ceiling = max(lo_mbps, min(hi_mbps, ceiling))
+                ceiling = float(self._display_setting(did, "video_bitrate") or hi_kbps)
+                ceiling = max(lo_kbps, min(hi_kbps, ceiling))
                 if worst_loss > 0.10:
                     target = current * 0.7
                 else:
@@ -1704,14 +1703,13 @@ class WebRTCService(BaseStreamingService):
                     # capacity — so it must never drag the target DOWN. It may lift
                     # the target when it shows real headroom; otherwise recover
                     # multiplicatively toward the user ceiling after a loss backoff.
-                    target = min(ceiling, max(current * 1.15, min(goodputs) * 0.85 / 1_000_000))
-                # Steer at kbps precision (what set_video_bitrate applies). Float math
-                # throughout so a sub-Mbps CBR target or range cap isn't truncated to 0.
-                target = round(max(lo_mbps, min(ceiling, target)), 3)
-                if target != round(current, 3):
+                    target = min(ceiling, max(current * 1.15, min(goodputs) * 0.85 / 1_000))
+                # Steer at kbps precision (what set_video_bitrate applies).
+                target = round(max(lo_kbps, min(ceiling, target)))
+                if target != round(current):
                     logger.info(
-                        f"Congestion control[{did}]: video bitrate {current:g} -> {target:g} Mbps "
-                        f"(goodput {min(goodputs) / 1e6:.1f} Mbps, loss {worst_loss:.1%})"
+                        f"Congestion control[{did}]: video bitrate {current:.0f} -> {target:.0f} kbps "
+                        f"(goodput {min(goodputs) / 1e3:.1f} kbps, loss {worst_loss:.1%})"
                     )
                     await pipeline.set_video_bitrate(target)
 

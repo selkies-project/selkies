@@ -31,6 +31,8 @@ Use `selkies --help` for all command-line options.
 
 Every command-line option has a matching environment variable, formed by capitalizing the option and prepending `SELKIES_` (such as `SELKIES_VIDEO_BITRATE` for `--video-bitrate`). The full list of settings, their flags, environment variables, and defaults is defined in [`src/selkies/settings.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/settings.py).
 
+`SELKIES_VIDEO_BITRATE` is in **kilobits per second (kbps)**, range `100-1000000`, default `8000` (8 Mbps); no unit multiplier is applied, e.g. `4000` is 4 Mbps. (Prior releases interpreted the same value as megabits per second — existing configs must be multiplied by 1000.)
+
 ## Configuring Encoders, Display Capture, or Transport Protocols
 
 [Components](component.md#encoders)

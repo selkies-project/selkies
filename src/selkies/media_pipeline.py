@@ -79,7 +79,7 @@ class MediaPipeline(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def set_video_bitrate(self, bitrate: float):
+    async def set_video_bitrate(self, bitrate: int):
         pass
 
     @abstractmethod
@@ -105,7 +105,7 @@ class MediaPipelinePixel(MediaPipeline):
         async_event_loop: asyncio.AbstractEventLoop,
         encoder_rtc: str,
         framerate: int = 30,
-        video_bitrate: float = 8,
+        video_bitrate: int = 8000,
         audio_bitrate: int = 128000,
         width: int = 1920,
         height: int = 1080,
@@ -319,10 +319,10 @@ class MediaPipelinePixel(MediaPipeline):
         self.video_paintover_burst_frames = frames
         await self._apply_tunables_live(f"paint-over burst -> {frames}")
 
-    async def set_video_bitrate(self, bitrate: float):
+    async def set_video_bitrate(self, bitrate: int):
         """Set video encoder target bitrate.
 
-        :bitrate: bitrate in mbps (fractions allowed for sub-Mbps targets)
+        :bitrate: bitrate in kbps
         """
         if not self._is_screen_capturing or self.capture_module is None:
             return
@@ -336,9 +336,9 @@ class MediaPipelinePixel(MediaPipeline):
 
         try:
             # Non-blocking in pixelflux (atomic store / channel send).
-            self.capture_module.update_video_bitrate(int(round(bitrate * 1000)))
+            self.capture_module.update_video_bitrate(int(bitrate))
             logger.info(
-                f"Updated video bitrate: {self.video_bitrate}Mbps -> {bitrate}Mbps"
+                f"Updated video bitrate: {self.video_bitrate} -> {bitrate} kbps"
             )
             self.video_bitrate = bitrate
         except Exception as e:
@@ -423,7 +423,7 @@ class MediaPipelinePixel(MediaPipeline):
             encoder=self.encoder_rtc,
             use_cpu=self.use_cpu,
             cbr=self.rc_mode == RateControlMode.CBR,
-            bitrate_mbps=self.video_bitrate,
+            bitrate_kbps=self.video_bitrate,
             crf=self.video_crf,
             paintover_crf=self.video_paintover_crf,
             paintover_burst=self.video_paintover_burst_frames,

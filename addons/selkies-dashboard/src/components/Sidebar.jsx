@@ -114,7 +114,7 @@ const DEFAULT_AUDIO_BITRATE = 128000;  // in bps (global default, matches server
 // (settings.py); the fallback list before serverSettings arrives. 510k is
 // libopus's hard maximum.
 const audioBitrateOptions = [32000, 48000, 64000, 96000, 128000, 192000, 256000, 320000, 384000, 510000];
-const DEFAULT_VIDEO_BITRATE = 8;   // in mbps
+const DEFAULT_VIDEO_BITRATE = 8000;   // in kbps
 const RATE_CONTROL_CBR = "cbr";
 const RATE_CONTROL_CRF = "crf";
 // Rate control resolves through the shared precedence ladder with CBR as the
@@ -127,11 +127,12 @@ const RATE_CONTROL_CBR_DEFAULT_SPEC = {
   fallback: RATE_CONTROL_CBR,
 };
 
-// Sub-Mbps CBR stops for constrained links, ahead of the whole-Mbps range.
-const SUB_MBPS_BITRATE_STEPS = [0.1, 0.25, 0.5, 0.75];
-// Above 100 Mbps the slider coarsens to these stops; per-Mbps granularity
+// Sub-Mbps CBR stops (kbps) for constrained links, ahead of the whole-Mbps
+// range (1000-kbps steps).
+const SUB_MBPS_BITRATE_STEPS = [100, 250, 500, 750];
+// Above 100000 kbps the slider coarsens to these stops; per-1000 granularity
 // stops mattering there and a 1000-position slider would be unusable.
-const COARSE_MBPS_BITRATE_STEPS = [150, 200, 300, 400, 500, 750, 1000];
+const COARSE_MBPS_BITRATE_STEPS = [150000, 200000, 300000, 400000, 500000, 750000, 1000000];
 
 
 function formatBytes(bytes, decimals = 2, rawDict) {
@@ -1028,9 +1029,7 @@ function Sidebar() {
     }
     const s_video_bitrate = serverSettings.video_bitrate;
     if (s_video_bitrate) {
-      // Fractional Mbps (sub-Mbps stops) must not be truncated here — the init
-      // uses parseFloat, so this merge effect must too.
-      const stored = parseFloat(localStorage.getItem(getPrefixedKey("video_bitrate")));
+      const stored = parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10);
       const final = !isNaN(stored)
         ? Math.max(s_video_bitrate.min, Math.min(s_video_bitrate.max, stored))
         : s_video_bitrate.default;
@@ -1189,8 +1188,8 @@ function Sidebar() {
     parseInt(localStorage.getItem(getPrefixedKey("audio_bitrate")), 10) || DEFAULT_AUDIO_BITRATE
   );
   const [videoBitrate, setVideoBitrate] = useState(
-    // Fractional Mbps values are legal (sub-Mbps stops).
-    parseFloat(localStorage.getItem(getPrefixedKey("video_bitrate"))) || DEFAULT_VIDEO_BITRATE
+    // kbps on the wire and in storage.
+    parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10) || DEFAULT_VIDEO_BITRATE
   );
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
   const [encoder, setEncoder] = useState(
@@ -1739,7 +1738,7 @@ function Sidebar() {
     debouncedPostSetting({ framerate: selectedFramerate });
   };
   const handleVideoBitrateChange = (event) => {
-    // Index into the stops list (which mixes sub-Mbps and whole Mbps values).
+    // Index into the stops list (kbps: sub-Mbps steps, then whole-Mbps steps).
     const index = parseInt(event.target.value, 10);
     const selectedVideoBitrate = videoBitrateOptions[index];
     if (selectedVideoBitrate === undefined) return;
@@ -2502,8 +2501,8 @@ function Sidebar() {
   );
   // The gauge reads full at the traffic the session is CONFIGURED to use
   // (video target + audio), not an arbitrary link speed — at 8 Mbps configured,
-  // 8 Mbps of traffic is a full circle.
-  const maxBandwidthMbps = Math.max(0.1, videoBitrate + audioBitrate / 1_000_000);
+  // 8 Mbps of traffic is a full circle. videoBitrate is kbps.
+  const maxBandwidthMbps = Math.max(0.1, videoBitrate / 1000 + audioBitrate / 1_000_000);
   const MAX_LATENCY_MS = 1000;
   const bandwidthPercent = Math.min(100, (bandwidthMbps / maxBandwidthMbps) * 100);
   const bandwidthOffset = calculateGaugeOffset(
@@ -2541,13 +2540,13 @@ function Sidebar() {
   const showJpegOptions = encoder === 'jpeg';
   const showPaintOverQualityToggle = showH264Options || showJpegOptions;
 
-  // CBR stops: sub-Mbps steps for constrained links, whole Mbps to 100, then
-  // the coarse steps to 1000.
+  // CBR stops: sub-Mbps kbps steps for constrained links, whole-Mbps steps to
+  // 100000, then the coarse steps to 1000000.
   const videoBitrateOptions = (() => {
-    const min = serverSettings?.video_bitrate?.min ?? 0.1;
-    const max = serverSettings?.video_bitrate?.max ?? 100;
+    const min = serverSettings?.video_bitrate?.min ?? 100;
+    const max = serverSettings?.video_bitrate?.max ?? 100000;
     const stops = SUB_MBPS_BITRATE_STEPS.filter((v) => v >= min && v <= max);
-    for (let v = Math.max(1, Math.ceil(min)); v <= Math.min(100, Math.floor(max)); v++) stops.push(v);
+    for (let v = Math.max(1000, Math.ceil(min / 1000) * 1000); v <= Math.min(100000, Math.floor(max / 1000) * 1000); v += 1000) stops.push(v);
     stops.push(...COARSE_MBPS_BITRATE_STEPS.filter((v) => v >= min && v <= max));
     return stops.length ? stops : [min];
   })();
@@ -2557,7 +2556,7 @@ function Sidebar() {
     const above = videoBitrateOptions.findIndex((v) => v >= videoBitrate);
     return above >= 0 ? above : videoBitrateOptions.length - 1;
   })();
-  const formatBitrate = (v) => (v < 1 ? `${Math.round(v * 1000)} Kbps` : `${v} Mbps`);
+  const formatBitrate = (v) => `${v / 1000} Mbps`;
   if (serverSettings && serverSettings.ui_show_sidebar?.value === false) {
     return null;
   }
@@ -3247,7 +3246,7 @@ function Sidebar() {
                         >
                           {(serverSettings?.scaling_dpi?.allowed || []).map((dpiValue) => {
                             const percent = Math.round((parseInt(dpiValue, 10) / 96) * 100);
-                            const label = `${percent}%`;
+                            const label = `${percent} %`;
                             return (
                               <option key={dpiValue} value={dpiValue}>
                                 {dpiValue === String(currentDeviceDpi) ? `${label} *` : label}
@@ -3511,7 +3510,7 @@ function Sidebar() {
                           >
                             {Math.round(
                               Math.max(0, Math.min(100, cpuPercent || 0))
-                            )}%
+                            )} %
                           </text>
                         </svg>
                         <div className="gauge-label">
@@ -3612,7 +3611,7 @@ function Sidebar() {
                               >
                                 {Math.round(
                                   Math.max(0, Math.min(100, gpuPercent || 0))
-                                )}%
+                                )} %
                               </text>
                             </svg>
                             <div className="gauge-label">

@@ -154,24 +154,25 @@ function readStreamAudioLevel(meterRef: { current: AudioMeter | null }): number 
 }
 
 const MAX_LATENCY_MS = 1000;
-const DEFAULT_VIDEO_BITRATE_MBPS = 8;
+const DEFAULT_VIDEO_BITRATE_KBPS = 8000;
 const DEFAULT_AUDIO_BITRATE_BPS = 128000;
 
 // The bandwidth gauge reads full at the traffic the session is CONFIGURED to
 // use (video target + audio), not an arbitrary link speed — at 8 Mbps
 // configured, 8 Mbps of traffic is a full circle. Explicit client choice
-// (localStorage) wins over the server's configured value.
+// (localStorage) wins over the server's configured value. video_bitrate is
+// kbps on the wire and in storage.
 function configuredMaxBandwidthMbps(): number {
 	const settings = getLastServerSettings();
 	const storedVideo = parseFloat(localStorage.getItem(getPrefixedKey('video_bitrate')) ?? '');
 	const serverVideo = parseFloat(settings?.video_bitrate?.value);
-	const videoMbps = !isNaN(storedVideo) ? storedVideo
-		: (!isNaN(serverVideo) ? serverVideo : DEFAULT_VIDEO_BITRATE_MBPS);
+	const videoKbps = !isNaN(storedVideo) ? storedVideo
+		: (!isNaN(serverVideo) ? serverVideo : DEFAULT_VIDEO_BITRATE_KBPS);
 	const storedAudio = parseInt(localStorage.getItem(getPrefixedKey('audio_bitrate')) ?? '', 10);
 	const serverAudio = parseInt(settings?.audio_bitrate?.value, 10);
 	const audioBps = !isNaN(storedAudio) ? storedAudio
 		: (!isNaN(serverAudio) ? serverAudio : DEFAULT_AUDIO_BITRATE_BPS);
-	return Math.max(0.1, videoMbps + audioBps / 1_000_000);
+	return Math.max(0.1, videoKbps / 1000 + audioBps / 1_000_000);
 }
 
 export function SystemMonitoring() {
@@ -249,7 +250,7 @@ export function SystemMonitoring() {
 	const formatMemory = (bytes: number | null): string => {
 		if (bytes === null) return t('sections.stats.tooltipMemoryNA');
 		const gb = bytes / (1024 * 1024 * 1024);
-		return gb >= 1 ? `${gb.toFixed(1)}GB` : `${(bytes / (1024 * 1024)).toFixed(0)}MB`;
+		return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 	};
 
 	// Performance status helper functions
@@ -391,7 +392,7 @@ export function SystemMonitoring() {
 						<div className="flex justify-between items-center py-1">
 							<span className="text-sm text-muted-foreground">{t('sections.stats.cpuLabel')}</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(cpuPercent)}%</span>
+								<span className="text-sm font-medium text-card-foreground">{Math.round(cpuPercent)} %</span>
 								{(() => {
 									const status = getPerformanceStatus(cpuPercent, 'percentage');
 									return (
@@ -406,7 +407,7 @@ export function SystemMonitoring() {
 						<div className="flex justify-between items-center py-1">
 							<span className="text-sm text-muted-foreground">{t('sections.stats.gpuLabel')}</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuPercent)}%</span>
+								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuPercent)} %</span>
 								{(() => {
 									const status = getPerformanceStatus(gpuPercent, 'percentage');
 									return (
@@ -421,7 +422,7 @@ export function SystemMonitoring() {
 						<div className="flex justify-between items-center py-1">
 							<span className="text-sm text-muted-foreground">{t('sections.stats.sysMemLabel')}</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(sysMemPercent)}% ({formatMemory(sysMemUsed)}/{formatMemory(sysMemTotal)})</span>
+								<span className="text-sm font-medium text-card-foreground">{Math.round(sysMemPercent)} % ({formatMemory(sysMemUsed)}/{formatMemory(sysMemTotal)})</span>
 								{(() => {
 									const status = getPerformanceStatus(sysMemPercent, 'percentage');
 									return (
@@ -436,7 +437,7 @@ export function SystemMonitoring() {
 						<div className="flex justify-between items-center py-1">
 							<span className="text-sm text-muted-foreground">{t('sections.stats.gpuMemLabel')}</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuMemPercent)}% ({formatMemory(gpuMemUsed)}/{formatMemory(gpuMemTotal)})</span>
+								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuMemPercent)} % ({formatMemory(gpuMemUsed)}/{formatMemory(gpuMemTotal)})</span>
 								{(() => {
 									const status = getPerformanceStatus(gpuMemPercent, 'percentage');
 									return (
@@ -466,7 +467,7 @@ export function SystemMonitoring() {
 						<div className="flex justify-between items-center py-1">
 							<span className="text-sm text-muted-foreground">{t('sections.stats.audioLabel')}</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{audioLevel}%</span>
+								<span className="text-sm font-medium text-card-foreground">{audioLevel} %</span>
 								{(() => {
 									const status = getPerformanceStatus(audioLevel, 'audio');
 									return (

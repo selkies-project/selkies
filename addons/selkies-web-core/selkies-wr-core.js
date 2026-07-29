@@ -153,9 +153,9 @@ function InitUI() {
 export default function webrtc() {
 	let appName;
 	let crf = 23;
-	let videoBitRate = 8;      // in mbps
+	let videoBitRate = 8000;   // in kbps
 	let videoFramerate = 60;
-	let audioBitRate = 128000; // in kbps
+	let audioBitRate = 128000; // in bps
 	let showStart = false;
 	let showDrawer = false;
 	// Log/debug entries are retained in capped ring buffers (devtools inspection via
@@ -396,7 +396,7 @@ export default function webrtc() {
 		const value = window.localStorage.getItem(prefixedKey);
 		return (value === null || value === undefined) ? default_value : parseInt(value);
 	};
-	// Fraction-preserving variant for values with sub-unit steps (Mbps bitrate).
+	// Fraction-preserving variant: range bounds stay float-capable.
 	const getFloatParam = (key, default_value) => {
 		const prefixedKey = storageKeyFor(key);
 		const value = window.localStorage.getItem(prefixedKey);
@@ -628,7 +628,7 @@ export default function webrtc() {
 			const wasUnset = window.localStorage.getItem(finalKey) === null;
 
 			if (setting.min !== undefined && setting.max !== undefined) {
-				// Float-aware: fractional ranges (sub-Mbps bitrate) must not be
+				// Float-aware: fractional ranges must not be
 				// parsed as ints — that reads "0.5" as 0, flags it out of range,
 				// and wipes the pick back to the server default on every connect.
 				// In-range stored values are kept verbatim (no write-back).
@@ -719,11 +719,8 @@ export default function webrtc() {
 		];
 		const integerSettingKeys = [
 			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_crf',
-			'video_paintover_crf', 'video_paintover_burst_frames'
+			'video_paintover_crf', 'video_paintover_burst_frames', 'video_bitrate'
 		];
-		// video_bitrate (Mbps) allows sub-Mbps fractions (0.25 = 250 Kbps); an
-		// integer parse would truncate it to 0 on this initial settings send.
-		const floatSettingKeys = ['video_bitrate'];
 
 		for (const key in localStorage) {
 			if (Object.hasOwnProperty.call(localStorage, key) && key.startsWith(settingsPrefix)) {
@@ -742,9 +739,6 @@ export default function webrtc() {
 					let value = localStorage.getItem(key);
 					if (booleanSettingKeys.includes(baseKey)) {
 						value = (value === 'true');
-					} else if (floatSettingKeys.includes(baseKey)) {
-						value = parseFloat(value);
-						if (isNaN(value)) continue;
 					} else if (integerSettingKeys.includes(baseKey)) {
 						value = parseInt(value, 10);
 						if (isNaN(value)) continue;
@@ -1320,7 +1314,7 @@ export default function webrtc() {
 			webrtc.sendDataChannelMessage(`SETTINGS,${JSON.stringify(passthrough)}`);
 		}
 		if (settings.video_bitrate !== undefined) {
-			videoBitRate = parseFloat(settings.video_bitrate);
+			videoBitRate = parseInt(settings.video_bitrate, 10);
 			webrtc.sendDataChannelMessage(`vb,${videoBitRate}`);
 			setIntParam('video_bitrate', videoBitRate);
 		}
@@ -1870,7 +1864,7 @@ export default function webrtc() {
 			turnSwitch = getBoolParam('turn_switch', false);
 			resizeRemote = getBoolParam('resize_remote', resizeRemote);
 			scaleLocal = getBoolParam('scaleLocallyManual', !resizeRemote);
-			videoBitRate = getFloatParam('video_bitrate', videoBitRate);
+			videoBitRate = getIntParam('video_bitrate', videoBitRate);
 			videoFramerate = getIntParam('framerate', videoFramerate);
 			audioBitRate = getIntParam('audio_bitrate', audioBitRate);
 			window.isManualResolutionMode = getBoolParam('is_manual_resolution_mode', false);

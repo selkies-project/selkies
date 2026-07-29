@@ -4410,9 +4410,9 @@ class WebRTCInput:
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
         elif msg_type == "vb":
             try:
-                # Mbps; fractional values carry sub-Mbps targets. Per-display: the
-                # sending page's channel names the display whose stream it tunes.
-                bitrate = float(toks[1])
+                # kbps (integer). Per-display: the sending page's channel names
+                # the display whose stream it tunes.
+                bitrate = int(toks[1])
                 if bitrate <= 0:
                     return
                 await self.on_video_encoder_bit_rate(bitrate, display_id)
