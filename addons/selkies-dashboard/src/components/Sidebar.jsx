@@ -81,12 +81,11 @@ const deriveDpiFromDpr = () => {
 
 const STATS_READ_INTERVAL_MS = 500;
 const DEFAULT_FRAMERATE = 60;
-const DEFAULT_JPEG_QUALITY = 60;
+const DEFAULT_JPEG_QUALITY = 40;
 const DEFAULT_PAINT_OVER_JPEG_QUALITY = 90;
 const DEFAULT_USE_CPU = false;
 const DEFAULT_H264_PAINTOVER_CRF = 18;
 const DEFAULT_USE_PAINT_OVER_QUALITY = true;
-const DEFAULT_VIDEO_BUFFER_SIZE = 0;
 const DEFAULT_ENCODER = encoderOptions[0];
 const DEFAULT_VIDEO_CRF = 25;
 const DEFAULT_SCALE_LOCALLY = true;
@@ -2544,7 +2543,7 @@ function Sidebar() {
   // 100000, then the coarse steps to 1000000.
   const videoBitrateOptions = (() => {
     const min = serverSettings?.video_bitrate?.min ?? 100;
-    const max = serverSettings?.video_bitrate?.max ?? 100000;
+    const max = serverSettings?.video_bitrate?.max ?? 1000000;
     const stops = SUB_MBPS_BITRATE_STEPS.filter((v) => v >= min && v <= max);
     for (let v = Math.max(1000, Math.ceil(min / 1000) * 1000); v <= Math.min(100000, Math.floor(max / 1000) * 1000); v += 1000) stops.push(v);
     stops.push(...COARSE_MBPS_BITRATE_STEPS.filter((v) => v >= min && v <= max));

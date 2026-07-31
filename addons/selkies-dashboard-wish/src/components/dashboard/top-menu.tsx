@@ -732,6 +732,7 @@ export function TopMenu({
                   </MenubarSub>
                 )}
 
+                {(renderableSettings.shortcuts ?? true) && (
                 <MenubarSub>
                   <MenubarSubTrigger>
                     <Keyboard className="h-4 w-4 mr-2" />
@@ -741,6 +742,7 @@ export function TopMenu({
                     <ShortcutsMenu />
                   </MenubarSubContent>
                 </MenubarSub>
+                )}
 
                 <MenubarSeparator />
 

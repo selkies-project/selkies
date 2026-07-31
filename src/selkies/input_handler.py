@@ -1986,7 +1986,9 @@ class WebRTCInput:
         self.on_scaling_ratio = lambda res: logger_webrtc_input.warning("unhandled on_scaling_ratio")
         self.on_ping_response = lambda latency: logger_webrtc_input.warning("unhandled on_ping_response")
         self.on_cursor_change = self._on_cursor_change
-        self.on_client_webrtc_stats = lambda webrtc_stat_type, webrtc_stats: logger_webrtc_input.warning("unhandled on_client_webrtc_stats")
+        async def _unhandled_webrtc_stats(webrtc_stat_type, webrtc_stats):
+            logger_webrtc_input.debug(f"unhandled on_client_webrtc_stats: {webrtc_stat_type}")
+        self.on_client_webrtc_stats = _unhandled_webrtc_stats
         self.clipboard_monitor_task = None
         self.multipart_clipboard_buffer = None
         self.multipart_clipboard_mime_type = "text/plain"
@@ -3244,15 +3246,18 @@ class WebRTCInput:
                             self.wayland_input.inject_mouse_button(273, state)
                         
                         elif bit_index == 3:
-                            if scroll_magnitude > 0: 
+                            if scroll_magnitude > 0:
                                 if is_pressed_now:
                                     self.wayland_input.inject_mouse_scroll(0.0, 10.0 * mag)
                             else:
                                 if is_pressed_now:
-                                    await self.send_x11_keypress(KEYSYM_ALT_L, down=True)
-                                    await self.send_x11_keypress(KEYSYM_LEFT_ARROW, down=True)
-                                    await self.send_x11_keypress(KEYSYM_LEFT_ARROW, down=False)
-                                    await self.send_x11_keypress(KEYSYM_ALT_L, down=False)
+                                    # Back: Alt+Left must queue behind any pending
+                                    # keys like every other key event (direct
+                                    # injection could interleave between a queued
+                                    # kd and its ku and produce stray chords).
+                                    for _item in (("kd", KEYSYM_ALT_L), ("kd", KEYSYM_LEFT_ARROW),
+                                                  ("ku", KEYSYM_LEFT_ARROW), ("ku", KEYSYM_ALT_L)):
+                                        self._keyboard_enqueue(_item)
 
                         elif bit_index == 4:
                             if scroll_magnitude > 0:
@@ -3260,10 +3265,10 @@ class WebRTCInput:
                                     self.wayland_input.inject_mouse_scroll(0.0, -10.0 * mag)
                             else:
                                 if is_pressed_now:
-                                    await self.send_x11_keypress(KEYSYM_ALT_L, down=True)
-                                    await self.send_x11_keypress(KEYSYM_RIGHT_ARROW, down=True)
-                                    await self.send_x11_keypress(KEYSYM_RIGHT_ARROW, down=False)
-                                    await self.send_x11_keypress(KEYSYM_ALT_L, down=False)
+                                    # Forward: Alt+Right, same queue ordering.
+                                    for _item in (("kd", KEYSYM_ALT_L), ("kd", KEYSYM_RIGHT_ARROW),
+                                                  ("ku", KEYSYM_RIGHT_ARROW), ("ku", KEYSYM_ALT_L)):
+                                        self._keyboard_enqueue(_item)
 
                         elif bit_index == 6:
                             if scroll_magnitude > 0 and is_pressed_now:
@@ -4764,11 +4769,10 @@ class WebRTCInput:
         elif msg_type == "r":
             res = toks[1]
             if re.fullmatch(r"^\d+x\d+$", res):
-                w, h = [int(i) + int(i)%2 for i in res.split("x")]
-                # The handler may be an async binding or a sync "disabled" fallback —
-                # await only a real coroutine so a skipped resize logs its warning
-                # instead of raising 'await None'.
-                _r = self.on_resize(f"{w}x{h}", display_id)
+                # Even-dim normalization lives in parse_resize_dims (round DOWN
+                # to even, 8K cap) so both transports realize an odd request
+                # identically; pass the request through verbatim.
+                _r = self.on_resize(res, display_id)
                 if asyncio.iscoroutine(_r): await _r
             else: logger_webrtc_input.warning(f"Rejecting resolution change, invalid: {res}")
         elif msg_type == "s":

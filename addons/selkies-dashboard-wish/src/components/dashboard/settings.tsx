@@ -85,7 +85,8 @@ const H264_ENCODERS = ["h264enc", "h264enc-striped", "openh264enc", "nvh264enc"]
 
 const FRAMERATE_STEPS = [8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144, 165, 240];
 
-const videoCRFOptions = [50, 45, 40, 35, 30, 25, 20, 10, 1];
+// CRF stops stay inside the server-supported video_crf range (min 5).
+const videoCRFOptions = [50, 45, 40, 35, 30, 25, 20, 10, 5];
 
 // Sub-Mbps CBR stops (kbps) for constrained links, ahead of the whole-Mbps
 // range (1000-kbps steps).
@@ -784,7 +785,7 @@ export function Settings() {
     // to 100000, then the coarse steps to 1000000.
     const videoBitrateOptions = (() => {
         const min = serverSettings?.video_bitrate?.min ?? 100;
-        const max = serverSettings?.video_bitrate?.max ?? 100000;
+        const max = serverSettings?.video_bitrate?.max ?? 1000000;
         const stops = SUB_MBPS_BITRATE_STEPS.filter(v => v >= min && v <= max);
         for (let v = Math.max(1000, Math.ceil(min / 1000) * 1000); v <= Math.min(100000, Math.floor(max / 1000) * 1000); v += 1000) stops.push(v);
         stops.push(...COARSE_MBPS_BITRATE_STEPS.filter(v => v >= min && v <= max));

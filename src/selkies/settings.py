@@ -325,6 +325,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Show the stats section in the sidebar.",
     },
     {
+        "name": "ui_sidebar_show_shortcuts",
+        "type": "bool",
+        "default": True,
+        "help": "Show the keyboard shortcuts section in the sidebar (both dashboards honor this).",
+    },
+    {
         "name": "ui_sidebar_show_clipboard",
         "type": "bool",
         "default": True,
@@ -1047,6 +1053,13 @@ class AppSettings:
                             processed_value = []
                         else:
                             user_items = [item.strip() for item in raw_value_str.split(',') if item.strip()]
+                            if name in ("encoder", "encoder_rtc"):
+                                # Historical name from base images still shipping
+                                # SELKIES_ENCODER=x264enc in their env.
+                                user_items = [
+                                    "h264enc" if item == "x264enc" else item
+                                    for item in user_items
+                                ]
                             valid_items = [item for item in user_items if item in master_list]
                             # A numeric enum may declare meta.value_range: an admin-set
                             # single value inside that span is taken verbatim as the

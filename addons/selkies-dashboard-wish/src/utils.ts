@@ -109,6 +109,7 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.keyboardButton = s.ui_sidebar_show_keyboard_button?.value ?? true;
   newRenderable.softButtons = s.ui_sidebar_show_soft_buttons?.value ?? true;
   newRenderable.coreButtons = s.ui_show_core_buttons?.value ?? true;
+  newRenderable.shortcuts = s.ui_sidebar_show_shortcuts?.value ?? true;
 
   // Per-control renderability derived from the settings' own constraints.
   newRenderable.encoder = isSettingRenderable(s.encoder);

@@ -34,6 +34,10 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
   const [showSidebar, setShowSidebar] = useState<boolean>(
     () => (getLastServerSettings() as any)?.ui_show_sidebar?.value !== false
   );
+  // The floating card honors the same admin toggle the menu's gamepad entries do.
+  const [showGamepadCard, setShowGamepadCard] = useState<boolean>(
+    () => (getLastServerSettings() as any)?.ui_sidebar_show_gamepads?.value !== false
+  );
 
   // Add message event listener for status updates
   React.useEffect(() => {
@@ -55,6 +59,7 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
           if (message.gamepad !== undefined) setIsGamepadEnabled(message.gamepad);
         } else if (message.type === 'serverSettings') {
           setShowSidebar(message.payload?.ui_show_sidebar?.value !== false);
+          setShowGamepadCard(message.payload?.ui_sidebar_show_gamepads?.value !== false);
         }
       }
     };
@@ -152,7 +157,7 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
         {/* Gamepad component (input is owned by the primary display); follows
             the same chrome gates as the menu so hidden-UI and viewer sessions
             don't get a floating card over the stream. */}
-        {isGamepadEnabled && !isSecondaryDisplay && showStats && !isViewer && showSidebar && (
+        {isGamepadEnabled && !isSecondaryDisplay && showStats && !isViewer && showSidebar && showGamepadCard && (
           <Gamepad isGamepadEnabled={isGamepadEnabled} onGamepadToggle={setIsGamepadEnabled} />
         )}
       </div>

@@ -467,11 +467,29 @@ class RTCApp:
         self.__send_data_channel_message(
             "system", {"action": "resize," + str(resize_enabled)})
 
-    def send_remote_resolution(self, res: str):
-        """sends the current remote resolution to the client"""
+    def send_remote_resolution(self, res: str, display_id: str = "primary"):
+        """sends the realized remote resolution to the clients of `display_id`
+        (display-scoped: the websockets transport tags its stream_resolution
+        with the display id and addresses only that page, so a secondary's
+        realized size must never rescale the primary page)"""
         logger.info("sending remote resolution of: " + res)
-        self.__send_data_channel_message(
-            "system", {"action": "resolution," + res})
+        sent = False
+        for peer_obj in self.peer_connections.values():
+            if (peer_obj.get("display_id") or "primary") != display_id:
+                continue
+            peer_conn = peer_obj.get("peer_conn")
+            channel = peer_obj.get("data_channel")
+            if (
+                peer_conn is not None
+                and channel is not None
+                and peer_conn.connectionState == "connected"
+                and channel.readyState == "open"
+            ):
+                self.send_message_to_channel(
+                    channel, "system", {"action": "resolution," + res})
+                sent = True
+        if not sent:
+            logger.info("skipping remote resolution because no data channel is ready")
 
     def send_ping(self, t: float):
         """Sends a ping request to the PRIMARY controller only: latency is measured
@@ -636,7 +654,18 @@ class RTCApp:
             # browser SDP parsers; the client derives minptime from it and pcmflux keeps
             # the real 2.5 ms frame.
             ptime = int(frame_ms + 0.5)
-            sdp_text = re.sub(r'([^-]sprop-[^\r\n]+)', r'\1\r\na=ptime:' + str(ptime), sdp_text)
+            # a=ptime is a media-level attribute: it must land inside the audio
+            # m-section — injecting after sprop lines would place it in the video
+            # section (invalid-but-ignored), and audio-less offers must skip it.
+            if f"a=ptime:{ptime}" not in sdp_text:
+                sections = re.split(r'(?m)(?=^m=)', sdp_text)
+                for i, section in enumerate(sections):
+                    if section.startswith('m=audio'):
+                        lines = section.split('\r\n')
+                        lines.insert(1, f'a=ptime:{ptime}')
+                        sections[i] = '\r\n'.join(lines)
+                        break
+                sdp_text = ''.join(sections)
 
         # Raise the SDP bandwidth ceiling so the browser's REMB doesn't throttle a
         # high-bitrate desktop stream (b=AS is a cap hint, not a target; generous is
@@ -955,6 +984,24 @@ class RTCApp:
         except Exception:
             logger.debug("collab-state send failed (channel closing)", exc_info=True)
 
+    def _send_auth_success(self, channel, client_type, client_token):
+        """Tell the client its effective role/slot (websockets AUTH_SUCCESS
+        parity): role coercion is decided server-side, so the page must learn
+        the verdict to degrade its own UI instead of driving a controller UI
+        whose input is all dropped."""
+        try:
+            role = "controller" if client_type == ClientType.CONTROLLER else "viewer"
+            slot = None
+            if client_token:
+                perms = current_session_tokens()[0].get(client_token)
+                if perms:
+                    slot = perms.get("slot")
+            verdict = json.dumps({"role": role, "slot": slot})
+            channel.send(json.dumps(
+                {"type": "system", "data": {"action": f"auth_success,{verdict}"}}))
+        except Exception:
+            logger.debug("auth_success send failed (channel closing)", exc_info=True)
+
     def _viewer_is_collaborator(self, client_token):
         """A viewer holding the active mk (mouse+keyboard) token is a read-write
         collaborator — mirrors the WS mk-token path — but only while enable_collab
@@ -975,6 +1022,12 @@ class RTCApp:
         if not app_settings.master_token:
             return False
         # "co" is composed-text typing (co,end,<text>) — keyboard input like kd/ku.
+        # The bare "cr" clipboard read-back is exempt like every other clipboard
+        # read on the websockets transport: it is direction-gated by the handler
+        # itself (enable_clipboard "out") and is sent at connect, before the peer
+        # can hold input authority.
+        if msg.split(",", 1)[0] in ("cr",):
+            return False
         if msg.split(",", 1)[0] not in ("cmd", "co") and not msg.startswith(VIEWER_COLLAB_EXTRA_PREFIXES):
             return False
         tokens, mk = current_session_tokens()
@@ -1219,7 +1272,7 @@ class RTCApp:
         mic_on, mic_locked = app_settings.microphone_enabled
         mic_state = None
         if display_id == "primary" and bool(app_settings.audio_enabled[0]) and (mic_on or not mic_locked):
-            mic_state = self._setup_mic_receiver(peer_connection)
+            mic_state = self._setup_mic_receiver(peer_connection, client_type, client_token)
 
         # Primary data channel, fully reliable + ordered: input, clipboard, and
         # upload control all ride it, and none of them tolerate loss.
@@ -1233,9 +1286,12 @@ class RTCApp:
         # open passes the channel so the greeting goes to the peer that joined.
         data_channel.on("open", lambda ch=data_channel: self.on_data_open(ch))
         # Secure-mode viewers learn their input authority at channel-open the way
-        # websockets clients do (MK_ACCESS on connect).
+        # websockets clients do (MK_ACCESS on connect), and every client learns
+        # its effective role/slot the way websockets clients do (AUTH_SUCCESS).
         data_channel.on("open", lambda ch=data_channel, ct=client_type, tok=client_token:
                         self._send_collab_state(ch, ct, tok))
+        data_channel.on("open", lambda ch=data_channel, ct=client_type, tok=client_token:
+                        self._send_auth_success(ch, ct, tok))
         data_channel.on("close", lambda: self.on_data_close())
         data_channel.on("error", lambda e=None: self.on_data_error(e))
         input_consumer = self._serialize_channel(
@@ -1274,10 +1330,18 @@ class RTCApp:
                 logger.warning("Failed to close peer connection after failed start", exc_info=True)
             raise
 
+        # The slot the token held at connect, for later reconcile deltas.
+        peer_slot = None
+        if client_token:
+            _perms = current_session_tokens()[0].get(client_token)
+            if _perms:
+                peer_slot = _perms.get("slot")
+
         self.peer_connections[client_peer_id] = {
             "peer_conn": peer_connection,
             "data_channel": data_channel,
             "client_type": client_type,
+            "client_slot": peer_slot,
             "display_id": display_id,
             # A channel that never reaches SCTP-established never emits 'close',
             # so its consumer must also be cancellable from teardown paths.
@@ -1300,7 +1364,7 @@ class RTCApp:
         # a stopped capture) — the owning service re-evaluates the consumer set.
         await self._notify_consumers_changed(display_id)
 
-    def _setup_mic_receiver(self, peer_connection):
+    def _setup_mic_receiver(self, peer_connection, client_type=None, client_token=None):
         """Add a recvonly mic transceiver in the bundled session and route its encoded
         Opus straight into pcmflux -- no aiortc/Python Opus decode. RED (UDP loss
         resilience) is gated by audio_redundancy: when on, the shared caps offer it and
@@ -1321,6 +1385,15 @@ class RTCApp:
 
         def sink(codec, frame):
             if state["closed"]:
+                return
+            # Only a controller or a live collab (m/k) holder speaks into the
+            # desktop mixer — the websockets transport's mic gate verdict. The
+            # collab state is read per packet so an m/k handoff takes effect
+            # without renegotiation.
+            if client_type is ClientType.VIEWER and not self._viewer_is_collaborator(client_token):
+                if not state.get("role_denied_logged"):
+                    state["role_denied_logged"] = True
+                    logger.info("Dropping microphone audio from a view-only peer (no m/k authority).")
                 return
             data = bytes(getattr(frame, "data", b"") or b"")
             if not data:

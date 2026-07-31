@@ -1009,6 +1009,8 @@ export default function webrtc() {
 		let message = event.data;
 		switch(message.type) {
 			case "setScaleLocally":
+				// Shared-mode parity with ws-core: a viewer must not drive resolution policy.
+				if (isSharedMode) { break; }
 				if (typeof message.value === 'boolean') {
 					console.log("Scaling the stream locally: ", message.value);
 					// setScaleLocally returns true or false; false, to turn off the scaling
@@ -1023,6 +1025,7 @@ export default function webrtc() {
 				}
 				break;
 			case "resetResolutionToWindow":
+				if (isSharedMode) { break; }
 				console.log("Resetting to window size");
 				manualHeight = manualWidth = 0; // clear manual W&H
 				let currentWindowRes = input.getWindowResolution();
@@ -1036,6 +1039,7 @@ export default function webrtc() {
 				window.isManualResolutionMode = false;
 				break;
 			case "setManualResolution":
+				if (isSharedMode) { break; }
 				const width = parseInt(message.width, 10);
 				const height = parseInt(message.height, 10);
 				if (isNaN(width) || width <= 0 || isNaN(height) || height <= 0) {
@@ -1059,6 +1063,7 @@ export default function webrtc() {
 				// flag matters: sendResolutionToServer/resetToWindowResolution multiply by
 				// devicePixelRatio only when CSS scaling is off, and input.updateCssScaling
 				// realigns the coordinate math (touch included via the shared sink mapper).
+				if (isSharedMode) { break; }
 				if (typeof message.value === 'boolean') {
 					const changed = useCssScaling !== message.value;
 					useCssScaling = message.value;
@@ -1089,6 +1094,9 @@ export default function webrtc() {
 				handleSettingsMessage(message.settings);
 				break;
 			case "command":
+				// Defense in depth (ws-core parity): a shared/strict-viewer page never
+				// reaches the server-side 'cmd,' execution path.
+				if (isSharedMode) { break; }
 				if (!serverCommandEnabled) {
 					console.log("Command sending suppressed: server has command_enabled=false; not sending 'cmd,'.");
 					break;
@@ -1103,6 +1111,10 @@ export default function webrtc() {
 				}
 				break;
 			case 'pipelineControl':
+				if (message.pipeline === 'microphone' && isSharedMode) {
+					console.log("Shared mode: Microphone control blocked.");
+					break;
+				}
 				if (message.pipeline === 'microphone' && webrtc && typeof webrtc.setMicrophone === 'function') {
 					const micOn = !!message.enabled;
 					webrtc.setMicrophone(micOn, preferredInputDeviceId).then(() => {
@@ -1113,6 +1125,9 @@ export default function webrtc() {
 						isMicrophoneActive = false;
 						postSidebarButtonUpdate();
 					});
+				} else if (message.pipeline === 'video' && isSharedMode) {
+					console.log("Shared mode: Video pipelineControl blocked.");
+					break;
 				} else if (message.pipeline === 'video' && webrtc) {
 					// Same per-peer server gate the tab-hide pause uses: the sender
 					// stops RTP for THIS peer, capture stops when every consumer is
@@ -1269,6 +1284,15 @@ export default function webrtc() {
 	}
 
 	function handleSettingsMessage(settings) {
+		// Debug toggle parity with the websockets core: persist and reload so the
+		// verbose log buffers/flips apply at every layer (server push included).
+		if (settings.debug !== undefined) {
+			debug = settings.debug;
+			setBoolParam('debug', debug);
+			console.log(`Applied debug setting: ${debug}. Reloading...`);
+			setTimeout(() => { window.location.reload(); }, 700);
+			return;
+		}
 		// Turbo/4:4:4/paint-over have no dedicated data-channel opcode; the server applies
 		// them via handle_update_settings, so forward them as a SETTINGS payload (mirrors the
 		// WebSocket SETTINGS path; the dashboard already persisted them to localStorage).
@@ -1282,6 +1306,10 @@ export default function webrtc() {
 		if (settings.use_cpu !== undefined) passthrough.use_cpu = !!settings.use_cpu;
 		// Encoder switch (h264enc <-> openh264enc): the server restarts the pipeline on this.
 		if (settings.encoder_rtc !== undefined) passthrough.encoder_rtc = settings.encoder_rtc;
+	// A secondary page's runtime move to another side of the primary (WS
+	// displayPosition parity): the server applies and re-lays out; unguarded
+	// for the primary, which ignores it server-side.
+	if (settings.displayPosition !== undefined) passthrough.displayPosition = settings.displayPosition;
 		if (Object.keys(passthrough).length > 0) {
 			webrtc.sendDataChannelMessage(`SETTINGS,${JSON.stringify(passthrough)}`);
 		}

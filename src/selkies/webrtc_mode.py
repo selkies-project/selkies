@@ -21,6 +21,7 @@
 
 import sys
 import time
+import json
 import logging
 import asyncio
 import argparse
@@ -127,9 +128,10 @@ def _install_webrtc_teardown_noise_filters(loop) -> None:
 logger.setLevel(logging.INFO)
 
 # Cursor base size in points at 96 DPI (DPI changes scale from it): the
-# cursor_size setting (SELKIES_CURSOR_SIZE / XCURSOR_SIZE) when explicit,
-# else the X11 default.
-CURSOR_SIZE = settings.cursor_size if settings.cursor_size > 0 else 32
+# cursor_size setting (SELKIES_CURSOR_SIZE / XCURSOR_SIZE) when explicit;
+# None means "auto" (platform default), which disables every cursor-size
+# override so a later DPI sync never stomps the compositor/DE choice.
+CURSOR_SIZE = settings.cursor_size if settings.cursor_size > 0 else None
 # Same switch selkies.py uses (SELKIES_WAYLAND / --wayland):
 # the input backend must match the capture backend, which gets the choice per
 # capture via the CaptureSettings use_wayland field.
@@ -311,7 +313,7 @@ class WebRTCService(BaseStreamingService):
         # Input handler
         self.input_handler = WebRTCInput(
             rtc_app=self.rtc_app,
-            uinput_mouse_socket_path="",
+            uinput_mouse_socket_path=getattr(self.args, "uinput_mouse_socket", "") or "",
             # Same setting as the websockets service: the interposer sockets are
             # shared process-wide state, so both transports must agree on the path.
             js_socket_path_prefix=getattr(self.args, "js_socket_path", "/tmp"),
@@ -599,17 +601,30 @@ class WebRTCService(BaseStreamingService):
                 await pipeline.set_pointer_visible(visible)
 
     async def handle_video_bitrate_change(self, bitrate: int, display_id: str = "primary") -> None:
-        """Video bitrate change for the display whose page sent it."""
-        await self._apply_display_setting(display_id or "primary", "video_bitrate", bitrate)
+        """Video bitrate change for the display whose page sent it; sanitized
+        against the server's configured range like the SETTINGS path, so the
+        opcode cannot bypass a locked/narrowed range."""
+        sanitized = sanitize_client_setting("video_bitrate", bitrate, self.settings, logger)
+        if sanitized is None or sanitized == self._display_setting(display_id, "video_bitrate"):
+            return
+        await self._apply_display_setting(display_id or "primary", "video_bitrate", sanitized)
 
     async def handle_audio_bitrate_change(self, bitrate: int) -> None:
-        """Handle audio bitrate change request."""
+        """Handle audio bitrate change request (bps; sanitized like SETTINGS)."""
+        sanitized = sanitize_client_setting("audio_bitrate", bitrate, self.settings, logger)
+        if sanitized is None or sanitized == getattr(self.args, "audio_bitrate", None):
+            return
         if self.media_pipeline:
-            await self.media_pipeline.set_audio_bitrate(bitrate)
+            await self.media_pipeline.set_audio_bitrate(int(sanitized))
+        setattr(self.args, "audio_bitrate", sanitized)
 
     async def handle_fps_change(self, fps: int, display_id: str = "primary") -> None:
-        """Framerate change for the display whose page sent it."""
-        await self._apply_display_setting(display_id or "primary", "framerate", fps)
+        """Framerate change for the display whose page sent it; sanitized against
+        the server's configured range like the SETTINGS path."""
+        sanitized = sanitize_client_setting("framerate", fps, self.settings, logger)
+        if sanitized is None or sanitized == self._display_setting(display_id, "framerate"):
+            return
+        await self._apply_display_setting(display_id or "primary", "framerate", sanitized)
 
     async def handle_rate_control_change(self, mode: Any, display_id: str = "primary") -> None:
         """Rate-control switch for the display whose page sent it; honors the
@@ -623,8 +638,12 @@ class WebRTCService(BaseStreamingService):
         await self._apply_display_setting(display_id or "primary", "rate_control_mode", mode_str)
 
     async def handle_crf_change(self, crf: int, display_id: str = "primary") -> None:
-        """CRF change for the display whose page sent it."""
-        await self._apply_display_setting(display_id or "primary", "video_crf", int(crf))
+        """CRF change for the display whose page sent it; sanitized against the
+        server's configured range like the SETTINGS path."""
+        sanitized = sanitize_client_setting("video_crf", int(crf), self.settings, logger)
+        if sanitized is None or sanitized == self._display_setting(display_id, "video_crf"):
+            return
+        await self._apply_display_setting(display_id or "primary", "video_crf", sanitized)
 
     async def handle_client_werbtc_stats(
         self, webrtc_stat_type: str, webrtc_stats: str
@@ -741,7 +760,7 @@ class WebRTCService(BaseStreamingService):
                     # Wayland-branch parity: X snapping (xrandr mode pick) can
                     # realize a different size than requested, and the client's
                     # manual-mode bookkeeping must follow the realized one.
-                    self.rtc_app.send_remote_resolution(f"{realized_w}x{realized_h}")
+                    self.rtc_app.send_remote_resolution(f"{realized_w}x{realized_h}", "primary")
             else:
                 logger.error(
                     f"resize_display('{target_w}x{target_h}') reported failure"
@@ -994,12 +1013,16 @@ class WebRTCService(BaseStreamingService):
             # Unconditional (idempotent, WS-broadcast parity): the client's own
             # request may have been snapped by sanitization before the pipeline
             # ever saw it, so "unchanged here" does not mean "what was asked".
-            self.rtc_app.send_remote_resolution(f"{w}x{h}")
+            # Scoped to this display's channels so a secondary's realized size
+            # never rescales the primary page.
+            self.rtc_app.send_remote_resolution(f"{w}x{h}", did)
 
     async def _apply_wayland_cursor_size(self, dpi_value: float) -> None:
         """Wayland counterpart of the X11 per-DPI cursor resize: the compositor
         reloads its theme cursor (composited overlay and named-cursor delivery
         both re-render) at the DPI-scaled size, live, no capture restart."""
+        if CURSOR_SIZE is None:
+            return
         module = self._wayland_capture_handle()
         setter = getattr(module, "set_cursor_size", None) if module else None
         if setter is None:
@@ -1101,6 +1124,20 @@ class WebRTCService(BaseStreamingService):
                 self.rtc_app._send_collab_state(
                     peer.get("data_channel"), ClientType.VIEWER, token
                 )
+            # A slot-only change keeps the peer but must reach its client
+            # (websockets ROLE_UPDATE parity): the gamepad slot mapping lives
+            # client-side and would silently desync otherwise.
+            new_slot = new_perms.get("slot")
+            if new_slot != peer.get("client_slot"):
+                peer["client_slot"] = new_slot
+                channel = peer.get("data_channel")
+                if channel is not None and channel.readyState == "open":
+                    try:
+                        verdict = json.dumps({"role": role_now, "slot": new_slot})
+                        channel.send(json.dumps(
+                            {"type": "system", "data": {"action": f"role_update,{verdict}"}}))
+                    except Exception:
+                        logger.debug("role_update send failed (channel closing)", exc_info=True)
 
     async def handle_consumers_changed(self, display_id: str) -> None:
         """A peer joined or left a display's consumer set: re-evaluate the
@@ -1457,6 +1494,10 @@ class WebRTCService(BaseStreamingService):
             await self._apply_wayland_cursor_size(dpi_value)
             return
 
+        if CURSOR_SIZE is None:
+            # Auto (platform default): only the DPI itself is applied.
+            return
+
         new_cursor_size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
 
         logger.info(
@@ -1603,6 +1644,19 @@ class WebRTCService(BaseStreamingService):
         def sanitize_value(name: str, client_value: Any) -> Any:
             """One-transport wrapper over the shared sanitizer (settings.py)."""
             return sanitize_client_setting(name, client_value, self.settings, logger)
+
+        # A secondary's position is runtime-adjustable (websockets parity): its
+        # page may move its display to any side of the primary after joining.
+        new_position = settings_json.get("displayPosition")
+        if new_position is not None and display_id != "primary":
+            new_position = str(new_position)
+            if new_position not in ("right", "left", "up", "down"):
+                logger.warning(f"Ignoring invalid displayPosition from '{display_id}': {new_position!r}")
+            else:
+                entry = self.display_clients.get(display_id)
+                if entry is not None and entry.get("position", "right") != new_position:
+                    entry["position"] = new_position
+                    await self.reconfigure_displays()
 
         for key in settings_allowed_to_update:
             client_value = settings_json.get(key)
@@ -2009,6 +2063,12 @@ class WebRTCService(BaseStreamingService):
     async def rtc_ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         if self.supervisor.current_mode != self.mode:
             return web.Response(status=409, text="WebRTC mode is inactive")
+        if self.peer_manager is None:
+            # Mode flips before the service finishes initializing (RTC config
+            # fetch precedes the peer manager); tell the client to retry rather
+            # than AttributeError its handshake.
+            return web.Response(status=503, headers={"Retry-After": "1"},
+                                text="WebRTC service is still starting")
         ws = web.WebSocketResponse()
         await ws.prepare(request)
 
@@ -2023,5 +2083,9 @@ class WebRTCService(BaseStreamingService):
         """Wrapper to handle TURN requests via aiohttp."""
         if self.supervisor.current_mode != self.mode:
             return web.json_response({"error": "WebRTC mode is inactive"}, status=409)
+        if self.peer_manager is None:
+            return web.json_response(
+                {"error": "WebRTC service is still starting"},
+                status=503, headers={"Retry-After": "1"})
         return await self.peer_manager.handle_turn_req(request)
 

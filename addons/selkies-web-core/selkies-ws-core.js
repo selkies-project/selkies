@@ -243,6 +243,7 @@ let manual_height = null;
 let originalWindowResizeHandler = null;
 let handleResizeUI_globalRef = null;
 let vncStripeDecoders = {};
+let stripeDecodeSoftErrors = {};
 let wakeLockSentinel = null;
 let currentEncoderMode = 'h264enc-striped';
 let useCssScaling = false;
@@ -1105,6 +1106,10 @@ function deactivateMstg() {
 
 const getDynamicH264Codec = (width, height, is444, fps) => {
   if (!isChromium) {
+    // Conservative pre-stream guess only: decoder creation sites re-derive
+    // the exact codec from the first keyframe's SPS (codecFromKeyframe) —
+    // Safari hard-rejects a stream whose real profile/level exceeds the
+    // configured one, so this fallback must never reach a live decode.
     return 'avc1.42E01E';
   }
   const effFps = (typeof fps === 'number' && fps > 0) ? fps : 60;
@@ -1166,6 +1171,21 @@ const parseAvcCodecFromAnnexB = (bytes) => {
     i = nalStart; // skip past this start code and keep scanning for the SPS
   }
   return null;
+};
+
+// Keyframe-driven H.264 codec derived from the in-band SPS. Every engine uses
+// this — Safari's VideoDecoder hard-errors (EncodingError -> fallback loop)
+// when the configured profile/level is lower than the stream's real one; the
+// parsed avc1.PPCCLL always matches the actual bitstream.
+const codecFromKeyframe = (keyframeBytes, fallback) => {
+  if (!keyframeBytes || !keyframeBytes.byteLength) return fallback;
+  try {
+    const parsed = parseAvcCodecFromAnnexB(
+      keyframeBytes instanceof Uint8Array ? keyframeBytes : new Uint8Array(keyframeBytes));
+    return parsed || fallback;
+  } catch (_) {
+    return fallback;
+  }
 };
 
 // Chromium only: reconfigure the decoder if a keyframe's SPS profile/level differs
@@ -1869,7 +1889,34 @@ function clearAllVncStripeDecoders() {
     }
   }
   vncStripeDecoders = {};
+  stripeDecodeSoftErrors = {};
   console.log("All VNC stripe decoders and metadata cleared.");
+}
+
+// Safari's main-thread VideoDecoder rejects streams its worker decoder plays
+// fine (strict Annex-B/SPS handling quirks). While the worker path is elected
+// for a full-frame encoder and still healthy, a stripe-decoder error is
+// handoff noise: rebuild the stripe decoder on the next keyframe instead of
+// escalating into the fallback ladder (which closes the socket and reloads).
+// Bounded — after enough repeats the ladder still wins.
+function handleStripeDecodeError(e, vncStripeYStart) {
+    if (decodeInWorker && !workerDecodeFailed &&
+        (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc')) {
+        stripeDecodeSoftErrors[vncStripeYStart] = (stripeDecodeSoftErrors[vncStripeYStart] || 0) + 1;
+        if (stripeDecodeSoftErrors[vncStripeYStart] <= 12) {
+            console.warn(`stripe decoder error on Y=${vncStripeYStart} (worker path healthy; soft ${stripeDecodeSoftErrors[vncStripeYStart]}/12):`, e && e.name);
+            const info = vncStripeDecoders[vncStripeYStart];
+            if (info) {
+                try { info.decoder.close(); } catch (_) {}
+                delete vncStripeDecoders[vncStripeYStart];
+            }
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.send("REQUEST_KEYFRAME");
+            }
+            return;
+        }
+    }
+    initiateFallback(e, `stripe_decoder_Y=${vncStripeYStart}`);
 }
 
 function processPendingChunksForStripe(stripe_y_start) {
@@ -3828,7 +3875,6 @@ function initWebsockets() {
       audioGainNode.connect(audioContext.destination);
       console.log('Playback AudioWorkletProcessor initialized and connected through a GainNode for volume control.');
       await applyOutputDevice();
-      await applyOutputDevice();
 
       if (audioDecoderWorker) {
         console.warn("[Main] Terminating existing audio decoder worker before creating a new one.");
@@ -4339,7 +4385,9 @@ function initWebsockets() {
         // so it always decodes on the main thread.
         if (decodeInWorker && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc') && isVideoPipelineActive) {
             if (h264Payload.byteLength === 0) return;
-            const workerCodec = getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate);
+            const workerCodec = video_frame_type_byte === 0x01
+                ? codecFromKeyframe(h264Payload, getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate))
+                : getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate);
             if (feedWorkerDecoder(video_frame_type_byte === 0x01, h264Payload, stripeWidth, stripeHeight, workerCodec)) {
                 return;
             }
@@ -4367,9 +4415,17 @@ function initWebsockets() {
 
                 const newStripeDecoder = new VideoDecoder({
                     output: handleDecodedVncStripeFrame.bind(null, vncStripeYStart),
-                    error: (e) => initiateFallback(e, `stripe_decoder_Y=${vncStripeYStart}`)
+                    error: (e) => handleStripeDecodeError(e, vncStripeYStart)
                 });
-                const dynamicCodec = getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate);
+                let dynamicCodec = getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate);
+                // Decoder (re)creation is only ever triggered ON a keyframe —
+                // the delta path above short-circuits with requestKeyframe() —
+                // so the SPS is in hand here; configure the stream's real codec.
+                // Safari hard-rejects a baseline guess against a High-profile
+                // stream where Chromium silently adapts.
+                if (video_frame_type_byte === 0x01) {
+                    dynamicCodec = codecFromKeyframe(h264Payload, dynamicCodec);
+                }
                 const decoderConfig = {
                     codec: dynamicCodec,
                     codedWidth: stripeWidth,

@@ -32,12 +32,6 @@ export function Gamepad({ isGamepadEnabled, onGamepadToggle }: GamepadProps) {
         );
         setIsMobile(!!mobileCheck);
 
-        if (!!mobileCheck) {
-            // If mobile, ensure the gamepads section is open by default
-            // Note: This should be handled by the parent component
-                    // If mobile, ensure the gamepads section is open by default
-            window.postMessage({ type: 'OPEN_GAMEPADS_SECTION' }, window.location.origin);
-        }
 
         // Log mobile detection details
         if ((navigator as any).userAgentData && (navigator as any).userAgentData.mobile !== undefined) {
@@ -135,7 +129,7 @@ export function Gamepad({ isGamepadEnabled, onGamepadToggle }: GamepadProps) {
                 buttons: { A: false, B: false, X: false, Y: false }
             }
         };
-        window.parent.postMessage(data, '*');
+        window.parent.postMessage(data, window.location.origin);
     }, [isGamepadEnabled]);
 
     // Add touch event listeners
@@ -151,7 +145,7 @@ export function Gamepad({ isGamepadEnabled, onGamepadToggle }: GamepadProps) {
                     buttons: { A: false, B: false, X: false, Y: false }
                 }
             };
-            window.parent.postMessage(data, '*');
+            window.parent.postMessage(data, window.location.origin);
         };
 
         const touchGamepadHost = document.getElementById(TOUCH_GAMEPAD_HOST_DIV_ID);

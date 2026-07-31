@@ -103,8 +103,12 @@ function determineStreamingMode() {
 }
 
 function handleMessage(event) {
+    if (event.origin !== window.location.origin) return;
     let message = event.data;
     if (message.mode !== undefined && message.type === "mode") {
+        // An invalid mode would poison the next load ('Invalid client mode' throw
+        // until localStorage is repaired); only the two real transports persist.
+        if (![STREAM_MODE_WEBRTC, STREAM_MODE_WEBSOCKETS].includes(message.mode)) return;
         console.log(`Switching streaming mode to: ${message.mode}`);
         safeSetItem(getPrefixedKey('stream_mode'), message.mode);
 

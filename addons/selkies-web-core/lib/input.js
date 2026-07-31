@@ -1755,7 +1755,19 @@ export class Input {
             return;
         }
 
-        _stopEvent(event);
+        // Non-Chromium clipboard sync rides the 'paste' event (see
+        // lib/clipboard-sync.js), which only fires as the browser's default
+        // action of a trusted Ctrl/Cmd+V. preventDefault here cancels that
+        // command before it ever becomes a paste, silently killing local->
+        // server paste on Firefox/WebKit. Let the chord keep its default
+        // action: the window 'paste' listener forwards the local clipboard,
+        // and the key still streams to the remote desktop below. Absent a
+        // paste-capable listener the default is inert (the overlay input is
+        // not a text editor the user sees).
+        const allowNativePaste = !browser.isChrome() && code === 'KeyV' &&
+            (event.ctrlKey || event.metaKey) && !event.altKey &&
+            !this.isComposing;
+        if (!allowNativePaste) _stopEvent(event);
 
         if ((code === "ControlLeft") && browser.isWindows() && !(code in this._keyDownList)) {
             this._altGrArmed = true;

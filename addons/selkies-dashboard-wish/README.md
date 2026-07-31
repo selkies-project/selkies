@@ -40,7 +40,7 @@ The dashboard communicates with selkies-core, which is responsible for the main 
 This example dashboard showcases how to implement a wide array of functionalities by interacting with the selkies-core component:
 
 *   **Video Settings:**
-    *   Controls for Encoder, Framerate, Video Bitrate, Client-side Video Buffer Size, and CRF (Constant Rate Factor) where applicable.
+    *   Controls for Encoder, Framerate, Video Bitrate, and CRF (Constant Rate Factor) where applicable.
     *   *Interaction:* Sends ```window.postMessage({ type: 'settings', settings: { ... } })``` to selkies-core. Receives available encoder options via ```initialClientSettings``` or ```serverSettings``` messages from selkies-core. Settings are persisted in ```localStorage```.
 
 *   **Audio Settings:**

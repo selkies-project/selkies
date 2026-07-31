@@ -184,6 +184,15 @@ class MediaPipelinePixel(MediaPipeline):
         # restarts and fps changes can never rewind pts on a live RTP sender.
         self._video_pts_anchor = None
         self._last_video_pts = -1
+        # Audio pts continuity: pcmflux's sample clock re-zeros on every capture
+        # restart, which is a backward RTP jump on a live sender. Anchor each new
+        # capture epoch one frame step past the last emitted pts instead. Only
+        # one capture thread exists at a time (stop joins before a new start).
+        self._audio_capture_epoch = 0
+        self._audio_cb_epoch = -1
+        self._audio_pts_offset = 0
+        self._audio_last_pts = -1
+        self._audio_frame_samples = 480
         self._audio_routing_task = None
 
     async def set_pointer_visible(self, visible: bool):
@@ -621,6 +630,7 @@ class MediaPipelinePixel(MediaPipeline):
             # ptime requirement, so shorter Opus frames flow through unchanged.
             frame_ms = float(getattr(app_settings, 'audio_frame_duration_ms', '20') or 20)
             capture_settings.frame_duration_ms = frame_ms
+            self._audio_frame_samples = max(1, int(48000 * frame_ms / 1000))
             # VBR (matches the WebSocket path): opus_bitrate is the target average
             # the encoder varies around by content complexity — better quality per
             # bit than CBR. RTP carries variable Opus payloads fine and browsers
@@ -645,9 +655,21 @@ class MediaPipelinePixel(MediaPipeline):
                         # zero-copy view; consume_data wraps it in av.Packet(buf) (zero-copy)
                         # and keeps a reference so `frame` stays alive.
                         data_bytes = memoryview(frame)
+                        # Map the per-capture sample clock onto a continuous one:
+                        # pcmflux re-zeros pts on every start, and a backward RTP
+                        # jump on a live sender plays as an audio glitch/loss.
+                        raw_pts = int(frame.pts)
+                        if self._audio_cb_epoch != self._audio_capture_epoch:
+                            self._audio_cb_epoch = self._audio_capture_epoch
+                            self._audio_pts_offset = (
+                                self._audio_last_pts + self._audio_frame_samples - raw_pts
+                                if self._audio_last_pts >= 0 else 0
+                            )
+                        pts = self._audio_pts_offset + raw_pts
+                        self._audio_last_pts = pts
 
                         self.async_event_loop.call_soon_threadsafe(
-                            self.produce_data, data_bytes, frame.pts, "audio"
+                            self.produce_data, data_bytes, pts, "audio"
                         )
                 except Exception as e:
                     logger.info(f"Error audio capture callback: {e}")
@@ -659,6 +681,9 @@ class MediaPipelinePixel(MediaPipeline):
                 audio_capture_callback,
             )
             self._is_pcmflux_capturing = True
+            # New capture session: the callback anchors its first frame's pts
+            # past the last one this pipeline emitted (see _audio_cb_epoch).
+            self._audio_capture_epoch += 1
             # Keep a reference: an unreferenced task can be garbage-collected
             # mid-flight, and a routing failure should be visible in the log.
             self._audio_routing_task = asyncio.create_task(self._enforce_audio_routing())

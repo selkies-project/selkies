@@ -29,3 +29,5 @@ src/selkies-core.js
 
 # Nginx theme
 nginx
+# build info caches
+*.tsbuildinfo

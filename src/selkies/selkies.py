@@ -109,15 +109,15 @@ SENT_FRAME_TIMESTAMP_HISTORY_SIZE = 1000
 VIEWER_RESUME_MIN_INTERVAL_S = 1.0
 TARGET_FRAMERATE = 60
 
-UINPUT_MOUSE_SOCKET = ""
+UINPUT_MOUSE_SOCKET = settings.uinput_mouse_socket
 JS_SOCKET_PATH = "/tmp"
 ENABLE_CLIPBOARD = True
 ENABLE_BINARY_CLIPBOARD = False
-ENABLE_CURSORS = True
-DEBUG_CURSORS = False
+ENABLE_CURSORS = bool(settings.enable_cursors[0])
+DEBUG_CURSORS = bool(settings.debug_cursors[0])
 ENABLE_RESIZE = bool(settings.enable_resize[0])
 AUDIO_CHANNELS_DEFAULT = 2
-AUDIO_BITRATE_DEFAULT = 320000
+AUDIO_BITRATE_DEFAULT = int(settings.audio_bitrate)
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "openh264enc"]
 
 LOGLEVEL = logging.INFO
@@ -139,9 +139,10 @@ PCMFLUX_PLAYBACK_AVAILABLE = False
 IS_WAYLAND = bool(settings.wayland[0])
 
 # Cursor base size in points at 96 DPI (DPI changes scale from it): the
-# cursor_size setting (SELKIES_CURSOR_SIZE / XCURSOR_SIZE) when explicit,
-# else the X11 default. The GPU-stats index likewise follows --gpu-id.
-CURSOR_SIZE = settings.cursor_size if settings.cursor_size > 0 else 32
+# cursor_size setting (SELKIES_CURSOR_SIZE / XCURSOR_SIZE) when explicit;
+# None means "auto" (platform default), which disables every cursor-size
+# override so a later DPI sync never stomps the compositor/DE choice.
+CURSOR_SIZE = settings.cursor_size if settings.cursor_size > 0 else None
 _EXPLICIT_GPU_ID = parse_gpu_id(settings.gpu_id)
 GPU_ID_DEFAULT = _EXPLICIT_GPU_ID if _EXPLICIT_GPU_ID is not None and _EXPLICIT_GPU_ID >= 0 else 0
 
@@ -1070,11 +1071,14 @@ class DataStreamingServer(BaseStreamingService):
         )
 
         self.input_handler.on_clipboard_read = self.app.send_ws_clipboard_data
-        # The websockets app has one global framerate; the display_id the shared
-        # protocol threads through is only meaningful to the WebRTC service.
-        self.input_handler.on_set_fps = (
-            lambda fps, display_id='primary': self.app.set_framerate(fps)
-        )
+        # The WebRTC-dialect per-key verbs ('_arg_fps', 'vb', 'ab', '_rc',
+        # '_crf') apply live here exactly as on the WebRTC transport, sanitized
+        # like the SETTINGS path.
+        self.input_handler.on_set_fps = self._handle_opcode_fps
+        self.input_handler.on_video_encoder_bit_rate = self._handle_opcode_video_bitrate
+        self.input_handler.on_audio_encoder_bit_rate = self._handle_opcode_audio_bitrate
+        self.input_handler.on_update_rate_control_mode = self._handle_opcode_rate_control
+        self.input_handler.on_update_crf = self._handle_opcode_crf
         # Prometheus (WebRTC-mode parity): the registry-global gauges otherwise
         # exist but never move in websockets mode. Primary feeds are server-side
         # (ACK-derived client fps + smoothed RTT from the backpressure loop, GPU
@@ -1116,6 +1120,129 @@ class DataStreamingServer(BaseStreamingService):
         if len(self.capture_instances) > 0:
             data_logger.info("Cursor rendering changed, triggering display reconfiguration.")
             await self.reconfigure_displays()
+
+    def _opcode_display_module(self, display_id):
+        inst = self.capture_instances.get(display_id)
+        return inst.get('module') if inst else None
+
+    async def _handle_opcode_fps(self, fps, display_id='primary'):
+        """Live framerate for the shared '_arg_fps' verb (WebRTC-mode parity):
+        sanitize against the server range, store, and live-update the display's
+        capture; a stopped display applies the new rate at its next START_VIDEO."""
+        sanitized = sanitize_client_setting("framerate", fps, self.cli_args, data_logger)
+        if sanitized is None:
+            return
+        self.app.set_framerate(sanitized)
+        display_state = self.display_clients.get(display_id)
+        if display_state is not None:
+            display_state["framerate"] = sanitized
+        module = self._opcode_display_module(display_id)
+        if module is not None:
+            try:
+                module.update_framerate(float(sanitized))
+                data_logger.info(f"Applied framerate live via '_arg_fps': {sanitized} fps for '{display_id}'")
+            except Exception as e:
+                data_logger.warning(f"Live framerate update failed for '{display_id}' ({e}).")
+
+    async def _handle_opcode_video_bitrate(self, bitrate, display_id="primary"):
+        """Live video bitrate (kbps) for the 'vb' verb, sanitized exactly like
+        the SETTINGS path so locked server ranges cannot be bypassed."""
+        sanitized = sanitize_client_setting("video_bitrate", bitrate, self.cli_args, data_logger)
+        if sanitized is None:
+            return
+        display_state = self.display_clients.get(display_id)
+        if display_state is not None:
+            display_state["video_bitrate"] = sanitized
+        self.app.video_bitrate = sanitized
+        module = self._opcode_display_module(display_id)
+        if module is not None:
+            try:
+                module.update_video_bitrate(int(round(float(sanitized))))
+                data_logger.info(f"Applied video bitrate live via 'vb': {int(round(float(sanitized)))} kbps for '{display_id}'")
+            except Exception as e:
+                data_logger.warning(f"Live bitrate update failed for '{display_id}' ({e}).")
+
+    async def _handle_opcode_audio_bitrate(self, bitrate):
+        """Live Opus bitrate (bps) for the 'ab' verb; same live-retarget with
+        restart fallback as the SETTINGS path."""
+        sanitized = sanitize_client_setting("audio_bitrate", bitrate, self.cli_args, data_logger)
+        if sanitized is None:
+            return
+        self.app.audio_bitrate = sanitized
+        for display_state in self.display_clients.values():
+            display_state["audio_bitrate"] = self.app.audio_bitrate
+        if self.is_pcmflux_capturing and self.pcmflux_module:
+            try:
+                self.pcmflux_module.update_audio_bitrate(int(self.app.audio_bitrate))
+                data_logger.info(f"Applied audio bitrate live: {self.app.audio_bitrate} bps")
+            except Exception as e:
+                data_logger.warning(f"Live audio bitrate update failed ({e}); restarting audio pipeline.")
+                await self._stop_pcmflux_pipeline()
+                await self._start_pcmflux_pipeline()
+
+    async def _handle_opcode_rate_control(self, mode, display_id='primary'):
+        """Rate-control switch for the '_rc' verb: structural like the SETTINGS
+        path (the encoder session must be rebuilt), honoring the server's
+        enable_rate_control lock and a stopped display's start gating."""
+        enable_rate_control, _ = self.cli_args.enable_rate_control
+        if not enable_rate_control:
+            data_logger.debug("Server has rate control disabled. Ignoring '_rc' change.")
+            return
+        # RateControlMode enums resolve by their value; duplicate class objects
+        # across modules must not leave a stray 'RateControlMode.CBR' repr.
+        mode_str = (mode.value if hasattr(mode, "value") else str(mode)).split(".")[-1].lower()
+        sanitized = sanitize_client_setting("rate_control_mode", mode_str, self.cli_args, data_logger)
+        if sanitized not in ("cbr", "crf"):
+            return
+        display_state = self.display_clients.get(display_id)
+        if display_state is None:
+            return
+        if display_state.get("rate_control_mode") == sanitized:
+            return
+        display_state["rate_control_mode"] = sanitized
+        if not display_state.get('video_active', True):
+            return
+        layout = self.display_layouts.get(display_id)
+        if layout is None:
+            return
+        restart_ok = False
+        async with self._reconfigure_lock:
+            if display_state.get('video_active', True):
+                data_logger.info(f"Applied rate-control via '_rc': {sanitized} for '{display_id}'. Restarting its capture stream.")
+                await self._stop_capture_for_display(display_id)
+                await self._start_capture_for_display(
+                    display_id=display_id,
+                    width=layout['w'], height=layout['h'],
+                    x_offset=layout['x'], y_offset=layout['y']
+                )
+                await self._start_backpressure_task_if_needed(display_id)
+                self._schedule_idr_for_display(display_id)
+                await self._broadcast_live_server_settings(display_id)
+                if IS_WAYLAND:
+                    await self._sync_wayland_realized_geometry(display_id)
+                restart_ok = self._opcode_display_module(display_id) is not None
+        if not restart_ok:
+            data_logger.warning(f"Rate-control restart failed for '{display_id}'; falling back to full reconfiguration.")
+            await self.reconfigure_displays()
+
+    async def _handle_opcode_crf(self, crf, display_id='primary'):
+        """Live CRF for the '_crf' verb; rides the tunables path like SETTINGS."""
+        sanitized = sanitize_client_setting("video_crf", crf, self.cli_args, data_logger)
+        if sanitized is None:
+            return
+        display_state = self.display_clients.get(display_id)
+        if display_state is not None:
+            display_state["video_crf"] = sanitized
+        module = self._opcode_display_module(display_id)
+        layout = self.display_layouts.get(display_id)
+        if module is not None and layout is not None:
+            try:
+                module.update_tunables(self._get_capture_settings(
+                    display_id, layout['w'], layout['h'], layout['x'], layout['y']
+                ))
+                data_logger.info(f"Applied CRF live via '_crf': {sanitized} for '{display_id}'")
+            except Exception as e:
+                data_logger.warning(f"Live CRF update failed for '{display_id}' ({e}).")
 
     async def broadcast_display_config(self):
         """Broadcasts the current display configuration to all clients."""
@@ -1817,7 +1944,7 @@ class DataStreamingServer(BaseStreamingService):
         """Wayland counterpart of the X11 per-DPI cursor resize: the compositor
         reloads its theme cursor (composited overlay and named-cursor delivery
         both re-render) at the DPI-scaled size, live, no capture restart."""
-        if CURSOR_SIZE <= 0:
+        if CURSOR_SIZE is None:
             return
         module = self._wayland_control_module()
         setter = getattr(module, 'set_cursor_size', None) if module else None
@@ -1855,7 +1982,11 @@ class DataStreamingServer(BaseStreamingService):
 
         def get_int(k):
             v = settings_data.get(k)
-            return int(v) if v is not None else None
+            if v is None:
+                return None
+            # Tolerate float-yielding values ("29.7"): truncate to int rather
+            # than poisoning the whole SETTINGS payload with a ValueError.
+            return int(float(v))
 
         def get_number(k):
             # int when integral, float otherwise.
@@ -1977,9 +2108,10 @@ class DataStreamingServer(BaseStreamingService):
                     target_h = old_display_height if old_display_height > 0 else 768
                 if target_w % 2 != 0: target_w -= 1
                 if target_h % 2 != 0: target_h -= 1
-                display_state["force_aligned_resolution"] = sanitize_value(
-                    "force_aligned_resolution", settings.get("force_aligned_resolution")
-                )
+                if settings.get("force_aligned_resolution") is not None:
+                    display_state["force_aligned_resolution"] = sanitize_value(
+                        "force_aligned_resolution", settings.get("force_aligned_resolution")
+                    )
                 if server_is_manual:
                     # A server-forced resolution may only be altered by the
                     # server's own setting, never by a client-side toggle.
@@ -2002,35 +2134,40 @@ class DataStreamingServer(BaseStreamingService):
                     if display_id == 'primary':
                         self.app.display_width = target_w
                         self.app.display_height = target_h
-                display_state["encoder"] = sanitize_value("encoder", settings.get("encoder"))
-                display_state["framerate"] = sanitize_value("framerate", settings.get("framerate"))
-                display_state["video_crf"] = sanitize_value("video_crf", settings.get("video_crf"))
-                display_state["video_fullcolor"] = sanitize_value("video_fullcolor", settings.get("video_fullcolor"))
-                display_state["video_streaming_mode"] = sanitize_value("video_streaming_mode", settings.get("video_streaming_mode"))
-                display_state["jpeg_quality"] = sanitize_value("jpeg_quality", settings.get("jpeg_quality"))
-                display_state["paint_over_jpeg_quality"] = sanitize_value("paint_over_jpeg_quality", settings.get("paint_over_jpeg_quality"))
-                display_state["use_paint_over_quality"] = sanitize_value("use_paint_over_quality", settings.get("use_paint_over_quality"))
-                display_state["video_paintover_crf"] = sanitize_value("video_paintover_crf", settings.get("video_paintover_crf"))
-                display_state["video_paintover_burst_frames"] = sanitize_value("video_paintover_burst_frames", settings.get("video_paintover_burst_frames"))
-                if display_state["encoder"] in ["jpeg", "h264enc-striped", "openh264enc"]:
-                    display_state["use_cpu"] = True
-                    data_logger.info(f"Forcing use_cpu=True because encoder is '{display_state['encoder']}'")
-                else:
-                    display_state["use_cpu"] = sanitize_value("use_cpu", settings.get("use_cpu"))
-                self.app.audio_bitrate = sanitize_value("audio_bitrate", settings.get("audio_bitrate"))
-                display_state["audio_bitrate"] = self.app.audio_bitrate
-                display_state["video_bitrate"] = sanitize_value("video_bitrate", settings.get("video_bitrate"))
+                # Assign only keys the payload actually carries (a parsed-absent
+                # key is None here): sanitizing None would silently reset the
+                # display's stored choice to the server default on every partial
+                # SETTINGS update.
+                for key in ("encoder", "framerate", "video_crf", "video_fullcolor",
+                            "video_streaming_mode", "jpeg_quality", "paint_over_jpeg_quality",
+                            "use_paint_over_quality", "video_paintover_crf",
+                            "video_paintover_burst_frames", "video_bitrate"):
+                    if settings.get(key) is not None:
+                        display_state[key] = sanitize_value(key, settings.get(key))
+                if settings.get("use_cpu") is not None or settings.get("encoder") is not None:
+                    if display_state["encoder"] in ["jpeg", "h264enc-striped", "openh264enc"]:
+                        display_state["use_cpu"] = True
+                        data_logger.info(f"Forcing use_cpu=True because encoder is '{display_state['encoder']}'")
+                    elif settings.get("use_cpu") is not None:
+                        display_state["use_cpu"] = sanitize_value("use_cpu", settings.get("use_cpu"))
+                if settings.get("audio_bitrate") is not None:
+                    self.app.audio_bitrate = sanitize_value("audio_bitrate", settings.get("audio_bitrate"))
+                    display_state["audio_bitrate"] = self.app.audio_bitrate
                 enable_rate_control, _ = self.cli_args.enable_rate_control
-                if enable_rate_control:
+                if enable_rate_control and settings.get("rate_control_mode") is not None:
                     display_state["rate_control_mode"] = sanitize_value("rate_control_mode", settings.get("rate_control_mode"))
-            
-                if self.input_handler:
+
+                if self.input_handler and settings.get("enable_binary_clipboard") is not None:
                     self.enable_binary_clipboard = sanitize_value("enable_binary_clipboard", settings.get("enable_binary_clipboard"))
                     await self.input_handler.update_binary_clipboard_setting(self.enable_binary_clipboard)
                     kb_layout = settings.get("keyboardLayout")
                     if kb_layout:
                         await self.input_handler.apply_client_keyboard_layout(kb_layout)
-                new_dpi = sanitize_value("scaling_dpi", settings.get("scaling_dpi"))
+                if settings.get("scaling_dpi") is not None:
+                    new_dpi = sanitize_value("scaling_dpi", settings.get("scaling_dpi"))
+                else:
+                    # Partial SETTINGS: keep the display's current DPI decision.
+                    new_dpi = old_settings.get("scaling_dpi")
                 if app_settings._overridden.get("scaling_dpi", False):
                     # An operator-set DPI (CLI/env) governs the desktop: client
                     # DPI syncs must not clobber it.
@@ -2040,7 +2177,7 @@ class DataStreamingServer(BaseStreamingService):
                 if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
                     data_logger.info(f"DPI changed from {old_settings.get('scaling_dpi')} to {new_dpi}. Applying system-level change.")
                     await set_dpi(new_dpi)
-                    if CURSOR_SIZE > 0 and not IS_WAYLAND:
+                    if CURSOR_SIZE is not None and not IS_WAYLAND:
                         new_cursor_size = cursor_size_for_dpi(new_dpi, CURSOR_SIZE)
                         await set_cursor_size(new_cursor_size)
                     if IS_WAYLAND:
@@ -2110,11 +2247,19 @@ class DataStreamingServer(BaseStreamingService):
                             )
                             video_restart_needed = True
                     if video_restart_needed or module is None:
-                        data_logger.info(
-                            f"Video parameters changed for '{display_id}'. "
-                            "Restarting its capture stream without reconfiguring displays."
-                        )
-                        if display_id in self.display_layouts:
+                        # A STOP_VIDEO'd display must stay stopped: the new values
+                        # already live in display_state, and the next START_VIDEO
+                        # builds its capture from them.
+                        if not display_state.get('video_active', True):
+                            data_logger.info(
+                                f"Video parameters changed for '{display_id}' while its stream "
+                                "is stopped; deferring the restart to the next START_VIDEO."
+                            )
+                        elif display_id in self.display_layouts:
+                            data_logger.info(
+                                f"Video parameters changed for '{display_id}'. "
+                                "Restarting its capture stream without reconfiguring displays."
+                            )
                             layout = self.display_layouts[display_id]
                             await self._stop_capture_for_display(display_id)
                             await self._start_capture_for_display(
@@ -2418,6 +2563,26 @@ class DataStreamingServer(BaseStreamingService):
                         continue
                     msg_type, payload = msg.data[0], msg.data[1:]
                     if msg_type == 0x02:  # Mic data
+                        # Only a controller or a viewer with collab (m/k)
+                        # authority may speak into the desktop mixer; the verdict
+                        # mirrors the text-input gate (including its collab escape
+                        # hatch) so both transports gate alike.
+                        mic_perms = client_permissions.get(websocket) or {}
+                        mic_ok = mic_perms.get("role") != "viewer" or (
+                            settings.enable_collab[0]
+                            and active_mk_token is not None
+                            and mic_perms.get("token") == active_mk_token
+                        )
+                        if not mic_ok:
+                            if not mic_disabled_sent:
+                                mic_disabled_sent = True
+                                data_logger.info(
+                                    f"Dropping microphone data from view-only client {remote_address}.")
+                                try:
+                                    await websocket.send_str("MICROPHONE_DISABLED")
+                                except (ConnectionResetError, OSError, RuntimeError):
+                                    pass
+                            continue
                         # Accept mic data unless audio is off or the microphone is
                         # administratively LOCKED off; an unlocked default-off only
                         # sets the client toggle, and the client sends data exactly
@@ -2684,18 +2849,24 @@ class DataStreamingServer(BaseStreamingService):
                                     'video_paintover_crf': self._initial_video_paintover_crf,
                                     'video_paintover_burst_frames': self._initial_video_paintover_burst_frames,
                                     'use_paint_over_quality': self._initial_use_paint_over_quality,
-                                    'rate_control_mode': self.rc_mode.value,
-                                    'video_bitrate': self._initial_video_bitrate,
-                                    # Seed from the configured DPI so a Wayland
-                                    # first load captures at the intended scale
-                                    # before any client DPI sync arrives.
-                                    'scale': float(getattr(app_settings, "scaling_dpi", "96") or 96) / 96.0,
+                                     'rate_control_mode': self.rc_mode.value,
+                                     'video_bitrate': self._initial_video_bitrate,
+                                     'force_aligned_resolution': self.cli_args.force_aligned_resolution[0],
+                                     'scaling_dpi': int(float(getattr(app_settings, "scaling_dpi", "96") or 96)),
+                                     # Seed from the configured DPI so a Wayland
+                                     # first load captures at the intended scale
+                                     # before any client DPI sync arrives.
+                                     'scale': float(getattr(app_settings, "scaling_dpi", "96") or 96) / 96.0,
                                 }
                             else:
                                 data_logger.info(f"Client is taking over existing display '{display_id}'. Updating state for new connection.")
                                 display_state = self.display_clients[display_id]
                                 display_state['ws'] = websocket
-                                display_state['video_active'] = True
+                                # Only a fresh page's FIRST SETTINGS reactivates video:
+                                # a later controller SETTINGS (slider tweaks) must not
+                                # resurrect a stream the user stopped with STOP_VIDEO.
+                                if not initial_settings_processed:
+                                    display_state['video_active'] = True
                                 display_state['acknowledged_frame_id'] = -1
                                 display_state['last_ack_update_time'] = time.monotonic()
                                 display_state['sent_timestamps'].clear()
@@ -3097,7 +3268,9 @@ class DataStreamingServer(BaseStreamingService):
                             continue
                         try:
                             dpi_value_str = message.split(",")[1]
-                            dpi_value = int(dpi_value_str)
+                            # Fractional DPI is legal on the shared verb (WebRTC-mode
+                            # parity); the desktop DPI property itself is integral.
+                            dpi_value = max(1, int(round(float(dpi_value_str))))
                             if app_settings._overridden.get("scaling_dpi", False):
                                 # An operator-set DPI (CLI/env) governs the desktop:
                                 # client DPI syncs must not clobber it.
@@ -3124,22 +3297,27 @@ class DataStreamingServer(BaseStreamingService):
                                 if client_display_id in self.display_clients:
                                     self.display_clients[client_display_id]['scale'] = scale_val
                                 self._update_wayland_cursor_cap(dpi_value)
-                                data_logger.info(f"Wayland: restarting stream with scale {scale_val} for {client_display_id}")
-                                await self._stop_capture_for_display(client_display_id)
-                                if hasattr(self, 'display_layouts') and client_display_id in self.display_layouts:
-                                    layout = self.display_layouts[client_display_id]
-                                    await self._start_capture_for_display(
-                                        display_id=client_display_id,
-                                        width=layout['w'], height=layout['h'],
-                                        x_offset=layout['x'], y_offset=layout['y']
-                                    )
-                                    await self._start_backpressure_task_if_needed(client_display_id)
-                                    # Close the realized-geometry loop: the compositor
-                                    # may clamp (even-masking, GBM degrade); the client
-                                    # reconciles from stream_resolution like X11.
-                                    await self._sync_wayland_realized_geometry(client_display_id)
+                                # A STOP_VIDEO'd display must stay stopped: only its
+                                # stored scale updates; the restart applies at the
+                                # next START_VIDEO.
+                                video_active = self.display_clients.get(client_display_id, {}).get('video_active', True)
+                                if video_active:
+                                    data_logger.info(f"Wayland: restarting stream with scale {scale_val} for {client_display_id}")
+                                    await self._stop_capture_for_display(client_display_id)
+                                    if hasattr(self, 'display_layouts') and client_display_id in self.display_layouts:
+                                        layout = self.display_layouts[client_display_id]
+                                        await self._start_capture_for_display(
+                                            display_id=client_display_id,
+                                            width=layout['w'], height=layout['h'],
+                                            x_offset=layout['x'], y_offset=layout['y']
+                                        )
+                                        await self._start_backpressure_task_if_needed(client_display_id)
+                                        # Close the realized-geometry loop: the compositor
+                                        # may clamp (even-masking, GBM degrade); the client
+                                        # reconciles from stream_resolution like X11.
+                                        await self._sync_wayland_realized_geometry(client_display_id)
 
-                            if CURSOR_SIZE > 0:
+                            if CURSOR_SIZE is not None:
                                 if IS_WAYLAND:
                                     await self._apply_wayland_cursor_size(dpi_value)
                                 else:
@@ -3150,8 +3328,6 @@ class DataStreamingServer(BaseStreamingService):
                                         data_logger.info(f"Successfully set cursor size to {new_cursor_size}")
                                     else:
                                         data_logger.error(f"Failed to set cursor size to {new_cursor_size}")
-                            else:
-                                data_logger.warning("CURSOR_SIZE is not positive. Skipping cursor size adjustment based on DPI.")
 
                         except ValueError:
                             data_logger.error(f"Invalid DPI value in message: {message}")
@@ -4061,8 +4237,11 @@ class DataStreamingServer(BaseStreamingService):
                         inst = self.capture_instances[display_id]
                         module, fresh = inst['module'], inst['settings']
                         if IS_WAYLAND:
-                            # A start on the live capture reconfigures it in place.
-                            await asyncio.to_thread(module.start_capture, inst['callback'], fresh)
+                            # A start on the live capture reconfigures it in place;
+                            # serialize against a concurrent capture teardown
+                            # (the resize path's in-place restart takes the same lock).
+                            async with self._video_capture_lock:
+                                await asyncio.to_thread(module.start_capture, inst['callback'], fresh)
                         else:
                             module.update_framerate(float(fresh.target_fps))
                             module.update_video_bitrate(int(fresh.video_bitrate_kbps))
@@ -4160,6 +4339,14 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.error(f"Viewer-driven capture start failed: {e}", exc_info=True)
         if started:
             await self._start_backpressure_task_if_needed('primary')
+            # A lone viewer listens too: the audio fan-out is shared, never
+            # per-controller, so it must not wait for one either.
+            if PCMFLUX_AVAILABLE and settings.audio_enabled[0] and not self.is_pcmflux_capturing:
+                try:
+                    async with self._reconfigure_guard():
+                        await self._start_pcmflux_pipeline()
+                except Exception as e:
+                    data_logger.error(f"Viewer-driven audio start failed: {e}", exc_info=True)
         return started
 
     async def _start_capture_for_display(self, display_id: str, width: int, height: int, x_offset: int, y_offset: int):
@@ -4477,9 +4664,40 @@ class DataStreamingServer(BaseStreamingService):
             return
         self._shutdown_called = True
         logger.info("DataStreamingServer shutdown initiated...")
-        
-        # Clear websockets connections FIRST so nothing re-enters
-        # reconfigure_displays while the tasks below are torn down.
+
+        # Close every live client socket: handlers exit, their per-connection
+        # teardown runs, and no stray capture keeps encoding for a page that can
+        # no longer receive anything (mode-switch parity with the WebRTC
+        # service, which kicks every peer on shutdown).
+        sockets_to_close = set(self.clients)
+        for info in self.display_clients.values():
+            ws = info.get('ws')
+            if ws is not None:
+                sockets_to_close.add(ws)
+
+        async def _close_one(sock):
+            try:
+                await asyncio.wait_for(sock.send_str("KILL server shutting down"), timeout=1.0)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(sock.close(code=4000, message=b"server shutting down"), timeout=1.0)
+            except Exception:
+                _close_abandoned_ws(sock)
+
+        if sockets_to_close:
+            await asyncio.gather(
+                *[_close_one(s) for s in sockets_to_close], return_exceptions=True
+            )
+
+        # Stop all capture pipelines and the shared audio fan-out while display
+        # state still exists to address their tasks; every socket is gone, so
+        # nothing re-adds work during the teardown.
+        try:
+            await self.shutdown_pipelines()
+        except Exception as e:
+            logger.error(f"Pipeline shutdown during server shutdown failed: {e}")
+
         self.clients.clear()
         self.video_paused_clients.clear()
         self._report_client_presence()
@@ -4514,6 +4732,16 @@ class DataStreamingServer(BaseStreamingService):
         # Drop the persistent ScreenCapture modules so their encoder sessions and
         # callbacks are released with the server.
         self._persistent_capture_modules.clear()
+
+        # The registry-global Prometheus gauges must be released, or re-entering
+        # this mode after a switch fails with duplicated timeseries (the WebRTC
+        # service unregisters on its own shutdown).
+        if self.metrics:
+            try:
+                await asyncio.to_thread(self.metrics.unregister)
+            except Exception as e:
+                logger.exception(f"Error unregistering metrics: {e}")
+            self.metrics = None
 
         self.app = None
         self.input_handler = None
@@ -4580,7 +4808,10 @@ class DataStreamingServer(BaseStreamingService):
 
         # Frames on this socket are already compressed (H.264/JPEG/Opus), so
         # permessage-deflate only wastes CPU and an extra copy per frame.
-        ws = web.WebSocketResponse(compress=False, max_msg_size=WS_MAX_MESSAGE_BYTES)
+        # heartbeat: websockets-level ping/pong so a silently-dead peer (idle
+        # viewer, stalled network) is reaped like the transport-level probes of
+        # the signaling sockets; browsers answer protocol pings automatically.
+        ws = web.WebSocketResponse(compress=False, max_msg_size=WS_MAX_MESSAGE_BYTES, heartbeat=30)
         await ws.prepare(request)
 
         peername = request.transport.get_extra_info('peername')

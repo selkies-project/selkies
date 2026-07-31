@@ -81,7 +81,14 @@ async function main() {
   
   console.log('Starting conversion...');
 
-  if (!fs.existsSync(OUTPUT_DIR)) {
+  // Clean before writing: stale mappings from an older SDL DB revision must not
+  // linger next to fresh ones (which is exactly how the two dashboards' jsdb
+  // trees drifted apart).
+  if (fs.existsSync(OUTPUT_DIR)) {
+    for (const f of fs.readdirSync(OUTPUT_DIR)) {
+      if (f.endsWith('.json')) fs.unlinkSync(path.join(OUTPUT_DIR, f));
+    }
+  } else {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     console.log(`Created output directory: ${OUTPUT_DIR}`);
   }
