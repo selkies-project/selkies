@@ -621,7 +621,7 @@ class CentralizedStreamServer:
                 if self.settings.unix_socket:
                     new_site = web.UnixSite(
                         self.runner,
-                        path=self.settings.unix_socket
+                        path=self.settings.unix_socket,
                         ssl_context=new_ssl_context,
                     )
                 else:
