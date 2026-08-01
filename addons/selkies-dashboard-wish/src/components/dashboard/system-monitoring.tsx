@@ -175,9 +175,20 @@ function configuredMaxBandwidthMbps(): number {
 	return Math.max(0.1, videoKbps / 1000 + audioBps / 1_000_000);
 }
 
+// The FPS gauge reads full at the framerate the session is configured to push.
+// Explicit client choice (localStorage) wins over the server's configured value.
+function configuredFramerateMax(): number {
+	const settings = getLastServerSettings();
+	const stored = parseFloat(localStorage.getItem(getPrefixedKey('framerate')) ?? '');
+	const server = parseFloat(settings?.framerate?.value);
+	const fps = !isNaN(stored) ? stored : (!isNaN(server) ? server : 60);
+	return fps > 0 ? fps : 60;
+}
+
 export function SystemMonitoring() {
 	const [isDetailedView, setIsDetailedView] = useState(false);
 	const [clientFps, setClientFps] = useState(0);
+	const [framerateMax, setFramerateMax] = useState(configuredFramerateMax);
 	const [audioLevel, setAudioLevel] = useState(0);
 	const audioMeterRef = useRef<AudioMeter | null>(null);
 	const [cpuPercent, setCpuPercent] = useState(0);
@@ -242,6 +253,7 @@ export function SystemMonitoring() {
 			setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
 			setMaxBandwidthMbps(configuredMaxBandwidthMbps());
 			setLatencyMs(netStats?.latency_ms ?? 0);
+			setFramerateMax(configuredFramerateMax());
 		};
 		const intervalId = setInterval(readStats, STATS_READ_INTERVAL_MS);
 		return () => clearInterval(intervalId);
@@ -331,7 +343,9 @@ export function SystemMonitoring() {
 		{
 			name: t('sections.stats.fpsLabel'),
 			current: Math.round(clientFps),
-			max: 60,
+			// Scale the gauge to the configured framerate (classic-dashboard parity):
+			// a 240 fps stream must not peg a gauge built for 60.
+			max: framerateMax,
 			fill: "hsl(220, 100%, 50%)",
 			hasData: hasFpsData
 		},

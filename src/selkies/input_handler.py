@@ -387,6 +387,9 @@ class _X11ClipboardMonitor:
             0, 0, 1, 1, 0, screen.root_depth, window_class=X.InputOutput,
             event_mask=X.PropertyChangeMask)
         self._clipboard = self._d.get_atom('CLIPBOARD')
+        # Middle-click paste mirrors what the Wayland compositor does natively:
+        # content written from the browser is offered on PRIMARY too.
+        self._primary = self._d.get_atom('PRIMARY')
         self._prop = self._d.get_atom('SELKIES_CLIP')
         self._incr = self._d.get_atom('INCR')
         self._targets = self._d.get_atom('TARGETS')
@@ -470,8 +473,16 @@ class _X11ClipboardMonitor:
         elif ev.type == X.SelectionRequest:
             self._serve_selection(ev)
         elif ev.type == X.SelectionClear:
-            # Another app owns the clipboard now; keep the payload only for
-            # requests already racing in — new content comes via the monitor.
+            # We serve one payload on CLIPBOARD and PRIMARY; drop it only once a
+            # foreign owner has taken BOTH (a text-selection steal of PRIMARY must
+            # not orphan the browser-written CLIPBOARD payload, and vice versa).
+            try:
+                owners = (self._d.get_selection_owner(self._clipboard),
+                          self._d.get_selection_owner(self._primary))
+                if any(getattr(o, 'id', o) == self._win.id for o in owners):
+                    return
+            except Exception:
+                pass
             self._own_data = None
             self._own_mime_atom = None
 
@@ -482,6 +493,10 @@ class _X11ClipboardMonitor:
             self._own_mime_atom = mime_atom
             self._own_is_text = is_text
             self._win.set_selection_owner(self._clipboard, X.CurrentTime)
+            # Middle-click paste parity with Wayland: serve the same payload on
+            # PRIMARY. _serve_selection matches requests by ev.selection, so one
+            # payload safely backs both selections.
+            self._win.set_selection_owner(self._primary, X.CurrentTime)
             self._d.flush()
             owner = self._d.get_selection_owner(self._clipboard)
             self._own_ok = (getattr(owner, 'id', owner) == self._win.id)
@@ -2659,6 +2674,21 @@ class WebRTCInput:
             # auto-release a key the reset just cleared (mirrors disconnect()).
             self.pressed_keys.clear()
             self.reaped_atomic_keys.clear()
+            # X11 parity: normalize a stuck Lock. The client resolves letter case
+            # itself (XK_a vs XK_A), so an engaged compositor Caps Lock inverts
+            # every letter. get_keyboard_state mods bit 4 is caps_lock; toggle it
+            # off with a virtual Caps_Lock press+release (keysym 0xffe5).
+            try:
+                if self.wayland_input and hasattr(self.wayland_input, 'get_keyboard_state'):
+                    _pressed, mods = self.wayland_input.get_keyboard_state()
+                    if mods & 0x10:
+                        keymap_owner = self._wl_keymap_owner
+                        if keymap_owner is not None:
+                            keymap_owner.press(0xffe5)
+                            await asyncio.sleep(0.02)
+                            keymap_owner.release(0xffe5)
+            except Exception as e:
+                logger_webrtc_input.debug(f"Wayland caps-lock normalization skipped: {e}")
             return
 
         if not self.keyboard or not self.xdisplay :
@@ -3573,7 +3603,8 @@ class WebRTCInput:
             available_types = await loop.run_in_executor(
                 None, self.wayland_input.clipboard_types_app, display)
             if use_binary:
-                image_mimes = ['image/png', 'image/jpeg', 'image/bmp', 'image/webp']
+                image_mimes = ['image/png', 'image/jpeg', 'image/bmp', 'image/webp',
+                               'image/svg+xml', 'image/svg']
                 target_mime = next((m for m in image_mimes if m in available_types), None)
                 if target_mime:
                     data = await loop.run_in_executor(
@@ -4400,7 +4431,12 @@ class WebRTCInput:
         msg_type = toks[0]
 
         if msg_type == "pong":
-            if self.ping_start is None: logger_webrtc_input.warning("received pong before ping"); return
+            if self.ping_start is None:
+                # Not an error: after a transport flip the client of the other mode
+                # (WebRTC pings over its data channel; WS has no app-level ping) may
+                # still answer — just drop the straggler.
+                logger_webrtc_input.debug("received pong before ping; ignoring")
+                return
             self.on_ping_response(float("%.3f" % ((time.time() - self.ping_start) / 2 * 1000)))
         elif msg_type == "kd":
             keysym = int(toks[1])

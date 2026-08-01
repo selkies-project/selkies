@@ -4010,35 +4010,36 @@ function initWebsockets() {
       });
     }
 
-    if (isSidebarOpen) {
-      const now = performance.now();
-      const elapsedStriped = now - lastStripedFpsUpdateTime;
-      const elapsedFullFrame = now - lastFpsUpdateTime;
-      const fpsUpdateInterval = 1000;
+    // The fps counters match the WebRTC core, which never gates on the sidebar:
+    // a dashboard may read window.fps at any time, including on connect (the
+    // server's own live metrics also pull from this value).
+    const now = performance.now();
+    const elapsedStriped = now - lastStripedFpsUpdateTime;
+    const elapsedFullFrame = now - lastFpsUpdateTime;
+    const fpsUpdateInterval = 1000;
 
-      if (uniqueStripedFrameIdsThisPeriod.size > 0) {
-        if (elapsedStriped >= fpsUpdateInterval) {
-          const stripedFps = (uniqueStripedFrameIdsThisPeriod.size * 1000) / elapsedStriped;
-          window.fps = Math.round(stripedFps);
-          uniqueStripedFrameIdsThisPeriod.clear();
-          lastStripedFpsUpdateTime = now;
-          frameCount = 0;
-          lastFpsUpdateTime = now;
-        }
-      } else if (frameCount > 0) {
-        if (elapsedFullFrame >= fpsUpdateInterval) {
-          const fullFrameFps = (frameCount * 1000) / elapsedFullFrame;
-          window.fps = Math.round(fullFrameFps);
-          frameCount = 0;
-          lastFpsUpdateTime = now;
-          lastStripedFpsUpdateTime = now;
-        }
-      } else {
-        if (elapsedStriped >= fpsUpdateInterval || elapsedFullFrame >= fpsUpdateInterval) {
-             window.fps = 0;
-             lastFpsUpdateTime = now;
-             lastStripedFpsUpdateTime = now;
-        }
+    if (uniqueStripedFrameIdsThisPeriod.size > 0) {
+      if (elapsedStriped >= fpsUpdateInterval) {
+        const stripedFps = (uniqueStripedFrameIdsThisPeriod.size * 1000) / elapsedStriped;
+        window.fps = Math.round(stripedFps);
+        uniqueStripedFrameIdsThisPeriod.clear();
+        lastStripedFpsUpdateTime = now;
+        frameCount = 0;
+        lastFpsUpdateTime = now;
+      }
+    } else if (frameCount > 0) {
+      if (elapsedFullFrame >= fpsUpdateInterval) {
+        const fullFrameFps = (frameCount * 1000) / elapsedFullFrame;
+        window.fps = Math.round(fullFrameFps);
+        frameCount = 0;
+        lastFpsUpdateTime = now;
+        lastStripedFpsUpdateTime = now;
+      }
+    } else {
+      if (elapsedStriped >= fpsUpdateInterval || elapsedFullFrame >= fpsUpdateInterval) {
+        window.fps = 0;
+        lastFpsUpdateTime = now;
+        lastStripedFpsUpdateTime = now;
       }
     }
   };
@@ -4402,7 +4403,8 @@ function initWebsockets() {
 
             let decoderInfo = vncStripeDecoders[vncStripeYStart];
             const chunkType = (video_frame_type_byte === 0x01) ? 'key' : 'delta';
-            if (chunkType === 'delta' && (!decoderInfo || !decoderInfo.hasReceivedKeyframe)) {
+            const needKeyframe = !decoderInfo || !decoderInfo.hasReceivedKeyframe;
+            if (chunkType === 'delta' && needKeyframe) {
                 requestKeyframe();
                 return;
             }

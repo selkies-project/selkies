@@ -397,11 +397,13 @@ export function Settings() {
         const s_audio_bitrate = serverSettings.audio_bitrate;
         if (s_audio_bitrate) {
             const stored = getStoredInt("audio_bitrate");
+            // `allowed` holds string bps ("128000"), `stored`/`value` are numbers:
+            // compare as strings and parse the fallback (classic-dashboard parity).
             const final = !isNaN(stored)
                 ? (s_audio_bitrate.allowed
-                    ? (s_audio_bitrate.allowed.includes(stored) ? stored : s_audio_bitrate.value)
+                    ? (s_audio_bitrate.allowed.includes(String(stored)) ? stored : parseInt(s_audio_bitrate.value, 10))
                     : Math.max(s_audio_bitrate.min ?? stored, Math.min(s_audio_bitrate.max ?? stored, stored)))
-                : s_audio_bitrate.value;
+                : parseInt(s_audio_bitrate.value, 10);
             setAudioBitRate(final);
         }
 

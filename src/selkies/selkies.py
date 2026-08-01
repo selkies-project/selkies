@@ -156,14 +156,14 @@ try:
     PCMFLUX_AVAILABLE = True
     PCMFLUX_PLAYBACK_AVAILABLE = True
     data_logger.info("pcmflux library found. Audio capture + mic playback available.")
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError) as e:
     # ImportError = missing; RuntimeError = pcmflux ABI/version skew. Degrade
     # to "audio capture unavailable" rather than crash at startup.
     AudioCapture = AudioCaptureSettings = None
     AudioPlayback = AudioPlaybackSettings = None
     PCMFLUX_AVAILABLE = False
     PCMFLUX_PLAYBACK_AVAILABLE = False
-    data_logger.warning("pcmflux library not found. Audio capture is unavailable.")
+    data_logger.warning("pcmflux library not found. Audio capture is unavailable. (%s)", e)
 
 try:
     import pulsectl_asyncio
@@ -2160,6 +2160,7 @@ class DataStreamingServer(BaseStreamingService):
                 if self.input_handler and settings.get("enable_binary_clipboard") is not None:
                     self.enable_binary_clipboard = sanitize_value("enable_binary_clipboard", settings.get("enable_binary_clipboard"))
                     await self.input_handler.update_binary_clipboard_setting(self.enable_binary_clipboard)
+                if self.input_handler:
                     kb_layout = settings.get("keyboardLayout")
                     if kb_layout:
                         await self.input_handler.apply_client_keyboard_layout(kb_layout)
@@ -2399,6 +2400,16 @@ class DataStreamingServer(BaseStreamingService):
             if self.data_ws is websocket:
                 self.data_ws = None
             return
+
+        # WebRTC parity: a page that joins after a secondary display attached must
+        # learn the roster immediately, not only after the next reconfigure.
+        try:
+            displays = list(self.display_clients.keys())
+            await websocket.send_str(
+                f"DISPLAY_CONFIG_UPDATE,{json.dumps({'type': 'display_config_update', 'displays': displays})}"
+            )
+        except (ConnectionResetError, OSError, RuntimeError):
+            pass
 
         await self.send_current_cursor(websocket, raddr)
 

@@ -221,17 +221,19 @@ class MediaPipelinePixel(MediaPipeline):
 
         :mode: Rate control mode, either "cbr" or "crf"
         """
-        if not self._is_screen_capturing or self.capture_module is None:
+        if mode not in [RateControlMode.CBR, RateControlMode.CRF]:
+            logger.error(f"Invalid rate control mode: {mode}")
             return
 
         if mode == self.rc_mode:
             return
 
-        if mode not in [RateControlMode.CBR, RateControlMode.CRF]:
-            logger.error(f"Invalid rate control mode: {mode}")
+        # Store first: a change sent while capture is paused must still shape the
+        # next start_screen_capture() (WS parity), not vanish.
+        self.rc_mode = mode
+        if not self._is_screen_capturing or self.capture_module is None:
             return
 
-        self.rc_mode = mode
         try:
             await self.restart_screen_capture()
             logger.info(f"Updated rate control mode to: {self.rc_mode}")
@@ -243,14 +245,14 @@ class MediaPipelinePixel(MediaPipeline):
 
         :crf: CRF value
         """
-        if not self._is_screen_capturing or self.capture_module is None:
-            return
-
         if self.rc_mode != RateControlMode.CRF or self.video_crf == crf:
             return
 
+        # Store first: applies at the next start even when capture is paused.
         old_crf = self.video_crf
         self.video_crf = crf
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
         try:
             # Live retarget: NVENC/x264/VAAPI re-read the CRF per frame; no restart.
             self.capture_module.update_tunables(self.generate_capture_settings())
@@ -333,9 +335,6 @@ class MediaPipelinePixel(MediaPipeline):
 
         :bitrate: bitrate in kbps
         """
-        if not self._is_screen_capturing or self.capture_module is None:
-            return
-
         if (
             self.rc_mode == RateControlMode.CRF
             or bitrate <= 0
@@ -343,34 +342,40 @@ class MediaPipelinePixel(MediaPipeline):
         ):
             return
 
+        # Store before the live call so a paused capture still picks the value
+        # up at its next start.
+        old_bitrate = self.video_bitrate
+        self.video_bitrate = bitrate
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
         try:
             # Non-blocking in pixelflux (atomic store / channel send).
             self.capture_module.update_video_bitrate(int(bitrate))
             logger.info(
-                f"Updated video bitrate: {self.video_bitrate} -> {bitrate} kbps"
+                f"Updated video bitrate: {old_bitrate} -> {bitrate} kbps"
             )
-            self.video_bitrate = bitrate
         except Exception as e:
             logger.info(f"Error updating video bitrate {e}", exc_info=True)
 
     async def set_audio_bitrate(self, bitrate: int):
         """Set audio encoder target bitrate.
 
-        :bitrate: bitrate in kbps
+        :bitrate: bitrate in bps
         """
-        if not self._is_pcmflux_capturing or self.pcmflux_module is None:
-            return
-
         if bitrate <= 0 or self.audio_bitrate == bitrate:
             return
 
+        # Store before the live call so a stopped pcmflux applies it on restart.
+        old_bitrate = self.audio_bitrate
+        self.audio_bitrate = bitrate
+        if not self._is_pcmflux_capturing or self.pcmflux_module is None:
+            return
         try:
             # Non-blocking in pcmflux (atomic store).
             self.pcmflux_module.update_audio_bitrate(bitrate)
             logger.info(
-                f"Updated audio bitrate: {self.audio_bitrate // 1000} -> {bitrate // 1000} kbps"
+                f"Updated audio bitrate: {old_bitrate // 1000} -> {bitrate // 1000} kbps"
             )
-            self.audio_bitrate = bitrate
         except Exception as e:
             logger.info(f"Error updating audio bitrate {e}", exc_info=True)
 
@@ -380,13 +385,13 @@ class MediaPipelinePixel(MediaPipeline):
         :framerate: framerate in frames per second, for example, 15, 30, 60.
         """
         async with self.async_lock:
-            if not self._is_screen_capturing:
-                return
-
             if framerate <= 0 or self.framerate == framerate:
                 return
 
+            # Store first: a paused capture applies the value at its next start.
             self.framerate = framerate
+            if not self._is_screen_capturing or self.capture_module is None:
+                return
             # Non-blocking in pixelflux (atomic store / channel send).
             self.capture_module.update_framerate(float(self.framerate))
             logger.info(f"Updated framerate to: {self.framerate}")
