@@ -397,7 +397,7 @@ class CentralizedStreamServer:
 
         self.app: Optional[web.Application] = None
         self.runner: Optional[web.AppRunner] = None
-        self.site: Optional[web.TCPSite] = None
+        self.site: Optional[web.BaseSite] = None
         self.cert_watcher: Optional[asyncio.Task] = None
         self.ssl_context: Optional[ssl.SSLContext] = None
         self.static_fs_path: str = ""
@@ -610,33 +610,49 @@ class CentralizedStreamServer:
                     "New SSL context is None (HTTPS disabled?), keeping old site."
                 )
                 continue
-
+            site_type = 'UnixSite' if self.settings.unix_socket else 'TCPSite'
             try:
                 await current_site.stop()
-                logger.info("Old TCPSite stopped.")
+                logger.info("Old %s stopped.", site_type)
             except Exception as exc:
-                logger.warning("Error stopping old TCPSite: %s", exc)
+                logger.warning("Error stopping old %s: %s", site_type, exc)
 
             try:
-                new_site = web.TCPSite(
-                    self.runner,
-                    host=self.settings.addr,
-                    port=self.settings.port,
-                    ssl_context=new_ssl_context,
-                )
+                if self.settings.unix_socket:
+                    new_site = web.UnixSite(
+                        self.runner,
+                        path=self.settings.unix_socket
+                        ssl_context=new_ssl_context,
+                    )
+                else:
+                    new_site = web.TCPSite(
+                        self.runner,
+                        host=self.settings.addr,
+                        port=self.settings.port,
+                        ssl_context=new_ssl_context,
+                    )
                 await new_site.start()
                 current_site = new_site
                 self.site = new_site
                 last_mtime = new_mtime
-                logger.info(
-                    "New TCPSite started with reloaded certificates on %s:%s",
-                    self.settings.addr,
-                    self.settings.port,
-                )
+                if self.settings.unix_socket:
+                    logger.info(
+                        "New %s started with reloaded certificates on %s",
+                        site_type,
+                        self.settings.unix_socket,
+                    )
+                else:
+                    logger.info(
+                        "New %s started with reloaded certificates on %s:%s",
+                        site_type,
+                        self.settings.addr,
+                        self.settings.port,
+                    )
             except Exception as exc:
                 logger.critical(
-                    "Failed to start new TCPSite: %s. HTTPS server may be down; "
+                    "Failed to start new %s: %s. HTTPS server may be down; "
                     "will retry on the next certificate poll.",
+                    site_type,
                     exc,
                 )
 
@@ -1379,17 +1395,28 @@ class CentralizedStreamServer:
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
 
-        self.site = web.TCPSite(
-            self.runner,
-            host=self.settings.addr,
-            port=self.settings.port,
-            ssl_context=self.ssl_context,
-        )
+        if self.settings.unix_socket:
+            self.site = web.UnixSite(
+                self.runner,
+                path=self.setiings.unix_socket,
+                ssl_context=self.ssl_context,
+            )
+            logger.info(
+                f"Selkies server running on "
+                f"unix:///{self.settings.unix_socket}"
+            )
+        else:
+            self.site = web.TCPSite(
+                self.runner,
+                host=self.settings.addr,
+                port=self.settings.port,
+                ssl_context=self.ssl_context,
+            )
+            logger.info(
+                f"Selkies server running on "
+                f"{'https' if https else 'http'}://{self.settings.addr}:{self.settings.port}"
+            )
 
-        logger.info(
-            f"Selkies server running on "
-            f"{'https' if https else 'http'}://{self.settings.addr}:{self.settings.port}"
-        )
         await self.site.start()
 
         # Start certificate watcher if HTTPS is enabled

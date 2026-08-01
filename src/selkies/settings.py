@@ -78,6 +78,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'Port to start the streaming service, default: "8081"',
     },
     {
+        "name": "unix_socket",
+        "type": "str",
+        "default": "",
+        "help": 'Unix socket path to start the streaming service, if provided, a Unix socket will be used instead of a TCP bind',
+    },
+    {
         "name": "web_root",
         "type": "str",
         "default": "",
