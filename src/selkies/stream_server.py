@@ -1398,7 +1398,7 @@ class CentralizedStreamServer:
         if self.settings.unix_socket:
             self.site = web.UnixSite(
                 self.runner,
-                path=self.setiings.unix_socket,
+                path=self.settings.unix_socket,
                 ssl_context=self.ssl_context,
             )
             logger.info(
