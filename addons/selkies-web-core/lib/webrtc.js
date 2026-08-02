@@ -931,7 +931,7 @@ export class WebRTCClient {
 
 		if (this.forceTurn) {
 			this._setStatus("forcing use of TURN server");
-			var config = this.peerConnection.getConfiguration();
+			const config = this.peerConnection.getConfiguration();
 			config.iceTransportPolicy = "relay";
 			this.peerConnection.setConfiguration(config);
 		}

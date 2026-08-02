@@ -1111,6 +1111,15 @@ class RTCApp:
             # its own feed too.
             return self.on_video_consumer_active(
                 peer_id, display_id or "primary", msg == "START_VIDEO")
+        if msg in ("STOP_AUDIO", "START_AUDIO"):
+            # WS toggles the one shared pcmflux capture for every client; in WebRTC
+            # mode audio is negotiated per peer over SDP (recvonly/sendonly), so a
+            # global toggle would either be a no-op for late joiners or cut audio
+            # for peers that never asked. Each page mutes its <video> locally,
+            # which stops Opus playback without stopping RTP — the parity is
+            # intentional, the verb is just inapplicable here.
+            logger.debug("Ignoring %s over WebRTC: audio is per-peer (SDP), not global.", msg)
+            return
         # peer_id doubles as the connection id so per-connection input state
         # (gamepad associations) can be traced to this peer.
         return self.on_data_message(msg, display_id or "primary", conn_id=peer_id)

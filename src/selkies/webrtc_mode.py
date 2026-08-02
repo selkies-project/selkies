@@ -287,6 +287,10 @@ class WebRTCService(BaseStreamingService):
             self.media_pipeline.width, self.media_pipeline.height = self._manual_dims
         if self.args.enable_rate_control:
             self.media_pipeline.rc_mode = RateControlMode(self.args.rate_control_mode)
+        else:
+            # WS parity: with rate control disabled the engine runs CRF on both
+            # transports (the WebRTC constructor defaulted to CBR).
+            self.media_pipeline.rc_mode = RateControlMode.CRF
 
         # Fetch rtc configuration
         (

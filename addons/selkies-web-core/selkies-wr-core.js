@@ -1875,7 +1875,8 @@ export default function webrtc() {
 				}
 				location.reload();
 			};
-			webrtc = new WebRTCClient(signaling, videoElement, 1, isSharedMode);
+			// (constructor takes 3 args; strict-viewer gating lives in the send wrapper below)
+			webrtc = new WebRTCClient(signaling, videoElement, 1);
 			const send = (data) => {
 				if (isSharedMode && isStrictViewer && !collabInputGranted) return;
 				webrtc.sendDataChannelMessage(data);
