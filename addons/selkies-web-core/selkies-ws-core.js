@@ -724,6 +724,7 @@ const VIDEO_WORKER_MAX_IN_FLIGHT = 3;
 // fall back to main-thread decode (+ the worker sink, or the 2D canvas).
 let decodeInWorker = false;
 let workerDecoderCodec = null, workerDecoderW = 0, workerDecoderH = 0;
+let workerKeyframeCodec = null;
 let workerDecodeFailed = false;
 const VIDEO_WORKER_SRC = `
 // Video sink + optional in-worker decoder. The sink is the standard worker-only
@@ -735,7 +736,14 @@ const VIDEO_WORKER_SRC = `
 let mode = null, oc = null, ctx = null, writer = null, closed = false, presented = false;
 let dec = null, decKey = false, decNeedKey = false;
 let sinkDrops = 0;   // consecutive backpressure drops; a stalled consumer never resumes on its own
-const OVERLOAD_QUEUE = 24;   // decode backlog (frames) that triggers a keyframe resync
+const OVERLOAD_QUEUE = 24;   // decode backlog (frames) above which deltas are dropped
+let lastNeedKey = 0;   // keyframe-request throttle while decode is backed up
+const sendNeedKey = (reason) => {
+  const now = Date.now();
+  if (now - lastNeedKey < 800) return;
+  lastNeedKey = now;
+  self.postMessage({ type: 'needKeyframe', reason });
+};
 const ack = () => self.postMessage({ ack: true });
 
 // Present one decoded VideoFrame on the active sink. Consumes/closes the frame.
@@ -800,8 +808,10 @@ self.onmessage = (e) => {
     if (!dec || dec.state !== 'configured') return;   // not ready yet; the page will resend a keyframe
     if (m.key) { decKey = true; decNeedKey = false; }
     else {
-      if (!decKey || decNeedKey) { self.postMessage({ type: 'needKeyframe' }); return; }     // no usable keyframe yet
-      if (dec.decodeQueueSize > OVERLOAD_QUEUE) { decNeedKey = true; self.postMessage({ type: 'needKeyframe' }); return; }  // decode falling behind -> resync
+      if (!decKey || decNeedKey) { sendNeedKey('no_key'); return; }     // no usable keyframe yet
+      // Decode is falling behind: drop the delta (a fresh IDR cannot unclog the
+      // queue) and request a throttled resync keyframe.
+      if (dec.decodeQueueSize > OVERLOAD_QUEUE) { decNeedKey = true; sendNeedKey('overload'); return; }
     }
     try { dec.decode(new EncodedVideoChunk({ type: m.key ? 'key' : 'delta', timestamp: m.timestamp, data: m.data })); }
     catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); }
@@ -948,6 +958,7 @@ function ensureVideoWorker() {
         // decode. The worker sink (track/canvas) stays up to receive transferred frames.
         workerDecodeFailed = true;
         workerDecoderCodec = null; workerDecoderW = 0; workerDecoderH = 0;
+        workerKeyframeCodec = null;
         return;
       }
       if (m.type === 'mode') {
@@ -990,6 +1001,7 @@ function deactivateVideoWorker() {
   videoWorkerRendered = false; sinkRevealGen++;
   // Forget the worker decoder config so a freshly recreated worker gets (re)configured.
   workerDecoderCodec = null; workerDecoderW = 0; workerDecoderH = 0;
+  workerKeyframeCodec = null;
   if (videoWorker) { try { videoWorker.terminate(); } catch (_) {} videoWorker = null; }
   if (wasVtg) {
     if (videoWorkerTrack) { try { videoWorkerTrack.stop(); } catch (_) {} videoWorkerTrack = null; }
@@ -4386,9 +4398,13 @@ function initWebsockets() {
         // so it always decodes on the main thread.
         if (decodeInWorker && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc') && isVideoPipelineActive) {
             if (h264Payload.byteLength === 0) return;
-            const workerCodec = video_frame_type_byte === 0x01
-                ? codecFromKeyframe(h264Payload, getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate))
-                : getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate);
+            // The SPS-based codec is derived on keyframes and cached; deltas reuse it
+            // so the worker decoder is not reconfigured (dropping its keyframe state)
+            // between keyframes.
+            if (video_frame_type_byte === 0x01) {
+                workerKeyframeCodec = codecFromKeyframe(h264Payload, getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate));
+            }
+            const workerCodec = workerKeyframeCodec || getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate);
             if (feedWorkerDecoder(video_frame_type_byte === 0x01, h264Payload, stripeWidth, stripeHeight, workerCodec)) {
                 return;
             }

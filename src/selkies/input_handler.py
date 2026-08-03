@@ -3596,12 +3596,17 @@ class WebRTCInput:
     async def _app_clipboard_read(self, use_binary):
         """Read the selection of the compositor the apps use over the pixelflux
         data-control ABI; (None, None) when it is empty or unreadable."""
+        read_fn = getattr(self.wayland_input, 'clipboard_read_app', None)
+        types_fn = getattr(self.wayland_input, 'clipboard_types_app', None)
+        if read_fn is None or types_fn is None:
+            # pixelflux builds without the app-compositor data-control ABI
+            # report no data rather than failing the clipboard path.
+            return None, None
         display = self._app_wayland_display()
-        read_fn = self.wayland_input.clipboard_read_app
         loop = asyncio.get_running_loop()
         try:
             available_types = await loop.run_in_executor(
-                None, self.wayland_input.clipboard_types_app, display)
+                None, types_fn, display)
             if use_binary:
                 image_mimes = ['image/png', 'image/jpeg', 'image/bmp', 'image/webp',
                                'image/svg+xml', 'image/svg']
@@ -3843,7 +3848,11 @@ class WebRTCInput:
         """Selection-change signals from the app compositor over the pixelflux
         data-control ABI (fork-free); returns the signal queue, or None when
         arming failed (retried by the monitor loop)."""
-        watch_fn = self.wayland_input.clipboard_watch_app
+        watch_fn = getattr(self.wayland_input, 'clipboard_watch_app', None)
+        if watch_fn is None:
+            # Without the app-compositor data-control ABI, the native callback
+            # monitor covers this display.
+            return None
         try:
             loop = asyncio.get_running_loop()
             queue = asyncio.Queue(maxsize=4)

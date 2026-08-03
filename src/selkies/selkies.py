@@ -85,8 +85,8 @@ STALLED_CLIENT_TIMEOUT_SECONDS = 4.0
 SHARED_STREAM_SEND_TIMEOUT_SECONDS = 1.0
 # Per-client video backlog bound: past it, a relay drops its backlog and the
 # client skips ahead to the next keyframe instead of backing encoded frames up
-# into the shared pipeline or the socket transport (whose freed burst peaks
-# the allocator retains — the issue #282 RSS ratchet). The bound is
+# into the shared pipeline or the socket transport (whose freed burst the RSS
+# allocator ratchets). The bound is
 # VIDEO_RELAY_BUDGET_SECONDS of stream at the capture's configured bitrate —
 # backlog is latency debt, so the skip-ahead threshold must track the stream
 # rate, not a fixed byte count — floored so low-bitrate streams keep absorbing
@@ -1154,6 +1154,10 @@ class DataStreamingServer(BaseStreamingService):
         if display_state is not None:
             display_state["video_bitrate"] = sanitized
         self.app.video_bitrate = sanitized
+        if display_id == 'primary':
+            # Later-registered displays seed their bitrate from this value.
+            self._initial_video_bitrate = sanitized
+            data_logger.info(f"Session default video_bitrate updated to {int(sanitized)} kbps for new displays.")
         module = self._opcode_display_module(display_id)
         if module is not None:
             try:
@@ -1200,6 +1204,10 @@ class DataStreamingServer(BaseStreamingService):
         if display_state.get("rate_control_mode") == sanitized:
             return
         display_state["rate_control_mode"] = sanitized
+        if display_id == 'primary':
+            # Later-registered displays seed their rate-control mode from this value.
+            self.rc_mode = RateControlMode(sanitized)
+            data_logger.info(f"Session default rate_control_mode updated to {sanitized} for new displays.")
         if not display_state.get('video_active', True):
             return
         layout = self.display_layouts.get(display_id)
@@ -2156,6 +2164,40 @@ class DataStreamingServer(BaseStreamingService):
                 enable_rate_control, _ = self.cli_args.enable_rate_control
                 if enable_rate_control and settings.get("rate_control_mode") is not None:
                     display_state["rate_control_mode"] = sanitize_value("rate_control_mode", settings.get("rate_control_mode"))
+
+                if display_id == 'primary':
+                    # A display registered later inherits the primary controller's
+                    # live tunables as its seeds.
+                    session_seeds = {
+                        'framerate': ('app_framerate',),
+                        'video_crf': ('video_crf', '_initial_video_crf'),
+                        'video_bitrate': ('video_bitrate', '_initial_video_bitrate'),
+                        'video_fullcolor': ('video_fullcolor', '_initial_video_fullcolor'),
+                        'video_streaming_mode': ('video_streaming_mode', '_initial_video_streaming_mode'),
+                        'jpeg_quality': ('jpeg_quality', '_initial_jpeg_quality'),
+                        'paint_over_jpeg_quality': ('paint_over_jpeg_quality', '_initial_paint_over_jpeg_quality'),
+                        'use_cpu': ('use_cpu', '_initial_use_cpu'),
+                        'use_paint_over_quality': ('use_paint_over_quality', '_initial_use_paint_over_quality'),
+                        'video_paintover_crf': ('video_paintover_crf', '_initial_video_paintover_crf'),
+                        'video_paintover_burst_frames': ('video_paintover_burst_frames', '_initial_video_paintover_burst_frames'),
+                    }
+                    for key, targets in session_seeds.items():
+                        if settings.get(key) is None:
+                            continue
+                        value = display_state.get(key)
+                        if value is None:
+                            continue
+                        for attr in targets:
+                            if attr == 'app_framerate':
+                                self.app.set_framerate(int(value))
+                            else:
+                                setattr(self, attr, value)
+                        data_logger.info(f"Session default {key} updated to {value} for new displays.")
+                    if enable_rate_control and settings.get('rate_control_mode') is not None:
+                        self.rc_mode = RateControlMode(display_state['rate_control_mode'])
+                        data_logger.info(
+                            f"Session default rate_control_mode updated to {self.rc_mode.value} for new displays."
+                        )
 
                 if self.input_handler and settings.get("enable_binary_clipboard") is not None:
                     self.enable_binary_clipboard = sanitize_value("enable_binary_clipboard", settings.get("enable_binary_clipboard"))
