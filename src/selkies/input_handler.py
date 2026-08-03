@@ -4541,7 +4541,7 @@ class WebRTCInput:
         elif msg_type in ["m", "m2"]:
             relative = msg_type == "m2"
             try: x, y, button_mask, scroll_magnitude = [int(i) for i in toks[1:]]
-            except: x,y,button_mask,scroll_magnitude = 0,0,self.button_mask,0; relative=False
+            except (ValueError, IndexError): x,y,button_mask,scroll_magnitude = 0,0,self.button_mask,0; relative=False
             try: await self.send_x11_mouse(x, y, button_mask, scroll_magnitude, relative, display_id=display_id)
             except Exception as e: logger_webrtc_input.warning(f"Failed to set mouse cursor: {e}")
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
@@ -4867,13 +4867,13 @@ class WebRTCInput:
             else: logger_webrtc_input.error("Invalid _arg_resize command format")
         elif msg_type == "_f": 
             try: self.on_client_fps(int(toks[1]))
-            except: logger_webrtc_input.error(f"Failed to parse client FPS: {toks}")
+            except (ValueError, IndexError): logger_webrtc_input.error(f"Failed to parse client FPS: {toks}")
         elif msg_type == "_l": 
             try: self.on_client_latency(int(toks[1]))
-            except: logger_webrtc_input.error(f"Failed to parse client latency: {toks}")
+            except (ValueError, IndexError): logger_webrtc_input.error(f"Failed to parse client latency: {toks}")
         elif msg_type in ["_stats_video", "_stats_audio"]: 
             try: await self.on_client_webrtc_stats(msg_type, ",".join(toks[1:]))
-            except: logger_webrtc_input.error("Failed to parse WebRTC Statistics")
+            except (ValueError, IndexError): logger_webrtc_input.error("Failed to parse WebRTC Statistics")
         elif msg_type == "co" and toks[1] == "end":
             try:
                 text_to_type = msg[7:]

@@ -160,7 +160,7 @@ class MediaPipelinePixel(MediaPipeline):
         self.produce_data: Callable[[bytes, int, str], None] = lambda buf, pts, kind: logger.warning(
             "unhandled produce_data"
         )
-        self.send_data_channel_message: Callable[[str], None] = lambda msg: logger.warning(
+        self.send_data_channel_message: Callable[..., None] = lambda msg: logger.warning(
             "unhandled send_data_channel_message"
         )
         # Fired after the video stream (re)starts so the transport can resend the

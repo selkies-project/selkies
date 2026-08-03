@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 from .rtc import RTCApp, ClientType
 from . import selkies as selkies_module
 from .selkies import current_session_tokens
-from .media_pipeline import (MediaPipeline, MediaPipelinePixel, RateControlMode,
+from .media_pipeline import (MediaPipelinePixel, RateControlMode,
                              ScreenCapture as PixelfluxScreenCapture)
 from .webrtc.codecs import configure_multiopus
 from .webrtc_signaling import WebRTCSignalingClient
@@ -149,7 +149,7 @@ class WebRTCService(BaseStreamingService):
         self.shutdown_event = asyncio.Event()
         self._shutdown_called = False
         self.signaling_client: Optional[WebRTCSignalingClient] = None
-        self.media_pipeline: Optional[MediaPipeline] = None
+        self.media_pipeline: Optional[MediaPipelinePixel] = None
         self.rtc_app: Optional[RTCApp] = None
         self.input_handler: Optional[WebRTCInput] = None
         self.system_monitor: Optional[SystemMonitor] = None
@@ -169,7 +169,7 @@ class WebRTCService(BaseStreamingService):
         # handler offsets against, and one media pipeline per display.
         self.display_clients: Dict[str, Dict[str, Any]] = {}
         self.display_layouts: Dict[str, Dict[str, int]] = {}
-        self.display_pipelines: Dict[str, MediaPipeline] = {}
+        self.display_pipelines: Dict[str, MediaPipelinePixel] = {}
         self._last_idr_request_times: Dict[str, float] = {}
         self._display_lock = asyncio.Lock()
         self._primary_dims: Optional[tuple] = None

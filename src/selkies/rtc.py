@@ -395,7 +395,7 @@ class RTCApp:
             self.__send_data_channel_message("clipboard-msg-start", start_payload)
             while read < len(data_bytes):
                 chunk = data_bytes[read:read + clipboard_chunk_size]
-                payload = json.dumps({
+                chunk_payload = json.dumps({
                     "type": "clipboard-msg-data",
                     "data": {"content": base64.b64encode(chunk).decode("utf-8")},
                 })
@@ -405,10 +405,10 @@ class RTCApp:
                 channels = list(self._iter_open_data_channels())
                 if any(getattr(c, "_selkies_gz_tx", False) for c in channels):
                     gz_payload = await asyncio.to_thread(
-                        gzip.compress, payload.encode("utf-8"), 6)
+                        gzip.compress, chunk_payload.encode("utf-8"), 6)
                 for channel in channels:
                     self._send_prepared_to_channel(
-                        channel, "clipboard-msg-data", payload, gz_payload)
+                        channel, "clipboard-msg-data", chunk_payload, gz_payload)
                 for channel in channels:
                     await drain_data_channel(channel)
                 read += len(chunk)

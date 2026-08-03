@@ -526,10 +526,10 @@ class RtcpRrPacket:
     reports: list[RtcpReceiverInfo] = field(default_factory=list)
 
     def __bytes__(self) -> bytes:
-        payload = pack("!L", self.ssrc)
+        payload = bytearray(pack("!L", self.ssrc))
         for report in self.reports:
             payload += bytes(report)
-        return pack_rtcp_packet(RTCP_RR, len(self.reports), payload)
+        return pack_rtcp_packet(RTCP_RR, len(self.reports), bytes(payload))
 
     @classmethod
     def parse(cls, data: bytes, count: int) -> "RtcpRrPacket":

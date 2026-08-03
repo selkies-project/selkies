@@ -965,6 +965,8 @@ class DataStreamingServer(BaseStreamingService):
         # primary capture module exists yet (any handle reaches the shared backend).
         self._wayland_ctl_module = None
         self._last_keyframe_request = {}  # display_id -> monotonic, rate-limits client IDR requests
+        self._last_keyframe_log = {}      # display_id -> monotonic, throttles the log line (not the IDR request)
+        self._keyframe_log_suppressed = {} # display_id -> int, requests elided between log lines
 
         # pcmflux audio capture state
         self.audio_device_name = self.cli_args.audio_device_name
@@ -2757,10 +2759,10 @@ class DataStreamingServer(BaseStreamingService):
                         # drives keyboard/mouse/clipboard) is gated by enable_collab —
                         # when off, the viewer stays read-only even with a valid mk
                         # token.
-                        allowed_viewer_prefixes = list(VIEWER_ALLOWED_PREFIXES)
+                        allowed_viewer_prefixes: tuple[str, ...] = VIEWER_ALLOWED_PREFIXES
                         if settings.enable_collab[0] and active_mk_token and perms.get("token") == active_mk_token:
-                            allowed_viewer_prefixes.extend(VIEWER_COLLAB_EXTRA_PREFIXES)
-                        if not any(message.startswith(prefix) for prefix in allowed_viewer_prefixes):
+                            allowed_viewer_prefixes = allowed_viewer_prefixes + VIEWER_COLLAB_EXTRA_PREFIXES
+                        if not message.startswith(allowed_viewer_prefixes):
                             # Executing a viewer's blur/visibility lifecycle noise
                             # (kr would clobber the controller's held modifiers) is
                             # refused, but silently — warning per blur floods the log.
@@ -3223,7 +3225,18 @@ class DataStreamingServer(BaseStreamingService):
                             now = time.monotonic()
                             if now - self._last_keyframe_request.get(target_display_id, 0.0) >= 0.25:
                                 self._last_keyframe_request[target_display_id] = now
-                                data_logger.info(f"Keyframe requested by {remote_address} for '{target_display_id}'.")
+                                # The IDR request stays at the 0.25 s throttle, but the
+                                # log line must not: a client in a decode-resync loop
+                                # otherwise fills the journal at that same cadence.
+                                if now - self._last_keyframe_log.get(target_display_id, 0.0) >= 5.0:
+                                    suppressed = self._keyframe_log_suppressed.get(target_display_id, 0)
+                                    suffix = f" (+{suppressed} further requests suppressed)" if suppressed else ""
+                                    self._keyframe_log_suppressed[target_display_id] = 0
+                                    self._last_keyframe_log[target_display_id] = now
+                                    data_logger.info(f"Keyframe requested by {remote_address} for '{target_display_id}'.{suffix}")
+                                else:
+                                    self._keyframe_log_suppressed[target_display_id] = \
+                                        self._keyframe_log_suppressed.get(target_display_id, 0) + 1
                                 # Non-blocking in pixelflux (atomic flag / channel send).
                                 module.request_idr_frame()
 

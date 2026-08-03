@@ -956,6 +956,26 @@ class AppSettings:
     environment variables, based on a centralized definition list.
     """
 
+    # Typing for settings that static tools access as attributes (everything
+    # else is attached dynamically at runtime by _process_and_set_attributes).
+    debug: tuple[bool, bool]
+    gamepad_enabled: tuple[bool, bool]
+    command_enabled: tuple[bool, bool]
+    uinput_mouse_socket: str
+    enable_cursors: tuple[bool, bool]
+    debug_cursors: tuple[bool, bool]
+    enable_resize: tuple[bool, bool]
+    audio_bitrate: str
+    wayland: tuple[bool, bool]
+    cursor_size: int
+    gpu_id: str
+    audio_enabled: tuple[bool, bool]
+    enable_collab: tuple[bool, bool]
+    master_token: str
+    video_fullcolor: tuple[bool, bool]
+    subfolder: str
+    video_bitrate: tuple[float, float]
+
     def __init__(self, setting):
         parser = argparse.ArgumentParser(
             description="Selkies WebSocket Streaming Server"

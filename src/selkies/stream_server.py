@@ -19,7 +19,7 @@ import tempfile
 from aiohttp import web
 from datetime import datetime
 from prometheus_client import generate_latest
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 try:
     # pyrefly: ignore[missing-import]
     import importlib_resources as importlib_resources  # pyright: ignore[reportMissingImports]
@@ -409,7 +409,7 @@ class CentralizedStreamServer:
         # the .part file path, a last-activity stamp for expiry, and a busy
         # flag that rejects interleaved writes to the same destination.
         self._chunked_uploads: Dict[str, Dict[str, Any]] = {}
-        self.web_files_ctx = None
+        self.web_files_ctx: Optional[tempfile.TemporaryDirectory] = None
 
         self._clients_present = False
         self._client_hook_tasks = set()
@@ -1227,7 +1227,7 @@ class CentralizedStreamServer:
             raise web.HTTPMovedPermanently(location)
 
         # If it's a directory, generate the "FancyIndex" HTML
-        items = []
+        items: List[dict[str, Any]] = []
         # Add parent directory link if not at root
         if full_path != self.upload_dir:
             items.append({"name": "../", "size": "-", "mtime": "-", "is_dir": True})

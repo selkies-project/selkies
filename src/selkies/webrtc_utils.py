@@ -442,7 +442,7 @@ def make_turn_rtc_config_json_legacy(
     for default_host, default_port in DEFAULT_STUN_SERVERS:
         _append_stun_url(stun_list, seen_stun, default_host, default_port)
 
-    rtc_config = {}
+    rtc_config: Dict[str, Any] = {}
     rtc_config["lifetimeDuration"] = "86400s"
     rtc_config["blockStatus"] = "NOT_BLOCKED"
     rtc_config["iceTransportPolicy"] = "all"

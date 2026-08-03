@@ -1086,6 +1086,24 @@ function presentFrameToWorker(frame) {
   return true;
 }
 
+// Rate-limited diagnostic logger for the worker decode path: a healthy stream
+// reconfigures ~once per session (join / resolution change); a reconfigure storm
+// with flipping codec strings was the #287 signature. Never more than one line
+// per interval, with a suppressed count so repeated events stay visible.
+let workerCfgLogLast = Number.NEGATIVE_INFINITY, workerCfgLogSuppressed = 0;
+const WORKER_CFG_LOG_MIN_INTERVAL_MS = 5000;
+function logWorkerDecoderConfig(codec, w, h) {
+  const now = performance.now();
+  if (now - workerCfgLogLast >= WORKER_CFG_LOG_MIN_INTERVAL_MS) {
+    const suppressed = workerCfgLogSuppressed > 0 ? ` (+${workerCfgLogSuppressed} suppressed)` : '';
+    console.info(`[VideoWorker] decoder (re)configure: codec=${codec} ${w}x${h}${workerDecoderCodec ? ` (was ${workerDecoderCodec} ${workerDecoderW}x${workerDecoderH})` : ''}${suppressed}`);
+    workerCfgLogLast = now;
+    workerCfgLogSuppressed = 0;
+  } else {
+    workerCfgLogSuppressed++;
+  }
+}
+
 // Forward an encoded full-frame H.264 chunk to the worker's own decoder, which decodes and
 // presents it entirely off the main thread (no decoded frame crosses the boundary). dataBuf
 // is transferred. Returns true if handled there; false to fall back to main-thread decode.
@@ -1095,6 +1113,7 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec) {
   if (!activateWorkerSinkDisplay()) return false;
   // (Re)configure the worker decoder when the codec or coded dimensions change.
   if (codec !== workerDecoderCodec || w !== workerDecoderW || h !== workerDecoderH) {
+    logWorkerDecoderConfig(codec, w, h);
     try { videoWorker.postMessage({ type: 'decoderConfig', codec: codec, codedWidth: w, codedHeight: h }); }
     catch (e) { return false; }
     workerDecoderCodec = codec; workerDecoderW = w; workerDecoderH = h;
@@ -4400,9 +4419,15 @@ function initWebsockets() {
             if (h264Payload.byteLength === 0) return;
             // The SPS-based codec is derived on keyframes and cached; deltas reuse it
             // so the worker decoder is not reconfigured (dropping its keyframe state)
-            // between keyframes.
+            // between keyframes. The pin is sticky: a parse miss keeps the previous
+            // codec rather than flipping back to the pre-stream guess (such a codec
+            // string oscillation reconfigures the decoder AND fires requestKeyframe()
+            // on every boundary — the #287 slideshow + keyframe-request spam).
             if (video_frame_type_byte === 0x01) {
-                workerKeyframeCodec = codecFromKeyframe(h264Payload, getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate));
+                const spsCodec = codecFromKeyframe(h264Payload, null);
+                if (spsCodec && spsCodec !== workerKeyframeCodec) {
+                    workerKeyframeCodec = spsCodec;
+                }
             }
             const workerCodec = workerKeyframeCodec || getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate);
             if (feedWorkerDecoder(video_frame_type_byte === 0x01, h264Payload, stripeWidth, stripeHeight, workerCodec)) {
