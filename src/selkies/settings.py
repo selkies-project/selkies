@@ -121,6 +121,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Enable parsing of command websocket messages. Disabled by default for security; opt in with SELKIES_COMMAND_ENABLED=true (or --command-enabled true).",
     },
     {
+        "name": "webrtc_pacer",
+        "type": "bool",
+        "default": True,
+        "help": "Pace outgoing WebRTC packets per transport with strict priorities (audio/RTCP > data-channel > video), an IDR-aware video queue budget and GOP-reset recovery: protects audio and interactive signaling from video bursts on congested links. On by default after A/B showed no regression on uncongested/shaped links and large latency wins under congestion; opt out with SELKIES_WEBRTC_PACER=false. Fine-tune the stale-GOP deadline with SELKIES_WEBRTC_PACER_STALE_MS (default 0 = off).",
+    },
+    {
         "name": "file_transfers",
         "type": "list",
         "default": "upload,download",
@@ -961,6 +967,7 @@ class AppSettings:
     debug: tuple[bool, bool]
     gamepad_enabled: tuple[bool, bool]
     command_enabled: tuple[bool, bool]
+    webrtc_pacer: tuple[bool, bool]
     uinput_mouse_socket: str
     enable_cursors: tuple[bool, bool]
     debug_cursors: tuple[bool, bool]

@@ -41,7 +41,7 @@ import struct
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Optional, Protocol, Type, TypeVar, Union
+from typing import Callable, Optional, Protocol, Type, TypeVar, Union
 
 import pylibsrtp
 from cryptography import x509
@@ -53,6 +53,13 @@ from pyee.asyncio import AsyncIOEventEmitter
 from pylibsrtp import Policy, Session
 
 from . import clock, rtp
+from .pacer import (
+    CLASS_DC,
+    CLASS_RTCP,
+    CLASS_VIDEO,
+    MIN_GOODPUT_SAMPLE_BYTES,
+    RtpPacer,
+)
 from .rtcicetransport import RTCIceTransport
 from .rtcrtpparameters import RTCRtpReceiveParameters, RTCRtpSendParameters
 from .rtp import (
@@ -328,6 +335,18 @@ class RtpRouter:
             for report in packet.reports:
                 add_recipient(self.senders.get(report.ssrc))
         elif isinstance(packet, (RtcpPsfbPacket, RtcpRtpfbPacket)):
+            # Transport-cc feedback is association-wide (media_ssrc=0), so keying
+            # by media_ssrc alone discards it entirely. Route it to ONE sender
+            # (video first: this is where congestion control input matters).
+            if isinstance(packet, RtcpRtpfbPacket) and packet.fmt == rtp.RTCP_RTPFB_TWCC:
+                sorter = sorted(
+                    self.senders.values(),
+                    key=lambda s: getattr(s, "_RTCRtpSender__kind", "") != "video")
+                if sorter:
+                    add_recipient(sorter[0])
+                else:
+                    for s in self.senders.values():
+                        add_recipient(s)
             add_recipient(self.senders.get(packet.media_ssrc))
 
             # for REMB packets, media_ssrc is always 0, we need to look into the FCI
@@ -406,6 +425,12 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_seq = 0
         self._twcc_history: dict[int, tuple[int, float]] = {}
         self.twcc_estimate: Optional[dict] = None
+
+        # Optional strict-priority packet pacer (SELKIES_WEBRTC_PACER): queues
+        # video behind audio/RTCP/data instead of blasting frames to the wire,
+        # with an IDR-aware budget and GOP-reset recovery. Off unless enabled by
+        # the application with enable_pacer().
+        self._pacer: Optional[RtpPacer] = None
 
         # counters
         self.__rx_bytes = 0
@@ -595,6 +620,12 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             self._task.cancel()
             self._task = None
 
+        if self._pacer is not None:
+            try:
+                await self._pacer.close()
+            finally:
+                self._pacer = None
+
         if self._ssl and self._state in [State.CONNECTING, State.CONNECTED]:
             try:
                 self._ssl.shutdown()
@@ -738,22 +769,72 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._rtp_header_extensions_map.configure(parameters)
         self._rtp_router.register_sender(sender, ssrc=sender._ssrc)
 
-    async def _send_data(self, data: bytes) -> None:
+    async def _send_data(self, data: bytes, rtc_class: Optional[int] = None) -> None:
         if self._state != State.CONNECTED:
             raise ConnectionError("Cannot send encrypted data, not connected")
 
+        # Data-channel traffic rides the pacer as class DC (interactive) by
+        # default so it stays ahead of queued video but behind audio/RTCP.
+        if self._pacer is not None:
+            await self._pacer.send(data, rtc_class if rtc_class is not None else CLASS_DC)
+            return
         self._ssl.send(data)
         await self._write_ssl()
 
-    async def _send_rtp(self, data: bytes) -> None:
+    def pacer_enabled(self) -> bool:
+        return self._pacer is not None
+
+    def enable_pacer(
+        self,
+        encoder_bps: int,
+        request_keyframe: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Attach the packet pacer to this transport (idempotent)."""
+        if self._pacer is None:
+            async def _send_now_data(payload: bytes) -> None:
+                self._ssl.send(payload)
+                await self._write_ssl()
+            self._pacer = RtpPacer(
+                encoder_bps=encoder_bps,
+                # Bound coroutine fn directly: the RTP hot path cannot afford
+                # a wrapper frame around every packet.
+                send_now=self.transport._send,
+                send_now_data=_send_now_data,
+                request_keyframe=request_keyframe,
+            )
+        elif request_keyframe is not None:
+            self._pacer._request_keyframe = request_keyframe
+
+    def set_pacer_encoder_bps(self, bps: int) -> None:
+        if self._pacer is not None:
+            self._pacer.set_encoder_bps(bps)
+
+    def note_video_keyframe(self, total_payload_bytes: int, natural: bool = True) -> None:
+        """Video senders report keyframe emissions here so the pacer can keep
+        its queue budget above the (content-variable) IDR size and resurrect
+        the video class after a GOP reset. `natural=False` marks forced
+        recovery keyframes: they resurrect the stream but must not shrink
+        the IDR budget floor."""
+        if self._pacer is not None:
+            self._pacer.note_keyframe(total_payload_bytes, natural)
+
+    def pacer_snapshot(self) -> Optional[dict]:
+        return self._pacer.snapshot() if self._pacer is not None else None
+
+    async def _send_rtp(self, data: bytes, rtc_class: Optional[int] = None) -> None:
         if self._state != State.CONNECTED:
             raise ConnectionError("Cannot send encrypted RTP, not connected")
 
         if is_rtcp(data):
             data = self._tx_srtp.protect_rtcp(data)
+            cls = CLASS_RTCP
         else:
             data = self._tx_srtp.protect(data)
-        await self.transport._send(data)
+            cls = rtc_class if rtc_class is not None else CLASS_VIDEO
+        if self._pacer is not None:
+            await self._pacer.send(data, cls)
+        else:
+            await self.transport._send(data)
         self.__tx_bytes += len(data)
         self.__tx_packets += 1
 
@@ -823,6 +904,10 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             "recv_span_s": span_s,
             "goodput_bps": int(bytes_acked * 8 / span_s) if received else 0,
         }
+        if self._pacer is not None and bytes_acked >= MIN_GOODPUT_SAMPLE_BYTES:
+            # Windows carrying almost no data (pure keepalive / control)
+            # carry no rate signal; feeding them to the pacer slams the pace.
+            self._pacer.set_goodput_bps(self.twcc_estimate["goodput_bps"])
         logger.debug(
             "TWCC feedback: recv=%d lost=%d goodput=%s bps",
             received,

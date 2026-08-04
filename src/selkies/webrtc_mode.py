@@ -1706,6 +1706,55 @@ class WebRTCService(BaseStreamingService):
             logger.debug("updating STUN/TURN servers in RTC app")
             self.rtc_app.update_rtc_config(stun_servers, turn_servers)
 
+    def _ensure_pacer(self, pc, peer: dict, display_id: str) -> None:
+        """Ensure the per-transport packet pacer is enabled/configured (called
+        from the congestion loop; idempotent and cheap). Encoder ceiling: the
+        display's configured video bitrate, CBR or not."""
+        # The shared DTLS transport is reachable via pc.sctp only once the
+        # data-channel m-line is negotiated; media can flow (and TWCC
+        # estimates accumulate) BEFORE that. Fall back to any transceiver's
+        # sender transport — it is the same shared RTCDtlsTransport object.
+        transport = getattr(getattr(pc, "sctp", None), "transport", None)
+        if transport is None:
+            for tr in pc.getTransceivers() or []:
+                transport = getattr(getattr(tr, "sender", None), "transport", None)
+                if transport is not None:
+                    break
+        if transport is None:
+            return
+        lo_kbps, hi_kbps = settings.video_bitrate
+        enc_kbps = float(self._display_setting(display_id, "video_bitrate") or hi_kbps)
+        enc_bps = int(max(lo_kbps, min(hi_kbps, enc_kbps)) * 1000)
+        if not transport.pacer_enabled():
+            vsender = None
+            for tr in pc.getTransceivers() or []:
+                if getattr(tr, "kind", None) == "video":
+                    vsender = tr.sender
+                    break
+            transport.enable_pacer(
+                encoder_bps=enc_bps,
+                # Keyframe requests must hit the encoder PIPELINE (dynamic IDR
+                # injection, shared + throttled across viewers): on this stack
+                # video rides the pre-encoded pack() path, where the sender's
+                # __force_keyframe flag is silently ignored.
+                request_keyframe=lambda did_=display_id: asyncio.ensure_future(
+                    self.request_idr_for_display(did_)),
+            )
+            # Bootstrap the IDR floor from the session-start keyframe — on a
+            # late attach, waiting for the next natural IDR would start the
+            # floor at 0 and reset on the first real burst.
+            kf_bytes = getattr(vsender, "_keyframe_bytes", None)
+            if kf_bytes:
+                transport.note_video_keyframe(
+                    kf_bytes, natural=getattr(vsender, "_keyframe_natural", True))
+            if transport.pacer_enabled():
+                logger.info(
+                    f"WebRTC pacer enabled for display '{display_id}' "
+                    f"(encoder ceiling {enc_bps // 1000} kbps, "
+                    f"keyreq callback: {'bound' if vsender is not None else 'MISSING'})")
+        else:
+            transport.set_pacer_encoder_bps(enc_bps)
+
     async def _congestion_control_loop(self) -> None:
         """GCC-style bitrate adaptation from transport-wide-cc receiver feedback:
         per display, follow the slowest of ITS peers' goodput estimates with
@@ -1716,6 +1765,11 @@ class WebRTCService(BaseStreamingService):
         logger.info(
             f"Congestion control loop started (CBR only, range {lo_kbps}-{hi_kbps} kbps)."
         )
+        # Direct access (NO getattr default): a missing/misnamed setting must
+        # fail loudly, not silently disable the feature — a silent default
+        # here once turned an entire E2E matrix into placebo cells.
+        pacer_on = bool(settings.webrtc_pacer[0])
+        logger.info(f"WebRTC pacer setting: {'ON' if pacer_on else 'OFF'}.")
         while True:
             await asyncio.sleep(1.0)
             rtc_app = self.rtc_app
@@ -1731,11 +1785,25 @@ class WebRTCService(BaseStreamingService):
                 if not estimate:
                     continue
                 did = peer.get("display_id", "primary") or "primary"
-                bucket = per_display.setdefault(did, {"goodputs": [], "worst_loss": 0.0})
+                bucket = per_display.setdefault(
+                    did, {"goodputs": [], "worst_loss": 0.0, "peers": []})
+                bucket["peers"].append(peer)
                 if estimate.get("goodput_bps"):
                     bucket["goodputs"].append(estimate["goodput_bps"])
                 bucket["worst_loss"] = max(bucket["worst_loss"], estimate.get("loss_fraction", 0.0))
+                if pacer_on:
+                    # Pacer config tracks the congestion loop's inputs: encoder
+                    # ceiling from the display setting, goodput handled per
+                    # transport inside RTCDtlsTransport._twcc_process_feedback.
+                    # One bad peer must never kill this tick loop — it is also
+                    # the pacer's only configuration path.
+                    try:
+                        self._ensure_pacer(pc, peer, did)
+                    except Exception:
+                        logger.exception("_ensure_pacer failed (display %s)", did)
             for did, bucket in per_display.items():
+                if not self.args.congestion_control:
+                    continue
                 pipeline = self.display_pipelines.get(did)
                 if (
                     pipeline is None
@@ -1795,7 +1863,10 @@ class WebRTCService(BaseStreamingService):
             initial_dpi = float(getattr(settings, "scaling_dpi", "96"))
             await set_cursor_size(cursor_size_for_dpi(initial_dpi, CURSOR_SIZE))
 
-        if self.args.congestion_control:
+        # The pacer rides this loop's 1 s tick but is an independent feature:
+        # encoder steering stays gated on --congestion-control, the pacer on
+        # --webrtc-pacer.
+        if self.args.congestion_control or bool(settings.webrtc_pacer[0]):
             self.tasks.append(asyncio.create_task(self._congestion_control_loop()))
 
         if self.gpu_monitor:

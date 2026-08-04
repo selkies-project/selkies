@@ -44,6 +44,7 @@ from av import AudioFrame
 from av.frame import Frame
 
 from . import clock, rtp
+from .pacer import CLASS_AUDIO, CLASS_VIDEO, h264_payloads_suggest_idr
 from .codecs import get_capabilities, get_encoder, is_rtx
 from .codecs.base import Encoder
 from .exceptions import InvalidStateError
@@ -142,6 +143,12 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self._enabled = True
         self.__encoder: Optional[Encoder] = None
         self.__force_keyframe = False
+        self.__force_keyframe_used = False
+        # Last observed keyframe size (bytes) and whether it was a natural
+        # IDR: lets a late-attaching pacer bootstrap its IDR floor from the
+        # session-start keyframe instead of waiting for the next one.
+        self._keyframe_bytes: Optional[int] = None
+        self._keyframe_natural: bool = True
         self.__loop = asyncio.get_event_loop()
         self.__mid: Optional[str] = None
         self.__rtp_exited = asyncio.Event()
@@ -378,6 +385,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if self.__encoder is None:
             self.__encoder = get_encoder(codec)
 
+        self.__force_keyframe_used = False
         if isinstance(data, Frame):
             # Encode the frame.
             if isinstance(data, AudioFrame):
@@ -388,6 +396,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
             payloads, timestamp = await self.__loop.run_in_executor(
                 None, self.__encoder.encode, data, force_keyframe
             )
+            self.__force_keyframe_used = force_keyframe
         else:
             # Pack the pre-encoded data.
             payloads, timestamp = self.__encoder.pack(data)
@@ -421,13 +430,17 @@ class RTCRtpSender(AsyncIOEventEmitter):
             )
             self.__log_debug("> %s", packet)
             packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
-            await self.transport._send_rtp(packet_bytes)
+            await self.transport._send_rtp(packet_bytes, rtc_class=CLASS_VIDEO)
 
     def _send_keyframe(self) -> None:
         """
         Request the next frame to be a keyframe.
         """
         self.__force_keyframe = True
+
+    def request_keyframe(self) -> None:
+        """Public alias used by the transport pacer's GOP-reset recovery hook."""
+        self._send_keyframe()
 
     async def _run_rtp(self, codec: RTCRtpCodecParameters) -> None:
         self.__log_debug("- RTP started")
@@ -453,6 +466,23 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 if enc_frame is None:
                     continue
                 frame_time = time.time()
+
+                if self.__kind == "video" and (
+                    self.__force_keyframe_used
+                    or "jpeg" in codec.mimeType.lower()
+                    or h264_payloads_suggest_idr(enc_frame.payloads)
+                ):
+                    # Report keyframe size to the pacer: feeds its IDR-aware
+                    # queue budget and resurrects video after a GOP reset.
+                    # Forced (recovery) keyframes resurrect but must not
+                    # shrink the IDR floor. JPEG: every frame is self-contained,
+                    # so every one feeds the floor (else a floor-0 cap would
+                    # reset-churn full-image frames). Remember for late attach.
+                    natural = not self.__force_keyframe_used
+                    size = sum(len(p_) for p_ in enc_frame.payloads)
+                    self._keyframe_bytes = size
+                    self._keyframe_natural = natural
+                    self.transport.note_video_keyframe(size, natural=natural)
 
                 timestamp = uint32_add(timestamp_origin, enc_frame.timestamp)
 
@@ -500,7 +530,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         packet
                     )
                     packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
-                    await self.transport._send_rtp(packet_bytes)
+                    await self.transport._send_rtp(
+                        packet_bytes,
+                        rtc_class=CLASS_AUDIO if self.__kind == "audio" else CLASS_VIDEO,
+                    )
 
                     self.__ntp_timestamp = clock.current_ntp_time()
                     self.__rtp_timestamp = packet.timestamp
@@ -526,7 +559,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                                 self.__fec_sequence_number, 1
                             )
                             fec_group = []
-                            await self.transport._send_rtp(fec_bytes)
+                            await self.transport._send_rtp(fec_bytes, rtc_class=CLASS_VIDEO)
         except (asyncio.CancelledError, ConnectionError, MediaStreamError):
             pass
         except Exception:
