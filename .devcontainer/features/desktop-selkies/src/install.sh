@@ -5,90 +5,74 @@
 
 set -e
 
-echo "Activating feature 'Selkies GStreamer'"
+echo "Activating feature 'Selkies'"
 echo "The provided release version is: ${RELEASE:-missing env}"
 echo "The provided web port is: ${WEB_PORT:-missing env}"
 echo "The provided xserver is: ${XSERVER:-missing env}"
+echo "The provided desktop is: ${DESKTOP:-missing env}"
+echo "Use Wayland backend: ${WAYLAND:-false}"
 
 export DEBIAN_FRONTEND=noninteractive
 
-# Install base dependencies
-apt-get update && apt-get install --no-install-recommends -y \
+# Install base dependencies (X11 capture/input for pixelflux, PulseAudio for
+# pcmflux, Mesa/VA-API for GPU acceleration, and the display stack)
+apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+    ca-certificates \
+    curl \
+    jq \
     python3-pip \
     python3-dev \
-    python3-gi \
     python3-setuptools \
     python3-wheel \
     libgcrypt20 \
-    libgirepository-1.0-1 \
-    glib-networking \
     libglib2.0-0 \
-    libgudev-1.0-0 \
-    alsa-utils \
-    jackd2 \
-    libjack-jackd2-0 \
+    glib-networking \
     libpulse0 \
-    libopus0 \
-    libvpx-dev \
-    x264 \
-    x265 \
+    pulseaudio \
+    pulseaudio-utils \
     libdrm2 \
     libegl1 \
     libgl1 \
-    libopengl0 \
-    libgles1 \
     libgles2 \
     libglvnd0 \
     libglx0 \
+    libva2 \
+    libva-drm2 \
+    libgbm1 \
+    mesa-utils \
     wayland-protocols \
-    libwayland-dev \
     libwayland-egl1 \
+    libxkbcommon0 \
     wmctrl \
-    xsel \
-    xdotool \
     x11-utils \
     x11-xkb-utils \
     x11-xserver-utils \
     xserver-xorg-core \
+    xvfb \
     libx11-xcb1 \
+    libxcb1 \
+    libxcb-shm0 \
+    libxcb-xfixes0 \
+    libxcb-randr0 \
     libxcb-dri3-0 \
     libxdamage1 \
     libxfixes3 \
-    libxv1 \
     libxtst6 \
-    libxext6 && \
-if { [ "$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" = "ubuntu" ] && [ "$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" \> "20.04" ]; } || { [ "$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" = "debian" ] && [ "$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" \> "11" ]; }; then apt-get install --no-install-recommends -y xcvt libopenh264-dev svt-av1 aom-tools; else apt-get install --no-install-recommends -y mesa-utils-extra; fi && \
-apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-
-# Install system dependencies
-apt-get update && apt-get install --no-install-recommends -y \
-    xvfb \
+    libxext6 \
     coturn && \
 apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
-if { [ "$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" = "ubuntu" ] && [ "$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" \> "20.04" ]; } || { [ "$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" = "debian" ] && [ "$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" \> "11" ]; }; then apt-get install --no-install-recommends -y xcvt; fi
-
-# Install desktop environment
-./install-desktop-environment.sh ${DESKTOP}
-
-SELKIES_RELEASE_TAG=${RELEASE}
-if [ "${RELEASE}" = "latest" ]; then
-    # Automatically fetch the latest Selkies version and install the components
-    SELKIES_RELEASE_TAG=$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')
-else
-    # Check for tagged release
-    if ! curl -fsSL -o /dev/null "https://api.github.com/repos/selkies-project/selkies/releases/tags/${RELEASE}"; then
-        echo "ERROR: could not find Selkies release ${RELEASE}"
-        exit 1
-    fi
+# Install desktop environment (LXQt), unless "none" was selected
+if [ "${DESKTOP:-lxqt}" != "none" ]; then
+    ./install-desktop-environment.sh
 fi
-# Remove leading 'v' to get semver number.
-SELKIES_VERSION=${SELKIES_RELEASE_TAG:1}
 
-cd /opt
-curl -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_RELEASE_TAG}/selkies-${SELKIES_RELEASE_TAG}-$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"').tar.gz" | tar -xzf -
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_RELEASE_TAG}/selkies-${SELKIES_VERSION}-py3-none-any.whl" && PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir "selkies-${SELKIES_VERSION}-py3-none-any.whl" && rm -f "selkies-${SELKIES_VERSION}-py3-none-any.whl"
-curl -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_RELEASE_TAG}/selkies-web-${SELKIES_RELEASE_TAG}.tar.gz" | tar -xzf -
+# Install Selkies from PyPI (latest release or a requested release tag)
+if [ "${RELEASE:-latest}" = "latest" ]; then
+    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --upgrade selkies
+else
+    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir "selkies==${RELEASE#v}"
+fi
 
 mkdir -pm755 /etc/OpenCL/vendors && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
 

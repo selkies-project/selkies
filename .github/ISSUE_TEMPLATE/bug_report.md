@@ -33,7 +33,6 @@ If applicable, add screenshots to help explain your problem.
 
  - Host OS Version: [e.g. Ubuntu 24.04, Arch Linux 2024.01.01]
  - Host GPU Model and Driver/Encoder Version: [e.g. Intel UHD Graphics 750, VA-API 1.19, libva 2.12.0 (outputs from `vainfo`) / NVIDIA RTX 3070, 535.129.03 driver]
- - GStreamer Version: [e.g. 1.26.0]
  - Browser Version [e.g. Chrome 121, Safari 17.9]
  - Any other information specific to your environment
 

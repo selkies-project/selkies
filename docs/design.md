@@ -8,7 +8,7 @@ Have you ever wondered if Parsec, Moonlight + Sunshine, or Steam Remote Play cou
 
 None of these capabilities have to be behind proprietary walls, the community can build one!
 
-**Moonlight, Google Stadia, or GeForce NOW in noVNC form factor for Linux X11, in any HTML5 web interface you wish to embed inside, with at least 60 frames per second on Full HD resolution.**
+**Moonlight, Google Stadia, or GeForce NOW in noVNC form factor for Linux X11 and Wayland, in any HTML5 web interface you wish to embed inside, with at least 60 frames per second on Full HD resolution.**
 
 Selkies is an open-source low-latency high-performance Linux-native GPU/CPU-accelerated WebRTC HTML5 remote desktop streaming platform, for self-hosting, containers, Kubernetes, or Cloud/HPC platforms, [started out first by Google engineers](https://web.archive.org/web/20210310083658/https://cloud.google.com/solutions/gpu-accelerated-streaming-using-webrtc), then expanded by academic researchers.
 
@@ -28,7 +28,7 @@ Although, such solutions are currently primarily proprietary, requiring license 
 
 ## Design
 
-Selkies streams a Linux X11 desktop or Docker®/Kubernetes container to a recent web browser with GPU hardware or CPU software acceleration from the server and the client. By default it delivers the stream over plain WebSockets to a WebCodecs-based web client; WebRTC is available as an opt-in transport (`--mode=webrtc`). Linux Wayland, Mac, and Windows support is planned, but community contribution will always accelerate new features.
+Selkies streams a Linux desktop or Docker®/Kubernetes container to a recent web browser with GPU hardware or CPU software acceleration from the server and the client. By default it delivers the stream over plain WebSockets to a WebCodecs-based web client; WebRTC is available as an opt-in transport (`--mode=webrtc`). The default capture backend attaches to an X.Org X11 display; a native Wayland backend (running a headless Wayland compositor, or capturing from a wlroots-based host compositor) is available through the `pixelflux` capture library (toggled with `--wayland` / `SELKIES_WAYLAND`), while X11 remains the default. Mac and Windows server support is planned, but community contribution will always accelerate new features.
 
 This project is adequate as a high-performance replacement to most Linux remote desktop solutions, especially VNC, delivering 60 frames per second at 1080p resolution with software encoding on 150% CPU consumption or better on an NVIDIA or Intel/AMD GPU. Selkies, overall, achieves comparable performance to proprietary remote desktop platforms and surpasses those of similar open-source applications by incorporating GPU-accelerated screen encoding and latency-eliminating techniques utilized in web-based WebRTC game streaming platforms.
 
@@ -64,10 +64,10 @@ Root permissions are also not required at all, and all components can be install
 
 The runtime is a single [Python](https://www.python.org) application built around an [`aiohttp`](https://docs.aiohttp.org) server. Media capture and encoding are delegated to two small, self-contained Rust (PyO3) extensions — `pixelflux` for screen capture and H.264/JPEG encoding, and `pcmflux` for PulseAudio capture and Opus encoding — so the performance-critical code is isolated and reusable, while the orchestration stays in highly readable Python. This clean separation lets developers and researchers customize to their own needs, as long as the MPL-2.0 license terms are met.
 
-For the opt-in WebRTC transport, Selkies embeds a vendored fork of [`aiortc`](https://github.com/aiortc/aiortc) (a pure-Python WebRTC implementation) under `src/selkies/webrtc/`, rather than depending on any native WebRTC or GStreamer stack. Input injection into the X11 display uses a vendored [`python-xlib`](https://github.com/python-xlib/python-xlib) (XTEST/XFixes) under `src/selkies/Xlib/`. The web client is a WebCodecs-based application under [`addons/selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core).
+For the opt-in WebRTC transport, Selkies embeds a vendored fork of [`aiortc`](https://github.com/aiortc/aiortc) (a pure-Python WebRTC implementation) under `src/selkies/webrtc/`, rather than depending on any native WebRTC multimedia-framework stack. Input injection into the X11 display uses a vendored [`python-xlib`](https://github.com/python-xlib/python-xlib) (XTEST/XFixes) under `src/selkies/Xlib/`. The web client is a WebCodecs-based application under [`addons/selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core).
 
 Therefore, Selkies is meant from the start to be a community-built project, where developers from all backgrounds can easily contribute to or expand upon.
 
-> **Historical note:** earlier releases of this project were named "Selkies-GStreamer" and used a [GStreamer](https://gstreamer.freedesktop.org) `webrtcbin` pipeline for capture, encoding, and transport. That GStreamer runtime has been fully removed in favor of the `pixelflux`/`pcmflux` plus vendored `aiortc` architecture described above.
+> **Historical note:** earlier releases of this project used a multimedia-framework-based `webrtcbin` pipeline for capture, encoding, and transport. That runtime has been fully removed in favor of the `pixelflux`/`pcmflux` plus vendored `aiortc` architecture described above.
 
 **Head to [Getting Started](start.md) to deploy your own instance.**

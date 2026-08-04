@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check spelling
+        uses: codespell-project/actions-codespell@v2
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Ruff
+        run: |
+          python3 -m pip install --upgrade ruff
+          ruff check src/selkies || true
+      - name: Validate workflow YAML
+        run: |
+          python3 -m pip install --upgrade pyyaml
+          python3 -c "import glob, yaml; [yaml.safe_load(open(f)) for f in glob.glob('.github/workflows/*.yaml') + glob.glob('.github/actions/*/action.yaml')]; print('YAML OK')"
+
+  wheel:
+    name: Build wheel
+    uses: ./.github/workflows/build-wheel.yaml

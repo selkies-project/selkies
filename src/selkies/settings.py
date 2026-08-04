@@ -635,7 +635,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "bool",
         "default": False,
         "env_var": "PIXELFLUX_WAYLAND",
-        "help": "Run the Wayland (headless compositor) backend instead of X11 capture/input.",
+        "help": "Run the Wayland (headless compositor) backend instead of X11 capture/input (default: X11); PIXELFLUX_WAYLAND remains as a legacy fallback.",
     },
     {
         "name": "app_wayland_display",

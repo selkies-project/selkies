@@ -1,90 +1,74 @@
-ARG IMAGE_TAG=jammy
+ARG IMAGE_TAG=ubuntu-24.04
 FROM mcr.microsoft.com/devcontainers/base:${IMAGE_TAG}
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Install base Selkies dependencies
+# Install base Selkies dependencies (X11 capture/input, PulseAudio, Mesa/VA-API, Wayland plumbing)
 RUN sudo apt-get update && sudo apt-get install --no-install-recommends -y \
+        ca-certificates \
+        curl \
+        jq \
         python3-pip \
         python3-dev \
-        python3-gi \
         python3-setuptools \
         python3-wheel \
+        python3-venv \
         libgcrypt20 \
-        libgirepository-1.0-1 \
-        glib-networking \
         libglib2.0-0 \
-        libgudev-1.0-0 \
-        alsa-utils \
-        jackd2 \
-        libjack-jackd2-0 \
+        glib-networking \
         libpulse0 \
-        libopus0 \
-        libvpx-dev \
-        x264 \
-        x265 \
+        pulseaudio \
+        pulseaudio-utils \
         libdrm2 \
         libegl1 \
         libgl1 \
-        libopengl0 \
-        libgles1 \
         libgles2 \
         libglvnd0 \
         libglx0 \
+        libva2 \
+        libva-drm2 \
+        libgbm1 \
+        mesa-utils \
         wayland-protocols \
-        libwayland-dev \
         libwayland-egl1 \
+        libxkbcommon0 \
         wmctrl \
-        xsel \
-        xdotool \
         x11-utils \
         x11-xkb-utils \
         x11-xserver-utils \
         xserver-xorg-core \
+        xvfb \
         libx11-xcb1 \
+        libxcb1 \
+        libxcb-shm0 \
+        libxcb-xfixes0 \
+        libxcb-randr0 \
         libxcb-dri3-0 \
         libxdamage1 \
         libxfixes3 \
-        libxv1 \
         libxtst6 \
-        libxext6 && \
-    if { [ "$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" = "ubuntu" ] && [ "$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" \> "20.04" ]; } || { [ "$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" = "debian" ] && [ "$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" \> "11" ]; }; then apt-get install --no-install-recommends -y xcvt libopenh264-dev svt-av1 aom-tools; else apt-get install --no-install-recommends -y mesa-utils-extra; fi && \
-    sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-
-RUN if { [ "$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" = "ubuntu" ] && [ "$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" \> "20.04" ]; } || { [ "$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" = "debian" ] && [ "$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" \> "11" ]; }; then \
-        sudo apt-get update && \
-        sudo apt-get install --no-install-recommends -y xcvt && \
-        sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*; \
-    fi
-
-# Download and extract latest GStreamer component
-RUN cd /opt && SELKIES_VERSION=$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g') && \
-    curl -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-v${SELKIES_VERSION}-$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"').tar.gz" | sudo tar -xzf -
-
-# Install development dependencies
-ARG PIP_BREAK_SYSTEM_PACKAGES=1
-RUN sudo apt-get update && sudo apt-get install --no-install-recommends -y \
-        xvfb \
+        libxext6 \
         coturn \
         imagemagick \
-        python3-venv && \
+        jstest-gtk \
+        netcat-openbsd && \
     sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
     sudo python3 -m pip install --no-cache-dir --upgrade build
 
-# Install desktop environment
-ARG DESKTOP=xfce
+# Install the LXQt desktop environment
 COPY ./features/desktop-selkies/src/install-desktop-environment.sh /tmp/
-RUN /tmp/install-desktop-environment.sh ${DESKTOP}
+RUN /tmp/install-desktop-environment.sh
 
-# Install Chrome browser
-RUN cd /tmp && curl -fsSL -o ./google-chrome-stable.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" && \
-    sudo apt-get update && sudo apt-get install --no-install-recommends -y xdg-utils ./google-chrome-stable.deb && \
-    sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
-    sudo rm -f google-chrome-stable.deb && \
-    xdg-settings set default-web-browser google-chrome.desktop
+# Install the Chrome browser (package available for amd64 only)
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+        cd /tmp && curl -fsSL -o ./google-chrome-stable.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" && \
+        sudo apt-get update && sudo apt-get install --no-install-recommends -y xdg-utils ./google-chrome-stable.deb && \
+        sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
+        sudo rm -f google-chrome-stable.deb && \
+        xdg-settings set default-web-browser google-chrome.desktop; \
+    fi
 
-# Install other development utilities
-RUN sudo apt-get update && sudo apt-get install --no-install-recommends -y \
-        jstest-gtk \
-        netcat && \
+# Web client build toolchain (Node.js LTS)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && \
+    sudo apt-get update && sudo apt-get install --no-install-recommends -y nodejs && \
     sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*

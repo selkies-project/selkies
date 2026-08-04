@@ -1,0 +1,8 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+export DISPLAY="${DISPLAY:-:20}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
+until [ -d "${XDG_RUNTIME_DIR}" ]; do sleep 0.5; done
+exec /usr/bin/Xvfb "${DISPLAY}" -screen 0 "8192x4096x24" +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem

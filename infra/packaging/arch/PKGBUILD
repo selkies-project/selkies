@@ -1,0 +1,19 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+pkgname=selkies
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)"
+arch=("x86_64" "aarch64")
+url="https://github.com/selkies-project/selkies"
+license=("MPL-2.0")
+depends=("python" "libpulse" "libxcb" "libxkbcommon" "libx11" "libva" "libdrm")
+# The payload (/opt/selkies venv staged by infra/packaging/arch.sh) is packed here.
+source=()
+sha256sums=()
+options=(!strip !debug)
+package() {
+    cp -a /pkg-root/opt "$pkgdir"/opt
+    cp -a /pkg-root/usr "$pkgdir"/usr
+}

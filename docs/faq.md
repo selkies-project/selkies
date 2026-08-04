@@ -9,7 +9,7 @@ This section applies to the opt-in WebRTC transport (`--mode=webrtc`). The defau
 
 First of all, ensure that there is a running PulseAudio or PipeWire-Pulse session as the interface does not establish without an audio server.
 
-**Moreover, check that you are using X.Org instead of Wayland (which is the default in many distributions but not supported) when using an existing display.**
+**Moreover, when attaching to an existing display, check that you are using X.Org instead of Wayland (the default in many distributions); an already-running Wayland session cannot be captured. The headless Wayland mode (`--wayland=true` / `SELKIES_WAYLAND=true`) runs its own compositor session and is not affected by this check.**
 
 **Then, if you are using WebRTC mode, please read [WebRTC and Firewall Issues](firewall.md).**
 
@@ -102,7 +102,7 @@ The below steps can be used when you want to test your TURN server configured wi
 **1. Run the [Example Container](component.md#example-container) (fill in `DISTRIB_RELEASE` to Ubuntu versions such as `24.04`):**
 
 ```bash
-docker run --name selkies -it -d --rm -p 8081:8081 -p 3478:3478 ghcr.io/selkies-project/selkies/gst-py-example:main-ubuntu${DISTRIB_RELEASE}
+docker run --name selkies -it -d --rm -p 8081:8081 -p 3478:3478 ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}
 docker exec -it selkies bash
 ```
 

@@ -1,0 +1,61 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/ubuntu
+{
+	"name": "Ubuntu 24.04 with LXQt Desktop",
+	"build": {
+		// Path is relative to the devcontainer.json file.
+		"dockerfile": "../Dockerfile",
+		"args": {
+			"IMAGE_TAG": "ubuntu-24.04"
+		}
+	},
+	"features": {
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+		"ghcr.io/devcontainers/features/github-cli:1": {},
+		"ghcr.io/devcontainers-extra/features/act:1": {}
+	},
+	// Run privileged to run Chrome without the --no-sandbox option.
+	"privileged": true,
+	// Increase SHM size to help with crashing on Chrome.
+	"runArgs": [
+		"--shm-size=1g"
+	],
+
+	"forwardPorts": [
+		8081, // selkies web port
+		3478, // turnserver
+		19081 // prometheus metrics port
+	],
+	"portsAttributes": {
+		// https://containers.dev/implementors/json_reference/#port-attributes
+		"8081": {
+			"label": "desktop",
+			"onAutoForward": "notify"
+		},
+		"3478": {
+			"label": "turnserver",
+			"onAutoForward": "ignore"
+		},
+		"19081": {
+			"label": "selkies-metrics",
+			"onAutoForward": "ignore"
+		}
+	},
+
+	"remoteEnv": {
+		"DESKTOP": "LXQT",
+		"SELKIES_PORT": "8081"
+	},
+
+	// Build the web client from source and install Selkies editable, exactly as
+	// the CI wheel build does.
+	"postCreateCommand": "bash .devcontainer/postcreate.sh",
+
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python"
+			]
+		}
+	}
+}

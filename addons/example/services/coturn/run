@@ -1,0 +1,27 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+# Embedded coTURN TURN server; also useful when WebRTC mode is selected
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
+until [ -d "${XDG_RUNTIME_DIR}" ]; do sleep 0.5; done
+[ -f "${XDG_RUNTIME_DIR}/container-env" ] && . "${XDG_RUNTIME_DIR}/container-env"
+exec turnserver \
+    --verbose \
+    --listening-ip="0.0.0.0" \
+    --listening-ip="::" \
+    --listening-port="${SELKIES_TURN_PORT:-3478}" \
+    --realm="${TURN_REALM:-example.com}" \
+    --external-ip="${TURN_EXTERNAL_IP:-127.0.0.1}" \
+    --min-port="${TURN_MIN_PORT:-49152}" \
+    --max-port="${TURN_MAX_PORT:-65535}" \
+    --channel-lifetime="${TURN_CHANNEL_LIFETIME:--1}" \
+    --lt-cred-mech \
+    --user="selkies:${TURN_RANDOM_PASSWORD:-selkies}" \
+    --no-cli \
+    --cli-password="${TURN_RANDOM_PASSWORD:-selkies}" \
+    --userdb="${XDG_RUNTIME_DIR}/turnserver-turndb" \
+    --pidfile="${XDG_RUNTIME_DIR}/turnserver.pid" \
+    --log-file="stdout" \
+    --allow-loopback-peers \
+    ${TURN_EXTRA_ARGS}

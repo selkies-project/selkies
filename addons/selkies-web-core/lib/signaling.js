@@ -36,14 +36,12 @@
 export class WebRTCSignaling {
     /**
      * Interface to the WebRTC signaling server.
-     * Protocol reference:
-     *   https://github.com/GStreamer/gstreamer/blob/main/subprojects/gst-examples/webrtc/signaling/Protocol.md
+     * Protocol: WebSocket offer/answer and ICE candidate exchange for the WebRTC transport,
+     *   kept in lockstep with the vendored server implementation.
      *
      * @constructor
      * @param {URL} [server]
      *    The URL object of the signaling server to connect to, created with `new URL()`.
-     *    Reference implementation:
-     *      https://github.com/GStreamer/gstreamer/tree/main/subprojects/gst-examples/webrtc/signaling
      */
     constructor(server, client_type, client_slot, client_strict_viewer, client_token, display_id, display_position) {
         /**

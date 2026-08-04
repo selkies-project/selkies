@@ -12,64 +12,46 @@ services:
       args:
         PYPI_PACKAGE: selkies
         PACKAGE_VERSION: 0.0.0.dev0
-  web:
-    image: selkies-web-core
-    build:
-      context: ./addons/selkies-web-core
-      dockerfile: Dockerfile
   test:
     ###
-    # NOTE: export the DISTRIB_IMAGE and DISTRIB_RELEASE environment variables to change the base image during build and run.
+    # NOTE: export DISTRIB_IMAGE and DISTRIB_RELEASE to change the base image.
+    # To test an unreleased wheel, build it with the `dist` service, then copy it
+    # from the `selkies-py-build` image into `addons/example/wheels/` before
+    # building this service; otherwise the latest PyPI release is installed.
     ###
-
     image: selkies-example:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-24.04}
-    entrypoint: ["/tini", "--", "/bin/bash"]
+    entrypoint: ["/bin/bash"]
     build:
       context: ./addons/example
       dockerfile: Dockerfile
       args:
         DISTRIB_IMAGE: ${DISTRIB_IMAGE:-ubuntu}
         DISTRIB_RELEASE: ${DISTRIB_RELEASE:-24.04}
-
-        PY_BUILD_IMAGE: selkies-py-build:latest
-        WEB_IMAGE: selkies-web-core:latest
         PYPI_PACKAGE: selkies
-        PACKAGE_VERSION: 0.0.0.dev0
     environment:
-      # Basic authentication
       SELKIES_ENABLE_BASIC_AUTH: ${SELKIES_ENABLE_BASIC_AUTH}
       SELKIES_BASIC_AUTH_USER: ${SELKIES_BASIC_AUTH_USER}
       SELKIES_BASIC_AUTH_PASSWORD: ${SELKIES_BASIC_AUTH_PASSWORD}
-
-      # TURN with shared secret or user/pass
       SELKIES_TURN_SHARED_SECRET: ${SELKIES_TURN_SHARED_SECRET}
       SELKIES_TURN_HOST: ${SELKIES_TURN_HOST}
       SELKIES_TURN_PORT: ${SELKIES_TURN_PORT}
       SELKIES_TURN_USERNAME: ${SELKIES_TURN_USERNAME}
       SELKIES_TURN_PASSWORD: ${SELKIES_TURN_PASSWORD}
-
-      # Turn with coTURN web
       SELKIES_TURN_REST_URI: ${SELKIES_TURN_REST_URI}
       SELKIES_TURN_REST_USERNAME: ${SELKIES_TURN_REST_USERNAME}
       SELKIES_TURN_REST_AUTHHEADER: ${SELKIES_TURN_REST_AUTHHEADER}
-
-      # Additional server-side settings.
       SELKIES_ENABLE_RESIZE: ${SELKIES_ENABLE_RESIZE}
-
-      # DEBUG remote cursors
       SELKIES_DEBUG_CURSORS: ${SELKIES_DEBUG_CURSORS:-false}
-
-      # Start full XFCE4 session, vs just X11 server.
-      START_XFCE4: ${START_XFCE4:-true}
+      # Start a full LXQt session, vs just the display server.
+      START_LXQT: ${START_LXQT:-true}
+      # Use the headless Wayland backend instead of X11 (default: X11 Xvfb).
+      SELKIES_WAYLAND: ${SELKIES_WAYLAND:-false}
     ports:
-      - "8080:8080"
+      - "8081:8081"
     volumes:
       - type: bind
         source: ./src/selkies
-        # Change Python version to system version
         target: /usr/local/lib/python3.12/dist-packages/selkies
         read_only: true
-
-    # Configure for interactive session
     stdin_open: true
     tty: true

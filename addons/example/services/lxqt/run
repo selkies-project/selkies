@@ -1,0 +1,10 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+export DISPLAY="${DISPLAY:-:20}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
+# Wait for the X11 socket, then start the LXQt session on it
+until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
+rm -rf "${HOME}/.config/lxqt"
+exec dbus-launch --exit-with-session lxqt-session

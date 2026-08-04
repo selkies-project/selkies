@@ -1,0 +1,75 @@
+name: Release
+
+# Maintainer-triggered release: builds the wheel, multi-arch images, native
+# packages, and AppImages, then assembles a DRAFT GitHub release with every
+# build artifact attached. The draft is finalized and published manually.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (semver without the leading v, e.g. 1.2.3)
+        type: string
+        required: true
+
+jobs:
+  validate:
+    name: Validate release inputs
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - id: ver
+        run: |
+          set -e
+          ver="${{ github.event.inputs.tag }}"
+          ver="${ver#v}"
+          echo "${ver}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "tag must be semver (e.g. 1.2.3)" >&2; exit 1; }
+          echo "version=${ver}" >> "${GITHUB_OUTPUT}"
+
+  wheel:
+    name: Build wheel
+    needs: validate
+    uses: ./.github/workflows/build-wheel.yaml
+    with:
+      package_version: ${{ needs.validate.outputs.version }}
+
+  images:
+    name: Build and publish multi-arch images
+    needs: validate
+    uses: ./.github/workflows/images.yaml
+    with:
+      tag_prefix: v${{ needs.validate.outputs.version }}
+
+  packages:
+    name: Build native packages
+    needs: validate
+    uses: ./.github/workflows/packages.yaml
+    with:
+      package_version: ${{ needs.validate.outputs.version }}
+
+  draft-release:
+    name: Assemble draft release
+    needs: [validate, wheel, images, packages]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: "*"
+          path: release-artifacts/
+          merge-multiple: true
+      - name: Collect release files
+        run: |
+          set -e
+          mkdir -p release
+          find release-artifacts -type f -exec mv {} release/ \;
+          ls -la release/
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.validate.outputs.version }}
+          name: v${{ needs.validate.outputs.version }}
+          draft: true
+          generate_release_notes: true
+          files: release/*

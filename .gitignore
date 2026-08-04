@@ -7,3 +7,10 @@ NOTES.md
 **/__pycache__/
 src/**/.ruff_cache
 src/selkies/selkies_web/
+addons/example/wheels/*.whl
+build/appimage/
+out/
+release-artifacts/
+release/
+AppDir/
+infra/appimage/AppDir/

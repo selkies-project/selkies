@@ -2,24 +2,64 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# Supported base images: Ubuntu 24.04, 22.04, 20.04
+# Reference minimal example container for Selkies.
+#
+#   - LXQt desktop (Openbox) on X11 (Xvfb) by default; headless Wayland backend
+#     with SELKIES_WAYLAND=true
+#   - s6 service supervision (works both as PID 1 and below a foreign init,
+#     unlike s6-overlay; no Python-based supervisor, no tini)
+#   - Joystick interposer + fake-udev (container-only gamepad plumbing) built
+#     in-tree and wired with LD_PRELOAD
+#   - Selkies installed with pip: from wheels dropped into `wheels/`, or from
+#     PyPI (latest release) when `wheels/` is empty
+#
+# Supported bases: Ubuntu 24.04 / 26.04, Debian Bookworm / Trixie and later
+# (select with --build-arg DISTRIB_IMAGE=ubuntu|debian DISTRIB_RELEASE=24.04|26.04|bookworm|trixie)
+
 ARG DISTRIB_IMAGE=ubuntu
 ARG DISTRIB_RELEASE=24.04
-ARG PY_BUILD_IMAGE=ghcr.io/selkies-project/selkies/py-build:main
-ARG WEB_IMAGE=ghcr.io/selkies-project/selkies/selkies-web:main
-ARG JS_BASE_IMAGE=ghcr.io/selkies-project/selkies/js-interposer
-ARG JS_BASE_IMAGE_RELEASE=main
-ARG LIBUDEV_IMAGE=ghcr.io/selkies-project/selkies/fake-udev
-ARG LIBUDEV_IMAGE_RELEASE=main
-FROM ${PY_BUILD_IMAGE} AS selkies-build
-FROM ${WEB_IMAGE} AS selkies-web
-FROM ${JS_BASE_IMAGE}:${JS_BASE_IMAGE_RELEASE}-${DISTRIB_IMAGE}${DISTRIB_RELEASE} AS selkies-js-interposer
-FROM ${LIBUDEV_IMAGE}:${LIBUDEV_IMAGE_RELEASE}-${DISTRIB_IMAGE}${DISTRIB_RELEASE} AS selkies-fake-udev
+ARG PYPI_PACKAGE=selkies
+
+# Build the joystick interposer and fake-udev inside this repository (they are
+# dedicated to containerized environments and are not desktop components)
+FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS add-ons
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+        build-essential \
+        ca-certificates && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
+COPY addons/js-interposer /build/js-interposer
+COPY addons/fake-udev /build/fake-udev
+RUN set -e; \
+    LIBDIR="$(gcc -print-multiarch)"; \
+    mkdir -p "/opt/add-ons/lib/${LIBDIR}"; \
+    gcc -shared -fPIC -o /opt/add-ons/lib/${LIBDIR}/selkies_joystick_interposer.so /build/js-interposer/joystick_interposer.c -ldl -pthread; \
+    make -C /build/fake-udev; \
+    cp /build/fake-udev/libudev.so.1.0.0-fake /build/fake-udev/libudev.so.1 /build/fake-udev/libudev.so "/opt/add-ons/lib/${LIBDIR}/"; \
+    # Also build the 32-bit variants so 32-bit (Wine-era) applications see the
+    # virtual gamepads too (`/usr/$LIB` expands per process bitness); amd64 only
+    if [ "$(uname -m)" = "x86_64" ]; then \
+        apt-get update && apt-get install --no-install-recommends -y gcc-multilib; \
+        LIB32DIR="$(gcc -m32 -print-multiarch)"; \
+        mkdir -p "/opt/add-ons/lib/${LIB32DIR}"; \
+        gcc -m32 -shared -fPIC -o /opt/add-ons/lib/${LIB32DIR}/selkies_joystick_interposer.so /build/js-interposer/joystick_interposer.c -ldl -pthread; \
+        make -C /build/fake-udev all32; \
+        cp /build/fake-udev/libudev_x86.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so.1.0.0-fake"; \
+        ln -sf libudev.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so.1"; \
+        ln -sf libudev.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so"; \
+    fi
+
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
-ARG DISTRIB_IMAGE
-ARG DISTRIB_RELEASE
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
+LABEL org.opencontainers.image.title="Selkies Example Container"
+LABEL org.opencontainers.image.description="Reference minimal Selkies container: LXQt (X11) by default, headless Wayland with SELKIES_WAYLAND=true, s6 service supervision, embedded coTURN"
+LABEL org.opencontainers.image.source="https://github.com/selkies-project/selkies"
+LABEL org.opencontainers.image.licenses="MPL-2.0"
+
+ARG DISTRIB_IMAGE
+ARG DISTRIB_RELEASE
+ARG PYPI_PACKAGE
 
 ARG DEBIAN_FRONTEND=noninteractive
 # Configure rootless user environment for constrained conditions without escalated root privileges inside containers
@@ -31,6 +71,7 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
         fakeroot \
         fuse \
         kmod \
+
         locales \
         ssl-cert \
         sudo \
@@ -57,291 +98,137 @@ ENV LANG="en_US.UTF-8"
 ENV LANGUAGE="en_US:en"
 ENV LC_ALL="en_US.UTF-8"
 
-USER 1000
-# Use BUILDAH_FORMAT=docker in buildah
-SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
+USER 0
 
-# Install Selkies system dependencies
-RUN apt-get update && apt-get install --no-install-recommends -y \
-        # System dependencies
-        build-essential \
+# Install and configure below this line
+###
+# Debian packaging frontends: apt-get only, never dpkg
+###
+RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+        # Process supervision (no Python, works below any PID 1 as well)
+        s6 \
+        # Base utilities
+        ca-certificates \
         curl \
-        gdebi-core \
-        gnupg \
-        software-properties-common \
         jq \
-        python3-pip \
-        python3-dev \
-        python3-setuptools \
-        python3-wheel \
-        libgcrypt20 \
-        alsa-utils \
-        jackd2 \
-        libjack-jackd2-0 \
-        libpulse0 \
-        libopus0 \
-        libvpx-dev \
-        x264 \
-        x265 \
-        libdrm2 \
-        libegl1 \
-        libgl1 \
-        libopengl0 \
-        libgles1 \
-        libgles2 \
-        libglvnd0 \
-        libglx0 \
-        wayland-protocols \
-        libwayland-dev \
-        libwayland-egl1 \
-        wmctrl \
-        xclip \
-        xdotool \
-        x11-utils \
-        x11-xkb-utils \
-        x11-xserver-utils \
+        dnsutils \
+        # X11 display server and utilities
         xserver-xorg-core \
+        xvfb \
+        x11-xserver-utils \
+        x11-xkb-utils \
+        x11-utils \
+        xauth \
+        wmctrl \
+        dbus-x11 \
+        # X11 client libraries required by pixelflux (XShm capture) and input injection
         libx11-xcb1 \
+        libxcb1 \
+        libxcb-shm0 \
+        libxcb-xfixes0 \
+        libxcb-randr0 \
         libxcb-dri3-0 \
+        libxkbcommon0 \
         libxdamage1 \
         libxfixes3 \
-        libxv1 \
         libxtst6 \
         libxext6 \
-        libxkbcommon-dev \
-        # Graphics driver dependencies
-        mesa-va-drivers \
-        libva2 \
-        vainfo \
-        vdpau-driver-all \
-        libvdpau-va-gl1 \
-        vdpauinfo \
-        mesa-vulkan-drivers \
-        vulkan-tools \
-        radeontop && \
-    if { [ "$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" = "ubuntu" ] && [ "$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" \> "20.04" ]; } || { [ "$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" = "debian" ] && [ "$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')" \> "11" ]; }; then apt-get install --no-install-recommends -y xcvt libopenh264-dev svt-av1 aom-tools; else apt-get install --no-install-recommends -y mesa-utils-extra; fi && \
-    if [ "$(dpkg --print-architecture)" = "amd64" ]; then apt-get install --no-install-recommends -y intel-gpu-tools nvtop va-driver-all i965-va-driver-shaders intel-media-va-driver-non-free; fi && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
-    echo "/usr/local/nvidia/lib" >> /etc/ld.so.conf.d/nvidia.conf && \
-    echo "/usr/local/nvidia/lib64" >> /etc/ld.so.conf.d/nvidia.conf && \
-    # Configure OpenCL manually
-    mkdir -pm755 /etc/OpenCL/vendors && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd && \
-    # Configure Vulkan manually
-    VULKAN_API_VERSION=$(dpkg -s libvulkan1 | grep -oP 'Version: [0-9|\.]+' | grep -oP '[0-9]+(\.[0-9]+)(\.[0-9]+)') && \
-    mkdir -pm755 /etc/vulkan/icd.d/ && echo "{\n\
-    \"file_format_version\" : \"1.0.0\",\n\
-    \"ICD\": {\n\
-        \"library_path\": \"libGLX_nvidia.so.0\",\n\
-        \"api_version\" : \"${VULKAN_API_VERSION}\"\n\
-    }\n\
-}" > /etc/vulkan/icd.d/nvidia_icd.json && \
-    # Configure EGL manually
-    mkdir -pm755 /usr/share/glvnd/egl_vendor.d/ && echo "{\n\
-    \"file_format_version\" : \"1.0.0\",\n\
-    \"ICD\": {\n\
-        \"library_path\": \"libEGL_nvidia.so.0\"\n\
-    }\n\
-}" > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
-# Expose NVIDIA libraries and paths
-ENV PATH="/usr/local/nvidia/bin${PATH:+:${PATH}}"
-ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
-# Make all NVIDIA GPUs visible by default
-ENV NVIDIA_VISIBLE_DEVICES=all
-# All NVIDIA driver capabilities should preferably be used, check `NVIDIA_DRIVER_CAPABILITIES` inside the container if things do not work
-ENV NVIDIA_DRIVER_CAPABILITIES=all
-# Disable VSYNC for NVIDIA GPUs
-ENV __GL_SYNC_TO_VBLANK=0
-# Set default DISPLAY environment
-ENV DISPLAY=":20"
-
-# Install VirtualGL and make libraries available for preload
-ENV VGL_DISPLAY=egl
-RUN cd /tmp && VIRTUALGL_VERSION="$(curl -fsSL "https://api.github.com/repos/VirtualGL/virtualgl/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')" && \
-    if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-    dpkg --add-architecture i386 && \
-    curl -fsSL -O "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALGL_VERSION}/virtualgl_${VIRTUALGL_VERSION}_amd64.deb" && \
-    curl -fsSL -O "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALGL_VERSION}/virtualgl32_${VIRTUALGL_VERSION}_amd64.deb" && \
-    apt-get update && apt-get install -y --no-install-recommends "./virtualgl_${VIRTUALGL_VERSION}_amd64.deb" "./virtualgl32_${VIRTUALGL_VERSION}_amd64.deb" && \
-    rm -f "virtualgl_${VIRTUALGL_VERSION}_amd64.deb" "virtualgl32_${VIRTUALGL_VERSION}_amd64.deb" && \
-    chmod -f u+s /usr/lib/libvglfaker.so /usr/lib/libvglfaker-nodl.so /usr/lib/libvglfaker-opencl.so /usr/lib/libdlfaker.so /usr/lib/libgefaker.so && \
-    chmod -f u+s /usr/lib32/libvglfaker.so /usr/lib32/libvglfaker-nodl.so /usr/lib32/libvglfaker-opencl.so /usr/lib32/libdlfaker.so /usr/lib32/libgefaker.so && \
-    chmod -f u+s /usr/lib/i386-linux-gnu/libvglfaker.so /usr/lib/i386-linux-gnu/libvglfaker-nodl.so /usr/lib/i386-linux-gnu/libvglfaker-opencl.so /usr/lib/i386-linux-gnu/libdlfaker.so /usr/lib/i386-linux-gnu/libgefaker.so; \
-    elif [ "$(dpkg --print-architecture)" = "arm64" ]; then \
-    curl -fsSL -O "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALGL_VERSION}/virtualgl_${VIRTUALGL_VERSION}_arm64.deb" && \
-    apt-get update && apt-get install -y --no-install-recommends ./virtualgl_${VIRTUALGL_VERSION}_arm64.deb && \
-    rm -f "virtualgl_${VIRTUALGL_VERSION}_arm64.deb" && \
-    chmod -f u+s /usr/lib/libvglfaker.so /usr/lib/libvglfaker-nodl.so /usr/lib/libdlfaker.so /usr/lib/libgefaker.so; fi && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-
-WORKDIR /opt
-
-# Install test dependencies
-RUN mkdir -pm755 /etc/apt/preferences.d && echo "Package: firefox*\n\
-Pin: version 1:1snap*\n\
-Pin-Priority: -1" > /etc/apt/preferences.d/firefox-nosnap && \
-    mkdir -pm755 /etc/apt/trusted.gpg.d && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x738BEB9321D1AAEC13EA9391AEBDF4819BE21867" | gpg --dearmor -o /etc/apt/trusted.gpg.d/mozillateam-ubuntu-ppa.gpg && \
-    mkdir -pm755 /etc/apt/sources.list.d && echo "deb https://ppa.launchpadcontent.net/mozillateam/ppa/ubuntu $(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '\"') main" > "/etc/apt/sources.list.d/mozillateam-ubuntu-ppa-$(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '\"').list" && \
-    mkdir -pm755 /etc/apt/trusted.gpg.d && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xFC43B7352BCC0EC8AF2EEB8B25088A0359807596" | gpg --dearmor -o /etc/apt/trusted.gpg.d/pipewire-debian-ubuntu-pipewire-upstream.gpg && \
-    mkdir -pm755 /etc/apt/sources.list.d && echo "deb https://ppa.launchpadcontent.net/pipewire-debian/pipewire-upstream/ubuntu $(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '\"') main" > "/etc/apt/sources.list.d/pipewire-debian-ubuntu-pipewire-upstream-$(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '\"').list" && \
-    mkdir -pm755 /etc/apt/sources.list.d && echo "deb https://ppa.launchpadcontent.net/pipewire-debian/wireplumber-upstream/ubuntu $(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '\"') main" > "/etc/apt/sources.list.d/pipewire-debian-ubuntu-wireplumber-upstream-$(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '\"').list" && \
-    apt-get update && apt-get install --no-install-recommends -y \
-        # PipeWire and WirePlumber
+        # Audio (PipeWire with the PulseAudio interface for pcmflux)
+        libpulse0 \
         pipewire \
-        pipewire-alsa \
         pipewire-audio-client-libraries \
-        pipewire-jack \
-        pipewire-locales \
-        pipewire-v4l2 \
-        pipewire-vulkan \
-        pipewire-libcamera \
-        gstreamer1.0-libcamera \
-        gstreamer1.0-pipewire \
-        libpipewire-0.3-modules \
-        libpipewire-module-x11-bell \
-        libspa-0.2-bluetooth \
-        libspa-0.2-jack \
-        libspa-0.2-modules \
+        pipewire-pulse \
         wireplumber \
-        wireplumber-locales \
-        gir1.2-wp-0.5 \
-        # Example packages
-        git \
-        tmux \
-        stterm \
-        nano \
-        vim \
-        wget \
-        zip \
-        unzip \
-        supervisor \
-        xvfb \
-        xfce4 \
-        xfce4-goodies \
-        xfce4-terminal \
+        # Minimal LXQt desktop (Openbox window manager)
+        lxqt-session \
+        lxqt-panel \
+        lxqt-runner \
+        lxqt-about \
+        openbox \
+        obconf-qt \
+        qterminal \
+        pcmanfm-qt \
+        # GPU support: Mesa (llvmpipe fallback, VA-API) and Vulkan/GL plumbing
+        libgl1 \
+        libgl1-mesa-dri \
+        libegl1 \
+        libgles2 \
         mesa-utils \
-        adwaita-icon-theme-full \
-        dbus-x11 \
-        x11-apps \
-        firefox \
-        pavucontrol \
-        jstest-gtk \
-        dnsutils \
-        coturn && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
-    # Prevent dialogs at Xfce4 desktop environment start
-    cp -rf /etc/xdg/xfce4/panel/default.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
-
-# Install web application
-COPY --chown=1000:1000 --from=selkies-web /usr/share/nginx/html ./selkies-web
-
-# Install Joystick Interposer
-COPY --chown=1000:1000 --from=selkies-js-interposer /opt/*.deb /opt/selkies-js-interposer.deb
-RUN apt-get update && apt-get install --no-install-recommends -y /opt/selkies-js-interposer.deb && rm -f /opt/selkies-js-interposer.deb && \
+        mesa-va-drivers \
+        mesa-vulkan-drivers \
+        libva2 \
+        libva-drm2 \
+        libdrm2 \
+        libgbm1 \
+        vainfo \
+        # Fonts
+        fonts-dejavu-core \
+        fonts-liberation \
+        # Python runtime and the embedded coTURN server (WebRTC mode)
+        python3 \
+        python3-pip \
+        coturn \
+        ssl-cert && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
-# Install fake udev library, required for js interposer to work
-ARG LIBUDEV_PACKAGE=libudev
-ARG LIBUDEV_PKG_VERSION=0.0.0
-COPY --chown=1000:1000 --from=selkies-fake-udev /opt/${LIBUDEV_PACKAGE}_${LIBUDEV_PKG_VERSION}.deb /opt/libudev-fake.deb
-RUN apt-get update && apt-get install --no-install-recommends -y /opt/libudev-fake.deb && rm -f /opt/libudev-fake.deb && \
+# Install the Mozilla APT repository (the Ubuntu `firefox` package is a snap
+# stub which cannot run inside containers); the pin also makes the snap stub
+# ineligible on Ubuntu and has no effect on Debian
+RUN install -d -m 0755 /etc/apt/keyrings && \
+    curl -fsSL "https://packages.mozilla.org/apt/repo-signing-key.gpg" -o /etc/apt/keyrings/packages.mozilla.org.asc && \
+    echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" > /etc/apt/sources.list.d/mozilla.list && \
+    printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1001\n' > /etc/apt/preferences.d/mozilla && \
+    printf 'Package: firefox*\nPin: release o=Ubuntu*\nPin-Priority: -1\n' > /etc/apt/preferences.d/firefox-no-snap && \
+    apt-get clean && apt-get update && apt-get install --no-install-recommends -y firefox && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
-RUN echo "**** libva hack ****" && \
-  mkdir /tmp/libva && \
-  curl -o \
-    /tmp/libva/libva.deb -L \
-    "https://launchpad.net/ubuntu/+source/libva/2.22.0-3ubuntu2/+build/30591127/+files/libva2_2.22.0-3ubuntu2_amd64.deb" && \
-  cd /tmp/libva && \
-  ar x libva.deb && \
-  tar xf data.tar.zst && \
-  rm -f \
-    /usr/lib/x86_64-linux-gnu/libva.so.2* && \
-  cp -a \
-    usr/lib/x86_64-linux-gnu/libva.so.2* \
-    /usr/lib/x86_64-linux-gnu
+# Install Selkies with pip: from the wheels dropped into `wheels/`, or the
+# latest PyPI release when `wheels/` is empty
+COPY wheels/ /tmp/wheels/
+RUN PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall $(ls /tmp/wheels/*.whl 2>/dev/null || printf '%s' "${PYPI_PACKAGE}") && rm -rf /tmp/wheels
 
-# Install Selkies Python application
-ARG PYPI_PACKAGE=selkies
-ARG PACKAGE_VERSION=0.0.0.dev0
-ARG PIP_BREAK_SYSTEM_PACKAGES=1
-COPY --chown=1000:1000 --from=selkies-build /opt/pypi/dist/${PYPI_PACKAGE}-${PACKAGE_VERSION}-py3-none-any.whl .
-RUN pip3 install --no-cache-dir --force-reinstall --ignore-installed /opt/${PYPI_PACKAGE}-${PACKAGE_VERSION}-py3-none-any.whl
+# Install the joystick interposer and fake-udev libraries (container-only)
+COPY --from=add-ons /opt/add-ons/lib/ /usr/lib/
 
-# Install proot-apps
-RUN mkdir -pm 755 /tmp/proot-apps && PAPPS_RELEASE=$(curl -sX GET "https://api.github.com/repos/linuxserver/proot-apps/releases/latest" \
-    | awk '/tag_name/{print $4;exit}' FS='[""]') && \
-    curl -L https://github.com/linuxserver/proot-apps/releases/download/${PAPPS_RELEASE}/proot-apps-x86_64.tar.gz \
-    | tar -xzf - -C /tmp/proot-apps/ && \
-    echo "${PAPPS_RELEASE}" > /tmp/proot-apps/pversion
-
-# Temporary installation of Node.js for development purposes
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
-    && npm install -g nodemon
-
-# Copy scripts and configurations used to start the container
-COPY --chown=1000:1000 entrypoint.sh /etc/entrypoint.sh
-RUN chmod -f 755 /etc/entrypoint.sh
+# Copy the startup scripts and s6 service definitions (same /etc/service/<svc>/run layout as runit, supervised by s6-supervise)
+COPY --chown=1000:1000 container-entrypoint.sh /etc/container-entrypoint.sh
 COPY --chown=1000:1000 selkies-entrypoint.sh /etc/selkies-entrypoint.sh
-RUN chmod -f 755 /etc/selkies-entrypoint.sh
-COPY --chown=1000:1000 supervisord.conf /etc/supervisord.conf
-RUN chmod -f 755 /etc/supervisord.conf
+COPY --chown=1000:1000 services/ /etc/service/
+RUN chmod -f 755 /etc/container-entrypoint.sh /etc/selkies-entrypoint.sh && \
+    find /etc/service -name run -exec chmod -f 755 {} +
 
-# Configure coTURN script
-RUN echo "#!/bin/bash\n\
-set -e\n\
-turnserver \
-    --verbose \
-    --listening-ip=\"0.0.0.0\" \
-    --listening-ip=\"::\" \
-    --listening-port=\"\${SELKIES_TURN_PORT:-3478}\" \
-    --realm=\"\${TURN_REALM:-example.com}\" \
-    --external-ip=\"\${TURN_EXTERNAL_IP:-\$(dig -4 TXT +short @ns1.google.com o-o.myaddr.l.google.com 2>/dev/null | { read output; if [ -z \"\$output\" ] || echo \"\$output\" | grep -q '^;;'; then exit 1; else echo \"\$(echo \$output | sed 's,\\\",,g')\"; fi } || dig -6 TXT +short @ns1.google.com o-o.myaddr.l.google.com 2>/dev/null | { read output; if [ -z \"\$output\" ] || echo \"\$output\" | grep -q '^;;'; then exit 1; else echo \"[\$(echo \$output | sed 's,\\\",,g')]\"; fi } || hostname -I 2>/dev/null | awk '{print \$1; exit}' || echo '127.0.0.1')}\" \
-    --min-port=\"\${TURN_MIN_PORT:-49152}\" \
-    --max-port=\"\${TURN_MAX_PORT:-65535}\" \
-    --channel-lifetime=\"\${TURN_CHANNEL_LIFETIME:--1}\" \
-    --lt-cred-mech \
-    --user=\"selkies:\${TURN_RANDOM_PASSWORD:-\$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 24)}\" \
-    --no-cli \
-    --cli-password=\"\${TURN_RANDOM_PASSWORD:-\$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 24)}\" \
-    --userdb=\"\${XDG_RUNTIME_DIR:-/tmp}/turnserver-turndb\" \
-    --pidfile=\"\${XDG_RUNTIME_DIR:-/tmp}/turnserver.pid\" \
-    --log-file=\"stdout\" \
-    --allow-loopback-peers \
-    \${TURN_EXTRA_ARGS} \$@\
-" > /etc/start-turnserver.sh && chmod -f 755 /etc/start-turnserver.sh
-
-# Configure bashrc to show /etc/motd and /etc/issue
-RUN echo "[ ! -z \"\$TERM\" -a -r /etc/motd ] && echo \"\$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '\\\"')\" && cat /etc/motd" >> /etc/bash.bashrc && \
-    echo "==============================================\n\
-= Selkies Example Docker Container =\n\
-==============================================\n\
-" > /etc/motd
-
-SHELL ["/bin/sh", "-c"]
+# Configure bashrc to show /etc/motd and enable bash completion
+RUN echo "[ ! -z \"\$TERM\" -a -r /etc/motd ] && echo \"\$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '\"')\" && cat /etc/motd" >> /etc/bash.bashrc && \
+    printf "==============================================\n=         Selkies Example Container          =\n==============================================\n" > /etc/motd
 
 USER 0
 # Enable sudo through sudo-root with uid 0
 RUN if [ -d "/usr/libexec/sudo" ]; then SUDO_LIB="/usr/libexec/sudo"; else SUDO_LIB="/usr/lib/sudo"; fi && \
     chown -R -f -h --no-preserve-root root:root /usr/bin/sudo-root /etc/sudo.conf /etc/sudoers /etc/sudoers.d /etc/sudo_logsrvd.conf "${SUDO_LIB}" || echo 'Failed to provide root permissions in some paths relevant to sudo' && \
     chmod -f 4755 /usr/bin/sudo-root || echo 'Failed to set chmod setuid for root'
+
 USER 1000
 
+# Default runtime environment (overridable with -e)
 ENV PIPEWIRE_LATENCY="128/48000"
 ENV XDG_RUNTIME_DIR=/tmp/runtime-ubuntu
-ENV PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
-ENV PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR:-/tmp}/pulse}"
-ENV PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR:-/tmp}/pulse}/native}"
-
+ENV PIPEWIRE_RUNTIME_DIR="${XDG_RUNTIME_DIR}"
+ENV PULSE_RUNTIME_PATH="${XDG_RUNTIME_DIR}/pulse"
+ENV PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/pulse/native"
 # dbus-daemon to the below address is required during startup
-ENV DBUS_SYSTEM_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR:-/tmp}/dbus-system-bus"
+ENV DBUS_SYSTEM_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/dbus-system-bus"
+# X11 (Xvfb) by default; set to true for the headless Wayland backend
+ENV SELKIES_WAYLAND=false
+# Start the LXQt session (set to false to run only the display server)
+ENV START_LXQT=true
+# Web interface port
+ENV SELKIES_PORT=8081
 
-USER 1000
 ENV SHELL=/bin/bash
 ENV USER=ubuntu
 ENV HOME=/home/ubuntu
 WORKDIR /home/ubuntu
 
-EXPOSE 8080
+EXPOSE 8081
 
-ENTRYPOINT ["/usr/bin/supervisord"]
+ENTRYPOINT ["/etc/container-entrypoint.sh"]

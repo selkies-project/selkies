@@ -62,7 +62,7 @@ These people make structural decisions for this project and press the `Merge Pul
 
 [PMohanJ](https://github.com/PMohanJ): Contributed new features for the X11 input protocol as well as providing various fixes for the project overall and providing various means of analysis, **currently available for paid consulting tasks in tandem with senior maintainers**
 
-[Kristian Ollikainen](https://github.com/DatCaptainHorse): Professional WebRTC and JavaScript frontend engineer, contributed various insights to the GStreamer and web components
+[Kristian Ollikainen](https://github.com/DatCaptainHorse): Professional WebRTC and JavaScript frontend engineer, contributed various insights to the WebRTC and web components
 
 [ayunami2000](https://github.com/ayunami2000): Provided various fixes for the WebRTC HTML5 web interface, as well as providing various means of analysis, **currently available for paid consulting tasks in tandem with senior maintainers**
 
@@ -86,7 +86,6 @@ This section is a knowledge base for code contributions and development.
 
 - Real-Time Streaming Discord (General WebRTC Advice): <https://discord.gg/KFS32mYXPr>
 
-- GStreamer Matrix Space (Specific to GStreamer, needs Matrix Account from <https://app.element.io>): <https://matrix.to/#/#community:gstreamer.org>
 
 ## Resources
 
@@ -104,43 +103,29 @@ This section is a knowledge base for code contributions and development.
 
 ## Container Customization
 
-**If you want to change the `Dockerfile`, you are recommended to use the original container as a base container and only replace the `entrypoint.sh` and `supervisord.conf` files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu24.04` for the [Example Container](component.md#example-container) or `24.04-20210101010101` for the desktop containers) to preserve a specific container build.**
+The reference container images (the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) and the LXQt desktop images built by CI) use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor, installed from the distribution's package registry (`s6` package): `s6-svscan /etc/service` starts one `s6-supervise` per service directory — the X11 display server (or the headless Wayland compositor), the desktop session, the audio stack (`pipewire`/`wireplumber`/`pipewire-pulse`), `dbus`, and `selkies`, restarting any that crash. Services are controlled with `s6-svc` and inspected with `s6-svstat`, the `supervisord`/`supervisorctl` equivalents, without any Python dependency (`s6-overlay` is deliberately NOT used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init or launcher).
 
-Start with the below sample `Dockerfile` example and place your modified `entrypoint.sh` and `supervisord.conf` files within the same empty directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/gst-py-example:main-ubuntu${DISTRIB_RELEASE}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
+**If you want to change the image behavior, use the original container as a base image and only replace the entrypoint script(s) and/or the s6 service files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu24.04` for the [Example Container](component.md#example-container)) to preserve a specific container build.**
+
+Start with the below sample `Dockerfile` example and place your modified `entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
 
 ```dockerfile
 ARG DISTRIB_RELEASE=24.04
-FROM ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}
+FROM ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}
 ARG DISTRIB_RELEASE
 
 USER 0
-# Restore file permissions to ubuntu user
-RUN if [ -d "/usr/libexec/sudo" ]; then SUDO_LIB="/usr/libexec/sudo"; else SUDO_LIB="/usr/lib/sudo"; fi && \
-    chown -R -f -h --no-preserve-root ubuntu:ubuntu /usr/bin/sudo-root /etc/sudo.conf /etc/sudoers /etc/sudoers.d /etc/sudo_logsrvd.conf "${SUDO_LIB}" || echo 'Failed to provide user permissions in some paths relevant to sudo'
-USER 1000
-
-# Use BUILDAH_FORMAT=docker in buildah
-SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
-# Install and configure below this line
+SHELL ["/bin/sh", "-c"]
 
 # Replace changed files
-# Copy scripts and configurations used to start the container with `--chown=1000:1000`
+# Copy scripts and service definitions used to start the container with `--chown=1000:1000`
 #COPY --chown=1000:1000 entrypoint.sh /etc/entrypoint.sh
 #RUN chmod -f 755 /etc/entrypoint.sh
 #COPY --chown=1000:1000 selkies-entrypoint.sh /etc/selkies-entrypoint.sh
 #RUN chmod -f 755 /etc/selkies-entrypoint.sh
-#COPY --chown=1000:1000 kasmvnc-entrypoint.sh /etc/kasmvnc-entrypoint.sh
-#RUN chmod -f 755 /etc/kasmvnc-entrypoint.sh
-#COPY --chown=1000:1000 supervisord.conf /etc/supervisord.conf
-#RUN chmod -f 755 /etc/supervisord.conf
-
-SHELL ["/bin/sh", "-c"]
-
-USER 0
-# Enable sudo through sudo-root with uid 0
-RUN if [ -d "/usr/libexec/sudo" ]; then SUDO_LIB="/usr/libexec/sudo"; else SUDO_LIB="/usr/lib/sudo"; fi && \
-    chown -R -f -h --no-preserve-root root:root /usr/bin/sudo-root /etc/sudo.conf /etc/sudoers /etc/sudoers.d /etc/sudo_logsrvd.conf "${SUDO_LIB}" || echo 'Failed to provide root permissions in some paths relevant to sudo' && \
-    chmod -f 4755 /usr/bin/sudo-root || echo 'Failed to set chmod setuid for root'
+# Replace or add s6 services (one directory per service under /etc/service)
+#COPY --chown=1000:1000 service/ /etc/service/
+#RUN find /etc/service -name run -exec chmod -f 755 {} +
 
 USER 1000
 ENV SHELL=/bin/bash
@@ -150,14 +135,16 @@ WORKDIR /home/ubuntu
 
 EXPOSE 8081
 
-ENTRYPOINT ["/usr/bin/supervisord"]
+ENTRYPOINT ["/etc/container-entrypoint.sh"]
 ```
+
+The entrypoint script of the base images launches `runsvdir -P /etc/service` itself, so `runsvdir` does not need to be PID 1 and the image keeps working when another init or launcher is injected above it.
 
 ## Container Guide
 
 The [`docker-nvidia-glx-desktop`](https://github.com/selkies-project/docker-nvidia-glx-desktop)/[`docker-nvidia-egl-desktop`](https://github.com/selkies-project/docker-nvidia-egl-desktop) desktop container repositories (referenced as Desktop Containers here), and the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) share various components between each other:
 
-`LICENSE`, `supervisord.conf`, `kasmvnc-entrypoint.sh`, and `selkies-entrypoint.sh` are always identical in both Desktop Containers (copy and paste between each container). As these components are also very similar to the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), **you need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and at least two Pull Requests for both Desktop Containers.**
+`LICENSE`, the entrypoint scripts (`entrypoint.sh` / `container-entrypoint.sh`, `selkies-entrypoint.sh`), and the s6 service definitions under `/etc/service` are always identical in both Desktop Containers (copy and paste between each container). As these components are also very similar to the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), **you need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and at least two Pull Requests for both Desktop Containers.**
 
 The `Dockerfile` is always identical below and above the lines that say `Anything above/below this line should always be kept the same...` in both Desktop Containers. This component is not shared with the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and installation procedures for Selkies should be updated to the desktop containers on every release, so **you need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and at least two Pull Requests for both Desktop Containers.**
 
@@ -189,4 +176,4 @@ The `entrypoint.sh` components are always identical from the start until the lin
 
 # Maintainer Documentation
 
-- New releases are published by going to the [Publish release](https://github.com/selkies-project/selkies/actions/workflows/build_and_publish_release.yaml) GitHub Action Workflow, and triggering `workflow_dispatch` by clicking on `Run workflow` with `Branch: main`, and specifying the release tag. The draft release for the new proposed release will be generated in the [Releases](https://github.com/selkies-project/selkies/releases) page, only visible to the maintainers. After waiting for the release build to finish, editing the release notes, and publishing the release, the release will be visible as the latest release. **If the same release is created multiple times because of certain issues, make sure to delete the previous release and the tag before running the [Publish release](https://github.com/selkies-project/selkies/actions/workflows/build_and_publish_release.yaml) GitHub Action Workflow again.**
+- New releases are published by going to the [Publish release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) GitHub Action Workflow, and triggering `workflow_dispatch` by clicking on `Run workflow` with `Branch: main`, and specifying the release tag. The draft release for the new proposed release will be generated in the [Releases](https://github.com/selkies-project/selkies/releases) page, only visible to the maintainers. After waiting for the release build to finish, editing the release notes, and publishing the release, the release will be visible as the latest release. **If the same release is created multiple times because of certain issues, make sure to delete the previous release and the tag before running the [Publish release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) GitHub Action Workflow again.**

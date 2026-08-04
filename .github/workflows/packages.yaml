@@ -1,0 +1,119 @@
+name: Packages
+
+# Native packages: .deb (Ubuntu/Debian), .rpm (Fedora/EL), .apk (Alpine),
+# .pkg.tar.zst (Arch), and .AppImage (x86_64 + aarch64, via rattler-build +
+# linuxdeploy-plugin-conda). Everything is assembled inside a container of the
+# target distribution; only apt/apt-get, dnf, apk, or pacman are ever invoked.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: Version string stamped into the packages
+        type: string
+        default: 0.0.0.dev0
+  workflow_call:
+    inputs:
+      package_version:
+        description: Version string stamped into the packages
+        type: string
+        default: 0.0.0.dev0
+
+jobs:
+  wheel:
+    name: Build wheel for the packages
+    uses: ./.github/workflows/build-wheel.yaml
+
+  package:
+    name: ${{ matrix.kind.name }} (${{ matrix.arch.name }})
+    needs: wheel
+    runs-on: ${{ matrix.arch.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - name: amd64
+            runner: ubuntu-latest
+          - name: arm64
+            runner: ubuntu-24.04-arm
+        kind:
+          - name: deb-ubuntu24.04
+            image: ubuntu:24.04
+            script: infra/packaging/deb.sh
+          - name: deb-ubuntu26.04
+            image: ubuntu:26.04
+            script: infra/packaging/deb.sh
+          - name: deb-bookworm
+            image: debian:bookworm
+            script: infra/packaging/deb.sh
+          - name: deb-trixie
+            image: debian:trixie
+            script: infra/packaging/deb.sh
+          - name: rpm-fedora
+            image: fedora:latest
+            script: infra/packaging/rpm.sh
+          - name: rpm-el9
+            image: almalinux:9
+            script: infra/packaging/rpm.sh
+          - name: apk
+            image: alpine:3
+            script: infra/packaging/apk.sh
+          - name: arch
+            image: archlinux:base-devel
+            script: infra/packaging/arch.sh
+    steps:
+      - uses: actions/checkout@v5
+      - name: Free disk space
+        uses: ./.github/actions/clean-disk
+      - name: Download the wheel
+        uses: actions/download-artifact@v5
+        with:
+          name: selkies-wheel
+          path: dist/
+      - name: Build the package inside the target distro container
+        env:
+          SELKIES_VERSION: ${{ github.event.inputs.package_version || inputs.package_version || '0.0.0.dev0' }}
+        run: |
+          set -e
+          mkdir -p out
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/repo:ro" \
+            -v "${GITHUB_WORKSPACE}/dist:/dist:ro" \
+            -v "${GITHUB_WORKSPACE}/out:/out" \
+            -e SELKIES_VERSION \
+            "${{ matrix.kind.image }}" \
+            bash "/repo/${{ matrix.kind.script }}"
+          ls -la out/
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.kind.name }}-${{ matrix.arch.name }}
+          path: out/*
+          retention-days: 14
+
+  appimage:
+    name: AppImage (${{ matrix.arch.name }})
+    needs: wheel
+    runs-on: ${{ matrix.arch.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - name: x86_64
+            runner: ubuntu-latest
+          - name: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Free disk space
+        uses: ./.github/actions/clean-disk
+      - name: Build the AppImage (rattler-build + linuxdeploy-plugin-conda)
+        env:
+          SELKIES_VERSION: ${{ github.event.inputs.package_version || inputs.package_version || '0.0.0.dev0' }}
+        run: ./scripts/ci/appimage.sh "${{ matrix.arch.name }}"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: appimage-${{ matrix.arch.name }}
+          path: out/*
+          retention-days: 14

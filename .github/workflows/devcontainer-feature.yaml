@@ -1,0 +1,45 @@
+name: Devcontainer feature
+
+# Validates and (on manual trigger) publishes the Selkies devcontainer feature.
+
+on:
+  pull_request:
+    paths:
+      - .devcontainer/**
+      - .github/workflows/devcontainer-feature.yaml
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Feature version to publish (semver, e.g. 1.1.0)
+        type: string
+        required: true
+
+jobs:
+  validate:
+    name: Validate feature with devcontainers/ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate devcontainer-feature.json files
+        uses: devcontainers/action@v1
+        with:
+          validate-only: "true"
+          base-path-to-features: ".devcontainer/features/desktop-selkies"
+
+  publish:
+    name: Publish feature to GHCR
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Publish features
+        uses: devcontainers/action@v1
+        with:
+          publish-features: "true"
+          base-path-to-features: ".devcontainer/features/desktop-selkies"
+          generate-docs: "false"

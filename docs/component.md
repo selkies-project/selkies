@@ -11,7 +11,7 @@ Use the following commands to retrieve the latest `SELKIES_VERSION` release, the
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')"
 export DISTRIB_RELEASE="$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')"
-export ARCH="$(dpkg --print-architecture)"
+export ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')"
 ```
 
 When instructed to install [binfmt](https://github.com/tonistiigi/binfmt), use the following command with Docker/Podman:
@@ -22,11 +22,11 @@ docker run --rm --privileged tonistiigi/binfmt:latest --install all
 
 ### Core Components
 
-At runtime, Selkies is a **single Python application** — the `selkies` wheel. Unlike earlier releases, there is no separate GStreamer build and no separate web-interface package: the HTML5 web client is bundled into the wheel, and screen/audio capture and encoding are provided by the `pixelflux` and `pcmflux` extensions, which are installed automatically as dependencies of the wheel.
+At runtime, Selkies is a **single Python application** — the `selkies` wheel. Unlike earlier releases, there is no separate multimedia-framework build and no separate web-interface package: the HTML5 web client is bundled into the wheel, and screen/audio capture and encoding are provided by the `pixelflux` and `pcmflux` extensions, which are installed automatically as dependencies of the wheel.
 
 All release components are available for download from the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
 
-For the most recent unreleased commit, download from the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions) `Build & publish all images` Build Artifacts (under `Artifacts (Produced during runtime)`) for each commit from the `main` branch. Build Artifacts can also be downloaded using the [GitHub CLI](https://cli.github.com) command [`gh run download`](https://cli.github.com/manual/gh_run_download).
+For the most recent unreleased commit, download the Build Artifacts of the `CI`, `Images`, or `Packages` workflows for that commit from the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions). Build Artifacts can also be downloaded using the [GitHub CLI](https://cli.github.com) command [`gh run download`](https://cli.github.com/manual/gh_run_download).
 
 #### Python Application
 
@@ -40,16 +40,10 @@ The architecture-independent wheel is available with the name **`selkies-${SELKI
 
 **Instructions from [Advanced Install](start.md#advanced-install) still apply below.**
 
-For the most recent unreleased commit, download from the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions) `Build & publish all images` **`py-build_linux-amd64`** Build Artifact (under `Artifacts (Produced during runtime)`) for each commit from the `main` branch.
-
-Alternatively, copy the Python Wheel file from the build container image (DO NOT change the platform in non-`x86_64` architectures, install [binfmt](https://github.com/tonistiigi/binfmt) instead, and change `main` with `latest` for the latest stable release):
+For the most recent unreleased commit, download the **`selkies-wheel`** artifact from the `CI` workflow run of that commit in the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions), then install it with pip (Build Artifacts can also be downloaded using the [GitHub CLI](https://cli.github.com) command [`gh run download`](https://cli.github.com/manual/gh_run_download)):
 
 ```bash
-docker create --platform="linux/amd64" --name selkies-py ghcr.io/selkies-project/selkies/py-build:main
-docker cp selkies-py:/opt/pypi/dist/selkies-0.0.0.dev0-py3-none-any.whl /tmp/selkies-0.0.0.dev0-py3-none-any.whl
-docker rm selkies-py
-sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall /tmp/selkies-0.0.0.dev0-py3-none-any.whl
-rm -f /tmp/selkies-0.0.0.dev0-py3-none-any.whl
+sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall selkies-0.0.0.dev0-py3-none-any.whl
 # Run the Selkies Python executable after all components are installed
 selkies --addr=0.0.0.0 --port=8081 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=h264enc --enable_resize=false
 ```
@@ -74,7 +68,7 @@ The web client is a WebCodecs-based HTML5 application (with the core `selkies-co
 
 It decodes the incoming H.264 or JPEG stream using the browser [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) API with a low-latency zero-copy rendering path, plays Opus audio, and detects keyboard, mouse, gamepad, and clipboard input from the user, then sends them to the host server backend. It also handles remote cursors with the Pointer Lock API so that you can correctly control interactive applications and games.
 
-The web client source lives at [`addons/selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core) and is built and bundled into the Python wheel automatically (installed at `src/selkies/selkies_web`), so **there is no separate web package to download or install**. To serve your own copy of the web files, point `--web_root=` (or the `SELKIES_WEB_ROOT` environment variable) at a directory containing an `index.html`. Note that you should change `manifest.json` and `cacheName` in `sw.js` to rebrand the web interface to a different name.
+The web client source lives at [`addons/selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core) and is built and bundled into the Python wheel automatically (installed at `src/selkies/selkies_web`), so **there is no separate web package to download or install**. To serve your own copy of the web files, point `--web_root=` (or the `SELKIES_WEB_ROOT` environment variable) at a built web directory containing an `index.html`. Rebranding (name, icons, manifest) is done at build time in the `addons/selkies-web-core` source tree, not by editing the shipped artifacts.
 
 #### Media Capture and Encoding (`pixelflux` and `pcmflux`)
 
@@ -83,6 +77,8 @@ Screen capture and video encoding are performed by [`pixelflux`](https://pypi.or
 Audio capture and encoding are performed by [`pcmflux`](https://pypi.org/project/pcmflux/), a companion Rust (PyO3) extension that captures from PulseAudio (or PipeWire-Pulse) and encodes to Opus.
 
 Both are pulled in automatically as dependencies of the `selkies` wheel, so you normally do not install them separately.
+
+**Licensing note (GPL toggle):** the default software H.264 encoder of `pixelflux` uses GPL-2.0+ `libx264`, enabled by default with an install-time notice. Build `pixelflux` from source with `PIXELFLUX_ENABLE_GPL=0` to exclude every GPL-licensed component (the BSD-licensed OpenH264 encoder then substitutes for software H.264).
 
 ### Optional Components
 
@@ -94,38 +90,21 @@ The [Joystick Interposer](https://github.com/selkies-project/selkies/tree/main/a
 
 > **Note:** the `LD_PRELOAD` used here (and in [fake-udev](#fake-udev)) is a deliberate, legitimate interposition technique for redirecting device access in unprivileged environments. It is unrelated to — and distinct from — the process-global `LD_PRELOAD` anti-pattern that `pixelflux`'s multi-GPU NVENC support specifically avoids when selecting a GPU for hardware encoding.
 
-Pre-built `x86_64` and `aarch64` joystick interposer components for Ubuntu are available with the name (fill in the OS version `DISTRIB_RELEASE` such as `24.04`, `22.04`, Ubuntu-style architecture `ARCH` such as `amd64` and `arm64`) **`selkies-js-interposer_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_${ARCH}.tar.gz`** or **`selkies-js-interposer_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_${ARCH}.deb`** for download in the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
-
-**Instructions from [Advanced Install](start.md#advanced-install) still apply below.**
-
-For the most recent unreleased commit, download from the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions) `Build & publish all images` **`js-interposer-ubuntu${DISTRIB_RELEASE}-tar.gz_linux-${ARCH}`** or **`js-interposer-ubuntu${DISTRIB_RELEASE}-deb_linux-${ARCH}`** Build Artifact (under `Artifacts (Produced during runtime)`) for each commit from the `main` branch.
-
-Alternatively, copy and install the pre-built Joystick Interposer build (change `--platform=` to `linux/arm64` for `aarch64`, and change `main` with `latest` and `0.0.0` to the release version for the latest stable release):
+The interposer is **container-only plumbing**: it is built from source and wired automatically in the [Example Container](#example-container) and the desktop containers; on a normal desktop with direct udev/kernel input access it is neither needed nor shipped as a standalone package. For custom containers, build and install it (and [fake-udev](#fake-udev)) from the source in this repository:
 
 ```bash
-docker create --platform="linux/amd64" --name js-interposer ghcr.io/selkies-project/selkies/js-interposer:main-ubuntu${DISTRIB_RELEASE}
-docker cp js-interposer:/opt/selkies-js-interposer_0.0.0.deb /tmp/selkies-js-interposer.deb
-docker rm js-interposer
-sudo apt-get update && sudo apt-get install --no-install-recommends --allow-downgrades -y /tmp/selkies-js-interposer.deb
-rm -f /tmp/selkies-js-interposer.deb
+git clone https://github.com/selkies-project/selkies.git && cd selkies
+apt-get update && apt-get install --no-install-recommends -y build-essential
+make -C addons/js-interposer && PREFIX=/usr make -C addons/js-interposer install
+cd addons/fake-udev && make && cp libudev.so.1.0.0-fake libudev.so.1 libudev.so /usr/lib/$(gcc -print-multiarch)/
 ```
-
-To retrieve the `.tar.gz` tarball instead of the `.deb` installer:
-
-```bash
-docker create --platform="linux/amd64" --name js-interposer ghcr.io/selkies-project/selkies/js-interposer:main-ubuntu${DISTRIB_RELEASE}
-docker cp js-interposer:/opt/selkies-js-interposer_0.0.0.tar.gz /tmp/selkies-js-interposer_0.0.0.tar.gz
-docker rm js-interposer
-```
-
-After extracting the `.tar.gz` tarball, move the `.so` library files to the library path (such as `/usr/lib/x86_64-linux-gnu` and `/usr/lib/i386-linux-gnu`) of your Linux distribution.
 
 The following paths are required to exist for the Joystick Interposer to pass the joystick/gamepad input to various applications:
 
 ```bash
-sudo mkdir -pm1777 /dev/input
-sudo touch /dev/input/js0 /dev/input/js1 /dev/input/js2 /dev/input/js3
-sudo chmod 777 /dev/input/js*
+mkdir -pm1777 /dev/input
+touch /dev/input/js0 /dev/input/js1 /dev/input/js2 /dev/input/js3
+chmod 777 /dev/input/js*
 ```
 
 The following environment variables are required to be set in the environment each application is being run in to receive the joystick/gamepad input.
@@ -136,7 +115,7 @@ export LD_PRELOAD="${SELKIES_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
 export SDL_JOYSTICK_DEVICE=/dev/input/js0
 ```
 
-You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root path of your choice if using the `.tar.gz` tarball.
+You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root path of your choice for the interposer library.
 
 Check the [Joystick Interposer README.md](https://github.com/selkies-project/selkies/tree/main/addons/js-interposer/README.md) documentation for usage instruction and compiling information on other platforms.
 
@@ -166,14 +145,14 @@ The [Selkies Dashboard](https://github.com/selkies-project/selkies/tree/main/add
 
 #### Example Container
 
-The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum Xfce4 desktop environment is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
+The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal. The container defaults to an X11 (Xvfb) session; set `SELKIES_WAYLAND=true` to switch it to the headless Wayland backend instead.
 
 Read the [Development](development.md) section for customizing this container for your own usage.
 
-Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8081** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **change `DISTRIB_RELEASE` to `24.04`, `22.04`, or `20.04`, and replace `main` to `latest` for the latest stable release**):
+Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8081** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **change `DISTRIB_RELEASE` to `24.04` or `26.04`, and replace `main` to `latest` for the latest stable release**):
 
 ```bash
-docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8081:8081 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/gst-py-example:main-ubuntu${DISTRIB_RELEASE}
+docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8081:8081 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}
 ```
 
 Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs.
@@ -248,14 +227,6 @@ From Selkies, it is sufficient to use the `selkies --turn_rest_uri=` option or `
 
 Consult the [WebRTC and Firewall Issues: TURN Server Authentication Methods](firewall.md#turn-server-authentication-methods) section for more information on TURN authentication methods.
 
-### Legacy Components
-
-The following components are kept in the repository for now but are **not used by the current runtime**. They are remnants of the previous GStreamer-based architecture and may be phased out.
-
-- [`addons/gstreamer`](https://github.com/selkies-project/selkies/tree/main/addons/gstreamer): the old standalone GStreamer build. The GStreamer runtime has been fully removed from Selkies; this component is no longer required to run the project.
-- [`addons/conda`](https://github.com/selkies-project/selkies/tree/main/addons/conda): the old Conda-based portable distribution toolchain that packaged GStreamer and its dependencies into a tarball. Selkies is now installed as a standard Python wheel, so this is no longer part of the install path.
-
-Contributions to remove or repurpose these components are welcome.
 
 ## Encoders and Interfaces
 
@@ -288,7 +259,8 @@ future; the vendored WebRTC stack already carries the RTP-side code for them.
 
 | Interface | Device Selector | Input Injection | Operating Systems | Notes |
 |---|---|---|---|---|
-| X.Org / X11 (via `pixelflux`) | `DISPLAY` environment | vendored [`python-xlib`](https://github.com/python-xlib/python-xlib) (XTEST/XFixes), under `src/selkies/Xlib/` | Linux | Wayland, Mac, and Windows support are planned |
+| X.Org / X11 (via `pixelflux`) | `DISPLAY` environment | vendored [`python-xlib`](https://github.com/python-xlib/python-xlib) (XTEST/XFixes), under `src/selkies/Xlib/` | Linux | Default backend |
+| Wayland (via `pixelflux`) | headless compositor started by Selkies (`--wayland=true` / `SELKIES_WAYLAND=true`) | input injection through the `pixelflux` Wayland backend | Linux | Native Wayland mode; Mac and Windows support is planned |
 
 ### Audio Encoder
 

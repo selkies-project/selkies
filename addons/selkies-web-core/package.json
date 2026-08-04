@@ -1,7 +1,7 @@
 {
-  "name": "gst-web-core",
+  "name": "selkies-web-core",
   "version": "1.0.0",
-  "description": "Core gst-web functionality",
+  "description": "Selkies HTML5 web client core",
   "main": "index.html",
   "directories": {
     "lib": "lib"

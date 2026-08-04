@@ -1,8 +1,8 @@
 {
     "name": "Selkies",
     "id": "selkies",
-    "version": "1.0.0",
-    "description": "WebRTC Remote Desktop for Linux",
+    "version": "1.1.0",
+    "description": "Low-latency HTML5 remote desktop streaming for Linux (WebSocket and WebRTC)",
     "options": {
         "release": {
             "type": "string",
@@ -16,21 +16,25 @@
                 "host"
             ],
             "default": "xvfb",
-            "description": "type of xserver to use, if xvfb, Xserver will be created automatically "
+            "description": "type of xserver to use, if xvfb, Xserver will be created automatically"
         },
         "desktop": {
             "type": "string",
             "enum": [
-                "kdeplasma",
-                "ubuntu",
-                "xfce"
+                "lxqt",
+                "none"
             ],
-            "default": "xfce",
-            "description": "The desktop environment to install"
+            "default": "lxqt",
+            "description": "The desktop environment to install (LXQt) or none"
+        },
+        "wayland": {
+            "type": "boolean",
+            "default": "false",
+            "description": "Use the headless Wayland backend instead of X11 (default: false)."
         },
         "web_port": {
             "type": "string",
-            "default": "8080",
+            "default": "8081",
             "description": "The port number to listen on to host the web interface and signal server."
         }
     },

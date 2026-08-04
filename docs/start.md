@@ -23,7 +23,7 @@ export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-proje
 cd /tmp && curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-py3-none-any.whl" && sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall "selkies-${SELKIES_VERSION}-py3-none-any.whl" && rm -f "selkies-${SELKIES_VERSION}-py3-none-any.whl"
 ```
 
-Alternatively, install directly from the source tree (this also builds and installs the bundled web client):
+Alternatively, install directly from the source tree. Note that a source checkout **does not contain the prebuilt web client**: the web files are built from `addons/selkies-web-core` and injected into the wheel only by the CI build pipeline. After a source install you must either point Selkies at an existing web build with `--web_root=` / `SELKIES_WEB_ROOT`, or embed the web files before building the wheel (see [Components](component.md#web-client)):
 
 ```bash
 git clone https://github.com/selkies-project/selkies.git
@@ -36,7 +36,7 @@ Either method installs the `selkies` and `selkies-resize` console commands.
 
 **Selkies attaches to an existing X.Org X11 display and an already-running PulseAudio (or PipeWire-Pulse) server; it does not start them for you.** See [Advanced Install](#advanced-install) for commands to start a virtual `Xvfb` display and a PulseAudio/PipeWire server yourself.
 
-**Check that you are using X.Org instead of Wayland (which is the default in many distributions but not supported) when using an existing display. You also need to be logged in from the login screen or autologin should be enabled.**
+**Check that you are using X.Org instead of Wayland (which is the default in many distributions) when attaching to an existing display -- an already-running Wayland session cannot be captured. A separate headless Wayland mode (started and owned by Selkies itself) is available with `--wayland=true` / `SELKIES_WAYLAND=true`, but when attaching to an existing graphical session that session must be X.Org. You also need to be logged in from the login screen or autologin should be enabled.**
 
 **The environment variables that are set here should also be set with the host application or desktop environment, else you will likely not have audio or be shown an error.**
 
@@ -89,7 +89,7 @@ The [`selkies-vdi`](https://github.com/selkies-project/selkies-vdi) or [`selkies
 
 ## Minimal Container
 
-The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum Xfce4 desktop environment is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
+The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
 
 Instructions are available in the [Example Container](component.md#example-container) section.
 
@@ -111,7 +111,7 @@ Selkies has a modularized architecture, but at runtime it is a **single Python a
 - injects keyboard, mouse, and gamepad input through a vendored `python-xlib` (XTEST/XFixes);
 - and, only for the opt-in WebRTC transport, uses a vendored fork of `aiortc`.
 
-`pixelflux` and `pcmflux` are installed automatically as dependencies of the wheel. There is **no separate GStreamer build or web-interface package to install** — earlier releases shipped GStreamer, a Python wheel, and a `gst-web` interface as three separate components, but the GStreamer runtime has been fully removed and the web client is now bundled into the wheel.
+`pixelflux` and `pcmflux` are installed automatically as dependencies of the wheel. There is **no separate multimedia-framework build or web-interface package to install** — earlier releases shipped an external multimedia framework, a Python wheel, and a separate web interface as three components, but that runtime has been fully removed and the web client is now bundled into the wheel.
 
 For more information, check the [Components](component.md#components) section.
 
@@ -136,7 +136,7 @@ Use the following commands to retrieve the latest `SELKIES_VERSION` release, the
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')"
 export DISTRIB_RELEASE="$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')"
-export ARCH="$(dpkg --print-architecture)"
+export ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')"
 ```
 
 **2. Install the Selkies Python package** (this component is pure Python, bundles the HTML5 web client, and any operating system is compatible, fill in `SELKIES_VERSION`)**:**
@@ -147,21 +147,22 @@ Read [Python Application](component.md#python-application) for more details of t
 cd /tmp && curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-py3-none-any.whl" && sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall "selkies-${SELKIES_VERSION}-py3-none-any.whl" && rm -f "selkies-${SELKIES_VERSION}-py3-none-any.whl"
 ```
 
-**3. Install the Joystick Interposer to process gamepad input**, if you need to use joystick/gamepad devices from your web browser client (fill in `SELKIES_VERSION`, `DISTRIB_RELEASE`, and `ARCH` of either `amd64` for `x86_64`, and `arm64` for `aarch64`)**:**
-
-Read [Joystick Interposer](component.md#joystick-interposer) for more details of this step and procedures for installing from the latest commit in the `main` branch.
+**3. Build the Joystick Interposer to process gamepad input**, if you need to use joystick/gamepad devices from your web browser client inside unprivileged containers. **The interposer and `fake-udev` are dedicated to containerized environments; on a normal desktop with udev access they are unnecessary.** They are built and wired automatically in the [Example Container](component.md#example-container) and the desktop containers. For custom containers, build them from source (they are small, dependency-free `LD_PRELOAD` libraries):
 
 ```bash
-cd /tmp && curl -o selkies-js-interposer.deb -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-js-interposer_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_${ARCH}.deb" && sudo apt-get update && sudo apt-get install --no-install-recommends -y ./selkies-js-interposer.deb && rm -f selkies-js-interposer.deb
+git clone https://github.com/selkies-project/selkies.git && cd selkies
+apt-get update && apt-get install --no-install-recommends -y build-essential
+make -C addons/js-interposer && PREFIX=/usr make -C addons/js-interposer install
+cd addons/fake-udev && make && cp libudev.so.1.0.0-fake libudev.so.1 libudev.so /usr/lib/$(gcc -print-multiarch)/
 ```
 
-Alternatively, users may directly place the Joystick Interposer libraries from the `selkies-js-interposer_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_${ARCH}.tar.gz` tarball into the library path, for instance into `/usr/lib/x86_64-linux-gnu` and `/usr/lib/i386-linux-gnu`. More information can be found in [Joystick Interposer](component.md#joystick-interposer).
+More information can be found in [Joystick Interposer](component.md#joystick-interposer).
 
 You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root path of your choice if using the `.tar.gz` tarball.
 
 **4. Run Selkies after changing the below script appropriately** (install `xvfb` and uncomment relevant sections if there is no real display, **DO NOT resize when streaming a physical monitor**)**:**
 
-**Check that you are using X.Org instead of Wayland (which is the default in many distributions but not supported) when using an existing display. You also need to be logged in from the login screen or autologin should be enabled.**
+**Check that you are using X.Org instead of Wayland (which is the default in many distributions) when attaching to an existing display -- an already-running Wayland session cannot be captured. A separate headless Wayland mode (started and owned by Selkies itself) is available with `--wayland=true` / `SELKIES_WAYLAND=true`, but when attaching to an existing graphical session that session must be X.Org. You also need to be logged in from the login screen or autologin should be enabled.**
 
 ```bash
 export DISPLAY="${DISPLAY:-:0}"
@@ -201,8 +202,8 @@ sudo chmod 777 /dev/input/js*
 # wireplumber &
 # pipewire-pulse &
 
-# Replace this line with your desktop environment session or skip this line if already running, use VirtualGL `vglrun +wm xfce4-session` here if needed
-# [ "${START_XFCE4:-true}" = "true" ] && rm -rf ~/.config/xfce4 && xfce4-session &
+# Replace this line with your desktop environment session or skip this line if already running, use VirtualGL `vglrun +wm lxqt-session` here if needed
+# [ "${START_LXQT:-true}" = "true" ] && rm -rf ~/.config/lxqt && lxqt-session &
 
 # Replace with your wanted resolution if using without resize, DO NOT USE if there is a physical display
 # selkies-resize 1920x1080

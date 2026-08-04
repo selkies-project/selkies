@@ -44,7 +44,7 @@ export function ShortcutsMenu() {
 								className="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
 								target="_blank"
 								rel="noopener noreferrer"
-								href="https://github.com/selkies-project/selkies/blob/main/docs/README.md#citations-in-academic-publications"
+								href="https://selkies-project.github.io/selkies/citation/"
 							>
 								<b>{t('shortcuts.citeNotice')}{" ↗"}</b>
 							</a>
