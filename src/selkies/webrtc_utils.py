@@ -883,6 +883,16 @@ class Metrics:
         self.gpu_utilization = Gauge('gpu_utilization', 'Utilization percentage reported by GPU')
         self.latency = Gauge('latency', 'Latency observed by client')
         self.webrtc_statistics = Info('webrtc_statistics', 'WebRTC Statistics from the client')
+        # Pacer observability (per display; series exist only while a pacer
+        # is attached). Counters are cumulative since transport start.
+        self.webrtc_pacer_pace_bps = Gauge(
+            'webrtc_pacer_pace_bps', 'Current pacer rate in bits per second', ['display'])
+        self.webrtc_pacer_queue_bytes = Gauge(
+            'webrtc_pacer_queue_bytes', 'Bytes queued in the pacer', ['display', 'kind'])
+        self.webrtc_pacer_idr_floor_bytes = Gauge(
+            'webrtc_pacer_idr_floor_bytes', 'IDR floor of the pacer video queue budget in bytes', ['display'])
+        self.webrtc_pacer_events = Gauge(
+            'webrtc_pacer_events', 'Cumulative pacer event counter', ['display', 'event'])
         self.stats_video_file_path: Optional[str] = None
         self.stats_audio_file_path: Optional[str] = None
         self.prev_stats_video_header_len: Optional[int]  = None
@@ -908,6 +918,19 @@ class Metrics:
     def set_fps(self, fps):
         self.fps.set(fps)
         self.fps_hist.observe(fps)
+
+    def set_pacer_snapshot(self, display: str, snap: Optional[dict]) -> None:
+        """Publish one pacer snapshot per display; no-ops when there is no pacer."""
+        if snap is None:
+            return
+        display = display or "primary"
+        self.webrtc_pacer_pace_bps.labels(display).set(snap.get("pace_bps", 0))
+        self.webrtc_pacer_queue_bytes.labels(display, "total").set(snap.get("queued_bytes", 0))
+        self.webrtc_pacer_queue_bytes.labels(display, "video").set(snap.get("video_bytes", 0))
+        self.webrtc_pacer_idr_floor_bytes.labels(display).set(snap.get("idr_floor_bytes", 0))
+        for event in ("video_dropped", "gop_resets", "keyreqs",
+                      "idr_resurrects", "timeout_resurrects", "stale_resets"):
+            self.webrtc_pacer_events.labels(display, event).set(snap.get(event, 0))
 
     def set_gpu_utilization(self, utilization):
         self.gpu_utilization.set(utilization)

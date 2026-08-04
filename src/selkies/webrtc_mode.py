@@ -1706,10 +1706,11 @@ class WebRTCService(BaseStreamingService):
             logger.debug("updating STUN/TURN servers in RTC app")
             self.rtc_app.update_rtc_config(stun_servers, turn_servers)
 
-    def _ensure_pacer(self, pc, peer: dict, display_id: str) -> None:
+    def _ensure_pacer(self, pc, peer: dict, display_id: str):
         """Ensure the per-transport packet pacer is enabled/configured (called
         from the congestion loop; idempotent and cheap). Encoder ceiling: the
-        display's configured video bitrate, CBR or not."""
+        display's configured video bitrate, CBR or not. Returns the transport
+        (so callers can snapshot its pacer) or None when unavailable yet."""
         # The shared DTLS transport is reachable via pc.sctp only once the
         # data-channel m-line is negotiated; media can flow (and TWCC
         # estimates accumulate) BEFORE that. Fall back to any transceiver's
@@ -1721,7 +1722,7 @@ class WebRTCService(BaseStreamingService):
                 if transport is not None:
                     break
         if transport is None:
-            return
+            return None
         lo_kbps, hi_kbps = settings.video_bitrate
         enc_kbps = float(self._display_setting(display_id, "video_bitrate") or hi_kbps)
         enc_bps = int(max(lo_kbps, min(hi_kbps, enc_kbps)) * 1000)
@@ -1750,10 +1751,10 @@ class WebRTCService(BaseStreamingService):
             if transport.pacer_enabled():
                 logger.info(
                     f"WebRTC pacer enabled for display '{display_id}' "
-                    f"(encoder ceiling {enc_bps // 1000} kbps, "
-                    f"keyreq callback: {'bound' if vsender is not None else 'MISSING'})")
+                    f"(encoder ceiling {enc_bps // 1000} kbps)")
         else:
             transport.set_pacer_encoder_bps(enc_bps)
+        return transport
 
     async def _congestion_control_loop(self) -> None:
         """GCC-style bitrate adaptation from transport-wide-cc receiver feedback:
@@ -1798,7 +1799,9 @@ class WebRTCService(BaseStreamingService):
                     # One bad peer must never kill this tick loop — it is also
                     # the pacer's only configuration path.
                     try:
-                        self._ensure_pacer(pc, peer, did)
+                        dtls = self._ensure_pacer(pc, peer, did)
+                        if self.metrics is not None and dtls is not None:
+                            self.metrics.set_pacer_snapshot(did, dtls.pacer_snapshot())
                     except Exception:
                         logger.exception("_ensure_pacer failed (display %s)", did)
             for did, bucket in per_display.items():
