@@ -171,14 +171,13 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         ssl-cert && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
-# Install the Mozilla APT repository (the Ubuntu `firefox` package is a snap
-# stub which cannot run inside containers); the pin also makes the snap stub
-# ineligible on Ubuntu and has no effect on Debian
-RUN install -d -m 0755 /etc/apt/keyrings && \
-    curl -fsSL "https://packages.mozilla.org/apt/repo-signing-key.gpg" -o /etc/apt/keyrings/packages.mozilla.org.asc && \
-    echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" > /etc/apt/sources.list.d/mozilla.list && \
-    printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1001\n' > /etc/apt/preferences.d/mozilla && \
-    printf 'Package: firefox*\nPin: release o=Ubuntu*\nPin-Priority: -1\n' > /etc/apt/preferences.d/firefox-no-snap && \
+# Install Firefox from Mozilla's official APT repository, which serves real .deb
+# builds on both Debian and Ubuntu and takes priority over any
+# distribution-provided Firefox packages
+RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d && \
+    curl -o /etc/apt/keyrings/packages.mozilla.org.asc -fsSL "https://packages.mozilla.org/apt/repo-signing-key.gpg" && \
+    printf 'Types: deb\nURIs: https://packages.mozilla.org/apt\nSuites: mozilla\nComponents: main\nSigned-By: /etc/apt/keyrings/packages.mozilla.org.asc\n' > /etc/apt/sources.list.d/mozilla.sources && \
+    printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla && \
     apt-get clean && apt-get update && apt-get install --no-install-recommends -y firefox && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
