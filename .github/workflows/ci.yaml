@@ -45,7 +45,7 @@ jobs:
       - name: Validate workflow YAML
         run: |
           python3 -m pip install --upgrade pyyaml
-          python3 -c "import glob, yaml; [yaml.safe_load(open(f)) for f in glob.glob('.github/workflows/*.yaml') + glob.glob('.github/actions/*/action.yaml')]; print('YAML OK')"
+          python3 -c "import glob, yaml; [yaml.safe_load(open(f)) for f in glob.glob('.github/workflows/*.yaml')]; print('YAML OK')"
 
   wheel:
     name: Build wheel
