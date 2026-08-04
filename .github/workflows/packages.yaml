@@ -5,30 +5,42 @@ name: Packages
 # linuxdeploy-plugin-conda). Everything is assembled inside a container of the
 # target distribution; only apt/apt-get, dnf, apk, or pacman are ever invoked.
 
+# Triggered by ci.yaml on pushes to main and by release.yaml for releases;
+# can also be run standalone via the Actions tab, in which case it builds
+# the wheel itself unless `wheel_artifact` names an existing artifact.
+
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       package_version:
         description: Version string stamped into the packages
         type: string
         default: 0.0.0.dev0
+      wheel_artifact:
+        description: Artifact name of a prebuilt wheel (skips the wheel build when set)
+        type: string
+        default: ""
   workflow_call:
     inputs:
       package_version:
         description: Version string stamped into the packages
         type: string
         default: 0.0.0.dev0
+      wheel_artifact:
+        description: Artifact name of a prebuilt wheel (skips the wheel build when set)
+        type: string
+        default: ""
 
 jobs:
   wheel:
     name: Build wheel for the packages
+    if: ${{ inputs.wheel_artifact == '' }}
     uses: ./.github/workflows/build-wheel.yaml
 
   package:
     name: ${{ matrix.kind.name }} (${{ matrix.arch.name }})
     needs: wheel
+    if: ${{ !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result) }}
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -70,8 +82,24 @@ jobs:
       - name: Download the wheel
         uses: actions/download-artifact@v5
         with:
-          name: selkies-wheel
+          name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
           path: dist/
+      # Fresh pixelflux/pcmflux wheels from the master HEAD of linuxserver/*;
+      # absence is tolerated (standalone dispatch) and mkvenv.sh uses PyPI
+      - name: Download pixelflux wheels (master HEAD)
+        uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: pixelflux-wheels-*
+          path: dist/
+          merge-multiple: true
+      - name: Download pcmflux wheels (master HEAD)
+        uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: pcmflux-wheels-*
+          path: dist/
+          merge-multiple: true
       - name: Build the package inside the target distro container
         env:
           SELKIES_VERSION: ${{ github.event.inputs.package_version || inputs.package_version || '0.0.0.dev0' }}
@@ -84,7 +112,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}/out:/out" \
             -e SELKIES_VERSION \
             "${{ matrix.kind.image }}" \
-            bash "/repo/${{ matrix.kind.script }}"
+            sh "/repo/${{ matrix.kind.script }}"
           ls -la out/
       - uses: actions/upload-artifact@v5
         with:
@@ -95,6 +123,7 @@ jobs:
   appimage:
     name: AppImage (${{ matrix.arch.name }})
     needs: wheel
+    if: ${{ !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result) }}
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -108,9 +137,26 @@ jobs:
       - uses: actions/checkout@v5
       - name: Free disk space
         uses: ./.github/actions/clean-disk
+      # Fresh pixelflux/pcmflux wheels from the master HEAD of linuxserver/*;
+      # absence is tolerated (standalone dispatch) and appimage.sh uses PyPI
+      - name: Download pixelflux wheels (master HEAD)
+        uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: pixelflux-wheels-*
+          path: pixelflux-pcmflux-wheels/
+          merge-multiple: true
+      - name: Download pcmflux wheels (master HEAD)
+        uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: pcmflux-wheels-*
+          path: pixelflux-pcmflux-wheels/
+          merge-multiple: true
       - name: Build the AppImage (rattler-build + linuxdeploy-plugin-conda)
         env:
           SELKIES_VERSION: ${{ github.event.inputs.package_version || inputs.package_version || '0.0.0.dev0' }}
+          PIXELFLUX_PCMFLUX_WHEELS_DIR: ${{ github.workspace }}/pixelflux-pcmflux-wheels
         run: ./scripts/ci/appimage.sh "${{ matrix.arch.name }}"
       - uses: actions/upload-artifact@v5
         with:

@@ -1,8 +1,21 @@
 name: CI
 
+# Single orchestrator for pushes to main: lint, build the wheel once, then
+# fan out to the image and native-package builds, which consume the wheel
+# artifact instead of rebuilding it. Pushes that only touch docs or
+# devcontainer files skip CI (their own workflows cover them).
+
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - docs/**
+      - mkdocs.yml
+      - .devcontainer/**
+      - .github/workflows/docs.yaml
+      - .github/workflows/devcontainer-feature.yaml
+      - README.md
+      - LICENSE
   pull_request:
 
 concurrency:
@@ -37,3 +50,25 @@ jobs:
   wheel:
     name: Build wheel
     uses: ./.github/workflows/build-wheel.yaml
+
+  pixelflux-pcmflux:
+    name: Build pixelflux and pcmflux wheels (master HEAD)
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+
+  images:
+    name: Multi-arch images
+    needs: [wheel, pixelflux-pcmflux]
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/images.yaml
+    with:
+      tag_prefix: main
+      wheel_artifact: selkies-wheel
+
+  packages:
+    name: Native packages
+    needs: [wheel, pixelflux-pcmflux]
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/packages.yaml
+    with:
+      wheel_artifact: selkies-wheel

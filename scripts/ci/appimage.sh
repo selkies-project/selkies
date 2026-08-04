@@ -61,7 +61,14 @@ export CONDA_CHANNELS="$(dirname "$(readlink -f "${PKG}")/../");conda-forge"
 # x264-free avcodec stack inside the AppImage (gpl variant exists but is wrong here)
 export CONDA_PACKAGES="selkies;python=3.12;ffmpeg=*=*lgpl*;libxcb;pulseaudio;libva;libxkbcommon;zlib"
 export CONDA_CHANNEL_PRIORITY="flexible"
-export PIP_REQUIREMENTS="pixelflux pcmflux"
+# pixelflux/pcmflux: freshly built wheels from the master HEAD of
+# linuxserver/* when the CI supplies them (the AppImage env always runs
+# Python 3.12, see CONDA_PACKAGES above); otherwise the PyPI releases
+PIP_REQUIREMENTS="pixelflux pcmflux"
+if [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ] && ls "${PIXELFLUX_PCMFLUX_WHEELS_DIR}"/pixelflux-*.whl >/dev/null 2>&1; then
+  PIP_REQUIREMENTS="$(ls "${PIXELFLUX_PCMFLUX_WHEELS_DIR}"/pixelflux-*cp312*manylinux*"${ARCH}"*.whl | head -n1) $(ls "${PIXELFLUX_PCMFLUX_WHEELS_DIR}"/pcmflux-*cp312*manylinux*"${ARCH}"*.whl | head -n1)"
+fi
+export PIP_REQUIREMENTS
 export DEPLOY_GLIBC_VERSION="0"
 
 rm -rf AppDir

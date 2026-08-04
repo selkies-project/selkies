@@ -1,8 +1,10 @@
 name: Release
 
-# Maintainer-triggered release: builds the wheel, multi-arch images, native
-# packages, and AppImages, then assembles a DRAFT GitHub release with every
-# build artifact attached. The draft is finalized and published manually.
+# Maintainer-triggered release: builds the wheel ONCE at the release version
+# plus fresh pixelflux/pcmflux wheels from the master HEAD of linuxserver/*,
+# then builds multi-arch images, native packages, and AppImages around those
+# wheels, and assembles a DRAFT GitHub release with every build artifact
+# attached. The draft is finalized and published manually.
 
 on:
   workflow_dispatch:
@@ -34,19 +36,26 @@ jobs:
     with:
       package_version: ${{ needs.validate.outputs.version }}
 
+  pixelflux-pcmflux:
+    name: Build pixelflux and pcmflux wheels (master HEAD)
+    needs: validate
+    uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+
   images:
     name: Build and publish multi-arch images
-    needs: validate
+    needs: [validate, wheel, pixelflux-pcmflux]
     uses: ./.github/workflows/images.yaml
     with:
       tag_prefix: v${{ needs.validate.outputs.version }}
+      wheel_artifact: selkies-wheel
 
   packages:
     name: Build native packages
-    needs: validate
+    needs: [validate, wheel, pixelflux-pcmflux]
     uses: ./.github/workflows/packages.yaml
     with:
       package_version: ${{ needs.validate.outputs.version }}
+      wheel_artifact: selkies-wheel
 
   draft-release:
     name: Assemble draft release
@@ -63,6 +72,12 @@ jobs:
         run: |
           set -e
           mkdir -p release
+          # Drop the empty image-digest placeholder files (64-hex filenames);
+          # they only exist for the multi-arch manifest merge
+          find release-artifacts -type f -regextype posix-extended -regex '.*/[0-9a-f]{64}' -delete
+          # Drop the pixelflux/pcmflux HEAD wheels: they are CI inputs (baked
+          # into the images, packages, and AppImages above), not selkies assets
+          find release-artifacts -type f \( -name 'pixelflux-*.whl' -o -name 'pcmflux-*.whl' \) -delete
           find release-artifacts -type f -exec mv {} release/ \;
           ls -la release/
       - name: Create draft release

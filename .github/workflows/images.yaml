@@ -5,33 +5,31 @@ name: Images
 # native runner (no QEMU), pushes by digest, and a merge job assembles the
 # multi-arch manifest.
 
+# Triggered by ci.yaml on pushes to main and by release.yaml for releases;
+# can also be run standalone via the Actions tab, in which case it builds
+# the wheel itself unless `wheel_artifact` names an existing artifact.
+
 on:
-  push:
-    branches: [main]
-    paths:
-      - Dockerfile
-      - pyproject.toml
-      - src/**
-      - addons/example/**
-      - addons/js-interposer/**
-      - addons/fake-udev/**
-      - addons/selkies-web-core/**
-      - addons/selkies-dashboard/**
-      - addons/universal-touch-gamepad/**
-      - .github/workflows/images.yaml
-      - .github/workflows/build-wheel.yaml
   workflow_dispatch:
     inputs:
       tag_prefix:
         description: Tag prefix for the images
         type: string
         default: main
+      wheel_artifact:
+        description: Artifact name of a prebuilt wheel (skips the wheel build when set)
+        type: string
+        default: ""
   workflow_call:
     inputs:
       tag_prefix:
         description: Tag prefix for the images (e.g. v1.2.3 or latest)
         type: string
         default: main
+      wheel_artifact:
+        description: Artifact name of a prebuilt wheel (skips the wheel build when set)
+        type: string
+        default: ""
 
 env:
   REGISTRY: ghcr.io
@@ -40,11 +38,13 @@ env:
 jobs:
   wheel:
     name: Build wheel for the images
+    if: ${{ inputs.wheel_artifact == '' }}
     uses: ./.github/workflows/build-wheel.yaml
 
   build:
     name: ${{ matrix.flavor.name }} (${{ matrix.arch.name }})
     needs: wheel
+    if: ${{ !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result) }}
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -76,13 +76,30 @@ jobs:
       - name: Download the wheel
         uses: actions/download-artifact@v5
         with:
-          name: selkies-wheel
+          name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
           path: dist/
+      # Fresh pixelflux/pcmflux wheels, built from the master HEAD of the
+      # linuxserver/* repos by the orchestrating run; absence is tolerated
+      # (standalone dispatch) and the Dockerfile falls back to PyPI
+      - name: Download pixelflux wheels (master HEAD)
+        uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: pixelflux-wheels-*
+          path: dist/
+          merge-multiple: true
+      - name: Download pcmflux wheels (master HEAD)
+        uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: pcmflux-wheels-*
+          path: dist/
+          merge-multiple: true
       - name: Prepare wheels directory
         run: |
           set -e
           # .gitignore keeps addons/example/wheels/*.whl out of git
-          cp dist/selkies-*.whl addons/example/wheels/
+          cp dist/*.whl addons/example/wheels/
           ls -la addons/example/wheels/
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3

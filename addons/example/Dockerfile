@@ -182,9 +182,24 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
 # Install Selkies with pip: from the wheels dropped into `wheels/`, or the
-# latest PyPI release when `wheels/` is empty
+# latest PyPI release when `wheels/` is empty. When fresh pixelflux/pcmflux
+# wheels (built from the master HEAD of linuxserver/pixelflux and
+# linuxserver/pcmflux) ride along, pip selects the ones matching this image's
+# Python and platform; everything else still resolves from PyPI
 COPY wheels/ /tmp/wheels/
-RUN PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall $(ls /tmp/wheels/*.whl 2>/dev/null || printf '%s' "${PYPI_PACKAGE}") && rm -rf /tmp/wheels
+RUN set -e; \
+    SELKIES_WHL="$(ls /tmp/wheels/selkies-*.whl 2>/dev/null || true)"; \
+    if [ -z "${SELKIES_WHL}" ]; then \
+      PKGS="${PYPI_PACKAGE}"; \
+    else \
+      PKGS="${SELKIES_WHL}"; \
+      if ls /tmp/wheels/pixelflux-*.whl > /dev/null 2>&1; then \
+        pip3 download --no-cache-dir --no-deps --no-index --find-links /tmp/wheels --dest /tmp/picked pixelflux pcmflux > /dev/null; \
+        PKGS="${PKGS} $(ls /tmp/picked/*.whl)"; \
+      fi; \
+    fi; \
+    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall ${PKGS}; \
+    rm -rf /tmp/wheels /tmp/picked
 
 # Install the joystick interposer and fake-udev libraries (container-only)
 COPY --from=add-ons /opt/add-ons/lib/ /usr/lib/
