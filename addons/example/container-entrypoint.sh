@@ -47,12 +47,11 @@ export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR}}"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
 
-# Hardware OpenGL. On NVIDIA, Zink routes GL through the Vulkan driver, which
-# is what serves here in place of VirtualGL; other vendors reach the GPU through
-# the display server's render node instead (see services/xvfb/run). Both signals
-# are required: the device nodes prove a GPU was passed in, and a working
-# nvidia-smi proves the driver stack matches it. Set DISABLE_ZINK=true for
-# llvmpipe.
+# Hardware OpenGL. On NVIDIA, Zink routes GL through the Vulkan driver; other
+# vendors reach the GPU through the display server's render node instead (see
+# services/xvfb/run). Both signals are required: the device nodes prove a GPU was
+# passed in, and a working nvidia-smi proves the driver stack matches it. Set
+# DISABLE_ZINK=true for llvmpipe.
 if [ "${DISABLE_ZINK:-false}" != "true" ] && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   export LIBGL_KOPPER_DRI2=1
   export MESA_LOADER_DRIVER_OVERRIDE=zink

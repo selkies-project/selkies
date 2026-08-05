@@ -673,9 +673,9 @@ int access(const char *pathname, int mode) {
  * We must forge unique IDs (Major 13 for Input) matching the virtual path indices.
  */
 /* The device index after `prefix`, or -1 when `path` is not that prefix followed
- * by digits alone. Hand-rolled rather than sscanf: glibc 2.38 redirects sscanf to
- * __isoc23_sscanf, and referencing that symbol would stop this library from
- * loading on every distribution older than the one it was built on. */
+ * by digits alone. The digits are parsed here because glibc 2.38 redirects
+ * sscanf to __isoc23_sscanf, and referencing that symbol would stop this library
+ * from loading on every distribution older than the one it was built on. */
 static int dev_index_after(const char *path, const char *prefix) {
     size_t prefix_len = strlen(prefix);
     if (strncmp(path, prefix, prefix_len) != 0) return -1;

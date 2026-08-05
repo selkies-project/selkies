@@ -15,9 +15,8 @@
   "author": "Selkies",
   "license": "GPL-3",
   "dependencies": {
-    "vite": "^6.2.4",
+    "vite": "^8.2.0",
     "vite-plugin-env-compatible": "^2.0.1",
-    "vite-plugin-minify": "^2.1.0",
-    "vite-plugin-restart": "^0.4.2"
+    "vite-plugin-minify": "^3.0.0"
   }
 }

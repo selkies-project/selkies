@@ -59,11 +59,14 @@ jobs:
         run: make -C tests/tools
       - name: Run the unit tier
         run: |
-          python -m pip install pytest
+          # The suites reach into selkies.input_handler, so its module-level
+          # imports have to resolve; everything below that is lazy, which is what
+          # keeps this tier off the capture and WebRTC stacks
+          python -m pip install pytest aiofiles msgpack Pillow
           python -m pytest tests -m unit -v
 
   suites:
-    name: ${{ inputs.tiers || 'integration or e2e' }}
+    name: Suites (${{ inputs.tiers || 'integration or e2e' }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -93,7 +96,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            xvfb x11-xserver-utils x11-utils xauth \
+            xvfb x11-xserver-utils x11-utils xauth xcvt \
             pulseaudio pulseaudio-utils \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
@@ -112,9 +115,13 @@ jobs:
           until [ -S "/tmp/.X11-unix/X${E2E_DISPLAY#*:}" ]; do sleep 0.5; done
           pulseaudio --start --exit-idle-time=-1
           pactl load-module module-null-sink sink_name=output rate=48000 channels=2
-      - name: Install the browsers
+      # The integration tier drives Chromium as well, for the gamepad and
+      # WebRTC-transport suites; only the browser matrix needs the other engines
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Install the remaining browser engines
         if: contains(inputs.tiers || 'integration or e2e', 'e2e')
-        run: python -m playwright install --with-deps chromium firefox webkit
+        run: python -m playwright install --with-deps firefox webkit
       - name: Run the suites
         env:
           TIERS: ${{ inputs.tiers || 'integration or e2e' }}

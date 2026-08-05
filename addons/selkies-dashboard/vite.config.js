@@ -6,8 +6,29 @@
 
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
-import ViteRestart from 'vite-plugin-restart'
 import { ViteMinifyPlugin } from 'vite-plugin-minify';
+
+// Restarts the dev server when a file Vite does not track as a module changes.
+function restartOnChange(globs) {
+  const patterns = globs.map((glob) => new RegExp(
+    '(^|/)' + glob.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                  .replace(/\*\*/g, ' ')
+                  .replace(/\*/g, '[^/]*')
+                  .replace(/ /g, '.*') + '$'));
+  return {
+    name: 'selkies-restart-on-change',
+    apply: 'serve',
+    configureServer(server) {
+      server.watcher.add(globs);
+      const onChange = (file) => {
+        const path = file.split(/[\\/]/).join('/');
+        if (patterns.some((pattern) => pattern.test(path))) server.restart();
+      };
+      server.watcher.on('add', onChange);
+      server.watcher.on('change', onChange);
+    },
+  };
+}
 
 export default ({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -31,7 +52,7 @@ export default ({ mode }) => {
         exclude: 'src/selkies-core.js'
       }),
       ViteMinifyPlugin(),
-      ViteRestart({restart: ['index.html', 'src/**']}),
+      restartOnChange(['index.html', 'src/**']),
     ],
     define: {
       // if inject=false -> undefined, so runtime falls back to localStorage/default
