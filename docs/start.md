@@ -154,6 +154,8 @@ make -C addons/js-interposer && PREFIX=/usr make -C addons/js-interposer install
 cd addons/fake-udev && make && cp libudev.so.1.0.0-fake libudev.so.1 libudev.so /usr/lib/$(gcc -print-multiarch)/
 ```
 
+On `x86_64`, add `apt-get install -y gcc-multilib && make -C addons/js-interposer install32` (and `make all32` in `addons/fake-udev`) for 32-bit applications such as most of the Steam and Wine catalog, since `/usr/$LIB` resolves per process bitness. Container images built on the `.deb`, `.rpm`, `.apk` or `.pkg.tar.zst` package need neither step: each of them already carries the interposer, and the `.deb` and `.rpm` carry the 32-bit variant too.
+
 More information can be found in [Joystick Interposer](component.md#joystick-interposer).
 
 You can install `selkies_joystick_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` at it.

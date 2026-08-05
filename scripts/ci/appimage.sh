@@ -6,7 +6,7 @@
 # Build selkies-<ver>-<arch>.AppImage on the runner for this architecture.
 # Uses rattler-build to package selkies as a conda package (which also ships as
 # a release artifact), then assembles the AppImage with linuxdeploy and the
-# linuxdeploy conda plugin (https://github.com/linuxdeploy/linuxdeploy-plugin-conda).
+# conda plugin in infra/appimage.
 #
 # Usage: scripts/ci/appimage.sh [x86_64|aarch64]
 
@@ -38,22 +38,18 @@ rattler-build build \
 PKG="$(find "${WORK}/conda-output" \( -name 'selkies-*.tar.bz2' -o -name 'selkies-*.conda' \) | head -n1)"
 test -f "${PKG}"
 
-# 2) linuxdeploy + conda plugin (latest published builds)
-case "${ARCH}" in
-  x86_64)
-    LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
-    PLUGIN_URL="https://github.com/linuxdeploy/linuxdeploy-plugin-conda/releases/download/continuous/linuxdeploy-plugin-conda-x86_64.AppImage"
-    ;;
-  aarch64)
-    LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage"
-    PLUGIN_URL="https://github.com/linuxdeploy/linuxdeploy-plugin-conda/releases/download/continuous/linuxdeploy-plugin-conda-aarch64.AppImage"
-    ;;
-esac
-curl -fsSL -o "${WORK}/linuxdeploy.AppImage" "${LINUXDEPLOY_URL}"
-curl -fsSL -o "${WORK}/linuxdeploy-plugin-conda.AppImage" "${PLUGIN_URL}"
-chmod +x "${WORK}/linuxdeploy.AppImage" "${WORK}/linuxdeploy-plugin-conda.AppImage"
+# 2) linuxdeploy (latest published build) and the conda plugin. The plugin is
+#    the one in infra/appimage: upstream publishes no release artifacts, and
+#    this one installs Miniforge rather than Miniconda3, keeping the AppImage
+#    on conda-forge alone.
+curl -fsSL -o "${WORK}/linuxdeploy.AppImage" \
+    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${ARCH}.AppImage"
+cp infra/appimage/linuxdeploy-plugin-conda.sh "${WORK}/linuxdeploy-plugin-conda.sh"
+chmod +x "${WORK}/linuxdeploy.AppImage" "${WORK}/linuxdeploy-plugin-conda.sh"
+# linuxdeploy resolves `--plugin conda` by searching PATH
+export PATH="${WORK}:${PATH}"
 
-# 3) Assemble the AppDir: the conda plugin installs a Miniconda prefix at
+# 3) Assemble the AppDir: the conda plugin installs a Miniforge prefix at
 #    AppDir/usr/conda, adds the channels and packages named below, and finally
 #    pip-installs PIP_REQUIREMENTS into the same prefix.
 export OUTPUT="selkies-${SELKIES_VERSION:-0.0.0}-${ARCH}.AppImage"

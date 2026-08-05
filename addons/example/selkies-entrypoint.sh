@@ -9,7 +9,7 @@ set -e
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 
 # Load the shared session environment computed by container-entrypoint.sh
-# (interposer LD_PRELOAD, display, audio, and TURN defaults) 
+# (interposer LD_PRELOAD, display, audio, and TURN defaults)
 [ -f "${XDG_RUNTIME_DIR}/container-env" ] && . "${XDG_RUNTIME_DIR}/container-env"
 
 # Wait for the X11 socket in the X11 backend; the Wayland backend owns its own

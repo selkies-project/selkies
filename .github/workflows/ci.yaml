@@ -78,6 +78,17 @@ jobs:
         # the newer interpreters accept
         run: python -m compileall -q src/selkies
 
+  tests:
+    name: Test suites
+    needs: [lint, python-compat]
+    # The browser tier runs nightly from tests.yaml; this keeps the push and
+    # pull-request path at the suites that need no browser install
+    permissions:
+      contents: read
+    uses: ./.github/workflows/tests.yaml
+    with:
+      tiers: unit or integration
+
   wheel:
     name: Build wheel
     needs: [lint, python-compat]

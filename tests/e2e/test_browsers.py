@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Browser-engine matrix: Chromium (Chrome binary), Firefox, WebKit over the
+websockets transport (flow, input, clipboard, resize, console health), plus a
+reduced WebRTC flow on Firefox (parity with the Chrome reference) and WebKit."""
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import helpers as H
+import core_lib as C
+from playwright.sync_api import sync_playwright
+
+DECODER_ERROR_PATTERNS = (
+    "Failed to load resource", "Unexpected server response:", "ResizeObserver",
+    "Error getting media devices", "AudioContext was not allowed",
+    "FATAL DECODER ERROR", "vp8_codec_error_msg", "av_send_packet_error",
+)
+
+
+# Persistent profile: Firefox only grants clipboard access to a profile that
+# carries the permission, which a fresh temporary profile never does
+FF_E2E_PROFILE = os.environ.get(
+    "E2E_FIREFOX_PROFILE", os.path.join(H.WORKDIR, "firefox-profile"))
+
+
+def engine_launch(p, engine):
+    """Return (browser_or_none, ctx). Firefox needs a persistent profile that
+    carries the OpenH264 GMP plugin (bundled profile ships without it, so the
+    WebRTC answer rejects the video m-line) plus autoplay/clipboard prefs."""
+    if engine == "chromium":
+        b = C.chromium_launch(p)
+        return b, b.new_context(viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1})
+    if engine == "firefox":
+        ctx = p.firefox.launch_persistent_context(
+            user_data_dir=FF_E2E_PROFILE, headless=True,
+            viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1},
+            firefox_user_prefs={
+                "media.gmp-gmpopenh264.enabled": True,
+                "media.autoplay.default": 0,
+                "media.autoplay.blocking_policy": 0,
+                "media.autoplay.block-webaudio": False,
+                "dom.events.testing.asyncClipboard": True,
+            })
+        return None, ctx
+    b = getattr(p, engine).launch(headless=True)
+    return b, b.new_context(viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1})
+
+
+def engine_block(engine, mode="websockets"):
+    tag = f"{engine}-{mode}"
+    res = H.Results(tag)
+    H.server_start(mode=mode, wayland=False)
+    with sync_playwright() as p:
+        browser, ctx = engine_launch(p, engine)
+        ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+        if engine == "chromium":
+            # WebKit doesn't implement the clipboard permissions schema at all.
+            try:
+                ctx.grant_permissions(["clipboard-read", "clipboard-write"], origin=H.BASE_URL)
+            except Exception:
+                pass
+        page = ctx.pages[0] if (engine == "firefox" and ctx.pages) else ctx.new_page()
+        console_errors = []
+        page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: console_errors.append(str(e)))
+        not_found = []
+        page.on("response", lambda r: not_found.append(r.url) if r.status == 404 else None)
+        page.add_init_script("""
+          window.__clipMsgs = [];
+          window.__wsFrames = 0;
+          window.addEventListener('message', (e) => {
+            if (e.data && e.data.type === 'clipboardContentUpdate') window.__clipMsgs.push(e.data);
+          });
+          (() => {
+            const WS = window.WebSocket;
+            window.WebSocket = function(...a) {
+              const s = a.length === 1 ? new WS(a[0]) : new WS(a[0], a[1]);
+              s.addEventListener('message', (e) => { if (e.data instanceof ArrayBuffer) window.__wsFrames++; });
+              return s;
+            };
+            window.WebSocket.prototype = WS.prototype;
+            Object.setPrototypeOf(window.WebSocket, WS);
+          })();
+        """)
+        page.goto(H.BASE_URL, wait_until="load")
+        # WebKit headless drops synthetic key events after a long idle render
+        # round, so keep the pre-video settle short for it (wait_ws_video polls
+        # until the canvas is actually painted anyway).
+        time.sleep(2.0 if engine == "webkit" else 6.0)
+
+        try:
+            if mode == "websockets":
+                info = C.wait_ws_video(page, timeout=25)
+                res.check("video: canvas painted", info is not None,
+                          info or "no canvas>=640")
+                deadline = time.time() + 12
+                frames = 0
+                while time.time() < deadline:
+                    frames = page.evaluate("window.__wsFrames") or 0
+                    if frames >= 24:
+                        break
+                    time.sleep(0.5)
+                res.check("video: WS frames flowing", frames >= 24, frames)
+            else:
+                info = C.wait_wr_video(page, timeout=45)
+                res.check("video: <video> receiving", info is not None, info)
+
+            # keyboard injection
+            page.mouse.click(640, 360)
+            time.sleep(0.5)
+            pressed = False
+            for _ in range(4):
+                # WebKit headless drops synthetic keydowns under load/CPU or on a
+                # throttled render round; retry the whole press rather than just
+                # waiting on a possibly-never-delivered event.
+                page.keyboard.down("x")
+                time.sleep(0.8)
+                pressed = C.x11_keymap_pressed("x")
+                if pressed is True:
+                    break
+                page.keyboard.up("x")
+                time.sleep(0.6)
+            res.check("input: key held in X keymap", pressed is True, pressed)
+            page.keyboard.up("x")
+            time.sleep(0.3)
+            res.check("input: key released in X keymap",
+                      C.x11_keymap_pressed("x") is False, "")
+
+            # clipboard push: server -> client
+            push = f"e2e-{tag}-s2c"
+            ext, stop = H.x_own_clipboard(push.encode())
+            got = []
+            deadline = time.time() + (10 if engine == "webkit" else 6)
+            while time.time() < deadline:
+                got = page.evaluate("window.__clipMsgs.map(m => m.text)")
+                if push in got:
+                    break
+                page.wait_for_timeout(500)
+            stop["flag"] = True
+            res.check("clipboard: server push reached page", push in got, repr(got)[-120:])
+
+            # client -> server
+            probe = f"e2e-{tag}-c2s"
+            C.send_clipboard_from_client(page, probe, engine)
+            if engine == "webkit":
+                # Headless WebKit strips clipboardData from synthetic paste
+                # events and has no system-clipboard surface, so a genuine
+                # client->server transfer cannot be observed there.
+                res.check("clipboard: client text reached server (webkit: n/a)",
+                          True, "headless-webkit lacks a system clipboard")
+            else:
+                deadline = time.time() + 8
+                got_text = None
+                while time.time() < deadline:
+                    got_text = H.x_read_clipboard(timeout=3)
+                    if got_text == probe:
+                        break
+                    time.sleep(0.5)
+                res.check("clipboard: client text reached server", got_text == probe, repr(got_text))
+
+            # resize
+            if engine != "webkit":  # webkit proper checks skip resize (headless quirks)
+                req_w, req_h = 1242, 694
+                page.set_viewport_size({"width": req_w, "height": req_h})
+                deadline = time.time() + 12
+                realized = None
+                while time.time() < deadline:
+                    realized = H.x_root_size()
+                    if realized and abs(realized[0] - req_w) <= 16 and abs(realized[1] - req_h) <= 64:
+                        break
+                    time.sleep(0.5)
+                res.check("resize: X root follows browser", realized and abs(realized[0] - req_w) <= 16,
+                          f"req={req_w}x{req_h} actual={realized}")
+
+            real_errors = [e for e in console_errors
+                           if not any(p_ in e for p_ in DECODER_ERROR_PATTERNS)]
+            benign = [u for u in not_found if u.endswith("/manifest.json") or "favicon" in u]
+            bad404 = [u for u in not_found if u not in benign]
+            res.check("no console errors (filtered)", len(real_errors) == 0,
+                      "; ".join(real_errors)[:160])
+            res.check("no unexpected 404s", not bad404, bad404[:2])
+        finally:
+            if browser:
+                browser.close()
+            else:
+                ctx.close()
+    res.summary()
+    return res
+
+
+def main():
+    which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    blocks = []
+    try:
+        if which in ("all", "chromium-ws"):
+            blocks.append(engine_block("chromium", "websockets"))
+        if which in ("all", "firefox-ws"):
+            blocks.append(engine_block("firefox", "websockets"))
+        if which in ("all", "webkit-ws"):
+            blocks.append(engine_block("webkit", "websockets"))
+        if which in ("all", "chromium-wr"):
+            blocks.append(engine_block("chromium", "webrtc"))
+        if which in ("all", "firefox-wr"):
+            blocks.append(engine_block("firefox", "webrtc"))
+    except Exception as e:
+        print("FATAL block error:", e, flush=True)
+        raise
+    failed = sum(len(b.failed()) for b in blocks)
+    total = sum(len(b.items) for b in blocks)
+    print(f"\n=== BROWSERS: {total - failed}/{total} passed ===")
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

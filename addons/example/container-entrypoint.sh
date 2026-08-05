@@ -47,6 +47,18 @@ export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR}}"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
 
+# Hardware OpenGL. On NVIDIA, Zink routes GL through the Vulkan driver, which
+# is what serves here in place of VirtualGL; other vendors reach the GPU through
+# the display server's render node instead (see services/xvfb/run). The device
+# nodes are the signal that a GPU was actually passed in, which neither a driver
+# library nor an empty /dev/dri establishes. Set DISABLE_ZINK=true for llvmpipe.
+if [ "${DISABLE_ZINK:-false}" != "true" ] && ls /dev/nvidia* >/dev/null 2>&1; then
+  export LIBGL_KOPPER_DRI2=1
+  export MESA_LOADER_DRIVER_OVERRIDE=zink
+  export GALLIUM_DRIVER=zink
+  echo 'NVIDIA GPU detected: OpenGL runs through Zink on the NVIDIA Vulkan driver'
+fi
+
 # Compute the shared session environment, including embedded coTURN defaults
 ENV_FILE="${XDG_RUNTIME_DIR}/container-env"
 : > "${ENV_FILE}"

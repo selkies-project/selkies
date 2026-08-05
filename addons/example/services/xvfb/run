@@ -5,7 +5,26 @@
 export DISPLAY="${DISPLAY:-:20}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 until [ -d "${XDG_RUNTIME_DIR}" ]; do sleep 0.5; done
+# DRI3: rendering through a DRM node is what gives GL clients the GPU, and only
+# the patched server in this image accepts -vfbdevice. The node is the one
+# Selkies renders on (--render-dri), so the X11 backend and the Wayland
+# compositor answer to the same setting; NVIDIA renders through Zink instead
+# (see container-entrypoint.sh) and is left with the software framebuffer here.
+VFB_DEVICE=""
+RENDER_DRI="${SELKIES_RENDER_DRI:-${DRINODE:-}}"
+if /usr/bin/Xvfb -help 2>&1 | grep -q 'vfbdevice'; then
+  if [ -n "${RENDER_DRI}" ]; then
+    VFB_DEVICE="-vfbdevice ${RENDER_DRI}"
+  elif ! ls /dev/nvidia* >/dev/null 2>&1; then
+    for node in /dev/dri/renderD*; do
+      [ -e "${node}" ] && VFB_DEVICE="-vfbdevice ${node}"
+      break
+    done
+  fi
+fi
+
 # Screen saver (-s 0) and DPMS (-dpms) are disabled at the server level so the
 # framebuffer can never go blank: capturing a black stream is never desirable,
 # and no lock-screen component is installed in this image anyway
-exec /usr/bin/Xvfb "${DISPLAY}" -screen 0 "8192x4096x24" +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem -s 0 -dpms
+# shellcheck disable=SC2086  # VFB_DEVICE is an option pair or empty
+exec /usr/bin/Xvfb "${DISPLAY}" -screen 0 "8192x4096x24" +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem -s 0 -dpms ${VFB_DEVICE}

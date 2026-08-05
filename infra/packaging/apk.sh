@@ -13,6 +13,7 @@ apk add --no-cache \
     python3 python3-dev py3-pip py3-virtualenv \
     libxkbcommon ca-certificates
 /repo/infra/packaging/mkvenv.sh
+/repo/infra/packaging/interposer.sh /pkg-root
 # abuild writes src/ and pkg/ next to the APKBUILD, and /repo is read-only
 rm -rf /build
 mkdir -p /build /out
@@ -21,7 +22,10 @@ chmod -R u+w /build/apk
 # Alpine rejects PEP 440 suffixes such as the 0.0.0.dev0 CI default
 PKGVER="$(printf '%s' "${SELKIES_VERSION:-0.0.0}" | sed -e 's/[^0-9.].*$//' -e 's/\.$//')"
 sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" /build/apk/APKBUILD
-abuild-keygen -a -i -n
+# -i would install the public key with doas, which this image has no need for:
+# the build runs as root and can place the key itself
+abuild-keygen -a -n
+cp -f "${HOME}"/.abuild/*.rsa.pub /etc/apk/keys/
 # rootpkg is the target that assembles the .apk; `package` alone only stages
 # $pkgdir
 REPODEST=/build/apkrepo

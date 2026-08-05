@@ -15,8 +15,14 @@ apt-get install --no-install-recommends -y \
     python3 python3-venv python3-pip python3-dev \
     libxkbcommon0 pkg-config \
     ruby ruby-dev build-essential ca-certificates
+# gcc-multilib builds the interposer's 32-bit variant, which the Wine and Steam
+# catalog loads through `/usr/$LIB`
+if [ "$(dpkg --print-architecture)" = "amd64" ]; then
+    apt-get install --no-install-recommends -y gcc-multilib
+fi
 gem install --no-document fpm
 /repo/infra/packaging/mkvenv.sh
+/repo/infra/packaging/interposer.sh /pkg-root
 DEB_ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')"
 mkdir -p /out
 cd /out

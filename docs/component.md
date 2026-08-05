@@ -89,7 +89,7 @@ The [Joystick Interposer](https://github.com/selkies-project/selkies/tree/main/a
 
 > **Note:** the `LD_PRELOAD` used here (and in [fake-udev](#fake-udev)) is a deliberate, legitimate interposition technique for redirecting device access in unprivileged environments. It is unrelated to — and distinct from — the process-global `LD_PRELOAD` anti-pattern that `pixelflux`'s multi-GPU NVENC support specifically avoids when selecting a GPU for hardware encoding.
 
-Selkies delivers gamepad input over these sockets alone and never creates a kernel input device, so an application sees a controller only when it is started with the interposer preloaded — on a bare desktop as much as inside a container. The interposer is built from source and wired automatically in the [Example Container](#example-container) and the desktop containers, and is not shipped as a standalone package; elsewhere, build and install it (and [fake-udev](#fake-udev)) from the source in this repository:
+On this backend Selkies delivers gamepad input over the sockets alone, so an application sees a controller only when it is started with the interposer preloaded. It is meant for containers: on a host where the kernel is reachable, [Kernel Gamepads](#kernel-gamepads) covers the same ground with no preloading and no shadowed system libraries. The interposer is built from source and wired automatically in the [Example Container](#example-container) and the desktop containers, and every native Selkies package ships it under `/usr/$LIB` for images built on those; elsewhere, build and install it (and [fake-udev](#fake-udev)) from the source in this repository:
 
 ```bash
 git clone https://github.com/selkies-project/selkies.git && cd selkies
@@ -132,7 +132,7 @@ Check the following links for explanations of similar, but different attempts, f
 
 #### fake-udev
 
-The [fake-udev](https://github.com/selkies-project/selkies/tree/main/addons/fake-udev) addon provides a fake `libudev` shared library (`libudev.so.1`) designed to be used with `LD_PRELOAD`. It intercepts `libudev` calls and simulates the presence of a fixed set of virtual gamepads, so that applications which discover input devices through `libudev` (for example, via `udev_enumerate_scan_devices`) find the Selkies virtual gamepads. A running udev daemon is no substitute: the pads exist only as interposer sockets, so a real `libudev` query never reports them, containerized or not. fake-udev covers discovery and the [Joystick Interposer](#joystick-interposer) covers the device itself — applications that enumerate through `libudev` need both, and, like the interposer, it uses `LD_PRELOAD` by design.
+The [fake-udev](https://github.com/selkies-project/selkies/tree/main/addons/fake-udev) addon provides a fake `libudev` shared library (`libudev.so.1`) designed to be used with `LD_PRELOAD`. It intercepts `libudev` calls and simulates the presence of a fixed set of virtual gamepads, so that applications which discover input devices through `libudev` (for example, via `udev_enumerate_scan_devices`) find the Selkies virtual gamepads. A running udev daemon is no substitute on this backend: the pads exist only as interposer sockets, so a real `libudev` query never reports them (the [kernel devices](#kernel-gamepads) are the case where it does). fake-udev covers discovery and the [Joystick Interposer](#joystick-interposer) covers the device itself — applications that enumerate through `libudev` need both, and, like the interposer, it uses `LD_PRELOAD` by design.
 
 #### Kernel Gamepads
 
@@ -175,7 +175,9 @@ Run the Docker®/Podman container built from the [`Example Dockerfile`](https://
 docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8081:8081 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}
 ```
 
-Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs.
+Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs, or `--device /dev/dri` for Intel and AMD.
+
+Hardware OpenGL is set up automatically for whichever GPU is passed in. On NVIDIA, GL runs through [Zink](https://docs.mesa3d.org/drivers/zink.html) on the NVIDIA Vulkan driver, which is what replaces VirtualGL here; other vendors render through the X server's DRI3 render node, for which the image carries an [Xvfb with DRI3](https://github.com/linuxserver/docker-xvfb) in place of the distribution's. `-e DISABLE_ZINK=true` opts out of Zink, and `-e SELKIES_RENDER_DRI=/dev/dri/renderD###` (or the legacy `DRINODE`) names the render node, the same setting the Wayland backend renders on; without a GPU, Mesa falls back to software rendering either way.
 
 Port 3478 and 65532-65535 (change the ports accordingly) are the ports for the internal TURN server, which is **only needed when using the opt-in WebRTC transport (`--mode=webrtc`)** to route WebRTC through restrictive networks. With the default WebSocket transport, you only need to expose the single web port (`8081`). When deploying multiple containers, the TURN ports must be changed (together with the environment variables `TURN_MIN_PORT`/`TURN_MAX_PORT` with at least two ports in the range plus the environment variable `SELKIES_TURN_PORT`) and cannot be used by any other host process or container.
 

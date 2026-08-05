@@ -5,4 +5,5 @@ skip = ./.git,./addons/*/node_modules,./addons/*/dist,*.lock,package-lock.json,*
 # renderD: DRM render node prefix (renderD128). requestor: X11 selection
 # protocol field name. currentY/initialY: pointer coordinate variables.
 # chage: the shadow-utils command. anc: SDI ancillary-data region.
-ignore-words-list = renderd,requestor,requestors,currenty,initialy,chage,anc
+# zink: the Mesa OpenGL-on-Vulkan driver.
+ignore-words-list = renderd,requestor,requestors,currenty,initialy,chage,anc,zink

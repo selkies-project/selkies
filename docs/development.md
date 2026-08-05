@@ -174,6 +174,19 @@ The `entrypoint.sh` components are always identical from the start until the lin
 
 - Some code components have `CAPITALIZED_COMMENT:` comment sections such as `OPUS_FRAME:`. These sections indicate that locations with the `CAPITALIZED_COMMENT:` must be edited or added simultaneously.
 
+## Tests
+
+[`tests/`](https://github.com/selkies-project/selkies/tree/main/tests) holds the suites, grouped into tiers by what they need to run. Each one is a standalone program printing a `PASS`/`FAIL` line per check, and `pytest` runs the same suites through a marker per tier:
+
+```bash
+pytest tests -m unit                    # the source tree only
+pytest tests -m integration             # a display, PulseAudio, an installed selkies
+pytest tests -m e2e                     # the above plus Playwright browsers
+python3 tests/e2e/test_matrix.py wr-wl  # or one suite, one block, on its own
+```
+
+The `integration` tier drives the server over a raw WebSocket or the kernel gamepad backend; the `e2e` tier drives real browsers across `{websockets, webrtc} x {X11, Wayland}`, which is where the transport and backend parity is actually held to account. The `perf` and `soak` tiers run on request. [`tests/README.md`](https://github.com/selkies-project/selkies/tree/main/tests/README.md) documents the environment variables, the `/dev/uinput` emulator that lets the kernel gamepad path run on a machine without one, and the packaging simulator that exercises `infra/packaging/*.sh` with no container runtime.
+
 ## Continuous Integration
 
 Every workflow lives under [`.github/workflows`](https://github.com/selkies-project/selkies/tree/main/.github/workflows):
@@ -182,7 +195,8 @@ Every workflow lives under [`.github/workflows`](https://github.com/selkies-proj
 - `build-wheel.yaml` bundles the web client with [`scripts/ci/build-web.sh`](https://github.com/selkies-project/selkies/tree/main/scripts/ci/build-web.sh), builds the wheel, and smoke-tests it in a clean virtual environment.
 - `build-pixelflux-pcmflux-wheels.yaml` builds pixelflux and pcmflux from their upstream `master` so images, packages, and AppImages ride the latest capture and audio code instead of the last PyPI release.
 - `images.yaml` publishes the multi-architecture `py-example`, `coturn`, and `turn-rest` images to ghcr.io. Each architecture builds on its own native runner and pushes by digest; a merge job assembles the manifest, so no QEMU is involved.
-- `packages.yaml` builds `.deb`, `.rpm`, `.apk`, `.pkg.tar.zst`, and both AppImages, each inside a container of the target distribution.
+- `packages.yaml` builds `.deb`, `.rpm`, `.apk`, `.pkg.tar.zst`, and both AppImages, each inside a container of the target distribution. Every native package carries the Joystick Interposer, which `infra/packaging/interposer.sh` compiles into the package root.
+- `tests.yaml` runs the suites in [`tests/`](https://github.com/selkies-project/selkies/tree/main/tests). `ci.yaml` calls it for the `unit` and `integration` tiers on every push and pull request, and it runs the browser tier nightly and on demand.
 - `release.yaml` is the maintainer entry point described below; `docs.yaml` publishes this site; `devcontainer-feature.yaml` validates and publishes the devcontainer feature.
 
 Ruff's rule selection lives in `pyproject.toml` and codespell's exceptions in `.codespellrc`, so `ruff check` and `codespell` from the repository root reproduce the CI lint exactly.

@@ -73,6 +73,18 @@ selkies-resize = "selkies.display_utils:entrypoint"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The suites in tests/ are standalone programs; tests/test_suites.py runs each
+# one as a pytest case. Select a tier with its marker: pytest -m unit
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: needs only the source tree",
+    "integration: needs a display, PulseAudio and an installed selkies",
+    "e2e: additionally needs Playwright browsers and the built web client",
+    "perf: long constrained-link benchmark, run on request",
+    "soak: full pixelflux and pcmflux API surface, run on request",
+]
+
 # Ruff runs as a bug-finder, not a style enforcer: only rule families that flag
 # defects (pyflakes, bugbear, pycodestyle errors, pylint errors) are enabled.
 # Run: ruff check   (from this directory)

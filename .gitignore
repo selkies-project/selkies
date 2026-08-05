@@ -14,3 +14,10 @@ release-artifacts/
 release/
 AppDir/
 infra/appimage/AppDir/
+
+# Built by tests/tools/Makefile
+tests/tools/*.so
+tests/tools/uinput_abi_truth
+tests/tools/gamepad/jsread
+tests/tools/gamepad/sdlenum
+tests/tools/gamepad/udevscan

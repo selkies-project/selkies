@@ -9,6 +9,7 @@ set -eux
 # lets mkvenv.sh's smoke test exercise that path
 pacman -Syu --noconfirm --needed python python-pip base-devel libxkbcommon sudo
 /repo/infra/packaging/mkvenv.sh
+/repo/infra/packaging/interposer.sh /pkg-root
 # makepkg writes src/ and pkg/ next to the PKGBUILD, and /repo is read-only
 rm -rf /build
 mkdir -p /build /out

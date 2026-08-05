@@ -13,8 +13,14 @@ dnf install -y \
     python3 python3-pip python3-devel \
     libxkbcommon pkgconf-pkg-config \
     ruby rubygems ruby-devel gcc gcc-c++ make rpm-build ca-certificates
+# The i686 glibc builds the interposer's 32-bit variant, which the Wine and
+# Steam catalog loads through `/usr/$LIB`
+if [ "$(uname -m)" = "x86_64" ]; then
+    dnf install -y glibc-devel.i686 libgcc.i686
+fi
 gem install --no-document fpm
 /repo/infra/packaging/mkvenv.sh
+/repo/infra/packaging/interposer.sh /pkg-root
 RPM_ARCH="$(uname -m)"
 mkdir -p /out
 cd /out

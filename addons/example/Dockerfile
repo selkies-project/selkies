@@ -1,3 +1,7 @@
+# PASSWD holds the default login password of the unprivileged user, which is a
+# published placeholder meant to be overridden with -e, not a build secret
+# check=skip=SecretsUsedInArgOrEnv
+
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -10,6 +14,8 @@
 #     unlike s6-overlay; no Python-based supervisor, no tini)
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) built
 #     in-tree and wired with LD_PRELOAD
+#   - GPU wiring: NVIDIA/VA-API/Vulkan runtime, Zink for hardware OpenGL, and a
+#     DRI3-capable Xvfb
 #   - Selkies installed with pip: from wheels dropped into `wheels/`, or from
 #     PyPI (latest release) when `wheels/` is empty
 #
@@ -19,6 +25,13 @@
 ARG DISTRIB_IMAGE=ubuntu
 ARG DISTRIB_RELEASE=24.04
 ARG PYPI_PACKAGE=selkies
+# Xvfb with DRI3 (https://github.com/linuxserver/docker-xvfb): the distribution
+# server has none, so GL clients render in software even with a GPU present.
+# Built on the oldest base this image supports, whose glibc the newer ones
+# satisfy; override to match a different base or to opt out.
+ARG XVFB_IMAGE=lscr.io/linuxserver/xvfb:debianbookworm
+
+FROM ${XVFB_IMAGE} AS xvfb
 
 # Build the joystick interposer and fake-udev inside this repository (they are
 # dedicated to containerized environments and are not desktop components)
@@ -159,7 +172,15 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         libva-drm2 \
         libdrm2 \
         libgbm1 \
+        libvulkan1 \
+        libglu1-mesa \
+        # Inspection tools for whichever GPU is passed in
         vainfo \
+        vdpauinfo \
+        vdpau-driver-all \
+        libvdpau-va-gl1 \
+        vulkan-tools \
+        radeontop \
         # Fonts
         fonts-dejavu-core \
         fonts-liberation \
@@ -168,7 +189,29 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         python3-pip \
         coturn \
         ssl-cert && \
+    # Intel and NVIDIA userspace exists for amd64 alone
+    if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        apt-get install --no-install-recommends -y \
+            va-driver-all intel-media-va-driver intel-gpu-tools nvtop; \
+    fi && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
+
+# NVIDIA runtime wiring. The container toolkit injects the host driver, but only
+# the capabilities requested below (pixelflux's NVENC path needs `video`, the GL
+# and Vulkan stacks need `graphics`), and it mounts the libraries under
+# /usr/local/nvidia, which the loader has to be told about. The ICD and vendor
+# files select the injected driver over Mesa; they are inert without one.
+RUN printf '/usr/local/nvidia/lib\n/usr/local/nvidia/lib64\n' > /etc/ld.so.conf.d/nvidia.conf && \
+    mkdir -pm755 /etc/OpenCL/vendors /etc/vulkan/icd.d /usr/share/glvnd/egl_vendor.d && \
+    echo 'libnvidia-opencl.so.1' > /etc/OpenCL/vendors/nvidia.icd && \
+    VULKAN_API_VERSION="$(dpkg -s libvulkan1 | grep -oP 'Version: [0-9|\.]+' | grep -oP '[0-9]+(\.[0-9]+)(\.[0-9]+)')" && \
+    printf '{\n  "file_format_version": "1.0.0",\n  "ICD": {\n    "library_path": "libGLX_nvidia.so.0",\n    "api_version": "%s"\n  }\n}\n' "${VULKAN_API_VERSION}" > /etc/vulkan/icd.d/nvidia_icd.json && \
+    printf '{\n  "file_format_version": "1.0.0",\n  "ICD": {\n    "library_path": "libEGL_nvidia.so.0"\n  }\n}\n' > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+ENV PATH="/usr/local/nvidia/bin${PATH:+:${PATH}}"
+ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+ENV __GL_SYNC_TO_VBLANK=0
 
 # Install Firefox from Mozilla's official APT repository, which serves real .deb
 # builds on both Debian and Ubuntu and takes priority over any
@@ -199,6 +242,9 @@ RUN set -e; \
     fi; \
     PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall ${PKGS}; \
     rm -rf /tmp/wheels /tmp/picked
+
+# The DRI3-capable server replaces the distribution's /usr/bin/Xvfb
+COPY --from=xvfb / /
 
 # Install the joystick interposer and fake-udev libraries (container-only)
 COPY --from=add-ons /opt/add-ons/lib/ /usr/lib/

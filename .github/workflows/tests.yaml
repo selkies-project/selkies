@@ -1,0 +1,128 @@
+name: Tests
+
+# The suites in tests/. The integration tier runs on every push and pull
+# request; the browser tier is long enough to run nightly and on request, and
+# the perf and soak tiers only on request.
+#
+# tests/README.md documents what each tier needs and how to run it locally.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tiers:
+        description: 'Marker expression, e.g. "e2e" or "integration or e2e"'
+        type: string
+        default: integration or e2e
+  workflow_call:
+    inputs:
+      tiers:
+        description: Marker expression selecting the tiers to run
+        type: string
+        default: integration
+  schedule:
+    # Nightly full browser matrix
+    - cron: "0 4 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+  E2E_DISPLAY: ":99"
+
+jobs:
+  unit:
+    name: Unit suites (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The uinput ABI is computed in pure Python, so every interpreter the
+        # package claims support for checks it against the kernel headers
+        python-version: ["3.9", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build the test tools
+        run: make -C tests/tools
+      - name: Run the unit tier
+        run: |
+          python -m pip install pytest
+          python -m pytest tests -m unit -v
+
+  suites:
+    name: ${{ inputs.tiers || 'integration or e2e' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free disk space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: false
+          remove_packages: azure-cli google-cloud-cli microsoft-edge-stable postgresql* temurin-* mysql* mongodb*
+          remove_packages_one_command: true
+          remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            addons/selkies-web-core/package.json
+            addons/selkies-dashboard/package.json
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install the display server, audio and GPU userspace
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            xvfb x11-xserver-utils x11-utils xauth \
+            pulseaudio pulseaudio-utils \
+            libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
+            libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
+            libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers
+      - name: Install selkies and the test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . -r tests/requirements.txt
+      - name: Build the web client
+        run: ./scripts/ci/build-web.sh
+      - name: Build the test tools
+        run: make -C tests/tools
+      - name: Start the display server and audio
+        run: |
+          Xvfb "${E2E_DISPLAY}" -screen 0 1920x1080x24 -nolisten tcp -noreset &
+          until [ -S "/tmp/.X11-unix/X${E2E_DISPLAY#*:}" ]; do sleep 0.5; done
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=output rate=48000 channels=2
+      - name: Install the browsers
+        if: contains(inputs.tiers || 'integration or e2e', 'e2e')
+        run: python -m playwright install --with-deps chromium firefox webkit
+      - name: Run the suites
+        env:
+          TIERS: ${{ inputs.tiers || 'integration or e2e' }}
+        run: python -m pytest tests -m "${TIERS}" -v
+      - name: Collect the server logs
+        if: always()
+        run: |
+          mkdir -p suite-logs
+          cp -r /tmp/selkies-tests/*.log suite-logs/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: suite-logs
+          path: suite-logs/
+          if-no-files-found: ignore
+          retention-days: 7
