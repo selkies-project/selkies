@@ -30,7 +30,7 @@ requirements:
     - python 3.12.*
     - pip
     - setuptools
-    - nodejs 24.*
+    - nodejs 26.*
   run:
     - python >=3.9
     # Mirrors [project.dependencies] in pyproject.toml; `pip install --no-deps`

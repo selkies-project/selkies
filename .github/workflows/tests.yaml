@@ -37,7 +37,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
-  NODE_VERSION: "24"
+  NODE_VERSION: "26"
   E2E_DISPLAY: ":99"
 
 jobs:
@@ -88,6 +88,7 @@ jobs:
           cache-dependency-path: |
             addons/selkies-web-core/package.json
             addons/selkies-dashboard/package.json
+            addons/selkies-dashboard-wish/package.json
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -111,7 +112,14 @@ jobs:
         run: make -C tests/tools
       - name: Start the display server and audio
         run: |
-          Xvfb "${E2E_DISPLAY}" -screen 0 1920x1080x24 -nolisten tcp -noreset &
+          # Same canvas and extension set as the container and AppImage servers:
+          # xrandr cannot grow a screen past its configured maximum, so a small
+          # one makes every second-display mode fail to even be created
+          Xvfb "${E2E_DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms \
+            +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" \
+            +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" \
+            +extension "XFIXES" +extension "XTEST" +iglx +render \
+            -nolisten "tcp" -ac -noreset -shmem &
           until [ -S "/tmp/.X11-unix/X${E2E_DISPLAY#*:}" ]; do sleep 0.5; done
           pulseaudio --start --exit-idle-time=-1
           pactl load-module module-null-sink sink_name=output rate=48000 channels=2

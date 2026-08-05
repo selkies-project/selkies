@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 env:
-  NODE_VERSION: "24"
+  NODE_VERSION: "26"
   PYTHON_VERSION: "3.12"
 
 jobs:
@@ -51,6 +51,7 @@ jobs:
           cache-dependency-path: |
             addons/selkies-web-core/package.json
             addons/selkies-dashboard/package.json
+            addons/selkies-dashboard-wish/package.json
       - name: Set up Python
         uses: actions/setup-python@v7
         with:

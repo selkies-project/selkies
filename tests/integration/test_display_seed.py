@@ -71,8 +71,7 @@ def main():
                 await asyncio.sleep(3.0)
                 txt = H.server_log()[st:]
                 res.check("D4: display2 seeded at client framerate",
-                          "'framerate': 33" in txt or "display2" in txt and "33" in txt,
-                          txt[-300:])
+                          "FPS: 33" in txt, txt[-300:])
             # cleanup
 
     asyncio.get_event_loop().run_until_complete(drive())

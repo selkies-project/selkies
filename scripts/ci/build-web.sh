@@ -24,6 +24,11 @@ npm_install() {
     && npm_install \
     && SELKIES_INJECT=1 npm run build)
 
+# The Wish dashboard is an alternative front end: it is not what the wheel
+# ships, but it is built here so a break in it fails the build, and so the
+# dashboard e2e tier has a bundle to serve
+(cd addons/selkies-dashboard-wish && npm_install && npm run build)
+
 mkdir -p addons/selkies-dashboard/dist/src
 cp addons/selkies-web-core/dist/selkies-core.js addons/selkies-dashboard/dist/src/
 cp addons/universal-touch-gamepad/universalTouchGamepad.js addons/selkies-dashboard/dist/src/

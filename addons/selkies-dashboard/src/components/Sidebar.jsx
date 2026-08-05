@@ -12,7 +12,7 @@ import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import { getTranslator } from "../translations";
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 import { getRoutePrefix } from "../utils.js";
 
 // --- Constants ---
