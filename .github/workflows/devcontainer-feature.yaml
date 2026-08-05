@@ -14,12 +14,15 @@ on:
         type: string
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     name: Validate feature with devcontainers/ci
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Validate devcontainer-feature.json files
         uses: devcontainers/action@v1
         with:
@@ -36,7 +39,7 @@ jobs:
       pull-requests: write
       packages: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Publish features
         uses: devcontainers/action@v1
         with:

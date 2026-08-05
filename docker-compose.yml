@@ -22,8 +22,10 @@ services:
     image: selkies-example:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-24.04}
     entrypoint: ["/bin/bash"]
     build:
-      context: ./addons/example
-      dockerfile: Dockerfile
+      # Repository root: the Dockerfile also pulls in addons/js-interposer and
+      # addons/fake-udev
+      context: .
+      dockerfile: addons/example/Dockerfile
       args:
         DISTRIB_IMAGE: ${DISTRIB_IMAGE:-ubuntu}
         DISTRIB_RELEASE: ${DISTRIB_RELEASE:-24.04}
@@ -51,7 +53,9 @@ services:
     volumes:
       - type: bind
         source: ./src/selkies
-        target: /usr/local/lib/python3.12/dist-packages/selkies
+        # pip installs into the base image's interpreter; set PYTHON_VERSION to
+        # match when DISTRIB_IMAGE/DISTRIB_RELEASE select a different one
+        target: /usr/local/lib/python${PYTHON_VERSION:-3.12}/dist-packages/selkies
         read_only: true
     stdin_open: true
     tty: true

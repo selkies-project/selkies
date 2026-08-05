@@ -21,12 +21,11 @@
 
 import asyncio
 import logging
-import os
 import re
 import time
 from enum import Enum
 from abc import ABCMeta, abstractmethod
-from typing import Callable, Awaitable
+from typing import Callable
 
 from .settings import settings as app_settings
 from .display_utils import apply_common_capture_settings, format_pixelflux_cursor
@@ -160,9 +159,6 @@ class MediaPipelinePixel(MediaPipeline):
         self.produce_data: Callable[[bytes, int, str], None] = lambda buf, pts, kind: logger.warning(
             "unhandled produce_data"
         )
-        self.send_data_channel_message: Callable[..., None] = lambda msg: logger.warning(
-            "unhandled send_data_channel_message"
-        )
         # Fired after the video stream (re)starts so the transport can resend the
         # cursor (a slept/woken tab clears its cursor canvas). No-op by default.
         self.on_pipeline_started: Callable[[], None] = lambda: None
@@ -245,12 +241,16 @@ class MediaPipelinePixel(MediaPipeline):
 
         :crf: CRF value
         """
-        if self.rc_mode != RateControlMode.CRF or self.video_crf == crf:
+        if self.video_crf == crf:
             return
 
-        # Store first: applies at the next start even when capture is paused.
+        # Store first, whatever the active mode: generate_capture_settings() always
+        # carries a CRF, so a value chosen while CBR is active (or while capture is
+        # paused) is the one a later switch to CRF encodes at instead of a stale one.
         old_crf = self.video_crf
         self.video_crf = crf
+        if self.rc_mode != RateControlMode.CRF:
+            return
         if not self._is_screen_capturing or self.capture_module is None:
             return
         try:
@@ -258,6 +258,9 @@ class MediaPipelinePixel(MediaPipeline):
             self.capture_module.update_tunables(self.generate_capture_settings())
             logger.info(f"Updated CRF live: {old_crf} -> {crf}")
         except Exception as e:
+            # Keep the stored CRF equal to what the encoder is still using, so the
+            # equality guard above lets a retry of this same value through.
+            self.video_crf = old_crf
             logger.info(f"Error updating CRF {e}", exc_info=True)
 
     async def set_use_cpu(self, use_cpu: bool):
@@ -335,17 +338,16 @@ class MediaPipelinePixel(MediaPipeline):
 
         :bitrate: bitrate in kbps
         """
-        if (
-            self.rc_mode == RateControlMode.CRF
-            or bitrate <= 0
-            or self.video_bitrate == bitrate
-        ):
+        if bitrate <= 0 or self.video_bitrate == bitrate:
             return
 
-        # Store before the live call so a paused capture still picks the value
-        # up at its next start.
+        # Store first, whatever the active mode: generate_capture_settings() always
+        # carries a bitrate, so a value chosen while CRF is active (or while capture
+        # is paused) is the one a later switch to CBR encodes at.
         old_bitrate = self.video_bitrate
         self.video_bitrate = bitrate
+        if self.rc_mode == RateControlMode.CRF:
+            return
         if not self._is_screen_capturing or self.capture_module is None:
             return
         try:
@@ -355,6 +357,10 @@ class MediaPipelinePixel(MediaPipeline):
                 f"Updated video bitrate: {old_bitrate} -> {bitrate} kbps"
             )
         except Exception as e:
+            # Congestion control reads self.video_bitrate as the rate currently
+            # being encoded and steers from it: leave it at the value the encoder
+            # kept, which also lets the equality guard retry this one.
+            self.video_bitrate = old_bitrate
             logger.info(f"Error updating video bitrate {e}", exc_info=True)
 
     async def set_audio_bitrate(self, bitrate: int):
@@ -377,7 +383,14 @@ class MediaPipelinePixel(MediaPipeline):
                 f"Updated audio bitrate: {old_bitrate // 1000} -> {bitrate // 1000} kbps"
             )
         except Exception as e:
-            logger.info(f"Error updating audio bitrate {e}", exc_info=True)
+            # Restart fallback (websockets parity): the stored value is what the
+            # fresh capture starts at, so the encoder never keeps running at a
+            # rate the pipeline no longer reports.
+            logger.warning(
+                f"Live audio bitrate update failed ({e}); restarting audio pipeline."
+            )
+            await self._stop_audio_pipeline()
+            await self._start_audio_pipeline()
 
     async def set_framerate(self, framerate: int):
         """Set pixelflux capture rate in fps .
@@ -680,15 +693,18 @@ class MediaPipelinePixel(MediaPipeline):
                     logger.info(f"Error audio capture callback: {e}")
 
             self.pcmflux_module = AudioCapture()
+            # Bump the epoch before the capture thread can deliver: the callback
+            # re-anchors pts past the last one this pipeline emitted only when it
+            # observes a new epoch, so a frame that lands first would otherwise
+            # carry the previous epoch's offset over a re-zeroed sample clock
+            # (see _audio_cb_epoch).
+            self._audio_capture_epoch += 1
             await asyncio.to_thread(
                 self.pcmflux_module.start_capture,
                 pcmflux_settings,
                 audio_capture_callback,
             )
             self._is_pcmflux_capturing = True
-            # New capture session: the callback anchors its first frame's pts
-            # past the last one this pipeline emitted (see _audio_cb_epoch).
-            self._audio_capture_epoch += 1
             # Keep a reference: an unreferenced task can be garbage-collected
             # mid-flight, and a routing failure should be visible in the log.
             self._audio_routing_task = asyncio.create_task(self._enforce_audio_routing())
@@ -840,6 +856,16 @@ class MediaPipelinePixel(MediaPipeline):
             logger.error(f"Error validating the audio device: {e}")
 
     async def _stop_audio_pipeline(self):
+        # Routing enforcement belongs to the capture session that armed it: a stop
+        # inside its start-up delay must not pactl-move a stream that is gone, and
+        # a pending subprocess must not outlive the loop.
+        task = self._audio_routing_task
+        self._audio_routing_task = None
+        if task is not None:
+            task.cancel()
+            # return_exceptions: the task's own cancellation is the expected
+            # outcome; only a cancel of this coroutine propagates.
+            await asyncio.gather(task, return_exceptions=True)
         if not self._is_pcmflux_capturing or not self.pcmflux_module:
             return
 

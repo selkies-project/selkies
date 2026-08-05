@@ -637,7 +637,7 @@ def get_display_opts(options, argv = sys.argv):
 
     The four return values are:
       DISPLAY -- the display object
-      NAME    -- the application name (the filname of ARGV[0])
+      NAME    -- the application name (the filename of ARGV[0])
       DB      -- the created resource database
       ARGS    -- any remaining arguments
     """

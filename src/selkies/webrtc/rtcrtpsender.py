@@ -511,8 +511,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     packet.extensions.playout_delay = (0, 0)
                     # video-timing rides the LAST packet of a frame. The encode legs
                     # happen in the capture library and aren't visible here (0 =
-                    # unknown); packetization-complete and pacer-exit are measured for
-                    # real (frames go straight to the wire, so the two coincide).
+                    # unknown). packetization-complete is real; pacer-exit repeats it
+                    # because the stamp is taken before the packet reaches the pacer,
+                    # so any pacing delay is not reflected.
                     if (
                         packet.marker
                         and self.__kind == "video"

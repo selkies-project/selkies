@@ -96,9 +96,10 @@ export async function readLocalClipboard(binaryEnabled) {
  * Multipart server->client clipboard download state, shared by both
  * transports. begin() arms a transfer, push() accumulates base64 chunks while
  * tracking the decoded byte count incrementally (nothing decodes on the main
- * thread until the caller assembles), and assemble() joins the chunks or
- * returns null when the byte accounting disagrees with the declared total —
- * a truncated stream must never be delivered as content.
+ * thread until the caller assembles), and assemble() joins the chunks and
+ * resets. A truncated stream must never be delivered as content, so callers
+ * compare receivedSize against totalSize themselves — before assembling, or
+ * against the decoded byteLength after — and discard on a mismatch.
  */
 export function createMultipartClipboardState() {
     let chunks = [];
@@ -126,7 +127,7 @@ export function createMultipartClipboardState() {
             chunks.push(b64);
             receivedSize += base64DecodedSize(b64);
         },
-        /** Join the chunks once byte accounting matches; null (and reset) on a truncated stream. */
+        /** Join the accumulated base64 chunks and reset; null when no transfer is in progress. */
         assemble() {
             if (!inProgress) return null;
             const result = { base64: chunks.join(''), mimeType, totalSize };

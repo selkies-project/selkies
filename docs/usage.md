@@ -23,7 +23,7 @@ Clipboard synchronization works in both directions and is supported across Chrom
 
 Image (binary) clipboard contents can also be transferred when binary clipboard support is enabled (see `enable_binary_clipboard`). Larger contents are sent in multiple parts automatically.
 
-Clipboard behaviour is controlled by the server options `SELKIES_CLIPBOARD_ENABLED`, `SELKIES_CLIPBOARD_IN_ENABLED` (paste into session), `SELKIES_CLIPBOARD_OUT_ENABLED` (copy from session), and `SELKIES_ENABLE_BINARY_CLIPBOARD` (image clipboard). The matching client settings `clipboard_in_enabled`, `clipboard_out_enabled`, and `enable_binary_clipboard` can be toggled per browser.
+Clipboard behaviour is controlled by the server option `SELKIES_ENABLE_CLIPBOARD`/`--enable-clipboard`, which takes `true` (both directions), `in` (paste into session only), `out` (copy from session only), or `false`, plus `SELKIES_ENABLE_BINARY_CLIPBOARD`/`--enable-binary-clipboard` for the image clipboard. The client settings `clipboard_in_enabled` and `clipboard_out_enabled` are derived from that policy and can be toggled per browser within it.
 
 ## Command-Line Options and Environment Variables
 
@@ -31,7 +31,7 @@ Use `selkies --help` for all command-line options.
 
 Every command-line option has a matching environment variable, formed by capitalizing the option and prepending `SELKIES_` (such as `SELKIES_VIDEO_BITRATE` for `--video-bitrate`). The full list of settings, their flags, environment variables, and defaults is defined in [`src/selkies/settings.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/settings.py).
 
-`SELKIES_VIDEO_BITRATE` is in **kilobits per second (kbps)**, range `100-1000000`, default `8000` (8 Mbps); no unit multiplier is applied, e.g. `4000` is 4 Mbps. (Prior releases interpreted the same value as megabits per second — existing configs must be multiplied by 1000.)
+`SELKIES_VIDEO_BITRATE` is in **kilobits per second (kbps)**, range `100-1000000`, default `8000` (8 Mbps); no unit multiplier is applied, e.g. `4000` is 4 Mbps.
 
 ## Configuring Encoders, Display Capture, or Transport Protocols
 

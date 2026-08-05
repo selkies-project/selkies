@@ -74,7 +74,7 @@ def _build_red(
     skipped; an empty history yields a valid primary-only payload.
     """
     headers = bytearray()
-    datas = bytearray()
+    bodies = bytearray()
     for payload, ts in history:
         offset = primary_ts - ts
         if offset < 1 or offset > MAX_TIMESTAMP_OFFSET:
@@ -88,11 +88,11 @@ def _build_red(
         headers.append((combined >> 16) & 0xFF)
         headers.append((combined >> 8) & 0xFF)
         headers.append(combined & 0xFF)
-        datas += payload
+        bodies += payload
     # F bit clear marks the final (primary) 1-byte block header.
     headers.append(block_pt & 0x7F)
-    datas += primary
-    return bytes(headers + datas)
+    bodies += primary
+    return bytes(headers + bodies)
 
 
 class RedOpusEncoder(Encoder):

@@ -3,7 +3,13 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 from flask import Flask, request, jsonify
-import os, time, hmac, hashlib, base64, secrets, string
+import os
+import time
+import hmac
+import hashlib
+import base64
+import secrets
+import string
 
 shared_secret = os.environ.get('TURN_SHARED_SECRET', 'openrelayprojectsecret')
 turn_api_key = os.environ.get('TURN_API_KEY', '')

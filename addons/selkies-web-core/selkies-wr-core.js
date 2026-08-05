@@ -281,7 +281,7 @@ export default function webrtc() {
 	let enable_binary_clipboard = true;
 	// Multipart download state + connect-time cache-only fetch ('cr') tracking:
 	// shared factories (lib/clipboard-sync.js), identical in the WebSocket core.
-	let multipartClipboard = createMultipartClipboardState();
+	const multipartClipboard = createMultipartClipboardState();
 	let clipboardWorker = new ClipboardWorkerBridge();
 	const taggedClipboardFetch = createTaggedClipboardFetch();
 	const armTaggedClipboardReply = () => taggedClipboardFetch.arm();
@@ -1000,7 +1000,7 @@ export default function webrtc() {
 		return false;
 	}
 
-	// callback invoked when "message" event is triggerd
+	// callback invoked when "message" event is triggered
 	function handleMessage(event) {
 		if (event.origin !== window.location.origin) {
 			console.warn("Received message from unexpected origin");
@@ -2179,6 +2179,39 @@ export default function webrtc() {
 							input.detach_context();
 						}
 					}
+				} else if (action.startsWith('auth_success,') || action.startsWith('role_update,')) {
+					// Secure-mode role verdict (websockets AUTH_SUCCESS / ROLE_UPDATE
+					// parity). The server decides role and gamepad slot; the hash-derived
+					// guess made at load time is only a default, so a token client must
+					// adopt the verdict or it drives a controller UI whose input the
+					// server drops, and its gamepad reports land on the wrong slot.
+					const verdict = action.slice(action.indexOf(',') + 1);
+					let perms;
+					try {
+						perms = JSON.parse(verdict);
+					} catch (e) {
+						console.error('Failed to parse role verdict:', e);
+						return;
+					}
+					const previousSlot = clientSlot;
+					clientRole = perms.role === CLIENT_CONTROLLER ? CLIENT_CONTROLLER : CLIENT_VIEWER;
+					clientSlot = (perms.slot === null || perms.slot === undefined) ? null : perms.slot;
+					playerInputTargetIndex = (clientSlot !== null && clientSlot > 0) ? clientSlot - 1 : undefined;
+					console.log(`Server role verdict: role=${clientRole}, slot=${clientSlot}`);
+					if (input) {
+						input.updateControllerSlot(clientSlot);
+						if (clientRole === CLIENT_VIEWER) input.setSharedMode(true);
+						// The slot mapping lives client-side, so polling must follow it:
+						// a revoked slot has nowhere to send reports.
+						if (input.gamepadManager) {
+							if (clientSlot === null) {
+								input.gamepadManager.disable();
+							} else if (previousSlot === null && isGamepadEnabled) {
+								input.gamepadManager.enable();
+							}
+						}
+					}
+					window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 				} else if (action.startsWith('resolution,')) {
 					// Realized-size reconciliation (websockets stream_resolution
 					// parity): the server may snap or clamp a request (16-px
@@ -2426,12 +2459,7 @@ export default function webrtc() {
 			enable_binary_clipboard = true;
 			// Reset the command gate to its default-true semantics for the next session.
 			serverCommandEnabled = true;
-			multipartClipboard = {
-				chunks: [],
-				mimeType: '',
-				totalSize: 0,
-				inProgress: false
-			};
+			multipartClipboard.reset();
 
 		}
 	}

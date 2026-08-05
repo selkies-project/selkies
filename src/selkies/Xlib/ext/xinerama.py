@@ -208,9 +208,9 @@ class GetInfo(rq.ReplyRequest):
         )
 
 def get_info(self, visual):
-    r = GetInfo(display=self.display,
-             opcode=self.display.get_extension_major(extname),
-             visual=visual)
+    return GetInfo(display=self.display,
+                   opcode=self.display.get_extension_major(extname),
+                   visual=visual)
 
 def init(disp, info):
     disp.extension_add_method('display', 'xinerama_query_version', query_version)

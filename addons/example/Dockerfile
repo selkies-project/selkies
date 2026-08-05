@@ -186,7 +186,7 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
 # wheels (built from the master HEAD of linuxserver/pixelflux and
 # linuxserver/pcmflux) ride along, pip selects the ones matching this image's
 # Python and platform; everything else still resolves from PyPI
-COPY wheels/ /tmp/wheels/
+COPY addons/example/wheels/ /tmp/wheels/
 RUN set -e; \
     SELKIES_WHL="$(ls /tmp/wheels/selkies-*.whl 2>/dev/null || true)"; \
     if [ -z "${SELKIES_WHL}" ]; then \
@@ -205,9 +205,9 @@ RUN set -e; \
 COPY --from=add-ons /opt/add-ons/lib/ /usr/lib/
 
 # Copy the startup scripts and s6 service definitions (same /etc/service/<svc>/run layout as runit, supervised by s6-supervise)
-COPY --chown=1000:1000 container-entrypoint.sh /etc/container-entrypoint.sh
-COPY --chown=1000:1000 selkies-entrypoint.sh /etc/selkies-entrypoint.sh
-COPY --chown=1000:1000 services/ /etc/service/
+COPY --chown=1000:1000 addons/example/container-entrypoint.sh /etc/container-entrypoint.sh
+COPY --chown=1000:1000 addons/example/selkies-entrypoint.sh /etc/selkies-entrypoint.sh
+COPY --chown=1000:1000 addons/example/services/ /etc/service/
 RUN chmod -f 755 /etc/container-entrypoint.sh /etc/selkies-entrypoint.sh && \
     find /etc/service -name run -exec chmod -f 755 {} +
 

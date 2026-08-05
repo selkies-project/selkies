@@ -1,6 +1,12 @@
 name: Build wheel
 
 on:
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: Version written into the wheel metadata
+        type: string
+        default: 0.0.0.dev0
   workflow_call:
     inputs:
       artifact_name:
@@ -12,6 +18,9 @@ on:
         type: string
         default: 0.0.0.dev0
 
+permissions:
+  contents: read
+
 env:
   NODE_VERSION: "22"
   PYTHON_VERSION: "3.12"
@@ -21,10 +30,9 @@ jobs:
     name: Build wheel (with bundled web client)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Free disk space
-        # Actively maintained alternative to the (2023-frozen) jlumbroso
-        # action; keep the tool cache, setup-python/setup-node depend on it
+        # The tool cache is kept: setup-python and setup-node resolve from it
         uses: endersonmenezes/free-disk-space@v3
         with:
           remove_android: true
@@ -35,33 +43,27 @@ jobs:
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          # Lockfiles are gitignored here, so the cache is keyed on the manifests
+          cache-dependency-path: |
+            addons/selkies-web-core/package.json
+            addons/selkies-dashboard/package.json
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Build the web client bundle
-        run: |
-          set -e
-          cd addons/selkies-web-core && npm install --no-audit --no-fund && npm run build && cd ../..
-          cd addons/selkies-dashboard && cp ../selkies-web-core/dist/selkies-core.js src/ && npm install --no-audit --no-fund && SELKIES_INJECT=1 npm run build && cd ../..
-          mkdir -p addons/selkies-dashboard/dist/src
-          cp addons/selkies-web-core/dist/selkies-core.js addons/selkies-dashboard/dist/src/
-          cp addons/universal-touch-gamepad/universalTouchGamepad.js addons/selkies-dashboard/dist/src/
-          cp -r addons/selkies-web-core/dist/jsdb addons/selkies-dashboard/dist/
-          # .gitignore keeps src/selkies/selkies_web out of git; the wheel is the only consumer of this stage
-          cp -ar addons/selkies-dashboard/dist src/selkies/selkies_web
-          printf '%s' '{"name":"Selkies","short_name":"Selkies","manifest_version":2,"version":"1.0.0","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon.png","type":"image/png","sizes":"512x512"}],"start_url":"/"}' > src/selkies/selkies_web/manifest.json
-          # PWA icon/favicon are vendored in this repository, not downloaded
-          cp docs/assets/logo/icon-512x512.png src/selkies/selkies_web/icon.png
-          cp docs/assets/logo/favicon.ico src/selkies/selkies_web/favicon.ico
+        run: ./scripts/ci/build-web.sh
       - name: Build the wheel
+        env:
+          PACKAGE_VERSION: ${{ inputs.package_version }}
         run: |
           python3 -m pip install --upgrade build
-          sed -i "s|^version =.*|version = \"${{ inputs.package_version }}\"|" pyproject.toml
+          sed -i "s|^version =.*|version = \"${PACKAGE_VERSION}\"|" pyproject.toml
           python3 -m build && ls -la dist/
       - name: Install smoke-test system packages
         # The xkbcommon Python package only ships an sdist; the smoke test
@@ -73,8 +75,9 @@ jobs:
           /tmp/selkies-venv/bin/pip install dist/selkies-*.whl
           /tmp/selkies-venv/bin/selkies --help >/dev/null && echo "selkies --help OK"
           /tmp/selkies-venv/bin/python -c "import importlib.resources as r; c = r.files('selkies.selkies_web'); assert (c / 'index.html').is_file(), 'web client missing from wheel'; print('bundled web client OK')"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
-          name: ${{ inputs.artifact_name }}
+          name: ${{ inputs.artifact_name || 'selkies-wheel' }}
           path: dist/*
+          if-no-files-found: error
           retention-days: 14

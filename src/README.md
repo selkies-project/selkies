@@ -195,22 +195,20 @@ The table below lists all available server settings.
 | `SELKIES_AUDIO_ENABLED` | `--audio-enabled` | `True` | Enable server-to-client audio streaming. |
 | `SELKIES_MICROPHONE_ENABLED` | `--microphone-enabled` | `True` | Enable client-to-server microphone forwarding. |
 | `SELKIES_GAMEPAD_ENABLED` | `--gamepad-enabled` | `True` | Enable gamepad support. |
-| `SELKIES_CLIPBOARD_ENABLED` | `--clipboard-enabled` | `True` | Enable clipboard synchronization. |
-| `SELKIES_CLIPBOARD_IN_ENABLED` | `--clipboard-in-enabled` | `True` | Enable client-to-server clipboard synchronization (ignored if `SELKIES_CLIPBOARD_ENABLED` is false). |
-| `SELKIES_CLIPBOARD_OUT_ENABLED` | `--clipboard-out-enabled` | `True` | Enable server-to-client clipboard synchronization (ignored if `SELKIES_CLIPBOARD_ENABLED` is false). |
+| `SELKIES_ENABLE_CLIPBOARD` | `--enable-clipboard` | `'true'` | Clipboard policy for both transports: `true` (both directions), `in` (client-to-server only), `out` (server-to-client only), `false` (disabled). |
 | `SELKIES_COMMAND_ENABLED` | `--command-enabled` | `False` | Enable parsing of `command` websocket messages. Disabled by default for security; opt in explicitly. |
 | `SELKIES_FILE_TRANSFERS` | `--file-transfers` | `'upload,download'` | Allowed file transfer directions (comma-separated: "upload,download"). Set to "" or "none" to disable. |
 | `SELKIES_ENCODER` | `--encoder` | `'h264enc'` | The default video encoder. |
 | `SELKIES_FRAMERATE` | `--framerate` | `'8-120'` | Allowed framerate range or a fixed value. |
-| `SELKIES_H264_CRF` | `--h264-crf` | `'5-50'` | Allowed H.264 CRF range or a fixed value. |
+| `SELKIES_VIDEO_CRF` | `--video-crf` | `'5-50'` | Allowed H.264 CRF range or a fixed value. |
 | `SELKIES_JPEG_QUALITY` | `--jpeg-quality` | `'1-100'` | Allowed JPEG quality range or a fixed value. |
-| `SELKIES_H264_FULLCOLOR` | `--h264-fullcolor` | `False` | Enable H.264 full color range for pixelflux encoders. |
-| `SELKIES_H264_STREAMING_MODE` | `--h264-streaming-mode` | `False` | Enable H.264 streaming mode for pixelflux encoders. |
+| `SELKIES_VIDEO_FULLCOLOR` | `--video-fullcolor` | `False` | Enable H.264 full color range for pixelflux encoders. |
+| `SELKIES_VIDEO_STREAMING_MODE` | `--video-streaming-mode` | `False` | Enable H.264 streaming mode for pixelflux encoders. |
 | `SELKIES_USE_CPU` | `--use-cpu` | `False` | Force CPU-based encoding for pixelflux. |
 | `SELKIES_USE_PAINT_OVER_QUALITY` | `--use-paint-over-quality` | `True` | Enable high-quality paint-over for static scenes. |
 | `SELKIES_PAINT_OVER_JPEG_QUALITY` | `--paint-over-jpeg-quality` | `'1-100'` | Allowed JPEG paint-over quality range or a fixed value. |
-| `SELKIES_H264_PAINTOVER_CRF` | `--h264-paintover-crf` | `'5-50'` | Allowed H.264 paint-over CRF range or a fixed value. |
-| `SELKIES_H264_PAINTOVER_BURST_FRAMES` | `--h264-paintover-burst-frames` | `'1-30'` | Allowed H.264 paint-over burst frames range or a fixed value. |
+| `SELKIES_VIDEO_PAINTOVER_CRF` | `--video-paintover-crf` | `'5-50'` | Allowed H.264 paint-over CRF range or a fixed value. |
+| `SELKIES_VIDEO_PAINTOVER_BURST_FRAMES` | `--video-paintover-burst-frames` | `'1-30'` | Allowed H.264 paint-over burst frames range or a fixed value. |
 | `SELKIES_SECOND_SCREEN` | `--second-screen` | `True` | Enable support for a second monitor/display. |
 | `SELKIES_AUDIO_BITRATE` | `--audio-bitrate` | `'320000'` | The default audio bitrate. |
 | `SELKIES_IS_MANUAL_RESOLUTION_MODE` | `--is-manual-resolution-mode` | `False` | Lock the resolution to the manual width/height values. |
@@ -222,7 +220,8 @@ The table below lists all available server settings.
 | `SELKIES_USE_CSS_SCALING` | `--use-css-scaling` | `False` | HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched. |
 | `SELKIES_PORT` (or `CUSTOM_WS_PORT`) | `--port` | `8081` | Port for the data websocket server. |
 | `SELKIES_MASTER_TOKEN` | `--master-token` | `''` | Master token to enable secure mode. If set, clients must authenticate using tokens provided via the token-management API (`POST /tokens`). |
-| `SELKIES_DRI_NODE` (or `DRI_NODE`) | `--dri-node` | `''` | Path to the DRI render node for VA-API. When unset, the GPU/render node is auto-selected (delegated to pixelflux); set this to pin a specific node. |
+| `SELKIES_ENCODE_DRI` (or `DRI_NODE`) | `--encode-dri` | `''` | Path to the DRI render node the encoder uses (VA-API/NVENC device selection). When unset, the node is auto-selected. |
+| `SELKIES_RENDER_DRI` (or `DRINODE`) | `--render-dri` | `''` | Path to the DRI render node the Wayland compositor renders on. Defaults to the `auto_gpu` selection, else software rendering. |
 | `SELKIES_AUDIO_DEVICE_NAME` | `--audio-device-name` | `'output.monitor'` | Audio device name for pcmflux capture. |
 | `SELKIES_WATERMARK_PATH` (or `WATERMARK_PNG`) | `--watermark-path` | `''` | Absolute path to the watermark PNG file. |
 | `SELKIES_WATERMARK_LOCATION` (or `WATERMARK_LOCATION`) | `--watermark-location` | `-1` | Watermark location enum (0-6). |

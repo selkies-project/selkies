@@ -12,6 +12,9 @@ on:
   workflow_dispatch:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: ${{ matrix.project }} (${{ matrix.arch.name }}, ${{ matrix.arch.platform }})
@@ -62,15 +65,15 @@ jobs:
               cp313-musllinux_aarch64
               cp314-musllinux_aarch64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: linuxserver/${{ matrix.project }}
           ref: master
       - name: Build wheels (${{ matrix.arch.build }})
-        uses: pypa/cibuildwheel@v4.1.0
+        uses: pypa/cibuildwheel@v4.2.0
         env:
           CIBW_BUILD: ${{ matrix.arch.build }}
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.project }}-wheels-${{ matrix.arch.name }}-${{ matrix.arch.platform }}
           path: wheelhouse/*.whl

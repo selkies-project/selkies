@@ -138,7 +138,7 @@ EXPOSE 8081
 ENTRYPOINT ["/etc/container-entrypoint.sh"]
 ```
 
-The entrypoint script of the base images launches `runsvdir -P /etc/service` itself, so `runsvdir` does not need to be PID 1 and the image keeps working when another init or launcher is injected above it.
+The entrypoint script of the base images launches `s6-svscan /etc/service` itself, so it does not need to be PID 1 and the image keeps working when another init or launcher is injected above it.
 
 ## Container Guide
 
@@ -174,6 +174,19 @@ The `entrypoint.sh` components are always identical from the start until the lin
 
 - Some code components have `CAPITALIZED_COMMENT:` comment sections such as `OPUS_FRAME:`. These sections indicate that locations with the `CAPITALIZED_COMMENT:` must be edited or added simultaneously.
 
+## Continuous Integration
+
+Every workflow lives under [`.github/workflows`](https://github.com/selkies-project/selkies/tree/main/.github/workflows):
+
+- `ci.yaml` orchestrates pushes to `main` and every pull request. It lints (Ruff, codespell, actionlint), byte-compiles the package on Python 3.9 through 3.14, then builds the wheel once and hands that single artifact to the image and package builds.
+- `build-wheel.yaml` bundles the web client with [`scripts/ci/build-web.sh`](https://github.com/selkies-project/selkies/tree/main/scripts/ci/build-web.sh), builds the wheel, and smoke-tests it in a clean virtual environment.
+- `build-pixelflux-pcmflux-wheels.yaml` builds pixelflux and pcmflux from their upstream `master` so images, packages, and AppImages ride the latest capture and audio code instead of the last PyPI release.
+- `images.yaml` publishes the multi-architecture `py-example`, `coturn`, and `turn-rest` images to ghcr.io. Each architecture builds on its own native runner and pushes by digest; a merge job assembles the manifest, so no QEMU is involved.
+- `packages.yaml` builds `.deb`, `.rpm`, `.apk`, `.pkg.tar.zst`, and both AppImages, each inside a container of the target distribution.
+- `release.yaml` is the maintainer entry point described below; `docs.yaml` publishes this site; `devcontainer-feature.yaml` validates and publishes the devcontainer feature.
+
+Ruff's rule selection lives in `pyproject.toml` and codespell's exceptions in `.codespellrc`, so `ruff check` and `codespell` from the repository root reproduce the CI lint exactly.
+
 # Maintainer Documentation
 
-- New releases are published by going to the [Publish release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) GitHub Action Workflow, and triggering `workflow_dispatch` by clicking on `Run workflow` with `Branch: main`, and specifying the release tag. The draft release for the new proposed release will be generated in the [Releases](https://github.com/selkies-project/selkies/releases) page, only visible to the maintainers. After waiting for the release build to finish, editing the release notes, and publishing the release, the release will be visible as the latest release. **If the same release is created multiple times because of certain issues, make sure to delete the previous release and the tag before running the [Publish release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) GitHub Action Workflow again.**
+- New releases are published by going to the [Release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) GitHub Action Workflow, and triggering `workflow_dispatch` by clicking on `Run workflow` with `Branch: main`, and specifying the release tag. The draft release for the new proposed release will be generated in the [Releases](https://github.com/selkies-project/selkies/releases) page, only visible to the maintainers. After waiting for the release build to finish, editing the release notes, and publishing the release, the release will be visible as the latest release. **If the same release is created multiple times because of certain issues, make sure to delete the previous release and the tag before running the [Release](https://github.com/selkies-project/selkies/actions/workflows/release.yaml) GitHub Action Workflow again.**

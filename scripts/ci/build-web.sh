@@ -1,0 +1,41 @@
+#!/bin/sh
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Bundle the web client into src/selkies/selkies_web, the directory the wheel
+# ships as package data. Run from the repository root; requires npm.
+#
+# Both the wheel build and the conda recipe call this, so the browser payload
+# is identical in every distribution channel.
+set -eux
+
+test -f pyproject.toml
+
+npm_install() {
+    # Lockfiles are gitignored in this repository, so `npm ci` has nothing to
+    # install from
+    npm install --no-audit --no-fund
+}
+
+(cd addons/selkies-web-core && npm_install && npm run build)
+(cd addons/selkies-dashboard \
+    && cp ../selkies-web-core/dist/selkies-core.js src/ \
+    && npm_install \
+    && SELKIES_INJECT=1 npm run build)
+
+mkdir -p addons/selkies-dashboard/dist/src
+cp addons/selkies-web-core/dist/selkies-core.js addons/selkies-dashboard/dist/src/
+cp addons/universal-touch-gamepad/universalTouchGamepad.js addons/selkies-dashboard/dist/src/
+cp -r addons/selkies-web-core/dist/jsdb addons/selkies-dashboard/dist/
+
+# .gitignore keeps src/selkies/selkies_web out of git; it is generated here
+rm -rf src/selkies/selkies_web
+cp -ar addons/selkies-dashboard/dist src/selkies/selkies_web
+
+printf '%s' '{"name":"Selkies","short_name":"Selkies","manifest_version":2,"version":"1.0.0","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon.png","type":"image/png","sizes":"512x512"}],"start_url":"/"}' > src/selkies/selkies_web/manifest.json
+# PWA icon/favicon are vendored in this repository, not downloaded
+cp docs/assets/logo/icon-512x512.png src/selkies/selkies_web/icon.png
+cp docs/assets/logo/favicon.ico src/selkies/selkies_web/favicon.ico
+
+test -f src/selkies/selkies_web/index.html

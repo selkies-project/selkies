@@ -2072,4 +2072,4 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         SHUTDOWN_ACK_SENT = 8
 
 
-## 1. not sending heartBeat chunck if we are data sender
+## 1. not sending heartBeat chunk if we are data sender

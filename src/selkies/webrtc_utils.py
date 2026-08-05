@@ -950,15 +950,19 @@ class Metrics:
             fut.cancel()
         self._csv_tasks.clear()
         self._csv_executor.shutdown(wait=True)
-        try:
-            REGISTRY.unregister(self.fps)
-            REGISTRY.unregister(self.fps_hist)
-            REGISTRY.unregister(self.gpu_utilization)
-            REGISTRY.unregister(self.latency)
-            REGISTRY.unregister(self.webrtc_statistics)
-        except KeyError:
-            # Metrics might have already been unregistered
-            pass
+        # Every collector built in __init__ must be released here: any one left
+        # behind makes the next Metrics() raise DuplicateTimeseries, so a mode
+        # switch back into metrics-enabled streaming would fail to start. Each
+        # is unregistered independently so an already-released collector does
+        # not strand the rest.
+        for collector in (self.fps, self.fps_hist, self.gpu_utilization,
+                          self.latency, self.webrtc_statistics,
+                          self.webrtc_pacer_pace_bps, self.webrtc_pacer_queue_bytes,
+                          self.webrtc_pacer_idr_floor_bytes, self.webrtc_pacer_events):
+            try:
+                REGISTRY.unregister(collector)
+            except KeyError:
+                pass
 
     async def set_webrtc_stats(self, webrtc_stat_type: str, webrtc_stats: str) -> None:
         sanitized_stats = await asyncio.to_thread(self._parse_and_sanitize_stats, webrtc_stats)

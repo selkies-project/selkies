@@ -1108,7 +1108,7 @@ NV_CTRL_TV_BRIGHTNESS = 55  # not supported
 NV_CTRL_TV_HUE = 56  # not supported
 
 #
-# NV_CTRL_TV_CONTRAST - not suppoerted
+# NV_CTRL_TV_CONTRAST - not supported
 #
 
 NV_CTRL_TV_CONTRAST = 57  # not supported
@@ -1443,7 +1443,7 @@ NV_CTRL_GVO_INPUT_VIDEO_FORMAT = 71  # renamed
 
 #
 # NV_CTRL_GVO_DATA_FORMAT - This controls how the data in the source
-# (either the X screen or the GLX pbuffer) is interpretted and
+# (either the X screen or the GLX pbuffer) is interpreted and
 # displayed.
 #
 # Note: some of the below DATA_FORMATS have been renamed.  For
@@ -1532,7 +1532,7 @@ NV_CTRL_GVO_SDI_SYNC_INPUT_DETECTED_SD = 2
 
 #
 # NV_CTRL_GVO_VIDEO_OUTPUTS - indicates which GVO video output
-# connectors are currently outputing data.
+# connectors are currently outputting data.
 #
 
 NV_CTRL_GVO_VIDEO_OUTPUTS = 77  # R--
@@ -2186,7 +2186,7 @@ NV_CTRL_HWOVERLAY_TRUE = 1
 
 #
 # NV_CTRL_NUM_GPU_ERRORS_RECOVERED - Returns the number of GPU errors
-# occured. This attribute may be queried through XNVCTRLQueryTargetAttribute()
+# occurred. This attribute may be queried through XNVCTRLQueryTargetAttribute()
 # using a NV_CTRL_TARGET_TYPE_X_SCREEN target.
 #
 
@@ -2307,7 +2307,7 @@ NV_CTRL_GVO_COMPOSITE_ALPHA_KEY_ENABLE = 1
 #
 # Range # (11 bits), (Enabled 1 bit), min value (10 bits), max value (10 bits)
 #
-# To query the current values, pass the range # throught the display_mask
+# To query the current values, pass the range # through the display_mask
 # variable.
 #
 
@@ -2320,7 +2320,7 @@ NV_CTRL_GVO_COMPOSITE_LUMA_KEY_RANGE = 272  # RW--
 #
 # Range # (11 bits), (Enabled 1 bit), min value (10 bits), max value (10 bits)
 #
-# To query the current values, pass the range # throught he display_mask
+# To query the current values, pass the range # through the display_mask
 # variable.
 #
 
@@ -2333,7 +2333,7 @@ NV_CTRL_GVO_COMPOSITE_CR_KEY_RANGE = 273  # RW--
 #
 # Range # (11 bits), (Enabled 1 bit), min value (10 bits), max value (10 bits)
 #
-# To query the current values, pass the range # throught he display_mask
+# To query the current values, pass the range # through the display_mask
 # variable.
 #
 
@@ -3327,7 +3327,7 @@ NV_CTRL_DISPLAY_ENABLED_FALSE = 0
 
 #
 # NV_CTRL_FRAMELOCK_INCOMING_HOUSE_SYNC_RATE: this is the rate
-# of an incomming house sync signal to the frame lock board, in milliHz.
+# of an incoming house sync signal to the frame lock board, in milliHz.
 #
 # This attribute may be queried through XNVCTRLQueryTargetAttribute()
 # using a NV_CTRL_TARGET_TYPE_FRAMELOCK or NV_CTRL_TARGET_TYPE_X_SCREEN
@@ -4209,7 +4209,7 @@ NV_CTRL_STRING_VCSC_FAN_STATUS = 30  # R---V
 #
 # Returns a string with all Temperature readings in the Visual Computing
 # System, if such a query is supported.  Intake, Exhaust and Board Temperature
-# values are reported in Celcius.
+# values are reported in Celsius.
 #
 # Valid tokens:
 #
@@ -4398,7 +4398,7 @@ NV_CTRL_STRING_3D_VISION_PRO_GLASSES_ADDRESS = 43  # R--T
 # NV_CTRL_STRING_3D_VISION_PRO_GLASSES_NAME - Controls the name the
 # glasses should use.
 # Use the display_mask parameter to specify the glasses id.
-# Glasses' name should start and end with an alpha-numeric character.
+# Glasses' name should start and end with an alphanumeric character.
 #
 NV_CTRL_STRING_3D_VISION_PRO_GLASSES_NAME = 44  # RW-T
 
@@ -4455,7 +4455,7 @@ NV_CTRL_STRING_DISPLAY_NAME_EDID_HASH = 49  # R-D-
 # NV_CTRL_STRING_DISPLAY_NAME_TARGET_INDEX - Returns the current NV-CONTROL
 # target ID (name) of the display device.  e.g. "DPY-1", "DPY-4"
 #
-# This name for the display device is not guarenteed to be the same between
+# This name for the display device is not guaranteed to be the same between
 # different runs of the X server.
 #
 NV_CTRL_STRING_DISPLAY_NAME_TARGET_INDEX = 50  # R-D-
@@ -4964,7 +4964,7 @@ NV_CTRL_BINARY_DATA_LAST_ATTRIBUTE = NV_CTRL_BINARY_DATA_DISPLAYS_ON_GPU
 # which causes the MetaMode to be inserted at position 5 in the
 # MetaMode list (all entries after 5 will be shifted down one slot in
 # the list), and the X server's containing mode stores 58 as the
-# VRefresh, so that the MetaMode can be uniquely identifed through
+# VRefresh, so that the MetaMode can be uniquely identified through
 # XRandR and XF86VidMode.
 #
 

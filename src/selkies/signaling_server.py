@@ -13,7 +13,7 @@ from aiohttp.web_ws import WebSocketResponse
 from aiohttp import web, WSMessage, WSMsgType
 from typing import Awaitable, Callable, Dict, Set, Optional, Any, Tuple, List
 
-from .webrtc_utils import generate_rtc_config, _is_trusted_config_file
+from .webrtc_utils import _is_trusted_config_file
 from .settings import settings as app_settings
 # Live control-plane token view (provisioned via /api/tokens), read per handshake.
 from .selkies import current_session_tokens
@@ -649,9 +649,9 @@ class WebRTCPeerManagement:
                         display_id = json_metadata.get("display_id") or "primary"
                         pos = json_metadata.get("display_position")
                         display_position = pos if pos in ("right", "left", "up", "down") else "right"
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
                         await ws.close(code=1002, message=b"invalid protocol")
-                        raise Exception("Invalid JSON metadata from {!r}".format(raddr))
+                        raise Exception("Invalid JSON metadata from {!r}".format(raddr)) from e
                     # Normalize client_slot to int so collision checks hold (1.0 != a
                     # distinct slot); None stays None, bool and non-coercible are rejected.
                     if client_slot is not None:
@@ -664,13 +664,13 @@ class WebRTCPeerManagement:
                             )
                         try:
                             client_slot = int(client_slot)
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError) as e:
                             await ws.close(code=1002, message=b"invalid protocol")
                             raise Exception(
                                 "Invalid client_slot {!r} from {!r}".format(
                                     client_slot, raddr
                                 )
-                            )
+                            ) from e
                 else:
                     hello, peer_type = toks
 

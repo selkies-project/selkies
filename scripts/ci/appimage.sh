@@ -3,7 +3,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Build Selkies-<ver>-<arch>.AppImage on the runner for this architecture.
+# Build selkies-<ver>-<arch>.AppImage on the runner for this architecture.
 # Uses rattler-build to package selkies as a conda package (which also ships as
 # a release artifact), then assembles the AppImage with linuxdeploy and the
 # linuxdeploy conda plugin (https://github.com/linuxdeploy/linuxdeploy-plugin-conda).
@@ -21,6 +21,7 @@ esac
 
 cd "$(readlink -f "$(dirname "$0")")/../.."
 WORK="${PWD}/build/appimage"
+rm -rf "${WORK}" AppDir
 mkdir -p "${WORK}"
 
 # 1) rattler-build: selkies conda package (noarch) from the repo
@@ -28,13 +29,13 @@ export PATH="${HOME}/.pixi/bin:${PATH}"
 if ! command -v pixi >/dev/null; then
   curl -fsSL https://pixi.sh/install.sh | sh
 fi
-pixi global install rattler-build micromamba || true
+pixi global install rattler-build
 rattler-build build \
     --recipe infra/appimage/recipe.yaml \
     --output-dir "${WORK}/conda-output" \
     --channel-priority disabled
 
-PKG="$(find "${WORK}/conda-output" -name 'selkies-*.tar.bz2' -o -name 'selkies-*.conda' | head -n1)"
+PKG="$(find "${WORK}/conda-output" \( -name 'selkies-*.tar.bz2' -o -name 'selkies-*.conda' \) | head -n1)"
 test -f "${PKG}"
 
 # 2) linuxdeploy + conda plugin (latest published builds)
@@ -52,34 +53,40 @@ curl -fsSL -o "${WORK}/linuxdeploy.AppImage" "${LINUXDEPLOY_URL}"
 curl -fsSL -o "${WORK}/linuxdeploy-plugin-conda.AppImage" "${PLUGIN_URL}"
 chmod +x "${WORK}/linuxdeploy.AppImage" "${WORK}/linuxdeploy-plugin-conda.AppImage"
 
-# 3) Assemble the AppDir: the conda plugin creates an env with the selkies
-#    package (from the local rattler-build channel) plus the runtime native
-#    libraries; pixelflux and pcmflux arrive as pip packages in the same env.
+# 3) Assemble the AppDir: the conda plugin installs a Miniconda prefix at
+#    AppDir/usr/conda, adds the channels and packages named below, and finally
+#    pip-installs PIP_REQUIREMENTS into the same prefix.
 export OUTPUT="selkies-${SELKIES_VERSION:-0.0.0}-${ARCH}.AppImage"
-export CONDA_CHANNELS="$(dirname "$(readlink -f "${PKG}")/../");conda-forge"
+# conda channels are ';'-separated; the local one is the rattler-build output
+# root, the directory holding noarch/
+export CONDA_CHANNELS="${WORK}/conda-output;conda-forge"
+export CONDA_PYTHON_VERSION="3.12"
 # ffmpeg pinned to the LGPL-only conda-forge variant so pixelflux sees an
-# x264-free avcodec stack inside the AppImage (gpl variant exists but is wrong here)
-export CONDA_PACKAGES="selkies;python=3.12;ffmpeg=*=*lgpl*;libxcb;pulseaudio;libva;libxkbcommon;zlib"
-export CONDA_CHANNEL_PRIORITY="flexible"
-# pixelflux/pcmflux: freshly built wheels from the master HEAD of
-# linuxserver/* when the CI supplies them (the AppImage env always runs
-# Python 3.12, see CONDA_PACKAGES above); otherwise the PyPI releases
-PIP_REQUIREMENTS="pixelflux pcmflux"
-if [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ] && ls "${PIXELFLUX_PCMFLUX_WHEELS_DIR}"/pixelflux-*.whl >/dev/null 2>&1; then
-  PIP_REQUIREMENTS="$(ls "${PIXELFLUX_PCMFLUX_WHEELS_DIR}"/pixelflux-*cp312*manylinux*"${ARCH}"*.whl | head -n1) $(ls "${PIXELFLUX_PCMFLUX_WHEELS_DIR}"/pcmflux-*cp312*manylinux*"${ARCH}"*.whl | head -n1)"
-fi
+# x264-free avcodec stack inside the AppImage
+export CONDA_PACKAGES="selkies;ffmpeg=*=*lgpl*;libxcb;pulseaudio;libva;libxkbcommon;zlib"
+# Runtime dependencies with no conda-forge package. pixelflux and pcmflux come
+# from the freshly built master-HEAD wheels when CI supplies them (the AppImage
+# env always runs Python 3.12, see CONDA_PYTHON_VERSION above), else from PyPI.
+PIP_REQUIREMENTS="xkbcommon pulsectl-asyncio aitop"
+for project in pixelflux pcmflux; do
+  wheel=""
+  if [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then
+    wheel="$(find "${PIXELFLUX_PCMFLUX_WHEELS_DIR}" -maxdepth 1 \
+        -name "${project}-*cp312*manylinux*${ARCH}*.whl" | head -n1)"
+  fi
+  PIP_REQUIREMENTS="${PIP_REQUIREMENTS} ${wheel:-${project}}"
+done
 export PIP_REQUIREMENTS
-export DEPLOY_GLIBC_VERSION="0"
 
-rm -rf AppDir
 "${WORK}/linuxdeploy.AppImage" --appimage-extract-and-run \
     --appdir AppDir \
     --plugin conda
 
-# 4) Custom AppRun + desktop integration (graphics/minimal: no desktop session
-#    is bundled; the AppImage streams an existing X display/Xvfb or Wayland)
-ENV_BIN="$(dirname "$(find AppDir/usr/conda/envs -name selkies -type f | head -n1)")"
-test -x "${ENV_BIN}/selkies" || test -x "${ENV_BIN}/python"
+# Fails the build rather than shipping an AppImage that cannot start
+AppDir/usr/conda/bin/selkies --help > /dev/null
+
+# 4) Custom AppRun + desktop integration. No desktop session is bundled: the
+#    AppImage streams an existing X display/Xvfb or a Wayland compositor.
 mkdir -p AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/512x512/apps
 cat > AppDir/usr/share/applications/selkies.desktop <<'DESKTOP'
 [Desktop Entry]
@@ -95,16 +102,15 @@ cp docs/assets/logo/icon-512x512.png AppDir/usr/share/icons/hicolor/512x512/apps
 cat > AppDir/AppRun <<'APPRUN'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "${0}")")"
-ENV_BIN="$(cd "${HERE}" && dirname "$(find usr/conda/envs -name selkies -type f | head -n1)")"
-export PATH="${HERE}/${ENV_BIN}:${PATH}"
+ENV_BIN="${HERE}/usr/conda/bin"
+export PATH="${ENV_BIN}:${PATH}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR}/pulse/native}"
 export PIPEWIRE_LATENCY="128/48000"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 
-# Auto-start a virtual display when none is available (salvaged from the legacy
-# run-wrappers, transport-agnostic). Wayland mode starts its own compositor and
-# skips this; the host's Xvfb is used when present.
+# X11 mode streams an existing display; start a virtual one when none is up.
+# Wayland mode starts its own compositor and needs nothing here.
 if [ "${SELKIES_WAYLAND:-false}" != "true" ]; then
     export DISPLAY="${DISPLAY:-:20}"
     if [ ! -S "/tmp/.X11-unix/X${DISPLAY#*:}" ] && command -v Xvfb >/dev/null 2>&1; then
@@ -118,14 +124,14 @@ fi
 # Start a PulseAudio server when none is listening yet (the conda env bundles
 # its own pulseaudio, falling back to a host binary otherwise)
 if [ ! -e "${PULSE_SERVER#unix:}" ] && [ ! -S "${PULSE_SERVER#unix:}" ]; then
-    if [ -x "${HERE}/${ENV_BIN}/pulseaudio" ]; then
-        "${HERE}/${ENV_BIN}/pulseaudio" --verbose --log-target=file:/tmp/pulseaudio_selkies.log --disallow-exit --exit-idle-time="-1" &
+    if [ -x "${ENV_BIN}/pulseaudio" ]; then
+        "${ENV_BIN}/pulseaudio" --verbose --log-target=file:/tmp/pulseaudio_selkies.log --disallow-exit --exit-idle-time="-1" &
     elif command -v pulseaudio >/dev/null 2>&1; then
         pulseaudio --verbose --log-target=file:/tmp/pulseaudio_selkies.log --disallow-exit --exit-idle-time="-1" &
     fi
 fi
 
-exec "${HERE}/${ENV_BIN}/selkies" "$@"
+exec "${ENV_BIN}/selkies" "$@"
 APPRUN
 chmod +x AppDir/AppRun
 ln -sf usr/share/icons/hicolor/512x512/apps/selkies.png AppDir/selkies.png
@@ -138,6 +144,8 @@ ln -sf usr/share/applications/selkies.desktop AppDir/selkies.desktop
 
 mkdir -p out
 mv "${OUTPUT}" out/
-# Keep the conda package alongside the AppImage (portable conda distribution)
-cp "${PKG}" out/
+# The conda package is noarch, so one architecture's job publishes it
+if [ "${ARCH}" = "x86_64" ]; then
+  cp "${PKG}" out/
+fi
 ls -la out/

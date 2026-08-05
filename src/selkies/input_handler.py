@@ -28,7 +28,6 @@ from asyncio import subprocess
 import socket
 import os
 import base64
-import binascii
 import io
 import re
 import json
@@ -395,8 +394,12 @@ class _X11ClipboardMonitor:
         self._targets = self._d.get_atom('TARGETS')
         # Pre-intern every target we can consume (all Display calls happen here,
         # before the event thread starts; read() then only compares atom ids).
+        # Same set, in the same precedence order, as the Wayland data-control read
+        # and the xclip fallback: a target offered on one path must be readable on
+        # all of them. read() walks this list; offer() maps a write mime from it.
         self._image_targets = [(self._d.get_atom(m), m) for m in (
-            'image/png', 'image/jpeg', 'image/bmp', 'image/webp', 'image/svg+xml')]
+            'image/png', 'image/jpeg', 'image/bmp', 'image/webp', 'image/svg+xml',
+            'image/svg')]
         self._text_targets = [(self._d.get_atom(t), t) for t in (
             'UTF8_STRING', 'text/plain;charset=utf-8', 'STRING')]
         # File managers copy an image as a text/uri-list of file:// URIs, not the
@@ -493,9 +496,9 @@ class _X11ClipboardMonitor:
             self._own_mime_atom = mime_atom
             self._own_is_text = is_text
             self._win.set_selection_owner(self._clipboard, X.CurrentTime)
-            # Middle-click paste parity with Wayland: serve the same payload on
-            # PRIMARY. _serve_selection matches requests by ev.selection, so one
-            # payload safely backs both selections.
+            # Middle-click paste parity with Wayland: offer the same payload on
+            # PRIMARY. _serve_selection answers from the one staged payload
+            # whatever selection a request names, so both are backed by it.
             self._win.set_selection_owner(self._primary, X.CurrentTime)
             self._d.flush()
             owner = self._d.get_selection_owner(self._clipboard)
@@ -1041,6 +1044,10 @@ MULTIPART_CLIPBOARD_MAX_SIZE = 64 * 1024 * 1024
 # unresponsive server, converting an unbounded event-loop freeze into a bounded
 # stall plus reconnect.
 INPUT_X_REPLY_TIMEOUT_S = 20.0
+
+# Poll interval (seconds) for the X event consumers when no loop reader is armed
+# on the input connection, so cursor and keymap changes still land promptly.
+INPUT_X_EVENT_POLL_S = 0.02
 
 
 def _is_within_directory(directory: str, target: str) -> bool:
@@ -1786,7 +1793,7 @@ class SelkiesGamepad:
 
                 # Send to JS clients
                 if js_data:
-                    for i, (writer, client_info) in enumerate(list(self.js_clients.items())):
+                    for i, (writer, _client_info) in enumerate(list(self.js_clients.items())):
                         if not writer.is_closing():
                             try:
                                 writer.write(js_data)
@@ -2157,10 +2164,15 @@ class WebRTCInput:
     async def _wait_x_event(self, timeout=1.0):
         """Sleep until the X socket signals readability or the failsafe elapses.
         Callers clear the Event BEFORE re-checking event availability, so an
-        event arriving between the check and the wait is never lost."""
+        event arriving between the check and the wait is never lost. With no
+        reader armed (add_reader unsupported or failed) nothing will ever set the
+        Event, so fall back to a short poll rather than idling out the failsafe."""
         wake = self._x_event_wake
         if wake is None:
             await asyncio.sleep(timeout)
+            return
+        if self._x_watcher_fd is None:
+            await asyncio.sleep(min(timeout, INPUT_X_EVENT_POLL_S))
             return
         try:
             await asyncio.wait_for(wake.wait(), timeout)
@@ -3285,9 +3297,9 @@ class WebRTCInput:
                                     # keys like every other key event (direct
                                     # injection could interleave between a queued
                                     # kd and its ku and produce stray chords).
-                                    for _item in (("kd", KEYSYM_ALT_L), ("kd", KEYSYM_LEFT_ARROW),
-                                                  ("ku", KEYSYM_LEFT_ARROW), ("ku", KEYSYM_ALT_L)):
-                                        self._keyboard_enqueue(_item)
+                                    self._keyboard_enqueue_chord((
+                                        (KEYSYM_ALT_L, True), (KEYSYM_LEFT_ARROW, True),
+                                        (KEYSYM_LEFT_ARROW, False), (KEYSYM_ALT_L, False)))
 
                         elif bit_index == 4:
                             if scroll_magnitude > 0:
@@ -3296,9 +3308,9 @@ class WebRTCInput:
                             else:
                                 if is_pressed_now:
                                     # Forward: Alt+Right, same queue ordering.
-                                    for _item in (("kd", KEYSYM_ALT_L), ("kd", KEYSYM_RIGHT_ARROW),
-                                                  ("ku", KEYSYM_RIGHT_ARROW), ("ku", KEYSYM_ALT_L)):
-                                        self._keyboard_enqueue(_item)
+                                    self._keyboard_enqueue_chord((
+                                        (KEYSYM_ALT_L, True), (KEYSYM_RIGHT_ARROW, True),
+                                        (KEYSYM_RIGHT_ARROW, False), (KEYSYM_ALT_L, False)))
 
                         elif bit_index == 6:
                             if scroll_magnitude > 0 and is_pressed_now:
@@ -3661,7 +3673,8 @@ class WebRTCInput:
                 return None, None
             targets = stdout_targets.decode().strip().split('\n')
             if use_binary:
-                for mime_type in ['image/png', 'image/jpeg', 'image/bmp', 'image/svg', 'image/webp', 'image/svg+xml']:
+                for mime_type in ['image/png', 'image/jpeg', 'image/bmp', 'image/webp',
+                                  'image/svg+xml', 'image/svg']:
                     if mime_type in targets:
                         proc_data = await subprocess.create_subprocess_exec(
                             "xclip", "-selection", "clipboard", "-o", "-t", mime_type,
@@ -3771,8 +3784,8 @@ class WebRTCInput:
                 stderr=subprocess.DEVNULL,
                 env=env
             )
-            # communicate() under one deadline: writing a payload larger than the
-            # pipe buffer must not pend forever on drain() while xclip stalls.
+            # One deadline covers the whole stdin write plus exit, so a payload
+            # larger than the pipe buffer cannot wedge on a stalled xclip.
             await self._communicate_or_kill(
                 process, 2.0, f"xclip -i {target_mime}", input_bytes)
             return_code = process.returncode
@@ -4158,8 +4171,8 @@ class WebRTCInput:
             if wake is not None:
                 wake.clear()
             if self.xdisplay.pending_events() == 0:
-                # Event-driven idle: block on socket readability (a 1s failsafe
-                # covers a watcher lost to reconnect) instead of 50Hz polling.
+                # Idle until the X socket goes readable; the 1s failsafe bounds
+                # the wait if the loop reader was lost to a reconnect.
                 self._arm_x_event_watcher()
                 await self._wait_x_event(timeout=1.0)
                 continue
@@ -4276,8 +4289,10 @@ class WebRTCInput:
 
     def _keyboard_enqueue(self, item):
         """Enqueue input for the keyboard worker, evicting the oldest entry on
-        overflow so a message flood can't grow the queue without bound. A held
-        key orphaned by an evicted release is recovered by the stale sweep."""
+        overflow so a message flood can't grow the queue without bound. A held key
+        orphaned by an evicted release is recovered by the stale sweep, which only
+        covers keysyms tracked in pressed_keys — server-generated sequences are not
+        tracked, so they go through _keyboard_enqueue_chord instead."""
         try:
             self.keyboard_queue.put_nowait(item)
         except asyncio.QueueFull:
@@ -4290,6 +4305,17 @@ class WebRTCInput:
                 self.keyboard_queue.put_nowait(item)
             except asyncio.QueueFull:
                 logger_webrtc_input.warning("keyboard queue full; dropping input event.")
+
+    def _keyboard_enqueue_chord(self, keys):
+        """Enqueue a server-synthesized press/release sequence as ONE entry, so
+        overflow eviction can only lose it whole.
+
+        `keys` is a sequence of (keysym, down) pairs the worker injects in order.
+        These keysyms never enter pressed_keys (no client 'ku' follows them), so a
+        release evicted on its own would leave the modifier held with nothing to
+        heal it — the stale sweep only covers tracked keys.
+        """
+        self._keyboard_enqueue(("chord", tuple(keys)))
 
     async def _keyboard_worker(self):
         unicode_buffer = []
@@ -4374,6 +4400,19 @@ class WebRTCInput:
                             self.atomically_typed_keys.discard(keysym)
                         else:
                             await self.send_x11_keypress(keysym, down=False)
+
+                    elif msg_type == "chord":
+                        # A whole server-synthesized sequence in one entry: its
+                        # presses and releases are injected back-to-back, so no
+                        # other queued key can land between them.
+                        await flush_buffer()
+                        for chord_keysym, down in data:
+                            if chord_keysym in self.MODIFIER_KEYSYMS:
+                                if down:
+                                    self.active_modifiers.add(chord_keysym)
+                                else:
+                                    self.active_modifiers.discard(chord_keysym)
+                            await self.send_x11_keypress(chord_keysym, down=down)
 
                     elif msg_type == "kr":
                         await flush_buffer()

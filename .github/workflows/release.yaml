@@ -14,6 +14,13 @@ on:
         type: string
         required: true
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
 jobs:
   validate:
     name: Validate release inputs
@@ -22,16 +29,19 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
     steps:
       - id: ver
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
           set -e
-          ver="${{ github.event.inputs.tag }}"
-          ver="${ver#v}"
+          ver="${TAG#v}"
           echo "${ver}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "tag must be semver (e.g. 1.2.3)" >&2; exit 1; }
           echo "version=${ver}" >> "${GITHUB_OUTPUT}"
 
   wheel:
     name: Build wheel
     needs: validate
+    permissions:
+      contents: read
     uses: ./.github/workflows/build-wheel.yaml
     with:
       package_version: ${{ needs.validate.outputs.version }}
@@ -39,11 +49,18 @@ jobs:
   pixelflux-pcmflux:
     name: Build pixelflux and pcmflux wheels (master HEAD)
     needs: validate
+    permissions:
+      contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
 
   images:
     name: Build and publish multi-arch images
     needs: [validate, wheel, pixelflux-pcmflux]
+    # A called workflow can only narrow the caller's token, so the GHCR push
+    # scope has to be granted here
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/images.yaml
     with:
       tag_prefix: v${{ needs.validate.outputs.version }}
@@ -52,6 +69,8 @@ jobs:
   packages:
     name: Build native packages
     needs: [validate, wheel, pixelflux-pcmflux]
+    permissions:
+      contents: read
     uses: ./.github/workflows/packages.yaml
     with:
       package_version: ${{ needs.validate.outputs.version }}
@@ -61,9 +80,11 @@ jobs:
     name: Assemble draft release
     needs: [validate, wheel, images, packages]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: "*"
           path: release-artifacts/
@@ -81,7 +102,7 @@ jobs:
           find release-artifacts -type f -exec mv {} release/ \;
           ls -la release/
       - name: Create draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.validate.outputs.version }}
           name: v${{ needs.validate.outputs.version }}

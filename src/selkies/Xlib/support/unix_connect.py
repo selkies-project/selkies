@@ -47,8 +47,8 @@ def get_display(display):
     if 'darwin' in SUPPORTED_PROTOCOLS:
         re_list.insert(0, (DARWIN_DISPLAY_RE, {'protocol': 'darwin'}))
 
-    for re, defaults in re_list:
-        m = re.match(display)
+    for display_re, defaults in re_list:
+        m = display_re.match(display)
         if m is not None:
             protocol, host, dno, screen = [
                 m.groupdict().get(field, defaults.get(field))

@@ -4,48 +4,36 @@
 #
 # Strict-priority packet pacer for the DTLS transport choke point.
 #
-# Architecture selected by empirical A/B/C/E/F/G candidate search over a
-# deterministic bottleneck model with real asyncio senders (see
-# /home/ubuntu/build/pacer_bench, results_round{1,2,3}.json):
+# One RtpPacer per RTCDtlsTransport. Priority classes, highest first:
+# RTCP + audio (which bypass the token bucket entirely: they are protocol
+# rate-limited, tiny and latency-critical), data-channel, video (incl. RTX and
+# FEC).
 #
-#   * Event-driven token-bucket scheduling (wake at the exact next affordable
-#     instant) with an immediate fast path when the queue is empty and credit
-#     covers the packet. Fixed-timer polling variants lose ~8% goodput to
-#     timer-jitter x debt-cap clipping and add ~100 ms video lag; in-sender
-#     sleeping cannot protect other classes at all.
-#   * Priority classes: RTCP/audio > interactive data-channel > video
-#     (incl. RTX/FEC) > bulk data-channel. Sharing audio's class with DC puts
-#     audio behind clipboard storms; bulk DC must sit BELOW video.
-#   * RTCP and audio bypass the bucket entirely. They are protocol rate-
-#     limited and tiny; queuing them behind video credit debt only adds wake
-#     latency to exactly the traffic this pacer exists to protect.
-#   * Video-only, IDR-aware queue budget. A fixed queue budget smaller than
-#     one variable-size IDR truncates every keyframe under sustained
-#     congestion and breaks the reference chain permanently, so the floor
-#     tracks the max of the last few observed IDR sizes (a sliding window,
-#     NOT time-decay: per-keyframe decay collapses precisely when congestion
-#     forces frequent keyframes, which is when the floor matters most).
-#   * GOP-reset posture on overflow: drop the damaged GOP wholesale and ask
-#     the encoder for a fresh keyframe (throttled), rather than thinning
-#     arbitrary packet tails. Deadline walls and IDR smoothing were tried and
-#     rejected by measurement.
-#   * Wake-on-affordable: packets enqueued while the drain sleeps poke it if
-#     credit already covers them, so neither sleep overshoot nor coalescing
-#     adds latency to other classes.
+# Scheduling is an event-driven token bucket. A packet goes straight out when
+# nothing is queued and credit covers it; otherwise it queues and the drain
+# task sleeps to the exact instant credit covers the highest-priority head. An
+# enqueue that credit already covers pokes the drain awake, so neither sleep
+# overshoot nor coalescing adds latency to another class.
 #
-# Anti-spiral lessons from LIVE E2E (a simulator cannot produce these):
-#   * A goodput estimate measures THIS pacer's own output once it throttles.
-#     Braking fractionally/subtractively on that signal is a feedback loop
-#     that always drifts (saturated wire = link limit, not capacity;
-#     unsaturated wire = own injection — three variants were tried and each
-#     failed differently live). The stable control law is classic AIMD: the
-#     internal queue overflow is the ONLY trustworthy congestion signal
-#     (like TCP's packet loss), so the pace is braked at overflow events
-#     (to est - bypass-reserve when an estimate exists, halved otherwise)
-#     and recovers multiplicatively (+25%/s) while overflow stays quiet.
-#   * A GOP-dead state must have a timeout resurrect: if the keyframe
-#     callback is unbound or the encoder ignores it, no IDR will ever come
-#     to lift the dead state (natural IDR cadence can be minutes).
+# Invariants:
+#   * The burst budget always covers one max-size packet, otherwise a packet
+#     could never become affordable and its class would wedge forever.
+#   * Video is the only droppable class; every other class is bounded by
+#     backpressure on the sender instead.
+#   * The video queue budget is max(CAP_MIN_MS of wire time, IDR_FLOOR_FACTOR x
+#     the largest of the last IDR_WINDOW keyframes). A budget below one IDR
+#     truncates every keyframe under sustained congestion and breaks the
+#     reference chain permanently, hence the sliding-window floor.
+#   * Overflow drops the whole GOP and requests a throttled keyframe rather
+#     than thinning arbitrary packet tails; a timeout resurrects video if no
+#     keyframe arrives, so an unbound keyframe callback or a stuck encoder
+#     cannot kill the class permanently (natural IDR cadence can be minutes).
+#   * Rate control is AIMD driven solely by internal queue overflow: a full
+#     queue means injection > wire, so it is the only congestion signal not
+#     contaminated by this pacer's own output. Brake to (goodput estimate -
+#     BYPASS_RESERVE_BPS) when an estimate exists, else halve, floored at
+#     AIMD_FLOOR_FACTOR x the encoder target; recover +25%/s while overflow
+#     stays quiet, ceilinged at PACE_FACTOR x the encoder target.
 import asyncio
 import logging
 import os
@@ -59,10 +47,10 @@ logger = logging.getLogger("selkies_webrtc_pacer")
 # tiny absolute rates and must never queue behind anything else.
 CLASS_RTCP = 0
 CLASS_AUDIO = 0
-CLASS_DC = 1        # interactive data-channel traffic (input, status, small msgs)
+CLASS_DC = 1        # data-channel traffic (input, status, clipboard)
 CLASS_VIDEO = 2     # video RTP, RTX and FEC
-CLASS_BULK_DC = 3   # bulk data-channel traffic (clipboard, file transfer)
-_NUM_CLASSES = 4
+# Classes that own a queue: class 0 bypasses the bucket and is never enqueued.
+_QUEUED_CLASSES = (CLASS_DC, CLASS_VIDEO)
 
 PACE_FACTOR = 2.5          # pace above encoder target when the link allows
 BYPASS_RESERVE_BPS = 500_000  # wire share reserved for bypass classes (audio
@@ -72,9 +60,14 @@ OVERFLOW_RECOVERY_PER_S = 0.25  # AIMD: multiplicative pace recovery (+25%/s)
 AIMD_FLOOR_FACTOR = 0.35   # brake depth floor (x encoder target): chained
                            # overflow brakes must never crater the stream into
                            # a starvation valley that +25%/s takes seconds to
-                           # escape (measured live: one osc run collapsed to
-                           # ~1/14 of frames without a floor)
-DEBT_WINDOW_S = 0.005      # burst credit window (5 ms; the 20 ms variant hurt audio)
+                           # climb out of
+DEBT_WINDOW_S = 0.005      # burst credit window: how much wire time the bucket
+                           # may hoard. Wider windows let video bursts land
+                           # in front of audio.
+BURST_FLOOR_BYTES = 2048   # floor under the burst budget. Credit saturates at
+                           # the budget, so a budget below one packet leaves
+                           # that packet unaffordable forever; DTLS records here
+                           # are MTU-sized and this keeps headroom above them.
 CAP_MIN_MS = 120           # video queue budget floor, time-denominated
 IDR_FLOOR_FACTOR = 2.2     # IDR-size floor for the video queue budget
 IDR_WINDOW = 4             # rolling window of recent IDR sizes for the floor
@@ -87,13 +80,29 @@ GOODPUT_WARMUP_S = 5.0     # post-enable grace: ignore goodput braking so the
                            # slam the pace before video even ramps
 RESURRECT_TIMEOUT_S = 1.0  # if no keyframe resurrects a dead GOP within this
                            # of the last keyreq, resurrect on queue-drain anyway
-VIDEO_STALE_S = float(os.environ.get("SELKIES_WEBRTC_PACER_STALE_MS", "0")) / 1000.0
-# Latency-first: whole-GOP deadline for queued video; never tighter than one
-# IDR's wire time. DEFAULT OFF: live A/B at 350 ms showed purging the GOP
-# inflates delivered-video one-way p99 (2.2 s vs 1.5 s without it): the
-# receiver's jitter buffer stalls on the purge gap and smears the cost into
-# later frames, eating the freshness gained. Configurable for links where
-# the tradeoff is wanted; unit-tested.
+DC_HIGH_WATER_BYTES = 2_000_000  # backlog at which data-channel senders block
+DC_LOW_WATER_BYTES = 1_000_000   # backlog at which they are released again
+DC_BLOCK_TIMEOUT_S = 1.0   # cap on one backpressure wait: a wedged wire must
+                           # slow senders, never park them forever
+
+
+def _stale_deadline_s() -> float:
+    """Read SELKIES_WEBRTC_PACER_STALE_MS as seconds; a malformed value disables
+    the deadline instead of killing the import."""
+    raw = os.environ.get("SELKIES_WEBRTC_PACER_STALE_MS", "0")
+    try:
+        return max(0.0, float(raw)) / 1000.0
+    except ValueError:
+        logger.warning("pacer: ignoring malformed "
+                       "SELKIES_WEBRTC_PACER_STALE_MS=%r", raw)
+        return 0.0
+
+
+# Whole-GOP deadline for queued video, never tighter than one IDR's wire time.
+# Off by default: purging the backlog stalls the receiver's jitter buffer on the
+# resulting gap, which costs more delivered-video latency than the freshness it
+# buys on most links. Set SELKIES_WEBRTC_PACER_STALE_MS to enable.
+VIDEO_STALE_S = _stale_deadline_s()
 MIN_GOODPUT_SAMPLE_BYTES = 2048  # near-empty windows carry no rate signal
 
 SendNow = Callable[[bytes], Awaitable[None]]
@@ -128,7 +137,8 @@ class RtpPacer:
     Video packets that cannot fit the queue budget trigger a GOP reset: queued
     video is purged, subsequent video is dropped until a fresh keyframe
     resurrects the stream, and a throttled keyframe request is emitted.
-    Nothing but video is ever dropped.
+    Video is the only class ever dropped; data-channel senders are throttled by
+    backpressure instead, since their traffic is reliable.
     """
 
     def __init__(
@@ -146,8 +156,12 @@ class RtpPacer:
         self._request_keyframe = request_keyframe
         self._loop = loop or asyncio.get_running_loop()
 
-        self._queues: Dict[int, Deque[bytes]] = {c: deque() for c in range(_NUM_CLASSES)}
+        self._queues: Dict[int, Deque[bytes]] = {c: deque() for c in _QUEUED_CLASSES}
         self._poke = asyncio.Event()
+        # Set while the backlog is below the low-water mark: data-channel
+        # senders wait on it once the backlog crosses the high-water mark.
+        self._drained = asyncio.Event()
+        self._drained.set()
         self._make_class_table()
         self._bytes_queued = 0
         self._video_bytes = 0
@@ -158,8 +172,10 @@ class RtpPacer:
         self.credit = 0.0
         self._debt_cap = 0.0
         self._pace_bps = MIN_PACE_BPS
-        self._saturated = False
-        self._last_overflow_at = 0.0
+        # Sentinel for "AIMD owns the pace now"; distinct from the recovery
+        # clock, which ticks on every pace update.
+        self._ever_overflowed = False
+        self._last_pace_update_at = 0.0
         self._refresh_windows()
         self._last = time.monotonic()
         self._drain_task: Optional[asyncio.Task] = None
@@ -170,6 +186,7 @@ class RtpPacer:
         self._last_keyreq = 0.0
         self._enabled_at = self._last
         self._gop_dead_at = 0.0
+        self._oversize_warned = False
         self.stats = {
             "video_dropped": 0, "keyreqs": 0, "gop_resets": 0,
             "idr_resurrects": 0, "timeout_resurrects": 0, "stale_resets": 0,
@@ -212,6 +229,11 @@ class RtpPacer:
         # injection). AIMD: estimates merely size the step taken on overflow.
         if bps is None:
             return
+        if time.monotonic() - self._enabled_at < GOODPUT_WARMUP_S:
+            # The first feedback windows after enabling carry audio-only (or
+            # no) traffic: their throughput measures the offered load, not the
+            # link, and would size an early brake far below capacity.
+            return
         bps = int(bps)
         if bps > 0:
             self._goodput_bps = bps
@@ -222,8 +244,8 @@ class RtpPacer:
         measured wire rate bounds capacity. Without an estimate yet, halve
         (classic TCP-style response to a loss event)."""
         now = time.monotonic()
-        self._last_overflow_at = now
-        self._saturated = True
+        self._ever_overflowed = True
+        self._last_pace_update_at = now
         est = self._goodput_bps
         if est:
             target = max(MIN_PACE_BPS, est - BYPASS_RESERVE_BPS)
@@ -234,57 +256,51 @@ class RtpPacer:
         target = max(target, int(AIMD_FLOOR_FACTOR * self._encoder_bps))
         if target < self._pace_bps:
             self._pace_bps = target
-            self._debt_cap = self._pace_bps / 8.0 * DEBT_WINDOW_S
-            if self.credit > self._debt_cap:
-                self.credit = self._debt_cap
+            self._apply_pace()
 
     def _maybe_recover_pace(self) -> None:
         # +25%/s multiplicative recovery toward the encoder ceiling,
         # accumulating only while overflow stays quiet.
         now = time.monotonic()
-        dt = now - self._last_overflow_at
+        dt = now - self._last_pace_update_at
         if dt < 1.0:
             return
         ceiling = PACE_FACTOR * self._encoder_bps
+        self._last_pace_update_at = now
         if self._pace_bps >= ceiling:
-            self._saturated = False
-            self._last_overflow_at = now
             return
         grown = int(self._pace_bps * (1.0 + OVERFLOW_RECOVERY_PER_S) ** min(dt, 4.0))
         self._pace_bps = min(int(ceiling), max(grown, MIN_PACE_BPS))
-        if self._pace_bps >= ceiling:
-            self._saturated = False
-        self._debt_cap = self._pace_bps / 8.0 * DEBT_WINDOW_S
-        self._last_overflow_at = now
-
-    def _set_goodput_bps_unslewed_for_tests(self, bps: Optional[float]) -> None:
-        """Test hook: plant an estimate as-if mid-session."""
-        self._enabled_at -= GOODPUT_WARMUP_S + 1.0
-        if bps is not None and int(bps) > 0:
-            self._goodput_bps = int(bps)
+        self._apply_pace()
 
     def _make_class_table(self) -> None:
-        """Precomputed per-class (queue, sender) pairs: per-packet work must not
-        re-derive what never changes."""
+        """Precomputed per-class (class, queue, sender) triples in priority
+        order: per-packet work must not re-derive what never changes."""
         self._class_table = [
-            (self._queues[CLASS_RTCP], self._send_now),
-            (self._queues[CLASS_DC], self._send_now_data),
-            (self._queues[CLASS_VIDEO], self._send_now),
-            (self._queues[CLASS_BULK_DC], self._send_now_data),
+            (CLASS_DC, self._queues[CLASS_DC], self._send_now_data),
+            (CLASS_VIDEO, self._queues[CLASS_VIDEO], self._send_now),
         ]
+
+    def _apply_pace(self) -> None:
+        """Re-derive the burst budget from the current pace and clamp credit to
+        it. Credit saturates at the budget, so the budget is floored at
+        BURST_FLOOR_BYTES: below one packet's size, that packet could never
+        become affordable and its class would wedge."""
+        self._debt_cap = max(self._pace_bps / 8.0 * DEBT_WINDOW_S,
+                             float(BURST_FLOOR_BYTES))
+        if self.credit > self._debt_cap:
+            self.credit = self._debt_cap
 
     def _refresh_windows(self) -> None:
         ceiling = PACE_FACTOR * self._encoder_bps
-        # Pre-first-overflow the encoder setting owns the pace (config
+        # Until the first overflow the encoder setting owns the pace (config
         # tracking); afterwards it can only CLAMP the AIMD-controlled pace.
-        if self._last_overflow_at == 0.0:
+        if not self._ever_overflowed:
             self._pace_bps = int(ceiling)
         else:
             self._pace_bps = min(self._pace_bps, int(ceiling))
         self._pace_bps = max(self._pace_bps, MIN_PACE_BPS)
-        self._debt_cap = self._pace_bps / 8.0 * DEBT_WINDOW_S
-        if self.credit > self._debt_cap:
-            self.credit = self._debt_cap
+        self._apply_pace()
 
     def _video_cap_bytes(self) -> int:
         base = int(self._pace_bps / 8.0 * CAP_MIN_MS / 1000)
@@ -293,14 +309,29 @@ class RtpPacer:
     # ----------------------------------------------------------------- inputs
     def note_keyframe(self, total_payload_bytes: int, natural: bool = True) -> None:
         """Feed the sliding-window IDR floor and resurrect the stream after a
-        GOP reset. Only NATURAL keyframes update the floor: forced mini-
-        keyframes (emitted at collapsed bitrate in response to our own
-        congestion signal) would shrink the floor, shrink the cap, and so
-        trigger the next reset — a self-reinforcing collapse measured in
-        E2E as a permanent keyframe-churn cycle under steady congestion."""
+        GOP reset.
+
+        Only NATURAL keyframes enter the window: a forced keyframe is emitted at
+        the collapsed bitrate that made us ask for it, so letting it evict a
+        window entry would shrink the floor, shrink the cap and trigger the next
+        reset — a self-reinforcing keyframe-churn cycle. A forced keyframe may
+        still RAISE the floor, so a cap too small to hold one IDR still grows out
+        of the churn.
+
+        A keyframe arriving within KEYREQ_MIN_INTERVAL_S of our own request is
+        treated as forced whatever the caller says: on the pre-encoded pack()
+        path the sender packetizes frames it did not encode, so it cannot tell
+        the two apart.
+        """
+        size = int(total_payload_bytes)
+        if natural and time.monotonic() - self._last_keyreq < KEYREQ_MIN_INTERVAL_S:
+            natural = False
         if natural:
-            self._idr_sizes.append(int(total_payload_bytes))
+            self._idr_sizes.append(size)
             self._idr_floor_bytes = int(max(self._idr_sizes) * IDR_FLOOR_FACTOR)
+        else:
+            self._idr_floor_bytes = max(self._idr_floor_bytes,
+                                        int(size * IDR_FLOOR_FACTOR))
         if self._gop_dead:
             self._gop_dead = False
             self.stats["idr_resurrects"] += 1
@@ -333,9 +364,7 @@ class RtpPacer:
         n = len(data)
 
         # RTCP/audio bypass: protocol rate-limited and latency-critical, so
-        # they never queue and never consume video's credit. This removes the
-        # wake-wait they previously paid while video debt rebuilt (the exact
-        # latency this whole mechanism exists to protect them from).
+        # they never queue and never consume video's credit.
         if cls == CLASS_RTCP:
             self.stats["fastpath_bytes"] += n
             await self._send_now(data)
@@ -343,12 +372,16 @@ class RtpPacer:
 
         self._maybe_recover_pace()
 
+        if cls != CLASS_VIDEO and self._bytes_queued >= DC_HIGH_WATER_BYTES:
+            await self._await_backlog_drain()
+            if self._stopped:
+                raise ConnectionError("pacer stopped")
+
         if cls == CLASS_VIDEO and self._gop_dead:
             # Safety net: if no keyframe resurrected us within the timeout of
             # the last keyreq (broken/unbound callback, encoder stuck), let
-            # video flow again anyway; the decoder's own repair (#287 path)
-            # recovers from the reference break, while a permanently dead
-            # class is unrecoverable by definition.
+            # video flow again anyway. The decoder recovers from the reference
+            # break at the next keyframe; a permanently dead class does not.
             if time.monotonic() - self._gop_dead_at >= RESURRECT_TIMEOUT_S:
                 self._gop_dead = False
                 self.stats["timeout_resurrects"] += 1
@@ -382,13 +415,12 @@ class RtpPacer:
             if n <= self.credit:
                 self.credit -= n
                 self.stats["fastpath_bytes"] += n
-                sender = self._send_now_data if cls in (CLASS_DC, CLASS_BULK_DC) \
-                    else self._send_now
+                sender = self._send_now_data if cls == CLASS_DC else self._send_now
                 await sender(data)
                 return
 
         # Video queue budget: purge oldest video to fit, then GOP-reset.
-        # cap is video-only: audio/DC bulk can never push an IDR out.
+        # cap is video-only: audio/DC can never push an IDR out.
         if cls == CLASS_VIDEO:
             cap = self._video_cap_bytes()
             if self._video_bytes + n > cap:
@@ -423,26 +455,30 @@ class RtpPacer:
         its usefulness: unlike a cap overflow (which trims only what doesn't
         fit), everything in the video queue belongs to the same late GOP, so
         the whole queue is purged to make room for the fresh keyframe."""
-        self._reset_gop()
-        dq = self._queues[CLASS_VIDEO]
-        n = len(dq)
-        if n:
-            dq.clear()
-            self._video_ts.clear()
-            self.stats["video_dropped"] += n
-            self._bytes_queued -= self._video_bytes
-            self._video_bytes = 0
+        n = len(self._queues[CLASS_VIDEO])
+        self._reset_gop("video backlog stale (>%.0fms, %d pkts purged)"
+                        % (deadline_s * 1000, n))
+        self._purge_video()
         self.stats["stale_resets"] += 1
-        logger.info("pacer: video backlog stale (>%.0fms) => GOP reset + purge (%d pkts)",
-                    deadline_s * 1000, n)
 
-    def _reset_gop(self) -> None:
+    def _purge_video(self) -> None:
+        """Drop the whole video queue, keeping the byte counters and the
+        enqueue-time mirror in lockstep with it."""
+        dq = self._queues[CLASS_VIDEO]
+        if dq:
+            self.stats["video_dropped"] += len(dq)
+            dq.clear()
+        self._video_ts.clear()
+        self._bytes_queued -= self._video_bytes
+        self._video_bytes = 0
+
+    def _reset_gop(self, reason: str = "video queue overflow") -> None:
         if not self._gop_dead:
             self._gop_dead = True
             self._gop_dead_at = time.monotonic()
             self._on_overflow()
             self.stats["gop_resets"] += 1
-            logger.info("pacer: video queue overflow => GOP reset, keyframe requested")
+            logger.info("pacer: %s => GOP reset, keyframe requested", reason)
             self.request_keyframe_once()
 
     # ------------------------------------------------------------------ drain
@@ -452,39 +488,76 @@ class RtpPacer:
             return
         self._drain_task = self._loop.create_task(self._drain())
 
+    async def _await_backlog_drain(self) -> None:
+        """Backpressure for the reliable classes: hold the caller until the
+        backlog falls back to the low-water mark. Bounded so a wedged wire can
+        only slow a sender, never park it."""
+        self._drained.clear()
+        self._kick()
+        try:
+            await asyncio.wait_for(self._drained.wait(), DC_BLOCK_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning("pacer: %d bytes still queued after %.1fs of "
+                           "backpressure; letting the sender through",
+                           self._bytes_queued, DC_BLOCK_TIMEOUT_S)
+
+    def _release_senders(self) -> None:
+        if not self._drained.is_set():
+            self._drained.set()
+
     async def _drain(self) -> None:
         try:
             while not self._stopped:
-                # Clear the poke BEFORE the pass: a poke arriving during the
-                # pass must survive into the wait below (clear-right-before-
-                # sleep racy-deletes pokes and added measured 75 ms of DC
-                # wait behind an IDR head).
+                # Clear the poke BEFORE the pass, not right before the wait: a
+                # poke arriving mid-pass must survive into the wait below,
+                # otherwise a newly affordable packet sleeps until the head's
+                # deadline.
                 self._poke.clear()
                 self._maybe_recover_pace()
                 self._accrue()
-                for cls, (dq, sender) in enumerate(self._class_table):
-                    while dq and len(dq[0]) <= self.credit:
+                for cls, dq, sender in self._class_table:
+                    while dq:
+                        size = len(dq[0])
+                        if size > self.credit:
+                            # A packet wider than the whole burst budget can
+                            # never be covered by credit; release it once the
+                            # bucket is full so its class cannot wedge.
+                            if size <= self._debt_cap or self.credit < self._debt_cap:
+                                break
+                            if not self._oversize_warned:
+                                self._oversize_warned = True
+                                logger.warning(
+                                    "pacer: %d-byte packet exceeds the %d-byte burst "
+                                    "budget; releasing oversized packets on a full "
+                                    "bucket", size, int(self._debt_cap))
                         data = dq.popleft()
-                        self._bytes_queued -= len(data)
+                        self._bytes_queued -= size
                         if cls == CLASS_VIDEO:
-                            self._video_bytes -= len(data)
+                            self._video_bytes -= size
                             self._video_ts.popleft()
-                        self.credit -= len(data)
+                        self.credit -= size
                         try:
                             await sender(data)
                         except Exception:
                             logger.warning("pacer: send failed; dropping queue",
                                            exc_info=True)
-                            self._queues = {c: deque() for c in range(_NUM_CLASSES)}
-                            self._video_ts.clear()
+                            # The receiver's reference chain dies with the
+                            # purged packets: mark video dead so nothing that
+                            # depends on them is sent, and ask for a keyframe.
+                            self._reset_gop("send failed")
+                            self._purge_video()
+                            self._queues = {c: deque() for c in _QUEUED_CLASSES}
                             self._make_class_table()
                             self._bytes_queued = self._video_bytes = 0
+                            self._release_senders()
                             return
-                        self.stats["paced_bytes"] += len(data)
+                        self.stats["paced_bytes"] += size
+                if self._bytes_queued <= DC_LOW_WATER_BYTES:
+                    self._release_senders()
                 if not self._bytes_queued:
                     return
                 head = 0
-                for dq, _ in self._class_table:
+                for _, dq, _sender in self._class_table:
                     if dq:
                         head = len(dq[0])
                         break
@@ -507,6 +580,8 @@ class RtpPacer:
 
     async def close(self) -> None:
         self._stopped = True
+        # Waiters re-check _stopped and raise; nothing may stay parked here.
+        self._release_senders()
         if self._stats_timer is not None:
             self._stats_timer.cancel()
             self._stats_timer = None

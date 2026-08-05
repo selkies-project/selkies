@@ -46,7 +46,7 @@ In most cases when either of your server or client does not have a restrictive f
 
 **While the [Open Relay](https://www.metered.ca/tools/openrelay) TURN server is the default when no TURN server is set, because there is only one server location, any connection with the type `relay` will add substantial latency as well as stutters to your connections.**
 
-For self-hosting with restricted host networks, [Cloudflare Calls TURN](https://developers.cloudflare.com/calls/turn/overview/) provides free geodistributed TURN servers for the first 1000 GB per month (0.05 USD per GB afterwards), using the `--enable_cloudflare_turn=`, `--cloudflare_turn_token_id=`, and `--cloudflare_turn_api_token=` options. Other cloud TURN server services also exist.
+For self-hosting with restricted host networks, [Cloudflare Calls TURN](https://developers.cloudflare.com/calls/turn/overview/) provides free geodistributed TURN servers for the first 1000 GB per month (0.05 USD per GB afterwards), using the `--enable-cloudflare-turn=`, `--cloudflare-turn-token-id=`, and `--cloudflare-turn-api-token=` options. Other cloud TURN server services also exist.
 
 For higher data transfer quotas, using coTURN with the [Oracle Cloud Free Tier](https://www.oracle.com/cloud/free) Arm Compute Instance provides up to 10 TB Outbound Data Transfer every month, which accounts to a total of nearly 30 mbps bandwidth even when Selkies is utilized 24/7. You may also configure coTURN with any computer, server, cloud service, or virtual machine you want. Make sure to use a location that is as close as possible to the web client or the host server.
 
@@ -56,13 +56,13 @@ For higher data transfer quotas, using coTURN with the [Oracle Cloud Free Tier](
 
 After configuring your TURN server, the following options are required to be used with Selkies:
 
-- TURN server hostname (command-line option `--turn_host=` or environment variable `SELKIES_TURN_HOST`, not used with `--rtc_config_json` JSON file authentication or `--turn_rest_uri` TURN REST API authentication)
+- TURN server hostname (command-line option `--turn-host=` or environment variable `SELKIES_TURN_HOST`, not used with `--rtc-config-json` JSON file authentication or `--turn-rest-uri` TURN REST API authentication)
 
-- TURN server port (command-line option `--turn_port=` or environment variable `SELKIES_TURN_PORT`, not used with `--rtc_config_json` JSON file authentication or `--turn_rest_uri` TURN REST API authentication)
+- TURN server port (command-line option `--turn-port=` or environment variable `SELKIES_TURN_PORT`, not used with `--rtc-config-json` JSON file authentication or `--turn-rest-uri` TURN REST API authentication)
 
-- You may set the command-line option `--turn_protocol=tcp` or the environment variable `SELKIES_TURN_PROTOCOL` to `tcp` if you are unable to open the UDP listening port to the internet for the coTURN container, or if the UDP protocol is blocked or throttled in your client network.
+- You may set the command-line option `--turn-protocol=tcp` or the environment variable `SELKIES_TURN_PROTOCOL` to `tcp` if you are unable to open the UDP listening port to the internet for the coTURN container, or if the UDP protocol is blocked or throttled in your client network.
 
-- You may also set the command-line option `--turn_tls=true` or the environment variable `SELKIES_TURN_TLS` to `true` if TURN over TLS/DTLS was properly configured with a certificate and key combination from a legitimate certificate authority such as [ZeroSSL](https://zerossl.com/features/acme/) or [Let's Encrypt](https://letsencrypt.org/getting-started/) with a valid hostname which resolves to the TURN server.
+- You may also set the command-line option `--turn-tls=true` or the environment variable `SELKIES_TURN_TLS` to `true` if TURN over TLS/DTLS was properly configured with a certificate and key combination from a legitimate certificate authority such as [ZeroSSL](https://zerossl.com/features/acme/) or [Let's Encrypt](https://letsencrypt.org/getting-started/) with a valid hostname which resolves to the TURN server.
 
 - **One of the methods in the TURN Server Authentication Methods section for authentication are required.**
 
@@ -70,21 +70,21 @@ After configuring your TURN server, the following options are required to be use
 
 There are currently four different supported TURN server authentication methods, in the order of priority:
 
-- Using the JSON configuration file authentication method with the `selkies --rtc_config_json=` option or the `SELKIES_RTC_CONFIG_JSON` environment variable. Selkies probes this file periodically, so it will automatically update the TURN authentication credentials if the JSON file is updated. **All other STUN/TURN credentials are overridden if this file exists.**
+- Using the JSON configuration file authentication method with the `selkies --rtc-config-json=` option or the `SELKIES_RTC_CONFIG_JSON` environment variable. Selkies probes this file periodically, so it will automatically update the TURN authentication credentials if the JSON file is updated. **All other STUN/TURN credentials are overridden if this file exists.**
 
-- Using the TURN REST API authentication method with the the `selkies --turn_rest_uri=` option or the `SELKIES_TURN_REST_URI` environment variable. Selkies probes this REST API endpoint periodically, so it will automatically update the TURN authentication credentials. Consult the **[TURN-REST](component.md#turn-rest)** section for more details of this authentication method. **All other STUN/TURN credentials below are overridden if this option is provided and is valid.**
+- Using the TURN REST API authentication method with the the `selkies --turn-rest-uri=` option or the `SELKIES_TURN_REST_URI` environment variable. Selkies probes this REST API endpoint periodically, so it will automatically update the TURN authentication credentials. Consult the **[TURN-REST](component.md#turn-rest)** section for more details of this authentication method. **All other STUN/TURN credentials below are overridden if this option is provided and is valid.**
 
 - **Note that the below two methods are only safe when the Selkies user also has legitimate control of the TURN server. Otherwise, if you maintain a multi-user environment, you are looking for the TURN REST API authentication method, right above.**
 
-- Using traditional long-term credential authentication with a fixed username and password combination using the `selkies --turn_username= --turn_password=`, or both environment variables `SELKIES_TURN_USERNAME` and `SELKIES_TURN_PASSWORD`.
+- Using traditional long-term credential authentication with a fixed username and password combination using the `selkies --turn-username= --turn-password=`, or both environment variables `SELKIES_TURN_USERNAME` and `SELKIES_TURN_PASSWORD`.
 
-- Directly inputting the time-limited TURN shared secret credential using the `selkies --turn_shared_secret=` option or the `SELKIES_TURN_SHARED_SECRET` environment variable.
+- Directly inputting the time-limited TURN shared secret credential using the `selkies --turn-shared-secret=` option or the `SELKIES_TURN_SHARED_SECRET` environment variable.
 
-The `--turn_host=` and `--turn_port=` options or the equivalent environment variables `SELKIES_TURN_HOST` and `SELKIES_TURN_PORT` are required for traditional long-term credential authentication or time-limited TURN shared secret credential authentication, but are NOT used for the JSON configuration file authentication method and TURN REST API authentication method.
+The `--turn-host=` and `--turn-port=` options or the equivalent environment variables `SELKIES_TURN_HOST` and `SELKIES_TURN_PORT` are required for traditional long-term credential authentication or time-limited TURN shared secret credential authentication, but are NOT used for the JSON configuration file authentication method and TURN REST API authentication method.
 
-Moreover, the `--stun_host=` and `--stun_port=` STUN server options, defaulting to `stun.l.google.com` and `19302` (the default Google STUN servers), take priority for for traditional long-term credential authentication or time-limited TURN shared secret credential authentication, but are NOT used for the JSON configuration file authentication method and TURN REST API authentication method. The JSON configuration file authentication method and TURN REST API authentication method takes the first STUN server received from their respective configuration file or API.
+Moreover, the `--stun-host=` and `--stun-port=` STUN server options, defaulting to `stun.l.google.com` and `19302` (the default Google STUN servers), take priority for for traditional long-term credential authentication or time-limited TURN shared secret credential authentication, but are NOT used for the JSON configuration file authentication method and TURN REST API authentication method. The JSON configuration file authentication method and TURN REST API authentication method takes the first STUN server received from their respective configuration file or API.
 
-If you are using Selkies in a private network without access to the internet, you must update the `--stun_host=` and `--stun_port=` options to your local STUN/TURN server if using traditional long-term credential authentication or time-limited TURN shared secret credential authentication. Else, you may have WebRTC connectivity issues. The JSON configuration file authentication method and TURN REST API authentication method uses the first STUN server received from the configuration file or API.
+If you are using Selkies in a private network without access to the internet, you must update the `--stun-host=` and `--stun-port=` options to your local STUN/TURN server if using traditional long-term credential authentication or time-limited TURN shared secret credential authentication. Else, you may have WebRTC connectivity issues. The JSON configuration file authentication method and TURN REST API authentication method uses the first STUN server received from the configuration file or API.
 
 ## coTURN
 

@@ -1556,7 +1556,7 @@ class RTCApp:
                 await self._teardown_display_graph(display_id)
             await self._notify_consumers_changed(peer_obj.get('display_id') or 'primary')
         except Exception as e:
-            raise RTCAppError(f"Error stopping pipeline: {e}")
+            raise RTCAppError(f"Error stopping pipeline: {e}") from e
 
     async def _notify_consumers_changed(self, display_id: str):
         """A peer left this display's consumer set; the owning service re-checks
@@ -1657,4 +1657,4 @@ class RTCApp:
                 await self._teardown_display_graph(display_id)
             logger.info("All RTC connections stopped, cleaned up media relays and bridges")
         except Exception as e:
-            raise RTCAppError(f"Error stopping all RTC connections: {e}")
+            raise RTCAppError(f"Error stopping all RTC connections: {e}") from e

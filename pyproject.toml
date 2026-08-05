@@ -74,6 +74,25 @@ selkies-resize = "selkies.display_utils:entrypoint"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Ruff runs as a bug-finder, not a style enforcer: only rule families that flag
+# defects (pyflakes, bugbear, pycodestyle errors, pylint errors) are enabled.
+# Run: ruff check   (from this directory)
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E9", "F", "B", "PLE"]
+
+[tool.ruff.lint.per-file-ignores]
+# XK loads its keysym constants into module globals at import time, which no
+# static analyzer can follow.
+"src/selkies/Xlib/XK.py" = ["F821"]
+# python-xlib and aiortc heritage. These are upstream idioms rather than
+# defects here; the surrounding style is kept so upstream fixes still apply.
+"src/selkies/Xlib/**" = ["B006", "B007", "B904"]
+"src/selkies/webrtc/**" = ["B007", "B008", "B020", "B904"]
+"src/selkies/ice/**" = ["B007"]
+
 # Type checkers run as bug-finders on this largely unannotated codebase:
 # inference-noise categories (Optional/attribute/argument inference on untyped
 # values, guarded-import callables, aiohttp/av stub strictness) are disabled;

@@ -124,7 +124,7 @@ class Display(object):
                 info = self.query_extension(extname)
                 self.display.set_extension_major(extname, info.major_opcode)
 
-                # Call initialiasation function
+                # Call initialisation function
                 mod.init(self, info)
 
                 self.extensions.append(extname)
@@ -618,7 +618,7 @@ class Display(object):
         return r.map
 
     def open_font(self, name):
-        """Open the font identifed by the pattern name and return its
+        """Open the font identified by the pattern name and return its
         font object. If name does not match any font, None is returned."""
         fid = self.display.allocate_resource_id()
         ec = error.CatchError(error.BadName)

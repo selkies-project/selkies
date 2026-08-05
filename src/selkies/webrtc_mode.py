@@ -261,7 +261,9 @@ class WebRTCService(BaseStreamingService):
             framerate=int(self.args.framerate),
             # kbps, as consumed by pixelflux.
             video_bitrate=int(self.args.video_bitrate),
-            audio_bitrate=int(self.args.audio_bitrate),
+            # enum with a wider server-side value_range, so an operator override
+            # can arrive as an arbitrary numeric string
+            audio_bitrate=int(float(self.args.audio_bitrate)),
             audio_channels=int(self.args.audio_channels),
             audio_enabled=self.args.audio_enabled,
             audio_device_name=self.args.audio_device_name,
@@ -472,9 +474,6 @@ class WebRTCService(BaseStreamingService):
         self.signaling_client.on_ice = self.rtc_app.set_ice
 
         self.media_pipeline.produce_data = self.rtc_app.consume_data
-        self.media_pipeline.send_data_channel_message = (
-            self.rtc_app.send_media_data_over_channel
-        )
         # Resend cursor on pipeline (re)start: a slept/woken tab clears its cursor canvas.
         self.media_pipeline.on_pipeline_started = self.send_current_cursor
 
@@ -620,7 +619,7 @@ class WebRTCService(BaseStreamingService):
             return
         if self.media_pipeline:
             await self.media_pipeline.set_audio_bitrate(int(sanitized))
-        setattr(self.args, "audio_bitrate", sanitized)
+        self.args.audio_bitrate = sanitized
 
     async def handle_fps_change(self, fps: int, display_id: str = "primary") -> None:
         """Framerate change for the display whose page sent it; sanitized against
@@ -1618,7 +1617,6 @@ class WebRTCService(BaseStreamingService):
         # The manual-resolution trio is server/startup resolution policy, not a
         # per-stream tunable: only the primary's payload may assert it.
         primary_only_keys = ("is_manual_resolution_mode", "manual_width", "manual_height")
-        global_keys = ("audio_bitrate", "enable_binary_clipboard")
 
         display_id = display_id or "primary"
         if display_id != "primary" and display_id not in self.display_clients:
@@ -1766,9 +1764,8 @@ class WebRTCService(BaseStreamingService):
         logger.info(
             f"Congestion control loop started (CBR only, range {lo_kbps}-{hi_kbps} kbps)."
         )
-        # Direct access (NO getattr default): a missing/misnamed setting must
-        # fail loudly, not silently disable the feature — a silent default
-        # here once turned an entire E2E matrix into placebo cells.
+        # Direct attribute access, no getattr default: a missing or misnamed
+        # setting must raise rather than silently disable the pacer.
         pacer_on = bool(settings.webrtc_pacer[0])
         logger.info(f"WebRTC pacer setting: {'ON' if pacer_on else 'OFF'}.")
         while True:
@@ -1781,29 +1778,30 @@ class WebRTCService(BaseStreamingService):
             per_display: Dict[str, Dict[str, Any]] = {}
             for peer in rtc_app.peer_connections.values():
                 pc = peer.get("peer_conn")
-                sctp = getattr(pc, "sctp", None)
-                estimate = getattr(getattr(sctp, "transport", None), "twcc_estimate", None)
-                if not estimate:
-                    continue
                 did = peer.get("display_id", "primary") or "primary"
-                bucket = per_display.setdefault(
-                    did, {"goodputs": [], "worst_loss": 0.0, "peers": []})
-                bucket["peers"].append(peer)
-                if estimate.get("goodput_bps"):
-                    bucket["goodputs"].append(estimate["goodput_bps"])
-                bucket["worst_loss"] = max(bucket["worst_loss"], estimate.get("loss_fraction", 0.0))
                 if pacer_on:
-                    # Pacer config tracks the congestion loop's inputs: encoder
-                    # ceiling from the display setting, goodput handled per
-                    # transport inside RTCDtlsTransport._twcc_process_feedback.
-                    # One bad peer must never kill this tick loop — it is also
-                    # the pacer's only configuration path.
+                    # Attach before the feedback gate below: the pacer must run
+                    # on links that never send transport-cc too. Its config
+                    # tracks this loop's inputs (encoder ceiling from the
+                    # display setting; goodput is fed per transport inside
+                    # RTCDtlsTransport._twcc_process_feedback), and this is its
+                    # only configuration path, so one bad peer must never kill
+                    # the tick loop.
                     try:
                         dtls = self._ensure_pacer(pc, peer, did)
                         if self.metrics is not None and dtls is not None:
                             self.metrics.set_pacer_snapshot(did, dtls.pacer_snapshot())
                     except Exception:
                         logger.exception("_ensure_pacer failed (display %s)", did)
+                sctp = getattr(pc, "sctp", None)
+                estimate = getattr(getattr(sctp, "transport", None), "twcc_estimate", None)
+                if not estimate:
+                    continue
+                bucket = per_display.setdefault(
+                    did, {"goodputs": [], "worst_loss": 0.0})
+                if estimate.get("goodput_bps"):
+                    bucket["goodputs"].append(estimate["goodput_bps"])
+                bucket["worst_loss"] = max(bucket["worst_loss"], estimate.get("loss_fraction", 0.0))
             for did, bucket in per_display.items():
                 if not self.args.congestion_control:
                     continue

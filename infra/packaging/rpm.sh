@@ -1,17 +1,26 @@
-#!/bin/bash
+#!/bin/sh
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
-# Build selkies-<ver>.<arch>.rpm (run inside a Fedora/EL dnf-based container)
+# Build selkies-<ver>-1.<distro>.<arch>.rpm (run inside a Fedora/EL dnf-based
+# container). DISTRO_TAG keeps the Fedora and EL flavors apart once the release
+# job collects every package into a single directory.
 set -eux
-dnf install -y python3 python3-pip ruby rubygems ruby-devel gcc gcc-c++ make rpm-build ca-certificates
+# libxkbcommon-devel and python3-devel: the xkbcommon dependency publishes an
+# sdist only and compiles a cffi extension against the system headers
+dnf install -y \
+    python3 python3-pip python3-devel \
+    libxkbcommon-devel pkgconf-pkg-config \
+    ruby rubygems ruby-devel gcc gcc-c++ make rpm-build ca-certificates
 gem install --no-document fpm
-rm -rf /pkg-root && mkdir -p /pkg-root/opt /pkg-root/usr/bin
 /repo/infra/packaging/mkvenv.sh
 RPM_ARCH="$(uname -m)"
+mkdir -p /out
+cd /out
 fpm -s dir -t rpm \
     --name selkies \
     --version "${SELKIES_VERSION:-0.0.0}" \
+    --iteration "1.${DISTRO_TAG:-linux}" \
     --architecture "${RPM_ARCH}" \
     --description "Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)" \
     --url "https://github.com/selkies-project/selkies" \
@@ -25,4 +34,4 @@ fpm -s dir -t rpm \
     --depends libdrm \
     --rpm-os linux \
     -C /pkg-root opt usr
-mkdir -p /out && mv selkies-*.rpm /out/
+ls -la /out

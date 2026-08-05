@@ -43,4 +43,4 @@ __extensions__ = [
     ('MIT-SCREEN-SAVER', 'screensaver'),
     ]
 
-__all__ = map(lambda x: x[1], __extensions__)
+__all__ = [modname for _extname, modname in __extensions__]

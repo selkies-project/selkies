@@ -212,7 +212,7 @@ class Display(object):
             self.event_queue_write_lock.release()
 
             # Call send_and_recv, which will return when
-            # something has occured
+            # something has occurred
             self.send_and_recv(event = True)
 
             # Before looping around, lock the event queue against
@@ -220,7 +220,7 @@ class Display(object):
             self.event_queue_write_lock.acquire()
 
         # Whiew, we have an event!  Remove it from
-        # the event queue and relaese its write lock.
+        # the event queue and release its write lock.
 
         event = self.event_queue[0]
         del self.event_queue[0]
@@ -359,12 +359,8 @@ class Display(object):
         self.request_serial = (self.request_serial + 1) % 65536
 
         self.request_queue.append((request, wait_for_response))
-        qlen = len(self.request_queue)
 
         self.request_queue_lock.release()
-
-#       if qlen > 10:
-#           self.flush()
 
     def close_internal(self, whom):
         # Clear out data structures
@@ -416,7 +412,7 @@ class Display(object):
 
         #  If flushing, we want to send
         #  If waiting for a response to a request, we want to send
-        #    (to ensure that the request was sent - we alway recv
+        #    (to ensure that the request was sent - we always recv
         #     when we get to the main loop, but sending is the important
         #     thing here)
         #  If waiting for an event, we want to recv
@@ -467,7 +463,7 @@ class Display(object):
             # or when an active send_and_recv exits.
 
             # Release it immediately afterwards as we're only using
-            # the lock for synchonization.  Since we're not modifying
+            # the lock for synchronization.  Since we're not modifying
             # event_waiting or request_waiting here we don't have
             # to lock send_and_recv_lock.  In fact, we can't do that
             # or we trigger a dead-lock.
@@ -852,7 +848,7 @@ class Display(object):
         self.data_recv = bytesview(self.data_recv, length)
 
         # Drop all requests having an error handler,
-        # but which obviously succeded.
+        # but which obviously succeeded.
 
         # Decrement it by one, so that we don't remove the request
         # that generated these events, if there is such a one.
@@ -890,12 +886,10 @@ class Display(object):
         #   self.sent_requests[0]._serial <= last_serial
 
         if self.sent_requests[0]._serial > self.request_serial:
-            last_serial = self.request_serial + 65536
             if sno < self.request_serial:
                 sno = sno + 65536
 
         else:
-            last_serial = self.request_serial
             if sno > self.request_serial:
                 sno = sno - 65536
 

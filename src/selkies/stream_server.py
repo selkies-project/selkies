@@ -8,12 +8,14 @@ import ssl
 import hmac
 import json
 import html
+import stat
 import time
 import shutil
 import base64
 import pathlib
 import asyncio
 import logging
+import socket
 import urllib.parse
 import tempfile
 from aiohttp import web
@@ -38,6 +40,22 @@ logger = logging.getLogger("stream_server")
 # slice completes well within this on any usable link), so only transfers
 # whose client is truly gone are reaped.
 UPLOAD_PART_TTL_SECONDS = 3600
+
+
+def _unix_socket_is_live(path: str) -> bool:
+    """True when something accepts a connection on `path`, i.e. the socket file
+    belongs to a running listener rather than being a leftover from a dead one.
+    Anything other than a refusal counts as live: an error that does not prove
+    the path is dead must not license removing it."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.25)
+        try:
+            probe.connect(path)
+        except (ConnectionRefusedError, FileNotFoundError):
+            return False
+        except OSError:
+            return True
+    return True
 
 
 # Inlined header/footer HTML for the /api/files directory index.
@@ -1360,20 +1378,65 @@ class CentralizedStreamServer:
     def _unix_socket_path(self) -> str:
         return str(getattr(self.settings, "unix_socket", "") or "").strip()
 
+    def _clear_stale_unix_socket(self, sock_path: str) -> None:
+        """Remove a leftover socket file so the bind cannot fail with EADDRINUSE.
+
+        Only a socket inode that nothing accepts on is removed. Unlinking a live
+        one would leave the instance that owns it serving an inode no client can
+        reach, so a path still in use — or occupied by anything that is not a
+        socket — aborts the start instead."""
+        try:
+            mode = os.stat(sock_path).st_mode
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot inspect unix socket path '{sock_path}': {exc}"
+            ) from exc
+        if not stat.S_ISSOCK(mode):
+            raise RuntimeError(
+                f"Unix socket path '{sock_path}' exists and is not a socket; "
+                "refusing to remove it."
+            )
+        if _unix_socket_is_live(sock_path):
+            raise RuntimeError(
+                f"Another server is already listening on '{sock_path}'."
+            )
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot remove stale unix socket '{sock_path}': {exc}"
+            ) from exc
+
+    def _remove_own_unix_socket(self) -> None:
+        """Drop this listener's socket file on shutdown so nothing is left behind
+        for the next start to clear; the runtime does not unlink it on every
+        supported Python version. A path something is accepting on again belongs
+        to another instance and is left alone."""
+        sock_path = self._unix_socket_path()
+        if not sock_path:
+            return
+        try:
+            if not stat.S_ISSOCK(os.stat(sock_path).st_mode):
+                return
+            if _unix_socket_is_live(sock_path):
+                return
+            os.unlink(sock_path)
+        except OSError:
+            pass
+
     def _build_site(self, ssl_context=None):
         """Build the aiohttp site for the configured listener: a Unix domain
         socket when ``unix_socket`` is set, otherwise the TCP addr/port pair."""
         sock_path = self._unix_socket_path()
         if sock_path:
-            # A stale socket file from a prior run would make the bind fail
-            # with EADDRINUSE; clear it and ensure the parent directory exists.
             parent = os.path.dirname(sock_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            try:
-                os.unlink(sock_path)
-            except FileNotFoundError:
-                pass
+            self._clear_stale_unix_socket(sock_path)
             return web.UnixSite(self.runner, path=sock_path, ssl_context=ssl_context)
         return web.TCPSite(
             self.runner,
@@ -1410,7 +1473,11 @@ class CentralizedStreamServer:
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
 
-        self.site = self._build_site(self.ssl_context)
+        try:
+            self.site = self._build_site(self.ssl_context)
+        except Exception as exc:
+            logger.error("Cannot bind %s: %s", self._site_endpoint(), exc)
+            raise
 
         logger.info("Selkies server running on %s", self._site_endpoint())
         await self.site.start()
@@ -1434,6 +1501,7 @@ class CentralizedStreamServer:
                 self.web_files_ctx.cleanup()
         if self.site:
             await self.site.stop()
+            self._remove_own_unix_socket()
         if self.runner:
             await self.runner.cleanup()
             logger.info("Server cleanup complete.")

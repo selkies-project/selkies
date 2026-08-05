@@ -32,7 +32,7 @@ Make sure to also check that you enabled automatic login with your display manag
 
 **Usually, if the host-client distance is not too far physically, the issue arises from using a Wi-Fi router with bufferbloat issues, especially if you observe stuttering. Try using the [Bufferbloat Test](https://www.waveform.com/tools/bufferbloat) to identify the issue first before moving on.**
 
-If this is the case, first try enabling `--congestion_control`, meant to mitigate such issues in coordination with the web browser.
+If this is the case, first try enabling `--congestion-control`, meant to mitigate such issues in coordination with the web browser.
 
 Moreover, always make sure that there are minimal background network processes, as live interactive streaming is much less tolerant to network fluctuation compared with other forms of video that may load the stream in advance. Using wired ethernet or a good 5GHz Wi-Fi connection is important (wired ethernet will eliminate all remaining issues of a good but slightly stuttering Wi-Fi connection).
 

@@ -2,7 +2,7 @@
 
 ## Introduction
 
-This document describes an example dashboard built with React, designed for video streaming projects. Its primary purpose is to serve as a comprehensive training tool and a starting point for developers looking to create their own custom dashboards that interact with selkies-core using window messaging. By ripping the logic out of frontend code and keeping it standardized the core screen delivery can remain constant while being a custom experience for your users down to themeing and settings available to them. 
+This document describes an example dashboard built with React, designed for video streaming projects. Its primary purpose is to serve as a comprehensive training tool and a starting point for developers looking to create their own custom dashboards that interact with selkies-core using window messaging. By ripping the logic out of frontend code and keeping it standardized the core screen delivery can remain constant while being a custom experience for your users down to theming and settings available to them. 
 
 While this example is implemented in React, the underlying principles of interaction via ```window``` messaging are universal and can be applied to any JavaScript framework (Angular, Vue, Svelte, etc.) or even vanilla JavaScript. This allows developers to use this example as a guide for building and branding their own dashboards according to their specific needs and chosen technology stack.
 

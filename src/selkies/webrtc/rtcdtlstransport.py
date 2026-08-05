@@ -279,6 +279,9 @@ class RtpReceiver(Protocol):
 class RtpSender(Protocol):
     _ssrc: int
 
+    @property
+    def kind(self) -> str: ...
+
     async def _handle_rtcp_packet(self, packet: AnyRtcpPacket) -> None: ...
 
 
@@ -339,14 +342,9 @@ class RtpRouter:
             # by media_ssrc alone discards it entirely. Route it to ONE sender
             # (video first: this is where congestion control input matters).
             if isinstance(packet, RtcpRtpfbPacket) and packet.fmt == rtp.RTCP_RTPFB_TWCC:
-                sorter = sorted(
-                    self.senders.values(),
-                    key=lambda s: getattr(s, "_RTCRtpSender__kind", "") != "video")
-                if sorter:
-                    add_recipient(sorter[0])
-                else:
-                    for s in self.senders.values():
-                        add_recipient(s)
+                if self.senders:
+                    add_recipient(min(self.senders.values(),
+                                      key=lambda s: s.kind != "video"))
             add_recipient(self.senders.get(packet.media_ssrc))
 
             # for REMB packets, media_ssrc is always 0, we need to look into the FCI
@@ -773,8 +771,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         if self._state != State.CONNECTED:
             raise ConnectionError("Cannot send encrypted data, not connected")
 
-        # Data-channel traffic rides the pacer as class DC (interactive) by
-        # default so it stays ahead of queued video but behind audio/RTCP.
+        # Data-channel traffic rides the pacer as class DC unless the caller
+        # names one: ahead of queued video, behind audio/RTCP.
         if self._pacer is not None:
             await self._pacer.send(data, rtc_class if rtc_class is not None else CLASS_DC)
             return

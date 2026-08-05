@@ -1,0 +1,17 @@
+# Both Dockerfiles build from the repository root, so keep the context small.
+# npm dependencies and every generated bundle are rebuilt inside the image.
+.git
+**/node_modules
+**/dist
+src/selkies/selkies_web/
+src/*.egg-info
+**/__pycache__
+**/*.pyc
+.ruff_cache
+build/
+out/
+release/
+release-artifacts/
+AppDir/
+infra/appimage/AppDir/
+site/

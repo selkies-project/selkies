@@ -6,12 +6,11 @@ Selkies is composed of a small number of core components plus several optional a
 
 **Refer to [Getting Started](start.md) on how you can get on board.**
 
-Use the following commands to retrieve the latest `SELKIES_VERSION` release, the current Ubuntu `DISTRIB_RELEASE`, and the current architecture `ARCH` in the next sections:
+Retrieve the latest `SELKIES_VERSION` release and the current Ubuntu `DISTRIB_RELEASE` for the sections below:
 
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')"
 export DISTRIB_RELEASE="$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')"
-export ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')"
 ```
 
 When instructed to install [binfmt](https://github.com/tonistiigi/binfmt), use the following command with Docker/Podman:
@@ -45,7 +44,7 @@ For the most recent unreleased commit, download the **`selkies-wheel`** artifact
 ```bash
 sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall selkies-0.0.0.dev0-py3-none-any.whl
 # Run the Selkies Python executable after all components are installed
-selkies --addr=0.0.0.0 --port=8081 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=h264enc --enable_resize=false
+selkies --addr=0.0.0.0 --port=8081 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
 One other alternative way to install the Python application components from the most recent unreleased commit:
@@ -55,7 +54,7 @@ git clone https://github.com/selkies-project/selkies.git
 cd selkies
 sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall .
 # Run the Selkies Python executable after all components are installed
-selkies --addr=0.0.0.0 --port=8081 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=h264enc --enable_resize=false
+selkies --addr=0.0.0.0 --port=8081 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
 Installing the wheel also installs the `selkies` and `selkies-resize` console commands.
@@ -68,7 +67,7 @@ The web client is a WebCodecs-based HTML5 application (with the core `selkies-co
 
 It decodes the incoming H.264 or JPEG stream using the browser [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) API with a low-latency zero-copy rendering path, plays Opus audio, and detects keyboard, mouse, gamepad, and clipboard input from the user, then sends them to the host server backend. It also handles remote cursors with the Pointer Lock API so that you can correctly control interactive applications and games.
 
-The web client source lives at [`addons/selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core) and is built and bundled into the Python wheel automatically (installed at `src/selkies/selkies_web`), so **there is no separate web package to download or install**. To serve your own copy of the web files, point `--web_root=` (or the `SELKIES_WEB_ROOT` environment variable) at a built web directory containing an `index.html`. Rebranding (name, icons, manifest) is done at build time in the `addons/selkies-web-core` source tree, not by editing the shipped artifacts.
+The web client source lives at [`addons/selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core) and is built and bundled into the Python wheel automatically (installed at `src/selkies/selkies_web`), so **there is no separate web package to download or install**. To serve your own copy of the web files, point `--web-root=` (or the `SELKIES_WEB_ROOT` environment variable) at a built web directory containing an `index.html`. Rebranding (name, icons, manifest) is done at build time in the `addons/selkies-web-core` source tree, not by editing the shipped artifacts.
 
 #### Media Capture and Encoding (`pixelflux` and `pcmflux`)
 
@@ -207,7 +206,7 @@ The recommended multi-user TURN server authentication mechanism is the [time-lim
 
 The [TURN-REST Container](https://github.com/selkies-project/selkies/tree/main/addons/turn-rest) is an easy way to distribute short-term TURN server authentication credentials and the information of the TURN server based on the REST API to many Selkies host instances, particularly when behind a local area network (LAN), which may or may not have restricted firewalls.
 
-Using the `selkies --turn_rest_uri=` option or `SELKIES_TURN_REST_URI` environment variable, the Selkies host periodically queries a URI such as `https://turn-rest.myinfrastructure.io/myturnrest` or `http://192.168.0.10/myturnrest`.
+Using the `selkies --turn-rest-uri=` option or `SELKIES_TURN_REST_URI` environment variable, the Selkies host periodically queries a URI such as `https://turn-rest.myinfrastructure.io/myturnrest` or `http://192.168.0.10/myturnrest`.
 
 This URI is ideally behind a local area network (LAN) inaccessible from the outside and only accessible to the Python hosts inside the LAN, or alternatively behind authentication using any web server or reverse proxy, if accessible from the outside. This information is periodically sent to the web client (that is also preferably behind authentication with HTTP Basic Authentication or a web server/reverse proxy) through HTTP(S), thus the TURN server information and credentials being propagated to both the Python host and the web client without exposing the TURN server information outside.
 
@@ -223,7 +222,7 @@ Run the Docker®/Podman container built from the [`TURN-REST Dockerfile`](https:
 docker run --name turn-rest -it -d --rm -e TURN_SHARED_SECRET=n0TaRealCoTURNAuthSecretThatIsSixtyFourLengthsLongPlaceholdPlace -e TURN_HOST=turn.myinfrastructure.io -e TURN_PORT=3478 -e TURN_PROTOCOL=udp -e TURN_TLS=false -p 8008:8008 ghcr.io/selkies-project/selkies/turn-rest:main
 ```
 
-From Selkies, it is sufficient to use the `selkies --turn_rest_uri=` option or `export SELKIES_TURN_REST_URI=` environment variable, pointing to the HTTP(S) URI to the TURN REST API server.
+From Selkies, it is sufficient to use the `selkies --turn-rest-uri=` option or `export SELKIES_TURN_REST_URI=` environment variable, pointing to the HTTP(S) URI to the TURN REST API server.
 
 Consult the [WebRTC and Firewall Issues: TURN Server Authentication Methods](firewall.md#turn-server-authentication-methods) section for more information on TURN authentication methods.
 
@@ -283,4 +282,4 @@ Opus is currently the only adequate full-band audio codec supported in web brows
 | WebSockets (default) | `--mode=websockets` | single TCP port (default `8081`) | WebCodecs-based client decode; no STUN/TURN required |
 | WebRTC (opt-in) | `--mode=webrtc` | signaling over the same port; media over UDP (or TCP) with ICE | Uses a vendored [`aiortc`](https://github.com/aiortc/aiortc) fork; may need STUN/TURN, see [WebRTC and Firewall Issues](firewall.md) |
 
-Use `--enable_dual_mode=true` to let the client switch between the WebSocket and WebRTC transports from the UI.
+Use `--enable-dual-mode=true` to let the client switch between the WebSocket and WebRTC transports from the UI.

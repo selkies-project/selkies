@@ -11,30 +11,36 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build documentation
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Python for MkDocs
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: 3.x
 
       - name: Generate MkDocs static files
+        # Pinned to the 9.x line: MkDocs 2.0 removes the plugin and theming
+        # systems this site depends on
         run: |
-          pip install --no-cache-dir --force-reinstall mkdocs-material
-          mkdir -pm755 /opt/mkdocs
-          mkdocs build --strict --verbose --site-dir /opt/mkdocs
+          pip install --no-cache-dir "mkdocs-material~=9.7"
+          mkdocs build --strict --verbose --site-dir "${RUNNER_TEMP}/mkdocs"
 
       - name: Upload MkDocs artifacts
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
-          path: /opt/mkdocs/
+          path: ${{ runner.temp }}/mkdocs
           retention-days: 1
 
   publish:
@@ -42,6 +48,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      # deploy-pages resolves the artifact through the Actions API
+      actions: read
       pages: write
       id-token: write
     if: ${{ github.event_name != 'pull_request' }}
@@ -51,4 +59,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

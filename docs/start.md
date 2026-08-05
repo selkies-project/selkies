@@ -23,7 +23,7 @@ export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-proje
 cd /tmp && curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-py3-none-any.whl" && sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall "selkies-${SELKIES_VERSION}-py3-none-any.whl" && rm -f "selkies-${SELKIES_VERSION}-py3-none-any.whl"
 ```
 
-Alternatively, install directly from the source tree. Note that a source checkout **does not contain the prebuilt web client**: the web files are built from `addons/selkies-web-core` and injected into the wheel only by the CI build pipeline. After a source install you must either point Selkies at an existing web build with `--web_root=` / `SELKIES_WEB_ROOT`, or embed the web files before building the wheel (see [Components](component.md#web-client)):
+Alternatively, install directly from the source tree. Note that a source checkout **does not contain the prebuilt web client**: the web files are built from `addons/selkies-web-core` and injected into the wheel only by the CI build pipeline. After a source install you must either point Selkies at an existing web build with `--web-root=` / `SELKIES_WEB_ROOT`, or embed the web files before building the wheel (see [Components](component.md#web-client)):
 
 ```bash
 git clone https://github.com/selkies-project/selkies.git
@@ -52,14 +52,14 @@ export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DI
 **4. Run Selkies:**
 
 ```bash
-selkies --addr=0.0.0.0 --port=8081 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=h264enc --enable_resize=false
+selkies --addr=0.0.0.0 --port=8081 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
 In the default WebSocket mode, `--encoder=` accepts `h264enc` (default; hardware NVENC or VA-API when a supported GPU is available, otherwise software `x264`), `h264enc-striped`, `openh264enc` (software OpenH264), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc` and select the encoder with `--encoder-rtc=` (`h264enc`, the hardware-first default, or `openh264enc`).
 
-The default username (set with `--basic_auth_user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is the current user environment variable `$USER` (empty username if nonexistent), and the default password (set with `--basic_auth_password=` or `SELKIES_BASIC_AUTH_PASSWORD`), when not specified, is `mypasswd`.
+The default username (set with `--basic-auth-user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is the current user environment variable `$USER` (empty username if nonexistent), and the default password (set with `--basic-auth-password=` or `SELKIES_BASIC_AUTH_PASSWORD`), when not specified, is `mypasswd`.
 
-Use `--enable_resize=true` if you want to fit the remote resolution to the client window and skip the next step. You **must NOT** enable this option when streaming a physical monitor.
+Use `--enable-resize=true` if you want to fit the remote resolution to the client window and skip the next step. You **must NOT** enable this option when streaming a physical monitor.
 
 **5. Resize to your intended resolution (DO NOT resize when streaming a physical monitor):**
 
@@ -69,7 +69,7 @@ selkies-resize 1920x1080
 
 **6. Check the [**Joystick Interposer**](component.md#joystick-interposer) section if you need to use joystick/gamepad devices from your web browser client.**
 
-You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root path of your choice if using the `.tar.gz` tarball.
+You can install `selkies_joystick_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` at it.
 
 **7. (WebRTC mode only) If you switched to `--mode=webrtc` and the HTML5 web interface loads and the signaling connection works, but the WebRTC connection fails or the remote desktop does not start:**
 
@@ -131,12 +131,10 @@ sudo apt-get update && sudo apt-get install --no-install-recommends -y python3 p
 
 If using supported NVIDIA GPUs, NVENC is bundled with the GPU driver (`libnvidia-encode`). If using AMD or Intel GPUs, install its graphics and VA-API drivers, as well as `libva2`. The `intel-media-va-driver-non-free` package (or `i965-va-driver-shaders` depending on your Intel GPU generation) is recommended for Intel GPUs, and the bundled VA-API driver in the AMDGPU driver is recommended for AMD GPUs. Optionally install `vainfo`, `intel-gpu-tools`, `radeontop`, or `nvtop` for GPU monitoring.
 
-Use the following commands to retrieve the latest `SELKIES_VERSION` release, the current Ubuntu `DISTRIB_RELEASE`, and the current architecture `ARCH` in the following steps:
+Retrieve the latest `SELKIES_VERSION` release for the steps below:
 
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')"
-export DISTRIB_RELEASE="$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')"
-export ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')"
 ```
 
 **2. Install the Selkies Python package** (this component is pure Python, bundles the HTML5 web client, and any operating system is compatible, fill in `SELKIES_VERSION`)**:**
@@ -158,7 +156,7 @@ cd addons/fake-udev && make && cp libudev.so.1.0.0-fake libudev.so.1 libudev.so 
 
 More information can be found in [Joystick Interposer](component.md#joystick-interposer).
 
-You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root path of your choice if using the `.tar.gz` tarball.
+You can install `selkies_joystick_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` at it.
 
 **4. Run Selkies after changing the below script appropriately** (install `xvfb` and uncomment relevant sections if there is no real display, **DO NOT resize when streaming a physical monitor**)**:**
 
@@ -211,11 +209,11 @@ sudo chmod 777 /dev/input/js*
 # Starts the remote desktop process
 # In the default WebSocket mode, change `--encoder=` to `h264enc-striped`, `openh264enc`, or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
 # For the WebRTC transport instead, add `--mode=webrtc` and set `--encoder-rtc=` to `h264enc` or `openh264enc`
-# DO NOT set `--enable_resize=true` if there is a physical display
-selkies --addr=0.0.0.0 --port=8081 --enable_https=false --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https_key=/etc/ssl/private/ssl-cert-snakeoil.key --basic_auth_user=user --basic_auth_password=mypasswd --encoder=h264enc --enable_resize=false &
+# DO NOT set `--enable-resize=true` if there is a physical display
+selkies --addr=0.0.0.0 --port=8081 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
 ```
 
-The default username (set with `--basic_auth_user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is the current user environment variable `$USER` (empty username if nonexistent), and the default password (set with `--basic_auth_password=` or `SELKIES_BASIC_AUTH_PASSWORD`), when not specified, is `mypasswd`.
+The default username (set with `--basic-auth-user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is the current user environment variable `$USER` (empty username if nonexistent), and the default password (set with `--basic-auth-password=` or `SELKIES_BASIC_AUTH_PASSWORD`), when not specified, is `mypasswd`.
 
 **5. (WebRTC mode only) If you switched to `--mode=webrtc` and the HTML5 web interface loads and the signaling connection works, but the WebRTC connection fails or the remote desktop does not start:**
 

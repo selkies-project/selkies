@@ -2394,14 +2394,14 @@ function Sidebar() {
                 };
                 scheduleNotificationRemoval(id, NOTIFICATION_TIMEOUT_SUCCESS);
               } else if (status === "error") {
-                const te = errMsg
+                const text = errMsg
                   ? `${t("notifications.errorPrefix")} ${errMsg}`
                   : t("notifications.unknownError");
                 un[exIdx] = {
                   ...cn,
                   status: "error",
                   progress: 100,
-                  message: te,
+                  message: text,
                   timestamp: Date.now(),
                   fadingOut: false,
                 };

@@ -44,7 +44,7 @@ class Colormap(resource.Resource):
 
         self.display.free_resource_id(self.id)
 
-    def copy_colormap_and_free(self, scr_cmap):
+    def copy_colormap_and_free(self, src_cmap):
         mid = self.display.allocate_resource_id()
         request.CopyColormapAndFree(display = self.display,
                                     mid = mid,

@@ -2,22 +2,38 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
-# Create the self-contained Selkies prefix at /pkg-root/opt/selkies from the
-# wheel in /dist, targeting the distro's system Python.
+# Build the self-contained Selkies prefix from the wheel in /dist and stage it
+# under /pkg-root for the packaging tools. The venv is created at its final
+# install path (/opt/selkies) and only moved afterwards, so console-script
+# shebangs and pyvenv.cfg point where the package actually lands.
 set -eux
-python3 -m venv /pkg-root/opt/selkies
-/pkg-root/opt/selkies/bin/pip install --no-cache-dir --upgrade pip
+rm -rf /opt/selkies /pkg-root
+python3 -m venv /opt/selkies
+/opt/selkies/bin/pip install --no-cache-dir --upgrade pip
 WHEELS="$(ls /dist/selkies-*-py3-none-any.whl)"
-# Fresh pixelflux/pcmflux wheels (built from the master HEAD of
-# linuxserver/*) ride along in /dist; pip selects the one matching this
-# distro's Python and platform, and anything absent resolves from PyPI
-if ls /dist/pixelflux-*.whl > /dev/null 2>&1; then
-  /pkg-root/opt/selkies/bin/pip download --no-cache-dir --no-deps --no-index --find-links /dist --dest /tmp/picked pixelflux pcmflux
+# CI drops pixelflux/pcmflux wheels built from the master HEAD of linuxserver/*
+# into /dist; pick the one matching this distro's Python and platform. Either
+# one that is absent resolves from PyPI as a dependency of the selkies wheel.
+mkdir -p /tmp/picked
+for pkg in pixelflux pcmflux; do
+  if ls "/dist/${pkg}"-*.whl > /dev/null 2>&1; then
+    /opt/selkies/bin/pip download --no-cache-dir --no-deps --no-index \
+        --find-links /dist --dest /tmp/picked "${pkg}"
+  fi
+done
+if ls /tmp/picked/*.whl > /dev/null 2>&1; then
   WHEELS="${WHEELS} $(ls /tmp/picked/*.whl)"
 fi
 # Wheel file names never contain spaces; word-splitting is intentional here
 # shellcheck disable=SC2086
-/pkg-root/opt/selkies/bin/pip install --no-cache-dir ${WHEELS}
-mkdir -p /pkg-root/usr/bin
+/opt/selkies/bin/pip install --no-cache-dir ${WHEELS}
+# Fails the package build rather than shipping a prefix that cannot start
+/opt/selkies/bin/selkies --help > /dev/null
+mkdir -p /pkg-root/opt /pkg-root/usr/bin
+mv /opt/selkies /pkg-root/opt/selkies
+if grep -rIl /pkg-root /pkg-root/opt/selkies/bin; then
+  echo "the staging path leaked into the packaged prefix" >&2
+  exit 1
+fi
 ln -s /opt/selkies/bin/selkies /pkg-root/usr/bin/selkies
 ln -s /opt/selkies/bin/selkies-resize /pkg-root/usr/bin/selkies-resize

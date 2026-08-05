@@ -8,7 +8,6 @@ import re
 import os
 import signal
 import struct
-import time
 import sys
 import zlib
 from asyncio import subprocess
@@ -1092,10 +1091,10 @@ async def generate_xrandr_gtf_modeline(res_wh_str, refresh_hz=60):
     try:
         try:
             w_str, h_str = res_wh_str.split("x")
-        except ValueError:
+        except ValueError as e:
             raise Exception(
                 f"Invalid resolution format for modeline generation: {res_wh_str}"
-            )
+            ) from e
         cmd = ["cvt", w_str, h_str, refresh_str]
         try:
             process = await subprocess.create_subprocess_exec(
@@ -1107,7 +1106,7 @@ async def generate_xrandr_gtf_modeline(res_wh_str, refresh_hz=60):
             if process.returncode != 0:
                 raise Exception(f"cvt failed: {stderr.decode()}")
             modeline_output = stdout.decode('utf-8')
-        except (FileNotFoundError, Exception):
+        except Exception:
             logger_app_resize.warning(
                 "cvt command failed or not found, trying gtf."
             )
@@ -1120,9 +1119,9 @@ async def generate_xrandr_gtf_modeline(res_wh_str, refresh_hz=60):
             )
             stdout, stderr = await _communicate_or_kill(process)
             if process.returncode != 0:
-                raise Exception(f"gtf failed: {stderr.decode()}")
+                raise Exception(f"gtf failed: {stderr.decode()}") from None
             modeline_output = stdout.decode('utf-8')
-    except (FileNotFoundError, Exception) as e:
+    except Exception as e:
         raise Exception(
             f"Failed to generate modeline using {tool_name} for {res_wh_str}: {e}"
         ) from e

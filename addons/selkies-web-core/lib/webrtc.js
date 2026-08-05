@@ -36,9 +36,9 @@ import { Input } from "./input";
  * @property {function} onplaystreamrequired - Callback fired when user interaction is required before playing the stream.
  * @property {function} onclipboardcontent - Callback fired when clipboard content from the remote host is received.
  * @property {function} getConnectionStats - Returns promise that resolves with connection stats.
- * @property {Objet} rtcPeerConfig - RTC configuration containing ICE servers and other connection properties.
+ * @property {Object} rtcPeerConfig - RTC configuration containing ICE servers and other connection properties.
  * @property {boolean} forceTurn - Force use of TURN server.
- * @property {fucntion} sendDataChannelMessage - Send a message to the peer though the data channel.
+ * @property {function} sendDataChannelMessage - Send a message to the peer through the data channel.
  */
 export class WebRTCClient {
 	/**
@@ -889,7 +889,7 @@ export class WebRTCClient {
 
 	/**
 	 * Starts playing the stream.
-	 * Note that this must be called after some DOM interaction has already occured.
+	 * Note that this must be called after some DOM interaction has already occurred.
 	 * Chrome does not allow auto playing of videos without first having a DOM interaction.
 	 */
 	// [START playStream]

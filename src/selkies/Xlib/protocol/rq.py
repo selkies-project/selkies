@@ -130,7 +130,7 @@ class Field(object):
         the Resource fields.
 
         The decoded value is returned as VALUE, and the remaining part
-        of DATA shold be returned as REMAINDATA.
+        of DATA should be returned as REMAINDATA.
         """
         raise RuntimeError('Neither structcode or parse_binary_value ' \
                 'provided for {0}'.format(self))

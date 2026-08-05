@@ -611,7 +611,7 @@ class Connection:
         """
         Perform ICE handshake.
 
-        This coroutine returns if a candidate pair was successfuly nominated
+        This coroutine returns if a candidate pair was successfully nominated
         and raises an exception otherwise.
         """
         if not self._local_candidates_end:
@@ -862,7 +862,7 @@ class Connection:
         self, message: stun.Message, addr: tuple[str, int], protocol: StunProtocol
     ) -> None:
         """
-        Handle a succesful incoming check.
+        Handle a successful incoming check.
         """
         component = protocol.local_candidate.component
 
@@ -965,7 +965,7 @@ class Connection:
 
         # success
         if nominate or pair.remote_nominated:
-            # nominated by agressive nomination or the remote party
+            # nominated by aggressive nomination or the remote party
             pair.nominated = True
         elif self.ice_controlling and pair.component not in self._nominating:
             # perform regular nomination

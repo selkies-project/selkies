@@ -31,14 +31,20 @@ on:
         type: string
         default: ""
 
+permissions:
+  contents: read
+  packages: write
+
 env:
-  REGISTRY: ghcr.io
+  REGISTRY_NAMESPACE: ghcr.io/selkies-project/selkies
   IMAGE_NAME: ghcr.io/selkies-project/selkies/py-example
 
 jobs:
   wheel:
     name: Build wheel for the images
     if: ${{ inputs.wheel_artifact == '' }}
+    permissions:
+      contents: read
     uses: ./.github/workflows/build-wheel.yaml
 
   build:
@@ -70,10 +76,9 @@ jobs:
             platform: linux/arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Free disk space
-        # Actively maintained alternative to the (2023-frozen) jlumbroso
-        # action; keep the tool cache, setup-python/setup-node depend on it
+        # The tool cache is kept: setup-python and setup-node resolve from it
         uses: endersonmenezes/free-disk-space@v3
         with:
           remove_android: true
@@ -84,7 +89,7 @@ jobs:
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
       - name: Download the wheel
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
           path: dist/
@@ -92,14 +97,14 @@ jobs:
       # linuxserver/* repos by the orchestrating run; absence is tolerated
       # (standalone dispatch) and the Dockerfile falls back to PyPI
       - name: Download pixelflux wheels (master HEAD)
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
           path: dist/
           merge-multiple: true
       - name: Download pcmflux wheels (master HEAD)
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
@@ -111,15 +116,15 @@ jobs:
           # .gitignore keeps addons/example/wheels/*.whl out of git
           cp dist/*.whl addons/example/wheels/
           ls -la addons/example/wheels/
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: addons/example/Dockerfile
@@ -127,15 +132,16 @@ jobs:
           build-args: |
             DISTRIB_IMAGE=${{ matrix.flavor.image }}
             DISTRIB_RELEASE=${{ matrix.flavor.release }}
-          outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,"name=${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=example-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           cache-to: type=gha,mode=max,scope=example-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
       - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-      - uses: actions/upload-artifact@v5
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           path: /tmp/digests/*
@@ -151,27 +157,118 @@ jobs:
       matrix:
         flavor: [ubuntu24.04, ubuntu26.04, bookworm, trixie]
     steps:
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download digests for this flavor
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: digest-${{ matrix.flavor }}-*
           path: /tmp/digests
           merge-multiple: true
       - name: Create and push the multi-arch manifest
         working-directory: /tmp/digests
+        env:
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+          FLAVOR: ${{ matrix.flavor }}
         run: |
           set -e
-          TAG_PREFIX="${{ github.event.inputs.tag_prefix || inputs.tag_prefix || 'main' }}"
-          IMGTAGS=("-t" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG_PREFIX}-${{ matrix.flavor }}")
+          IMGTAGS=("-t" "${IMAGE_NAME}:${TAG_PREFIX}-${FLAVOR}")
           if [ "${TAG_PREFIX}" != "main" ]; then
             # Release builds also carry the floating `latest-*` tags
-            IMGTAGS+=("-t" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.flavor }}")
+            IMGTAGS+=("-t" "${IMAGE_NAME}:latest-${FLAVOR}")
           fi
-          docker buildx imagetools create "${IMGTAGS[@]}" $(printf "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s " *)
-          echo "pushed: ${IMGTAGS[@]}"
+          # One empty file per pushed digest, named after it
+          SOURCES=()
+          for digest in *; do SOURCES+=("${IMAGE_NAME}@sha256:${digest}"); done
+          docker buildx imagetools create "${IMGTAGS[@]}" "${SOURCES[@]}"
+          echo "pushed: ${IMGTAGS[*]}"
+
+  addons:
+    name: ${{ matrix.addon }} (${{ matrix.arch.name }})
+    # The TURN server and the TURN REST credential service documented in
+    # docs/component.md; independent of the wheel
+    runs-on: ${{ matrix.arch.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        addon: [coturn, turn-rest]
+        arch:
+          - name: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - name: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: addons/${{ matrix.addon }}
+          platforms: ${{ matrix.arch.platform }}
+          outputs: type=image,"name=${{ env.REGISTRY_NAMESPACE }}/${{ matrix.addon }}",push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.addon }}-${{ matrix.arch.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.addon }}-${{ matrix.arch.name }}
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.addon }}-${{ matrix.arch.name }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  addons-merge:
+    name: Merge multi-arch manifests (${{ matrix.addon }})
+    needs: addons
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        addon: [coturn, turn-rest]
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download digests for this addon
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digest-${{ matrix.addon }}-*
+          path: /tmp/digests
+          merge-multiple: true
+      - name: Create and push the multi-arch manifest
+        working-directory: /tmp/digests
+        env:
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+          ADDON: ${{ matrix.addon }}
+        run: |
+          set -e
+          IMAGE="${REGISTRY_NAMESPACE}/${ADDON}"
+          IMGTAGS=("-t" "${IMAGE}:${TAG_PREFIX}")
+          if [ "${TAG_PREFIX}" != "main" ]; then
+            # Release builds also carry the floating `latest` tag
+            IMGTAGS+=("-t" "${IMAGE}:latest")
+          fi
+          # One empty file per pushed digest, named after it
+          SOURCES=()
+          for digest in *; do SOURCES+=("${IMAGE}@sha256:${digest}"); done
+          docker buildx imagetools create "${IMGTAGS[@]}" "${SOURCES[@]}"
+          echo "pushed: ${IMGTAGS[*]}"

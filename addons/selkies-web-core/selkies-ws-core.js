@@ -37,7 +37,7 @@ detectKeyboardLayout().then((layout) => { detectedKeyboardLayout = layout; });
 // to recover frames the sender dropped under backpressure (pcmflux's delivery ring and the
 // server's audio queue both drop-oldest, and a dropped frame rides along as redundancy in
 // the next packet). n_red==0 is the plain path: [0x01,0x00]+opus. n_red>0 is
-// [0x01, n_red, pts32] + n_red*(4-byte header) + 1-byte primary header + block datas
+// [0x01, n_red, pts32] + n_red*(4-byte header) + 1-byte primary header + block data
 // (redundant oldest-first, then primary); each block's timestamp is pts - tsOffset. Each
 // frame is decoded at most once, in order: any block newer than the last one already
 // played is taken, so a redundant copy fills the gap left by a dropped primary.
@@ -939,7 +939,12 @@ function ensureVideoWorker() {
   if (videoWorkerReady) return true;
   if (videoWorker) return false;   // created, handshake still in flight
   try {
-    videoWorker = new Worker(URL.createObjectURL(new Blob([VIDEO_WORKER_SRC], { type: 'text/javascript' })));
+    // The Worker keeps its own reference to the fetched script, so the object URL (and
+    // the source string behind it) is revoked immediately; ensureVideoWorker() runs again
+    // after every deactivate and each URL would otherwise live until the page unloads.
+    const workerURL = URL.createObjectURL(new Blob([VIDEO_WORKER_SRC], { type: 'text/javascript' }));
+    videoWorker = new Worker(workerURL);
+    URL.revokeObjectURL(workerURL);
     videoWorkerInFlight = 0;
     videoWorker.onerror = () => deactivateVideoWorker();
     videoWorker.onmessage = (e) => {
@@ -952,7 +957,14 @@ function ensureVideoWorker() {
         if (videoWorkerActive && canvas) canvas.style.display = 'none';
         return;
       }
-      if (m.type === 'needKeyframe') { requestKeyframe(); return; }  // worker decoder needs a fresh keyframe
+      if (m.type === 'needKeyframe') {
+        // 'no_key' = nothing decodable yet (normal right after a (re)configure);
+        // 'overload' = the decode backlog forced a resync. The worker throttles these
+        // to one per 800 ms, so logging the reason cannot become a storm.
+        console.info(`[VideoWorker] keyframe requested: ${m.reason}`);
+        requestKeyframe();
+        return;
+      }
       if (m.type === 'decoderError') {
         // Worker-side decode failed: stop routing chunks to it and fall back to main-thread
         // decode. The worker sink (track/canvas) stays up to receive transferred frames.
@@ -1087,9 +1099,9 @@ function presentFrameToWorker(frame) {
 }
 
 // Rate-limited diagnostic logger for the worker decode path: a healthy stream
-// reconfigures ~once per session (join / resolution change); a reconfigure storm
-// with flipping codec strings was the #287 signature. Never more than one line
-// per interval, with a suppressed count so repeated events stay visible.
+// reconfigures ~once per session (join / resolution change), so a reconfigure storm
+// with flipping codec strings means the codec string is oscillating. Never more than
+// one line per interval, with a suppressed count so repeated events stay visible.
 let workerCfgLogLast = Number.NEGATIVE_INFINITY, workerCfgLogSuppressed = 0;
 const WORKER_CFG_LOG_MIN_INTERVAL_MS = 5000;
 function logWorkerDecoderConfig(codec, w, h) {
@@ -1929,21 +1941,25 @@ function clearAllVncStripeDecoders() {
 // for a full-frame encoder and still healthy, a stripe-decoder error is
 // handoff noise: rebuild the stripe decoder on the next keyframe instead of
 // escalating into the fallback ladder (which closes the socket and reloads).
-// Bounded — after enough repeats the ladder still wins.
+// Bounded — a burst that keeps repeating still reaches the ladder. The count is
+// per stripe and only spans STRIPE_SOFT_ERROR_WINDOW_MS, so errors an hour apart
+// are treated as the isolated handoff noise they are, not as one long burst.
+const STRIPE_SOFT_ERROR_WINDOW_MS = 10000;
 function handleStripeDecodeError(e, vncStripeYStart) {
     if (decodeInWorker && !workerDecodeFailed &&
         (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc')) {
-        stripeDecodeSoftErrors[vncStripeYStart] = (stripeDecodeSoftErrors[vncStripeYStart] || 0) + 1;
-        if (stripeDecodeSoftErrors[vncStripeYStart] <= 12) {
-            console.warn(`stripe decoder error on Y=${vncStripeYStart} (worker path healthy; soft ${stripeDecodeSoftErrors[vncStripeYStart]}/12):`, e && e.name);
+        const now = performance.now();
+        const prev = stripeDecodeSoftErrors[vncStripeYStart];
+        const soft = (prev && now - prev.last <= STRIPE_SOFT_ERROR_WINDOW_MS) ? prev.count + 1 : 1;
+        stripeDecodeSoftErrors[vncStripeYStart] = { count: soft, last: now };
+        if (soft <= 12) {
+            console.warn(`stripe decoder error on Y=${vncStripeYStart} (worker path healthy; soft ${soft}/12):`, e && e.name);
             const info = vncStripeDecoders[vncStripeYStart];
             if (info) {
                 try { info.decoder.close(); } catch (_) {}
                 delete vncStripeDecoders[vncStripeYStart];
             }
-            if (websocket && websocket.readyState === WebSocket.OPEN) {
-                websocket.send("REQUEST_KEYFRAME");
-            }
+            requestKeyframe();
             return;
         }
     }
@@ -3735,8 +3751,13 @@ function initWebsockets() {
     try {
       if (audioDecoderWorker) {
       console.warn("Terminating existing audio worker during init.");
-      audioDecoderWorker.terminate();
+      // Detach it first, then let it close its own AudioDecoder before the hard
+      // terminate; nothing may adopt the outgoing worker while we wait.
+      const outgoingAudioWorker = audioDecoderWorker;
       audioDecoderWorker = null;
+      outgoingAudioWorker.postMessage({ type: 'close' });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      outgoingAudioWorker.terminate();
     }
     if (audioContext) {
       console.warn("Closing existing AudioContext during init.");
@@ -3907,15 +3928,6 @@ function initWebsockets() {
       console.log('Playback AudioWorkletProcessor initialized and connected through a GainNode for volume control.');
       await applyOutputDevice();
 
-      if (audioDecoderWorker) {
-        console.warn("[Main] Terminating existing audio decoder worker before creating a new one.");
-        audioDecoderWorker.postMessage({
-          type: 'close'
-        });
-        await new Promise(resolve => setTimeout(resolve, 50));
-        if (audioDecoderWorker) audioDecoderWorker.terminate();
-        audioDecoderWorker = null;
-      }
       const audioDecoderWorkerBlob = new Blob([audioDecoderWorkerCode], {
         type: 'application/javascript'
       });
@@ -4041,9 +4053,9 @@ function initWebsockets() {
       });
     }
 
-    // The fps counters match the WebRTC core, which never gates on the sidebar:
-    // a dashboard may read window.fps at any time, including on connect (the
-    // server's own live metrics also pull from this value).
+    // Sidebar-independent, like the WebRTC core: a dashboard may read window.fps at any
+    // time, including on connect (the server's own live metrics pull from it too).
+    // Shared viewers are excluded by the isSharedMode guard above.
     const now = performance.now();
     const elapsedStriped = now - lastStripedFpsUpdateTime;
     const elapsedFullFrame = now - lastFpsUpdateTime;
@@ -4422,7 +4434,8 @@ function initWebsockets() {
             // between keyframes. The pin is sticky: a parse miss keeps the previous
             // codec rather than flipping back to the pre-stream guess (such a codec
             // string oscillation reconfigures the decoder AND fires requestKeyframe()
-            // on every boundary — the #287 slideshow + keyframe-request spam).
+            // on every boundary — which drops decoded state and stalls playback into
+            // a slideshow of keyframes).
             if (video_frame_type_byte === 0x01) {
                 const spsCodec = codecFromKeyframe(h264Payload, null);
                 if (spsCodec && spsCodec !== workerKeyframeCodec) {
@@ -4489,9 +4502,10 @@ function initWebsockets() {
                         if (support.supported) {
                             return newStripeDecoder.configure(decoderConfig);
                         } else {
-                            console.error(`VNC stripe decoder config not supported for Y=${vncStripeYStart}:`, decoderConfig);
-                            delete vncStripeDecoders[vncStripeYStart];
-                            return Promise.reject("Config not supported");
+                            // Leave the map entry in place: the .catch below is what closes
+                            // this decoder, and it only does so while the entry still points
+                            // at it.
+                            return Promise.reject(new Error(`config not supported: ${dynamicCodec}`));
                         }
                     })
                     .then(() => {
@@ -4689,11 +4703,12 @@ function initWebsockets() {
             const hash = window.location.hash;
             if (hash === '#shared') {
                 clientRole = 'viewer'; clientSlot = null;
-                if (clientSlot !== null) playerInputTargetIndex = clientSlot - 1;
             } else if (hash.startsWith('#player')) {
                 clientRole = 'viewer'; clientSlot = parseInt(hash.substring(7), 10) || null;
+                // #playerN addresses slot N, i.e. the same 0-based input target the
+                // shared-mode identification path derives from an assigned slot.
+                if (clientSlot !== null) playerInputTargetIndex = clientSlot - 1;
             } else {
-                clientRole = 'controller'; clientSlot = 1;
                 clientRole = 'controller';
                 clientSlot = 1;
                 playerInputTargetIndex = 0;

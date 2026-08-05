@@ -124,7 +124,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "webrtc_pacer",
         "type": "bool",
         "default": True,
-        "help": "Pace outgoing WebRTC packets per transport with strict priorities (audio/RTCP > data-channel > video), an IDR-aware video queue budget and GOP-reset recovery: protects audio and interactive signaling from video bursts on congested links. On by default after A/B showed no regression on uncongested/shaped links and large latency wins under congestion; opt out with SELKIES_WEBRTC_PACER=false. Fine-tune the stale-GOP deadline with SELKIES_WEBRTC_PACER_STALE_MS (default 0 = off).",
+        "help": "Pace outgoing WebRTC packets per transport with strict priorities (audio/RTCP > data-channel > video), an IDR-aware video queue budget and GOP-reset recovery, so audio and interactive signaling are protected from video bursts on congested links. Enabled by default; set SELKIES_WEBRTC_PACER=false to disable. SELKIES_WEBRTC_PACER_STALE_MS sets the stale-GOP purge deadline in milliseconds (0 = disabled).",
     },
     {
         "name": "file_transfers",
@@ -950,8 +950,8 @@ for _setting_def in SETTING_DEFINITIONS:
 
 
 def _range_number(text):
-    """A range-setting number: int when integral, float otherwise (kept
-    generic so a fractional span bound stays representable)."""
+    """A range-setting number: int when integral, float otherwise, so a
+    fractional span bound stays representable."""
     value = float(text)
     return int(value) if value.is_integer() else value
 
@@ -1308,10 +1308,12 @@ class AppSettings:
 settings = AppSettings(SETTING_DEFINITIONS)
 
 # Settings never broadcast to clients: server-local paths and lifecycle hooks.
+# Server-local listener, filesystem and hook settings: a browser has no use for
+# them and they disclose host layout.
 CLIENT_PAYLOAD_EXCLUDED = [
-    'port', 'addr', 'web_root', 'encode_dri', 'debug', 'audio_device_name',
-    'watermark_path', 'recording_socket', 'file_manager_path',
-    'run_after_connect', 'run_after_disconnect',
+    'port', 'addr', 'unix_socket', 'web_root', 'encode_dri', 'debug',
+    'audio_device_name', 'watermark_path', 'recording_socket',
+    'file_manager_path', 'run_after_connect', 'run_after_disconnect',
 ]
 
 
@@ -1369,9 +1371,9 @@ def sanitize_client_setting(name, client_value, source, log):
     settings namespace); `log` is the calling transport's logger. Returns the
     sanitized value, or None when the setting is unknown.
 
-    Rules: ranges clamp into the server min/max (fractional values are legal —
-    integral values stay ints); enums fall back to the
-    server default when not allowed; ints/floats clamp into declared bounds
+    Rules: ranges clamp into the server min/max (fractional values are legal,
+    integral values stay ints); enums fall back to the server default when not
+    allowed; ints/floats clamp into declared bounds
     (top-level min/max win over meta so declared bounds aren't loosened by the
     sentinel-safe negative fallback); locked bools keep the server value. A
     None client value resolves to the server value/default for the type.

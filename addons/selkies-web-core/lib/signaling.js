@@ -141,7 +141,7 @@ export class WebRTCSignaling {
 
         /**
          * @type {string}
-         * possile values: 'viewer', 'controller'
+         * possible values: 'viewer', 'controller'
          */
         this.client_type = client_type;
 

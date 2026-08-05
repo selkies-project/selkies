@@ -1,7 +1,6 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
-import aiofiles
 import asyncio
 import base64
 import contextlib
@@ -9,7 +8,6 @@ import gzip
 import json
 import logging
 import os
-import re
 import time
 from asyncio import subprocess
 from collections import OrderedDict, deque
@@ -85,9 +83,9 @@ STALLED_CLIENT_TIMEOUT_SECONDS = 4.0
 SHARED_STREAM_SEND_TIMEOUT_SECONDS = 1.0
 # Per-client video backlog bound: past it, a relay drops its backlog and the
 # client skips ahead to the next keyframe instead of backing encoded frames up
-# into the shared pipeline or the socket transport (whose freed burst the RSS
-# allocator ratchets). The bound is
-# VIDEO_RELAY_BUDGET_SECONDS of stream at the capture's configured bitrate —
+# into the shared pipeline or the socket transport (whose freed burst peaks the
+# allocator retains, ratcheting RSS). The bound is VIDEO_RELAY_BUDGET_SECONDS of
+# stream at the capture's configured bitrate —
 # backlog is latency debt, so the skip-ahead threshold must track the stream
 # rate, not a fixed byte count — floored so low-bitrate streams keep absorbing
 # transport jitter. Keyframes are exempt (a keyframe is indivisible: part of
@@ -110,14 +108,14 @@ VIEWER_RESUME_MIN_INTERVAL_S = 1.0
 TARGET_FRAMERATE = 60
 
 UINPUT_MOUSE_SOCKET = settings.uinput_mouse_socket
-JS_SOCKET_PATH = "/tmp"
-ENABLE_CLIPBOARD = True
-ENABLE_BINARY_CLIPBOARD = False
 ENABLE_CURSORS = bool(settings.enable_cursors[0])
 DEBUG_CURSORS = bool(settings.debug_cursors[0])
 ENABLE_RESIZE = bool(settings.enable_resize[0])
 AUDIO_CHANNELS_DEFAULT = 2
-AUDIO_BITRATE_DEFAULT = int(settings.audio_bitrate)
+# audio_bitrate is an enum with a wider server-side value_range, so an operator
+# override reaches here as an arbitrary numeric string: parse it as a float
+# before narrowing, or a fractional in-range value aborts module import.
+AUDIO_BITRATE_DEFAULT = int(float(settings.audio_bitrate))
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "openh264enc"]
 
 LOGLEVEL = logging.INFO
@@ -143,6 +141,19 @@ IS_WAYLAND = bool(settings.wayland[0])
 # None means "auto" (platform default), which disables every cursor-size
 # override so a later DPI sync never stomps the compositor/DE choice.
 CURSOR_SIZE = settings.cursor_size if settings.cursor_size > 0 else None
+
+
+def _scaling_dpi_bounds():
+    """Numeric span of the declared scaling_dpi stops. The 's,' DPI verb accepts
+    any value in between (a client's device-pixel ratio need not land on a stop),
+    but never outside it: the DPI is applied to the desktop and, when an explicit
+    cursor size is configured, scales the cursor request with it."""
+    definition = next((s for s in SETTING_DEFINITIONS if s['name'] == 'scaling_dpi'), None)
+    stops = [float(v) for v in (definition or {}).get('meta', {}).get('allowed', [])]
+    return (int(min(stops)), int(max(stops))) if stops else (96, 288)
+
+
+SCALING_DPI_MIN, SCALING_DPI_MAX = _scaling_dpi_bounds()
 _EXPLICIT_GPU_ID = parse_gpu_id(settings.gpu_id)
 GPU_ID_DEFAULT = _EXPLICIT_GPU_ID if _EXPLICIT_GPU_ID is not None and _EXPLICIT_GPU_ID >= 0 else 0
 
@@ -471,7 +482,10 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
                     gz_frame_holder.append(_gzip_frame())
             frame = gz_frame_holder[0]
             if asyncio.isfuture(frame):
-                frame = await frame
+                # Shielded: the future is shared by every gzip-capable client, so
+                # one client's per-send timeout must not cancel the compression
+                # the others are still waiting on.
+                frame = await asyncio.shield(frame)
                 gz_frame_holder[0] = frame
             await client.send_bytes(frame)
         else:
@@ -521,7 +535,14 @@ async def _broadcast_to_clients(clients, message, per_client_timeout=None):
     tasks = [task for _, task in client_task_pairs]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for (client, _), result in zip(client_task_pairs, results):
-        if isinstance(result, Exception):
+        if isinstance(result, asyncio.CancelledError):
+            # CancelledError is a BaseException and matches none of the branches
+            # below, so it must be classified here or the client is silently
+            # skipped — neither delivered to nor dropped. An interrupted send
+            # leaves the same unknown stream state as a stalled one.
+            data_logger.warning("Broadcast send was cancelled; dropping the socket.")
+            timed_out_clients.add(client)
+        elif isinstance(result, Exception):
             # A stalled (cancelled) send may have corrupted the stream: drop + close.
             # Check TimeoutError first: on 3.11+ it is a subclass of OSError.
             if isinstance(result, asyncio.TimeoutError):
@@ -1127,6 +1148,27 @@ class DataStreamingServer(BaseStreamingService):
         inst = self.capture_instances.get(display_id)
         return inst.get('module') if inst else None
 
+    def _track_capture_settings(self, display_id, fresh=None, **live_fields):
+        """Record what the display's running capture is actually configured with:
+        pass `fresh` after rebuilding the whole settings object, or individual
+        fields after a targeted rate update.
+
+        The tracked object is what _video_relay_budget sizes new relays from and
+        what a layout-following reconfigure re-pushes to the module, so a live
+        change that skipped it would be applied to the encoder and then silently
+        reverted."""
+        inst = self.capture_instances.get(display_id)
+        if inst is None:
+            return
+        if fresh is not None:
+            inst['settings'] = fresh
+            return
+        cs = inst.get('settings')
+        if cs is None:
+            return
+        for name, value in live_fields.items():
+            setattr(cs, name, value)
+
     async def _handle_opcode_fps(self, fps, display_id='primary'):
         """Live framerate for the shared '_arg_fps' verb (WebRTC-mode parity):
         sanitize against the server range, store, and live-update the display's
@@ -1134,7 +1176,11 @@ class DataStreamingServer(BaseStreamingService):
         sanitized = sanitize_client_setting("framerate", fps, self.cli_args, data_logger)
         if sanitized is None:
             return
-        self.app.set_framerate(sanitized)
+        if display_id == 'primary':
+            # Later-registered displays seed their framerate from this value, so
+            # only the primary controller may move the session default.
+            self.app.set_framerate(sanitized)
+            data_logger.info(f"Session default framerate updated to {int(sanitized)} for new displays.")
         display_state = self.display_clients.get(display_id)
         if display_state is not None:
             display_state["framerate"] = sanitized
@@ -1142,6 +1188,7 @@ class DataStreamingServer(BaseStreamingService):
         if module is not None:
             try:
                 module.update_framerate(float(sanitized))
+                self._track_capture_settings(display_id, target_fps=float(sanitized))
                 data_logger.info(f"Applied framerate live via '_arg_fps': {sanitized} fps for '{display_id}'")
             except Exception as e:
                 data_logger.warning(f"Live framerate update failed for '{display_id}' ({e}).")
@@ -1155,16 +1202,17 @@ class DataStreamingServer(BaseStreamingService):
         display_state = self.display_clients.get(display_id)
         if display_state is not None:
             display_state["video_bitrate"] = sanitized
-        self.app.video_bitrate = sanitized
         if display_id == 'primary':
             # Later-registered displays seed their bitrate from this value.
             self._initial_video_bitrate = sanitized
             data_logger.info(f"Session default video_bitrate updated to {int(sanitized)} kbps for new displays.")
         module = self._opcode_display_module(display_id)
         if module is not None:
+            kbps = int(round(float(sanitized)))
             try:
-                module.update_video_bitrate(int(round(float(sanitized))))
-                data_logger.info(f"Applied video bitrate live via 'vb': {int(round(float(sanitized)))} kbps for '{display_id}'")
+                module.update_video_bitrate(kbps)
+                self._track_capture_settings(display_id, video_bitrate_kbps=kbps)
+                data_logger.info(f"Applied video bitrate live via 'vb': {kbps} kbps for '{display_id}'")
             except Exception as e:
                 data_logger.warning(f"Live bitrate update failed for '{display_id}' ({e}).")
 
@@ -1216,7 +1264,7 @@ class DataStreamingServer(BaseStreamingService):
         if layout is None:
             return
         restart_ok = False
-        async with self._reconfigure_lock:
+        async with self._reconfigure_guard():
             if display_state.get('video_active', True):
                 data_logger.info(f"Applied rate-control via '_rc': {sanitized} for '{display_id}'. Restarting its capture stream.")
                 await self._stop_capture_for_display(display_id)
@@ -1247,9 +1295,11 @@ class DataStreamingServer(BaseStreamingService):
         layout = self.display_layouts.get(display_id)
         if module is not None and layout is not None:
             try:
-                module.update_tunables(self._get_capture_settings(
+                fresh = self._get_capture_settings(
                     display_id, layout['w'], layout['h'], layout['x'], layout['y']
-                ))
+                )
+                module.update_tunables(fresh)
+                self._track_capture_settings(display_id, fresh=fresh)
                 data_logger.info(f"Applied CRF live via '_crf': {sanitized} for '{display_id}'")
             except Exception as e:
                 data_logger.warning(f"Live CRF update failed for '{display_id}' ({e}).")
@@ -1999,7 +2049,6 @@ class DataStreamingServer(BaseStreamingService):
             return int(float(v))
 
         def get_number(k):
-            # int when integral, float otherwise.
             v = settings_data.get(k)
             if v is None:
                 return None
@@ -2125,7 +2174,7 @@ class DataStreamingServer(BaseStreamingService):
                 if server_is_manual:
                     # A server-forced resolution may only be altered by the
                     # server's own setting, never by a client-side toggle.
-                    apply_alignment = getattr(self.cli_args, "force_aligned_resolution")[0]
+                    apply_alignment = self.cli_args.force_aligned_resolution[0]
                 else:
                     apply_alignment = display_state["force_aligned_resolution"]
                 if apply_alignment:
@@ -2281,11 +2330,13 @@ class DataStreamingServer(BaseStreamingService):
                                 'w': display_state.get('width', 0), 'h': display_state.get('height', 0),
                                 'x': 0, 'y': 0,
                             }
+                            fresh = self._get_capture_settings(
+                                display_id, layout['w'], layout['h'], layout['x'], layout['y']
+                            )
                             module.update_framerate(float(display_state.get('framerate') or self.app.framerate))
                             module.update_video_bitrate(int(round(float(display_state.get('video_bitrate') or 0))))
-                            module.update_tunables(self._get_capture_settings(
-                                display_id, layout['w'], layout['h'], layout['x'], layout['y']
-                            ))
+                            module.update_tunables(fresh)
+                            self._track_capture_settings(display_id, fresh=fresh)
                         except Exception as e:
                             data_logger.warning(
                                 f"Live video settings update failed for '{display_id}' ({e}); restarting its capture."
@@ -3336,7 +3387,11 @@ class DataStreamingServer(BaseStreamingService):
                             dpi_value_str = message.split(",")[1]
                             # Fractional DPI is legal on the shared verb (WebRTC-mode
                             # parity); the desktop DPI property itself is integral.
-                            dpi_value = max(1, int(round(float(dpi_value_str))))
+                            # Bounded by the declared scaling_dpi span so a client
+                            # cannot drive xrdb — and, with an explicit cursor size,
+                            # the cursor request — to an arbitrary value.
+                            dpi_value = min(SCALING_DPI_MAX,
+                                            max(SCALING_DPI_MIN, int(round(float(dpi_value_str)))))
                             if app_settings._overridden.get("scaling_dpi", False):
                                 # An operator-set DPI (CLI/env) governs the desktop:
                                 # client DPI syncs must not clobber it.
@@ -4570,8 +4625,13 @@ class DataStreamingServer(BaseStreamingService):
 
             def pixelflux_cursor_handler(msg_type, data_bytes, hot_x, hot_y):
                 try:
+                    # An unset (auto) cursor_size is None here, but the formatter
+                    # uses this value as the square fallback dimension for a cursor
+                    # PNG it cannot decode. Fall back to the same 24 the WebRTC
+                    # cursor handler uses so neither transport emits a null size.
+                    size = int(self.cursor_size or 0)
                     payload = format_pixelflux_cursor(
-                        msg_type, data_bytes, hot_x, hot_y, self.cursor_size)
+                        msg_type, data_bytes, hot_x, hot_y, size if size > 0 else 24)
                     if payload is not None:
                         self.app.send_ws_cursor_data(payload)
                 except Exception as e:
@@ -4733,8 +4793,11 @@ class DataStreamingServer(BaseStreamingService):
 
         # Close every live client socket: handlers exit, their per-connection
         # teardown runs, and no stray capture keeps encoding for a page that can
-        # no longer receive anything (mode-switch parity with the WebRTC
-        # service, which kicks every peer on shutdown).
+        # no longer receive anything. The close carries no KILL verb: KILL is the
+        # client's terminal verdict (it clears the reconnect timer and drops its
+        # onclose handler), whereas a shutdown is usually a mode switch that
+        # every page must recover from. A bare close leaves the client's onclose
+        # reconnect/mode-flip loop armed, which is what converges the other tabs.
         sockets_to_close = set(self.clients)
         for info in self.display_clients.values():
             ws = info.get('ws')
@@ -4742,10 +4805,6 @@ class DataStreamingServer(BaseStreamingService):
                 sockets_to_close.add(ws)
 
         async def _close_one(sock):
-            try:
-                await asyncio.wait_for(sock.send_str("KILL server shutting down"), timeout=1.0)
-            except Exception:
-                pass
             try:
                 await asyncio.wait_for(sock.close(code=4000, message=b"server shutting down"), timeout=1.0)
             except Exception:

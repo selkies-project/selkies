@@ -22,44 +22,85 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   PYTHON_VERSION: "3.12"
+  # Linters are pinned to a minor line so a new rule in a released version
+  # cannot turn a green branch red without a deliberate bump here
+  RUFF_VERSION: "0.16.*"
+  CODESPELL_VERSION: "2.4.*"
+  ACTIONLINT_VERSION: "1.7.12"
 
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - name: Check spelling
-        uses: codespell-project/actions-codespell@v2
+      - uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Ruff
+        # Rule selection lives in pyproject.toml
         run: |
-          python3 -m pip install --upgrade ruff
-          ruff check src/selkies || true
-      - name: Validate workflow YAML
+          python3 -m pip install "ruff==${RUFF_VERSION}"
+          ruff check
+      - name: Codespell
+        # Skip list and dictionary exceptions live in .codespellrc
         run: |
-          python3 -m pip install --upgrade pyyaml
-          python3 -c "import glob, yaml; [yaml.safe_load(open(f)) for f in glob.glob('.github/workflows/*.yaml')]; print('YAML OK')"
+          python3 -m pip install "codespell==${CODESPELL_VERSION}"
+          codespell
+      - name: Lint the workflow files
+        # actionlint validates the expression syntax and runs shellcheck over
+        # every `run:` block; shellcheck is preinstalled on the runner image
+        run: |
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | tar -xz actionlint
+          ./actionlint -color
+
+  python-compat:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Byte-compile every module
+        # pyproject.toml claims 3.9 through 3.14; this catches syntax that only
+        # the newer interpreters accept
+        run: python -m compileall -q src/selkies
 
   wheel:
     name: Build wheel
+    needs: [lint, python-compat]
+    permissions:
+      contents: read
     uses: ./.github/workflows/build-wheel.yaml
 
   pixelflux-pcmflux:
     name: Build pixelflux and pcmflux wheels (master HEAD)
     if: github.event_name == 'push'
+    permissions:
+      contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
 
   images:
     name: Multi-arch images
     needs: [wheel, pixelflux-pcmflux]
     if: github.event_name == 'push'
+    # A called workflow can only narrow the caller's token, so the GHCR push
+    # scope has to be granted here
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/images.yaml
     with:
       tag_prefix: main
@@ -69,6 +110,8 @@ jobs:
     name: Native packages
     needs: [wheel, pixelflux-pcmflux]
     if: github.event_name == 'push'
+    permissions:
+      contents: read
     uses: ./.github/workflows/packages.yaml
     with:
       wheel_artifact: selkies-wheel

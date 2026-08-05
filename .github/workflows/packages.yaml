@@ -31,11 +31,18 @@ on:
         type: string
         default: ""
 
+permissions:
+  contents: read
+
 jobs:
   wheel:
     name: Build wheel for the packages
     if: ${{ inputs.wheel_artifact == '' }}
+    permissions:
+      contents: read
     uses: ./.github/workflows/build-wheel.yaml
+    with:
+      package_version: ${{ inputs.package_version }}
 
   package:
     name: ${{ matrix.kind.name }} (${{ matrix.arch.name }})
@@ -52,21 +59,27 @@ jobs:
             runner: ubuntu-24.04-arm
         kind:
           - name: deb-ubuntu24.04
+            tag: ubuntu24.04
             image: ubuntu:24.04
             script: infra/packaging/deb.sh
           - name: deb-ubuntu26.04
+            tag: ubuntu26.04
             image: ubuntu:26.04
             script: infra/packaging/deb.sh
           - name: deb-bookworm
+            tag: bookworm
             image: debian:bookworm
             script: infra/packaging/deb.sh
           - name: deb-trixie
+            tag: trixie
             image: debian:trixie
             script: infra/packaging/deb.sh
           - name: rpm-fedora
+            tag: fc
             image: fedora:latest
             script: infra/packaging/rpm.sh
           - name: rpm-el9
+            tag: el9
             image: almalinux:9
             script: infra/packaging/rpm.sh
           - name: apk
@@ -75,11 +88,19 @@ jobs:
           - name: arch
             image: archlinux:base-devel
             script: infra/packaging/arch.sh
+        exclude:
+          # Arch Linux publishes an x86_64-only image
+          - arch:
+              name: arm64
+              runner: ubuntu-24.04-arm
+            kind:
+              name: arch
+              image: archlinux:base-devel
+              script: infra/packaging/arch.sh
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Free disk space
-        # Actively maintained alternative to the (2023-frozen) jlumbroso
-        # action; keep the tool cache, setup-python/setup-node depend on it
+        # The tool cache is kept: setup-python and setup-node resolve from it
         uses: endersonmenezes/free-disk-space@v3
         with:
           remove_android: true
@@ -90,21 +111,21 @@ jobs:
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
       - name: Download the wheel
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
           path: dist/
       # Fresh pixelflux/pcmflux wheels from the master HEAD of linuxserver/*;
       # absence is tolerated (standalone dispatch) and mkvenv.sh uses PyPI
       - name: Download pixelflux wheels (master HEAD)
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
           path: dist/
           merge-multiple: true
       - name: Download pcmflux wheels (master HEAD)
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
@@ -112,28 +133,35 @@ jobs:
           merge-multiple: true
       - name: Build the package inside the target distro container
         env:
-          SELKIES_VERSION: ${{ github.event.inputs.package_version || inputs.package_version || '0.0.0.dev0' }}
+          SELKIES_VERSION: ${{ inputs.package_version }}
+          DISTRO_TAG: ${{ matrix.kind.tag }}
+          IMAGE: ${{ matrix.kind.image }}
+          SCRIPT: ${{ matrix.kind.script }}
         run: |
           set -e
           mkdir -p out
+          # /repo is read-only: the scripts stage everything under /pkg-root and
+          # /build inside the container and only write their artifacts to /out
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/repo:ro" \
             -v "${GITHUB_WORKSPACE}/dist:/dist:ro" \
             -v "${GITHUB_WORKSPACE}/out:/out" \
             -e SELKIES_VERSION \
-            "${{ matrix.kind.image }}" \
-            sh "/repo/${{ matrix.kind.script }}"
+            -e DISTRO_TAG \
+            "${IMAGE}" \
+            sh "/repo/${SCRIPT}"
           ls -la out/
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.kind.name }}-${{ matrix.arch.name }}
           path: out/*
+          if-no-files-found: error
           retention-days: 14
 
   appimage:
     name: AppImage (${{ matrix.arch.name }})
-    needs: wheel
-    if: ${{ !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result) }}
+    # The AppImage builds selkies from this checkout with rattler-build, so it
+    # needs no prebuilt wheel
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -144,10 +172,9 @@ jobs:
           - name: aarch64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Free disk space
-        # Actively maintained alternative to the (2023-frozen) jlumbroso
-        # action; keep the tool cache, setup-python/setup-node depend on it
+        # The tool cache is kept: setup-python and setup-node resolve from it
         uses: endersonmenezes/free-disk-space@v3
         with:
           remove_android: true
@@ -160,14 +187,14 @@ jobs:
       # Fresh pixelflux/pcmflux wheels from the master HEAD of linuxserver/*;
       # absence is tolerated (standalone dispatch) and appimage.sh uses PyPI
       - name: Download pixelflux wheels (master HEAD)
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
           path: pixelflux-pcmflux-wheels/
           merge-multiple: true
       - name: Download pcmflux wheels (master HEAD)
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
@@ -175,11 +202,12 @@ jobs:
           merge-multiple: true
       - name: Build the AppImage (rattler-build + linuxdeploy-plugin-conda)
         env:
-          SELKIES_VERSION: ${{ github.event.inputs.package_version || inputs.package_version || '0.0.0.dev0' }}
+          SELKIES_VERSION: ${{ inputs.package_version }}
           PIXELFLUX_PCMFLUX_WHEELS_DIR: ${{ github.workspace }}/pixelflux-pcmflux-wheels
         run: ./scripts/ci/appimage.sh "${{ matrix.arch.name }}"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: appimage-${{ matrix.arch.name }}
           path: out/*
+          if-no-files-found: error
           retention-days: 14
