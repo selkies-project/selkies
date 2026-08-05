@@ -9,7 +9,7 @@ pkgdesc="Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)"
 url="https://github.com/selkies-project/selkies"
 arch="all"
 license="MPL-2.0"
-depends="python3 libpulse libxcb libxkbcommon libx11 libva libdrm"
+depends="python3 libpulse libxcb libxkbcommon libx11 libxext libva libdrm mesa-gbm glib pixman"
 # The payload (/opt/selkies venv staged by infra/packaging/apk.sh) is packed here.
 source=""
 # !fhs: the venv is self-contained under /opt, which abuild's FHS check rejects.

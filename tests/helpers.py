@@ -193,21 +193,42 @@ def decode_input_events(path):
             for o in range(0, len(blob) - 23, 24)]
 
 
+# Exit code for a suite whose subject is missing from the installed
+# dependencies; test_suites.py reports it as a pytest skip.
+SKIP_EXIT = 77
+
+
+def skip_suite(reason):
+    """End the suite as skipped rather than failed. For a capability the
+    installed capture stack does not expose at all, where every check would only
+    report the same absence."""
+    print(f"SKIP {reason}", flush=True)
+    sys.exit(SKIP_EXIT)
+
+
 class Results:
     def __init__(self, block):
         self.block = block
         self.items = []
+        self.skipped = []
 
     def check(self, name, ok, detail=""):
         self.items.append((name, bool(ok), str(detail)[:160]))
         print(("PASS" if ok else "FAIL") + f"  [{self.block}] {name}  {str(detail)[:110]}", flush=True)
+
+    def skip(self, name, reason=""):
+        """Record a check the installed dependencies cannot observe. Not a
+        failure: the behaviour is unproven here rather than known broken."""
+        self.skipped.append((name, str(reason)[:160]))
+        print(f"SKIP  [{self.block}] {name}  {str(reason)[:110]}", flush=True)
 
     def failed(self):
         return [i for i in self.items if not i[1]]
 
     def summary(self):
         f = self.failed()
-        print(f"[{self.block}] {len(self.items) - len(f)}/{len(self.items)} passed", flush=True)
+        tail = f", {len(self.skipped)} skipped" if self.skipped else ""
+        print(f"[{self.block}] {len(self.items) - len(f)}/{len(self.items)} passed{tail}", flush=True)
         return not f
 
 

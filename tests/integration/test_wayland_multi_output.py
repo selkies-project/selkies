@@ -53,6 +53,9 @@ def main():
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
     import pixelflux
 
+    if not hasattr(pixelflux.ScreenCapture, "create_output"):
+        H.skip_suite("the installed pixelflux has no multi-output API")
+
     res = H.Results("wl-multi-output")
     socket = pixelflux.ensure_wayland_display(width=1920, height=1080,
                                               render_node="", auto_gpu="",

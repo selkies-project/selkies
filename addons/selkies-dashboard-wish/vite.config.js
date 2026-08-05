@@ -22,7 +22,7 @@ export default ({ mode }) => {
     plugins: [react(), tailwindcss(), ViteMinifyPlugin()],
     resolve: {
       alias: {
-        "@": path.resolve(__dirname, "./src"),
+        "@": path.resolve(import.meta.dirname, "./src"),
       },
     },
     server: {

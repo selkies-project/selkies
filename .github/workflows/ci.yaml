@@ -58,7 +58,8 @@ jobs:
         # actionlint validates the expression syntax and runs shellcheck over
         # every `run:` block; shellcheck is preinstalled on the runner image
         run: |
-          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | tar -xz actionlint
+          scripts/ci/fetch.sh "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint.tar.gz
+          tar -xzf actionlint.tar.gz actionlint
           ./actionlint -color
 
   python-compat:

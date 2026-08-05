@@ -14,6 +14,7 @@ import sys
 
 import pytest
 
+import helpers
 import suites
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
@@ -34,6 +35,10 @@ def test_suite(path, selector, timeout):
                           timeout=timeout)
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
+    if proc.returncode == helpers.SKIP_EXIT:
+        reason = next((line for line in proc.stdout.splitlines()
+                       if line.startswith("SKIP")), "subject not installed")
+        pytest.skip(f"{path}: {reason}")
     failed = [line for line in proc.stdout.splitlines() if line.startswith("FAIL")]
     # A suite that died rather than failing checks reports through stderr, so
     # the traceback is what the message has to carry

@@ -38,10 +38,13 @@ test -f "${PKG}"
 #    the one in infra/appimage: upstream publishes no release artifacts, and
 #    this one installs Miniforge rather than Miniconda3, keeping the AppImage
 #    on conda-forge alone.
-curl -fsSL -o "${WORK}/linuxdeploy.AppImage" \
-    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${ARCH}.AppImage"
+scripts/ci/fetch.sh \
+    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${ARCH}.AppImage" \
+    "${WORK}/linuxdeploy.AppImage"
 cp infra/appimage/linuxdeploy-plugin-conda.sh "${WORK}/linuxdeploy-plugin-conda.sh"
-chmod +x "${WORK}/linuxdeploy.AppImage" "${WORK}/linuxdeploy-plugin-conda.sh"
+# The plugin downloads Miniforge from the same rate-limited host
+cp scripts/ci/fetch.sh "${WORK}/fetch.sh"
+chmod +x "${WORK}/linuxdeploy.AppImage" "${WORK}/linuxdeploy-plugin-conda.sh" "${WORK}/fetch.sh"
 # linuxdeploy resolves `--plugin conda` by searching PATH
 export PATH="${WORK}:${PATH}"
 

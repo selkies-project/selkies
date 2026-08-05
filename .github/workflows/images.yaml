@@ -38,6 +38,11 @@ permissions:
 env:
   REGISTRY_NAMESPACE: ghcr.io/selkies-project/selkies
   IMAGE_NAME: ghcr.io/selkies-project/selkies/py-example
+  # ghcr answers a secondary rate limit with 403 on the push itself. buildx
+  # reports that as a build failure rather than a response this can read a
+  # Retry-After from, so the pause is the minute GitHub asks for when it names
+  # no delay of its own.
+  PUSH_RETRY_DELAY: "60"
 
 jobs:
   wheel:
@@ -124,7 +129,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v7
+        uses: ./.github/actions/build-push
         with:
           context: .
           file: addons/example/Dockerfile
@@ -133,8 +138,8 @@ jobs:
             DISTRIB_IMAGE=${{ matrix.flavor.image }}
             DISTRIB_RELEASE=${{ matrix.flavor.release }}
           outputs: type=image,"name=${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=example-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
-          cache-to: type=gha,mode=max,scope=example-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
+          cache-scope: example-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
+          retry-delay: ${{ env.PUSH_RETRY_DELAY }}
       - name: Export digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -157,6 +162,7 @@ jobs:
       matrix:
         flavor: [ubuntu24.04, ubuntu26.04, bookworm, trixie]
     steps:
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -184,7 +190,8 @@ jobs:
           # One empty file per pushed digest, named after it
           SOURCES=()
           for digest in *; do SOURCES+=("${IMAGE_NAME}@sha256:${digest}"); done
-          docker buildx imagetools create "${IMGTAGS[@]}" "${SOURCES[@]}"
+          "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" 3 "${PUSH_RETRY_DELAY}" \
+            docker buildx imagetools create "${IMGTAGS[@]}" "${SOURCES[@]}"
           echo "pushed: ${IMGTAGS[*]}"
 
   addons:
@@ -213,13 +220,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v7
+        uses: ./.github/actions/build-push
         with:
           context: addons/${{ matrix.addon }}
           platforms: ${{ matrix.arch.platform }}
           outputs: type=image,"name=${{ env.REGISTRY_NAMESPACE }}/${{ matrix.addon }}",push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.addon }}-${{ matrix.arch.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.addon }}-${{ matrix.arch.name }}
+          cache-scope: ${{ matrix.addon }}-${{ matrix.arch.name }}
+          retry-delay: ${{ env.PUSH_RETRY_DELAY }}
       - name: Export digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -242,6 +249,7 @@ jobs:
       matrix:
         addon: [coturn, turn-rest]
     steps:
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -270,5 +278,6 @@ jobs:
           # One empty file per pushed digest, named after it
           SOURCES=()
           for digest in *; do SOURCES+=("${IMAGE}@sha256:${digest}"); done
-          docker buildx imagetools create "${IMGTAGS[@]}" "${SOURCES[@]}"
+          "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" 3 "${PUSH_RETRY_DELAY}" \
+            docker buildx imagetools create "${IMGTAGS[@]}" "${SOURCES[@]}"
           echo "pushed: ${IMGTAGS[*]}"

@@ -46,8 +46,18 @@ unset CONDA_CHANNELS CONDA_PACKAGES CONDA_PYTHON_VERSION PIP_REQUIREMENTS
 mkdir -p "${DOWNLOAD_DIR}" "${APPDIR}"
 # Miniforge names its installers after `uname -m`
 INSTALLER="Miniforge3-Linux-${ARCH}.sh"
-curl -fsSL -o "${DOWNLOAD_DIR}/${INSTALLER}" \
-    "https://github.com/conda-forge/miniforge/releases/latest/download/${INSTALLER}"
+# GitHub rate-limits release downloads. fetch.sh waits out the Retry-After it
+# sends; it sits beside this plugin when scripts/ci/appimage.sh placed it there,
+# and a direct run of the plugin falls back to a plain download.
+HERE="$(dirname "$(readlink -f "$0")")"
+if [ -x "${HERE}/fetch.sh" ]; then
+    "${HERE}/fetch.sh" \
+        "https://github.com/conda-forge/miniforge/releases/latest/download/${INSTALLER}" \
+        "${DOWNLOAD_DIR}/${INSTALLER}"
+else
+    curl -fsSL -o "${DOWNLOAD_DIR}/${INSTALLER}" \
+        "https://github.com/conda-forge/miniforge/releases/latest/download/${INSTALLER}"
+fi
 
 # usr/conda rather than usr/ so these libraries cannot collide with what
 # linuxdeploy and its other plugins bundle

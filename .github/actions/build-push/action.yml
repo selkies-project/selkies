@@ -1,0 +1,71 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+name: Build and push by digest
+description: >
+  Build an image and push it to the registry by digest, attempted twice. ghcr
+  reports a secondary rate limit as a 403 on the push, which buildx surfaces as
+  a build failure rather than a response carrying Retry-After, so the pause is
+  the minute GitHub asks for when it names no delay. The rebuild behind the
+  second attempt is served from the layer cache.
+
+inputs:
+  context:
+    description: Build context path.
+    required: true
+  file:
+    description: Dockerfile, where it is not <context>/Dockerfile.
+    default: ""
+  platforms:
+    description: Target platform.
+    required: true
+  build-args:
+    description: Newline-separated build arguments.
+    default: ""
+  outputs:
+    description: buildx output specification, naming the image to push.
+    required: true
+  cache-scope:
+    description: Layer cache scope, one per image and architecture.
+    required: true
+  retry-delay:
+    description: Seconds to wait before the second attempt.
+    default: "60"
+
+outputs:
+  digest:
+    description: Digest of the pushed image, from whichever attempt succeeded.
+    value: ${{ steps.retry.outputs.digest || steps.first.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - id: first
+      uses: docker/build-push-action@v7
+      continue-on-error: true
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        platforms: ${{ inputs.platforms }}
+        build-args: ${{ inputs.build-args }}
+        outputs: ${{ inputs.outputs }}
+        cache-from: type=gha,scope=${{ inputs.cache-scope }}
+        cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}
+    - if: steps.first.outcome == 'failure'
+      shell: bash
+      env:
+        RETRY_DELAY: ${{ inputs.retry-delay }}
+      run: |
+        echo "push failed, waiting ${RETRY_DELAY}s for the registry"
+        sleep "${RETRY_DELAY}"
+    - id: retry
+      if: steps.first.outcome == 'failure'
+      uses: docker/build-push-action@v7
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        platforms: ${{ inputs.platforms }}
+        build-args: ${{ inputs.build-args }}
+        outputs: ${{ inputs.outputs }}
+        cache-from: type=gha,scope=${{ inputs.cache-scope }}
+        cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}

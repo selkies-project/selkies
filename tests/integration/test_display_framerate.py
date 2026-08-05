@@ -29,6 +29,12 @@ def loglen():
     return len(H.server_log())
 
 
+def status_lines(text):
+    """The capture module's per-display "Stream settings active" lines, which
+    carry the settings a capture actually started with."""
+    return [ln for ln in text.splitlines() if "Stream settings active" in ln]
+
+
 def wait_contains(mark, substr, timeout=12):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -71,11 +77,18 @@ def main():
                 await p2.send("SETTINGS," + json.dumps(d2))
                 await asyncio.sleep(3.0)
                 await read_ws(p2, 1.5)
-                seg = H.server_log()[mark2:]
+                d2_status = status_lines(H.server_log()[mark2:])
                 res.check("display2 capture carries client framerate",
-                          "FPS: 33" in seg, seg[seg.find("Stream settings active"):][:160])
-                res.check("display2 capture carries client bitrate",
-                          "2200" in seg, seg[seg.find("Stream settings active"):][:160])
+                          any("FPS: 33" in ln for ln in d2_status), d2_status[:1])
+                # The primary set its bitrate explicitly, so the primary's own
+                # status line says whether this capture module reports one at
+                # all; where it does not, inheritance is unobservable here.
+                if any("2200" in ln for ln in status_lines(H.server_log()[:mark2])):
+                    res.check("display2 capture carries client bitrate",
+                              any("2200" in ln for ln in d2_status), d2_status[:1])
+                else:
+                    res.skip("display2 capture carries client bitrate",
+                             "the capture module omits bitrate from its status line")
                 await asyncio.sleep(0.5)
             await read_ws(p1, 1)
 

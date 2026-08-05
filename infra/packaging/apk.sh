@@ -6,12 +6,15 @@
 set -eux
 # build-base/python3-dev/linux-headers: musl has no manylinux wheels, so every
 # extension dependency is compiled here (psutil needs the kernel headers).
-# libxkbcommon is loaded with ctypes at runtime and lets mkvenv.sh's smoke test
-# exercise that path
 apk add --no-cache \
     abuild build-base pkgconf linux-headers \
     python3 python3-dev py3-pip py3-virtualenv \
-    libxkbcommon ca-certificates
+    ca-certificates
+# The runtime libraries come from the APKBUILD's own depends, keeping one list:
+# the venv links them, mkvenv.sh's smoke test loads them, and abuild resolves the
+# sonames it scans against whatever the builder has installed.
+# shellcheck disable=SC2046  # the depends list is deliberately word-split
+apk add --no-cache $(sed -n 's/^depends="\(.*\)"$/\1/p' /repo/infra/packaging/apk/APKBUILD)
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
 # abuild writes src/ and pkg/ next to the APKBUILD, and /repo is read-only
