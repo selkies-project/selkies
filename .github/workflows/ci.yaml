@@ -80,7 +80,9 @@ jobs:
 
   tests:
     name: Test suites
-    needs: [lint, python-compat]
+    # The wheels are a dependency, not just an ordering constraint: the suites
+    # run against the same master-HEAD capture stack the artifacts ship
+    needs: [lint, python-compat, pixelflux-pcmflux]
     # The browser tier runs nightly from tests.yaml; this keeps the push and
     # pull-request path at the suites that need no browser install
     permissions:
@@ -88,6 +90,7 @@ jobs:
     uses: ./.github/workflows/tests.yaml
     with:
       tiers: unit or integration
+      wheels_ready: true
 
   wheel:
     name: Build wheel

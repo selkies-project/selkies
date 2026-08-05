@@ -34,6 +34,7 @@ SUITES = [
     {"path": "integration/test_state_stress.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_switch_stress.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_webrtc_unix_socket.py", "tier": "integration", "timeout": 600},
+    {"path": "integration/test_wayland_multi_output.py", "tier": "integration", "timeout": 600},
 
     # --- e2e --------------------------------------------------------------
     {"path": "e2e/test_matrix.py", "tier": "e2e", "timeout": 1200,

@@ -19,6 +19,10 @@ on:
         description: Marker expression selecting the tiers to run
         type: string
         default: integration
+      wheels_ready:
+        description: The caller already built the pixelflux and pcmflux wheels in this run
+        type: boolean
+        default: false
   schedule:
     # Nightly full browser matrix
     - cron: "0 4 * * *"
@@ -65,8 +69,20 @@ jobs:
           python -m pip install pytest aiofiles msgpack Pillow
           python -m pytest tests -m unit -v
 
+  # The suites run against the master-HEAD capture stack the artifacts ship, so
+  # a run that arrives without those wheels builds them first. ci.yaml already
+  # builds them and sets wheels_ready, which skips this.
+  wheels:
+    name: Capture stack (master HEAD)
+    if: ${{ !inputs.wheels_ready }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+
   suites:
     name: Suites (${{ inputs.tiers || 'integration or e2e' }})
+    needs: [wheels]
+    if: ${{ always() && (needs.wheels.result == 'success' || needs.wheels.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -101,11 +117,39 @@ jobs:
             pulseaudio pulseaudio-utils \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
-            libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers
+            libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
+            labwc
+      # The suites have to exercise the pixelflux and pcmflux that the images,
+      # packages and AppImages ship, which are built from master HEAD rather
+      # than taken from the last PyPI release. ci.yaml builds them earlier in
+      # the same run; a standalone run carries none and says so below.
+      - name: Download the pixelflux wheels (master HEAD)
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: pixelflux-wheels-*
+          path: master-wheels/
+          merge-multiple: true
+      - name: Download the pcmflux wheels (master HEAD)
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: pcmflux-wheels-*
+          path: master-wheels/
+          merge-multiple: true
       - name: Install selkies and the test dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install . -r tests/requirements.txt
+          TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
+          WHEELS="$(find master-wheels -maxdepth 1 \
+              -name "*${TAG}-*manylinux*$(uname -m)*.whl" 2>/dev/null | tr '\n' ' ')"
+          if [ -n "${WHEELS}" ]; then
+            python -m pip install --force-reinstall --no-deps ${WHEELS}
+          else
+            echo 'No master-HEAD wheels in this run: the suites use the PyPI pixelflux and pcmflux'
+          fi
+          python -c 'import pixelflux, pcmflux; print("capture stack:", pixelflux.__file__)'
       - name: Build the web client
         run: ./scripts/ci/build-web.sh
       - name: Build the test tools
