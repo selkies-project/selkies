@@ -119,6 +119,7 @@ SETTING_DEFINITIONS_WEBSOCKETS = [
     {'name': 'dri_node', 'type': 'str', 'default': '', 'env_var': 'DRI_NODE', 'help': 'Path to the DRI render node for VA-API.'},
     {'name': 'watermark_path', 'type': 'str', 'default': '', 'env_var': 'WATERMARK_PNG', 'help': 'Absolute path to the watermark PNG file.'},
     {'name': 'watermark_location', 'type': 'int', 'default': -1, 'env_var': 'WATERMARK_LOCATION', 'help': 'Watermark location enum (0-6).'},
+    {'name': 'recording_socket', 'type': 'str', 'default': '', 'env_var': 'PIXELFLUX_RECORDING_SOCKET', 'help': 'Unix socket path exposing the raw H.264 stream sent to the client for external capture (full-frame H.264 encoders only).'},
     {'name': 'wayland_socket_index', 'type': 'int', 'default': 0, 'help': 'Index for the Wayland command socket (e.g. 0 for wayland-0).'},
 ]
 

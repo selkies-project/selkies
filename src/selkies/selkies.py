@@ -3261,7 +3261,7 @@ class DataStreamingServer:
             cs.use_cpu = display_state.get('use_cpu', self._initial_use_cpu)
 
         cs.cursor_size = self.cursor_size
-        cs.recording_socket = ""
+        cs.recording_socket = self.cli_args.recording_socket
 
         watermark_path_str = self.cli_args.watermark_path
         if watermark_path_str and os.path.exists(watermark_path_str):
