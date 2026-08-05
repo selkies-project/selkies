@@ -23,8 +23,13 @@ on:
     # Nightly full browser matrix
     - cron: "0 4 * * *"
 
+# `github.workflow` resolves to the CALLING workflow inside a `workflow_call`,
+# so deriving the group from it would produce ci.yaml's own group and deadlock
+# every run that calls this one. The literal name keeps standalone runs
+# deduplicated, and the event keeps the nightly browser matrix from being
+# cancelled by a push to the same ref.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: tests-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
