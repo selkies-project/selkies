@@ -2,7 +2,16 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-version: "3.9"
+# Development stack for this repository. `dist` builds the wheel (web client
+# included), `example` runs the reference container from addons/example, and
+# `example-gpu` is the same container with a GPU attached.
+#
+#   docker compose build dist                      # wheel image
+#   docker compose up example                      # http://localhost:8081
+#   docker compose --profile gpu up example-gpu    # NVIDIA
+#
+# Compose V2 is required (no `version:` key, `extends`, `develop`).
+
 services:
   dist:
     image: selkies-py-build
@@ -11,8 +20,10 @@ services:
       dockerfile: Dockerfile
       args:
         PYPI_PACKAGE: selkies
-        PACKAGE_VERSION: 0.0.0.dev0
-  test:
+        PACKAGE_VERSION: ${PACKAGE_VERSION:-0.0.0.dev0}
+        SELKIES_MODE: ${SELKIES_MODE:-webrtc}
+
+  example:
     ###
     # NOTE: export DISTRIB_IMAGE and DISTRIB_RELEASE to change the base image.
     # To test an unreleased wheel, build it with the `dist` service, then copy it
@@ -20,7 +31,6 @@ services:
     # building this service; otherwise the latest PyPI release is installed.
     ###
     image: selkies-example:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-24.04}
-    entrypoint: ["/bin/bash"]
     build:
       # Repository root: the Dockerfile also pulls in addons/js-interposer and
       # addons/fake-udev
@@ -30,26 +40,38 @@ services:
         DISTRIB_IMAGE: ${DISTRIB_IMAGE:-ubuntu}
         DISTRIB_RELEASE: ${DISTRIB_RELEASE:-24.04}
         PYPI_PACKAGE: selkies
+        # DRI3-capable Xvfb; see the Dockerfile for what overriding this costs
+        XVFB_IMAGE: ${XVFB_IMAGE:-lscr.io/linuxserver/xvfb:debianbookworm}
     environment:
-      SELKIES_ENABLE_BASIC_AUTH: ${SELKIES_ENABLE_BASIC_AUTH}
-      SELKIES_BASIC_AUTH_USER: ${SELKIES_BASIC_AUTH_USER}
-      SELKIES_BASIC_AUTH_PASSWORD: ${SELKIES_BASIC_AUTH_PASSWORD}
-      SELKIES_TURN_SHARED_SECRET: ${SELKIES_TURN_SHARED_SECRET}
-      SELKIES_TURN_HOST: ${SELKIES_TURN_HOST}
-      SELKIES_TURN_PORT: ${SELKIES_TURN_PORT}
-      SELKIES_TURN_USERNAME: ${SELKIES_TURN_USERNAME}
-      SELKIES_TURN_PASSWORD: ${SELKIES_TURN_PASSWORD}
-      SELKIES_TURN_REST_URI: ${SELKIES_TURN_REST_URI}
-      SELKIES_TURN_REST_USERNAME: ${SELKIES_TURN_REST_USERNAME}
-      SELKIES_TURN_REST_AUTHHEADER: ${SELKIES_TURN_REST_AUTHHEADER}
-      SELKIES_ENABLE_RESIZE: ${SELKIES_ENABLE_RESIZE}
+      # Streaming mode: websockets, webrtc, or both with dual mode
+      SELKIES_MODE: ${SELKIES_MODE:-websockets}
+      SELKIES_ENABLE_DUAL_MODE: ${SELKIES_ENABLE_DUAL_MODE:-false}
+      SELKIES_PORT: ${SELKIES_PORT:-8081}
+      SELKIES_ENABLE_BASIC_AUTH: ${SELKIES_ENABLE_BASIC_AUTH:-}
+      SELKIES_BASIC_AUTH_USER: ${SELKIES_BASIC_AUTH_USER:-}
+      SELKIES_BASIC_AUTH_PASSWORD: ${SELKIES_BASIC_AUTH_PASSWORD:-}
+      # Left empty, the entrypoint starts an internal coTURN for WebRTC
+      SELKIES_TURN_SHARED_SECRET: ${SELKIES_TURN_SHARED_SECRET:-}
+      SELKIES_TURN_HOST: ${SELKIES_TURN_HOST:-}
+      SELKIES_TURN_PORT: ${SELKIES_TURN_PORT:-}
+      SELKIES_TURN_USERNAME: ${SELKIES_TURN_USERNAME:-}
+      SELKIES_TURN_PASSWORD: ${SELKIES_TURN_PASSWORD:-}
+      SELKIES_TURN_REST_URI: ${SELKIES_TURN_REST_URI:-}
+      SELKIES_TURN_REST_USERNAME: ${SELKIES_TURN_REST_USERNAME:-}
+      SELKIES_TURN_REST_AUTHHEADER: ${SELKIES_TURN_REST_AUTHHEADER:-}
+      SELKIES_ENABLE_RESIZE: ${SELKIES_ENABLE_RESIZE:-}
       SELKIES_DEBUG_CURSORS: ${SELKIES_DEBUG_CURSORS:-false}
+      # Login password of the unprivileged user
+      PASSWD: ${PASSWD:-mypasswd}
       # Start a full LXQt session, vs just the display server.
       START_LXQT: ${START_LXQT:-true}
       # Use the headless Wayland backend instead of X11 (default: X11 Xvfb).
       SELKIES_WAYLAND: ${SELKIES_WAYLAND:-false}
+      # Render/encode GPU selection; empty means auto-detect
+      SELKIES_RENDER_DRI: ${SELKIES_RENDER_DRI:-}
+      DRI_NODE: ${DRI_NODE:-}
     ports:
-      - "8081:8081"
+      - "${SELKIES_PORT:-8081}:${SELKIES_PORT:-8081}"
     volumes:
       - type: bind
         source: ./src/selkies
@@ -57,5 +79,24 @@ services:
         # match when DISTRIB_IMAGE/DISTRIB_RELEASE select a different one
         target: /usr/local/lib/python${PYTHON_VERSION:-3.12}/dist-packages/selkies
         read_only: true
+    # The browsers in the image allocate their shared memory here; the 64 MB
+    # Docker default makes them abort on the first heavy page
+    shm_size: "2gb"
     stdin_open: true
     tty: true
+
+  # Same container with a GPU. NVIDIA needs the container toolkit on the host
+  # and drives OpenGL through Zink; AMD and Intel need nothing beyond the render
+  # nodes, which the display server opens directly.
+  example-gpu:
+    extends: example
+    profiles: ["gpu"]
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu", "compute", "utility", "video", "graphics", "display"]

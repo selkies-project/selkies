@@ -101,6 +101,18 @@ This section is a knowledge base for code contributions and development.
 
 - WebRTC Hacks: <https://webrtchacks.com>
 
+## Local Builds
+
+[`docker-compose.yml`](https://github.com/selkies-project/selkies/tree/main/docker-compose.yml) builds and runs everything this repository produces, with Compose V2:
+
+```bash
+docker compose build dist                    # the wheel, web client included
+docker compose up example                    # the Example Container on http://localhost:8081
+docker compose --profile gpu up example-gpu  # the same container with a GPU attached
+```
+
+`example` bind-mounts `src/selkies` over the installed package, so server-side edits take effect on a restart rather than a rebuild. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. To run a wheel built from this tree instead of the latest PyPI release, copy it out of the `selkies-py-build` image into `addons/example/wheels/` before building.
+
 ## Container Customization
 
 The reference container images (the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) and the LXQt desktop images built by CI) use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor, installed from the distribution's package registry (`s6` package): `s6-svscan /etc/service` starts one `s6-supervise` per service directory — the X11 display server (or the headless Wayland compositor), the desktop session, the audio stack (`pipewire`/`wireplumber`/`pipewire-pulse`), `dbus`, and `selkies`, restarting any that crash. Services are controlled with `s6-svc` and inspected with `s6-svstat`, the `supervisord`/`supervisorctl` equivalents, without any Python dependency (`s6-overlay` is deliberately NOT used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init or launcher).

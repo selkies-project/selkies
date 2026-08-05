@@ -23,7 +23,9 @@ fi
 gem install --no-document fpm
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
-DEB_ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')"
+# dpkg knows the Debian name for whatever this is running on, so a new
+# architecture needs no translation table here
+DEB_ARCH="$(dpkg --print-architecture)"
 mkdir -p /out
 cd /out
 fpm -s dir -t deb \

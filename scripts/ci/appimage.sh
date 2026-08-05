@@ -8,16 +8,12 @@
 # a release artifact), then assembles the AppImage with linuxdeploy and the
 # conda plugin in infra/appimage.
 #
-# Usage: scripts/ci/appimage.sh [x86_64|aarch64]
+# Usage: scripts/ci/appimage.sh [arch]   (any `uname -m` name; defaults to this host)
 
 set -eux
 
+# linuxdeploy and Miniforge both name their artifacts after `uname -m`
 ARCH="${1:-$(uname -m)}"
-case "${ARCH}" in
-  x86_64|amd64) ARCH=x86_64 ;;
-  aarch64|arm64) ARCH=aarch64 ;;
-  *) echo "unsupported architecture: ${ARCH}" >&2; exit 1 ;;
-esac
 
 cd "$(readlink -f "$(dirname "$0")")/../.."
 WORK="${PWD}/build/appimage"
@@ -140,8 +136,8 @@ ln -sf usr/share/applications/selkies.desktop AppDir/selkies.desktop
 
 mkdir -p out
 mv "${OUTPUT}" out/
-# The conda package is noarch, so one architecture's job publishes it
-if [ "${ARCH}" = "x86_64" ]; then
+# The conda package is noarch, so exactly one architecture's job publishes it
+if [ "${ARCH}" = "${CONDA_PACKAGE_ARCH:-x86_64}" ]; then
   cp "${PKG}" out/
 fi
 ls -la out/

@@ -202,7 +202,7 @@ sudo chmod 777 /dev/input/js*
 # wireplumber &
 # pipewire-pulse &
 
-# Replace this line with your desktop environment session or skip this line if already running, use VirtualGL `vglrun +wm lxqt-session` here if needed
+# Replace this line with your desktop environment session or skip this line if already running; on an NVIDIA GPU, export `MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_KOPPER_DRI2=1` beforehand to run OpenGL through the NVIDIA Vulkan driver
 # [ "${START_LXQT:-true}" = "true" ] && rm -rf ~/.config/lxqt && lxqt-session &
 
 # Replace with your wanted resolution if using without resize, DO NOT USE if there is a physical display

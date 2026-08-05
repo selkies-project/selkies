@@ -33,6 +33,16 @@ done
 [ -n "${APPDIR}" ] || { echo "usage: $0 --appdir <path>" >&2; exit 1; }
 
 DOWNLOAD_DIR="${CONDA_DOWNLOAD_DIR:-/tmp/linuxdeploy-plugin-conda-$(id -u)}"
+# conda maps CONDA_*-named environment variables onto its own configuration, and
+# `channels` is one of them: left in the environment, the solver reads the whole
+# ';'-separated list as a single channel name. pip does the same with PIP_*. Take
+# a copy and clear them before anything is invoked.
+CHANNELS="${CONDA_CHANNELS:-}"
+PACKAGES="${CONDA_PACKAGES:-}"
+PYTHON_VERSION="${CONDA_PYTHON_VERSION:-}"
+REQUIREMENTS="${PIP_REQUIREMENTS:-}"
+unset CONDA_CHANNELS CONDA_PACKAGES CONDA_PYTHON_VERSION PIP_REQUIREMENTS
+
 mkdir -p "${DOWNLOAD_DIR}" "${APPDIR}"
 # Miniforge names its installers after `uname -m`
 INSTALLER="Miniforge3-Linux-${ARCH}.sh"
@@ -50,14 +60,14 @@ export HOME
 HOME="$(readlink -f "${APPDIR}/.conda-home")"
 
 channel_args=()
-IFS=';' read -ra chans <<< "${CONDA_CHANNELS:-}"
+IFS=';' read -ra chans <<< "${CHANNELS}"
 for chan in "${chans[@]}"; do
     [ -n "${chan}" ] && channel_args+=(-c "${chan}")
 done
 
 pkgs=()
-[ -n "${CONDA_PYTHON_VERSION:-}" ] && pkgs+=("python=${CONDA_PYTHON_VERSION}")
-IFS=';' read -ra requested <<< "${CONDA_PACKAGES:-}"
+[ -n "${PYTHON_VERSION}" ] && pkgs+=("python=${PYTHON_VERSION}")
+IFS=';' read -ra requested <<< "${PACKAGES}"
 for pkg in "${requested[@]}"; do
     [ -n "${pkg}" ] && pkgs+=("${pkg}")
 done
@@ -71,9 +81,9 @@ else
     "${SOLVER}" install -y "${channel_args[@]}" "${pkgs[@]}"
 fi
 
-if [ -n "${PIP_REQUIREMENTS:-}" ]; then
+if [ -n "${REQUIREMENTS}" ]; then
     # shellcheck disable=SC2086  # the requirement list is intentionally split
-    "${PREFIX}/bin/pip" install -U ${PIP_REQUIREMENTS}
+    "${PREFIX}/bin/pip" install -U ${REQUIREMENTS}
 fi
 
 # linuxdeploy looks for the entry points in usr/bin

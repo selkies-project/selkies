@@ -1,0 +1,51 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# Every ecosystem is grouped into a single weekly pull request: this repository
+# carries five of them across a dozen manifests, and one pull request per
+# dependency would bury everything else.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The package itself and the test requirements
+  - package-ecosystem: pip
+    directories: ["/", "/tests"]
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+
+  # Web client: core, dashboard, and the Wish dashboard
+  - package-ecosystem: npm
+    directories: ["/addons/selkies-web-core", "/addons/selkies-dashboard", "/addons/selkies-dashboard-wish"]
+    schedule:
+      interval: weekly
+    groups:
+      web-client:
+        patterns: ["*"]
+
+  # Base images of the wheel builder, the devcontainer, and the published images
+  - package-ecosystem: docker
+    directories: ["/", "/.devcontainer", "/addons/coturn", "/addons/example", "/addons/turn-rest"]
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
+
+  - package-ecosystem: devcontainers
+    directories: ["/.devcontainer/ubuntu24.04-lxqt", "/.devcontainer/ubuntu26.04-lxqt"]
+    schedule:
+      interval: weekly
+    groups:
+      devcontainer-features:
+        patterns: ["*"]

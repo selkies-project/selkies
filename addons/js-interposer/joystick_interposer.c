@@ -39,6 +39,13 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <linux/input-event-codes.h>
 #include <pthread.h>
 
+/* Only glibc has separate large-file entry points. musl's off_t is always 64-bit
+ * and its headers alias the names (`#define stat64 stat`), so defining stat64()
+ * there would redefine the plain stat() interposer. */
+#if defined(_LARGEFILE64_SOURCE) && defined(__GLIBC__)
+#define SJI_LFS64 1
+#endif
+
 /* We interpose libc entry points whose `pathname` is __nonnull, but a real caller
  * can pass NULL and our `if (pathname)` guards forward it for the real EFAULT.
  * The guards are intentional, so silence the false-positive -Wnonnull-compare. */
@@ -174,7 +181,7 @@ static int (*real_access)(const char *pathname, int mode) = NULL;
 static int (*real_fstat)(int fd, struct stat *buf) = NULL;
 static int (*real_stat)(const char *pathname, struct stat *buf) = NULL;
 static int (*real_lstat)(const char *pathname, struct stat *buf) = NULL;
-#ifdef _LARGEFILE64_SOURCE
+#ifdef SJI_LFS64
 static int (*real_stat64)(const char *pathname, struct stat64 *buf) = NULL;
 static int (*real_lstat64)(const char *pathname, struct stat64 *buf) = NULL;
 static int (*real_fstat64)(int fd, struct stat64 *buf) = NULL;
@@ -688,7 +695,7 @@ static void fill_fake_stat(const char* path, struct stat *buf) {
     FILL_FAKE_STAT_FIELDS(buf, path);
 }
 
-#ifdef _LARGEFILE64_SOURCE
+#ifdef SJI_LFS64
 static void fill_fake_stat64(const char* path, struct stat64 *buf) {
     FILL_FAKE_STAT_FIELDS(buf, path);
 }
@@ -773,8 +780,9 @@ int lstat(const char *pathname, struct stat *buf) {
     return real_lstat(pathname, buf);
 }
 
-/* Helper: is this one of our interposed device paths? */
-static int is_interposed_path(const char *pathname) {
+/* Helper: is this one of our interposed device paths? Only the glibc-specific
+ * wrappers below call it, so it stays inline to keep musl builds warning-free. */
+static inline int is_interposed_path(const char *pathname) {
     if (!pathname) return 0;
     for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
         if (strcmp(pathname, interposers[i].open_dev_name) == 0) return 1;
@@ -782,7 +790,7 @@ static int is_interposed_path(const char *pathname) {
     return 0;
 }
 
-#ifdef _LARGEFILE64_SOURCE
+#ifdef SJI_LFS64
 /**
  * @brief Intercepted `stat64()` (LFS variant used by 64-bit-off_t callers).
  */
@@ -838,7 +846,7 @@ int fstat64(int fd, struct stat64 *buf) {
     pthread_mutex_unlock(&interposers_mutex);
     return real_fstat64(fd, buf);
 }
-#endif /* _LARGEFILE64_SOURCE */
+#endif /* SJI_LFS64 */
 
 #ifdef __GLIBC__
 /**

@@ -1,6 +1,10 @@
-# PASSWD holds the default login password of the unprivileged user, which is a
-# published placeholder meant to be overridden with -e, not a build secret
-# check=skip=SecretsUsedInArgOrEnv
+# check=skip=SecretsUsedInArgOrEnv,UndefinedVar
+
+# Build checks are skipped for two intentional patterns, and a parser directive
+# only counts on the first line: PASSWD is a published placeholder login
+# password meant to be overridden with -e rather than a build secret, and
+# LD_LIBRARY_PATH is extended from whatever the base image set, which is nothing
+# on the bases supported here.
 
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -174,10 +178,12 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         libgbm1 \
         libvulkan1 \
         libglu1-mesa \
-        # Inspection tools for whichever GPU is passed in
+        # VDPAU and the tools that inspect whichever GPU is passed in. The
+        # drivers themselves rather than vdpau-driver-all: that metapackage
+        # pulls the proprietary NVIDIA driver and is absent on some releases.
         vainfo \
         vdpauinfo \
-        vdpau-driver-all \
+        mesa-vdpau-drivers \
         libvdpau-va-gl1 \
         vulkan-tools \
         radeontop \
@@ -189,10 +195,20 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         python3-pip \
         coturn \
         ssl-cert && \
-    # Intel and NVIDIA userspace exists for amd64 alone
+    # The Intel media stack exists for amd64 alone
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install --no-install-recommends -y \
-            va-driver-all intel-media-va-driver intel-gpu-tools nvtop; \
+            intel-media-va-driver intel-gpu-tools; \
+    fi && \
+    # Ubuntu carries nvtop in universe, which is enabled; Debian puts it in
+    # contrib, which is not, so that component is added on the second attempt
+    if ! apt-get install --no-install-recommends -y nvtop; then \
+        if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+            sed -i 's/^Components: .*/& contrib/' /etc/apt/sources.list.d/debian.sources; \
+        elif [ -f /etc/apt/sources.list ]; then \
+            sed -i 's/ main/ main contrib/g' /etc/apt/sources.list; \
+        fi && \
+        apt-get update && apt-get install --no-install-recommends -y nvtop; \
     fi && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
