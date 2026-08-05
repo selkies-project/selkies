@@ -84,6 +84,14 @@ jobs:
     # The wheels are a dependency, not just an ordering constraint: the suites
     # run against the same master-HEAD capture stack the artifacts ship
     needs: [lint, python-compat, pixelflux-pcmflux]
+    # Stated rather than left to the default: the wheels are built on pushes
+    # only, and a skip carries down the whole chain from wherever it starts. On
+    # a pull request the suites resolve the capture stack from PyPI instead.
+    if: >-
+      ${{ !cancelled()
+          && needs.lint.result == 'success'
+          && needs.python-compat.result == 'success'
+          && contains(fromJSON('["success", "skipped"]'), needs['pixelflux-pcmflux'].result) }}
     # The browser tier runs nightly from tests.yaml; this keeps the push and
     # pull-request path at the suites that need no browser install
     permissions:

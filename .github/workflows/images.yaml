@@ -154,8 +154,12 @@ jobs:
           retention-days: 1
 
   merge:
-    name: Merge multi-arch manifests
+    name: Merge multi-arch manifests (${{ matrix.flavor }})
     needs: build
+    # Stated rather than left to the default: `wheel` is skipped whenever the
+    # caller supplies the artifact, and the images stay untagged if that skip
+    # carries down the chain past `build`.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
