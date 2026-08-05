@@ -51,11 +51,11 @@ export PATH="${WORK}:${PATH}"
 export OUTPUT="selkies-${SELKIES_VERSION:-0.0.0}-${ARCH}.AppImage"
 # conda channels are ';'-separated; the local one is the rattler-build output
 # root, the directory holding noarch/
-export CONDA_CHANNELS="${WORK}/conda-output;conda-forge"
-export CONDA_PYTHON_VERSION="3.12"
+CONDA_CHANNELS="${WORK}/conda-output;conda-forge"
+CONDA_PYTHON_VERSION="3.12"
 # ffmpeg pinned to the LGPL-only conda-forge variant so pixelflux sees an
 # x264-free avcodec stack inside the AppImage
-export CONDA_PACKAGES="selkies;ffmpeg=*=*lgpl*;libxcb;pulseaudio;libva;libxkbcommon;zlib"
+CONDA_PACKAGES="selkies;ffmpeg=*=*lgpl*;libxcb;pulseaudio;libva;libxkbcommon;zlib"
 # Runtime dependencies with no conda-forge package. pixelflux and pcmflux come
 # from the freshly built master-HEAD wheels when CI supplies them (the AppImage
 # env always runs Python 3.12, see CONDA_PYTHON_VERSION above), else from PyPI.
@@ -68,9 +68,16 @@ for project in pixelflux pcmflux; do
   fi
   PIP_REQUIREMENTS="${PIP_REQUIREMENTS} ${wheel:-${project}}"
 done
-export PIP_REQUIREMENTS
 
-"${WORK}/linuxdeploy.AppImage" --appimage-extract-and-run \
+# conda and pip take configuration from CONDA_*/PIP_* names of their own, where a
+# ';'-separated channel list parses as one channel. These four address the plugin,
+# so they reach linuxdeploy alone and the toolchain solve below stays on
+# conda-forge.
+env CONDA_CHANNELS="${CONDA_CHANNELS}" \
+    CONDA_PYTHON_VERSION="${CONDA_PYTHON_VERSION}" \
+    CONDA_PACKAGES="${CONDA_PACKAGES}" \
+    PIP_REQUIREMENTS="${PIP_REQUIREMENTS}" \
+    "${WORK}/linuxdeploy.AppImage" --appimage-extract-and-run \
     --appdir AppDir \
     --plugin conda
 

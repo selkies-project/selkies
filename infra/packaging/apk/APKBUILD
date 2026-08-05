@@ -7,13 +7,15 @@ pkgver=0.0.0
 pkgrel=0
 pkgdesc="Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)"
 url="https://github.com/selkies-project/selkies"
-arch="x86_64 aarch64"
+arch="all"
 license="MPL-2.0"
 depends="python3 libpulse libxcb libxkbcommon libx11 libva libdrm"
 # The payload (/opt/selkies venv staged by infra/packaging/apk.sh) is packed here.
 source=""
-options="!check"
+# !fhs: the venv is self-contained under /opt, which abuild's FHS check rejects.
+options="!check !fhs"
 package() {
-    cp -r /pkg-root/opt "$pkgdir"/opt
-    cp -r /pkg-root/usr "$pkgdir"/usr
+    # abuild removes $pkgdir before package() and leaves recreating it to us
+    mkdir -p "$pkgdir"
+    cp -a /pkg-root/. "$pkgdir"/
 }
