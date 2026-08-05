@@ -133,9 +133,9 @@ const roundDownToEven = (num: number) => {
 };
 
 // Debounce function
-function debounce(func: Function, delay: number) {
-    let timeoutId: NodeJS.Timeout;
-    return function (...args: any[]) {
+function debounce(func: (...args: any[]) => void, delay: number) {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    return function (this: unknown, ...args: any[]) {
         const context = this;
         clearTimeout(timeoutId);
         timeoutId = setTimeout(() => {
@@ -183,17 +183,17 @@ export function Settings() {
     // HiDPI and UI Scaling State
     const [selectedDpi, setSelectedDpi] = useState(() => {
         // Explicit stored value diverges (wins); otherwise default to the local display scaling.
-        return parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")), 10) || deriveDpiFromDpr();
+        return parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")) ?? "", 10) || deriveDpiFromDpr();
     });
 
     // Video and Audio Settings State
     const [videoBitRate, setVideoBitRate] = useState(() => {
         // kbps on the wire and in storage.
-        const parsed = parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10);
+        const parsed = parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")) ?? "", 10);
         return !isNaN(parsed) ? parsed : DEFAULT_VIDEO_BITRATE;
     });
     const [audioBitRate, setAudioBitRate] = useState(() =>
-        parseInt(localStorage.getItem(getPrefixedKey("audio_bitrate")), 10) || DEFAULT_AUDIO_BITRATE
+        parseInt(localStorage.getItem(getPrefixedKey("audio_bitrate")) ?? "", 10) || DEFAULT_AUDIO_BITRATE
     );
     const [encoder, setEncoder] = useState(() =>
         localStorage.getItem(getPrefixedKey("encoder")) || "h264enc"
@@ -202,7 +202,7 @@ export function Settings() {
         localStorage.getItem(getPrefixedKey("encoder_rtc")) || "h264enc"
     );
     const [framerate, setFramerate] = useState(() =>
-        parseInt(localStorage.getItem(getPrefixedKey("framerate")), 10) || 60
+        parseInt(localStorage.getItem(getPrefixedKey("framerate")) ?? "", 10) || 60
     );
     const [videoCRF, setVideoCRF] = useState(() => {
         const saved = localStorage.getItem(getPrefixedKey("video_crf"));
@@ -247,16 +247,16 @@ export function Settings() {
     const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
         VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     const [jpegQuality, setJpegQuality] = useState(() =>
-        parseInt(localStorage.getItem(getPrefixedKey("jpeg_quality")), 10) || 60
+        parseInt(localStorage.getItem(getPrefixedKey("jpeg_quality")) ?? "", 10) || 60
     );
     const [paintOverJpegQuality, setPaintOverJpegQuality] = useState(() =>
-        parseInt(localStorage.getItem(getPrefixedKey("paint_over_jpeg_quality")), 10) || 90
+        parseInt(localStorage.getItem(getPrefixedKey("paint_over_jpeg_quality")) ?? "", 10) || 90
     );
     const [videoPaintoverCRF, setVideoPaintoverCRF] = useState(() =>
-        parseInt(localStorage.getItem(getPrefixedKey("video_paintover_crf")), 10) || 18
+        parseInt(localStorage.getItem(getPrefixedKey("video_paintover_crf")) ?? "", 10) || 18
     );
     const [videoPaintoverBurstFrames, setVideoPaintoverBurstFrames] = useState(() =>
-        parseInt(localStorage.getItem(getPrefixedKey("video_paintover_burst_frames")), 10) || 5
+        parseInt(localStorage.getItem(getPrefixedKey("video_paintover_burst_frames")) ?? "", 10) || 5
     );
     const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
         USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings]);
@@ -348,7 +348,7 @@ export function Settings() {
     useEffect(() => {
         if (!serverSettings) return;
 
-        const getStoredInt = (key: string) => parseInt(localStorage.getItem(getPrefixedKey(key)), 10);
+        const getStoredInt = (key: string) => parseInt(localStorage.getItem(getPrefixedKey(key)) ?? "", 10);
         const getStoredBool = (key: string, fallback = false) => {
             const v = localStorage.getItem(getPrefixedKey(key));
             return v === null ? fallback : v === 'true';
@@ -387,7 +387,7 @@ export function Settings() {
         // Clamp the CBR bitrate (kbps) to the server range
         const s_video_bitrate = serverSettings.video_bitrate;
         if (s_video_bitrate) {
-            const stored = parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10);
+            const stored = parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")) ?? "", 10);
             const final = !isNaN(stored)
                 ? Math.max(s_video_bitrate.min, Math.min(s_video_bitrate.max, stored))
                 : s_video_bitrate.default;
@@ -502,8 +502,8 @@ export function Settings() {
                 tempStream.getTracks().forEach(track => track.stop());
 
                 const devices = await navigator.mediaDevices.enumerateDevices();
-                const inputs = [];
-                const outputs = [];
+                const inputs: { deviceId: string; label: string }[] = [];
+                const outputs: { deviceId: string; label: string }[] = [];
 
                 devices.forEach((device, index) => {
                     if (!device.deviceId) return;
@@ -522,8 +522,9 @@ export function Settings() {
                 setSelectedOutputDeviceId('default');
 
             } catch (err) {
-                console.error('Error getting media devices:', err);
-                setAudioDeviceError(err.message || t('sections.audio.deviceErrorDefault', { errorName: err.name || 'unknown' }));
+                const error = err instanceof Error ? err : new Error(String(err));
+                console.error('Error getting media devices:', error);
+                setAudioDeviceError(error.message || t('sections.audio.deviceErrorDefault', { errorName: error.name || 'unknown' }));
             } finally {
                 setIsLoadingAudioDevices(false);
             }
