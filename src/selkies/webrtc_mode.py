@@ -335,6 +335,9 @@ class WebRTCService(BaseStreamingService):
             is_wayland=IS_WAYLAND,
             app_wayland_display=(getattr(self.args, "app_wayland_display", "")
                                  or getattr(self.args, "wayland_host_display", "")),
+            # Same setting as the websockets service: kernel gamepads are
+            # process-wide, so both transports must resolve them identically.
+            uinput_gamepad=getattr(self.args, "uinput_gamepad", "auto"),
             # Duck-typed layout source: send_x11_mouse offsets a secondary
             # display's coordinates by display_layouts[display_id].
             data_server_instance=self,

@@ -8,11 +8,12 @@
 set -eux
 export DEBIAN_FRONTEND=noninteractive
 apt-get clean && apt-get update
-# libxkbcommon-dev and python3-dev: the xkbcommon dependency publishes an sdist
-# only and compiles a cffi extension against the system headers
+# python3-dev and build-essential: dependencies without a wheel for this
+# distribution's Python are compiled from their sdist. libxkbcommon0 is loaded
+# with ctypes at runtime and lets mkvenv.sh's smoke test exercise that path
 apt-get install --no-install-recommends -y \
     python3 python3-venv python3-pip python3-dev \
-    libxkbcommon-dev pkg-config \
+    libxkbcommon0 pkg-config \
     ruby ruby-dev build-essential ca-certificates
 gem install --no-document fpm
 /repo/infra/packaging/mkvenv.sh

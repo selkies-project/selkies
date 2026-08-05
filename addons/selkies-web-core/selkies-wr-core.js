@@ -2193,6 +2193,7 @@ export default function webrtc() {
 						console.error('Failed to parse role verdict:', e);
 						return;
 					}
+					const isLiveRoleChange = action.startsWith('role_update,');
 					const previousSlot = clientSlot;
 					clientRole = perms.role === CLIENT_CONTROLLER ? CLIENT_CONTROLLER : CLIENT_VIEWER;
 					clientSlot = (perms.slot === null || perms.slot === undefined) ? null : perms.slot;
@@ -2201,12 +2202,14 @@ export default function webrtc() {
 					if (input) {
 						input.updateControllerSlot(clientSlot);
 						if (clientRole === CLIENT_VIEWER) input.setSharedMode(true);
-						// The slot mapping lives client-side, so polling must follow it:
-						// a revoked slot has nowhere to send reports.
-						if (input.gamepadManager) {
-							if (clientSlot === null) {
+						// Only a live slot change gates polling (websockets ROLE_UPDATE
+						// parity): the initial verdict carries slot null outside secure
+						// mode, which means "slots unmanaged", not a revoked controller,
+						// and input.controllerSlot already falls back to the player index.
+						if (isLiveRoleChange && input.gamepadManager) {
+							if (previousSlot !== null && clientSlot === null) {
 								input.gamepadManager.disable();
-							} else if (previousSlot === null && isGamepadEnabled) {
+							} else if (previousSlot === null && clientSlot !== null && isGamepadEnabled) {
 								input.gamepadManager.enable();
 							}
 						}

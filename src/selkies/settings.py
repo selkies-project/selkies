@@ -853,6 +853,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Directory to write the Selkies Joystick Interposer communication sockets to, default: /tmp, results in socket files: /tmp/selkies_js{0-3}.sock",
     },
     {
+        "name": "uinput_gamepad",
+        "type": "str",
+        "default": "auto",
+        "help": 'Register gamepads as kernel devices through /dev/uinput, which applications (Steam, Proton, in-desktop browsers) find without the Joystick Interposer or fake-udev: "auto" does so only where the interposer is not configured for the session and /dev/uinput is writable — typically a desktop host rather than a container — while "true" always attempts it and "false" never does.',
+    },
+    {
         "name": "gpu_id",
         "type": "str",
         "default": "",
@@ -969,6 +975,7 @@ class AppSettings:
     command_enabled: tuple[bool, bool]
     webrtc_pacer: tuple[bool, bool]
     uinput_mouse_socket: str
+    uinput_gamepad: str
     enable_cursors: tuple[bool, bool]
     debug_cursors: tuple[bool, bool]
     enable_resize: tuple[bool, bool]

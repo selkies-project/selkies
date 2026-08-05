@@ -89,7 +89,7 @@ The [Joystick Interposer](https://github.com/selkies-project/selkies/tree/main/a
 
 > **Note:** the `LD_PRELOAD` used here (and in [fake-udev](#fake-udev)) is a deliberate, legitimate interposition technique for redirecting device access in unprivileged environments. It is unrelated to — and distinct from — the process-global `LD_PRELOAD` anti-pattern that `pixelflux`'s multi-GPU NVENC support specifically avoids when selecting a GPU for hardware encoding.
 
-The interposer is **container-only plumbing**: it is built from source and wired automatically in the [Example Container](#example-container) and the desktop containers; on a normal desktop with direct udev/kernel input access it is neither needed nor shipped as a standalone package. For custom containers, build and install it (and [fake-udev](#fake-udev)) from the source in this repository:
+Selkies delivers gamepad input over these sockets alone and never creates a kernel input device, so an application sees a controller only when it is started with the interposer preloaded — on a bare desktop as much as inside a container. The interposer is built from source and wired automatically in the [Example Container](#example-container) and the desktop containers, and is not shipped as a standalone package; elsewhere, build and install it (and [fake-udev](#fake-udev)) from the source in this repository:
 
 ```bash
 git clone https://github.com/selkies-project/selkies.git && cd selkies
@@ -132,7 +132,28 @@ Check the following links for explanations of similar, but different attempts, f
 
 #### fake-udev
 
-The [fake-udev](https://github.com/selkies-project/selkies/tree/main/addons/fake-udev) addon provides a fake `libudev` shared library (`libudev.so.1`) designed to be used with `LD_PRELOAD`. It intercepts `libudev` calls and simulates the presence of a fixed set of virtual gamepads, so that applications which discover input devices through `libudev` (for example, via `udev_enumerate_scan_devices`) find the Selkies virtual gamepads even in containerized environments where a full udev daemon is not available. It complements the [Joystick Interposer](#joystick-interposer) and, like it, uses `LD_PRELOAD` by design.
+The [fake-udev](https://github.com/selkies-project/selkies/tree/main/addons/fake-udev) addon provides a fake `libudev` shared library (`libudev.so.1`) designed to be used with `LD_PRELOAD`. It intercepts `libudev` calls and simulates the presence of a fixed set of virtual gamepads, so that applications which discover input devices through `libudev` (for example, via `udev_enumerate_scan_devices`) find the Selkies virtual gamepads. A running udev daemon is no substitute: the pads exist only as interposer sockets, so a real `libudev` query never reports them, containerized or not. fake-udev covers discovery and the [Joystick Interposer](#joystick-interposer) covers the device itself — applications that enumerate through `libudev` need both, and, like the interposer, it uses `LD_PRELOAD` by design.
+
+#### Kernel Gamepads
+
+Where `/dev/uinput` is available — a desktop host rather than an unprivileged container — Selkies registers each gamepad slot as a real kernel device instead. Applications then enumerate it through the kernel like any USB controller, so neither the [Joystick Interposer](#joystick-interposer) nor [fake-udev](#fake-udev) is involved and nothing has to be preloaded. This is what lets Steam, Proton, and browsers running inside the remote desktop find the controller.
+
+`SELKIES_UINPUT_GAMEPAD` (`--uinput-gamepad`) selects the behavior:
+
+| Value | Behavior |
+| --- | --- |
+| `auto` (default) | Kernel devices when `/dev/uinput` is writable and the interposer is not configured for the session (`SELKIES_INTERPOSER` or `LD_PRELOAD`); the interposer sockets otherwise. |
+| `true` | Always register kernel devices. |
+| `false` | Never register kernel devices. |
+
+The kernel device is the same Xbox pad the interposer presents, with the same axis ranges, and it is created when a client's controller is associated with the slot, so an idle slot is not a phantom controller. The interposer sockets stay bound either way; avoid running an application against both backends at once, or it will see the pad twice.
+
+This needs the `uinput` module and write access to `/dev/uinput` for the account running Selkies, and read access to the created `/dev/input/event*` node for the applications:
+
+```bash
+sudo modprobe uinput
+sudo usermod -aG input "$(whoami)"
+```
 
 #### Universal Touch Gamepad
 

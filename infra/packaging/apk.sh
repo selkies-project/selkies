@@ -4,12 +4,14 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # Build selkies-<ver>-r0.apk (run inside an Alpine container)
 set -eux
-# build-base/python3-dev/libxkbcommon-dev: the xkbcommon dependency publishes an
-# sdist only and compiles a cffi extension against the system headers
+# build-base/python3-dev/linux-headers: musl has no manylinux wheels, so every
+# extension dependency is compiled here (psutil needs the kernel headers).
+# libxkbcommon is loaded with ctypes at runtime and lets mkvenv.sh's smoke test
+# exercise that path
 apk add --no-cache \
-    abuild build-base pkgconf \
+    abuild build-base pkgconf linux-headers \
     python3 python3-dev py3-pip py3-virtualenv \
-    libxkbcommon-dev ca-certificates
+    libxkbcommon ca-certificates
 /repo/infra/packaging/mkvenv.sh
 # abuild writes src/ and pkg/ next to the APKBUILD, and /repo is read-only
 rm -rf /build

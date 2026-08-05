@@ -38,7 +38,6 @@ dependencies = [
     "Pillow",
     "pixelflux",
     "pcmflux",
-    "xkbcommon",
     # PulseAudio Microphone
     "pulsectl-asyncio",
     # WebRTC

@@ -1091,6 +1091,7 @@ class DataStreamingServer(BaseStreamingService):
             wayland_socket_index=settings.wayland_socket_index,
             app_wayland_display=(settings.app_wayland_display
                                  or settings.wayland_host_display),
+            uinput_gamepad=settings.uinput_gamepad,
         )
 
         self.input_handler.on_clipboard_read = self.app.send_ws_clipboard_data

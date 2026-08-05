@@ -61,6 +61,21 @@ Copy (`Ctrl/Cmd + C`) and paste (`Ctrl/Cmd + V`) work on Chromium, Firefox, and 
 
 </details>
 
+## The gamepad shows as connected in Selkies, but Steam or a browser inside the remote desktop does not see it.
+
+<details markdown>
+  <summary>Open Answer</summary>
+
+Applications reach a Selkies gamepad in one of two ways, and only one of them is a device the kernel knows about.
+
+Where `/dev/uinput` is writable, Selkies registers a real kernel controller ([Kernel Gamepads](component.md#kernel-gamepads)) that every application enumerates normally. If nothing appears, check that the `uinput` module is loaded, that the account running Selkies can write `/dev/uinput`, and that your desktop user can read the `/dev/input/event*` node it creates — the server log names the node and warns when it is unreadable. Steam picks up the controller as a hot-plug, but a Steam that was already running when the pad first appeared may need a restart.
+
+In a container without `/dev/uinput` the [Joystick Interposer](component.md#joystick-interposer) is used instead. It presents the pad only to applications started with it preloaded, which is why Steam and in-desktop browsers cannot find it there.
+
+Also note that the browser Gamepad API only reports controllers in a [secure context](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API), so open Selkies over HTTPS or `localhost` and press a button before the pad appears at all.
+
+</details>
+
 ## The web interface refuses to start up in the terminal after rebooting my computer or restarting my desktop in a standalone instance.
 
 <details markdown>

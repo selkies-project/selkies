@@ -6,11 +6,12 @@
 # container). DISTRO_TAG keeps the Fedora and EL flavors apart once the release
 # job collects every package into a single directory.
 set -eux
-# libxkbcommon-devel and python3-devel: the xkbcommon dependency publishes an
-# sdist only and compiles a cffi extension against the system headers
+# python3-devel and the compilers: dependencies without a wheel for this
+# distribution's Python are compiled from their sdist. libxkbcommon is loaded
+# with ctypes at runtime and lets mkvenv.sh's smoke test exercise that path
 dnf install -y \
     python3 python3-pip python3-devel \
-    libxkbcommon-devel pkgconf-pkg-config \
+    libxkbcommon pkgconf-pkg-config \
     ruby rubygems ruby-devel gcc gcc-c++ make rpm-build ca-certificates
 gem install --no-document fpm
 /repo/infra/packaging/mkvenv.sh

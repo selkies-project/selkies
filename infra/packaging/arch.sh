@@ -4,8 +4,9 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # Build selkies-<ver>-1-<arch>.pkg.tar.zst (run inside an Arch container)
 set -eux
-# libxkbcommon: the xkbcommon dependency publishes an sdist only and compiles a
-# cffi extension against the system headers (base-devel supplies the toolchain)
+# base-devel: dependencies without a wheel for this distribution's Python are
+# compiled from their sdist. libxkbcommon is loaded with ctypes at runtime and
+# lets mkvenv.sh's smoke test exercise that path
 pacman -Syu --noconfirm --needed python python-pip base-devel libxkbcommon sudo
 /repo/infra/packaging/mkvenv.sh
 # makepkg writes src/ and pkg/ next to the PKGBUILD, and /repo is read-only

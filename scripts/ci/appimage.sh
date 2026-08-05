@@ -67,7 +67,7 @@ export CONDA_PACKAGES="selkies;ffmpeg=*=*lgpl*;libxcb;pulseaudio;libva;libxkbcom
 # Runtime dependencies with no conda-forge package. pixelflux and pcmflux come
 # from the freshly built master-HEAD wheels when CI supplies them (the AppImage
 # env always runs Python 3.12, see CONDA_PYTHON_VERSION above), else from PyPI.
-PIP_REQUIREMENTS="xkbcommon pulsectl-asyncio aitop"
+PIP_REQUIREMENTS="pulsectl-asyncio aitop"
 for project in pixelflux pcmflux; do
   wheel=""
   if [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then

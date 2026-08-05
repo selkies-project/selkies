@@ -195,6 +195,7 @@ The table below lists all available server settings.
 | `SELKIES_AUDIO_ENABLED` | `--audio-enabled` | `True` | Enable server-to-client audio streaming. |
 | `SELKIES_MICROPHONE_ENABLED` | `--microphone-enabled` | `True` | Enable client-to-server microphone forwarding. |
 | `SELKIES_GAMEPAD_ENABLED` | `--gamepad-enabled` | `True` | Enable gamepad support. |
+| `SELKIES_UINPUT_GAMEPAD` | `--uinput-gamepad` | `'auto'` | Register gamepads as kernel devices through `/dev/uinput`, which applications find without the Joystick Interposer or fake-udev: `auto` does so only where the interposer is not configured for the session and `/dev/uinput` is writable, `true` always attempts it, `false` never does. |
 | `SELKIES_ENABLE_CLIPBOARD` | `--enable-clipboard` | `'true'` | Clipboard policy for both transports: `true` (both directions), `in` (client-to-server only), `out` (server-to-client only), `false` (disabled). |
 | `SELKIES_COMMAND_ENABLED` | `--command-enabled` | `False` | Enable parsing of `command` websocket messages. Disabled by default for security; opt in explicitly. |
 | `SELKIES_FILE_TRANSFERS` | `--file-transfers` | `'upload,download'` | Allowed file transfer directions (comma-separated: "upload,download"). Set to "" or "none" to disable. |

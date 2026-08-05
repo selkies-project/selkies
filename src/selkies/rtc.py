@@ -1545,10 +1545,16 @@ class RTCApp:
             # Explicit stop deletes the registration before the 'closed' state
             # event can see it, so this peer's mic must be stopped here too.
             await self._stop_mic_playback_state(peer_obj.get("mic_state"))
-            try:
-                del self.peer_connections[client_peer_id]
-            except KeyError:
-                pass
+            removed = self.peer_connections.pop(client_peer_id, None)
+            if removed is not None and self.on_peer_gone is not None:
+                # For the same reason, the input state this peer owns (gamepad
+                # associations, and the controls they hold non-neutral) is
+                # released here — SESSION_END arrives as soon as the client's
+                # signaling socket drops, long before ICE gives up on the peer.
+                try:
+                    await self.on_peer_gone(client_peer_id)
+                except Exception:
+                    logger.exception("on_peer_gone hook failed")
 
             if peer_obj.get('client_type') == ClientType.CONTROLLER:
                 display_id = peer_obj.get('display_id') or 'primary'

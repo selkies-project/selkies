@@ -7,7 +7,9 @@
 
 context:
   name: selkies
-  version: ${{ env.get("SELKIES_VERSION", "0.0.0") }}
+  # env.get takes no default and raises when the variable is unset, and CI sets
+  # SELKIES_VERSION empty for builds that carry no release version
+  version: ${{ (env.get("SELKIES_VERSION") if env.exists("SELKIES_VERSION") else "") | default("0.0.0", true) }}
 
 package:
   name: ${{ name|lower }}
@@ -33,15 +35,13 @@ requirements:
     - python >=3.9
     # Mirrors [project.dependencies] in pyproject.toml; `pip install --no-deps`
     # above deliberately leaves resolution to conda. pixelflux, pcmflux,
-    # xkbcommon, pulsectl-asyncio and aitop have no conda-forge packages and
-    # are pip-installed into the environment by scripts/ci/appimage.sh.
+    # pulsectl-asyncio and aitop have no conda-forge packages and are
+    # pip-installed into the environment by scripts/ci/appimage.sh.
     - prometheus_client
     - msgpack-python
     - psutil
     - watchdog
     - pillow
-    - xkbcommon
-    - pulsectl-asyncio
     - dnspython >=2.0.0
     - ifaddr >=0.2.0
     - av

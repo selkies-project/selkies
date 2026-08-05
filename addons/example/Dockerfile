@@ -71,7 +71,6 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
         fakeroot \
         fuse \
         kmod \
-
         locales \
         ssl-cert \
         sudo \

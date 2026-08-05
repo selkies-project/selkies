@@ -18,6 +18,7 @@
 #   limitations under the License.
 
 import ctypes
+import fcntl
 import logging
 import select
 import struct
@@ -1386,6 +1387,184 @@ class GamepadMapper:
         
         return None
 
+UINPUT_PATH = "/dev/uinput"
+UINPUT_SYSFS_BASE = "/sys/devices/virtual/input"
+UINPUT_MAX_NAME_SIZE = 80
+BUS_USB = 0x03
+
+# asm-generic ioctl encoding, which is what every architecture Selkies builds for
+# (x86_64, aarch64) uses. The exotic layouts (alpha, mips, ppc, sparc) differ.
+_IOC_WRITE = 1
+_IOC_READ = 2
+_IOC_TYPESHIFT = 8
+_IOC_SIZESHIFT = 16
+_IOC_DIRSHIFT = 30
+
+
+def _uinput_ioc(direction, number, size):
+    return ((direction << _IOC_DIRSHIFT) | (ord("U") << _IOC_TYPESHIFT) |
+            number | (size << _IOC_SIZESHIFT))
+
+
+# struct uinput_setup { struct input_id id; char name[80]; __u32 ff_effects_max; }
+UINPUT_SETUP_FMT = "=HHHH80sI"
+# struct uinput_abs_setup { __u16 code; struct input_absinfo absinfo; }
+UINPUT_ABS_SETUP_FMT = "=H2x6i"
+UINPUT_SYSNAME_LEN = 64
+
+UI_DEV_CREATE = _uinput_ioc(0, 1, 0)
+UI_DEV_DESTROY = _uinput_ioc(0, 2, 0)
+UI_DEV_SETUP = _uinput_ioc(_IOC_WRITE, 3, struct.calcsize(UINPUT_SETUP_FMT))
+UI_ABS_SETUP = _uinput_ioc(_IOC_WRITE, 4, struct.calcsize(UINPUT_ABS_SETUP_FMT))
+UI_SET_EVBIT = _uinput_ioc(_IOC_WRITE, 100, 4)
+UI_SET_KEYBIT = _uinput_ioc(_IOC_WRITE, 101, 4)
+UI_SET_ABSBIT = _uinput_ioc(_IOC_WRITE, 103, 4)
+UI_GET_SYSNAME = _uinput_ioc(_IOC_READ, 44, UINPUT_SYSNAME_LEN)
+
+# (minimum, maximum, fuzz, flat, resolution) per axis, matching what the
+# interposer answers EVIOCGABS with so an application cannot tell the two
+# backends apart.
+UINPUT_ABS_INFO_DEFAULT = (ABS_MIN_VAL, ABS_MAX_VAL, 16, 128, 1)
+UINPUT_ABS_INFO = {
+    ABS_HAT0X: (ABS_HAT_MIN_VAL, ABS_HAT_MAX_VAL, 0, 0, 0),
+    ABS_HAT0Y: (ABS_HAT_MIN_VAL, ABS_HAT_MAX_VAL, 0, 0, 0),
+}
+
+LOCAL_ARCH_BITS = 64 if struct.calcsize("P") == 8 else 32
+
+
+def uinput_writable():
+    """Whether this process can create kernel input devices."""
+    try:
+        fd = os.open(UINPUT_PATH, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    os.close(fd)
+    return True
+
+
+def interposer_configured():
+    """Whether this session preloads the Joystick Interposer into applications,
+    which already delivers gamepad events without any kernel device."""
+    if os.environ.get("SELKIES_INTERPOSER"):
+        return True
+    return "selkies_joystick_interposer" in os.environ.get("LD_PRELOAD", "")
+
+
+def uinput_gamepads_enabled(mode):
+    """Resolve the uinput_gamepad setting to a decision, logging why.
+
+    'auto' makes kernel gamepads the fallback for hosts that do not preload the
+    interposer: it stays off wherever the interposer is set up, so no
+    application ever sees the same pad through both backends at once.
+    """
+    mode = str(mode or "auto").strip().lower()
+    if mode in ("false", "0", "no", "off"):
+        return False
+    forced = mode in ("true", "1", "yes", "on")
+    if not forced and mode != "auto":
+        logger_selkies_gamepad.warning(f"Unrecognized uinput_gamepad value '{mode}'; using 'auto'.")
+    if not forced and interposer_configured():
+        logger_selkies_gamepad.info(
+            "Joystick Interposer is configured for this session; kernel gamepads stay off."
+        )
+        return False
+    if not uinput_writable():
+        log = logger_selkies_gamepad.error if forced else logger_selkies_gamepad.info
+        log(
+            f"{UINPUT_PATH} is missing or not writable, so gamepads reach applications only "
+            "through the Joystick Interposer. Load the uinput module and grant this user "
+            "write access to enable kernel gamepads."
+        )
+        return False
+    return True
+
+
+class UInputGamepad:
+    """One slot's kernel gamepad, created through /dev/uinput.
+
+    Applications discover it as an ordinary controller, so neither the Joystick
+    Interposer nor fake-udev is involved. It carries the evdev event stream the
+    interposer socket carries, presented as the same Xbox pad.
+    """
+
+    def __init__(self, label):
+        self.label = label
+        self.fd = None
+        self.device_nodes = []
+
+    def create(self):
+        fd = os.open(UINPUT_PATH, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_ABS)
+            for code in STANDARD_XPAD_CONFIG["btn_map"]:
+                fcntl.ioctl(fd, UI_SET_KEYBIT, code)
+            for code in STANDARD_XPAD_CONFIG["axes_map"]:
+                fcntl.ioctl(fd, UI_SET_ABSBIT, code)
+                minimum, maximum, fuzz, flat, resolution = UINPUT_ABS_INFO.get(
+                    code, UINPUT_ABS_INFO_DEFAULT
+                )
+                fcntl.ioctl(fd, UI_ABS_SETUP, struct.pack(
+                    UINPUT_ABS_SETUP_FMT, code, 0, minimum, maximum, fuzz, flat, resolution
+                ))
+            fcntl.ioctl(fd, UI_DEV_SETUP, struct.pack(
+                UINPUT_SETUP_FMT,
+                BUS_USB,
+                STANDARD_XPAD_CONFIG["vendor_id"],
+                STANDARD_XPAD_CONFIG["product_id"],
+                STANDARD_XPAD_CONFIG["version"],
+                STANDARD_XPAD_CONFIG["name"].encode("utf-8")[:UINPUT_MAX_NAME_SIZE - 1],
+                0,
+            ))
+            fcntl.ioctl(fd, UI_DEV_CREATE)
+        except OSError:
+            os.close(fd)
+            raise
+        self.fd = fd
+        self.device_nodes = self._resolve_device_nodes()
+        return self.device_nodes
+
+    def _resolve_device_nodes(self):
+        """The /dev/input nodes the kernel registered for this device: event*
+        always, js* as well when joydev is loaded."""
+        buffer = bytearray(UINPUT_SYSNAME_LEN)
+        try:
+            fcntl.ioctl(self.fd, UI_GET_SYSNAME, buffer, True)
+        except OSError:
+            return []
+        sysname = bytes(buffer).split(b"\0", 1)[0].decode("utf-8", "replace")
+        if not sysname:
+            return []
+        sysdir = os.path.join(UINPUT_SYSFS_BASE, sysname)
+        try:
+            entries = os.listdir(sysdir)
+        except OSError:
+            return []
+        return sorted(
+            os.path.join("/dev/input", entry)
+            for entry in entries
+            if entry.startswith(("event", "js"))
+        )
+
+    def emit(self, ev_type, ev_code, ev_value):
+        os.write(self.fd, get_evdev_events_packed(ev_type, ev_code, ev_value, LOCAL_ARCH_BITS))
+
+    def destroy(self):
+        if self.fd is None:
+            return
+        try:
+            fcntl.ioctl(self.fd, UI_DEV_DESTROY)
+        except OSError as e:
+            logger_selkies_gamepad.warning(f"Gamepad {self.label}: could not destroy the kernel device: {e}")
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+        self.fd = None
+        self.device_nodes = []
+
+
 # Process-wide virtual gamepad instances, keyed by slot index. Apps open the
 # interposer sockets ONCE at their own startup (the .so presents them as
 # /dev/input devices), so the instances — and the bound sockets — must outlive
@@ -1398,10 +1577,16 @@ _persistent_gamepads = {}
 
 
 class SelkiesGamepad:
-    def __init__(self, js_interposer_socket_path, evdev_interposer_socket_path, loop=None):
+    def __init__(self, js_interposer_socket_path, evdev_interposer_socket_path, loop=None,
+                 uinput_enabled=False):
         self.js_sock_path = js_interposer_socket_path
         self.evdev_sock_path = evdev_interposer_socket_path
         self.loop = loop or asyncio.get_running_loop()
+
+        # Kernel device for this slot, created on first use so an unused slot is
+        # not a phantom controller in every application.
+        self.uinput_enabled = uinput_enabled
+        self.uinput = None
         
         self.mapper = None # Set by set_config
         self.config_payload_cache = None # Cache for js_config_t
@@ -1455,6 +1640,47 @@ class SelkiesGamepad:
             f"Gamepad configured. JS socket: {self.js_sock_path}, EVDEV socket: {self.evdev_sock_path}. "
             f"Using fixed config: {STANDARD_XPAD_CONFIG['name']}"
         )
+
+    def ensure_uinput(self):
+        """Bring this slot's kernel device up, once, if kernel gamepads are on.
+        A failure downgrades the slot to the interposer sockets rather than
+        killing input."""
+        if not self.uinput_enabled or self.uinput is not None:
+            return
+        device = UInputGamepad(os.path.basename(self.js_sock_path))
+        try:
+            nodes = device.create()
+        except OSError as e:
+            self.uinput_enabled = False
+            logger_selkies_gamepad.error(
+                f"Gamepad {self.js_sock_path}: could not create a kernel device ({e}); "
+                "this slot now reaches applications only through the Joystick Interposer."
+            )
+            return
+        self.uinput = device
+        logger_selkies_gamepad.info(
+            f"Gamepad {self.js_sock_path}: kernel device ready ({', '.join(nodes) or 'node path unknown'})."
+        )
+        unreadable = [node for node in nodes if not os.access(node, os.R_OK)]
+        if unreadable:
+            logger_selkies_gamepad.warning(
+                f"Gamepad {self.js_sock_path}: {', '.join(unreadable)} is not readable by this user, "
+                "so applications cannot open it. Add the account to the 'input' group."
+            )
+
+    def _emit_uinput(self, ev_type, ev_code, ev_value):
+        self.ensure_uinput()
+        if self.uinput is None:
+            return
+        try:
+            self.uinput.emit(ev_type, ev_code, ev_value)
+        except OSError as e:
+            logger_selkies_gamepad.error(
+                f"Gamepad {self.js_sock_path}: kernel device write failed ({e}); tearing it down."
+            )
+            self.uinput.destroy()
+            self.uinput = None
+            self.uinput_enabled = False
 
     def _make_interposer_config_payload(self, js_index: int, controller_config: dict) -> bytes:
         """
@@ -1812,6 +2038,7 @@ class SelkiesGamepad:
                 # Send to EVDEV clients
                 if evdev_template:
                     ev_type, ev_code, ev_value = evdev_template
+                    self._emit_uinput(ev_type, ev_code, ev_value)
                     for i, (writer, client_info) in enumerate(list(self.evdev_clients.items())):
                         if not writer.is_closing():
                             try:
@@ -1878,7 +2105,11 @@ class SelkiesGamepad:
                     logger_selkies_gamepad.info(f"Removed socket file: {sock_path}")
                 except OSError as e:
                     logger_selkies_gamepad.warning(f"Could not remove socket file {sock_path} on close: {e}")
-        
+
+        if self.uinput is not None:
+            self.uinput.destroy()
+            self.uinput = None
+
         logger_selkies_gamepad.info("Gamepad services fully closed.")
 
 
@@ -1903,6 +2134,7 @@ class WebRTCInput:
         is_wayland=False,
         wayland_socket_index=0,
         app_wayland_display="",
+        uinput_gamepad="auto",
     ):
         self.wayland_socket_index = wayland_socket_index
         # Socket of the compositor apps run under (input + clipboard target) when
@@ -1952,9 +2184,12 @@ class WebRTCInput:
         self.rtc_app = rtc_app
         self.loop = asyncio.get_running_loop()
         self.js_socket_path_prefix = js_socket_path_prefix
-        self.num_gamepads = 4 
+        self.num_gamepads = 4
         self.gamepad_instances = {}
-        self.client_gamepad_associations = {} 
+        self.client_gamepad_associations = {}
+        # Resolved once: the decision (and the reason for it) is logged at startup
+        # rather than per gamepad slot.
+        self.uinput_gamepads = uinput_gamepads_enabled(uinput_gamepad)
 
         self.clipboard_running = False
         # Serializes update_binary_clipboard_setting so its cancel+reassign of the
@@ -2324,6 +2559,10 @@ class WebRTCInput:
             "conn_id": conn_id,
         }
 
+        # Kernel device up front, so applications see a plug event before the
+        # first input rather than a controller that appears mid-press.
+        self.gamepad_instances[gamepad_idx].ensure_uinput()
+
     async def release_gamepads_for_conn(self, conn_id):
         """Disassociate (and neutralize, via reset_state) every gamepad slot whose
         association was made by this transport connection. This is the ungraceful
@@ -2450,7 +2689,10 @@ class WebRTCInput:
             js_ip_sock_path = os.path.join(self.js_socket_path_prefix, f"selkies_js{i}.sock")
             evdev_ip_sock_path = os.path.join(self.js_socket_path_prefix, f"selkies_event{1000+i}.sock")
 
-            gamepad = SelkiesGamepad(js_ip_sock_path, evdev_ip_sock_path, self.loop)
+            gamepad = SelkiesGamepad(
+                js_ip_sock_path, evdev_ip_sock_path, self.loop,
+                uinput_enabled=self.uinput_gamepads,
+            )
 
             # Use standardized name and capabilities from STANDARD_XPAD_CONFIG
             gamepad_name_for_interposer = STANDARD_XPAD_CONFIG.get("name", f"Selkies Virtual Gamepad {i}")
