@@ -7,7 +7,7 @@
 # pre-published images are consumed.
 
 # 1) Build the web client (core + dashboard + keyboard-layout DB + touch gamepad)
-FROM docker.io/library/node:22-alpine AS web-build
+FROM docker.io/library/node:25-alpine AS web-build
 
 ARG SELKIES_MODE=webrtc
 ARG SELKIES_UPLOAD_DIR=/home/ubuntu/Desktop
