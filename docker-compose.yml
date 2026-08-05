@@ -67,6 +67,11 @@ services:
       START_LXQT: ${START_LXQT:-true}
       # Use the headless Wayland backend instead of X11 (default: X11 Xvfb).
       SELKIES_WAYLAND: ${SELKIES_WAYLAND:-false}
+      # Session compositor nested in the capture compositor, supplying window
+      # management and XWayland; empty picks the installed one, "none" drops it
+      SELKIES_WAYLAND_COMPOSITOR: ${SELKIES_WAYLAND_COMPOSITOR:-}
+      # Screens the nested compositor opens; 2 for a second display
+      SELKIES_WAYLAND_OUTPUTS: ${SELKIES_WAYLAND_OUTPUTS:-2}
       # Render/encode GPU selection; empty means auto-detect
       SELKIES_RENDER_DRI: ${SELKIES_RENDER_DRI:-}
       DRI_NODE: ${DRI_NODE:-}

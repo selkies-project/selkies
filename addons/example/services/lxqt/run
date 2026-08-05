@@ -2,9 +2,68 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
-export DISPLAY="${DISPLAY:-:20}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
-# Wait for the X11 socket, then start the LXQt session on it
-until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
+until [ -f "${XDG_RUNTIME_DIR}/container-env" ]; do sleep 0.5; done
+# shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
+. "${XDG_RUNTIME_DIR}/container-env"
+shopt -s nullglob
+
+if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
+  # The session belongs to the nested compositor: it manages the windows and
+  # runs the XWayland server the LXQt components draw on. Its socket is the one
+  # the wayland service did not record as the capture compositor's, and both it
+  # and the display are discovered here — the inherited values name what a shell
+  # attached to the container should use, not what is up yet.
+  unset DISPLAY WAYLAND_DISPLAY
+  until [ -f "${XDG_RUNTIME_DIR}/selkies-capture-display" ]; do sleep 0.5; done
+  capture="$(cat "${XDG_RUNTIME_DIR}/selkies-capture-display")"
+  # Each socket sits beside a wayland-N.lock of the same stem, so only sockets
+  # count here
+  until [ -n "${WAYLAND_DISPLAY}" ]; do
+    sleep 0.5
+    for socket in "${XDG_RUNTIME_DIR}"/wayland-[0-9]*; do
+      [ -S "${socket}" ] && [ "${socket##*/}" != "${capture}" ] \
+        && WAYLAND_DISPLAY="${socket##*/}" && break
+    done
+  done
+  export WAYLAND_DISPLAY
+  # XWayland takes the first free display number, and no other X server runs on
+  # this backend
+  until [ -n "${DISPLAY}" ]; do
+    sleep 0.5
+    for socket in /tmp/.X11-unix/X[0-9]*; do
+      [ -S "${socket}" ] && DISPLAY=":${socket##*/X}" && break
+    done
+  done
+  export DISPLAY
+  # Window management belongs to the nested compositor; LXQt starting one of its
+  # own would find the selection taken and leave the session half-built
+  export WINDOW_MANAGER=/bin/true
+  # LXQt draws one desktop sized for every screen together, and sometimes anchors
+  # it on the last screen instead of at the layout origin, which leaves the
+  # screen the first display shows without a wallpaper, icons or desktop menu.
+  # Re-anchor it there, keeping its size. Only when it is misplaced: moving a
+  # desktop that is already right makes pcmanfm-qt rebuild it for nothing.
+  (
+    attempt=0
+    while [ "${attempt}" -lt 60 ]; do
+      sleep 1
+      attempt=$((attempt + 1))
+      # shellcheck disable=SC2046  # the geometry fields are deliberately split
+      set -- $(wmctrl -l -G 2>/dev/null |
+               awk '$8 ~ /^pcmanfm-desktop/ { print $1, $3, $5, $6; exit }')
+      [ -n "${1:-}" ] || continue
+      [ "$2" = "0" ] && break
+      wmctrl -i -r "$1" -e "0,0,0,$3,$4" && break
+    done
+  ) &
+else
+  export DISPLAY="${DISPLAY:-:20}"
+  until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
+fi
 rm -rf "${HOME}/.config/lxqt"
+# The panel, desktop, runner and PolicyKit agent are autostart entries carrying
+# OnlyShowIn=LXQt, and a session started outside a display manager has nobody
+# else to name the desktop
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-LXQt}"
 exec dbus-launch --exit-with-session lxqt-session

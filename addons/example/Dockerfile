@@ -12,8 +12,9 @@
 
 # Reference minimal example container for Selkies.
 #
-#   - LXQt desktop (Openbox) on X11 (Xvfb) by default; headless Wayland backend
-#     with SELKIES_WAYLAND=true
+#   - LXQt desktop on X11 (Xvfb, Openbox) by default; the same desktop on the
+#     headless Wayland backend with SELKIES_WAYLAND=true, where a nested labwc
+#     (sway on Bookworm) supplies window management and XWayland
 #   - s6 service supervision (works both as PID 1 and below a foreign init,
 #     unlike s6-overlay; no Python-based supervisor, no tini)
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) built
@@ -70,7 +71,7 @@ FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
 LABEL org.opencontainers.image.title="Selkies Example Container"
-LABEL org.opencontainers.image.description="Reference minimal Selkies container: LXQt (X11) by default, headless Wayland with SELKIES_WAYLAND=true, s6 service supervision, embedded coTURN"
+LABEL org.opencontainers.image.description="Reference minimal Selkies container: LXQt on X11 by default, the same desktop on headless Wayland with SELKIES_WAYLAND=true, s6 service supervision, embedded coTURN"
 LABEL org.opencontainers.image.source="https://github.com/selkies-project/selkies"
 LABEL org.opencontainers.image.licenses="MPL-2.0"
 
@@ -149,6 +150,13 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         libxfixes3 \
         libxtst6 \
         libxext6 \
+        # Wayland backend: pixelflux opens libwayland-server for the capture
+        # compositor, and XWayland serves the X11-only applications running
+        # under the nested session compositor installed below
+        libwayland-server0 \
+        libwayland-client0 \
+        libwayland-egl1 \
+        xwayland \
         # Audio (PipeWire with the PulseAudio interface for pcmflux)
         libpulse0 \
         pipewire \
@@ -199,6 +207,13 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install --no-install-recommends -y \
             intel-media-va-driver intel-gpu-tools; \
+    fi && \
+    # Session compositor for the Wayland backend. labwc is the Openbox-alike of
+    # the wlroots family and matches the X11 session's window manager; Debian
+    # Bookworm predates it and takes sway. Not wayfire: it demands a DRM file
+    # descriptor the nested Wayland backend has none of without a GPU.
+    if ! apt-get install --no-install-recommends -y labwc; then \
+        apt-get install --no-install-recommends -y sway; \
     fi && \
     # Ubuntu carries nvtop in universe, which is enabled; Debian puts it in
     # contrib, which is not, so that component is added on the second attempt
@@ -265,6 +280,9 @@ COPY --from=xvfb / /
 # Install the joystick interposer and fake-udev libraries (container-only)
 COPY --from=add-ons /opt/add-ons/lib/ /usr/lib/
 
+# Keeps a sway session behaving like the labwc ones; inert where labwc is used
+COPY --chown=1000:1000 addons/example/sway.conf /etc/sway/config.d/99-selkies.conf
+
 # Copy the startup scripts and s6 service definitions (same /etc/service/<svc>/run layout as runit, supervised by s6-supervise)
 COPY --chown=1000:1000 addons/example/container-entrypoint.sh /etc/container-entrypoint.sh
 COPY --chown=1000:1000 addons/example/selkies-entrypoint.sh /etc/selkies-entrypoint.sh
@@ -294,6 +312,13 @@ ENV PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/pulse/native"
 ENV DBUS_SYSTEM_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/dbus-system-bus"
 # X11 (Xvfb) by default; set to true for the headless Wayland backend
 ENV SELKIES_WAYLAND=false
+# Session compositor nested inside the Wayland capture compositor: empty picks
+# the installed one, "none" leaves applications on the capture compositor with
+# no window management and no XWayland
+ENV SELKIES_WAYLAND_COMPOSITOR=""
+# Screens the nested compositor opens. The room has to exist before a second
+# display's client connects, and the spare screen is idle until one does
+ENV SELKIES_WAYLAND_OUTPUTS=2
 # Start the LXQt session (set to false to run only the display server)
 ENV START_LXQT=true
 # Web interface port

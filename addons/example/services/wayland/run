@@ -1,0 +1,46 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
+until [ -f "${XDG_RUNTIME_DIR}/container-env" ]; do sleep 0.5; done
+# shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
+. "${XDG_RUNTIME_DIR}/container-env"
+shopt -s nullglob
+
+# Session compositor for the Wayland backend, nested inside the capture
+# compositor Selkies owns. It supplies what the capture compositor deliberately
+# does not: window management, and an XWayland server so X11-only applications
+# keep working. Applications connect to its socket, which Selkies auto-detects
+# and retargets input and clipboard to (--app-wayland-display).
+
+# Selkies is the only other compositor here, so the socket that exists before
+# this one starts is the capture socket. The name is recorded rather than
+# derived: Smithay numbers from wayland-1 and wlroots from wayland-0, so the
+# nested socket sorts FIRST and picking by order would invert the two. Each
+# socket sits beside a wayland-N.lock of the same stem, so only sockets count.
+# A restart is the exception: this compositor may have left its own socket
+# behind, so the name recorded earlier wins while it still answers.
+unset WAYLAND_DISPLAY
+recorded="$(cat "${XDG_RUNTIME_DIR}/selkies-capture-display" 2>/dev/null)"
+[ -n "${recorded}" ] && [ -S "${XDG_RUNTIME_DIR}/${recorded}" ] && WAYLAND_DISPLAY="${recorded}"
+until [ -n "${WAYLAND_DISPLAY}" ]; do
+  sleep 0.5
+  for socket in "${XDG_RUNTIME_DIR}"/wayland-[0-9]*; do
+    [ -S "${socket}" ] && WAYLAND_DISPLAY="${socket##*/}" && break
+  done
+done
+export WAYLAND_DISPLAY
+echo "${WAYLAND_DISPLAY}" > "${XDG_RUNTIME_DIR}/selkies-capture-display"
+
+export WLR_BACKENDS=wayland
+# The nested backend takes its screen count at startup and adding one later needs
+# a command from the compositor that labwc has none of, so the room for the
+# second display Selkies supports is made here. The spare screen costs nothing
+# until a client arrives for it: Selkies holds it clear of every capture output,
+# composites and encodes nothing for it, and moves it onto the second output the
+# moment that output exists.
+export WLR_WL_OUTPUTS="${SELKIES_WAYLAND_OUTPUTS:-2}"
+[ -n "${SELKIES_WAYLAND_RENDERER}" ] && export WLR_RENDERER="${SELKIES_WAYLAND_RENDERER}"
+
+exec "${SELKIES_WAYLAND_COMPOSITOR}"

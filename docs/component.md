@@ -167,6 +167,12 @@ The [Selkies Dashboard](https://github.com/selkies-project/selkies/tree/main/add
 
 The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal. The container defaults to an X11 (Xvfb) session; set `SELKIES_WAYLAND=true` to switch it to the headless Wayland backend instead.
 
+The same LXQt desktop runs on either backend. On Wayland the capture compositor Selkies owns serves Wayland clients and manages no windows, so the container nests a second compositor inside it — [labwc](https://labwc.github.io), the Openbox-alike of the wlroots family, or sway on Debian Bookworm, which predates labwc. That compositor supplies window management and an XWayland server, so X11-only applications keep working, and Selkies detects its socket and aims input and clipboard at it. `-e SELKIES_WAYLAND_COMPOSITOR=none` skips it: applications then connect to the capture compositor directly, which is leaner for a single Wayland-native application but leaves no window management, no XWayland, and no desktop session.
+
+A second display needs no configuration. The nested compositor takes its screen count at startup and cannot be given another afterwards, so it opens with room for the two displays Selkies supports. The spare screen is free until a client arrives for it: Selkies holds it clear of every capture output, composites and encodes nothing for it, and moves it onto the second display's output the moment that output exists, without ever covering what the first display shows. `-e SELKIES_WAYLAND_OUTPUTS=1` opts out.
+
+Neither applies with `SELKIES_WAYLAND_COMPOSITOR=none`: applications sit on the capture compositor itself and simply see outputs appear and disappear as Selkies creates them.
+
 Read the [Development](development.md) section for customizing this container for your own usage.
 
 Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8081** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **change `DISTRIB_RELEASE` to `24.04` or `26.04`, and replace `main` to `latest` for the latest stable release**):

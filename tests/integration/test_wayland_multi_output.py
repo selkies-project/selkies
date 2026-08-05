@@ -94,6 +94,32 @@ def main():
         except subprocess.TimeoutExpired:
             proc.kill()
 
+    # Screens the layout has no display for wait off-display rather than cover the
+    # one the primary is showing, so a session can be started with room for a
+    # second display before anyone connects to it.
+    proc = nested(socket, 2)
+    try:
+        windows = windows_after(capture, 2)
+        waiting = [w for w in windows if w[4]]
+        res.check("the spare screen waits instead of covering the primary",
+                  len(windows) >= 2 and len(waiting) == 1,
+                  f"{len(windows)} toplevel(s), {len(waiting)} waiting")
+        res.check("a new output takes the waiting screen",
+                  capture.create_output(1, 1920, 1080, 1920, 0, 1.0)
+                  and not any(w[4] for w in windows_after(capture, 2)),
+                  capture.list_windows())
+        capture.destroy_output(1)
+        time.sleep(1)
+        res.check("the screen waits again when its output goes away",
+                  sum(1 for w in capture.list_windows() if w[4]) == 1,
+                  capture.list_windows())
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
     res.summary()
     return res
 

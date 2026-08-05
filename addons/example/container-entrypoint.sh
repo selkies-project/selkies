@@ -39,8 +39,36 @@ else
   echo 'Skipping joystick interposer device files creation since /dev/input is unavailable'
 fi
 
-# Default display for the X11 backend (unused in Wayland mode)
-export DISPLAY="${DISPLAY:-:20}"
+# Backend switch. Selkies resolves SELKIES_WAYLAND first and falls back to
+# PIXELFLUX_WAYLAND, so the service set below has to follow the same order or
+# the container would start an X11 session for a Wayland capture.
+export SELKIES_WAYLAND="${SELKIES_WAYLAND:-${PIXELFLUX_WAYLAND:-false}}"
+
+# Default display for the X11 backend. In Wayland mode the session compositor's
+# XWayland server owns it instead, and takes the first free number.
+if [ "${SELKIES_WAYLAND}" = "true" ]; then
+  export DISPLAY="${DISPLAY:-:0}"
+  # Session compositor for the Wayland backend: it nests inside the capture
+  # compositor to add window management and XWayland, neither of which the
+  # capture compositor provides. "none" keeps applications on the capture
+  # compositor alone — Wayland clients only, unmanaged.
+  if [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
+    for wm in labwc sway; do
+      command -v "${wm}" >/dev/null 2>&1 && SELKIES_WAYLAND_COMPOSITOR="${wm}" && break
+    done
+  elif [ "${SELKIES_WAYLAND_COMPOSITOR}" != "none" ] && ! command -v "${SELKIES_WAYLAND_COMPOSITOR}" >/dev/null 2>&1; then
+    echo "SELKIES_WAYLAND_COMPOSITOR=${SELKIES_WAYLAND_COMPOSITOR} is not installed; applications stay on the capture compositor"
+    SELKIES_WAYLAND_COMPOSITOR=none
+  fi
+  export SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR:-none}"
+  # Toolkits that can speak both protocols prefer Wayland and keep X11 as the
+  # fallback; Selkies resolves WAYLAND_DISPLAY itself, per compositor socket.
+  export XDG_SESSION_TYPE=wayland
+  export GDK_BACKEND="${GDK_BACKEND:-wayland,x11}"
+  export MOZ_ENABLE_WAYLAND="${MOZ_ENABLE_WAYLAND:-1}"
+else
+  export DISPLAY="${DISPLAY:-:20}"
+fi
 # PipeWire-Pulse server socket path
 export PIPEWIRE_LATENCY="128/48000"
 export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR}}"
@@ -86,14 +114,25 @@ env | sort | while IFS= read -r kv; do
 done > "${ENV_FILE}"
 
 # Derive the service set from the environment toggles
-if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
-  rm -rf /etc/service/xvfb /etc/service/lxqt 2>/dev/null || sudo-root rm -rf /etc/service/xvfb /etc/service/lxqt 2>/dev/null || true
-  echo 'SELKIES_WAYLAND=true: headless Wayland compositor replaces Xvfb; no desktop session is started'
-else
-  if [ "${START_LXQT:-true}" != "true" ]; then
-    rm -rf /etc/service/lxqt 2>/dev/null || sudo-root rm -rf /etc/service/lxqt 2>/dev/null || true
+drop_service() {
+  rm -rf "/etc/service/$1" 2>/dev/null || sudo-root rm -rf "/etc/service/$1" 2>/dev/null || true
+}
+
+if [ "${SELKIES_WAYLAND}" = "true" ]; then
+  drop_service xvfb
+  if [ "${SELKIES_WAYLAND_COMPOSITOR}" = "none" ]; then
+    # No session compositor means no window management and no XWayland, so a
+    # desktop session cannot run either.
+    drop_service wayland
+    drop_service lxqt
+    echo 'Wayland backend: applications connect to the capture compositor directly; no XWayland'
+  else
+    echo "Wayland backend: ${SELKIES_WAYLAND_COMPOSITOR} nests inside the capture compositor and provides XWayland"
   fi
+else
+  drop_service wayland
 fi
+[ "${START_LXQT:-true}" = "true" ] || drop_service lxqt
 if [ "${SELKIES_ENABLE_INTERNAL_TURN}" != "true" ]; then
   rm -rf /etc/service/coturn 2>/dev/null || sudo-root rm -rf /etc/service/coturn 2>/dev/null || true
 fi
