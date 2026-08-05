@@ -40,6 +40,7 @@ let isMicrophoneActive = false;
 let isGamepadEnabled;
 let lastReceivedVideoFrameId = -1;
 let mainDecoderHasKeyframe = false;
+let forceSoftwareDecoding = false;
 let initializationComplete = false;
 // Display related resources
 let displayId = 'primary';
@@ -2219,6 +2220,9 @@ document.addEventListener('DOMContentLoaded', () => {
       codedHeight: actualCodedHeight,
       optimizeForLatency: true
     };
+    if (forceSoftwareDecoding) {
+      decoderConfig.hardwareAcceleration = 'prefer-software';
+    }
     try {
       const support = await VideoDecoder.isConfigSupported(decoderConfig);
       if (!support.supported) {
@@ -3114,6 +3118,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     codedHeight: stripeHeight,
                     optimizeForLatency: true
                 };
+                if (forceSoftwareDecoding) {
+                    decoderConfig.hardwareAcceleration = 'prefer-software';
+                }
                 vncStripeDecoders[vncStripeYStart] = {
                     decoder: newStripeDecoder,
                     pendingChunks: [],
@@ -4455,6 +4462,22 @@ function initiateFallback(error, context) {
     if (error.name === 'QuotaExceededError' || (error.message && error.message.includes('reclaimed'))) {
         console.warn(`[initiateFallback] Ignoring soft error (Context: ${context}): Codec reclaimed by browser. Waiting for tab focus to re-initialize.`);
         return; 
+    }
+    if (!isSharedMode && !forceSoftwareDecoding && !window.isFallingBack) {
+        forceSoftwareDecoding = true;
+        console.warn(`[initiateFallback] Critical decode error (Context: ${context}). Retrying with software decoding for this session before falling back.`, error);
+        if (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'x264enc' && currentEncoderMode !== 'x264enc-striped') {
+            triggerInitializeDecoder();
+        }
+        if (websocket && websocket.readyState === WebSocket.OPEN && isVideoPipelineActive) {
+            websocket.send('STOP_VIDEO');
+            setTimeout(() => {
+                if (websocket && websocket.readyState === WebSocket.OPEN) {
+                    websocket.send('START_VIDEO');
+                }
+            }, 250);
+        }
+        return;
     }
     console.error(`FATAL DECODER ERROR (Context: ${context}).`, error);
     if (window.isFallingBack) return;
