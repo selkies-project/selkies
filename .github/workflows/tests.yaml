@@ -142,10 +142,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install . -r tests/requirements.txt
           TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
-          WHEELS="$(find master-wheels -maxdepth 1 \
-              -name "*${TAG}-*manylinux*$(uname -m)*.whl" 2>/dev/null | tr '\n' ' ')"
-          if [ -n "${WHEELS}" ]; then
-            python -m pip install --force-reinstall --no-deps ${WHEELS}
+          WHEEL_GLOB="*${TAG}-*manylinux*$(uname -m)*.whl"
+          if [ -n "$(find master-wheels -maxdepth 1 -name "${WHEEL_GLOB}" 2>/dev/null)" ]; then
+            find master-wheels -maxdepth 1 -name "${WHEEL_GLOB}" -print0 \
+              | xargs -0 python -m pip install --force-reinstall --no-deps
           else
             echo 'No master-HEAD wheels in this run: the suites use the PyPI pixelflux and pcmflux'
           fi

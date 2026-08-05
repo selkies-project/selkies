@@ -99,6 +99,16 @@ mkdir -p AppDir/usr/lib
     addons/js-interposer/joystick_interposer.c -ldl -lpthread
 rm -rf "${CC_ENV}"
 
+# The floor is the whole point of compiling this with conda, and the fallback
+# above would raise it silently, so the result is checked rather than assumed
+INTERPOSER_FLOOR="$(objdump -T AppDir/usr/lib/selkies_joystick_interposer.so \
+    | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)"
+echo "interposer requires at most ${INTERPOSER_FLOOR}"
+if [ "$(printf '%s\n%s\n' "${INTERPOSER_FLOOR}" "GLIBC_2.28" | sort -uV | tail -n1)" != "GLIBC_2.28" ]; then
+    echo "interposer needs ${INTERPOSER_FLOOR}, newer than the pinned sysroot provides" >&2
+    exit 1
+fi
+
 # 4) Custom AppRun + desktop integration. No desktop session is bundled: the
 #    AppImage streams an existing X display/Xvfb or a Wayland compositor.
 mkdir -p AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/512x512/apps
