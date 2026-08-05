@@ -20,6 +20,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <fcntl.h>
 #include <string.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <sys/socket.h>
@@ -671,18 +672,31 @@ int access(const char *pathname, int mode) {
  * Since our sockets are just unix sockets, they usually return 0 or a generic ID.
  * We must forge unique IDs (Major 13 for Input) matching the virtual path indices.
  */
+/* The device index after `prefix`, or -1 when `path` is not that prefix followed
+ * by digits alone. Hand-rolled rather than sscanf: glibc 2.38 redirects sscanf to
+ * __isoc23_sscanf, and referencing that symbol would stop this library from
+ * loading on every distribution older than the one it was built on. */
+static int dev_index_after(const char *path, const char *prefix) {
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(path, prefix, prefix_len) != 0) return -1;
+    const char *digits = path + prefix_len;
+    if (*digits == '\0') return -1;
+    int index = 0;
+    for (const char *c = digits; *c != '\0'; c++) {
+        if (*c < '0' || *c > '9') return -1;
+        if (index > (INT_MAX - (*c - '0')) / 10) return -1;
+        index = index * 10 + (*c - '0');
+    }
+    return index;
+}
+
 /* Field names are identical between struct stat and struct stat64, so a single
  * macro fills either flavour without risking a layout mismatch between them. */
 #define FILL_FAKE_STAT_FIELDS(buf, path) do {                              \
     (buf)->st_mode = S_IFCHR | 0666;                                       \
-    int _dev_num = -1;                                                     \
-    if (sscanf((path), "/dev/input/event%d", &_dev_num) == 1) {            \
-        (buf)->st_rdev = makedev(13, _dev_num);                            \
-    } else if (sscanf((path), "/dev/input/js%d", &_dev_num) == 1) {        \
-        (buf)->st_rdev = makedev(13, _dev_num);                            \
-    } else {                                                               \
-        (buf)->st_rdev = makedev(13, 9999);                                \
-    }                                                                      \
+    int _dev_num = dev_index_after((path), "/dev/input/event");            \
+    if (_dev_num < 0) _dev_num = dev_index_after((path), "/dev/input/js"); \
+    (buf)->st_rdev = makedev(13, _dev_num < 0 ? 9999 : _dev_num);          \
     (buf)->st_uid = 0;                                                     \
     (buf)->st_gid = 0;                                                     \
     (buf)->st_size = 0;                                                    \

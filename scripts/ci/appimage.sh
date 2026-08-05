@@ -77,6 +77,28 @@ export PIP_REQUIREMENTS
 # Fails the build rather than shipping an AppImage that cannot start
 AppDir/usr/conda/bin/selkies --help > /dev/null
 
+# 3b) Joystick Interposer, for containers with no reachable /dev/uinput. It is
+#     compiled with the conda-forge toolchain instead of the runner's gcc: the
+#     runner links against a glibc far newer than the rest of the AppImage
+#     needs, while the sysroot pinned here keeps the library loadable on every
+#     distribution the bundled environment already runs on. The 2.28 sysroot is
+#     the oldest that still carries the kernel input headers.
+CC_ENV="${WORK}/cc-env"
+# conda names its sysroot packages after its own subdir (linux-64,
+# linux-aarch64, ...), which no `uname -m` mapping reproduces
+CONDA_SUBDIR="$(AppDir/usr/conda/bin/conda info --json \
+    | AppDir/usr/conda/bin/python -c 'import json,sys; print(json.load(sys.stdin)["platform"])')"
+AppDir/usr/conda/bin/conda create -y -p "${CC_ENV}" -c conda-forge \
+    c-compiler "sysroot_${CONDA_SUBDIR}=2.28" \
+  || AppDir/usr/conda/bin/conda create -y -p "${CC_ENV}" -c conda-forge c-compiler
+CONDA_CC="$(find "${CC_ENV}/bin" -name '*-linux-gnu-gcc' | head -n1)"
+CONDA_SYSROOT="$(find "${CC_ENV}" -maxdepth 2 -type d -name sysroot | head -n1)"
+mkdir -p AppDir/usr/lib
+"${CONDA_CC}" --sysroot="${CONDA_SYSROOT}" -shared -fPIC -O2 \
+    -o AppDir/usr/lib/selkies_joystick_interposer.so \
+    addons/js-interposer/joystick_interposer.c -ldl -lpthread
+rm -rf "${CC_ENV}"
+
 # 4) Custom AppRun + desktop integration. No desktop session is bundled: the
 #    AppImage streams an existing X display/Xvfb or a Wayland compositor.
 mkdir -p AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/512x512/apps
@@ -100,6 +122,10 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR}/pulse/native}"
 export PIPEWIRE_LATENCY="128/48000"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
+# Path to the bundled Joystick Interposer, for LD_PRELOADing into an application
+# that needs gamepads where /dev/uinput is unreachable. Deliberately not added to
+# LD_PRELOAD here: selkies itself must keep seeing the real device nodes.
+export SELKIES_INTERPOSER="${HERE}/usr/lib/selkies_joystick_interposer.so"
 
 # X11 mode streams an existing display; start a virtual one when none is up.
 # Wayland mode starts its own compositor and needs nothing here.

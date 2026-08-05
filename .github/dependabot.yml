@@ -15,14 +15,10 @@ updates:
       actions:
         patterns: ["*"]
 
-  # The package itself and the test requirements
-  - package-ecosystem: pip
-    directories: ["/", "/tests"]
-    schedule:
-      interval: weekly
-    groups:
-      python:
-        patterns: ["*"]
+  # No pip entry: every Python dependency here is a lower bound with no upper
+  # cap, so pip already installs the newest compatible release and a bump would
+  # only raise the floor. Worse, the updater ignores `requires-python`, so those
+  # bumps land on releases that no longer support the 3.9 this package supports.
 
   # Web client: core, dashboard, and the Wish dashboard
   - package-ecosystem: npm
@@ -41,9 +37,16 @@ updates:
     groups:
       base-images:
         patterns: ["*"]
+    ignore:
+      # Node majors follow the LTS cadence, not whatever tag is newest: the
+      # odd-numbered releases reach end of life within months of shipping
+      - dependency-name: "*node"
+        update-types: ["version-update:semver-major"]
 
+  # The devcontainers updater discovers `.devcontainer/**/devcontainer.json`
+  # itself; naming the per-image directories makes it report them as not found
   - package-ecosystem: devcontainers
-    directories: ["/.devcontainer/ubuntu24.04-lxqt", "/.devcontainer/ubuntu26.04-lxqt"]
+    directory: /
     schedule:
       interval: weekly
     groups:

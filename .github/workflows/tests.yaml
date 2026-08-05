@@ -32,7 +32,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
-  NODE_VERSION: "22"
+  NODE_VERSION: "24"
   E2E_DISPLAY: ":99"
 
 jobs:
