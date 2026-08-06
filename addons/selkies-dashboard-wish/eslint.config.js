@@ -11,9 +11,10 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 
 export default [
-  { ignores: ['dist'] },
+  // public/selkies-core.js is the bundled streaming core, not source.
+  { ignores: ['dist', 'public/selkies-core.js'] },
   {
-    files: ['*.config.js', 'vite.config.js'],
+    files: ['*.config.js', 'copy-*.js'],
     languageOptions: { globals: globals.node },
   },
   {

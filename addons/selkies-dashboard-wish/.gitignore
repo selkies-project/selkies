@@ -24,8 +24,8 @@ dist-ssr
 *.sln
 *.sw?
 
-# Selkies Core
-src/selkies-core.js
+# Selkies Core, copied out of selkies-web-core's build by copy-core.js
+public/selkies-core.js
 
 # Nginx theme
 nginx

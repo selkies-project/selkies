@@ -51,6 +51,8 @@ SUITES = [
     {"path": "e2e/test_gamepad_uinput.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_regressions.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["matrix", "switch", "clipboard", "pacer"]},
+    {"path": "e2e/test_software_decode.py", "tier": "e2e", "timeout": 900,
+     "selectors": ["retry", "persisted", "ladder", "healthy", "striped"]},
 
     # --- on request -------------------------------------------------------
     {"path": "perf/test_pacer.py", "tier": "perf", "timeout": 3600},

@@ -46,6 +46,8 @@ If the latency becomes higher while the screen is idle or the tab is not focused
 
 If it does not, disable all power saving or efficiency features available in the web browser. In Windows 10 or 11, try `Start > Settings > System > Power & battery > Power mode > Best performance`. Also, note that if you saturate your CPU or GPU with an application on the host, the remote desktop interface will also substantially slow down as it cannot use the CPU or GPU enough to decode the screen. Also, check for GPU driver/firmware updates in the client computer.
 
+A client whose hardware video decoder accepts the stream and then fails on it — a driver-level fault that the browser reports only once decoding has started — is switched to software decoding instead of being reloaded onto a lower-quality encoder. That costs client CPU, so the choice is remembered only for the browser build it was made on and is re-probed after a browser update; clearing the site's browser storage also resets it.
+
 However, it might be that the parameters for the transport, the video encoder (`pixelflux`), or the audio encoder (`pcmflux`) are not optimized enough. If you find that it is the case, we always welcome [contributions](development.md). If your changes show noticeably better results in the same conditions, please make a [Pull Request](https://github.com/selkies-project/selkies/pulls), or tell us about the parameters in any channel that we can reach so that we could also test.
 
 </details>

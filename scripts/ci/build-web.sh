@@ -18,11 +18,11 @@ npm_install() {
     npm install --no-audit --no-fund
 }
 
+# The core is built first: both dashboards take it, and the gamepad DB built
+# alongside it, out of its dist through their own copy-core.js/copy-jsdb.js
+# build steps, so neither carries a committed copy that can fall behind.
 (cd addons/selkies-web-core && npm_install && npm run build)
-(cd addons/selkies-dashboard \
-    && cp ../selkies-web-core/dist/selkies-core.js src/ \
-    && npm_install \
-    && SELKIES_INJECT=1 npm run build)
+(cd addons/selkies-dashboard && npm_install && SELKIES_INJECT=1 npm run build)
 
 # The Wish dashboard is an alternative front end: it is not what the wheel
 # ships, but it is built here so a break in it fails the build, and so the
@@ -32,7 +32,6 @@ npm_install() {
 mkdir -p addons/selkies-dashboard/dist/src
 cp addons/selkies-web-core/dist/selkies-core.js addons/selkies-dashboard/dist/src/
 cp addons/universal-touch-gamepad/universalTouchGamepad.js addons/selkies-dashboard/dist/src/
-cp -r addons/selkies-web-core/dist/jsdb addons/selkies-dashboard/dist/
 
 # .gitignore keeps src/selkies/selkies_web out of git; it is generated here
 rm -rf src/selkies/selkies_web

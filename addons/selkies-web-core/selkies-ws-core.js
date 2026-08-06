@@ -368,6 +368,48 @@ const safeSetItem = (key, value) => {
   }
 };
 
+// Software-decode preference. A hardware H.264 decoder can accept a config and
+// then fail at decode(), which isConfigSupported cannot predict, so the first
+// hard decoder error retries the same encoder on software before the fallback
+// ladder reloads the page and degrades the stream. The choice is remembered
+// against the user agent so a client whose hardware path is broken starts there
+// instead of paying a failed decode on every load, while a browser update
+// (which usually carries a new decoder stack) re-probes hardware.
+const SOFTWARE_DECODE_KEY = `${storageAppName}_prefer_software_decode`;
+let preferSoftwareDecode = false;
+try {
+  preferSoftwareDecode =
+    window.localStorage.getItem(SOFTWARE_DECODE_KEY) === navigator.userAgent;
+} catch (e) {
+  console.warn('Selkies: could not read the software-decode preference:', e);
+}
+// One retry per session. The rung is spent whether or not the engine honoured
+// the hint, so an engine that silently ignores it cannot loop the retry. The
+// striped modes run a decoder per stripe and they fail together, so errors that
+// were already in flight when the switch happened describe the path just torn
+// down: absorb them for a moment instead of letting them reach the ladder.
+let softwareDecodeAttempted = preferSoftwareDecode;
+let softwareDecodeSwitchedAt = Number.NEGATIVE_INFINITY;
+const SOFTWARE_DECODE_SETTLE_MS = 3000;
+const rememberSoftwareDecode = (enabled) => {
+  preferSoftwareDecode = enabled;
+  if (enabled) {
+    safeSetItem(SOFTWARE_DECODE_KEY, navigator.userAgent);
+    return;
+  }
+  try {
+    window.localStorage.removeItem(SOFTWARE_DECODE_KEY);
+  } catch (e) {
+    console.warn('Selkies: could not clear the software-decode preference:', e);
+  }
+};
+// Every VideoDecoder config goes through here so the main, stripe, SPS-driven
+// and worker decoders agree on the acceleration preference. Unset, the UA
+// default is used so a hardware decoder is picked when one works (much lower
+// CPU on power-constrained clients).
+const decoderConfigFor = (config) =>
+  preferSoftwareDecode ? { ...config, hardwareAcceleration: 'prefer-software' } : config;
+
 // Set page title
 document.title = 'Selkies';
 fetch('manifest.json')
@@ -795,10 +837,12 @@ self.onmessage = (e) => {
       dec = new VideoDecoder({ output: present, error: () => { closeDecoder(); self.postMessage({ type: 'decoderError' }); } });
       // configure() is synchronous (state becomes 'configured' immediately), so the next
       // chunk decodes without an async gap; an unsupported config surfaces via error().
-      // No hardwareAcceleration hint: use the UA default so a hardware decoder is used
-      // when available (much lower CPU on power-constrained clients); the pinned SPS
-      // level keeps the hardware path from re-initializing mid-stream.
-      dec.configure({ codec: m.codec, codedWidth: m.codedWidth, codedHeight: m.codedHeight, optimizeForLatency: true });
+      // The page owns the acceleration preference; unset, the UA default picks a
+      // hardware decoder when available (much lower CPU on power-constrained clients)
+      // and the pinned SPS level keeps it from re-initializing mid-stream.
+      const cfg = { codec: m.codec, codedWidth: m.codedWidth, codedHeight: m.codedHeight, optimizeForLatency: true };
+      if (m.software) cfg.hardwareAcceleration = 'prefer-software';
+      dec.configure(cfg);
       decNeedKey = true;   // a keyframe is required after (re)configure
     } catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); }
     return;
@@ -1126,7 +1170,7 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec) {
   // (Re)configure the worker decoder when the codec or coded dimensions change.
   if (codec !== workerDecoderCodec || w !== workerDecoderW || h !== workerDecoderH) {
     logWorkerDecoderConfig(codec, w, h);
-    try { videoWorker.postMessage({ type: 'decoderConfig', codec: codec, codedWidth: w, codedHeight: h }); }
+    try { videoWorker.postMessage({ type: 'decoderConfig', codec: codec, codedWidth: w, codedHeight: h, software: preferSoftwareDecode }); }
     catch (e) { return false; }
     workerDecoderCodec = codec; workerDecoderW = w; workerDecoderH = h;
     requestKeyframe();   // WebCodecs needs a keyframe right after (re)configure
@@ -1241,12 +1285,12 @@ const maybeReconfigureMainDecoderFromSps = (keyframeBytes) => {
   if (!spsCodec || spsCodec === configuredMainCodec) return false;
   const w = mainDecoderCodedWidth, h = mainDecoderCodedHeight;
   if (!(w > 0 && h > 0)) return false;
-  const newConfig = {
+  const newConfig = decoderConfigFor({
     codec: spsCodec,
     codedWidth: w,
     codedHeight: h,
     optimizeForLatency: true
-  };
+  });
   try {
     decoder.configure(newConfig);
     console.log(`Main VideoDecoder reconfigured from SPS: ${configuredMainCodec} -> ${spsCodec}`);
@@ -3258,14 +3302,23 @@ function initWebsockets() {
       error: (e) => initiateFallback(e, 'main_decoder'),
     });
     const dynamicCodec = getDynamicH264Codec(actualCodedWidth, actualCodedHeight, video_fullcolor, framerate);
-    const decoderConfig = {
+    const baseConfig = {
       codec: dynamicCodec,
       codedWidth: actualCodedWidth,
       codedHeight: actualCodedHeight,
       optimizeForLatency: true
     };
+    let decoderConfig = decoderConfigFor(baseConfig);
     try {
-      const support = await VideoDecoder.isConfigSupported(decoderConfig);
+      let support = await VideoDecoder.isConfigSupported(decoderConfig);
+      if (!support.supported && preferSoftwareDecode) {
+        // A remembered software preference this engine will not honour would
+        // fail on every load: drop it and probe the default path instead.
+        console.warn('Software decode is unsupported here; reverting to the default decoder path.');
+        rememberSoftwareDecode(false);
+        decoderConfig = baseConfig;
+        support = await VideoDecoder.isConfigSupported(decoderConfig);
+      }
       if (!support.supported) {
         throw new Error(`Configuration not supported: ${JSON.stringify(decoderConfig)}`);
       }
@@ -4482,12 +4535,12 @@ function initWebsockets() {
                 if (video_frame_type_byte === 0x01) {
                     dynamicCodec = codecFromKeyframe(h264Payload, dynamicCodec);
                 }
-                const decoderConfig = {
+                const decoderConfig = decoderConfigFor({
                     codec: dynamicCodec,
                     codedWidth: stripeWidth,
                     codedHeight: stripeHeight,
                     optimizeForLatency: true
-                };
+                });
                 vncStripeDecoders[vncStripeYStart] = {
                     decoder: newStripeDecoder,
                     pendingChunks: [],
@@ -5912,14 +5965,61 @@ function requestKeyframe() {
     }
 }
 
+// Rebuild every video decoder so a changed acceleration preference takes hold,
+// then resync from a fresh IDR (WebCodecs needs a keyframe after a reconfigure).
+// The main decoder is only fed in shared mode; the stripe and worker decoders
+// are rebuilt from the next keyframe by the paths that own them.
+function restartDecodersForAcceleration() {
+    workerDecoderCodec = null; workerDecoderW = 0; workerDecoderH = 0;
+    workerKeyframeCodec = null;
+    // The worker decoder was disqualified by the same broken path, so give it
+    // back its turn; a repeat failure disqualifies it again.
+    workerDecodeFailed = false;
+    if (videoWorker) {
+        try { videoWorker.postMessage({ type: 'closeDecoder' }); } catch (_) {}
+    }
+    clearAllVncStripeDecoders();
+    configuredMainCodec = null;
+    mainDecoderHasKeyframe = false;
+    if (isSharedMode) {
+        triggerInitializeDecoder();
+    } else if (decoder && decoder.state !== 'closed') {
+        try { decoder.close(); } catch (_) {}
+    }
+    lastKeyframeRequestTime = 0;
+    requestKeyframe();
+}
+
 function initiateFallback(error, context) {
     if (error.name === 'QuotaExceededError' || (error.message && error.message.includes('reclaimed'))) {
         console.warn(`[initiateFallback] Ignoring soft error (Context: ${context}): Codec reclaimed by browser. Waiting for tab focus to re-initialize.`);
-        return; 
+        return;
+    }
+    // A decoder that accepted its config and then failed is the signature of a
+    // broken hardware decode path, so retry the same encoder on software before
+    // the ladder below reloads the page and steps the stream down. jpeg mode
+    // runs no VideoDecoder, so an error there is handover noise from the stream
+    // the server has yet to stop, not a decoder the preference could repair.
+    if (!softwareDecodeAttempted && !window.isFallingBack &&
+        getStringParam('encoder', 'h264enc') !== 'jpeg') {
+        softwareDecodeAttempted = true;
+        softwareDecodeSwitchedAt = performance.now();
+        console.warn(`[initiateFallback] Decoder error (Context: ${context}); retrying on software decode.`, error);
+        rememberSoftwareDecode(true);
+        restartDecodersForAcceleration();
+        return;
+    }
+    if (performance.now() - softwareDecodeSwitchedAt < SOFTWARE_DECODE_SETTLE_MS) {
+        console.warn(`[initiateFallback] Ignoring decoder error (Context: ${context}) from the decoders the software switch replaced.`);
+        return;
     }
     console.error(`FATAL DECODER ERROR (Context: ${context}).`, error);
     if (window.isFallingBack) return;
     window.isFallingBack = true;
+    // Software decode did not rescue the stream either, so the acceleration path
+    // is not what is wrong here: forget the preference rather than leave the next
+    // load paying for software decode.
+    rememberSoftwareDecode(false);
     if (websocket && websocket.readyState === WebSocket.OPEN) {
         websocket.onclose = null;
         websocket.close();

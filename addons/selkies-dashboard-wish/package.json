@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "serve": "vite",
+    "prebuild": "node copy-core.js",
     "build": "tsc -b && vite build",
     "postbuild": "node copy-jsdb.js",
     "lint": "eslint .",
