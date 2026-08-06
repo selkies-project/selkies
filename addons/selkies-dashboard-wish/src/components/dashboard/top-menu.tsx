@@ -782,8 +782,11 @@ export function TopMenu({
                   </>
                 )}
 
-                {/* Second Screen Support (both transports run one pipeline per display) */}
-                {!isSecondaryDisplay && (
+                {/* Second Screen Support (both transports run one pipeline per display).
+                    The server rejects a secondary display when second_screen is off, so
+                    the entry follows that setting rather than offering a window it would
+                    immediately kill. */}
+                {!isSecondaryDisplay && serverSettings?.second_screen?.value && (
                   <>
                     <MenubarItem
                       onClick={handleAddScreenClick}
