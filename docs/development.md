@@ -203,7 +203,7 @@ The `integration` tier drives the server over a raw WebSocket or the kernel game
 
 Every workflow lives under [`.github/workflows`](https://github.com/selkies-project/selkies/tree/main/.github/workflows):
 
-- `ci.yaml` orchestrates pushes to `main` and every pull request. It lints (Ruff, codespell, actionlint), byte-compiles the package on Python 3.9 through 3.14, then builds the wheel once and hands that single artifact to the image and package builds.
+- `ci.yaml` orchestrates pushes to `main` and every pull request. It lints (Ruff, codespell, actionlint, and ESLint plus TypeScript over the dashboards), byte-compiles the package on Python 3.9 through 3.14, then builds the wheel once and hands that single artifact to the image and package builds.
 - `build-wheel.yaml` bundles the web client with [`scripts/ci/build-web.sh`](https://github.com/selkies-project/selkies/tree/main/scripts/ci/build-web.sh), builds the wheel, and smoke-tests it in a clean virtual environment.
 - `build-pixelflux-pcmflux-wheels.yaml` builds pixelflux and pcmflux from their upstream `master` so images, packages, and AppImages ride the latest capture and audio code instead of the last PyPI release.
 - `images.yaml` publishes the multi-architecture `py-example`, `coturn`, and `turn-rest` images to ghcr.io. Each architecture builds on its own native runner and pushes by digest; a merge job assembles the manifest, so no QEMU is involved.
@@ -211,7 +211,15 @@ Every workflow lives under [`.github/workflows`](https://github.com/selkies-proj
 - `tests.yaml` runs the suites in [`tests/`](https://github.com/selkies-project/selkies/tree/main/tests). `ci.yaml` calls it for the `unit` and `integration` tiers on every push and pull request, and it runs the browser tier nightly and on demand.
 - `release.yaml` is the maintainer entry point described below; `docs.yaml` publishes this site; `devcontainer-feature.yaml` validates and publishes the devcontainer feature.
 
-Ruff's rule selection lives in `pyproject.toml` and codespell's exceptions in `.codespellrc`, so `ruff check` and `codespell` from the repository root reproduce the CI lint exactly.
+Ruff's rule selection lives in `pyproject.toml`, codespell's exceptions in `.codespellrc`, and each dashboard's ESLint rules in its own `eslint.config.js`, so `ruff check`, `codespell`, and [`scripts/ci/lint-web.sh`](https://github.com/selkies-project/selkies/tree/main/scripts/ci/lint-web.sh) from the repository root reproduce the CI lint exactly.
+
+The same three run as a pre-commit hook, which is the easier way to stay ahead of the lint gate:
+
+```bash
+pip install pre-commit
+pre-commit install          # once per clone
+pre-commit run --all-files  # or check the whole tree on demand
+```
 
 # Maintainer Documentation
 

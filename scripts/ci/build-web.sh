@@ -20,7 +20,7 @@ npm_install() {
 
 # The core is built first: both dashboards take it, and the gamepad DB built
 # alongside it, out of its dist through their own copy-core.js/copy-jsdb.js
-# build steps, so neither carries a committed copy that can fall behind.
+# build steps.
 (cd addons/selkies-web-core && npm_install && npm run build)
 (cd addons/selkies-dashboard && npm_install && SELKIES_INJECT=1 npm run build)
 

@@ -1,0 +1,36 @@
+# The checks the CI lint gate runs, moved ahead of the commit. One-time setup:
+#
+#     pip install pre-commit
+#     pre-commit install
+#
+# Run over the whole tree at any time with `pre-commit run --all-files`.
+#
+# The revisions here and the linter pins in .github/workflows/ci.yaml name the
+# same tools; bump them together. CI additionally runs actionlint over the
+# workflow files, which is left to CI because it needs its own download.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.1
+    hooks:
+      # Rule selection lives in pyproject.toml
+      - id: ruff-check
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      # Skip list and dictionary exceptions live in .codespellrc, and they only
+      # apply to paths codespell walks itself: given explicit filenames it would
+      # spell-check the translation catalogues and generated bundles too
+      - id: codespell
+        pass_filenames: false
+
+  - repo: local
+    hooks:
+      - id: web-lint
+        name: eslint and tsc (dashboards)
+        # The flat configs are per package and their rules read across files, so
+        # each package is linted whole rather than by staged path
+        entry: scripts/ci/lint-web.sh
+        language: script
+        pass_filenames: false
+        files: ^addons/selkies-dashboard(-wish)?/.*\.(js|jsx|ts|tsx|json)$

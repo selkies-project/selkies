@@ -1,7 +1,7 @@
 // Prebuild: take the streaming core from selkies-web-core's build into public/,
 // which vite serves at the site root where index.html loads it from. Copied at
-// build time rather than committed so this dashboard cannot drift behind the
-// core the rest of the project ships.
+// build time so this dashboard cannot drift behind the core the rest of the
+// project ships.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

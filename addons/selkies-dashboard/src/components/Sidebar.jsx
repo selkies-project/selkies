@@ -5,7 +5,7 @@
  */
 
 // src/components/Sidebar.jsx
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { displayLabel } from "../../../selkies-web-core/lib/util.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
@@ -69,6 +69,29 @@ const dpiScalingOptions = [
   { label: "275%", value: 264 },
   { label: "300%", value: 288 },
 ];
+// Browser language, form factor and display density are fixed for the life of
+// the document, so they are resolved once here and are available to the first
+// render: a phone gets the mobile layout without a repaint.
+const BROWSER_PRIMARY_LANG = (
+  (typeof navigator !== "undefined" &&
+    (navigator.language || navigator.userLanguage)) || "en"
+).split("-")[0].toLowerCase();
+
+const IS_MOBILE_CLIENT =
+  typeof window !== "undefined" &&
+  !!((navigator.userAgentData && navigator.userAgentData.mobile) ||
+    /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+      navigator.userAgent
+    ));
+
+// The scaling option closest to the display's own DPI, which seeds the picker.
+const DEVICE_DPI = (() => {
+  const target = (typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1) * 96;
+  return dpiScalingOptions.reduce((prev, curr) =>
+    Math.abs(curr.value - target) < Math.abs(prev.value - target) ? curr : prev
+  ).value;
+})();
+
 const DEFAULT_SCALING_DPI = 96;
 // scaling_dpi DEFAULT synced to the local display scaling (devicePixelRatio) so the remote
 // desktop's fonts/UI match the local environment; an explicit slider value diverges (wins).
@@ -360,7 +383,7 @@ function readStreamAudioLevel(meterRef) {
 }
 
 function AppsModal({ isOpen, onClose, t }) {
-  const [appData, setAppData] = useState(null);
+  const [appData, setAppData] = useState(cachedAppData);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [fetchAttempt, setFetchAttempt] = useState(0);
@@ -402,16 +425,15 @@ function AppsModal({ isOpen, onClose, t }) {
   // and the cleanup's `active` flag suppresses any late setState.
   useEffect(() => {
     if (!isOpen || appData) return;
-    if (cachedAppData) {
-      setAppData(cachedAppData);
-      return;
-    }
     const controller = new AbortController();
     const timeoutId = window.setTimeout(
       () => controller.abort(),
       METADATA_FETCH_TIMEOUT_MS
     );
     let active = true;
+    // Not derivable during render: this is the transition into a fetch, and a
+    // Retry has to re-enter it.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsLoading(true);
     setError(null);
     (async () => {
@@ -678,7 +700,9 @@ const readStored = (key) => localStorage.getItem(getPrefixedKey(key));
 function useConditionalSetting(spec, serverSettings, ctx, deps) {
   const compute = () => resolveSpec(spec, serverSettings, ctx, readStored);
   const [value, setValue] = useState(compute);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Re-resolving writes state rather than deriving during render because the
+  // caller edits this value afterwards; deriving would discard their choice.
+  // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   useEffect(() => { setValue(compute()); }, deps);
   return [value, setValue];
 }
@@ -718,8 +742,7 @@ function Sidebar() {
     setIsOpen(!isOpen);
   };
   const isSecondaryDisplay = displayId === 'display2';
-  const [, setLangCode] = useState("en");
-  const [translator, setTranslator] = useState(() => getTranslator("en"));
+  const translator = useMemo(() => getTranslator(BROWSER_PRIMARY_LANG), []);
   useEffect(() => {
     window.postMessage({ type: 'sidebarVisibilityChanged', isOpen: isOpen }, window.location.origin);
   }, [isOpen]);
@@ -734,8 +757,8 @@ function Sidebar() {
     document.addEventListener("fullscreenchange", foldOnFullscreen);
     return () => document.removeEventListener("fullscreenchange", foldOnFullscreen);
   }, []);
-  const [currentDeviceDpi, setCurrentDeviceDpi] = useState(null);
-  const [isMobile, setIsMobile] = useState(false);
+  const currentDeviceDpi = DEVICE_DPI;
+  const isMobile = IS_MOBILE_CLIENT;
   const [isTrackpadModeActive, setIsTrackpadModeActive] = useState(false);
   const [hasDetectedTouch, setHasDetectedTouch] = useState(false);
   const [heldKeys, setHeldKeys] = useState({
@@ -748,7 +771,7 @@ function Sidebar() {
   const [isTouchGamepadSetup, setIsTouchGamepadSetup] = useState(false);
   const [availablePlacements, setAvailablePlacements] = useState(null);
   const [serverSettings, setServerSettings] = useState(null);
-  const [renderableSettings, setRenderableSettings] = useState({});
+
   const [uiTitle, setUiTitle] = useState('Selkies');
   const [uiShowLogo, setUiShowLogo] = useState(true);
 
@@ -768,8 +791,10 @@ function Sidebar() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!serverSettings) return;
+  // Which sidebar controls the server's settings allow: a pure projection of
+  // serverSettings, derived on demand.
+  const renderableSettings = useMemo(() => {
+    if (!serverSettings) return {};
 
     const newRenderable = {};
     const s = serverSettings;
@@ -844,7 +869,7 @@ function Sidebar() {
     newRenderable.fileUpload = ftSetting ? ftSetting.value.includes('upload') : true;
     newRenderable.fileDownload = ftSetting ? ftSetting.value.includes('download') : true;
 
-    setRenderableSettings(newRenderable);
+    return newRenderable;
   }, [serverSettings]);
 
   const launchWindow = (direction, screen = null) => {
@@ -912,64 +937,6 @@ function Sidebar() {
   };
 
   useEffect(() => {
-    const browserLang = navigator.language || navigator.userLanguage || "en";
-    const primaryLang = browserLang.split("-")[0].toLowerCase();
-    console.log(
-      `Dashboard: Detected browser language: ${browserLang}, using primary: ${primaryLang}`
-    );
-    setLangCode(primaryLang);
-    setTranslator(getTranslator(primaryLang));
-  }, []);
-
-  useEffect(() => {
-    const dpr = window.devicePixelRatio || 1;
-    const targetDpi = dpr * 96;
-
-    if (dpiScalingOptions && dpiScalingOptions.length > 0) {
-      const closestOption = dpiScalingOptions.reduce((prev, curr) => {
-        return Math.abs(curr.value - targetDpi) < Math.abs(prev.value - targetDpi)
-          ? curr
-          : prev;
-      });
-      setCurrentDeviceDpi(closestOption.value);
-    }
-  }, []);
-
-  useEffect(() => {
-    const mobileCheck =
-      typeof window !== "undefined" &&
-      ((navigator.userAgentData && navigator.userAgentData.mobile) ||
-        /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-          navigator.userAgent
-        ));
-    setIsMobile(!!mobileCheck);
-
-    if (mobileCheck) {
-      setSectionsOpen((prev) => ({ ...prev, gamepads: true }));
-    }
-
-    if (
-      navigator.userAgentData &&
-      navigator.userAgentData.mobile !== undefined
-    ) {
-      console.log(
-        "Dashboard: Mobile detected via userAgentData.mobile:",
-        navigator.userAgentData.mobile
-      );
-    } else if (typeof navigator.userAgent === "string") {
-      console.log(
-        "Dashboard: Mobile detected via userAgent string match:",
-        /Mobi|Android/i.test(navigator.userAgent)
-      );
-    } else {
-      console.warn(
-        "Dashboard: Mobile detection methods not fully available. Mobile status set to:",
-        !!mobileCheck
-      );
-    }
-  }, []);
-
-  useEffect(() => {
     const detectTouch = () => {
       console.log("Dashboard: First touch detected. Enabling touch-specific features.");
       setHasDetectedTouch(true);
@@ -994,6 +961,270 @@ function Sidebar() {
     };
   }, []);
 
+  const { t, raw } = translator;
+  const sendKeyEvent = (type, key, code, modifierState) => {
+    const event = new KeyboardEvent(type, {
+      key: key,
+      code: code,
+      ctrlKey: modifierState.Control,
+      altKey: modifierState.Alt,
+      metaKey: modifierState.Meta,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+  };
+  const handleHoldKeyClick = (key, code) => {
+    const isCurrentlyHeld = heldKeys[key];
+    const currentHeldCount = Object.values(heldKeys).filter(Boolean).length;
+    if (!isCurrentlyHeld && currentHeldCount === 0) {
+      window.postMessage({ type: 'setSynth', value: true }, window.location.origin);
+    } else if (isCurrentlyHeld && currentHeldCount === 1) {
+      window.postMessage({ type: 'setSynth', value: false }, window.location.origin);
+    }
+    const nextHeldState = {
+      ...heldKeys,
+      [key]: !isCurrentlyHeld,
+    };
+    setHeldKeys(nextHeldState);
+    if (isCurrentlyHeld) {
+      sendKeyEvent('keyup', key, code, nextHeldState);
+      console.log(`Dashboard: Dispatched keyup for ${key} with state:`, nextHeldState);
+    } else {
+      sendKeyEvent('keydown', key, code, nextHeldState);
+      console.log(`Dashboard: Dispatched keydown for ${key} with state:`, nextHeldState);
+    }
+  };
+  const handleOnceKeyClick = (key, code) => {
+    console.log(`Dashboard: Dispatching key press for ${key} with modifiers:`, heldKeys);
+    sendKeyEvent('keydown', key, code, heldKeys);
+    setTimeout(() => {
+      sendKeyEvent('keyup', key, code, heldKeys);
+    }, 50);
+  };
+  const toggleKeyboardButtonVisibility = () => {
+    setIsKeyboardButtonVisible(prev => !prev);
+  };
+
+  const [streamMode, setStreamMode] = useState(
+    localStorage.getItem(getPrefixedKey("stream_mode")) ||
+      (typeof window !== "undefined" && window.__SELKIES_STREAMING_MODE__) ||
+      DEFAULT_STREAM_MODE
+  );
+  const [encoderRTC, setEncoderRTC] = useState(
+    localStorage.getItem(getPrefixedKey("encoder_rtc")) || DEFAULT_WEBRTC_ENCODER
+  );
+  const [audioBitrate, setAudioBitrate] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("audio_bitrate")), 10) || DEFAULT_AUDIO_BITRATE
+  );
+  const [videoBitrate, setVideoBitrate] = useState(
+    // kbps on the wire and in storage.
+    parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10) || DEFAULT_VIDEO_BITRATE
+  );
+  const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
+  const [encoder, setEncoder] = useState(
+    localStorage.getItem(getPrefixedKey("encoder")) || DEFAULT_ENCODER
+  );
+  const [framerate, setFramerate] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("framerate")), 10) ||
+      DEFAULT_FRAMERATE
+  );
+  const [video_crf, setVideoCRF] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("video_crf")), 10) ||
+      DEFAULT_VIDEO_CRF
+  );
+  const [videoPaintoverCRF, setVideoPaintoverCRF] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("video_paintover_crf")), 10) ||
+      DEFAULT_H264_PAINTOVER_CRF
+  );
+  const [videoPaintoverBurstFrames, setVideoPaintoverBurstFrames] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("video_paintover_burst_frames")), 10) || 5
+  );
+  const [jpeg_quality, setJpegQuality] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("jpeg_quality")), 10) ||
+      DEFAULT_JPEG_QUALITY
+  );
+  const [paint_over_jpeg_quality, setPaintOverJpegQuality] = useState(
+    parseInt(localStorage.getItem(getPrefixedKey("paint_over_jpeg_quality")), 10) ||
+      DEFAULT_PAINT_OVER_JPEG_QUALITY
+  );
+  const [selectedDpi, setSelectedDpi] = useState(
+    // Explicit stored value diverges (wins); otherwise default to the local display scaling.
+    parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")), 10) || deriveDpiFromDpr()
+  );
+  const [manual_width, setManualWidth] = useState(localStorage.getItem(getPrefixedKey("manual_width")) || "");
+  const [manual_height, setManualHeight] = useState(localStorage.getItem(getPrefixedKey("manual_height")) || "");
+  const [scaleLocally, setScaleLocally] = useState(() => {
+    const saved = localStorage.getItem(getPrefixedKey("scaleLocallyManual"));
+    return saved !== null ? saved === "true" : DEFAULT_SCALE_LOCALLY;
+  });
+  // State the conditional settings read; rebuilt each render so the hooks
+  // below re-resolve against current values when their deps change.
+  const conditionalCtx = {
+    manualActive: !!readStored("manual_width") || serverSettings?.is_manual_resolution_mode?.value === true,
+    activeEncoder: (streamMode === STREAM_MODE_WEBRTC)
+      ? (readStored("encoder_rtc") || encoderRTC)
+      : (readStored("encoder") || encoder),
+    allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
+  };
+  // Each conditional setting: one hook call over a shared spec. The hook owns
+  // init + server-sync; client-driven changes (explicit toggle, or a dependency
+  // like the encoder/resolution) flow through writeConditional below, which
+  // sets state, persists, and propagates uniformly.
+  const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
+    HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [rateControlMode, setRateControlMode] = useConditionalSetting(
+    RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
+    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [videoFullColor, setVideoFullColor] = useConditionalSetting(
+    VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [use_cpu, setUseCpu] = useConditionalSetting(
+    USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
+    VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [forceAlignedResolution, setForceAlignedResolution] = useConditionalSetting(
+    FORCE_ALIGNED_RESOLUTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [use_browser_cursors, setUseBrowserCursors] = useConditionalSetting(
+    USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  // The value the core reports as actually in effect (multi-monitor forces
+  // browser cursors on); null until reported. Displayed over the stored
+  // preference so the toggle can't lie about the live state.
+  const [effectiveCursor, setEffectiveCursor] = useState(null);
+  const [antiAliasing, setAntiAliasing] = useState(() => {
+    const saved = localStorage.getItem(getPrefixedKey("antiAliasingEnabled"));
+    return saved !== null ? saved === "true" : true;
+  });
+  const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
+    const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
+    return saved !== null ? saved === 'true' : DEFAULT_ENABLE_BINARY_CLIPBOARD;
+  });
+  const [presetValue, setPresetValue] = useState("");
+  const [clientFps, setClientFps] = useState(0);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const audioMeterRef = useRef(null);
+  const [bandwidthMbps, setBandwidthMbps] = useState(0);
+  const [latencyMs, setLatencyMs] = useState(0);
+  const [cpuPercent, setCpuPercent] = useState(0);
+  const [gpuPercent, setGpuPercent] = useState(0);
+  const [sysMemPercent, setSysMemPercent] = useState(0);
+  const [gpuMemPercent, setGpuMemPercent] = useState(0);
+  const [sysMemUsed, setSysMemUsed] = useState(null);
+  const [sysMemTotal, setSysMemTotal] = useState(null);
+  const [gpuMemUsed, setGpuMemUsed] = useState(null);
+  const [gpuMemTotal, setGpuMemTotal] = useState(null);
+  const [hoveredItem, setHoveredItem] = useState(null);
+  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
+  const [isVideoActive, setIsVideoActive] = useState(true);
+  const [isAudioActive, setIsAudioActive] = useState(true);
+  const [isMicrophoneActive, setIsMicrophoneActive] = useState(false);
+  const [isGamepadEnabled, setIsGamepadEnabled] = useState(true);
+  const [dashboardClipboardContent, setDashboardClipboardContent] =
+    useState("");
+  // Large server clipboards arrive as a bounded, truncated preview; editing it
+  // would echo the cut-down text back over the real server clipboard on blur,
+  // so truncated content renders read-only.
+  const [dashboardClipboardTruncated, setDashboardClipboardTruncated] =
+    useState(false);
+  const [audioInputDevices, setAudioInputDevices] = useState([]);
+  const [audioOutputDevices, setAudioOutputDevices] = useState([]);
+  const [selectedInputDeviceId, setSelectedInputDeviceId] = useState("default");
+  const [selectedOutputDeviceId, setSelectedOutputDeviceId] =
+    useState("default");
+  const [isOutputSelectionSupported, setIsOutputSelectionSupported] =
+    useState(false);
+  const [audioDeviceError, setAudioDeviceError] = useState(null);
+  const [isLoadingAudioDevices, setIsLoadingAudioDevices] = useState(false);
+  const [gamepadStates, setGamepadStates] = useState({});
+  const [hasReceivedGamepadData, setHasReceivedGamepadData] = useState(false);
+  const [sectionsOpen, setSectionsOpen] = useState({
+    settings: false,
+    audioSettings: false,
+    screenSettings: false,
+    stats: false,
+    clipboard: false,
+    // A phone opens on the gamepads section: it is the reason to reach for the
+    // dashboard on a touch device at all.
+    gamepads: IS_MOBILE_CLIENT,
+    files: false,
+    apps: false,
+    sharing: false,
+    shortcuts: false,
+  });
+  const [notifications, setNotifications] = useState([]);
+  const notificationTimeouts = useRef({});
+  const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
+  const [isAppsModalOpen, setIsAppsModalOpen] = useState(false);
+  const [keyboardButtonPosition, setKeyboardButtonPosition] = useState({ bottom: 20, right: 20 });
+  const dragInfo = useRef({
+    isDragging: false,
+    hasDragged: false,
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    initialBottom: 0,
+    initialRight: 0,
+  });
+  // Sidebar toggle handle: vertical position as a percentage of the viewport
+  // height (a resize keeps it proportional), persisted across reloads.
+  const [toggleHandleTopPct, setToggleHandleTopPct] = useState(() => {
+    const stored = parseFloat(localStorage.getItem(getPrefixedKey("sidebarToggleTopPct")));
+    return Number.isFinite(stored) ? clampToggleHandleTopPct(stored) : 50;
+  });
+  const toggleDragInfo = useRef({
+    isDragging: false,
+    hasDragged: false,
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    initialTopPct: 50,
+    lastTopPct: 50,
+  });
+  const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
+  // Seeded for the transport in use; the server's own allowed list replaces it
+  // as soon as settings arrive.
+  const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState(
+    () => (isWebrtc ? encoderOptionsWR : encoderOptions));
+  // Audio-bitrate choices from the server's allowed enum (fallback to the local
+  // list before serverSettings); the slider below indexes into this.
+  const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v) => parseInt(v, 10))) || audioBitrateOptions;
+
+  // --- Debounce Settings ---
+  const DEBOUNCE_DELAY = 500;
+
+  // One wrapper for the component's lifetime, so a burst of slider moves
+  // coalesces into a single post.
+  const debouncedPostSetting = useMemo(
+    () => debounce((setting) => {
+      window.postMessage(
+        { type: "settings", settings: setting },
+        window.location.origin
+      );
+    }, DEBOUNCE_DELAY),
+    []
+  );
+
+  // Uniform write path for conditional settings: optimistic setState, optional
+  // persist (explicit choices pin; derived ones don't), and propagate via the
+  // spec. `io` routes the two push channels; the specs decide which to use.
+  const conditionalIo = {
+    postSetting: (obj) => debouncedPostSetting(obj),
+    postToCore: (obj) => window.postMessage(obj, window.location.origin),
+  };
+  const writeConditional = (spec, uiValue, setValue, opts = {}) => {
+    setValue(uiValue);
+    if (opts.persist) {
+      localStorage.setItem(getPrefixedKey(spec.storageKey),
+        spec.serialize ? spec.serialize(uiValue) : String(uiValue));
+    }
+    spec.propagate(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
+  };
+
+  // Seeding and re-derivation from the server's settings; both read the state
+  // declared above. The seeding writes state instead of deriving during render
+  // because every value below stays editable afterwards, with localStorage
+  // taking precedence: recomputing each render would discard the user's edits.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!serverSettings) return;
     const getStoredInt = (key) => parseInt(localStorage.getItem(getPrefixedKey(key)), 10);
@@ -1127,123 +1358,9 @@ function Sidebar() {
     if (s_ui_show_logo) {
         setUiShowLogo(s_ui_show_logo.value);
     }
-  }, [serverSettings]);
+  }, [serverSettings, debouncedPostSetting]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
-  const { t, raw } = translator;
-  const sendKeyEvent = (type, key, code, modifierState) => {
-    const event = new KeyboardEvent(type, {
-      key: key,
-      code: code,
-      ctrlKey: modifierState.Control,
-      altKey: modifierState.Alt,
-      metaKey: modifierState.Meta,
-      bubbles: true,
-      cancelable: true,
-    });
-    window.dispatchEvent(event);
-  };
-  const handleHoldKeyClick = (key, code) => {
-    const isCurrentlyHeld = heldKeys[key];
-    const currentHeldCount = Object.values(heldKeys).filter(Boolean).length;
-    if (!isCurrentlyHeld && currentHeldCount === 0) {
-      window.postMessage({ type: 'setSynth', value: true }, window.location.origin);
-    } else if (isCurrentlyHeld && currentHeldCount === 1) {
-      window.postMessage({ type: 'setSynth', value: false }, window.location.origin);
-    }
-    const nextHeldState = {
-      ...heldKeys,
-      [key]: !isCurrentlyHeld,
-    };
-    setHeldKeys(nextHeldState);
-    if (isCurrentlyHeld) {
-      sendKeyEvent('keyup', key, code, nextHeldState);
-      console.log(`Dashboard: Dispatched keyup for ${key} with state:`, nextHeldState);
-    } else {
-      sendKeyEvent('keydown', key, code, nextHeldState);
-      console.log(`Dashboard: Dispatched keydown for ${key} with state:`, nextHeldState);
-    }
-  };
-  const handleOnceKeyClick = (key, code) => {
-    console.log(`Dashboard: Dispatching key press for ${key} with modifiers:`, heldKeys);
-    sendKeyEvent('keydown', key, code, heldKeys);
-    setTimeout(() => {
-      sendKeyEvent('keyup', key, code, heldKeys);
-    }, 50);
-  };
-  const toggleKeyboardButtonVisibility = () => {
-    setIsKeyboardButtonVisible(prev => !prev);
-  };
-
-  const [streamMode, setStreamMode] = useState(
-    localStorage.getItem(getPrefixedKey("stream_mode")) ||
-      (typeof window !== "undefined" && window.__SELKIES_STREAMING_MODE__) ||
-      DEFAULT_STREAM_MODE
-  );
-  const [encoderRTC, setEncoderRTC] = useState(
-    localStorage.getItem(getPrefixedKey("encoder_rtc")) || DEFAULT_WEBRTC_ENCODER
-  );
-  const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState();
-  const [audioBitrate, setAudioBitrate] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("audio_bitrate")), 10) || DEFAULT_AUDIO_BITRATE
-  );
-  const [videoBitrate, setVideoBitrate] = useState(
-    // kbps on the wire and in storage.
-    parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10) || DEFAULT_VIDEO_BITRATE
-  );
-  const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
-  const [encoder, setEncoder] = useState(
-    localStorage.getItem(getPrefixedKey("encoder")) || DEFAULT_ENCODER
-  );
-  const [framerate, setFramerate] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("framerate")), 10) ||
-      DEFAULT_FRAMERATE
-  );
-  const [video_crf, setVideoCRF] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("video_crf")), 10) ||
-      DEFAULT_VIDEO_CRF
-  );
-  const [videoPaintoverCRF, setVideoPaintoverCRF] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("video_paintover_crf")), 10) ||
-      DEFAULT_H264_PAINTOVER_CRF
-  );
-  const [videoPaintoverBurstFrames, setVideoPaintoverBurstFrames] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("video_paintover_burst_frames")), 10) || 5
-  );
-  const [jpeg_quality, setJpegQuality] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("jpeg_quality")), 10) ||
-      DEFAULT_JPEG_QUALITY
-  );
-  const [paint_over_jpeg_quality, setPaintOverJpegQuality] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("paint_over_jpeg_quality")), 10) ||
-      DEFAULT_PAINT_OVER_JPEG_QUALITY
-  );
-  const [selectedDpi, setSelectedDpi] = useState(
-    // Explicit stored value diverges (wins); otherwise default to the local display scaling.
-    parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")), 10) || deriveDpiFromDpr()
-  );
-  const [manual_width, setManualWidth] = useState(localStorage.getItem(getPrefixedKey("manual_width")) || "");
-  const [manual_height, setManualHeight] = useState(localStorage.getItem(getPrefixedKey("manual_height")) || "");
-  const [scaleLocally, setScaleLocally] = useState(() => {
-    const saved = localStorage.getItem(getPrefixedKey("scaleLocallyManual"));
-    return saved !== null ? saved === "true" : DEFAULT_SCALE_LOCALLY;
-  });
-  // State the conditional settings read; rebuilt each render so the hooks
-  // below re-resolve against current values when their deps change.
-  const conditionalCtx = {
-    manualActive: !!readStored("manual_width") || serverSettings?.is_manual_resolution_mode?.value === true,
-    activeEncoder: (streamMode === STREAM_MODE_WEBRTC)
-      ? (readStored("encoder_rtc") || encoderRTC)
-      : (readStored("encoder") || encoder),
-    allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
-  };
-  // Each conditional setting: one hook call over a shared spec. The hook owns
-  // init + server-sync; client-driven changes (explicit toggle, or a dependency
-  // like the encoder/resolution) flow through writeConditional below, which
-  // sets state, persists, and propagates uniformly.
-  const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
-    HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-  const [rateControlMode, setRateControlMode] = useConditionalSetting(
-    RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   // The CBR dashboard default diverges from the server's own per-encoder
   // derivation (CRF for the striped/jpeg encoders), and the hook above only
   // sets local UI state: without pushing the resolved default the server
@@ -1261,147 +1378,6 @@ function Sidebar() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverSettings]);
-  const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
-    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-  const [videoFullColor, setVideoFullColor] = useConditionalSetting(
-    VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-  const [use_cpu, setUseCpu] = useConditionalSetting(
-    USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-  const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
-    VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-  const [forceAlignedResolution, setForceAlignedResolution] = useConditionalSetting(
-    FORCE_ALIGNED_RESOLUTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-  const [use_browser_cursors, setUseBrowserCursors] = useConditionalSetting(
-    USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-  // The value the core reports as actually in effect (multi-monitor forces
-  // browser cursors on); null until reported. Displayed over the stored
-  // preference so the toggle can't lie about the live state.
-  const [effectiveCursor, setEffectiveCursor] = useState(null);
-  const [antiAliasing, setAntiAliasing] = useState(() => {
-    const saved = localStorage.getItem(getPrefixedKey("antiAliasingEnabled"));
-    return saved !== null ? saved === "true" : true;
-  });
-  const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
-    const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
-    return saved !== null ? saved === 'true' : DEFAULT_ENABLE_BINARY_CLIPBOARD;
-  });
-  const [presetValue, setPresetValue] = useState("");
-  const [clientFps, setClientFps] = useState(0);
-  const [audioLevel, setAudioLevel] = useState(0);
-  const audioMeterRef = useRef(null);
-  const [bandwidthMbps, setBandwidthMbps] = useState(0);
-  const [latencyMs, setLatencyMs] = useState(0);
-  const [cpuPercent, setCpuPercent] = useState(0);
-  const [gpuPercent, setGpuPercent] = useState(0);
-  const [sysMemPercent, setSysMemPercent] = useState(0);
-  const [gpuMemPercent, setGpuMemPercent] = useState(0);
-  const [sysMemUsed, setSysMemUsed] = useState(null);
-  const [sysMemTotal, setSysMemTotal] = useState(null);
-  const [gpuMemUsed, setGpuMemUsed] = useState(null);
-  const [gpuMemTotal, setGpuMemTotal] = useState(null);
-  const [hoveredItem, setHoveredItem] = useState(null);
-  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
-  const [isVideoActive, setIsVideoActive] = useState(true);
-  const [isAudioActive, setIsAudioActive] = useState(true);
-  const [isMicrophoneActive, setIsMicrophoneActive] = useState(false);
-  const [isGamepadEnabled, setIsGamepadEnabled] = useState(true);
-  const [dashboardClipboardContent, setDashboardClipboardContent] =
-    useState("");
-  // Large server clipboards arrive as a bounded, truncated preview; editing it
-  // would echo the cut-down text back over the real server clipboard on blur,
-  // so truncated content renders read-only.
-  const [dashboardClipboardTruncated, setDashboardClipboardTruncated] =
-    useState(false);
-  const [audioInputDevices, setAudioInputDevices] = useState([]);
-  const [audioOutputDevices, setAudioOutputDevices] = useState([]);
-  const [selectedInputDeviceId, setSelectedInputDeviceId] = useState("default");
-  const [selectedOutputDeviceId, setSelectedOutputDeviceId] =
-    useState("default");
-  const [isOutputSelectionSupported, setIsOutputSelectionSupported] =
-    useState(false);
-  const [audioDeviceError, setAudioDeviceError] = useState(null);
-  const [isLoadingAudioDevices, setIsLoadingAudioDevices] = useState(false);
-  const [gamepadStates, setGamepadStates] = useState({});
-  const [hasReceivedGamepadData, setHasReceivedGamepadData] = useState(false);
-  const [sectionsOpen, setSectionsOpen] = useState({
-    settings: false,
-    audioSettings: false,
-    screenSettings: false,
-    stats: false,
-    clipboard: false,
-    gamepads: false,
-    files: false,
-    apps: false,
-    sharing: false,
-    shortcuts: false,
-  });
-  const [notifications, setNotifications] = useState([]);
-  const notificationTimeouts = useRef({});
-  const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
-  const [isAppsModalOpen, setIsAppsModalOpen] = useState(false);
-  const [keyboardButtonPosition, setKeyboardButtonPosition] = useState({ bottom: 20, right: 20 });
-  const dragInfo = useRef({
-    isDragging: false,
-    hasDragged: false,
-    pointerId: null,
-    startX: 0,
-    startY: 0,
-    initialBottom: 0,
-    initialRight: 0,
-  });
-  // Sidebar toggle handle: vertical position as a percentage of the viewport
-  // height (a resize keeps it proportional), persisted across reloads.
-  const [toggleHandleTopPct, setToggleHandleTopPct] = useState(() => {
-    const stored = parseFloat(localStorage.getItem(getPrefixedKey("sidebarToggleTopPct")));
-    return Number.isFinite(stored) ? clampToggleHandleTopPct(stored) : 50;
-  });
-  const toggleDragInfo = useRef({
-    isDragging: false,
-    hasDragged: false,
-    pointerId: null,
-    startX: 0,
-    startY: 0,
-    initialTopPct: 50,
-    lastTopPct: 50,
-  });
-  const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
-  // Audio-bitrate choices from the server's allowed enum (fallback to the local
-  // list before serverSettings); the slider below indexes into this.
-  const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v) => parseInt(v, 10))) || audioBitrateOptions;
-
-  useEffect(() => {
-    // Default encoder options; might be replaced with server sent options later
-    setDynamicEncoderOptions(isWebrtc ? encoderOptionsWR: encoderOptions);
-  }, [])
-
-  // --- Debounce Settings ---
-  const DEBOUNCE_DELAY = 500;
-
-  const debouncedPostSetting = useCallback(
-    debounce((setting) => {
-      window.postMessage(
-        { type: "settings", settings: setting },
-        window.location.origin
-      );
-    }, DEBOUNCE_DELAY),
-    []
-  );
-
-  // Uniform write path for conditional settings: optimistic setState, optional
-  // persist (explicit choices pin; derived ones don't), and propagate via the
-  // spec. `io` routes the two push channels; the specs decide which to use.
-  const conditionalIo = {
-    postSetting: (obj) => debouncedPostSetting(obj),
-    postToCore: (obj) => window.postMessage(obj, window.location.origin),
-  };
-  const writeConditional = (spec, uiValue, setValue, opts = {}) => {
-    setValue(uiValue);
-    if (opts.persist) {
-      localStorage.setItem(getPrefixedKey(spec.storageKey),
-        spec.serialize ? spec.serialize(uiValue) : String(uiValue));
-    }
-    spec.propagate(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
-  };
 
   const handleDpiScalingChange = (event) => {
     const newDpi = parseInt(event.target.value, 10);
@@ -2179,6 +2155,8 @@ function Sidebar() {
       gpuMemTotal,
       clientFps,
       audioLevel,
+      bandwidthMbps,
+      latencyMs,
     ]
   );
 
@@ -2457,6 +2435,7 @@ function Sidebar() {
     t,
     dynamicEncoderOptions,
     isOpen,
+    isWebrtc,
   ]);
 
   const gaugeSize = 80,

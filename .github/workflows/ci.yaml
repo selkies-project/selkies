@@ -27,6 +27,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
+  NODE_VERSION: "26"
   # Linters are pinned to a minor line so a new rule in a released version
   # cannot turn a green branch red without a deliberate bump here
   RUFF_VERSION: "0.16.*"
@@ -62,6 +63,26 @@ jobs:
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -color
 
+  web-lint:
+    name: Lint web client
+    # Its own job rather than a step of Lint: the npm install is the slow part
+    # and there is no reason for it to sit in front of the Python linters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          # Lockfiles are gitignored here, so the cache is keyed on the manifests
+          cache-dependency-path: |
+            addons/selkies-dashboard/package.json
+            addons/selkies-dashboard-wish/package.json
+      - name: ESLint and TypeScript
+        # Same script the pre-commit hook runs
+        run: ./scripts/ci/lint-web.sh
+
   python-compat:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -83,13 +104,14 @@ jobs:
     name: Test suites
     # The wheels are a dependency, not just an ordering constraint: the suites
     # run against the same master-HEAD capture stack the artifacts ship
-    needs: [lint, python-compat, pixelflux-pcmflux]
+    needs: [lint, web-lint, python-compat, pixelflux-pcmflux]
     # Stated rather than left to the default: the wheels are built on pushes
     # only, and a skip carries down the whole chain from wherever it starts. On
     # a pull request the suites resolve the capture stack from PyPI instead.
     if: >-
       ${{ !cancelled()
           && needs.lint.result == 'success'
+          && needs['web-lint'].result == 'success'
           && needs.python-compat.result == 'success'
           && contains(fromJSON('["success", "skipped"]'), needs['pixelflux-pcmflux'].result) }}
     # The browser tier runs nightly from tests.yaml; this keeps the push and
@@ -103,7 +125,7 @@ jobs:
 
   wheel:
     name: Build wheel
-    needs: [lint, python-compat]
+    needs: [lint, web-lint, python-compat]
     permissions:
       contents: read
     uses: ./.github/workflows/build-wheel.yaml

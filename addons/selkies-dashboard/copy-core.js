@@ -1,7 +1,6 @@
 // Prebuild: take the streaming core from selkies-web-core's build into src/,
-// which main.jsx imports and vite bundles. Copied at build time rather than
-// committed so this dashboard cannot drift behind the core the rest of the
-// project ships.
+// which main.jsx imports and vite bundles. Copied at build time so this
+// dashboard cannot drift behind the core the rest of the project ships.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
