@@ -55,12 +55,6 @@
     "typescript": "^7.0.2",
     "vite": "^8.0.11",
     "vite-plugin-minify": "^3.0.0",
-    "eslint-plugin-react": "^7.37.5",
     "shadcn": "^4.7.0"
-  },
-  "overrides": {
-    "eslint-plugin-react": {
-      "eslint": "$eslint"
-    }
   }
 }

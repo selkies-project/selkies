@@ -35,6 +35,12 @@ const urlHash = typeof window !== 'undefined' ? window.location.hash : '';
 export const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
 export const isSecondaryDisplay = displayId === 'display2';
 
+/// Viewer-designated URL modes, known before the server answers with a role. The
+/// control UI keys off this for its first render so a shared viewer never sees
+/// controls it cannot use in the gap before `clientRoleUpdate` arrives.
+export const isViewerUrlMode =
+  urlHash.toLowerCase().startsWith('#shared') || /^#player[234]$/.test(urlHash.toLowerCase());
+
 export function getStorageAppName(): string {
   if (typeof window === 'undefined') return '';
   // Origin + pathname only (NOT the full URL): a per-session ?token=... must not mint

@@ -135,10 +135,14 @@ class _WaylandKeymapOwner:
     through inject_key / set_keymap_string on the one compositor channel, so key
     ordering holds. Raises on failure so the caller can fall back."""
 
-    _OVERLAY_SLOTS = 16
-    # Past the evdev/pc105 base range; pure-Wayland clients look keycodes up in
-    # the delivered keymap, so exceeding X11's 255 ceiling is safe here.
-    _OVERLAY_BASE_KEYCODE = 257
+    # Overlay keycodes are chosen from the live keymap in _build_map rather than
+    # fixed, because they must stay under X11's 255 ceiling for XWayland apps to
+    # receive them. These bound the search.
+    _SUB256_CEILING = 256
+    # Overflow past the ceiling, appended so a layout with no room still works for
+    # Wayland clients instead of failing outright; XWayland cannot see these.
+    _OVERFLOW_BASE_KEYCODE = 257
+    _OVERFLOW_SLOTS = 64
 
     def __init__(self, wayland_input, base_keymap_text):
         if libxkb is None:
@@ -167,15 +171,37 @@ class _WaylandKeymapOwner:
                 lo = libxkb.xkb_keymap_min_keycode(km)
                 hi = libxkb.xkb_keymap_max_keycode(km)
                 syms = ctypes.POINTER(ctypes.c_uint32)()
+                # Overlay pool, gathered in this same walk. Under X11 a keycode is
+                # a byte, so XWayland clients never see anything above 255; emoji and
+                # CJK bound up there would reach Wayland apps only. The sub-256 range
+                # is nearly full on a pc105 keymap, so unbound keycodes are taken
+                # first, then ones carrying only XF86 media/browser keysyms. All the
+                # rest down there is load bearing (modifiers, F-keys, punctuation,
+                # Print) and is never touched.
+                unbound, shadowable = [], []
                 for kc in range(lo, hi + 1):
                     levels = min(4, libxkb.xkb_keymap_num_levels_for_key(km, kc, 0))
+                    seen = spare = 0
                     for level in range(levels):
                         n = libxkb.xkb_keymap_key_get_syms_by_level(
                             km, kc, 0, level, ctypes.byref(syms))
                         for i in range(n):
                             sym = syms[i]
-                            if sym and sym not in self._map:
+                            if not sym:
+                                continue
+                            seen += 1
+                            if self._VENDOR_FIRST <= sym <= self._VENDOR_LAST:
+                                spare += 1
+                            if sym not in self._map:
                                 self._map[sym] = (kc, level)
+                    if kc < self._SUB256_CEILING and kc >= max(lo, 9):
+                        if not seen:
+                            unbound.append(kc)
+                        elif seen == spare:
+                            shadowable.append(kc)
+                self._overlay_codes = unbound + shadowable + list(range(
+                    self._OVERFLOW_BASE_KEYCODE,
+                    self._OVERFLOW_BASE_KEYCODE + self._OVERFLOW_SLOTS))
             finally:
                 libxkb.xkb_keymap_unref(km)
         finally:
@@ -183,6 +209,12 @@ class _WaylandKeymapOwner:
         # Modifier keycodes for level synthesis; conventional evdev+8 fallbacks.
         self._shift_kc = self._map.get(0xFFE1, (50, 0))[0]
         self._altgr_kc = self._map.get(0xFE03, (108, 0))[0]
+
+    # XF86 vendor keysym block: media and browser keys a streamed session does not
+    # need, so their keycodes can be shadowed by the overlay. Matched numerically —
+    # a name lookup per keysym doubled the cost of building the map.
+    _VENDOR_FIRST = 0x10080000
+    _VENDOR_LAST = 0x1008FFFF
 
     def _mods_for_level(self, level):
         mods = []
@@ -198,13 +230,19 @@ class _WaylandKeymapOwner:
         base = self._base_text
         max_at = base.index("maximum = ")
         max_end = base.index(";", max_at)
+        # Only the slots actually in use are declared, and at the keycodes the pool
+        # handed out (which are mostly existing sub-256 codes being shadowed). The
+        # base's own maximum is kept: a pc105 keymap binds a couple of hundred
+        # keycodes above 255, and lowering the ceiling would drop every one of them.
+        used = sorted(self._overlay.values())
+        base_max = int(base[max_at + len("maximum = "):max_end].strip())
         parts = [base[:max_at],
-                 f"maximum = {self._OVERLAY_BASE_KEYCODE + self._OVERLAY_SLOTS}"]
+                 f"maximum = {max([base_max] + used)}"]
         rest = base[max_end:]
         kc_end = rest.index("};")
         parts.append(rest[:kc_end])
-        for i in range(self._OVERLAY_SLOTS):
-            parts.append(f"\t<UC{i + 1:02}> = {self._OVERLAY_BASE_KEYCODE + i};\n")
+        for kc in used:
+            parts.append(f"\t<UC{kc:03}> = {kc};\n")
         rest = rest[kc_end:]
         sym_at = rest.index("xkb_symbols")
         open_at = rest.index("{", sym_at)
@@ -223,75 +261,116 @@ class _WaylandKeymapOwner:
             raise RuntimeError("unbalanced xkb_symbols section")
         parts.append(rest[:close_at])
         for keysym, kc in self._overlay.items():
-            slot = kc - self._OVERLAY_BASE_KEYCODE
-            parts.append(f"\tkey <UC{slot + 1:02}> {{ [ {keysym:#x} ] }};\n")
+            parts.append(f"\tkey <UC{kc:03}> {{ [ {keysym:#x} ] }};\n")
         parts.append(rest[close_at:])
         return "".join(parts)
 
+    def _overlay_bind_many(self, keysyms):
+        """Assign overlay keycodes to every keysym not already bound, then swap the
+        keymap ONCE for the whole batch. A swap costs milliseconds on the compositor
+        thread (which also drives input and rendering), so binding a burst one at a
+        time would stall it proportionally. Returns {keysym: keycode}."""
+        held = {kc for kc, _ in self._pressed.values()}
+        out = {}
+        fresh = False
+        for keysym in dict.fromkeys(keysyms):
+            kc = self._overlay.get(keysym)
+            if kc is None:
+                if len(self._overlay) >= len(self._overlay_codes):
+                    # Recycle the oldest slot that is not held down: rebinding a
+                    # pressed keycode would make its release report a different
+                    # symbol than its press did.
+                    victim = next(
+                        (s for s in self._overlay_order if self._overlay[s] not in held),
+                        None,
+                    )
+                    if victim is None:
+                        out[keysym] = 0
+                        continue
+                    self._overlay_order.remove(victim)
+                    kc = self._overlay.pop(victim)
+                else:
+                    kc = self._overlay_codes[len(self._overlay)]
+                self._overlay[keysym] = kc
+                self._overlay_order.append(keysym)
+                held.add(kc)
+                fresh = True
+            out[keysym] = kc
+        if fresh:
+            # Both calls ride the one command channel the key events use and
+            # neither awaits a reply, so the swap is drained before the keys that
+            # need it while this loop is never blocked on the compositor. The
+            # splice hands over just the binds; the fallback rebuilds and re-sends
+            # the whole keymap text, which costs a redundant compile on the far side.
+            binds = [(kc, sym) for sym, kc in self._overlay.items()]
+            splice = getattr(self._input, "set_keymap_overlay", None)
+            if splice is not None:
+                splice(binds)
+            else:
+                self._input.set_keymap_string(self._overlay_text())
+        return out
+
     def _overlay_bind(self, keysym):
-        kc = self._overlay.get(keysym)
-        if kc is not None:
-            return kc
-        if len(self._overlay) >= self._OVERLAY_SLOTS:
-            oldest = self._overlay_order.pop(0)
-            kc = self._overlay.pop(oldest)
-        else:
-            kc = self._OVERLAY_BASE_KEYCODE + len(self._overlay)
-        self._overlay[keysym] = kc
-        self._overlay_order.append(keysym)
-        # Clients receive the new keymap before the key event that uses it
-        # (same wl_keyboard event stream), so pressing immediately is safe.
-        self._input.set_keymap_string(self._overlay_text())
-        return kc
+        return self._overlay_bind_many([keysym])[keysym]
 
-    def _bind_via_compositor(self, keysyms):
-        """Batch-resolve keysyms through the compositor's keymap policy
-        (bind_keysyms): unmapped ones are overlay-bound in ONE keymap swap.
-        Successful resolutions are cached in _map (compositor overlay binds keep
-        their keycodes across base swaps). Returns None when the API is absent,
-        else the list of (keycode, level) pairs ((0, 0) = unbindable)."""
-        binder = getattr(self._input, 'bind_keysyms', None)
-        if binder is None:
-            return None
-        pairs = binder(list(keysyms))
-        for ks, pair in zip(keysyms, pairs):
-            if pair[0]:
-                self._map[ks] = (pair[0], pair[1])
-        return pairs
+    def _tap(self, kc, mods, into=None):
+        """Momentary press+release with refcounted modifier synthesis.
 
-    def _tap(self, kc, mods):
-        """Momentary press+release with refcounted modifier synthesis."""
+        With `into`, the events are appended to that list instead of injected, so a
+        caller typing a run of characters can hand the compositor one ordered batch —
+        an event at a time costs a channel send and a calloop wake each, on the thread
+        that also renders."""
+        out = [] if into is None else into
         for m in mods:
             self._mod_refs[m] = self._mod_refs.get(m, 0) + 1
             if self._mod_refs[m] == 1:
-                self._input.inject_key(m, 1)
-        self._input.inject_key(kc, 1)
-        self._input.inject_key(kc, 0)
+                out.append((m, 1))
+        out.append((kc, 1))
+        out.append((kc, 0))
         for m in reversed(mods):
             refs = self._mod_refs.get(m, 0) - 1
             if refs <= 0:
                 self._mod_refs.pop(m, None)
-                self._input.inject_key(m, 0)
+                out.append((m, 0))
             else:
                 self._mod_refs[m] = refs
+        if into is None:
+            self._inject_run(out)
+
+    def _inject_run(self, events):
+        """Deliver an ordered run of (keycode, state) events, batched when the
+        compositor accepts a batch."""
+        if not events:
+            return
+        batch = getattr(self._input, "inject_keys", None)
+        if batch is not None:
+            batch(events)
+            return
+        for kc, state in events:
+            self._input.inject_key(kc, state)
 
     def type_text(self, text):
-        """Type text as momentary taps, resolving every missing keysym through
-        the compositor in ONE keymap swap (no per-char swap storm). Returns False
-        — having typed nothing — when a char cannot be bound or the batch API is
-        unavailable, so the caller can fall back."""
+        """Type text as momentary taps, resolving every missing keysym in ONE keymap
+        swap (no per-char swap storm) — through the compositor's batch API when it
+        offers one, else through the local overlay, which batches the same way.
+        Returns False, having typed nothing, when a char cannot be bound at all."""
         keysyms = []
         for ch in text:
             cp = ord(ch)
             keysyms.append(cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp))
         missing = [ks for ks in dict.fromkeys(keysyms) if ks not in self._map]
-        if missing:
-            pairs = self._bind_via_compositor(missing)
-            if pairs is None or any(not p[0] for p in pairs):
-                return False
+        overlay = self._overlay_bind_many(missing) if missing else {}
+        events = []
         for ks in keysyms:
-            kc, level = self._map[ks]
-            self._tap(kc, self._mods_for_level(level))
+            resolved = self._map.get(ks)
+            if resolved is not None:
+                kc, level = resolved
+            elif overlay.get(ks):
+                kc, level = overlay[ks], 0
+            else:
+                return False
+            self._tap(kc, self._mods_for_level(level), into=events)
+        self._inject_run(events)
         return True
 
     def press(self, keysym):
@@ -302,18 +381,15 @@ class _WaylandKeymapOwner:
             self._input.inject_key(held[0], 1)
             return
         resolved = self._map.get(keysym)
-        if resolved is None:
-            # Compositor-side bind first (one keymap swap, held keycodes never
-            # rebound); the legacy full-keymap-text overlay is the fallback for
-            # backends without bind_keysyms.
-            pairs = self._bind_via_compositor([keysym])
-            if pairs is not None and pairs[0][0]:
-                resolved = self._map[keysym]
         if resolved is not None:
             kc, level = resolved
             mods = self._mods_for_level(level)
         else:
             kc = self._overlay_bind(keysym)
+            if not kc:
+                # Every slot is held down, so there is nothing to bind this to.
+                # Injecting keycode 0 would press a key that does not exist.
+                return
             mods = ()
         for m in mods:
             self._mod_refs[m] = self._mod_refs.get(m, 0) + 1
@@ -4663,10 +4739,9 @@ class WebRTCInput:
                     elif msg_type == "co_end":
                         if native_inject():
                             # One batch: every missing keysym binds in a single
-                            # compositor keymap swap (bind_keysyms), then the taps
-                            # flow ordered through the compositor channel. The
-                            # per-char path below is the fallback when the batch
-                            # API is missing or a char is unbindable.
+                            # compositor keymap swap, then the taps flow ordered
+                            # through the compositor channel. The per-char path
+                            # below is the fallback when a char is unbindable.
                             typed = False
                             owner = await self._ensure_wayland_keymap_owner()
                             if owner is not None:

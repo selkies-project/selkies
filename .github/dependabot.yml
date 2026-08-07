@@ -28,13 +28,6 @@ updates:
     groups:
       web-client:
         patterns: ["*"]
-    ignore:
-      # eslint-plugin-react peers at eslint ^9.7 in its newest release, so an
-      # eslint major cannot resolve until upstream ships support for it
-      - dependency-name: "eslint"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "@eslint/js"
-        update-types: ["version-update:semver-major"]
 
   # Base images of the wheel builder, the devcontainer, and the published images
   - package-ecosystem: docker

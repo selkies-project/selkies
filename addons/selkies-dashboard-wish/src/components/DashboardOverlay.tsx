@@ -9,7 +9,7 @@ import ReactDOM from 'react-dom';
 import { TopMenu } from './dashboard/top-menu';
 import { Gamepad } from './dashboard/gamepad';
 import { TooltipProvider } from './ui/tooltip';
-import { isSecondaryDisplay, getLastServerSettings } from '../utils';
+import { isSecondaryDisplay, isViewerUrlMode, getLastServerSettings } from '../utils';
 import '../styles/Overlay.css';
 
 interface DashboardOverlayProps {
@@ -28,7 +28,9 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
   const [isVideoActive, setIsVideoActive] = useState<boolean>(true);
   const [isAudioActive, setIsAudioActive] = useState<boolean>(true);
   const [isMicrophoneActive, setIsMicrophoneActive] = useState<boolean>(false);
-  const [isViewer, setIsViewer] = useState<boolean>(false);
+  // Seeded from the URL so a shared/player viewer never sees control UI in the
+  // gap before the server's clientRoleUpdate lands.
+  const [isViewer, setIsViewer] = useState<boolean>(isViewerUrlMode);
   // ui_show_sidebar hides the whole dashboard chrome — wish's analog of the
   // classic sidebar is the top menu (and everything it opens).
   const [showSidebar, setShowSidebar] = useState<boolean>(

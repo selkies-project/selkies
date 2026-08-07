@@ -6,7 +6,6 @@
 
 import js from '@eslint/js'
 import globals from 'globals'
-import react from 'eslint-plugin-react'
 import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 
@@ -29,7 +28,6 @@ export default [
       },
     },
     plugins: {
-      react,
       'react-hooks': reactHooks,
       'react-refresh': reactRefresh,
     },
@@ -39,7 +37,6 @@ export default [
       // Count JSX element names as references so no-unused-vars can safely
       // exempt only ALL_CAPS constants instead of everything PascalCase
       // (which let unused component and React imports go unflagged).
-      'react/jsx-uses-vars': 'error',
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_][A-Z0-9_]*$' }],
       'react-refresh/only-export-components': [
         'warn',
