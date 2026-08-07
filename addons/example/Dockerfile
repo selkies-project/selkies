@@ -15,8 +15,7 @@
 #   - LXQt desktop on X11 (Xvfb, Openbox) by default; the same desktop on the
 #     headless Wayland backend with SELKIES_WAYLAND=true, where a nested labwc
 #     (sway on Bookworm) supplies window management and XWayland
-#   - s6 service supervision (works both as PID 1 and below a foreign init,
-#     unlike s6-overlay; no Python-based supervisor, no tini)
+#   - s6 service supervision, running as PID 1 or below a foreign init
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) built
 #     in-tree and wired with LD_PRELOAD
 #   - GPU wiring: NVIDIA/VA-API/Vulkan runtime, Zink for hardware OpenGL, and a
@@ -122,7 +121,7 @@ USER 0
 # Debian packaging frontends: apt-get only, never dpkg
 ###
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
-        # Process supervision (no Python, works below any PID 1 as well)
+        # Process supervision
         s6 \
         # Base utilities
         ca-certificates \
@@ -322,13 +321,13 @@ ENV SELKIES_WAYLAND_OUTPUTS=2
 # Start the LXQt session (set to false to run only the display server)
 ENV START_LXQT=true
 # Web interface port
-ENV SELKIES_PORT=8081
+ENV SELKIES_PORT=8080
 
 ENV SHELL=/bin/bash
 ENV USER=ubuntu
 ENV HOME=/home/ubuntu
 WORKDIR /home/ubuntu
 
-EXPOSE 8081
+EXPOSE 8080
 
 ENTRYPOINT ["/etc/container-entrypoint.sh"]

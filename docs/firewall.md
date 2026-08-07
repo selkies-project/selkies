@@ -1,6 +1,6 @@
 # WebRTC and Firewall Issues
 
-**This entire document applies only to the opt-in WebRTC transport (`--mode=webrtc`).** The default WebSocket transport streams over a single TCP port (default `8081`) and does not perform UDP hole-punching, so it needs no STUN/TURN server and is not affected by the firewall issues described here. Reach for this page only after you have deliberately switched to WebRTC mode.
+**This entire document applies only to the opt-in WebRTC transport (`--mode=webrtc`).** The default WebSocket transport streams over a single TCP port (default `8080`) and does not perform UDP hole-punching, so it needs no STUN/TURN server and is not affected by the firewall issues described here. Reach for this page only after you have deliberately switched to WebRTC mode.
 
 WebRTC uses the UDP protocol (and may use TCP in some cases when UDP is not available) to transport your desktop.
 

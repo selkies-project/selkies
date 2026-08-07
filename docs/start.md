@@ -4,7 +4,7 @@
 
 **Choose between this section and [Advanced Install](#advanced-install) if you need to self-host on a standalone instance or use with HPC clusters. This section is recommended for starters.**
 
-This **Quick Start** installs the Selkies Python package directly with `pip`. The package bundles the HTML5 web client and pulls in the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) extensions as dependencies. Selkies streams over plain WebSockets by default, serving the web interface, signaling, and media on a **single port (default `8081`)**; WebRTC is available as an opt-in transport (`--mode=webrtc`).
+This **Quick Start** installs the Selkies Python package directly with `pip`. The package bundles the HTML5 web client and pulls in the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) extensions as dependencies. Selkies streams over plain WebSockets by default, serving the web interface, signaling, and media on a **single port (default `8080`)**; WebRTC is available as an opt-in transport (`--mode=webrtc`).
 
 Read [Python Application](component.md#python-application) for more details of this step and procedures for installing from the latest commit in the `main` branch.
 
@@ -52,7 +52,7 @@ export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DI
 **4. Run Selkies:**
 
 ```bash
-selkies --addr=0.0.0.0 --port=8081 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
+selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
 In the default WebSocket mode, `--encoder=` accepts `h264enc` (default; hardware NVENC or VA-API when a supported GPU is available, otherwise software `x264`), `h264enc-striped`, `openh264enc` (software OpenH264), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc` and select the encoder with `--encoder-rtc=` (`h264enc`, the hardware-first default, or `openh264enc`).
@@ -212,7 +212,7 @@ sudo chmod 777 /dev/input/js*
 # In the default WebSocket mode, change `--encoder=` to `h264enc-striped`, `openh264enc`, or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
 # For the WebRTC transport instead, add `--mode=webrtc` and set `--encoder-rtc=` to `h264enc` or `openh264enc`
 # DO NOT set `--enable-resize=true` if there is a physical display
-selkies --addr=0.0.0.0 --port=8081 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
+selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
 ```
 
 The default username (set with `--basic-auth-user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is the current user environment variable `$USER` (empty username if nonexistent), and the default password (set with `--basic-auth-password=` or `SELKIES_BASIC_AUTH_PASSWORD`), when not specified, is `mypasswd`.

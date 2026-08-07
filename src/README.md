@@ -62,7 +62,7 @@ This server provides the backend infrastructure for establishing and managing in
 
 ### Token Management API
 
-When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server exposes a token-management API on the main streaming port (default: 8081), gated by the master token. It is used to dynamically set and update the access tokens that clients can use to connect.
+When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server exposes a token-management API on the main streaming port (default: 8080), gated by the master token. It is used to dynamically set and update the access tokens that clients can use to connect.
 
 **Endpoint:** `POST /tokens`
 
@@ -87,7 +87,7 @@ When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server exposes 
 
 **Example `curl` Command:**
 ```bash
-curl -X POST http://localhost:8081/tokens \
+curl -X POST http://localhost:8080/tokens \
 -H "Authorization: Bearer my-secret-master-token" \
 -H "Content-Type: application/json" \
 -d '{
@@ -219,7 +219,7 @@ The table below lists all available server settings.
 | `SELKIES_ENABLE_BINARY_CLIPBOARD` | `--enable-binary-clipboard` | `False` | Allow binary data on the clipboard. |
 | `SELKIES_USE_BROWSER_CURSORS` | `--use-browser-cursors` | `False` | Use browser CSS cursors instead of rendering to canvas. |
 | `SELKIES_USE_CSS_SCALING` | `--use-css-scaling` | `False` | HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched. |
-| `SELKIES_PORT` (or `CUSTOM_WS_PORT`) | `--port` | `8081` | Port for the data websocket server. |
+| `SELKIES_PORT` (or `CUSTOM_WS_PORT`) | `--port` | `8080` | Port for the data websocket server. |
 | `SELKIES_MASTER_TOKEN` | `--master-token` | `''` | Master token to enable secure mode. If set, clients must authenticate using tokens provided via the token-management API (`POST /tokens`). |
 | `SELKIES_ENCODE_DRI` (or `DRI_NODE`) | `--encode-dri` | `''` | Path to the DRI render node the encoder uses (VA-API/NVENC device selection). When unset, the node is auto-selected. |
 | `SELKIES_RENDER_DRI` (or `DRINODE`) | `--render-dri` | `''` | Path to the DRI render node the Wayland compositor renders on. Defaults to the `auto_gpu` selection, else software rendering. |

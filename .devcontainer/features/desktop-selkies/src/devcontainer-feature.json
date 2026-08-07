@@ -34,7 +34,7 @@
         },
         "web_port": {
             "type": "string",
-            "default": "8081",
+            "default": "8080",
             "description": "The port number to listen on to host the web interface and signal server."
         }
     },

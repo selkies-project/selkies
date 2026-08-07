@@ -31,7 +31,7 @@ For the most recent unreleased commit, download the Build Artifacts of the `CI`,
 
 The term `host` or `server` refers to the [Python components](https://github.com/selkies-project/selkies/tree/main/src/selkies) across this documentation.
 
-The Python components are responsible for the host server backend: capturing and encoding the host screen (via `pixelflux`) and audio (via `pcmflux`), injecting keyboard/mouse/gamepad input into the X11 display (via a vendored `python-xlib` using XTEST/XFixes), receiving input signals and communicating other data (including the clipboard) between the client and the host, serving the HTML5 web client, and — only in WebRTC mode — establishing the WebRTC connection to the client. Everything is served by a single [`aiohttp`](https://docs.aiohttp.org) server on a **single port (default `8081`)**.
+The Python components are responsible for the host server backend: capturing and encoding the host screen (via `pixelflux`) and audio (via `pcmflux`), injecting keyboard/mouse/gamepad input into the X11 display (via a vendored `python-xlib` using XTEST/XFixes), receiving input signals and communicating other data (including the clipboard) between the client and the host, serving the HTML5 web client, and — only in WebRTC mode — establishing the WebRTC connection to the client. Everything is served by a single [`aiohttp`](https://docs.aiohttp.org) server on a **single port (default `8080`)**.
 
 In the default WebSocket mode, encoded screen frames, audio, input, and other data are multiplexed over WebSocket connections to a WebCodecs-based web client. In the opt-in WebRTC mode (`--mode=webrtc`), host screen video and audio are transported using the WebRTC `MediaStream` interface (through a vendored fork of [`aiortc`](https://github.com/aiortc/aiortc) under `src/selkies/webrtc/`), and other data are transported using the WebRTC `DataChannel` interface.
 
@@ -44,7 +44,7 @@ For the most recent unreleased commit, download the **`selkies-wheel`** artifact
 ```bash
 sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall selkies-0.0.0.dev0-py3-none-any.whl
 # Run the Selkies Python executable after all components are installed
-selkies --addr=0.0.0.0 --port=8081 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
+selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
 One other alternative way to install the Python application components from the most recent unreleased commit:
@@ -54,7 +54,7 @@ git clone https://github.com/selkies-project/selkies.git
 cd selkies
 sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall .
 # Run the Selkies Python executable after all components are installed
-selkies --addr=0.0.0.0 --port=8081 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
+selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
 Installing the wheel also installs the `selkies` and `selkies-resize` console commands.
@@ -175,17 +175,17 @@ Neither applies with `SELKIES_WAYLAND_COMPOSITOR=none`: applications sit on the 
 
 Read the [Development](development.md) section for customizing this container for your own usage.
 
-Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8081** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **change `DISTRIB_RELEASE` to `24.04` or `26.04`, and replace `main` to `latest` for the latest stable release**):
+Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8080** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **change `DISTRIB_RELEASE` to `24.04` or `26.04`, and replace `main` to `latest` for the latest stable release**):
 
 ```bash
-docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8081:8081 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}
+docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8080:8080 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}
 ```
 
 Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs, or `--device /dev/dri` for Intel and AMD.
 
 Hardware OpenGL is set up automatically for whichever GPU is passed in. On NVIDIA, GL runs through [Zink](https://docs.mesa3d.org/drivers/zink.html) on the NVIDIA Vulkan driver, which is what replaces VirtualGL here; other vendors render through the X server's DRI3 render node, for which the image carries an [Xvfb with DRI3](https://github.com/linuxserver/docker-xvfb) in place of the distribution's. `-e DISABLE_ZINK=true` opts out of Zink, and `-e SELKIES_RENDER_DRI=/dev/dri/renderD###` (or the legacy `DRINODE`) names the render node, the same setting the Wayland backend renders on; without a GPU, Mesa falls back to software rendering either way.
 
-Port 3478 and 65532-65535 (change the ports accordingly) are the ports for the internal TURN server, which is **only needed when using the opt-in WebRTC transport (`--mode=webrtc`)** to route WebRTC through restrictive networks. With the default WebSocket transport, you only need to expose the single web port (`8081`). When deploying multiple containers, the TURN ports must be changed (together with the environment variables `TURN_MIN_PORT`/`TURN_MAX_PORT` with at least two ports in the range plus the environment variable `SELKIES_TURN_PORT`) and cannot be used by any other host process or container.
+Port 3478 and 65532-65535 (change the ports accordingly) are the ports for the internal TURN server, which is **only needed when using the opt-in WebRTC transport (`--mode=webrtc`)** to route WebRTC through restrictive networks. With the default WebSocket transport, you only need to expose the single web port (`8080`). When deploying multiple containers, the TURN ports must be changed (together with the environment variables `TURN_MIN_PORT`/`TURN_MAX_PORT` with at least two ports in the range plus the environment variable `SELKIES_TURN_PORT`) and cannot be used by any other host process or container.
 
 If UDP cannot be used, at the cost of higher latency and lower performance, omit the ports containing `/udp` and use the environment variable `-e SELKIES_TURN_PROTOCOL=tcp`.
 
@@ -308,7 +308,7 @@ Opus is currently the only adequate full-band audio codec supported in web brows
 
 | Transport | Selected with | Ports | Notes |
 |---|---|---|---|
-| WebSockets (default) | `--mode=websockets` | single TCP port (default `8081`) | WebCodecs-based client decode; no STUN/TURN required |
+| WebSockets (default) | `--mode=websockets` | single TCP port (default `8080`) | WebCodecs-based client decode; no STUN/TURN required |
 | WebRTC (opt-in) | `--mode=webrtc` | signaling over the same port; media over UDP (or TCP) with ICE | Uses a vendored [`aiortc`](https://github.com/aiortc/aiortc) fork; may need STUN/TURN, see [WebRTC and Firewall Issues](firewall.md) |
 
 Use `--enable-dual-mode=true` to let the client switch between the WebSocket and WebRTC transports from the UI.

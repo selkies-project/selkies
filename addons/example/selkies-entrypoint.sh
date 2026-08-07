@@ -24,4 +24,4 @@ if [ "${SELKIES_WAYLAND:-false}" != "true" ]; then
   selkies-resize 1920x1080
 fi
 
-exec selkies --addr=0.0.0.0 --port="${SELKIES_PORT:-8081}" "$@"
+exec selkies --addr=0.0.0.0 --port="${SELKIES_PORT:-8080}" "$@"

@@ -107,7 +107,7 @@ This section is a knowledge base for code contributions and development.
 
 ```bash
 docker compose build dist                    # the wheel, web client included
-docker compose up example                    # the Example Container on http://localhost:8081
+docker compose up example                    # the Example Container on http://localhost:8080
 docker compose --profile gpu up example-gpu  # the same container with a GPU attached
 ```
 
@@ -145,7 +145,7 @@ ENV USER=ubuntu
 ENV HOME=/home/ubuntu
 WORKDIR /home/ubuntu
 
-EXPOSE 8081
+EXPOSE 8080
 
 ENTRYPOINT ["/etc/container-entrypoint.sh"]
 ```

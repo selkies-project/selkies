@@ -7,7 +7,7 @@
 # `example-gpu` is the same container with a GPU attached.
 #
 #   docker compose build dist                      # wheel image
-#   docker compose up example                      # http://localhost:8081
+#   docker compose up example                      # http://localhost:8080
 #   docker compose --profile gpu up example-gpu    # NVIDIA
 #
 # Compose V2 is required (no `version:` key, `extends`, `develop`).
@@ -46,7 +46,7 @@ services:
       # Streaming mode: websockets, webrtc, or both with dual mode
       SELKIES_MODE: ${SELKIES_MODE:-websockets}
       SELKIES_ENABLE_DUAL_MODE: ${SELKIES_ENABLE_DUAL_MODE:-false}
-      SELKIES_PORT: ${SELKIES_PORT:-8081}
+      SELKIES_PORT: ${SELKIES_PORT:-8080}
       SELKIES_ENABLE_BASIC_AUTH: ${SELKIES_ENABLE_BASIC_AUTH:-}
       SELKIES_BASIC_AUTH_USER: ${SELKIES_BASIC_AUTH_USER:-}
       SELKIES_BASIC_AUTH_PASSWORD: ${SELKIES_BASIC_AUTH_PASSWORD:-}
@@ -76,7 +76,7 @@ services:
       SELKIES_RENDER_DRI: ${SELKIES_RENDER_DRI:-}
       DRI_NODE: ${DRI_NODE:-}
     ports:
-      - "${SELKIES_PORT:-8081}:${SELKIES_PORT:-8081}"
+      - "${SELKIES_PORT:-8080}:${SELKIES_PORT:-8080}"
     volumes:
       - type: bind
         source: ./src/selkies

@@ -39,7 +39,7 @@ firefox webkit`.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `E2E_DISPLAY` | `:99` | X display the server streams from. Never point this at a real session: the suites inject input and resize the root window. |
-| `E2E_PORT` | `18081` | Server port; metrics take `E2E_PORT + 1000`. |
+| `E2E_PORT` | `18080` | Server port. Everything the server exposes, `/api/metrics` included, is on it. |
 | `E2E_WORKDIR` | `$TMPDIR/selkies-tests` | Server log, shim recordings and other scratch. |
 | `SELKIES_TEST_PYTHON` | the interpreter running the tests | Interpreter the server under test runs on. |
 | `E2E_CHROME` | unset | System Chrome/Chromium binary. Unset uses Playwright's bundled Chromium. |

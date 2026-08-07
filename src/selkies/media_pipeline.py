@@ -436,9 +436,9 @@ class MediaPipelinePixel(MediaPipeline):
             cs.capture_y = 0
             cs.auto_adjust_screen_capture_size = True
         cs.output_mode = 1
-        # WebRTC has its own RTP framing; omit pixelflux's per-stripe header on both
-        # backends (the Wayland backend now supports omission) so there's no Python
-        # strip. frame_id comes from the frame attribute, not the header.
+        # WebRTC has its own RTP framing; both backends omit pixelflux's per-stripe
+        # header, so there is nothing for Python to strip. frame_id comes from the
+        # frame attribute, not the header.
         self._omit_stripe_headers = True
         cs.omit_stripe_headers = self._omit_stripe_headers
         apply_common_capture_settings(
@@ -485,9 +485,9 @@ class MediaPipelinePixel(MediaPipeline):
                 if pts <= self._last_video_pts:
                     pts = self._last_video_pts + 1
                 self._last_video_pts = pts
-                # consume_data is synchronous now (its bridge put no longer awaits),
-                # so schedule it with the lighter call_soon_threadsafe -- no per-frame
-                # Future/Task allocation -- matching the websockets path.
+                # consume_data is synchronous, so the lighter call_soon_threadsafe
+                # is enough -- no per-frame Future/Task allocation -- matching the
+                # websockets path.
                 self.async_event_loop.call_soon_threadsafe(
                     self.produce_data, data_bytes, pts, "video"
                 )

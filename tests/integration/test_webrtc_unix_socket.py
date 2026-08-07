@@ -3,8 +3,8 @@
 
 Setup:
   selkies --mode webrtc --unix-socket /tmp/...sock   (NO TCP listener)
-  tcp2unix TCP:18081 -> unix socket                  (reverse-proxy shim, HTTP only)
-  Chrome connects to http://localhost:18081, does WebRTC (signaling via the shim,
+  tcp2unix TCP:18080 -> unix socket                  (reverse-proxy shim, HTTP only)
+  Chrome connects to http://localhost:18080, does WebRTC (signaling via the shim,
   media over the server's own UDP ICE sockets).
 """
 import os

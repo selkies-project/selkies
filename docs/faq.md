@@ -119,7 +119,7 @@ The below steps can be used when you want to test your TURN server configured wi
 **1. Run the [Example Container](component.md#example-container) (fill in `DISTRIB_RELEASE` to Ubuntu versions such as `24.04`):**
 
 ```bash
-docker run --name selkies -it -d --rm -p 8081:8081 -p 3478:3478 ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}
+docker run --name selkies -it -d --rm -p 8080:8080 -p 3478:3478 ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}
 docker exec -it selkies bash
 ```
 

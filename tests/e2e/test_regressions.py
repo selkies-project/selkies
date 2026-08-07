@@ -17,8 +17,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
 
-METRICS_PORT = 19081
-
 
 def _log_has(pattern, log=H.LOG):
     return re.search(pattern, H.server_log(log) or "", re.I) is not None
@@ -71,9 +69,16 @@ def block_switch(r):
     dies before it can serve.
     """
     H.server_start(mode="websockets",
-                   extra_env={"SELKIES_ENABLE_METRICS_HTTP": "true",
-                              "SELKIES_METRICS_HTTP_PORT": str(METRICS_PORT)})
+                   extra_env={"SELKIES_ENABLE_METRICS_HTTP": "true"})
     try:
+        # The Prometheus registry is served from the streaming port; there is no
+        # second listener to point a scraper at.
+        try:
+            st, body = H.curl("/api/metrics")
+        except Exception as e:
+            st, body = 0, str(e).encode()
+        r.check("metrics served on the streaming port",
+                st == 200 and b"fps" in body, f"{st} {body[:80]}")
         for target in ("webrtc", "websockets", "webrtc"):
             try:
                 st, _ = H.curl("/api/switch", method="POST", data={"mode": target})

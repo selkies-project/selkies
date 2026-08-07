@@ -20,7 +20,7 @@ TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
 # the tests, so a venv with selkies installed needs no further configuration.
 PYTHON = os.environ.get("SELKIES_TEST_PYTHON", sys.executable)
 TEST_DISPLAY = os.environ.get("E2E_DISPLAY", ":99")
-PORT = int(os.environ.get("E2E_PORT", "18081"))
+PORT = int(os.environ.get("E2E_PORT", "18080"))
 BASE_URL = f"http://localhost:{PORT}"
 
 CORE_DIST = os.path.join(REPO, "addons/selkies-web-core/dist")
@@ -71,7 +71,6 @@ def server_start(mode="websockets", wayland=False, web_root=CORE_DIST,
         "SELKIES_WEB_ROOT": web_root,
         "SELKIES_WAYLAND": "true" if wayland else "false",
         "SELKIES_ENABLE_HTTPS": "false",
-        "SELKIES_METRICS_HTTP_PORT": str(port + 1000),
     }
     # WebRTC works over host candidates alone on a loopback run; a TURN REST
     # endpoint is only wired in when one is offered.

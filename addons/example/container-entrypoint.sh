@@ -8,10 +8,9 @@
 # TURN defaults), derives the service set from the environment toggles, and then
 # hands service supervision to s6 (`s6-svscan /etc/service`): one `s6-supervise`
 # per service directory, restarts crashed services, and is controlled with
-# `s6-svc`/`s6-svstat` (the supervisorctl equivalent). s6-svscan does NOT need
-# to be PID 1 (unlike s6-overlay): it can be launched below any injected init
-# or script, and equally works when this script itself is PID 1 (in which case
-# `docker run --init` for zombie reaping is recommended).
+# `s6-svc`/`s6-svstat`. s6-svscan runs at any PID: it can be launched below an
+# injected init or script, and equally works when this script itself is PID 1
+# (in which case `docker run --init` for zombie reaping is recommended).
 
 set -e
 
@@ -137,5 +136,5 @@ if [ "${SELKIES_ENABLE_INTERNAL_TURN}" != "true" ]; then
   rm -rf /etc/service/coturn 2>/dev/null || sudo-root rm -rf /etc/service/coturn 2>/dev/null || true
 fi
 
-# Hand over to s6 service supervision (works as PID 1 or below any other init)
+# Hand over to s6 service supervision
 exec s6-svscan -t5 /etc/service

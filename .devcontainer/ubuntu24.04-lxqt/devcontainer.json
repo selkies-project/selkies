@@ -22,29 +22,24 @@
 	],
 
 	"forwardPorts": [
-		8081, // selkies web port
-		3478, // turnserver
-		19081 // prometheus metrics port
+		8080, // selkies web port, including /api/metrics
+		3478 // turnserver
 	],
 	"portsAttributes": {
 		// https://containers.dev/implementors/json_reference/#port-attributes
-		"8081": {
+		"8080": {
 			"label": "desktop",
 			"onAutoForward": "notify"
 		},
 		"3478": {
 			"label": "turnserver",
 			"onAutoForward": "ignore"
-		},
-		"19081": {
-			"label": "selkies-metrics",
-			"onAutoForward": "ignore"
 		}
 	},
 
 	"remoteEnv": {
 		"DESKTOP": "LXQT",
-		"SELKIES_PORT": "8081"
+		"SELKIES_PORT": "8080"
 	},
 
 	// Build the web client from source and install Selkies editable, exactly as

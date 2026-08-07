@@ -747,7 +747,7 @@ class RTCApp:
 
     def consume_data(self, buf, pts, kind, display_id: str = "primary"):
         # Synchronous: scheduled via loop.call_soon_threadsafe from the capture
-        # thread (no per-frame Future/Task), since set_data no longer awaits.
+        # thread, since set_data does not await -- no per-frame Future/Task.
         graph = self.displays.get(display_id or "primary")
         if graph is None:
             return

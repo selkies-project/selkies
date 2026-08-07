@@ -71,11 +71,11 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "port",
         "type": "int",
-        "default": 8081,
+        "default": 8080,
         "min": 1,
         "max": 65535,
         'env_var': 'CUSTOM_WS_PORT',
-        "help": 'Port to start the streaming service, default: "8081"',
+        "help": 'Port to start the streaming service, default: "8080"',
     },
     {
         "name": "unix_socket",
