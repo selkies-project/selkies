@@ -103,7 +103,7 @@ jobs:
   tests:
     name: Test suites
     # The wheels are a dependency, not just an ordering constraint: the suites
-    # run against the same master-HEAD capture stack the artifacts ship
+    # run against the same main-HEAD capture stack the artifacts ship
     needs: [lint, web-lint, python-compat, pixelflux-pcmflux]
     # Stated rather than left to the default: the wheels are built on pushes
     # only, and a skip carries down the whole chain from wherever it starts. On
@@ -131,7 +131,7 @@ jobs:
     uses: ./.github/workflows/build-wheel.yaml
 
   pixelflux-pcmflux:
-    name: Build pixelflux and pcmflux wheels (master HEAD)
+    name: Build pixelflux and pcmflux wheels (main HEAD)
     if: github.event_name == 'push'
     permissions:
       contents: read

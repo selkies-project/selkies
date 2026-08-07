@@ -1,7 +1,7 @@
 name: Build pixelflux and pcmflux wheels
 
-# Builds pixelflux and pcmflux from the master branch (HEAD) of
-# linuxserver/pixelflux and linuxserver/pcmflux, so that container images,
+# Builds pixelflux and pcmflux from the main branch (HEAD) of
+# selkies-project/pixelflux and selkies-project/pcmflux, so that container images,
 # native packages, and AppImages ride the latest code instead of the last
 # PyPI release. Mirrors the two projects' own release workflows: a single
 # pypa/cibuildwheel invocation per (arch, libc), with each repository's own
@@ -67,8 +67,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          repository: linuxserver/${{ matrix.project }}
-          ref: master
+          repository: selkies-project/${{ matrix.project }}
+          ref: main
       - name: Build wheels (${{ matrix.arch.build }})
         uses: pypa/cibuildwheel@v4.2.0
         env:

@@ -255,8 +255,8 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
 
 # Install Selkies with pip: from the wheels dropped into `wheels/`, or the
 # latest PyPI release when `wheels/` is empty. When fresh pixelflux/pcmflux
-# wheels (built from the master HEAD of linuxserver/pixelflux and
-# linuxserver/pcmflux) ride along, pip selects the ones matching this image's
+# wheels (built from the main HEAD of selkies-project/pixelflux and
+# selkies-project/pcmflux) ride along, pip selects the ones matching this image's
 # Python and platform; everything else still resolves from PyPI
 COPY addons/example/wheels/ /tmp/wheels/
 RUN set -e; \

@@ -1,7 +1,7 @@
 name: Release
 
 # Maintainer-triggered release: builds the wheel ONCE at the release version
-# plus fresh pixelflux/pcmflux wheels from the master HEAD of linuxserver/*,
+# plus fresh pixelflux/pcmflux wheels from the main HEAD of selkies-project/*,
 # then builds multi-arch images, native packages, and AppImages around those
 # wheels, and assembles a DRAFT GitHub release with every build artifact
 # attached. The draft is finalized and published manually.
@@ -47,7 +47,7 @@ jobs:
       package_version: ${{ needs.validate.outputs.version }}
 
   pixelflux-pcmflux:
-    name: Build pixelflux and pcmflux wheels (master HEAD)
+    name: Build pixelflux and pcmflux wheels (main HEAD)
     needs: validate
     permissions:
       contents: read

@@ -115,16 +115,16 @@ jobs:
         with:
           name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
           path: dist/
-      # Fresh pixelflux/pcmflux wheels from the master HEAD of linuxserver/*;
+      # Fresh pixelflux/pcmflux wheels from the main HEAD of selkies-project/*;
       # absence is tolerated (standalone dispatch) and mkvenv.sh uses PyPI
-      - name: Download pixelflux wheels (master HEAD)
+      - name: Download pixelflux wheels (main HEAD)
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
           path: dist/
           merge-multiple: true
-      - name: Download pcmflux wheels (master HEAD)
+      - name: Download pcmflux wheels (main HEAD)
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
@@ -184,16 +184,16 @@ jobs:
           remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* mongodb*
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
-      # Fresh pixelflux/pcmflux wheels from the master HEAD of linuxserver/*;
+      # Fresh pixelflux/pcmflux wheels from the main HEAD of selkies-project/*;
       # absence is tolerated (standalone dispatch) and appimage.sh uses PyPI
-      - name: Download pixelflux wheels (master HEAD)
+      - name: Download pixelflux wheels (main HEAD)
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
           path: pixelflux-pcmflux-wheels/
           merge-multiple: true
-      - name: Download pcmflux wheels (master HEAD)
+      - name: Download pcmflux wheels (main HEAD)
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:

@@ -69,11 +69,11 @@ jobs:
           python -m pip install pytest aiofiles msgpack Pillow
           python -m pytest tests -m unit -v
 
-  # The suites run against the master-HEAD capture stack the artifacts ship, so
+  # The suites run against the main-HEAD capture stack the artifacts ship, so
   # a run that arrives without those wheels builds them first. ci.yaml already
   # builds them and sets wheels_ready, which skips this.
   wheels:
-    name: Capture stack (master HEAD)
+    name: Capture stack (main HEAD)
     if: ${{ !inputs.wheels_ready }}
     permissions:
       contents: read
@@ -120,22 +120,22 @@ jobs:
             libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
             labwc
       # The suites have to exercise the pixelflux and pcmflux that the images,
-      # packages and AppImages ship, which are built from master HEAD rather
+      # packages and AppImages ship, which are built from main HEAD rather
       # than taken from the last PyPI release. ci.yaml builds them earlier in
       # the same run; a standalone run carries none and says so below.
-      - name: Download the pixelflux wheels (master HEAD)
+      - name: Download the pixelflux wheels (main HEAD)
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
-          path: master-wheels/
+          path: main-wheels/
           merge-multiple: true
-      - name: Download the pcmflux wheels (master HEAD)
+      - name: Download the pcmflux wheels (main HEAD)
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
-          path: master-wheels/
+          path: main-wheels/
           merge-multiple: true
       - name: Install selkies and the test dependencies
         run: |
@@ -143,11 +143,11 @@ jobs:
           python -m pip install . -r tests/requirements.txt
           TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
           WHEEL_GLOB="*${TAG}-*manylinux*$(uname -m)*.whl"
-          if [ -n "$(find master-wheels -maxdepth 1 -name "${WHEEL_GLOB}" 2>/dev/null)" ]; then
-            find master-wheels -maxdepth 1 -name "${WHEEL_GLOB}" -print0 \
+          if [ -n "$(find main-wheels -maxdepth 1 -name "${WHEEL_GLOB}" 2>/dev/null)" ]; then
+            find main-wheels -maxdepth 1 -name "${WHEEL_GLOB}" -print0 \
               | xargs -0 python -m pip install --force-reinstall --no-deps
           else
-            echo 'No master-HEAD wheels in this run: the suites use the PyPI pixelflux and pcmflux'
+            echo 'No main-HEAD wheels in this run: the suites use the PyPI pixelflux and pcmflux'
           fi
           python -c 'import pixelflux, pcmflux; print("capture stack:", pixelflux.__file__)'
       - name: Build the web client

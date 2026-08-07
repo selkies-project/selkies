@@ -98,17 +98,17 @@ jobs:
         with:
           name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
           path: dist/
-      # Fresh pixelflux/pcmflux wheels, built from the master HEAD of the
-      # linuxserver/* repos by the orchestrating run; absence is tolerated
+      # Fresh pixelflux/pcmflux wheels, built from the main HEAD of the
+      # selkies-project/* repos by the orchestrating run; absence is tolerated
       # (standalone dispatch) and the Dockerfile falls back to PyPI
-      - name: Download pixelflux wheels (master HEAD)
+      - name: Download pixelflux wheels (main HEAD)
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
           path: dist/
           merge-multiple: true
-      - name: Download pcmflux wheels (master HEAD)
+      - name: Download pcmflux wheels (main HEAD)
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
