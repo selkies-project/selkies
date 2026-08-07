@@ -119,7 +119,7 @@ The reference container images (the [Example Container](https://github.com/selki
 
 **If you want to change the image behavior, use the original container as a base image and only replace the entrypoint script(s) and/or the s6 service files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu24.04` for the [Example Container](component.md#example-container)) to preserve a specific container build.**
 
-Start with the below sample `Dockerfile` example and place your modified `entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
+Start with the below sample `Dockerfile` example and place your modified `container-entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
 
 ```dockerfile
 ARG DISTRIB_RELEASE=24.04
@@ -131,12 +131,12 @@ SHELL ["/bin/sh", "-c"]
 
 # Replace changed files
 # Copy scripts and service definitions used to start the container with `--chown=1000:1000`
-#COPY --chown=1000:1000 entrypoint.sh /etc/entrypoint.sh
-#RUN chmod -f 755 /etc/entrypoint.sh
+#COPY --chown=1000:1000 container-entrypoint.sh /etc/container-entrypoint.sh
+#RUN chmod -f 755 /etc/container-entrypoint.sh
 #COPY --chown=1000:1000 selkies-entrypoint.sh /etc/selkies-entrypoint.sh
 #RUN chmod -f 755 /etc/selkies-entrypoint.sh
 # Replace or add s6 services (one directory per service under /etc/service)
-#COPY --chown=1000:1000 service/ /etc/service/
+#COPY --chown=1000:1000 services/ /etc/service/
 #RUN find /etc/service -name run -exec chmod -f 755 {} +
 
 USER 1000

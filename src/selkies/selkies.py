@@ -238,6 +238,44 @@ async def _poll_pa_object(list_coro, valid_names, poll_interval=0.1, timeout=2.0
     return None
 
 
+async def ensure_capture_sink(audio_device_name):
+    """Make sure the sink whose monitor the server captures exists.
+
+    A container's PipeWire or PulseAudio comes up with no sink at all when the
+    host exposes no sound card, so the monitor source named by `audio_device`
+    is missing and pcmflux gives up after its retry budget. The microphone
+    control plane creates the same sink, but only once a client sends mic data,
+    which server-to-client audio must not wait for.
+
+    Best effort: returns True when the sink is present afterwards. A False only
+    means the capture will fail for the usual reasons, so callers proceed and
+    let pcmflux report.
+    """
+    sink_name = (audio_device_name or "output").strip().split(".monitor")[0]
+    if not PULSEAUDIO_AVAILABLE or not sink_name:
+        return False
+    pulse = pulsectl_asyncio.PulseAsync("selkies-sink-provision")
+    try:
+        await asyncio.wait_for(pulse.connect(), timeout=2.0)
+        if any(s.name == sink_name for s in await pulse.sink_list()):
+            return True
+        data_logger.info(f"Capture sink '{sink_name}' not found. Attempting to create...")
+        await pulse.module_load("module-null-sink", f"sink_name={sink_name}")
+        if await _poll_pa_object(pulse.sink_list, [sink_name]):
+            data_logger.info(f"Created capture sink '{sink_name}'.")
+            return True
+        data_logger.error(
+            f"Loaded module-null-sink for '{sink_name}' but it never appeared."
+        )
+        return False
+    except Exception as e:
+        data_logger.warning(f"Could not provision capture sink '{sink_name}': {e}")
+        return False
+    finally:
+        with contextlib.suppress(Exception):
+            pulse.close()
+
+
 async def provision_virtual_microphone(pulse, audio_device_name, is_pcmflux_capturing):
     """Provision the SelkiesVirtualMic control plane shared by both transports.
 
@@ -1474,6 +1512,7 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.error("Cannot start pcmflux: asyncio event loop not found.")
             return False
 
+        await ensure_capture_sink(self.audio_device_name)
         data_logger.info("Starting pcmflux audio pipeline...")
         try:
             capture_settings = AudioCaptureSettings()

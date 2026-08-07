@@ -202,8 +202,10 @@ class RtpPacer:
         self._stats_timer = self._loop.call_later(10.0, self._maybe_log_stats)
 
     def _maybe_log_stats(self) -> None:
-        """Periodic observability: emit only when activity changed progressfully, so
-        a quiet link costs zero log lines."""
+        """Periodic counter deltas, at debug: a streaming link moves them every
+        interval, so this is one line per pacer per interval for as long as the
+        session lasts. The same numbers are exported as webrtc_pacer_* gauges,
+        which is where a running deployment should read them."""
         changed = {
             k: self.stats[k] - self._stats_prev.get(k, 0)
             for k in self.stats
@@ -211,7 +213,7 @@ class RtpPacer:
         }
         self._stats_prev = dict(self.stats)
         if changed:
-            logger.info(
+            logger.debug(
                 "pacer: +%s | total %s", changed, self.snapshot())
         self._arm_stats_log()
 

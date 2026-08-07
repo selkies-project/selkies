@@ -21,6 +21,7 @@ SUITES = [
     # --- unit -------------------------------------------------------------
     {"path": "unit/test_uinput_abi.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_uinput_policy.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_i18n_keys.py", "tier": "unit", "timeout": 120},
 
     # --- integration ------------------------------------------------------
     {"path": "integration/test_uinput_backend.py", "tier": "integration", "timeout": 300},

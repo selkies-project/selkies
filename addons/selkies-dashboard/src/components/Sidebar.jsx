@@ -3904,7 +3904,7 @@ function Sidebar() {
                             className="app-action-button install"
                             onClick={() => clipboardImageInputRef.current?.click()}
                           >
-                            {t("clipboard.uploadImage", "Upload Image")}
+                            {t("sections.clipboard.uploadImage", "Upload Image")}
                           </button>
                           <input
                             ref={clipboardImageInputRef}

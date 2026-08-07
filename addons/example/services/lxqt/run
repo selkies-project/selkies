@@ -38,7 +38,7 @@ if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
   export DISPLAY
   # Window management belongs to the nested compositor; LXQt starting one of its
   # own would find the selection taken and leave the session half-built
-  export WINDOW_MANAGER=/bin/true
+  session_wm=/bin/true
   # LXQt draws one desktop sized for every screen together, and sometimes anchors
   # it on the last screen instead of at the layout origin, which leaves the
   # screen the first display shows without a wallpaper, icons or desktop menu.
@@ -60,8 +60,18 @@ if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
 else
   export DISPLAY="${DISPLAY:-:20}"
   until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
+  # The multi-monitor layout code drives Openbox, so the session runs it
+  session_wm=openbox
 fi
 rm -rf "${HOME}/.config/lxqt"
+# Name the window manager in the session's own settings. lxqt-session takes it
+# only from there, and the distribution ships no default: left unset it asks
+# interactively which of the installed managers to run, which in a container
+# nobody answers, so the session sits with no window manager and nothing paints
+# the root. Written under HOME because the packaged session.conf lives in a
+# data directory that only the startlxqt wrapper puts on XDG_CONFIG_DIRS.
+mkdir -p "${HOME}/.config/lxqt"
+printf '[General]\nwindow_manager=%s\n' "${session_wm}" > "${HOME}/.config/lxqt/session.conf"
 # The panel, desktop, runner and PolicyKit agent are autostart entries carrying
 # OnlyShowIn=LXQt, and a session started outside a display manager has nobody
 # else to name the desktop

@@ -632,6 +632,9 @@ class MediaPipelinePixel(MediaPipeline):
             )
             return
 
+        # Imported here because selkies reaches this module through input_handler.
+        from .selkies import ensure_capture_sink
+        await ensure_capture_sink(self.audio_device_name)
         logger.info("Starting pcmflux audio pipeline...")
         try:
             capture_settings = AudioCaptureSettings()

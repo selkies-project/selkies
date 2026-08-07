@@ -131,6 +131,7 @@ const en = {
             tooltipVideoBitrate: "Video Bitrate: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Upload Image",
             title: "Clipboard",
             label: "Server Clipboard:",
             placeholder: "Clipboard content from server...",
@@ -183,6 +184,7 @@ const en = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { 
+        launchButton: "Launch",
         closeAlt: "Close apps modal",
         loading: "Loading apps...",
         errorLoading: "Failed to load app data. Please try again.",
@@ -199,6 +201,7 @@ const en = {
         installedBadge: "Installed"
     },
     notifications: {
+        warningPrefix: "Warning",
         closeButtonAlt: "Close notification for {fileName}",
         uploading: "Uploading... {progress} %",
         uploadComplete: "Upload Complete",
@@ -339,6 +342,7 @@ const es = {
              tooltipVideoBitrate: "Tasa de Bits de Video: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Subir imagen",
              title: "Portapapeles",
              label: "Portapapeles del Servidor:",
              placeholder: "Contenido del portapapeles del servidor...",
@@ -391,6 +395,7 @@ const es = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "Iniciar",
         closeAlt: "Cerrar modal de aplicaciones",
         loading: "Cargando aplicaciones...",
         errorLoading: "Error al cargar los datos de las aplicaciones. Por favor, inténtalo de nuevo.",
@@ -407,6 +412,7 @@ const es = {
         installedBadge: "Instalado"
     },
     notifications: {
+        warningPrefix: "Advertencia",
         closeButtonAlt: "Cerrar notificación para {fileName}",
         uploading: "Subiendo... {progress} %",
         uploadComplete: "Subida Completa",
@@ -547,6 +553,7 @@ const zh = {
             tooltipVideoBitrate: "视频码率: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "上传图片",
             title: "剪贴板",
             label: "服务器剪贴板:",
             placeholder: "来自服务器的剪贴板内容...",
@@ -599,6 +606,7 @@ const zh = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "启动",
         closeAlt: "关闭应用程序模态框",
         loading: "正在加载应用程序...",
         errorLoading: "加载应用程序数据失败。请重试。",
@@ -615,6 +623,7 @@ const zh = {
         installedBadge: "已安装"
     },
     notifications: {
+        warningPrefix: "警告",
         closeButtonAlt: "关闭 {fileName} 的通知",
         uploading: "正在上传... {progress} %",
         uploadComplete: "上传完成",
@@ -755,6 +764,7 @@ const hi = {
             tooltipVideoBitrate: "वीडियो बिटरेट: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "छवि अपलोड करें",
             title: "क्लिपबोर्ड",
             label: "सर्वर क्लिपबोर्ड:",
             placeholder: "सर्वर से क्लिपबोर्ड सामग्री...",
@@ -807,6 +817,7 @@ const hi = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "लॉन्च करें",
         closeAlt: "ऐप्स मोडल बंद करें",
         loading: "ऐप्स लोड हो रहे हैं...",
         errorLoading: "ऐप डेटा लोड करने में विफल। कृपया पुनः प्रयास करें।",
@@ -823,6 +834,7 @@ const hi = {
         installedBadge: "इंस्टॉल किया गया"
     },
     notifications: {
+        warningPrefix: "चेतावनी",
         closeButtonAlt: "{fileName} के लिए अधिसूचना बंद करें",
         uploading: "अपलोड हो रहा है... {progress} %",
         uploadComplete: "अपलोड पूर्ण",
@@ -963,6 +975,7 @@ const pt = {
             tooltipVideoBitrate: "Taxa de Bits de Vídeo: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Enviar imagem",
             title: "Área de Transferência",
             label: "Área de Transferência do Servidor:",
             placeholder: "Conteúdo da área de transferência do servidor...",
@@ -1015,6 +1028,7 @@ const pt = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "Iniciar",
         closeAlt: "Fechar modal de aplicativos",
         loading: "Carregando aplicativos...",
         errorLoading: "Falha ao carregar dados dos aplicativos. Por favor, tente novamente.",
@@ -1031,6 +1045,7 @@ const pt = {
         installedBadge: "Instalado"
     },
     notifications: {
+        warningPrefix: "Aviso",
         closeButtonAlt: "Fechar notificação para {fileName}",
         uploading: "Carregando... {progress} %",
         uploadComplete: "Carregamento Completo",
@@ -1171,6 +1186,7 @@ const fr = {
             tooltipVideoBitrate: "Débit vidéo : {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Téléverser une image",
             title: "Presse-papiers",
             label: "Presse-papiers du serveur :",
             placeholder: "Contenu du presse-papiers depuis le serveur...",
@@ -1223,6 +1239,7 @@ const fr = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "Lancer",
         closeAlt: "Fermer la modale des applications",
         loading: "Chargement des applications...",
         errorLoading: "Échec du chargement des données des applications. Veuillez réessayer.",
@@ -1239,6 +1256,7 @@ const fr = {
         installedBadge: "Installé"
     },
     notifications: {
+        warningPrefix: "Avertissement",
         closeButtonAlt: "Fermer la notification pour {fileName}",
         uploading: "Téléversement... {progress} %",
         uploadComplete: "Téléversement terminé",
@@ -1379,6 +1397,7 @@ const ru = {
             tooltipVideoBitrate: "Битрейт видео: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Загрузить изображение",
             title: "Буфер обмена",
             label: "Буфер обмена сервера:",
             placeholder: "Содержимое буфера обмена с сервера...",
@@ -1431,6 +1450,7 @@ const ru = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "Запустить",
         closeAlt: "Закрыть модальное окно приложений",
         loading: "Загрузка приложений...",
         errorLoading: "Не удалось загрузить данные приложений. Пожалуйста, попробуйте еще раз.",
@@ -1447,6 +1467,7 @@ const ru = {
         installedBadge: "Установлено"
     },
     notifications: {
+        warningPrefix: "Предупреждение",
         closeButtonAlt: "Закрыть уведомление для {fileName}",
         uploading: "Загрузка... {progress} %",
         uploadComplete: "Загрузка завершена",
@@ -1587,6 +1608,7 @@ const de = {
             tooltipVideoBitrate: "Video-Bitrate: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Bild hochladen",
             title: "Zwischenablage",
             label: "Server-Zwischenablage:",
             placeholder: "Inhalt der Zwischenablage vom Server...",
@@ -1639,6 +1661,7 @@ const de = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "Starten",
         closeAlt: "Anwendungsmodal schließen",
         loading: "Anwendungen werden geladen...",
         errorLoading: "Fehler beim Laden der Anwendungsdaten. Bitte versuchen Sie es erneut.",
@@ -1655,6 +1678,7 @@ const de = {
         installedBadge: "Installiert"
     },
     notifications: {
+        warningPrefix: "Warnung",
         closeButtonAlt: "Benachrichtigung für {fileName} schließen",
         uploading: "Hochladen... {progress} %",
         uploadComplete: "Hochladen abgeschlossen",
@@ -1795,6 +1819,7 @@ const tr = {
             tooltipVideoBitrate: "Video Bit Hızı: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Görsel yükle",
             title: "Pano",
             label: "Sunucu Panosu:",
             placeholder: "Sunucudan pano içeriği...",
@@ -1847,6 +1872,7 @@ const tr = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "Başlat",
         closeAlt: "Uygulama modalını kapat",
         loading: "Uygulamalar yükleniyor...",
         errorLoading: "Uygulama verileri yüklenemedi. Lütfen tekrar deneyin.",
@@ -1863,6 +1889,7 @@ const tr = {
         installedBadge: "Yüklendi"
     },
     notifications: {
+        warningPrefix: "Uyarı",
         closeButtonAlt: "{fileName} için bildirimi kapat",
         uploading: "Yükleniyor... {progress} %",
         uploadComplete: "Yükleme Tamamlandı",
@@ -2003,6 +2030,7 @@ const it = {
             tooltipVideoBitrate: "Bitrate Video: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Carica immagine",
             title: "Appunti",
             label: "Appunti del Server:",
             placeholder: "Contenuto degli appunti dal server...",
@@ -2055,6 +2083,7 @@ const it = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "Avvia",
         closeAlt: "Chiudi modale applicazioni",
         loading: "Caricamento applicazioni...",
         errorLoading: "Errore nel caricamento dei dati delle applicazioni. Riprova.",
@@ -2071,6 +2100,7 @@ const it = {
         installedBadge: "Installato"
     },
     notifications: {
+        warningPrefix: "Avviso",
         closeButtonAlt: "Chiudi notifica per {fileName}",
         uploading: "Caricamento... {progress} %",
         uploadComplete: "Caricamento Completato",
@@ -2211,6 +2241,7 @@ const nl = {
             tooltipVideoBitrate: "Videobitrate: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Afbeelding uploaden",
             title: "Klembord",
             label: "Server Klembord:",
             placeholder: "Klembord inhoud van server...",
@@ -2263,6 +2294,7 @@ const nl = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "Starten",
         closeAlt: "Applicatiemodal sluiten",
         loading: "Applicaties laden...",
         errorLoading: "Fout bij het laden van applicatiegegevens. Probeer het opnieuw.",
@@ -2279,6 +2311,7 @@ const nl = {
         installedBadge: "Geïnstalleerd"
     },
     notifications: {
+        warningPrefix: "Waarschuwing",
         closeButtonAlt: "Melding sluiten voor {fileName}",
         uploading: "Uploaden... {progress} %",
         uploadComplete: "Upload Voltooid",
@@ -2419,6 +2452,7 @@ const ar = {
             tooltipVideoBitrate: "معدل بت الفيديو: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "رفع صورة",
             title: "الحافظة",
             label: "حافظة الخادم:",
             placeholder: "محتوى الحافظة من الخادم...",
@@ -2471,6 +2505,7 @@ const ar = {
         "320x240": "320 × 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "تشغيل",
         closeAlt: "إغلاق نافذة التطبيقات",
         loading: "جارٍ تحميل التطبيقات...",
         errorLoading: "فشل تحميل بيانات التطبيقات. يرجى المحاولة مرة أخرى.",
@@ -2487,6 +2522,7 @@ const ar = {
         installedBadge: "مثبت"
     },
     notifications: {
+        warningPrefix: "تحذير",
         closeButtonAlt: "إغلاق الإشعار لـ {fileName}",
         uploading: "جارٍ التحميل... {progress} %",
         uploadComplete: "اكتمل التحميل",
@@ -2627,6 +2663,7 @@ const ko = {
             tooltipVideoBitrate: "비디오 비트레이트: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "이미지 업로드",
             title: "클립보드",
             label: "서버 클립보드:",
             placeholder: "서버의 클립보드 내용...",
@@ -2679,6 +2716,7 @@ const ko = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "실행",
         closeAlt: "앱 모달 닫기",
         loading: "앱 로드 중...",
         errorLoading: "앱 데이터 로드 실패. 다시 시도하십시오.",
@@ -2695,6 +2733,7 @@ const ko = {
         installedBadge: "설치됨"
     },
     notifications: {
+        warningPrefix: "경고",
         closeButtonAlt: "{fileName} 알림 닫기",
         uploading: "업로드 중... {progress} %",
         uploadComplete: "업로드 완료",
@@ -2835,6 +2874,7 @@ const ja = {
             tooltipVideoBitrate: "ビデオビットレート: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "画像をアップロード",
             title: "クリップボード",
             label: "サーバークリップボード:",
             placeholder: "サーバーからのクリップボードの内容...",
@@ -2887,6 +2927,7 @@ const ja = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "起動",
         closeAlt: "アプリモーダルを閉じる",
         loading: "アプリを読み込み中...",
         errorLoading: "アプリデータの読み込みに失敗しました。もう一度お試しください。",
@@ -2903,6 +2944,7 @@ const ja = {
         installedBadge: "インストール済み"
     },
     notifications: {
+        warningPrefix: "警告",
         closeButtonAlt: "{fileName} の通知を閉じる",
         uploading: "アップロード中... {progress} %",
         uploadComplete: "アップロード完了",
@@ -3043,6 +3085,7 @@ const vi = {
             tooltipVideoBitrate: "Tốc độ bit video: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Tải ảnh lên",
             title: "Bộ nhớ tạm",
             label: "Bộ nhớ tạm Máy chủ:",
             placeholder: "Nội dung bộ nhớ tạm từ máy chủ...",
@@ -3095,6 +3138,7 @@ const vi = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "Khởi chạy",
         closeAlt: "Đóng modal ứng dụng",
         loading: "Đang tải ứng dụng...",
         errorLoading: "Tải dữ liệu ứng dụng thất bại. Vui lòng thử lại.",
@@ -3111,6 +3155,7 @@ const vi = {
         installedBadge: "Đã cài đặt"
     },
     notifications: {
+        warningPrefix: "Cảnh báo",
         closeButtonAlt: "Đóng thông báo cho {fileName}",
         uploading: "Đang tải lên... {progress} %",
         uploadComplete: "Tải lên Hoàn tất",
@@ -3251,6 +3296,7 @@ const th = {
             tooltipVideoBitrate: "บิตเรตวิดีโอ: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "อัปโหลดรูปภาพ",
             title: "คลิปบอร์ด",
             label: "คลิปบอร์ดเซิร์ฟเวอร์:",
             placeholder: "เนื้อหาคลิปบอร์ดจากเซิร์ฟเวอร์...",
@@ -3303,6 +3349,7 @@ const th = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: { // New section for "AppsModal"
+        launchButton: "เปิด",
         closeAlt: "ปิดหน้าต่างแอป",
         loading: "กำลังโหลดแอป...",
         errorLoading: "โหลดข้อมูลแอปไม่สำเร็จ โปรดลองอีกครั้ง",
@@ -3319,6 +3366,7 @@ const th = {
         installedBadge: "ติดตั้งแล้ว"
     },
     notifications: {
+        warningPrefix: "คำเตือน",
         closeButtonAlt: "ปิดการแจ้งเตือนสำหรับ {fileName}",
         uploading: "กำลังอัปโหลด... {progress} %",
         uploadComplete: "อัปโหลดเสร็จสมบูรณ์",
@@ -3459,6 +3507,7 @@ const fil = {
             tooltipVideoBitrate: "Bitrate ng Video: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Mag-upload ng larawan",
             title: "Klippboard",
             label: "Clipboard ng Server:",
             placeholder: "Nilalaman ng clipboard mula sa server...",
@@ -3511,6 +3560,7 @@ const fil = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: {
+        launchButton: "Ilunsad",
         closeAlt: "Isara ang modal ng mga app",
         loading: "Nilo-load ang mga app...",
         errorLoading: "Nabigo ang pag-load ng data ng app. Pakisubukang muli.",
@@ -3527,6 +3577,7 @@ const fil = {
         installedBadge: "Naka-install"
     },
     notifications: {
+        warningPrefix: "Babala",
         closeButtonAlt: "Isara ang notification para sa {fileName}",
         uploading: "Nag-a-upload... {progress} %",
         uploadComplete: "Kumpleto ang Pag-upload",
@@ -3667,6 +3718,7 @@ const da = {
             tooltipVideoBitrate: "Videobitrate: {value} Mbps",
         },
         clipboard: {
+            uploadImage: "Upload billede",
             title: "Udklipsholder",
             label: "Server Udklipsholder:",
             placeholder: "Indhold fra serverens udklipsholder...",
@@ -3719,6 +3771,7 @@ const da = {
         "320x240": "320 x 240 (QVGA 4:3)",
     },
     appsModal: {
+        launchButton: "Start",
         closeAlt: "Luk app-modal",
         loading: "Indlæser apps...",
         errorLoading: "Kunne ikke indlæse app-data. Prøv venligst igen.",
@@ -3735,6 +3788,7 @@ const da = {
         installedBadge: "Installeret"
     },
     notifications: {
+        warningPrefix: "Advarsel",
         closeButtonAlt: "Luk notifikation for {fileName}",
         uploading: "Uploader... {progress} %",
         uploadComplete: "Upload Fuldført",
@@ -3790,8 +3844,12 @@ export const getTranslator = (langCode = 'en') => {
     // Always use English as the ultimate fallback if a key is missing even in the selected language
     const fallbackDict = translations.en;
 
-    // The actual translation function
+    // The actual translation function. A string second argument is a literal
+    // fallback rather than an interpolation map, so a call site that spells a
+    // key wrong shows its English text instead of the raw key.
     const t = (key, variables) => {
+        const defaultText = typeof variables === 'string' ? variables : null;
+        if (defaultText !== null) variables = undefined;
         const keys = key.split('.');
         let text = langDict;
         let fallbackText = fallbackDict;
@@ -3834,9 +3892,10 @@ export const getTranslator = (langCode = 'en') => {
             return simpleInterpolate(text, variables);
         }
 
-        // If key wasn't found anywhere or isn't a string, return the key itself as an indicator
+        // If key wasn't found anywhere or isn't a string, fall back to the
+        // literal the caller supplied, else the key itself as an indicator.
         console.warn(`Translation key not found or invalid: ${key}`);
-        return key;
+        return defaultText !== null ? defaultText : key;
     };
 
     // Also return the raw dictionary of the selected language (or fallback)
