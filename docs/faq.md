@@ -89,6 +89,29 @@ In order to use the web interface when this is not possible (or when you are usi
 
 </details>
 
+## The video goes black when the screen locks or blanks on an existing desktop.
+
+<details markdown>
+  <summary>Open Answer</summary>
+
+Selkies captures one display, and locking or blanking takes the desktop off it. An X11 display manager runs its greeter on a **separate** X server (LightDM spawns `:1` for it), a Wayland session hands its output to the locker, and DPMS blanks the framebuffer on either. Capture keeps running against a display that has stopped drawing, so the stream stays black until the session is unlocked.
+
+The fix is to stop the captured session from idling or locking in the first place. This block is safe to paste on either backend — each line applies where it is meaningful and is skipped where it is not:
+
+```bash
+xset s off -dpms                                                    # X11 server-wide
+gsettings set org.gnome.desktop.session idle-delay 0                # GNOME, either backend
+gsettings set org.gnome.desktop.screensaver lock-enabled false
+```
+
+Other desktops keep the same two switches elsewhere: KDE under *Energy Saving* and *Screen Locking* in System Settings, XFCE under *Power Manager* and *Screensaver*, and sway or labwc simply by not running `swayidle`/`swaylock`.
+
+These apply to the running session only, so also stop the desktop from autostarting a screen locker (`light-locker`, `xscreensaver`, `gnome-screensaver`), or it returns at the next login. With NVIDIA GPUs, DPMS blanking may additionally need `Option "HardDPMS" "False"` under the `Device` or `Screen` section of `/etc/X11/xorg.conf`.
+
+None of this applies to a session Selkies brings up itself. The [Example Container](component.md#example-container) starts its X server with `-s 0 -dpms` and installs no locker, and the headless Wayland backend has no display manager to lock.
+
+</details>
+
 ## My touchpad does not move while pressing a key with the keyboard.
 
 <details markdown>

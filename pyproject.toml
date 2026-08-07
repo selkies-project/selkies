@@ -11,12 +11,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "selkies"
-version = "0.0.0"
-authors = [
-    {name = "Dan Isla", email = "danisla@users.noreply.github.com"},
-    {name = "Seungmin Kim", email = "8457324+ehfd@users.noreply.github.com"},
-    {name = "Ryan Kuba", email = "ryankuba@gmail.com"},
-]
+version = "2.0.0"
+authors = [{name = "Selkies Project", email = "pypi@linuxserver.io"}]
 description = "Open-Source Low-Latency Linux WebRTC HTML5 Remote Desktop and 3D Graphics / Game Streaming Platform"
 readme = "README.md"
 license = "MPL-2.0"
