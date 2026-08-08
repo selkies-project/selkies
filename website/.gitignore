@@ -1,0 +1,13 @@
+# deps
+/node_modules
+package-lock.json
+
+# generated content
+.source
+/public/assets
+
+# build
+/.next/
+/out/
+next-env.d.ts
+*.tsbuildinfo

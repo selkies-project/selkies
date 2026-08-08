@@ -1,6 +1,9 @@
-**Go to [Knowledge Base](#knowledge-base) for information on customization.**
+---
+title: Development and Contributions
+description: Build Selkies locally, customize a container, follow the style guides, and run the tests.
+---
 
-# Development and Contributions
+**Go to [Knowledge Base](#knowledge-base) for information on customization.**
 
 **We are in need of maintainers and community contributors. Please consider stepping up, as we can never have too much help!**
 
@@ -112,6 +115,33 @@ docker compose --profile gpu up example-gpu  # the same container with a GPU att
 ```
 
 `example` bind-mounts `src/selkies` over the installed package, so server-side edits take effect on a restart rather than a rebuild. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. To run a wheel built from this tree instead of the latest PyPI release, copy it out of the `selkies-py-build` image into `addons/example/wheels/` before building.
+
+## Documentation
+
+The pages under [`docs/`](https://github.com/selkies-project/selkies/tree/main/docs) are plain Markdown and are what <https://selkies-project.github.io/selkies> publishes. Editing one through GitHub's web editor is enough to change the site: either the pencil icon in the repository, or the **Edit this page on GitHub** link that every page carries, opens the file it was built from.
+
+A page begins with front matter naming it:
+
+```yaml
+---
+title: Getting Started
+description: One sentence, shown under the title and in search results.
+---
+```
+
+[`docs/meta.json`](https://github.com/selkies-project/selkies/tree/main/docs/meta.json) lists the pages in sidebar order, and a new page has to be added to it to appear there.
+
+Links between pages are written the way GitHub resolves them (`start.md`, or `component.md#encoders`) and are rewritten to site URLs during the build. Images live in `docs/assets` and are referenced relative to the file.
+
+Previewing the site needs nothing but [Node.js](https://nodejs.org):
+
+```bash
+cd website
+npm install
+npm run dev          # http://localhost:3000
+```
+
+`npm run build` writes the site to `website/out`, which is what the `Docs` workflow uploads, and `npm run check-links` fails on any link or anchor in that output that does not resolve.
 
 ## Container Customization
 

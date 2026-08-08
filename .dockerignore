@@ -8,10 +8,10 @@ src/*.egg-info
 **/__pycache__
 **/*.pyc
 .ruff_cache
+**/.next
 build/
 out/
 release/
 release-artifacts/
 AppDir/
 infra/appimage/AppDir/
-site/

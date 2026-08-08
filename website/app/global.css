@@ -1,0 +1,29 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+/*
+ * The accent is the logo gradient's magenta, darkened for the light surface
+ * and left at the gradient's own pink on the dark one. Both clear 4.5:1
+ * against their background and against the text placed on top of them; the
+ * gradient's violet end stop does not, so it stays out of the interface.
+ */
+:root {
+  --color-fd-primary: #b83a80;
+  --color-fd-ring: #b83a80;
+}
+
+/* Roboto is the wordmark's typeface, and was the previous site's as well. */
+@theme inline {
+  --font-sans: var(--font-roboto);
+  --font-mono: var(--font-roboto-mono);
+}
+
+.dark {
+  --color-fd-primary: #ef5c9c;
+  --color-fd-ring: #ef5c9c;
+}
+
+html {
+  scrollbar-gutter: stable;
+}

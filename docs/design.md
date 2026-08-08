@@ -1,6 +1,9 @@
-**If you simply want to get this project running and do not like reading long text, head to [Getting Started](start.md).**
+---
+title: What is Selkies?
+description: The problem Selkies solves, where it came from, and the decisions behind its design.
+---
 
-## What is Selkies?
+**If you simply want to get this project running and do not like reading long text, head to [Getting Started](start.md).**
 
 Have you ever wondered why Windows has Parsec, and Linux does not? Have you ever wanted to obtain full frame on interactive 3D OpenGL/Vulkan/Wine-Direct3D applications or Linux/Wine video games, without relying on proprietary installers or seated server licenses, from the convenience of your web browser that you enjoyed from noVNC or Apache Guacamole? Do you have a web server, reverse proxy, or load balancer in your infrastructure that a web application deployment must pass through?
 

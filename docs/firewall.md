@@ -1,4 +1,7 @@
-# WebRTC and Firewall Issues
+---
+title: WebRTC and Firewall Issues
+description: STUN and TURN configuration for the opt-in WebRTC transport on restrictive networks.
+---
 
 **This entire document applies only to the opt-in WebRTC transport (`--mode=webrtc`).** The default WebSocket transport streams over a single TCP port (default `8080`) and does not perform UDP hole-punching, so it needs no STUN/TURN server and is not affected by the firewall issues described here. Reach for this page only after you have deliberately switched to WebRTC mode.
 

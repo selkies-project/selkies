@@ -1,4 +1,7 @@
-# Components
+---
+title: Components
+description: The core components and optional addons Selkies is built from, and the encoders and interfaces each one supports.
+---
 
 ## Component Structure
 

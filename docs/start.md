@@ -1,4 +1,7 @@
-# Getting Started
+---
+title: Getting Started
+description: Install Selkies with pip, run it from a container, or build it from source.
+---
 
 ## Quick Start
 
@@ -113,7 +116,7 @@ Selkies has a modularized architecture, but at runtime it is a **single Python a
 
 `pixelflux` and `pcmflux` are installed automatically as dependencies of the wheel. There is **no separate multimedia-framework build or web-interface package to install** — earlier releases shipped an external multimedia framework, a Python wheel, and a separate web interface as three components, but that runtime has been fully removed and the web client is now bundled into the wheel.
 
-For more information, check the [Components](component.md#components) section.
+For more information, check the [Components](component.md) section.
 
 The [All-In-One Desktop Containers](#desktop-container) support unprivileged self-hosted Kubernetes clusters and Docker®/Podman.
 

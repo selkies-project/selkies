@@ -1,8 +1,11 @@
-# Troubleshooting and FAQs
+---
+title: Troubleshooting and FAQs
+description: Fixes for connection, performance, clipboard, gamepad, and display problems.
+---
 
 ## The HTML5 web interface loads and the signaling connection works, but the WebRTC connection fails or the remote desktop does not start.
 
-<details markdown>
+<details>
   <summary>Open Answer</summary>
 
 This section applies to the opt-in WebRTC transport (`--mode=webrtc`). The default WebSocket transport streams over a single TCP port and does not use STUN/TURN or UDP hole-punching, so it is unaffected by most of the firewall issues below.
@@ -25,7 +28,7 @@ Make sure to also check that you enabled automatic login with your display manag
 
 ## The HTML5 web interface is slow, lagging, or stuttering.
 
-<details markdown>
+<details>
   <summary>Open Answer</summary>
 
 **First, check if the TURN server is shown as `staticauth.openrelay.metered.ca` with a `relay` connection, and if so, please read [WebRTC and Firewall Issues](firewall.md).**
@@ -54,7 +57,7 @@ However, it might be that the parameters for the transport, the video encoder (`
 
 ## The clipboard does not work.
 
-<details markdown>
+<details>
   <summary>Open Answer</summary>
 
 This is very likely a web browser constraint that is applied because you are using HTTP for an address to the web interface that is not localhost. The clipboard only works when you use HTTPS (with a valid or self-signed certificate), or when accessing localhost (some browsers do not support this as well). You could use port forwarding to access through localhost or obtain an HTTPS certificate.
@@ -65,7 +68,7 @@ Copy (`Ctrl/Cmd + C`) and paste (`Ctrl/Cmd + V`) work on Chromium, Firefox, and 
 
 ## The gamepad shows as connected in Selkies, but Steam or a browser inside the remote desktop does not see it.
 
-<details markdown>
+<details>
   <summary>Open Answer</summary>
 
 Applications reach a Selkies gamepad in one of two ways, and only one of them is a device the kernel knows about.
@@ -80,7 +83,7 @@ Also note that the browser Gamepad API only reports controllers in a [secure con
 
 ## The web interface refuses to start up in the terminal after rebooting my computer or restarting my desktop in a standalone instance.
 
-<details markdown>
+<details>
   <summary>Open Answer</summary>
 
 This is because the desktop session starts as `root` when the user is not logged in. Next time, set up automatic login in the settings with the user you want to use.
@@ -91,7 +94,7 @@ In order to use the web interface when this is not possible (or when you are usi
 
 ## The video goes black when the screen locks or blanks on an existing desktop.
 
-<details markdown>
+<details>
   <summary>Open Answer</summary>
 
 Selkies captures one display, and locking or blanking takes the desktop off it. An X11 display manager runs its greeter on a **separate** X server (LightDM spawns `:1` for it), a Wayland session hands its output to the locker, and DPMS blanks the framebuffer on either. Capture keeps running against a display that has stopped drawing, so the stream stays black until the session is unlocked.
@@ -114,7 +117,7 @@ None of this applies to a session Selkies brings up itself. The [Example Contain
 
 ## My touchpad does not move while pressing a key with the keyboard.
 
-<details markdown>
+<details>
   <summary>Open Answer</summary>
 
 This is a setting from the client operating system and will show the same behavior with any other application. In Windows, go to `Settings > Bluetooth & devices > Touchpad > Taps` to increase your touchpad sensitivity. In Linux or Mac, turn off the setting `Touchpad > Disable while typing`.
@@ -123,7 +126,7 @@ This is a setting from the client operating system and will show the same behavi
 
 ## I want to pass multiple screens within a server to another client using the WebRTC HTML5 web interface.
 
-<details markdown>
+<details>
   <summary>Open Answer</summary>
 
 You can start a new instance of Selkies by changing the `DISPLAY` environment variable (or even use the same one for multiple instances) and setting a different web interface port in a different terminal to pass a different screen simultaneously to your current screen. Reverse proxy server/web servers supporting WebSocket such as `nginx` can be utilized to expose the interfaces to multiple users in different paths.
@@ -132,7 +135,7 @@ You can start a new instance of Selkies by changing the `DISPLAY` environment va
 
 ## I want to test a shared secret TURN server by manually generating a TURN credential from a shared secret.
 
-<details markdown>
+<details>
   <summary>Open Answer</summary>
 
 Try the [TURN-REST Container](component.md#turn-rest) or its underlying turn-rest `app.py` Flask web application. This will output TURN credentials automatically when the Docker®/Podman options `-e TURN_SHARED_SECRET=`, `-e TURN_HOST=`, `-e TURN_PORT=`, `-e TURN_PROTOCOL=`, `-e TURN_TLS=` or environment variables `export TURN_SHARED_SECRET=`, `export TURN_HOST=`, `export TURN_PORT=`, `export TURN_PROTOCOL=`, `export TURN_TLS=` are set.

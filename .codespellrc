@@ -1,7 +1,7 @@
 [codespell]
 # npm dependencies, lockfiles, generated bundles and the translation
 # catalogues are not ours to spell-check.
-skip = ./.git,./addons/*/node_modules,./addons/*/dist,./src/selkies/selkies_web,*.lock,package-lock.json,*.min.js,selkies-core.js,translations.js,translations-extra.ts,*.svg,*.png,*.ico,*.woff,*.woff2
+skip = ./.git,./addons/*/node_modules,./addons/*/dist,./website/node_modules,./website/out,./website/.next,./website/public,./src/selkies/selkies_web,*.lock,package-lock.json,*.min.js,selkies-core.js,translations.js,translations-extra.ts,*.svg,*.png,*.ico,*.woff,*.woff2
 # renderD: DRM render node prefix (renderD128). requestor: X11 selection
 # protocol field name. currentY/initialY: pointer coordinate variables.
 # chage: the shadow-utils command. anc: SDI ancillary-data region.

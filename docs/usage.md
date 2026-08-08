@@ -1,4 +1,7 @@
-# Usage
+---
+title: Usage
+description: Keyboard shortcuts, clipboard behaviour, and the command-line options and environment variables.
+---
 
 ## Shortcuts
 

@@ -1,4 +1,7 @@
-# Citing Selkies
+---
+title: Citing Selkies
+description: How to cite Selkies in academic publications, and why citations keep the project alive.
+---
 
 > **NOTE: This page is also applicable for developers applying, embedding, forking, deriving, or taking influence from this project.**
 

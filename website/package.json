@@ -1,0 +1,35 @@
+{
+  "name": "selkies-website",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "node scripts/sync-assets.mjs",
+    "dev": "next dev",
+    "prebuild": "node scripts/sync-assets.mjs",
+    "build": "next build",
+    "postbuild": "node scripts/mirror-page-urls.mjs",
+    "typecheck": "next typegen && tsc --noEmit",
+    "check-links": "node scripts/check-links.mjs"
+  },
+  "dependencies": {
+    "@mdx-js/mdx": "^3.1.1",
+    "fumadocs-core": "16.14.2",
+    "fumadocs-mdx": "15.2.2",
+    "fumadocs-ui": "npm:@fumadocs/base-ui@16.14.2",
+    "next": "16.3.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "rehype-raw": "^7.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/mdx": "^2.0.14",
+    "@types/node": "^26.1.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "postcss": "^8.5.25",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^6.0.3"
+  }
+}

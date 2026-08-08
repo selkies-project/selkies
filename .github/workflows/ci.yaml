@@ -10,7 +10,7 @@ on:
     branches: [main]
     paths-ignore:
       - docs/**
-      - mkdocs.yml
+      - website/**
       - .devcontainer/**
       - .github/workflows/docs.yaml
       - .github/workflows/devcontainer-feature.yaml

@@ -18,6 +18,12 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  NODE_VERSION: "26"
+  # Pages serves a project site under a path named after the repository, and
+  # every URL the export emits has to carry it
+  NEXT_PUBLIC_BASE_PATH: /selkies
+
 jobs:
   build:
     name: Build documentation
@@ -25,22 +31,26 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup Python for MkDocs
-        uses: actions/setup-python@v7
+      - uses: actions/setup-node@v7
         with:
-          python-version: 3.x
+          node-version: ${{ env.NODE_VERSION }}
 
-      - name: Generate MkDocs static files
-        # Pinned to the 9.x line: MkDocs 2.0 removes the plugin and theming
-        # systems this site depends on
+      - name: Build the static site
+        working-directory: website
+        # Lockfiles are gitignored in this repository, so `npm ci` has nothing
+        # to install from
         run: |
-          pip install --no-cache-dir "mkdocs-material~=9.7"
-          mkdocs build --strict --verbose --site-dir "${RUNNER_TEMP}/mkdocs"
+          npm install --no-audit --no-fund
+          npm run build
 
-      - name: Upload MkDocs artifacts
+      - name: Check every link and anchor in the built site
+        working-directory: website
+        run: npm run check-links
+
+      - name: Upload the site
         uses: actions/upload-pages-artifact@v5
         with:
-          path: ${{ runner.temp }}/mkdocs
+          path: website/out
           retention-days: 1
 
   publish:
