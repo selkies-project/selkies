@@ -17,8 +17,8 @@ const PROTOCOL = /^[a-z][a-z0-9+.-]*:/i;
  *   landing page is served one path segment deep, so the same relative URL
  *   would miss; sync-assets.mjs mirrors docs/assets to the site root and these
  *   are pointed at it.
- * - The coTURN configuration blocks are tagged `conf`, the name Pygments gives
- *   that grammar. Shiki calls it `ini`.
+ * - The coTURN configuration blocks are tagged `conf`. Shiki knows that
+ *   grammar as `ini`.
  */
 export function remarkDocsCompat(): Transformer<Root, Root> {
   return (tree) => {

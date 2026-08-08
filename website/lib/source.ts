@@ -12,8 +12,7 @@ const docs = defineDocs({
 });
 
 export const source = loader({
-  // Pages sit at the site root rather than under a /docs prefix, which is the
-  // URL shape already in circulation.
+  // Pages sit at the site root rather than under a /docs prefix.
   baseUrl: '/',
   source: docs.toFumadocsSource(),
   slugs(file) {

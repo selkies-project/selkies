@@ -26,7 +26,7 @@ docker run --rm --privileged tonistiigi/binfmt:latest --install all
 
 ### Core Components
 
-At runtime, Selkies is a **single Python application** — the `selkies` wheel. Unlike earlier releases, there is no separate multimedia-framework build and no separate web-interface package: the HTML5 web client is bundled into the wheel, and screen/audio capture and encoding are provided by the `pixelflux` and `pcmflux` extensions, which are installed automatically as dependencies of the wheel.
+At runtime, Selkies is a **single Python application** — the `selkies` wheel. The HTML5 web client is bundled into it, and screen/audio capture and encoding are provided by the `pixelflux` and `pcmflux` extensions, which are installed automatically as dependencies of the wheel.
 
 All release components are available for download from the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
 

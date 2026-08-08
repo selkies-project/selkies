@@ -11,6 +11,9 @@
 :root {
   --color-fd-primary: #b83a80;
   --color-fd-ring: #b83a80;
+  /* Narrower than the 1400px default, which left body text running to nearly
+     100 characters a line on a wide display. */
+  --fd-layout-width: 1200px;
 }
 
 /* Roboto is the wordmark's typeface, and was the previous site's as well. */
@@ -26,4 +29,74 @@
 
 html {
   scrollbar-gutter: stable;
+}
+
+/*
+ * Badges are written as a run of linked images on one line, which is a row on
+ * GitHub. The typography defaults make every image a block, which would stack
+ * them instead.
+ */
+#nd-page p a img {
+  display: inline-block;
+  margin-block: 0;
+  vertical-align: middle;
+}
+
+/*
+ * Collapsible answers are written as plain <details>, which is what GitHub
+ * renders, so they arrive as HTML and never reach the framework's accordion
+ * component. These give them the same surface and the same affordances.
+ */
+#nd-page details {
+  border: 1px solid var(--color-fd-border);
+  border-radius: 0.75rem;
+  background-color: var(--color-fd-card);
+  margin-block: 1rem;
+}
+
+#nd-page summary {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.75rem 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  list-style: none;
+  border-radius: inherit;
+  transition: background-color 0.15s;
+}
+
+#nd-page summary::-webkit-details-marker {
+  display: none;
+}
+
+#nd-page summary::before {
+  content: '';
+  width: 0.4rem;
+  height: 0.4rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  rotate: -45deg;
+  transition: rotate 0.2s;
+}
+
+#nd-page details[open] > summary {
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+}
+
+#nd-page details[open] > summary::before {
+  rotate: 45deg;
+}
+
+#nd-page summary:hover {
+  background-color: var(--color-fd-accent);
+}
+
+#nd-page details > :not(summary) {
+  padding-inline: 1rem;
+}
+
+#nd-page details > :last-child:not(summary) {
+  padding-bottom: 0.5rem;
 }

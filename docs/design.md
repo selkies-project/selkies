@@ -71,6 +71,4 @@ For the opt-in WebRTC transport, Selkies embeds a vendored fork of [`aiortc`](ht
 
 Therefore, Selkies is meant from the start to be a community-built project, where developers from all backgrounds can easily contribute to or expand upon.
 
-> **Historical note:** earlier releases of this project used a multimedia-framework-based `webrtcbin` pipeline for capture, encoding, and transport. That runtime has been fully removed in favor of the `pixelflux`/`pcmflux` plus vendored `aiortc` architecture described above.
-
 **Head to [Getting Started](start.md) to deploy your own instance.**

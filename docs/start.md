@@ -114,7 +114,7 @@ Selkies has a modularized architecture, but at runtime it is a **single Python a
 - injects keyboard, mouse, and gamepad input through a vendored `python-xlib` (XTEST/XFixes);
 - and, only for the opt-in WebRTC transport, uses a vendored fork of `aiortc`.
 
-`pixelflux` and `pcmflux` are installed automatically as dependencies of the wheel. There is **no separate multimedia-framework build or web-interface package to install** — earlier releases shipped an external multimedia framework, a Python wheel, and a separate web interface as three components, but that runtime has been fully removed and the web client is now bundled into the wheel.
+`pixelflux` and `pcmflux` are installed automatically as dependencies of the wheel, and the web client is bundled into it. There is **no separate multimedia-framework build or web-interface package to install**.
 
 For more information, check the [Components](component.md) section.
 

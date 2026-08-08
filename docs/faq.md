@@ -62,7 +62,7 @@ However, it might be that the parameters for the transport, the video encoder (`
 
 This is very likely a web browser constraint that is applied because you are using HTTP for an address to the web interface that is not localhost. The clipboard only works when you use HTTPS (with a valid or self-signed certificate), or when accessing localhost (some browsers do not support this as well). You could use port forwarding to access through localhost or obtain an HTTPS certificate.
 
-Copy (`Ctrl/Cmd + C`) and paste (`Ctrl/Cmd + V`) work on Chromium, Firefox, and Safari over a secure context; on browsers that block the asynchronous clipboard API, copy-from-session falls back to a synchronous copy automatically, so the older Firefox `about:config` workaround is no longer required.
+Copy (`Ctrl/Cmd + C`) and paste (`Ctrl/Cmd + V`) work on Chromium, Firefox, and Safari over a secure context. On browsers that block the asynchronous clipboard API, copy-from-session falls back to a synchronous copy automatically, so no browser configuration is needed.
 
 </details>
 

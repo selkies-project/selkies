@@ -7,7 +7,7 @@ description: Keyboard shortcuts, clipboard behaviour, and the command-line optio
 
 **Fullscreen: `Control + Shift + F` or Fullscreen Button**
 
-**Remote (Game) Cursor Lock: `Ctrl + Shift + LeftClick`**
+**Remote (Game) Cursor Lock: `Ctrl + Shift + Left Click`**
 
 **Open Side Menu: Ctrl + Shift + M or Side Button**
 
