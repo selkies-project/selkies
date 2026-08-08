@@ -118,7 +118,7 @@ docker compose --profile gpu up example-gpu  # the same container with a GPU att
 
 ## Documentation
 
-The pages under [`docs/`](https://github.com/selkies-project/selkies/tree/main/docs) are plain Markdown and are what <https://selkies-project.github.io/selkies> publishes. Editing one through GitHub's web editor is enough to change the site: either the pencil icon in the repository, or the **Edit this page on GitHub** link that every page carries, opens the file it was built from.
+The pages under [`docs/`](https://github.com/selkies-project/selkies/tree/main/docs) are plain Markdown and are what <https://selkies-project.github.io/selkies> publishes. Editing one through GitHub's web editor is enough to change the site: either the pencil icon in the repository, or the **Edit on GitHub** button beside every page, opens the file it was built from.
 
 A page begins with front matter naming it:
 

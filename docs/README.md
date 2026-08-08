@@ -1,7 +1,6 @@
 ---
 title: Selkies
 description: Open-Source Low-Latency Accelerated Linux WebSocket and WebRTC HTML5 Remote Desktop Streaming Platform for Self-Hosting, Containers, Kubernetes, or Cloud/HPC
-full: true
 ---
 
 ![Selkies](assets/logo/horizontal-480.png)
