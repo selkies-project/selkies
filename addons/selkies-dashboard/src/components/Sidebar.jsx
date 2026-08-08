@@ -3228,7 +3228,7 @@ function Sidebar() {
                         >
                           {(serverSettings?.scaling_dpi?.allowed || []).map((dpiValue) => {
                             const percent = Math.round((parseInt(dpiValue, 10) / 96) * 100);
-                            const label = `${percent} %`;
+                            const label = `${percent}%`;
                             return (
                               <option key={dpiValue} value={dpiValue}>
                                 {dpiValue === String(currentDeviceDpi) ? `${label} *` : label}
@@ -3492,7 +3492,7 @@ function Sidebar() {
                           >
                             {Math.round(
                               Math.max(0, Math.min(100, cpuPercent || 0))
-                            )} %
+                            )}%
                           </text>
                         </svg>
                         <div className="gauge-label">
@@ -3593,7 +3593,7 @@ function Sidebar() {
                               >
                                 {Math.round(
                                   Math.max(0, Math.min(100, gpuPercent || 0))
-                                )} %
+                                )}%
                               </text>
                             </svg>
                             <div className="gauge-label">

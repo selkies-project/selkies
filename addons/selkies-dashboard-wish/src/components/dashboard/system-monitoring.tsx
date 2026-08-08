@@ -406,7 +406,7 @@ export function SystemMonitoring() {
 						<div className="flex justify-between items-center py-1">
 							<span className="text-sm text-muted-foreground">{t('sections.stats.cpuLabel')}</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(cpuPercent)} %</span>
+								<span className="text-sm font-medium text-card-foreground">{Math.round(cpuPercent)}%</span>
 								{(() => {
 									const status = getPerformanceStatus(cpuPercent, 'percentage');
 									return (
@@ -421,7 +421,7 @@ export function SystemMonitoring() {
 						<div className="flex justify-between items-center py-1">
 							<span className="text-sm text-muted-foreground">{t('sections.stats.gpuLabel')}</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuPercent)} %</span>
+								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuPercent)}%</span>
 								{(() => {
 									const status = getPerformanceStatus(gpuPercent, 'percentage');
 									return (
@@ -436,7 +436,7 @@ export function SystemMonitoring() {
 						<div className="flex justify-between items-center py-1">
 							<span className="text-sm text-muted-foreground">{t('sections.stats.sysMemLabel')}</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(sysMemPercent)} % ({formatMemory(sysMemUsed)}/{formatMemory(sysMemTotal)})</span>
+								<span className="text-sm font-medium text-card-foreground">{Math.round(sysMemPercent)}% ({formatMemory(sysMemUsed)}/{formatMemory(sysMemTotal)})</span>
 								{(() => {
 									const status = getPerformanceStatus(sysMemPercent, 'percentage');
 									return (
@@ -451,7 +451,7 @@ export function SystemMonitoring() {
 						<div className="flex justify-between items-center py-1">
 							<span className="text-sm text-muted-foreground">{t('sections.stats.gpuMemLabel')}</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuMemPercent)} % ({formatMemory(gpuMemUsed)}/{formatMemory(gpuMemTotal)})</span>
+								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuMemPercent)}% ({formatMemory(gpuMemUsed)}/{formatMemory(gpuMemTotal)})</span>
 								{(() => {
 									const status = getPerformanceStatus(gpuMemPercent, 'percentage');
 									return (
@@ -481,7 +481,7 @@ export function SystemMonitoring() {
 						<div className="flex justify-between items-center py-1">
 							<span className="text-sm text-muted-foreground">{t('sections.stats.audioLabel')}</span>
 							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{audioLevel} %</span>
+								<span className="text-sm font-medium text-card-foreground">{audioLevel}%</span>
 								{(() => {
 									const status = getPerformanceStatus(audioLevel, 'audio');
 									return (

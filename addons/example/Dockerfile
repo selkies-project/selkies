@@ -226,6 +226,28 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     fi && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
+# LXQt's system defaults, which the distribution packages do not ship: without
+# them a session has no theme, so lxqt-panel finds no stylesheet, keeps the
+# invalid colours it writes as its own default, and paints nothing at all — a
+# panel that runs and maps a window but is invisible against the desktop. The
+# icon theme goes with it, since LXQt otherwise falls back to Oxygen, which is
+# not installed here. This is the system scope, so a user's own
+# ~/.config/lxqt/lxqt.conf still overrides it. The names are checked against
+# what the packages above actually installed, so a package change fails the
+# build here rather than reaching a user as a desktop that will not paint.
+#
+# pcmanfm-qt gets its desktop background the same way, for the same reason: its
+# own default is #000000 with no wallpaper, which reads as a broken session
+# rather than a plain one. A flat colour rather than one of the shipped
+# wallpapers, because every full refresh re-encodes whatever the desktop shows
+# and a photograph costs far more of the stream than a single tone.
+RUN ICON_THEME=Adwaita && THEME=ambiance && \
+    test -d "/usr/share/icons/${ICON_THEME}" && \
+    test -d "/usr/share/lxqt/themes/${THEME}" && \
+    mkdir -pm755 /etc/xdg/lxqt /etc/xdg/pcmanfm-qt/lxqt && \
+    printf '[General]\nicon_theme=%s\ntheme=%s\n' "${ICON_THEME}" "${THEME}" > /etc/xdg/lxqt/lxqt.conf && \
+    printf '[Desktop]\nWallpaperMode=color\nBgColor=#2e3436\nFgColor=#ffffff\n' > /etc/xdg/pcmanfm-qt/lxqt/settings.conf
+
 # NVIDIA runtime wiring. The container toolkit injects the host driver, but only
 # the capabilities requested below (pixelflux's NVENC path needs `video`, the GL
 # and Vulkan stacks need `graphics`), and it mounts the libraries under
