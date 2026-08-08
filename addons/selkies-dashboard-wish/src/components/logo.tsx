@@ -25,10 +25,10 @@ export const SelkiesLogo = ({ width = 30, height = 30, className = "", ...props 
       {...props}
     >
       <defs>
-        <linearGradient id={id} x1="0.3" y1="1" x2="0.7" y2="0">
-          <stop offset="0.43" stopColor="#EF5C9C" />
-          <stop offset="0.63" stopColor="#D5499A" />
-          <stop offset="1" stopColor="#B54395" />
+        <linearGradient id={id} x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0.4293" stopColor="#EF5C9C" />
+          <stop offset="0.6263" stopColor="#D5499A" />
+          <stop offset="0.9945" stopColor="#6051A2" />
         </linearGradient>
       </defs>
       <g transform="translate(0,460) scale(0.1,-0.1)">
