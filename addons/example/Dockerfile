@@ -253,6 +253,17 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
     apt-get clean && apt-get update && apt-get install --no-install-recommends -y firefox && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
+# Google Chrome, for the H.264/AV1 media stack the Chromium builds in the
+# distribution registries do not carry. The launcher is switched to the basic
+# password store because the container runs no keyring daemon to unlock, and
+# Chrome otherwise blocks on a prompt nobody can answer.
+RUN cd /tmp && \
+    curl -o google-chrome-stable.deb -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb" && \
+    apt-get update && apt-get install --no-install-recommends -y ./google-chrome-stable.deb && \
+    rm -f google-chrome-stable.deb && \
+    sed -i '/^Exec=/ s/$/ --password-store=basic/' /usr/share/applications/google-chrome.desktop && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
+
 # Install Selkies with pip: from the wheels dropped into `wheels/`, or the
 # latest PyPI release when `wheels/` is empty. When fresh pixelflux/pcmflux
 # wheels (built from the main HEAD of selkies-project/pixelflux and

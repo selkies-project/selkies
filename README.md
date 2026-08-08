@@ -1,4 +1,4 @@
-![Selkies WebRTC](/docs/assets/logo/horizontal-480.png)
+![Selkies](/docs/assets/logo/horizontal-480.png)
 
 [![Build](https://github.com/selkies-project/selkies/actions/workflows/ci.yaml/badge.svg)](https://github.com/selkies-project/selkies/actions/workflows/ci.yaml)
 

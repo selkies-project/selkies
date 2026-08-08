@@ -30,7 +30,7 @@ firefox webkit`.
 | --- | --- |
 | `unit` | The source tree and `gcc` for `tests/tools`. The dashboard translation audit also wants `node`, and reports itself skipped without it. |
 | `integration` | An X display (`E2E_DISPLAY`, default `:99`) or the Wayland backend, PulseAudio, and `selkies` importable with `pixelflux`/`pcmflux`. |
-| `e2e` | The above plus Playwright browsers and the built web client (`scripts/ci/build-web.sh`). |
+| `e2e` | The above plus Playwright browsers, the built web client (`scripts/ci/build-web.sh`), `wl-clipboard` for the Wayland clipboard checks, and `tests/tools/fetch-openh264.sh` for the Firefox WebRTC block. |
 | `perf` | A long constrained-link pacer benchmark, plus `xterm` and `xdotool` for the screen-damage load generator. Run on request. |
 | `soak` | The whole `pixelflux`/`pcmflux` API surface, including recording and Wayland. Run on request. |
 
@@ -43,7 +43,7 @@ firefox webkit`.
 | `E2E_WORKDIR` | `$TMPDIR/selkies-tests` | Server log, shim recordings and other scratch. |
 | `SELKIES_TEST_PYTHON` | the interpreter running the tests | Interpreter the server under test runs on. |
 | `E2E_CHROME` | unset | System Chrome/Chromium binary. Unset uses Playwright's bundled Chromium. |
-| `E2E_FIREFOX_PROFILE` | `$E2E_WORKDIR/firefox-profile` | Persistent Firefox profile; clipboard permission does not survive a fresh one. |
+| `E2E_FIREFOX_PROFILE` | `$E2E_WORKDIR/firefox-profile` | Persistent Firefox profile; clipboard permission does not survive a fresh one, and `tests/tools/fetch-openh264.sh` seeds the OpenH264 plugin into it. Firefox negotiates no H.264 without that plugin, and the WebRTC block skips. |
 | `E2E_TURN_REST_URI` | unset | TURN REST endpoint. WebRTC runs on host candidates alone without it. |
 
 ## Tools

@@ -37,7 +37,7 @@ permissions:
 
 env:
   REGISTRY_NAMESPACE: ghcr.io/selkies-project/selkies
-  IMAGE_NAME: ghcr.io/selkies-project/selkies/py-example
+  IMAGE_NAME: ghcr.io/selkies-project/selkies/example
   # ghcr answers a secondary rate limit with 403 on the push itself. buildx
   # reports that as a build failure rather than a response this can read a
   # Retry-After from, so the pause is the minute GitHub asks for when it names

@@ -31,9 +31,12 @@ def check(label, ok, detail=""):
 
 node = shutil.which("node")
 if not node:
-    print("note: node not found, skipping the dashboard translation audit", flush=True)
-    print("[i18n] 0/0 passed")
-    sys.exit(0)
+    # Reported as a skip, never as a pass: the audit is the whole suite, so
+    # exiting 0 here would announce that every key resolves without having
+    # looked at one.
+    print("SKIP node not found, so the dashboard translation audit cannot run",
+          flush=True)
+    sys.exit(77)  # helpers.SKIP_EXIT, without importing the e2e helper module
 
 r = subprocess.run([node, AUDIT, ADDONS], capture_output=True, text=True, timeout=120)
 if r.returncode != 0:

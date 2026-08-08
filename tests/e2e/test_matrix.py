@@ -97,8 +97,7 @@ def run_block(mode, wayland, block=""):
 
             # --- clipboard: client -> server -------------------------------
             probe = f"e2e-{tag}-c2s-{int(time.time())}"
-            page.evaluate(f"navigator.clipboard.writeText({json.dumps(probe)})")
-            page.evaluate("window.dispatchEvent(new Event('focus'))")
+            C.send_clipboard_from_client(page, probe, "chromium")
             deadline = time.time() + 8
             got = None
             while time.time() < deadline:

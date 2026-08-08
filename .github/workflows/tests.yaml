@@ -43,6 +43,8 @@ env:
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "26"
   E2E_DISPLAY: ":99"
+  # Drive the release Chrome build rather than Playwright's bundled Chromium
+  E2E_CHROME: /usr/bin/google-chrome
 
 jobs:
   unit:
@@ -59,6 +61,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+      # The dashboard translation audit is JavaScript, and reports itself
+      # skipped rather than passing when it cannot run
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Build the test tools
         run: make -C tests/tools
       - name: Run the unit tier
@@ -67,7 +74,10 @@ jobs:
           # imports have to resolve; everything below that is lazy, which is what
           # keeps this tier off the capture and WebRTC stacks
           python -m pip install pytest aiofiles msgpack Pillow
-          python -m pytest tests -m unit -v
+          python -m pytest tests -m unit -v --junitxml=unit-report.xml
+      - name: Fail if any suite skipped
+        if: ${{ !cancelled() }}
+        run: python tests/tools/assert_no_skips.py unit-report.xml
 
   # The suites run against the main-HEAD capture stack the artifacts ship, so
   # a run that arrives without those wheels builds them first. ci.yaml already
@@ -114,6 +124,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             xvfb x11-xserver-utils x11-utils xauth xcvt \
+            wl-clipboard \
             pulseaudio pulseaudio-utils \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
@@ -171,13 +182,30 @@ jobs:
       # WebRTC-transport suites; only the browser matrix needs the other engines
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
+      # Release Chrome alongside it: its media stack differs from Chromium's,
+      # and E2E_CHROME is what points the suites at a system browser.
+      - name: Install Google Chrome
+        run: |
+          cd /tmp
+          curl -o google-chrome-stable.deb -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ./google-chrome-stable.deb
+          rm -f google-chrome-stable.deb
       - name: Install the remaining browser engines
         if: contains(inputs.tiers || 'integration or e2e', 'e2e')
         run: python -m playwright install --with-deps firefox webkit
+      # Firefox negotiates H.264 only with the OpenH264 GMP, which its bundled
+      # profile never carries; without this the whole firefox-wr block skips.
+      - name: Install the OpenH264 plugin for Firefox
+        if: contains(inputs.tiers || 'integration or e2e', 'e2e')
+        run: sh tests/tools/fetch-openh264.sh
       - name: Run the suites
         env:
           TIERS: ${{ inputs.tiers || 'integration or e2e' }}
-        run: python -m pytest tests -m "${TIERS}" -v
+        run: python -m pytest tests -m "${TIERS}" -v --junitxml=suites-report.xml
+      - name: Fail if any suite skipped
+        if: ${{ !cancelled() }}
+        run: python tests/tools/assert_no_skips.py suites-report.xml
       - name: Collect the server logs
         if: always()
         run: |

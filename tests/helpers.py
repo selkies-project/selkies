@@ -366,13 +366,6 @@ def x_key_watcher():
     return d, events, stop
 
 
-def xdotool(*args):
-    r = subprocess.run(["xdotool"] + [str(a) for a in args],
-                       env={"DISPLAY": TEST_DISPLAY, "PATH": os.environ.get("PATH", "")},
-                       capture_output=True, text=True, timeout=10)
-    return r.stdout.strip()
-
-
 def x_root_size():
     from selkies.Xlib import display as xdisp
     d = xdisp.Display(TEST_DISPLAY)
@@ -383,23 +376,29 @@ def x_root_size():
 
 # ------------- Wayland helpers -------------
 
+def _wl_env(socket_name):
+    # Set through the environment rather than an `env` prefix: `env` exists even
+    # where wl-clipboard does not, and would turn a missing tool into an exit
+    # 127 with empty output, which reads as an empty clipboard rather than as
+    # the missing dependency it is.
+    return {**os.environ, "WAYLAND_DISPLAY": socket_name,
+            "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", WORKDIR)}
+
+
 def wl_paste(socket_name, timeout=6):
-    r = subprocess.run(
-        ["env", "WAYLAND_DISPLAY=" + socket_name, "wl-paste", "-n"],
-        capture_output=True, text=True, timeout=timeout,
-        env={**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", WORKDIR)})
+    r = subprocess.run(["wl-paste", "-n"], capture_output=True, text=True,
+                       timeout=timeout, env=_wl_env(socket_name))
     return r.stdout
 
 
 def wl_copy(socket_name, text, timeout=10):
     """wl-copy against the compositor with one bounded retry: it can transiently
     stall on protocol dispatch when the compositor is under input load."""
-    env = {**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", WORKDIR)}
+    env = _wl_env(socket_name)
     for attempt in (1, 2):
         try:
-            r = subprocess.run(
-                ["env", "WAYLAND_DISPLAY=" + socket_name, "wl-copy", text],
-                capture_output=True, text=True, timeout=timeout, env=env)
+            r = subprocess.run(["wl-copy", text], capture_output=True, text=True,
+                               timeout=timeout, env=env)
             return r.returncode == 0
         except subprocess.TimeoutExpired:
             if attempt == 2:

@@ -30,7 +30,7 @@ Please join our [Discord](https://discord.gg/wDNGDeSW5F) server, then start out 
 
 **Any type of multimedia networking experience:** While relevant experience is not necessary to contribute, we still feel great to have you as our companions. Please consider stepping up as a maintainer in addition to contributing! Development for commercial purposes are always fine as well as (our weak copyleft) license terms are complied with. Shape Selkies so that it fits your project as a first-class citizen, while keeping it accessible to many other people.
 
-**WebRTC developers or Chromium/Firefox/Safari multimedia contributors:** We always need you, but you are generally very busy people. Even so, you can always provide directions on topics, ideas, specifications, or technologies that we have missed, so that other people including us can implement them. In many occasions, a single paragraph from experts are equal to hundreds of hours of work.
+**WebSocket/WebRTC developers or Chromium/Firefox/Safari multimedia contributors:** We always need you, but you are generally very busy people. Even so, you can always provide directions on topics, ideas, specifications, or technologies that we have missed, so that other people including us can implement them. In many occasions, a single paragraph from experts are equal to hundreds of hours of work.
 
 **Funding to improve this project:** If you want new features or improvements but if you are not a developer or lack enough time, please consider offering bounties by contacting us. If you want new features that require upstream work in our dependencies (such as `pixelflux`, `pcmflux`, or `aiortc`), we may need to fund developers capable of implementing them so they can be brought into Selkies as well. Such issues are tagged as requiring upstream development. Even for features or improvements that are ready to be implemented, crowdfunding bounties motivate developers to solve them faster.
 
@@ -52,25 +52,25 @@ Contact information for contributors currently available for paid consulting tas
 
 These people make structural decisions for this project and press the `Merge Pull Request` button.
 
-[Dan Isla](https://github.com/danisla): Project Founder, Owner, Head Maintainer (Start - Sep 2023, August 2024 -), Industry Representative (ex-Google, ex-NASA, ex-itopia), **currently available for paid consulting tasks**
+[Seungmin Kim](https://github.com/ehfd): Co-Owner, Head Maintainer (Apr 2022 -), Academia Representative (Yonsei University College of Medicine, San Diego Supercomputer Center)
 
-[Seungmin Kim](https://github.com/ehfd): Co-Owner, Head Maintainer (Apr 2022 - August 2024, est. 2025 -), Academia Representative (Yonsei University College of Medicine, San Diego Supercomputer Center), currently not available for paid consulting tasks (on hiatus from project)
+[Ryan Kuba](https://github.com/): Co-Owner, Head Maintainer (Jun 2025 -), [LinuxServer.io](https://www.linuxserver.io) Representative.
 
-[Dmitry Mishin](https://github.com/dimm0): Interim Head Maintainer (August 2024 -), Interim Academia Representative (University of California San Diego, San Diego Supercomputer Center)
-
-### Code Contributors
+[Dan Isla](https://github.com/danisla): Project Founder, Co-Owner, Industry Representative (ex-Google, ex-NASA, ex-itopia)
 
 [PMohanJ](https://github.com/PMohanJ): Contributed new features for the X11 input protocol as well as providing various fixes for the project overall and providing various means of analysis, **currently available for paid consulting tasks in tandem with senior maintainers**
 
+### Code Contributors
+
+[Sam Williams](https://github.com/ayunami2000): Provided various fixes for the WebRTC HTML5 web interface, as well as providing various means of analysis, **currently available for paid consulting tasks in tandem with senior maintainers**
+
 [Kristian Ollikainen](https://github.com/DatCaptainHorse): Professional WebRTC and JavaScript frontend engineer, contributed various insights to the WebRTC and web components
-
-[ayunami2000](https://github.com/ayunami2000): Provided various fixes for the WebRTC HTML5 web interface, as well as providing various means of analysis, **currently available for paid consulting tasks in tandem with senior maintainers**
-
-[Carlos Ruiz](https://github.com/cruizba): [OpenVidu](https://openvidu.io) Team, provided various proposals for fixing the X11 input protocol
 
 ### Past Maintainers
 
 [Jan Van Bruggen](https://github.com/JanCVanB): Project Co-Founder, ex-Google, ex-NASA, ex-itopia, current Verily
+
+[Carlos Ruiz](https://github.com/cruizba): [OpenVidu](https://openvidu.io) Team, provided various proposals for fixing the X11 input protocol
 
 [Reisbel Machado](https://github.com/reisbel): itopia
 
@@ -119,11 +119,11 @@ The reference container images (the [Example Container](https://github.com/selki
 
 **If you want to change the image behavior, use the original container as a base image and only replace the entrypoint script(s) and/or the s6 service files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu24.04` for the [Example Container](component.md#example-container)) to preserve a specific container build.**
 
-Start with the below sample `Dockerfile` example and place your modified `container-entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
+Start with the below sample `Dockerfile` example and place your modified `container-entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/example:main-${DISTRIB_RELEASE}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
 
 ```dockerfile
-ARG DISTRIB_RELEASE=24.04
-FROM ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}
+ARG DISTRIB_RELEASE=ubuntu24.04
+FROM ghcr.io/selkies-project/selkies/example:main-${DISTRIB_RELEASE}
 ARG DISTRIB_RELEASE
 
 USER 0
@@ -206,7 +206,7 @@ Every workflow lives under [`.github/workflows`](https://github.com/selkies-proj
 - `ci.yaml` orchestrates pushes to `main` and every pull request. It lints (Ruff, codespell, actionlint, and ESLint plus TypeScript over the dashboards), byte-compiles the package on Python 3.9 through 3.14, then builds the wheel once and hands that single artifact to the image and package builds.
 - `build-wheel.yaml` bundles the web client with [`scripts/ci/build-web.sh`](https://github.com/selkies-project/selkies/tree/main/scripts/ci/build-web.sh), builds the wheel, and smoke-tests it in a clean virtual environment.
 - `build-pixelflux-pcmflux-wheels.yaml` builds pixelflux and pcmflux from their upstream `master` so images, packages, and AppImages ride the latest capture and audio code instead of the last PyPI release.
-- `images.yaml` publishes the multi-architecture `py-example`, `coturn`, and `turn-rest` images to ghcr.io. Each architecture builds on its own native runner and pushes by digest; a merge job assembles the manifest, so no QEMU is involved.
+- `images.yaml` publishes the multi-architecture `example`, `coturn`, and `turn-rest` images to ghcr.io. Each architecture builds on its own native runner and pushes by digest; a merge job assembles the manifest, so no QEMU is involved.
 - `packages.yaml` builds `.deb`, `.rpm`, `.apk`, `.pkg.tar.zst`, and both AppImages, each inside a container of the target distribution. Every native package carries the Joystick Interposer, which `infra/packaging/interposer.sh` compiles into the package root.
 - `tests.yaml` runs the suites in [`tests/`](https://github.com/selkies-project/selkies/tree/main/tests). `ci.yaml` calls it for the `unit` and `integration` tiers on every push and pull request, and it runs the browser tier nightly and on demand.
 - `release.yaml` is the maintainer entry point described below; `docs.yaml` publishes this site; `devcontainer-feature.yaml` validates and publishes the devcontainer feature.

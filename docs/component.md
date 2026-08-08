@@ -6,11 +6,13 @@ Selkies is composed of a small number of core components plus several optional a
 
 **Refer to [Getting Started](start.md) on how you can get on board.**
 
-Retrieve the latest `SELKIES_VERSION` release and the current Ubuntu `DISTRIB_RELEASE` for the sections below:
+Retrieve the latest `SELKIES_VERSION` release, and pick the `DISTRIB_RELEASE` flavor of the
+container images below (`ubuntu24.04`, `ubuntu26.04`, `bookworm`, or `trixie`). The flavor names the distribution
+inside the image, so it is a free choice and not a property of the host:
 
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')"
-export DISTRIB_RELEASE="$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '\"')"
+export DISTRIB_RELEASE="ubuntu24.04"
 ```
 
 When instructed to install [binfmt](https://github.com/tonistiigi/binfmt), use the following command with Docker/Podman:
@@ -175,10 +177,10 @@ Neither applies with `SELKIES_WAYLAND_COMPOSITOR=none`: applications sit on the 
 
 Read the [Development](development.md) section for customizing this container for your own usage.
 
-Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8080** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **change `DISTRIB_RELEASE` to `24.04` or `26.04`, and replace `main` to `latest` for the latest stable release**):
+Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8080** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **set `DISTRIB_RELEASE` to `ubuntu24.04`, `ubuntu26.04`, `bookworm`, or `trixie`, and replace `main` to `latest` for the latest stable release**):
 
 ```bash
-docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8080:8080 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/py-example:main-ubuntu${DISTRIB_RELEASE}
+docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8080:8080 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/example:main-${DISTRIB_RELEASE}
 ```
 
 Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs, or `--device /dev/dri` for Intel and AMD.

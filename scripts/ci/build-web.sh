@@ -37,7 +37,9 @@ cp addons/universal-touch-gamepad/universalTouchGamepad.js addons/selkies-dashbo
 rm -rf src/selkies/selkies_web
 cp -ar addons/selkies-dashboard/dist src/selkies/selkies_web
 
-printf '%s' '{"name":"Selkies","short_name":"Selkies","manifest_version":2,"version":"1.0.0","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon.png","type":"image/png","sizes":"512x512"}],"start_url":"/"}' > src/selkies/selkies_web/manifest.json
+# start_url is relative so an installed client launches back into the subfolder
+# it was served from, which an absolute "/" would discard.
+printf '%s' '{"name":"Selkies","short_name":"Selkies","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon.png","type":"image/png","sizes":"512x512"}],"start_url":"."}' > src/selkies/selkies_web/manifest.json
 # PWA icon/favicon are vendored in this repository, not downloaded
 cp docs/assets/logo/icon-512x512.png src/selkies/selkies_web/icon.png
 cp docs/assets/logo/favicon.ico src/selkies/selkies_web/favicon.ico

@@ -17,7 +17,7 @@ cp addons/selkies-web-core/dist/selkies-core.js addons/selkies-dashboard/dist/sr
 cp addons/universal-touch-gamepad/universalTouchGamepad.js addons/selkies-dashboard/dist/src/
 cp -r addons/selkies-web-core/dist/jsdb addons/selkies-dashboard/dist/
 cp -ar addons/selkies-dashboard/dist src/selkies/selkies_web
-printf '%s' '{"name":"Selkies","short_name":"Selkies","manifest_version":2,"version":"1.0.0","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon.png","type":"image/png","sizes":"512x512"}],"start_url":"/"}' > src/selkies/selkies_web/manifest.json
+printf '%s' '{"name":"Selkies","short_name":"Selkies","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon.png","type":"image/png","sizes":"512x512"}],"start_url":"."}' > src/selkies/selkies_web/manifest.json
 cp docs/assets/logo/icon-512x512.png src/selkies/selkies_web/icon.png
 cp docs/assets/logo/favicon.ico src/selkies/selkies_web/favicon.ico
 

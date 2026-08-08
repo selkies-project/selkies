@@ -3,6 +3,7 @@
 websockets transport (flow, input, clipboard, resize, console health), plus a
 reduced WebRTC flow on Firefox (parity with the Chrome reference) and WebKit."""
 import os
+import platform
 import sys
 import time
 
@@ -24,6 +25,36 @@ FF_E2E_PROFILE = os.environ.get(
     "E2E_FIREFOX_PROFILE", os.path.join(H.WORKDIR, "firefox-profile"))
 
 
+def openh264_version():
+    """Version of the OpenH264 GMP side-loaded by tests/tools/fetch-openh264.sh,
+    or None. Without the plugin Firefox answers the offer with the video m-line
+    rejected, so every video, input and clipboard check in the WebRTC block
+    reports the same one absence."""
+    root = os.path.join(FF_E2E_PROFILE, "gmp-gmpopenh264")
+    if not os.path.isdir(root):
+        return None
+    for version in sorted(os.listdir(root), reverse=True):
+        if os.path.isfile(os.path.join(root, version, "libgmpopenh264.so")):
+            return version
+    return None
+
+
+def openh264_prefs():
+    """Prefs that point Firefox at the side-loaded plugin. Firefox only scans
+    gmp-gmpopenh264/<version> once a pref names that exact version, and the GMP
+    updater is turned off so it does not replace it mid-run."""
+    version = openh264_version()
+    if not version:
+        return {}
+    abi = "aarch64-gcc3" if platform.machine() in ("aarch64", "arm64") else "x86_64-gcc3"
+    return {
+        "media.gmp-gmpopenh264.version": version,
+        "media.gmp-gmpopenh264.abi": abi,
+        "media.gmp-gmpopenh264.lastUpdate": 1,
+        "media.gmp-manager.updateEnabled": False,
+    }
+
+
 def engine_launch(p, engine):
     """Return (browser_or_none, ctx). Firefox needs a persistent profile that
     carries the OpenH264 GMP plugin (bundled profile ships without it, so the
@@ -41,6 +72,7 @@ def engine_launch(p, engine):
                 "media.autoplay.blocking_policy": 0,
                 "media.autoplay.block-webaudio": False,
                 "dom.events.testing.asyncClipboard": True,
+                **openh264_prefs(),
             })
         return None, ctx
     b = getattr(p, engine).launch(headless=True)
@@ -146,9 +178,11 @@ def engine_block(engine, mode="websockets"):
             if engine == "webkit":
                 # Headless WebKit strips clipboardData from synthetic paste
                 # events and has no system-clipboard surface, so a genuine
-                # client->server transfer cannot be observed there.
-                res.check("clipboard: client text reached server (webkit: n/a)",
-                          True, "headless-webkit lacks a system clipboard")
+                # client->server transfer cannot be observed there. Recorded as
+                # unobserved rather than as a pass, which would claim coverage
+                # this engine cannot give.
+                res.skip("clipboard: client text reached server",
+                         "headless WebKit has no system clipboard")
             else:
                 deadline = time.time() + 8
                 got_text = None
@@ -202,7 +236,14 @@ def main():
         if which in ("all", "chromium-wr"):
             blocks.append(engine_block("chromium", "webrtc"))
         if which in ("all", "firefox-wr"):
-            blocks.append(engine_block("firefox", "webrtc"))
+            reason = (f"firefox webrtc: no OpenH264 GMP plugin in {FF_E2E_PROFILE}; "
+                      "run tests/tools/fetch-openh264.sh to cover H.264 in Firefox")
+            if openh264_version():
+                blocks.append(engine_block("firefox", "webrtc"))
+            elif which == "firefox-wr":
+                H.skip_suite(reason)
+            else:
+                print(f"SKIP {reason}", flush=True)
     except Exception as e:
         print("FATAL block error:", e, flush=True)
         raise

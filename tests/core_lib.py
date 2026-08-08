@@ -155,6 +155,10 @@ def send_clipboard_from_client(page, text, engine="chromium"):
     page.evaluate(f"navigator.clipboard.writeText({json.dumps(text)}).catch(() => {{}})")
     time.sleep(0.4)
     if engine == "chromium":
+        # The read the focus handler performs needs the document to actually be
+        # focused; a synthetic Event('focus') runs the handler but leaves
+        # document.hasFocus() false, and the read then rejects.
+        page.bring_to_front()
         page.evaluate("window.dispatchEvent(new Event('focus'))")
     else:
         page.evaluate("""(text) => {
@@ -205,13 +209,6 @@ def wait_log_absent(substr, timeout=6, log=H.LOG):
 
 # ---------------- X11-observable input checks ----------------
 
-def x11_press_key(page, keysym_char="x"):
-    page.keyboard.down(keysym_char)
-    time.sleep(0.4)
-    res = H.xdotool("getmouselocation")
-    return res
-
-
 def x11_keymap_pressed(keysym_char="x"):
     from selkies.Xlib import XK
     code = None
@@ -229,6 +226,10 @@ def x11_keymap_pressed(keysym_char="x"):
 
 
 def x11_mouse_pos():
-    out = H.xdotool("getmouselocation")
-    parts = dict(p.split(":") for p in out.split())
-    return int(parts["x"]), int(parts["y"])
+    """Pointer position straight from the X server, so no xdotool is needed."""
+    d = H.x_display()
+    try:
+        p = d.screen().root.query_pointer()
+        return p.root_x, p.root_y
+    finally:
+        d.close()
