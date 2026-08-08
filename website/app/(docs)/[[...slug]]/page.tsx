@@ -36,12 +36,14 @@ export default async function Page(props: PageProps<'/[[...slug]]'>) {
       tableOfContentPopover={{ footer: edit }}
     >
       {/* The landing page opens with the logo and its own lead paragraphs,
-          which say all of this over again. */}
+          which say all of this over again. The rule is what separates a page's
+          heading from its first section, which is otherwise spaced exactly
+          like one section from the next. */}
       {!isLanding(page.url) && (
-        <>
+        <div className="mb-2 flex flex-col gap-4 border-b border-fd-border pb-6">
           <DocsTitle>{page.data.title}</DocsTitle>
-          <DocsDescription>{page.data.description}</DocsDescription>
-        </>
+          <DocsDescription className="mb-0">{page.data.description}</DocsDescription>
+        </div>
       )}
       <DocsBody>
         <MDX

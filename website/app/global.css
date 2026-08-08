@@ -11,9 +11,6 @@
 :root {
   --color-fd-primary: #b83a80;
   --color-fd-ring: #b83a80;
-  /* Narrower than the 1400px default, which left body text running to nearly
-     100 characters a line on a wide display. */
-  --fd-layout-width: 1200px;
 }
 
 /* Roboto is the wordmark's typeface, and was the previous site's as well. */
