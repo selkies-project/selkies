@@ -814,15 +814,28 @@ class CentralizedStreamServer:
             return web.Response(status=401, text="Invalid Credentials")
         return await handler(request)
 
-    def _update_auth_credentials(self):
-        try:
-            if self.settings.enable_basic_auth[0] and self.settings.basic_auth_password == "mypasswd":
-                logger.warning(
-                    "Basic Auth is enabled with the well-known default password 'mypasswd'. "
-                    "Set a strong password via --basic_auth_password, SELKIES_BASIC_AUTH_PASSWORD, or the PASSWORD env var."
-                )
-        except Exception:
-            pass
+    def _require_configured_credentials(self):
+        """Refuse to serve a login that nobody chose a password for.
+
+        The built-in password is a placeholder, not a credential: reaching this point
+        still carrying it means no password was set anywhere, and the server would
+        otherwise put an unconfigured login on the network. What counts is that a value
+        was supplied, on the command line or in the environment — not what the value is.
+        An image that ships its own default is choosing it deliberately, the way most
+        container images do, and rejecting known-weak values here would break every one
+        of them while stopping nobody who meant it.
+        """
+        if not self.settings.enable_basic_auth[0]:
+            return
+        if self.settings.was_provided("basic_auth_password"):
+            return
+        logger.error(
+            "Basic authentication is enabled but no password was set. Set one with "
+            "--basic-auth-password, or the SELKIES_BASIC_AUTH_PASSWORD, PASSWORD or "
+            "PASSWD environment variable; or serve without a login by passing "
+            "--enable-basic-auth=false."
+        )
+        raise SystemExit(1)
 
     async def switch_to_mode(self, mode_name: str):
         """
@@ -1323,7 +1336,7 @@ class CentralizedStreamServer:
 
     async def initialize_app(self):
         """Initialize the web application with routes and middleware."""
-        self._update_auth_credentials()
+        self._require_configured_credentials()
 
         # Create web application with auth middleware
         self.app = web.Application(middlewares=[self._auth_middleware])

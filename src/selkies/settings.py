@@ -499,7 +499,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "enable_basic_auth",
         "type": "bool",
         "default": True,
-        "help": "Enable basic authentication on the server. On by default with the default credentials; set --basic_auth_password (a warning is logged while the well-known default password is in use).",
+        "help": "Enable basic authentication on the server. On by default, and the server refuses to start until a password is set through --basic-auth-password, SELKIES_BASIC_AUTH_PASSWORD, PASSWORD or PASSWD; pass --enable-basic-auth=false to serve without a login instead.",
     },
     {
         "name": "basic_auth_user",
@@ -511,9 +511,11 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "basic_auth_password",
         "type": "str",
-        "default": "mypasswd",
-        "env_var": "PASSWORD",
-        "help": "Password used when basic authentication is set",
+        # No built-in credential: the server refuses to serve a login until an
+        # operator names a password, so there is nothing here to ship or leak.
+        "default": "",
+        "env_var": ["PASSWORD", "PASSWD"],
+        "help": "Password used when basic authentication is set; resolves from SELKIES_BASIC_AUTH_PASSWORD, then PASSWORD, then PASSWD, so an image that already names a container account password does not have to repeat it. There is no default: the server will not start with basic authentication enabled until one of these is set.",
     },
     {
         "name": "basic_auth_viewonly_password",
@@ -764,19 +766,19 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "turn_shared_secret",
         "type": "str",
         "default": "openrelayprojectsecret",
-        "help": "Shared TURN secret used to generate HMAC credentials, also requires --turn_host and --turn_port",
+        "help": "Shared TURN secret used to generate HMAC credentials, also requires --turn-host and --turn-port",
     },
     {
         "name": "turn_username",
         "type": "str",
         "default": "",
-        "help": "Legacy non-HMAC TURN credential username, also requires --turn_host and --turn_port",
+        "help": "Legacy non-HMAC TURN credential username, also requires --turn-host and --turn-port",
     },
     {
         "name": "turn_password",
         "type": "str",
         "default": "",
-        "help": "Legacy non-HMAC TURN credential password, also requires --turn_host and --turn_port",
+        "help": "Legacy non-HMAC TURN credential password, also requires --turn-host and --turn-port",
     },
     {
         "name": "stun_host",
@@ -832,7 +834,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "app_wait_ready",
         "type": "bool",
         "default": False,
-        "help": 'Waits for --app_ready_file to exist before starting stream if set to "true"',
+        "help": 'Waits for --app-ready-file to exist before starting stream if set to "true"',
     },
     {
         "name": "app_ready_file",
@@ -906,7 +908,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "enable_webrtc_statistics",
         "type": "bool",
         "default": False,
-        "help": "Enable WebRTC Statistics CSV dumping to the directory --webrtc_statistics_dir with filenames selkies-stats-video-[timestamp].csv and selkies-stats-audio-[timestamp].csv",
+        "help": "Enable WebRTC Statistics CSV dumping to the directory --webrtc-statistics-dir with filenames selkies-stats-video-[timestamp].csv and selkies-stats-audio-[timestamp].csv",
     },
     {
         "name": "webrtc_statistics_dir",
@@ -996,7 +998,16 @@ class AppSettings:
         )
         self._setting_definitions = setting
         self._add_arguments(parser)
-        args, _ = parser.parse_known_args()
+        args, unknown = parser.parse_known_args()
+        # Unrecognized arguments are tolerated so a wrapper can pass its own through,
+        # which also means a misspelled flag is accepted and ignored rather than
+        # rejected. Naming them is what makes that visible, since a setting that never
+        # took its value looks the same as one left at its default.
+        for token in unknown:
+            if token.startswith("-"):
+                logging.warning(
+                    "Ignoring unrecognized argument %s", token.split("=", 1)[0]
+                )
         self._process_and_set_attributes(args)
         self._post_process_settings()
 
@@ -1015,14 +1026,21 @@ class AppSettings:
         """Programmatically add arguments to the parser from definitions."""
         for setting in self._setting_definitions:
             name = setting["name"]
-            cli_flag = f"--{name.replace('_', '-')}"
+            # Dashes are the documented spelling, but the setting's own name is the
+            # obvious thing to type and every environment variable uses it, so the
+            # underscore spelling is accepted too rather than being parsed as an
+            # unknown argument and dropped.
+            cli_flags = [f"--{name.replace('_', '-')}"]
+            if "_" in name:
+                cli_flags.append(f"--{name}")
             standard_env_var = f"SELKIES_{name.upper()}"
             fallback_env_vars = self._fallback_env_vars(setting)
             env_help_text = f"Env: {standard_env_var}"
             if fallback_env_vars:
                 env_help_text = f"Env: {standard_env_var} (or {', '.join(fallback_env_vars)})"
             parser.add_argument(
-                cli_flag,
+                *cli_flags,
+                dest=name,
                 type=str,
                 default=None,
                 help=f"{setting['help']} ({env_help_text})",
@@ -1267,6 +1285,14 @@ class AppSettings:
         # Which settings were explicitly given (CLI/env), for default
         # resolution that depends on other settings (e.g. rate control).
         self._overridden = overrides
+
+    def was_provided(self, name: str) -> bool:
+        """Whether a setting was given on the command line or in the environment.
+
+        A setting left to its built-in default reads as not provided, and so does one
+        overridden to the empty string, which carries the "use the default" meaning.
+        """
+        return bool(getattr(self, "_overridden", {}).get(name, False))
 
     # Rate-control default per encoder: the striped software encoder and jpeg
     # are quality-driven (CRF), the single-slice software encoders target a

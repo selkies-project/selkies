@@ -78,6 +78,13 @@ ARG DISTRIB_IMAGE
 ARG DISTRIB_RELEASE
 ARG PYPI_PACKAGE
 
+# Every network fetch in this image is retried, because a build that reaches for
+# a package index, a signing key or a wheel is one transient failure away from
+# losing the whole run. apt is configured once here so each of its later
+# invocations inherits it; curl and pip carry their own flags at each call.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
+        > /etc/apt/apt.conf.d/99-selkies-retries
+
 ARG DEBIAN_FRONTEND=noninteractive
 # Configure rootless user environment for constrained conditions without escalated root privileges inside containers
 ARG TZ=UTC
@@ -171,6 +178,27 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         obconf-qt \
         qterminal \
         pcmanfm-qt \
+        # Recommends of the packages above, named here because the image installs
+        # none of them by default and each is load-bearing rather than optional:
+        # lxqt-qtplugin is the platform theme QT_QPA_PLATFORMTHEME=lxqt loads, so
+        # without it no Qt application picks up the session's icons or palette;
+        # lxqt-config supplies the settings backend the session reads; and an icon
+        # theme is named by LXQt rather than shipped, so every icon is blank
+        # without one. The notification and PolicyKit agents are what applications
+        # expect a session to provide. Deliberately still dropped: the screen
+        # lockers, gvfs, and the KDE portal, none of which a container session has
+        # any use for.
+        adwaita-icon-theme \
+        lxqt-qtplugin \
+        lxqt-config \
+        lxqt-notificationd \
+        lxqt-policykit \
+        # Translations for each shipped component, which are Recommends too
+        lxqt-panel-l10n \
+        lxqt-runner-l10n \
+        lxqt-session-l10n \
+        pcmanfm-qt-l10n \
+        qterminal-l10n \
         # GPU support: Mesa (llvmpipe fallback, VA-API) and Vulkan/GL plumbing
         libgl1 \
         libgl1-mesa-dri \
@@ -214,6 +242,16 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     if ! apt-get install --no-install-recommends -y labwc; then \
         apt-get install --no-install-recommends -y sway; \
     fi && \
+    # The LXQt Wayland session, where the distribution packages it (LXQt 2.1+).
+    # The Qt platform plugin is installed only alongside it, never on its own:
+    # without layer-shell behind it, Qt picking Wayland gives a session whose
+    # panel and desktop are surfaces with nothing to anchor to, and which
+    # therefore paint nothing at all. The service reads the same pair back to
+    # decide which session to run.
+    if apt-get install --no-install-recommends -y lxqt-wayland-session; then \
+        apt-get install --no-install-recommends -y qt6-wayland || \
+        apt-get install --no-install-recommends -y qtwayland5 || true; \
+    fi && \
     # Ubuntu carries nvtop in universe, which is enabled; Debian puts it in
     # contrib, which is not, so that component is added on the second attempt
     if ! apt-get install --no-install-recommends -y nvtop; then \
@@ -241,11 +279,18 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 # rather than a plain one. A flat colour rather than one of the shipped
 # wallpapers, because every full refresh re-encodes whatever the desktop shows
 # and a photograph costs far more of the stream than a single tone.
-RUN ICON_THEME=Adwaita && THEME=ambiance && \
-    test -d "/usr/share/icons/${ICON_THEME}" && \
-    test -d "/usr/share/lxqt/themes/${THEME}" && \
-    mkdir -pm755 /etc/xdg/lxqt /etc/xdg/pcmanfm-qt/lxqt && \
-    printf '[General]\nicon_theme=%s\ntheme=%s\n' "${ICON_THEME}" "${THEME}" > /etc/xdg/lxqt/lxqt.conf && \
+# Both names are taken from what is installed rather than asserted, so a
+# distribution that renames or drops one still produces a session that paints.
+RUN set -eu; \
+    first_installed() { \
+        base="$1"; shift; \
+        for name in "$@"; do [ -d "${base}/${name}" ] && { printf '%s' "${name}"; return; }; done; \
+    }; \
+    ICON_THEME="$(first_installed /usr/share/icons Adwaita breeze oxygen hicolor)"; \
+    THEME="$(first_installed /usr/share/lxqt/themes ambiance system light Leech)"; \
+    echo "LXQt defaults: icon_theme=${ICON_THEME} theme=${THEME}"; \
+    mkdir -pm755 /etc/xdg/lxqt /etc/xdg/pcmanfm-qt/lxqt; \
+    printf '[General]\nicon_theme=%s\ntheme=%s\n' "${ICON_THEME}" "${THEME}" > /etc/xdg/lxqt/lxqt.conf; \
     printf '[Desktop]\nWallpaperMode=color\nBgColor=#2e3436\nFgColor=#ffffff\n' > /etc/xdg/pcmanfm-qt/lxqt/settings.conf
 
 # NVIDIA runtime wiring. The container toolkit injects the host driver, but only
@@ -269,7 +314,7 @@ ENV __GL_SYNC_TO_VBLANK=0
 # builds on both Debian and Ubuntu and takes priority over any
 # distribution-provided Firefox packages
 RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d && \
-    curl -o /etc/apt/keyrings/packages.mozilla.org.asc -fsSL "https://packages.mozilla.org/apt/repo-signing-key.gpg" && \
+    curl -o /etc/apt/keyrings/packages.mozilla.org.asc -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://packages.mozilla.org/apt/repo-signing-key.gpg" && \
     printf 'Types: deb\nURIs: https://packages.mozilla.org/apt\nSuites: mozilla\nComponents: main\nSigned-By: /etc/apt/keyrings/packages.mozilla.org.asc\n' > /etc/apt/sources.list.d/mozilla.sources && \
     printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla && \
     apt-get clean && apt-get update && apt-get install --no-install-recommends -y firefox && \
@@ -280,7 +325,7 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
 # password store because the container runs no keyring daemon to unlock, and
 # Chrome otherwise blocks on a prompt nobody can answer.
 RUN cd /tmp && \
-    curl -o google-chrome-stable.deb -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb" && \
+    curl -o google-chrome-stable.deb -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb" && \
     apt-get update && apt-get install --no-install-recommends -y ./google-chrome-stable.deb && \
     rm -f google-chrome-stable.deb && \
     sed -i '/^Exec=/ s/$/ --password-store=basic/' /usr/share/applications/google-chrome.desktop && \
@@ -303,7 +348,7 @@ RUN set -e; \
         PKGS="${PKGS} $(ls /tmp/picked/*.whl)"; \
       fi; \
     fi; \
-    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall ${PKGS}; \
+    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --force-reinstall ${PKGS}; \
     rm -rf /tmp/wheels /tmp/picked
 
 # The DRI3-capable server replaces the distribution's /usr/bin/Xvfb

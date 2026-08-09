@@ -39,31 +39,64 @@ if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
   # Window management belongs to the nested compositor; LXQt starting one of its
   # own would find the selection taken and leave the session half-built
   session_wm=/bin/true
-  # LXQt draws one desktop sized for every screen together, and sometimes anchors
-  # it on the last screen instead of at the layout origin, which leaves the
-  # screen the first display shows without a wallpaper, icons or desktop menu.
-  # Re-anchor it there, keeping its size. Only when it is misplaced: moving a
-  # desktop that is already right makes pcmanfm-qt rebuild it for nothing.
-  (
-    attempt=0
-    while [ "${attempt}" -lt 60 ]; do
-      sleep 1
-      attempt=$((attempt + 1))
-      # shellcheck disable=SC2046  # the geometry fields are deliberately split
-      set -- $(wmctrl -l -G 2>/dev/null |
-               awk '$8 ~ /^pcmanfm-desktop/ { print $1, $3, $5, $6; exit }')
-      [ -n "${1:-}" ] || continue
-      [ "$2" = "0" ] && break
-      wmctrl -i -r "$1" -e "0,0,0,$3,$4" && break
+  # A panel and a desktop are shell surfaces: they have to anchor to an edge and
+  # reserve space, which on Wayland means wlr-layer-shell. LXQt grew that in 2.1,
+  # and a distribution that packages `startlxqtwayland` is one that carries it —
+  # so that binary and a Qt Wayland plugin together are what decides. With both,
+  # the session runs natively on the nested compositor, given the environment
+  # startlxqtwayland would have exported (the compositor itself is already up, so
+  # only the environment is wanted, not its exec). With either missing, Qt finds
+  # no Wayland plugin to load and reaches the compositor's XWayland by itself,
+  # which is where a session predating layer-shell has to draw anyway.
+  qt_has_wayland_plugin() {
+    for dir in /usr/lib/*/qt[0-9]*/plugins/platforms; do
+      for plugin in "${dir}"/libqwayland*.so; do
+        [ -e "${plugin}" ] && return 0
+      done
     done
-  ) &
+    return 1
+  }
+  if command -v startlxqtwayland >/dev/null 2>&1 && qt_has_wayland_plugin; then
+    export XDG_SESSION_TYPE=wayland
+    export XDG_CURRENT_DESKTOP="LXQt:${SELKIES_WAYLAND_COMPOSITOR:-labwc}:wlroots"
+    export QT_QPA_PLATFORMTHEME=lxqt
+    export XDG_MENU_PREFIX=lxqt-
+    echo "[lxqt] session draws on ${WAYLAND_DISPLAY} natively"
+  else
+    echo "[lxqt] session draws through the compositor's XWayland on ${DISPLAY}"
+    # Only this session places its desktop as a managed window, and LXQt sizes one
+    # desktop across every screen together, sometimes anchoring it on the last
+    # instead of at the layout origin — which leaves the screen the first display
+    # shows without a wallpaper, icons or desktop menu. Re-anchor it there,
+    # keeping its size, and only when it is misplaced: moving a desktop that is
+    # already right makes pcmanfm-qt rebuild it for nothing.
+    (
+      attempt=0
+      while [ "${attempt}" -lt 60 ]; do
+        sleep 1
+        attempt=$((attempt + 1))
+        # shellcheck disable=SC2046  # the geometry fields are deliberately split
+        set -- $(wmctrl -l -G 2>/dev/null |
+                 awk '$8 ~ /^pcmanfm-desktop/ { print $1, $3, $5, $6; exit }')
+        [ -n "${1:-}" ] || continue
+        [ "$2" = "0" ] && break
+        wmctrl -i -r "$1" -e "0,0,0,$3,$4" && break
+      done
+    ) &
+  fi
 else
   export DISPLAY="${DISPLAY:-:20}"
   until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
   # The multi-monitor layout code drives Openbox, so the session runs it
   session_wm=openbox
 fi
-rm -rf "${HOME}/.config/lxqt"
+# Both of these are derived from the system defaults on every start, so the
+# session is the same on a fresh container and a reused home directory. The
+# pcmanfm-qt one has to go for the desktop to be drawn at all: it rewrites its
+# whole settings file on exit, including the black background it defaults to
+# when nothing else is configured, and that user file then shadows
+# /etc/xdg/pcmanfm-qt for good.
+rm -rf "${HOME}/.config/lxqt" "${HOME}/.config/pcmanfm-qt"
 # Name the window manager in the session's own settings. lxqt-session takes it
 # only from there, and the distribution ships no default: left unset it asks
 # interactively which of the installed managers to run, which in a container

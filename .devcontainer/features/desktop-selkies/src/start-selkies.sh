@@ -76,5 +76,5 @@ ${SCRIPT_DIR}/start-turnserver.sh &
 exec selkies \
     --addr="0.0.0.0" \
     --port="${SELKIES_PORT:-${WEB_PORT:-8080}}" \
-    --enable_resize="${SELKIES_ENABLE_RESIZE:-true}" \
+    --enable-resize="${SELKIES_ENABLE_RESIZE:-true}" \
     "$@"
