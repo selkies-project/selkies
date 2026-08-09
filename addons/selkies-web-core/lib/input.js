@@ -2132,9 +2132,21 @@ export class Input {
             // requestPointerLock() returns undefined (not a Promise) on older
             // engines (Safari, Firefox < 122); failures there surface via the
             // pointerlockerror event instead.
-            const lockPromise = targetElement.requestPointerLock();
+            // Request unadjustedMovement first so relative-move deltas bypass
+            // the OS pointer-acceleration curve; engines that don't support
+            // the option reject with NotSupportedError, so retry without it.
+            const lockPromise = targetElement.requestPointerLock({ unadjustedMovement: true });
             if (lockPromise && typeof lockPromise.catch === 'function') {
-                lockPromise.catch(err => console.error("Pointer lock failed:", err));
+                lockPromise.catch(err => {
+                    if (err && err.name === 'NotSupportedError') {
+                        const fallback = targetElement.requestPointerLock();
+                        if (fallback && typeof fallback.catch === 'function') {
+                            fallback.catch(err2 => console.error("Pointer lock failed:", err2));
+                        }
+                        return;
+                    }
+                    console.error("Pointer lock failed:", err);
+                });
             }
             this.cursorDiv.style.visibility = 'hidden';
             event.preventDefault();
@@ -3168,14 +3180,27 @@ export class Input {
         // requestPointerLock() returns undefined (not a Promise) on older engines
         // (Safari, Firefox < 122); there the transition-race retry cannot run and
         // failures surface via the pointerlockerror event instead.
-        const lockPromise = this.element.requestPointerLock();
+        const onLockFailure = (err) => {
+            if (attempt < 5) {
+                setTimeout(() => this._armPointerLock(attempt + 1), 60);
+            } else {
+                console.warn("Pointer lock failed on fullscreen:", err);
+            }
+        };
+        // Request unadjustedMovement first (bypasses OS pointer-acceleration);
+        // engines that don't support it reject with NotSupportedError, so
+        // retry without it there rather than treating it as a real failure.
+        const lockPromise = this.element.requestPointerLock({ unadjustedMovement: true });
         if (lockPromise && typeof lockPromise.catch === 'function') {
             lockPromise.catch((err) => {
-                if (attempt < 5) {
-                    setTimeout(() => this._armPointerLock(attempt + 1), 60);
-                } else {
-                    console.warn("Pointer lock failed on fullscreen:", err);
+                if (err && err.name === 'NotSupportedError') {
+                    const fallback = this.element.requestPointerLock();
+                    if (fallback && typeof fallback.catch === 'function') {
+                        fallback.catch(onLockFailure);
+                    }
+                    return;
                 }
+                onLockFailure(err);
             });
         }
     }
