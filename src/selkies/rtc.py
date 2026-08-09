@@ -252,6 +252,11 @@ class RTCApp:
         # SDP munging): the owning service overrides this when displays can run
         # different encoders; the default is the single global encoder.
         self.get_encoder_for_display = lambda display_id: self.encoder
+        # Per-display full-colour (4:4:4) state, resolved at offer time like the
+        # encoder: the profile advertised in the SDP has to describe the bitstream
+        # the display is producing NOW, not the startup setting. The owning service
+        # overrides this when the value is client-tunable.
+        self.get_fullcolor_for_display = lambda display_id: bool(app_settings.video_fullcolor[0])
 
         # Data channel events. on_data_open receives the channel that opened so
         # per-connection greetings (server settings, current cursor) reach the
@@ -617,10 +622,14 @@ class RTCApp:
             controllers[0],
         )
 
-    def munge_sdp(self, sdp: str, encoder: Optional[str] = None):
-        # Displays can run different encoders; the caller passes the one this
-        # offer's display uses (default: the primary/global encoder).
+    def munge_sdp(self, sdp: str, encoder: Optional[str] = None,
+                  fullcolor: Optional[bool] = None):
+        # Displays can run different encoders and chroma formats; the caller
+        # passes the ones this offer's display is using (defaults: the
+        # primary/global encoder and the configured full-colour setting).
         encoder = encoder or self.encoder
+        if fullcolor is None:
+            fullcolor = bool(app_settings.video_fullcolor[0])
         sdp_text = sdp
         # rtx-time needs to be set to 125 milliseconds for optimal performance
         if 'rtx-time' not in sdp_text:
@@ -638,7 +647,7 @@ class RTCApp:
                 logger.warning("injecting modified sps-pps-idr-in-keyframe to SDP")
                 sdp_text = re.sub(r'sps-pps-idr-in-keyframe=\d+', r'sps-pps-idr-in-keyframe=1', sdp_text)
             if ("h264" in encoder or "x264" in encoder) \
-                    and "openh264" not in encoder and app_settings.video_fullcolor[0]:
+                    and "openh264" not in encoder and fullcolor:
                 # Full-colour is a 4:4:4 bitstream: advertise the High 4:4:4 profile so a
                 # decoder isn't handed a 4:2:0 baseline profile-level-id that can't match
                 # what it receives. 4:2:0 keeps 42e01f (the Firefox negotiation trick).
@@ -1343,6 +1352,10 @@ class RTCApp:
                 display_encoder = self.get_encoder_for_display(display_id) or self.encoder
             except Exception:
                 display_encoder = self.encoder
+            try:
+                display_fullcolor = bool(self.get_fullcolor_for_display(display_id))
+            except Exception:
+                display_fullcolor = bool(app_settings.video_fullcolor[0])
             preferred_codec = self.get_mime_by_encoder(display_encoder)
             if preferred_codec is None:
                 raise RTCAppError(f"Encoder {display_encoder} is not supported")
@@ -1352,7 +1365,7 @@ class RTCApp:
             offer = peer_connection.localDescription
 
             sdp = offer.sdp
-            sdp = self.munge_sdp(sdp, display_encoder)
+            sdp = self.munge_sdp(sdp, display_encoder, display_fullcolor)
             await self.on_sdp('offer', sdp, client_peer_id)
         except BaseException:
             # Failure before registration: no teardown path could ever reach this

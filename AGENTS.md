@@ -27,4 +27,9 @@ Python and JavaScript, as well as thread usage in all languages, so that everyth
 hanging or lagging. Performance preservation or improvements such as zero-copy and latency-reducing measures are
 always important. Note that compatibility should be ensured for Python 3.9 to 3.14 or even higher, and CUDA/NVENC 11
 to 13 or higher. Update the translations as well (and write/update additional entries if necessary) as necessary.
+A defect that predates the change you are making is still in scope: finding it does not make it someone else's,
+and "pre-existing" is not a reason to leave it. Fix it, or say precisely what is broken, what you ruled out, and
+what you would do next. The same applies to a failure you cannot reproduce yet -- narrow it until it is either
+fixed or precisely described, and never let a test that fails for an unknown reason pass unremarked.
+
 Update this file when certain details change.

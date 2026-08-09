@@ -365,7 +365,7 @@ COPY --chown=1000:1000 addons/example/container-entrypoint.sh /etc/container-ent
 COPY --chown=1000:1000 addons/example/selkies-entrypoint.sh /etc/selkies-entrypoint.sh
 COPY --chown=1000:1000 addons/example/services/ /etc/service/
 RUN chmod -f 755 /etc/container-entrypoint.sh /etc/selkies-entrypoint.sh && \
-    find /etc/service -name run -exec chmod -f 755 {} +
+    find /etc/service \( -name run -o -name finish \) -exec chmod -f 755 {} +
 
 # Configure bashrc to show /etc/motd and enable bash completion
 RUN echo "[ ! -z \"\$TERM\" -a -r /etc/motd ] && echo \"\$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '\"')\" && cat /etc/motd" >> /etc/bash.bashrc && \

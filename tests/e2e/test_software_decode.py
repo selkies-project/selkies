@@ -199,7 +199,14 @@ def block_ladder(r):
         with sync_playwright() as pw:
             browser, page = open_client(pw, fail_mode="all")
             try:
-                state = wait_for(page, lambda s: s["navs"] > 1, timeout=40)
+                # The reload is only half the event: wait for the decoder the
+                # reloaded page configures, or a busy machine is read between the
+                # two and the ladder looks like it stopped at software.
+                state = wait_for(
+                    page,
+                    lambda s: s["navs"] > 1 and "prefer-software" in s["cfgs"]
+                    and s["cfgs"][s["cfgs"].index("prefer-software") + 1:],
+                    timeout=60)
                 r.check("software was tried first",
                         "prefer-software" in state["cfgs"], state["cfgs"][:6])
                 r.check("fallback ladder still reached", state["navs"] > 1,

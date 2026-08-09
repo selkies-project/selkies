@@ -25,6 +25,7 @@ import {
   createFileUploader
 } from './lib/file-upload.js';
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
+import { storageKeyForServerKey } from './lib/conditional-settings.js';
 
 // Best-effort local keyboard layout, resolved once at script init so the value
 // is ready by the time the socket finishes connecting (getLayoutMap resolves in
@@ -423,6 +424,24 @@ const rememberSoftwareDecode = (enabled) => {
 const decoderConfigFor = (config) =>
   preferSoftwareDecode ? { ...config, hardwareAcceleration: 'prefer-software' } : config;
 
+// The fallback ladder escalates on repeated failures inside one troubled stretch,
+// so the count has to describe the current stretch and not a lifetime total: a
+// session that decodes video for this long retires it, otherwise unrelated faults
+// months apart accumulate until the ladder pins the profile to jpeg.
+const CRASH_COUNT_KEY = `${storageAppName}_crash_count`;
+const HEALTHY_SESSION_MS = 60000;
+let crashCountRetired = false;
+const retireCrashCountWhenHealthy = () => {
+  if (crashCountRetired || isSharedMode) return;
+  if (!(window.fps > 0) || performance.now() < HEALTHY_SESSION_MS) return;
+  crashCountRetired = true;
+  try {
+    window.localStorage.removeItem(CRASH_COUNT_KEY);
+  } catch (e) {
+    console.warn('Selkies: could not clear the decoder crash count:', e);
+  }
+};
+
 // Set page title
 document.title = 'Selkies';
 fetch('manifest.json')
@@ -579,7 +598,11 @@ function sanitizeAndStoreSettings(serverSettings) {
   for (const key in serverSettings) {
     if (!serverSettings.hasOwnProperty(key)) continue;
     const setting = serverSettings[key];
-    const finalKey = storageKeyFor(key);
+    // The user's pick may live under a different name than the server's key
+    // (HiDPI stores as useCssScaling), and the override check must read the key
+    // the dashboard actually writes, or an unlocked operator value wins forever.
+    const storeKey = storageKeyForServerKey(key);
+    const finalKey = storageKeyFor(storeKey);
     const wasUnset = window.localStorage.getItem(finalKey) === null;
 
     if (setting.min !== undefined && setting.max !== undefined) {
@@ -587,7 +610,7 @@ function sanitizeAndStoreSettings(serverSettings) {
       // ints — that reads "0.5" as 0, flags it out of range, and wipes the pick
       // back to the server default on every connect. In-range stored values are
       // kept verbatim (no write-back), so fractions survive untruncated.
-      const clientValue = getFloatParam(key, setting.default);
+      const clientValue = getFloatParam(storeKey, setting.default);
       if (wasUnset) {
         window[key] = clientValue;
       } else if (clientValue < setting.min || clientValue > setting.max) {
@@ -602,8 +625,8 @@ function sanitizeAndStoreSettings(serverSettings) {
     else if (setting.allowed !== undefined) {
       const isNumericEnum = !isNaN(parseFloat(setting.allowed[0]));
       const clientValueStr = isNumericEnum
-        ? getIntParam(key, parseInt(setting.value, 10)).toString()
-        : getStringParam(key, setting.value);
+        ? getIntParam(storeKey, parseInt(setting.value, 10)).toString()
+        : getStringParam(storeKey, setting.value);
       const applyRuntime = (val) => { window[key] = isNumericEnum ? parseInt(val, 10) : val; };
       if (wasUnset) {
         applyRuntime(setting.value);
@@ -614,14 +637,14 @@ function sanitizeAndStoreSettings(serverSettings) {
         changes[key] = setting.value;
       } else {
         applyRuntime(clientValueStr);
-        if (isNumericEnum) setIntParam(key, parseInt(clientValueStr, 10));
-        else setStringParam(key, clientValueStr);
+        if (isNumericEnum) setIntParam(storeKey, parseInt(clientValueStr, 10));
+        else setStringParam(storeKey, clientValueStr);
       }
     }
     else if (typeof setting.value === 'boolean') {
       const serverValue = setting.value;
       if (setting.locked) {
-        const clientValue = getBoolParam(key, !serverValue);
+        const clientValue = getBoolParam(storeKey, !serverValue);
         if (clientValue !== serverValue) {
           console.log(`Sanitizing '${key}': setting is locked by server. Client value ${clientValue} is being overwritten with ${serverValue}.`);
           changes[key] = serverValue;
@@ -638,9 +661,9 @@ function sanitizeAndStoreSettings(serverSettings) {
           changes[key] = serverValue;
         }
       } else {
-        const clientValue = getBoolParam(key, serverValue);
+        const clientValue = getBoolParam(storeKey, serverValue);
         window[key] = clientValue;
-        setBoolParam(key, clientValue);
+        setBoolParam(storeKey, clientValue);
       }
     }
     else if (setting.value !== undefined) {
@@ -2636,8 +2659,12 @@ function receiveMessage(event) {
       if (typeof message.value === 'boolean') {
         const changed = useCssScaling !== message.value;
         useCssScaling = message.value;
-        setBoolParam('useCssScaling', useCssScaling);
-        console.log(`Set useCssScaling to ${useCssScaling} and persisted.`);
+        // persist === false marks a server-authored value: apply it, but leave
+        // the user's own key alone so their pick survives the lock.
+        if (message.persist !== false) {
+          setBoolParam('useCssScaling', useCssScaling);
+        }
+        console.log(`Set useCssScaling to ${useCssScaling}${message.persist === false ? '.' : ' and persisted.'}`);
 
         if (window.webrtcInput && typeof window.webrtcInput.updateCssScaling === 'function') {
           window.webrtcInput.updateCssScaling(useCssScaling);
@@ -3035,19 +3062,26 @@ async function sendClipboardData(data, mimeType = 'text/plain') {
     }
 }
 
-function handleSettingsMessage(settings) {
+function handleSettingsMessage(settings, fromServer) {
+  // A server-authored payload (the locked/overridden values replayed on every
+  // connect) is applied to the runtime but never written to the user's own keys,
+  // where it would outlive the lock and masquerade as their pick. Only a
+  // dashboard-authored payload persists.
+  const storeInt = fromServer ? () => {} : setIntParam;
+  const storeBool = fromServer ? () => {} : setBoolParam;
+  const storeString = fromServer ? () => {} : setStringParam;
   console.log('Applying settings:', settings);
   let settingsChanged = false;
   if (settings.framerate !== undefined) {
     framerate = parseInt(settings.framerate);
-    setIntParam('framerate', framerate);
+    storeInt('framerate', framerate);
     settingsChanged = true;
   }
   if (settings.encoder !== undefined) {
     const newEncoderSetting = settings.encoder;
     if (currentEncoderMode !== newEncoderSetting) {
         currentEncoderMode = newEncoderSetting;
-        setStringParam('encoder', currentEncoderMode);
+        storeString('encoder', currentEncoderMode);
         settingsChanged = true;
         if (newEncoderSetting === 'jpeg' || newEncoderSetting === 'h264enc' || newEncoderSetting === 'openh264enc' || newEncoderSetting === 'h264enc-striped') {
             if (decoder && decoder.state !== 'closed') {
@@ -3075,12 +3109,12 @@ function handleSettingsMessage(settings) {
   }
   if (settings.video_crf !== undefined) {
     video_crf = parseInt(settings.video_crf, 10);
-    setIntParam('video_crf', video_crf);
+    storeInt('video_crf', video_crf);
     settingsChanged = true;
   }
   if (settings.video_fullcolor !== undefined) {
     video_fullcolor = !!settings.video_fullcolor;
-    setBoolParam('video_fullcolor', video_fullcolor);
+    storeBool('video_fullcolor', video_fullcolor);
     settingsChanged = true;
     if (decoder && decoder.state !== 'closed') {
       console.log('video_fullcolor setting changed, closing main video decoder.');
@@ -3091,22 +3125,22 @@ function handleSettingsMessage(settings) {
   }
   if (settings.video_streaming_mode !== undefined) {
     video_streaming_mode = !!settings.video_streaming_mode;
-    setBoolParam('video_streaming_mode', video_streaming_mode);
+    storeBool('video_streaming_mode', video_streaming_mode);
     settingsChanged = true;
   }
   if (settings.jpeg_quality !== undefined) {
     jpeg_quality = parseInt(settings.jpeg_quality, 10);
-    setIntParam('jpeg_quality', jpeg_quality);
+    storeInt('jpeg_quality', jpeg_quality);
     settingsChanged = true;
   }
   if (settings.paint_over_jpeg_quality !== undefined) {
     paint_over_jpeg_quality = parseInt(settings.paint_over_jpeg_quality, 10);
-    setIntParam('paint_over_jpeg_quality', paint_over_jpeg_quality);
+    storeInt('paint_over_jpeg_quality', paint_over_jpeg_quality);
     settingsChanged = true;
   }
   if (settings.use_cpu !== undefined) {
     use_cpu = !!settings.use_cpu;
-    setBoolParam('use_cpu', use_cpu);
+    storeBool('use_cpu', use_cpu);
     settingsChanged = true;
     if (decoder && decoder.state !== 'closed') {
       console.log('use_cpu setting changed, closing main video decoder.');
@@ -3117,17 +3151,17 @@ function handleSettingsMessage(settings) {
   }
   if (settings.video_paintover_crf !== undefined) {
     video_paintover_crf = parseInt(settings.video_paintover_crf, 10);
-    setIntParam('video_paintover_crf', video_paintover_crf);
+    storeInt('video_paintover_crf', video_paintover_crf);
     settingsChanged = true;
   }
   if (settings.video_paintover_burst_frames !== undefined) {
     video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames, 10);
-    setIntParam('video_paintover_burst_frames', video_paintover_burst_frames);
+    storeInt('video_paintover_burst_frames', video_paintover_burst_frames);
     settingsChanged = true;
   }
   if (settings.use_paint_over_quality !== undefined) {
     use_paint_over_quality = !!settings.use_paint_over_quality;
-    setBoolParam('use_paint_over_quality', use_paint_over_quality);
+    storeBool('use_paint_over_quality', use_paint_over_quality);
     settingsChanged = true;
   }
   if (settings.scaling_dpi !== undefined) {
@@ -3142,21 +3176,21 @@ function handleSettingsMessage(settings) {
   }
   if (settings.enable_binary_clipboard !== undefined) {
     enable_binary_clipboard = !!settings.enable_binary_clipboard;
-    setBoolParam('enable_binary_clipboard', enable_binary_clipboard);
+    storeBool('enable_binary_clipboard', enable_binary_clipboard);
     settingsChanged = true;
   }
   if (settings.clipboard_in_enabled !== undefined) {
     clipboard_in_enabled = !!settings.clipboard_in_enabled;
-    setBoolParam('clipboard_in_enabled', clipboard_in_enabled);
+    storeBool('clipboard_in_enabled', clipboard_in_enabled);
     settingsChanged = true;
   }
   if (settings.clipboard_out_enabled !== undefined) {
     clipboard_out_enabled = !!settings.clipboard_out_enabled;
-    setBoolParam('clipboard_out_enabled', clipboard_out_enabled);
+    storeBool('clipboard_out_enabled', clipboard_out_enabled);
     settingsChanged = true;
   }
   if (settings.use_css_scaling !== undefined) {
-    const messageData = { type: 'setUseCssScaling', value: !!settings.use_css_scaling };
+    const messageData = { type: 'setUseCssScaling', value: !!settings.use_css_scaling, persist: !fromServer };
     receiveMessage({ origin: window.location.origin, data: messageData });
   }
   if (settings.use_browser_cursors !== undefined) {
@@ -3169,6 +3203,8 @@ function handleSettingsMessage(settings) {
   }
   if (settings.debug !== undefined) {
     debug = settings.debug;
+    // Persisted even for a server-authored value: the reload below only settles
+    // once the flag is already in storage.
     setBoolParam('debug', debug);
     console.log(`Applied debug setting: ${debug}. Reloading...`);
     setTimeout(() => { window.location.reload(); }, 700);
@@ -3176,23 +3212,23 @@ function handleSettingsMessage(settings) {
   }
   if (settings.rate_control_mode !== undefined) {
     rateControlMode = settings.rate_control_mode;
-    setStringParam('rate_control_mode', rateControlMode);
+    storeString('rate_control_mode', rateControlMode);
     fetchLatestRCvalue(rateControlMode);
     settingsChanged = true;
   }
   if (settings.video_bitrate !== undefined) {
     videoBitrate = parseInt(settings.video_bitrate, 10);
-    setIntParam('video_bitrate', videoBitrate);
+    storeInt('video_bitrate', videoBitrate);
     settingsChanged = true;
   }
   if (settings.audio_bitrate !== undefined) {
     audio_bitrate = parseInt(settings.audio_bitrate, 10);
-    setIntParam('audio_bitrate', audio_bitrate);
+    storeInt('audio_bitrate', audio_bitrate);
     settingsChanged = true;
   }
   if (settings.force_aligned_resolution !== undefined) {
     force_aligned_resolution = !!settings.force_aligned_resolution;
-    setBoolParam('force_aligned_resolution', force_aligned_resolution);
+    storeBool('force_aligned_resolution', force_aligned_resolution);
     settingsChanged = true;
   }
   if (settingsChanged) {
@@ -4124,6 +4160,8 @@ function initWebsockets() {
         lastStripedFpsUpdateTime = now;
       }
     }
+
+    retireCrashCountWhenHealthy();
   };
 
   websocket.onopen = () => {
@@ -4928,7 +4966,7 @@ function initWebsockets() {
               window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
               if (Object.keys(changes).length > 0) {
                   console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
-                  handleSettingsMessage(changes);
+                  handleSettingsMessage(changes, true);
               }
               const serverForcesManual = obj.settings && obj.settings.is_manual_resolution_mode && obj.settings.is_manual_resolution_mode.value === true;
 
@@ -5988,7 +6026,7 @@ function initiateFallback(error, context) {
     // runs no VideoDecoder, so an error there is handover noise from the stream
     // the server has yet to stop, not a decoder the preference could repair.
     if (!softwareDecodeAttempted && !window.isFallingBack &&
-        getStringParam('encoder', 'h264enc') !== 'jpeg') {
+        currentEncoderMode !== 'jpeg') {
         softwareDecodeAttempted = true;
         softwareDecodeSwitchedAt = performance.now();
         console.warn(`[initiateFallback] Decoder error (Context: ${context}); retrying on software decode.`, error);
@@ -6023,14 +6061,13 @@ function initiateFallback(error, context) {
         }
     } else {
         console.log("Primary client fallback: Forcing client settings to safe defaults.");
-        const crashKey = `${storageAppName}_crash_count`;
-        let crashCount = parseInt(window.localStorage.getItem(crashKey) || '0');
+        let crashCount = parseInt(window.localStorage.getItem(CRASH_COUNT_KEY) || '0');
         crashCount++;
-        safeSetItem(crashKey, crashCount.toString());
+        safeSetItem(CRASH_COUNT_KEY, crashCount.toString());
         if (crashCount >= 3) {
             setStringParam('encoder', 'jpeg');
-            safeSetItem(crashKey, '0');
-        } else if (getStringParam('encoder', 'h264enc') !== 'jpeg') {
+            safeSetItem(CRASH_COUNT_KEY, '0');
+        } else if (currentEncoderMode !== 'jpeg') {
             setStringParam('encoder', 'h264enc');
         } else {
             // Already on the safest encoder: jpeg mode runs no VideoDecoder, so a
@@ -6038,7 +6075,7 @@ function initiateFallback(error, context) {
             // until our settings push lands). Un-escalating to h264enc would loop
             // the ladder forever on builds whose WebCodecs claims H.264 support
             // but fails at decode() (isConfigSupported is not trustworthy there).
-            safeSetItem(crashKey, '0');
+            safeSetItem(CRASH_COUNT_KEY, '0');
         }
         setBoolParam('video_fullcolor', false);
         setIntParam('framerate', 60);

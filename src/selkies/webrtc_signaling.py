@@ -327,7 +327,7 @@ class WebRTCSignalingClient:
                 # verbatim, so a malformed one is ignored like the non-object and
                 # unrecognized cases below rather than reported as a transport
                 # failure, which would tear down every peer's session.
-                logger.warning(f"ignoring unparseable signaling message: {message}")
+                logger.warning(f"ignoring unparsable signaling message: {message}")
                 return
 
             if not isinstance(data, dict):

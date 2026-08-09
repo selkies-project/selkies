@@ -5,6 +5,14 @@
 export DISPLAY="${DISPLAY:-:20}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 until [ -d "${XDG_RUNTIME_DIR}" ]; do sleep 0.5; done
+
+# Zink belongs to the GL applications in the session, not to the display server:
+# this is a virtual framebuffer with no GPU output. Inheriting it makes the
+# server's GLX module bring up a Vulkan driver it never renders through, and on
+# some Mesa versions that initialisation never returns -- the server then holds
+# its listening sockets without ever accepting, so clients hang instead of
+# failing. The session keeps its own Zink settings; only this process drops them.
+unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
 # DRI3: rendering through a DRM node is what gives GL clients the GPU, and only
 # the patched server in this image accepts -vfbdevice. The node is the one
 # Selkies renders on (--render-dri), so the X11 backend and the Wayland
@@ -25,6 +33,41 @@ fi
 
 # Screen saver (-s 0) and DPMS (-dpms) are disabled at the server level so the
 # framebuffer can never go blank: capturing a black stream is never desirable,
+# A server that died leaves its lock and socket behind, and the replacement then
+# starts against a display number that still looks taken.
+DISPLAY_NUM="${DISPLAY#:}"
+DISPLAY_NUM="${DISPLAY_NUM%%.*}"
+if [ -n "${DISPLAY_NUM}" ] && ! pgrep -f "Xvfb ${DISPLAY}( |$)" >/dev/null 2>&1; then
+    rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
+fi
+
 # and no lock-screen component is installed in this image anyway
 # shellcheck disable=SC2086  # VFB_DEVICE is an option pair or empty
-exec /usr/bin/Xvfb "${DISPLAY}" -screen 0 "8192x4096x24" +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem -s 0 -dpms ${VFB_DEVICE}
+/usr/bin/Xvfb "${DISPLAY}" -screen 0 "8192x4096x24" +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem -s 0 -dpms ${VFB_DEVICE} &
+XVFB_PID=$!
+trap 'kill "${XVFB_PID}" 2>/dev/null' TERM INT
+
+# The socket appears before the server can answer, and a server that stalls
+# during startup keeps it open without ever accepting: clients then hang instead
+# of failing, which reads downstream as "no screen found" and leaves the whole
+# container up but unusable. Prove the server completes a handshake, and hand a
+# stalled one back to the supervisor rather than supervising a dead display.
+READY=false
+for _ in $(seq 1 30); do
+    if ! kill -0 "${XVFB_PID}" 2>/dev/null; then
+        break
+    fi
+    if timeout 2 xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1; then
+        READY=true
+        break
+    fi
+    sleep 1
+done
+if [ "${READY}" != "true" ]; then
+    echo "[xvfb] ${DISPLAY} did not answer within 30s; restarting the server" >&2
+    kill -9 "${XVFB_PID}" 2>/dev/null
+    wait "${XVFB_PID}" 2>/dev/null
+    exit 1
+fi
+echo "[xvfb] ${DISPLAY} is serving clients"
+wait "${XVFB_PID}"

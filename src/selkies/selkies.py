@@ -117,6 +117,23 @@ AUDIO_CHANNELS_DEFAULT = 2
 # before narrowing, or a fractional in-range value aborts module import.
 AUDIO_BITRATE_DEFAULT = int(float(settings.audio_bitrate))
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "openh264enc"]
+# Encoders with no hardware path: selecting one implies software encoding
+# regardless of what the client asked for.
+CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped", "openh264enc")
+
+
+def effective_use_cpu(encoder, requested, default):
+    """Software-encode flag for an encoder choice.
+
+    A CPU-only encoder implies software encoding, but that is a property of the
+    encoder rather than a decision the client made: any other encoder honours the
+    client's own request, falling back to the server default when it never made
+    one. Deriving it this way is what lets a display return to hardware encoding
+    after a spell on JPEG.
+    """
+    if encoder in CPU_ONLY_ENCODERS:
+        return True
+    return bool(default) if requested is None else bool(requested)
 
 LOGLEVEL = logging.INFO
 logging.basicConfig(level=LOGLEVEL)
@@ -1885,28 +1902,73 @@ class DataStreamingServer(BaseStreamingService):
             except Exception:
                 pass
 
-    async def _broadcast_live_server_settings(self, display_id: str):
-        """Re-announce server settings carrying the display's LIVE encoder.
+    def _settings_payload_for_display(self, display_id: str) -> dict:
+        """Client settings snapshot as it applies to one display.
 
-        The handshake payload holds boot config only; after an encoder switch
-        every connected client — shared viewers included — must re-key its
-        wire-format demux, or it drops the new mode's chunks forever.
+        build_client_settings_payload() publishes boot config, so the encoder is
+        patched to the one this display is actually captured with (its stored
+        pick, else the session default a fresh capture would use): clients key
+        their wire-format demux off this value and drop every chunk of any other
+        format.
+        """
+        payload = build_client_settings_payload()
+        live_encoder = (self.display_clients.get(display_id) or {}).get('encoder') or self.app.encoder
+        if live_encoder and isinstance(payload.get('encoder'), dict):
+            payload['encoder'] = dict(payload['encoder'])
+            payload['encoder']['value'] = live_encoder
+        # Transport capacity, not a user setting: lets the client size multipart
+        # chunks (clipboard, uploads) to the whole frame.
+        payload['ws_max_message_bytes'] = {"value": WS_MAX_MESSAGE_BYTES}
+        return payload
+
+    async def _broadcast_live_server_settings(self, display_id: str):
+        """Re-announce server settings after the given display changed its live encoder.
+
+        The handshake payload holds boot config only, so every connected client —
+        shared viewers included — must re-key its wire-format demux or it drops
+        the new mode's chunks forever. Routed like broadcast_stream_resolution:
+        each display's own socket gets its own encoder and every remaining socket
+        gets the primary's, since shared viewers render the primary stream and one
+        display's encoder applied on another page keys that page to a format its
+        own stream never sends.
         """
         try:
-            payload = build_client_settings_payload()
-            live_encoder = self.display_clients.get(display_id, {}).get('encoder')
-            if live_encoder and isinstance(payload.get('encoder'), dict):
-                payload['encoder'] = dict(payload['encoder'])
-                payload['encoder']['value'] = live_encoder
-            payload['ws_max_message_bytes'] = {"value": WS_MAX_MESSAGE_BYTES}
-            msg = json.dumps({"type": "server_settings", "settings": payload})
+            messages = {}
+
+            def message_for(did):
+                if did not in messages:
+                    messages[did] = json.dumps({
+                        "type": "server_settings",
+                        "displayId": did,
+                        "settings": self._settings_payload_for_display(did),
+                    })
+                return messages[did]
+
+            per_socket = {}
+            for did, client in self.display_clients.items():
+                ws = client.get('ws')
+                if ws is not None:
+                    per_socket[ws] = message_for(did)
+            primary_message = message_for('primary')
         except Exception as e:
             data_logger.warning(f"Could not build live server settings broadcast: {e}")
             return
-        # Bounded broadcast: this runs while _apply_client_settings holds
-        # _reconfigure_lock, so a frozen client's full socket buffer must be
-        # dropped, not waited on.
-        await _broadcast_to_clients(self.clients, msg, per_client_timeout=2.0)
+        groups = {}
+        for ws in self.clients:
+            groups.setdefault(per_socket.get(ws) or primary_message, set()).add(ws)
+        data_logger.info(
+            f"Re-announcing live server settings after the '{display_id}' capture restart "
+            f"to {len(self.clients)} client(s)."
+        )
+        for message_str, sockets in groups.items():
+            # Bounded broadcast: this runs while _apply_client_settings holds
+            # _reconfigure_lock, so a frozen client's full socket buffer must be
+            # dropped, not waited on.
+            dropped = await _broadcast_to_clients(sockets, message_str, per_client_timeout=2.0)
+            # The fan-out ran over a computed group set; mirror removals into
+            # the authoritative registry.
+            for ws in dropped:
+                self.clients.discard(ws)
 
     def _set_backpressure_enabled(self, display_id: str, display_state: dict, enabled: bool):
         """Update the backpressure flag, requesting an IDR when it lifts.
@@ -2331,11 +2393,21 @@ class DataStreamingServer(BaseStreamingService):
                     if settings.get(key) is not None:
                         display_state[key] = sanitize_value(key, settings.get(key))
                 if settings.get("use_cpu") is not None or settings.get("encoder") is not None:
-                    if display_state["encoder"] in ["jpeg", "h264enc-striped", "openh264enc"]:
-                        display_state["use_cpu"] = True
-                        data_logger.info(f"Forcing use_cpu=True because encoder is '{display_state['encoder']}'")
-                    elif settings.get("use_cpu") is not None:
-                        display_state["use_cpu"] = sanitize_value("use_cpu", settings.get("use_cpu"))
+                    # The client's own choice is stored apart from the effective flag
+                    # so a spell on a CPU-only encoder does not pin the display to
+                    # software once it moves back to a hardware-capable one.
+                    if settings.get("use_cpu") is not None:
+                        display_state["use_cpu_requested"] = sanitize_value(
+                            "use_cpu", settings.get("use_cpu"))
+                    was_use_cpu = display_state["use_cpu"]
+                    display_state["use_cpu"] = effective_use_cpu(
+                        display_state["encoder"],
+                        display_state.get("use_cpu_requested"),
+                        self._initial_use_cpu)
+                    if display_state["use_cpu"] != was_use_cpu:
+                        data_logger.info(
+                            f"Software encoding {'enabled' if display_state['use_cpu'] else 'disabled'} "
+                            f"for encoder '{display_state['encoder']}'")
                 if settings.get("audio_bitrate") is not None:
                     self.app.audio_bitrate = sanitize_value("audio_bitrate", settings.get("audio_bitrate"))
                     display_state["audio_bitrate"] = self.app.audio_bitrate
@@ -2347,6 +2419,7 @@ class DataStreamingServer(BaseStreamingService):
                     # A display registered later inherits the primary controller's
                     # live tunables as its seeds.
                     session_seeds = {
+                        'encoder': ('app_encoder',),
                         'framerate': ('app_framerate',),
                         'video_crf': ('video_crf', '_initial_video_crf'),
                         'video_bitrate': ('video_bitrate', '_initial_video_bitrate'),
@@ -2359,15 +2432,22 @@ class DataStreamingServer(BaseStreamingService):
                         'video_paintover_crf': ('video_paintover_crf', '_initial_video_paintover_crf'),
                         'video_paintover_burst_frames': ('video_paintover_burst_frames', '_initial_video_paintover_burst_frames'),
                     }
+                    # The use_cpu seed carries the client's REQUEST: seeding the
+                    # encoder-forced effective flag would pin every later display —
+                    # and the client-less viewer capture — to software encoding
+                    # after one spell on a CPU-only encoder.
+                    seed_sources = {'use_cpu': 'use_cpu_requested'}
                     for key, targets in session_seeds.items():
                         if settings.get(key) is None:
                             continue
-                        value = display_state.get(key)
+                        value = display_state.get(seed_sources.get(key, key))
                         if value is None:
                             continue
                         for attr in targets:
                             if attr == 'app_framerate':
                                 self.app.set_framerate(int(value))
+                            elif attr == 'app_encoder':
+                                self.app.encoder = value
                             else:
                                 setattr(self, attr, value)
                         data_logger.info(f"Session default {key} updated to {value} for new displays.")
@@ -2642,14 +2722,13 @@ class DataStreamingServer(BaseStreamingService):
 
         await self.send_current_cursor(websocket, raddr)
 
+        # Which display this socket renders is only known from its first SETTINGS,
+        # so the handshake publishes the primary's live encoder: a viewer renders
+        # the primary stream, and a display registering later seeds its own encoder
+        # from the same session default.
         server_settings_payload = {
             "type": "server_settings",
-            "settings": build_client_settings_payload(),
-        }
-        # Transport capacity, not a user setting: lets the client size multipart
-        # chunks (clipboard, uploads) to the whole frame.
-        server_settings_payload["settings"]["ws_max_message_bytes"] = {
-            "value": WS_MAX_MESSAGE_BYTES
+            "settings": self._settings_payload_for_display('primary'),
         }
         try:
             await websocket.send_str(json.dumps(server_settings_payload))
@@ -3086,7 +3165,8 @@ class DataStreamingServer(BaseStreamingService):
                                     'video_streaming_mode': self._initial_video_streaming_mode,
                                     'jpeg_quality': self._initial_jpeg_quality,
                                     'paint_over_jpeg_quality': self._initial_paint_over_jpeg_quality,
-                                    'use_cpu': self._initial_use_cpu,
+                                    'use_cpu': effective_use_cpu(
+                                        self.app.encoder, None, self._initial_use_cpu),
                                     'video_paintover_crf': self._initial_video_paintover_crf,
                                     'video_paintover_burst_frames': self._initial_video_paintover_burst_frames,
                                     'use_paint_over_quality': self._initial_use_paint_over_quality,
@@ -4630,6 +4710,11 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.error(f"Viewer-driven capture start failed: {e}", exc_info=True)
         if started:
             await self._start_backpressure_task_if_needed('primary')
+            # This capture is built from the session defaults, not from any
+            # client's settings, so tell the watching clients which wire format
+            # it came up in: one keyed to the departed controller's encoder would
+            # otherwise drop every chunk.
+            await self._broadcast_live_server_settings('primary')
             # A lone viewer listens too: the audio fan-out is shared, never
             # per-controller, so it must not wait for one either.
             if PCMFLUX_AVAILABLE and settings.audio_enabled[0] and not self.is_pcmflux_capturing:
@@ -4893,8 +4978,9 @@ class DataStreamingServer(BaseStreamingService):
             scale=display_state.get('scale', 1.0),
             framerate=display_state.get('framerate', self.app.framerate),
             encoder=encoder,
-            use_cpu=display_state.get('use_cpu', self._initial_use_cpu),
-            cbr=display_state.get('rate_control_mode', settings.rate_control_mode) == 'cbr',
+            use_cpu=display_state.get(
+                'use_cpu', effective_use_cpu(encoder, None, self._initial_use_cpu)),
+            cbr=display_state.get('rate_control_mode', self.rc_mode.value) == 'cbr',
             bitrate_kbps=display_state.get('video_bitrate', self._initial_video_bitrate),
             crf=display_state.get('video_crf', self._initial_video_crf),
             paintover_crf=display_state.get('video_paintover_crf', self._initial_video_paintover_crf),

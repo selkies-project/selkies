@@ -5,5 +5,10 @@
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 export DISABLE_RTKIT="y"
 export PIPEWIRE_LATENCY="128/48000"
-until [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] || [ -n "$(ls ${XDG_RUNTIME_DIR}/pipewire-*.lock 2>/dev/null)" ]; do sleep 0.5; done
+# Wait for a PipeWire that answers, not merely for its lock file: connecting to
+# a half-started daemon exits immediately and is respawned in a loop.
+until [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ]; do sleep 0.5; done
+if command -v pw-cli >/dev/null 2>&1; then
+    until pw-cli info 0 >/dev/null 2>&1; do sleep 0.5; done
+fi
 exec dbus-run-session -- /usr/bin/pipewire-pulse

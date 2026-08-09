@@ -117,3 +117,23 @@ export const USE_CPU_SPEC = boolSpec("use_cpu", false,
     (value, _ctx, io) => io.postSetting({ use_cpu: value }));
 export const FORCE_ALIGNED_RESOLUTION_SPEC = boolSpec("force_aligned_resolution", false,
     (value, _ctx, io) => io.postSetting({ force_aligned_resolution: value }));
+
+const SETTING_SPECS = [
+    HIDPI_SPEC, RATE_CONTROL_SPEC, USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC,
+    VIDEO_STREAMING_MODE_SPEC, USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC,
+    FORCE_ALIGNED_RESOLUTION_SPEC,
+];
+
+// Server payload key -> localStorage key, derived from the specs so the two
+// names cannot drift apart. Only HiDPI differs (use_css_scaling is stored as the
+// client-side useCssScaling flag); anything unregistered stores under its own
+// server key. The cores need this to ask "has the user overridden this?" about
+// the key the user's pick actually lives under.
+const SERVER_TO_STORAGE_KEY = SETTING_SPECS.reduce((map, spec) => {
+    if (spec.storageKey !== spec.serverKey) map[spec.serverKey] = spec.storageKey;
+    return map;
+}, {});
+
+export function storageKeyForServerKey(serverKey) {
+    return SERVER_TO_STORAGE_KEY[serverKey] || serverKey;
+}

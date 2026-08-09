@@ -213,16 +213,19 @@ def x11_keymap_pressed(keysym_char="x"):
     from selkies.Xlib import XK
     code = None
     d = H.x_display()
-    for name in ("XK_" + keysym_char,):
-        ks = getattr(XK, name, None)
-        if ks is not None:
-            code = d.keysym_to_keycode(ks)
-            break
-    if not code:
-        return None
-    keymap = d.query_keymap()
-    byte = keymap[code // 8]
-    return bool(byte & (1 << (code % 8)))
+    try:
+        for name in ("XK_" + keysym_char,):
+            ks = getattr(XK, name, None)
+            if ks is not None:
+                code = d.keysym_to_keycode(ks)
+                break
+        if not code:
+            return None
+        keymap = d.query_keymap()
+        byte = keymap[code // 8]
+        return bool(byte & (1 << (code % 8)))
+    finally:
+        d.close()
 
 
 def x11_mouse_pos():

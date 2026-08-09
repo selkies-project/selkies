@@ -50,7 +50,7 @@ const DEFAULT_SCALING_DPI = 96;
 const deriveDpiFromDpr = (): number => {
     const dpr = window.devicePixelRatio || 1;
     const target = Math.round(dpr * 4) * 24;
-    return (dpr > 1 && [120, 144, 168, 192, 216, 240, 288].includes(target)) ? target : DEFAULT_SCALING_DPI;
+    return (dpr > 1 && [120, 144, 168, 192, 216, 240, 264, 288].includes(target)) ? target : DEFAULT_SCALING_DPI;
 };
 
 const commonResolutionValues = [
@@ -97,12 +97,26 @@ const COARSE_MBPS_BITRATE_STEPS = [150000, 200000, 300000, 400000, 500000, 75000
 
 const readStored = (key: string) => localStorage.getItem(getPrefixedKey(key));
 
+// The cores persist every value they are told to apply, so the stored key alone
+// cannot tell a user's explicit pick from one the dashboard derived (HiDPI from
+// the resolution mode, rate control from the encoder). An explicit choice writes
+// a marker beside the value; the settings that are also derived read storage
+// through this reader, so a derived write never pins them.
+const EXPLICIT_CHOICE_SUFFIX = "_explicit_choice";
+// Suffixed onto the already-prefixed value key so the marker inherits the
+// per-display suffix and a secondary display keeps its own choice.
+const explicitChoiceKey = (spec: any) => `${getPrefixedKey(spec.storageKey)}${EXPLICIT_CHOICE_SUFFIX}`;
+const isExplicitChoice = (spec: any) => localStorage.getItem(explicitChoiceKey(spec)) === "true";
+const readExplicitStored = (spec: any) => (key: string) => (
+    isExplicitChoice(spec) ? readStored(key) : null
+);
+
 // Drives a conditional setting: lazy init + re-resolve whenever the server
 // settings or any dependency in `deps` changes (server-sync AND encoder/manual-
 // resolution re-derivation, uniformly). The resolver honors explicit choices,
 // so a re-resolve never clobbers a pinned value. Returns [value, setValue].
-function useConditionalSetting(spec: any, serverSettings: any, ctx: any, deps: any[]) {
-    const compute = () => resolveSpec(spec, serverSettings, ctx, readStored);
+function useConditionalSetting(spec: any, serverSettings: any, ctx: any, deps: any[], read: any = readStored) {
+    const compute = () => resolveSpec(spec, serverSettings, ctx, read);
     const [value, setValue] = useState(compute);
     // eslint-disable-next-line react-hooks/exhaustive-deps
     useEffect(() => { setValue(compute()); }, deps);
@@ -124,6 +138,8 @@ const RATE_CONTROL_CBR_DEFAULT_SPEC = {
     conditional: () => "cbr",
     fallback: "cbr",
 };
+const readHidpiStored = readExplicitStored(HIDPI_SPEC);
+const readRateControlStored = readExplicitStored(RATE_CONTROL_CBR_DEFAULT_SPEC);
 // Expressed in kbps
 const DEFAULT_VIDEO_BITRATE = 8000;
 
@@ -223,9 +239,13 @@ export function Settings() {
     // dependency like the encoder/resolution) flow through writeConditional
     // below, which sets state, persists, and propagates uniformly.
     const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
-        HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+        HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
     const [rateControlMode, setRateControlMode] = useConditionalSetting(
-        RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+        RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
+    // With rate control disabled the server ignores rate_control_mode entirely
+    // and keeps the encoder on its built-in default, so the dashboard neither
+    // pushes a mode nor lets its own pick decide which quality slider is shown.
+    const rateControlEnabled = renderableSettings.enableRateControl ?? true;
     // The CBR dashboard default diverges from the server's own per-encoder
     // derivation (CRF for the striped/jpeg encoders), and the hook above only
     // sets local UI state: without pushing the resolved default the server
@@ -234,9 +254,19 @@ export function Settings() {
     // server's value and post nothing.
     useEffect(() => {
         if (!serverSettings) return;
-        if (isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readStored)) return;
+        if (serverSettings.enable_rate_control?.value === false) return;
+        const rcKey = RATE_CONTROL_CBR_DEFAULT_SPEC.storageKey;
         const resolved = resolveSpec(
-            RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, readStored);
+            RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, readRateControlStored);
+        // The core persists every mode it is told to apply and resends it on the
+        // next connect. Without an explicit pick that stored echo is not a choice:
+        // drop it once it stops matching what the ladder resolves, or it would
+        // outlive the derivation — and an operator override with it.
+        if (!isExplicitChoice(RATE_CONTROL_CBR_DEFAULT_SPEC)
+            && readStored(rcKey) !== null && readStored(rcKey) !== resolved) {
+            localStorage.removeItem(getPrefixedKey(rcKey));
+        }
+        if (isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readRateControlStored)) return;
         const serverValue = serverSettings[RATE_CONTROL_CBR_DEFAULT_SPEC.serverKey]?.value;
         if (resolved && serverValue !== undefined && resolved !== serverValue) {
             writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, resolved, setRateControlMode, { persist: false });
@@ -311,6 +341,7 @@ export function Settings() {
         if (opts.persist) {
             localStorage.setItem(getPrefixedKey(spec.storageKey),
                 spec.serialize ? spec.serialize(uiValue) : String(uiValue));
+            localStorage.setItem(explicitChoiceKey(spec), "true");
         }
         spec.propagate(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
     };
@@ -455,7 +486,7 @@ export function Settings() {
         }
 
         // video_fullcolor, video_streaming_mode, use_paint_over_quality, use_cpu,
-        // use_browser_cursors and force_aligned_resolution now resolve through the
+        // use_browser_cursors and force_aligned_resolution resolve through the
         // shared ladder (useConditionalSetting above), so they stay overridden- and
         // locked-aware without a bespoke sync line here.
 
@@ -465,21 +496,15 @@ export function Settings() {
             const storedAllowed = s_scaling_dpi.allowed.includes(String(stored));
             const serverVal = parseInt(s_scaling_dpi.value, 10);
             const derived = deriveDpiFromDpr();
-            const manualActive = !!localStorage.getItem(getPrefixedKey("manual_width"))
-                || serverSettings?.is_manual_resolution_mode?.value === true;
-            // The derived default only exists client-side: without a post the server
-            // keeps its built-in DPI, so we send it only when nothing explicit governs
-            // scaling (no client choice, no override, no manual resolution) and it
-            // differs from what the server already has.
+            // Ladder matches what actually governs the desktop: an operator override
+            // (which the server refuses to let clients clobber) > the stored pick >
+            // the derived local-display default (the cores send stored-else-derived
+            // on every connect, independent of the resolution mode).
             const willPostDerived = !storedAllowed && !s_scaling_dpi.overridden
-                && !manualActive && derived !== serverVal;
-            // The label must show the value ACTUALLY in effect on the server:
-            // client choice > server override > the derived default (only if we post
-            // it) > the server's current value. Never a derived value we didn't apply.
-            const final = storedAllowed ? stored
-                : s_scaling_dpi.overridden ? serverVal
-                : willPostDerived ? derived
-                : serverVal;
+                && derived !== serverVal;
+            const final = s_scaling_dpi.overridden ? serverVal
+                : storedAllowed ? stored
+                : derived;
             setSelectedDpi(final);
             if (willPostDerived) {
                 debouncedPostSetting({ scaling_dpi: derived });
@@ -539,19 +564,18 @@ export function Settings() {
         populateAudioDevices();
     }, []);
 
-    // Screen Settings Handlers
+    // Screen Settings Handlers. A half-typed size stays in component state: the
+    // stored manual_width/manual_height mean "a manual resolution is applied",
+    // which the HiDPI and UI-scaling derivations read, so only Set/preset/Reset
+    // may write them.
     const handleManualWidthChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-        const value = event.target.value;
-        setManualWidth(value);
+        setManualWidth(event.target.value);
         setPresetValue("");
-        localStorage.setItem(getPrefixedKey('manual_width'), value);
     };
 
     const handleManualHeightChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-        const value = event.target.value;
-        setManualHeight(value);
+        setManualHeight(event.target.value);
         setPresetValue("");
-        localStorage.setItem(getPrefixedKey('manual_height'), value);
     };
 
     const handleScaleLocallyToggle = () => {
@@ -638,10 +662,11 @@ export function Settings() {
         }
         // Rate control follows the encoder unless pinned (explicit client/server
         // choice). A derived change is not persisted, so it keeps following.
-        if (!isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readStored)) {
+        if (rateControlEnabled
+            && !isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readRateControlStored)) {
             const rcResolved = resolveSpec(
                 RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings,
-                { ...conditionalCtx, activeEncoder: selectedEncoder }, readStored);
+                { ...conditionalCtx, activeEncoder: selectedEncoder }, readRateControlStored);
             if (rcResolved !== rateControlMode) {
                 writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, rcResolved, setRateControlMode, { persist: false });
             }
@@ -737,9 +762,10 @@ export function Settings() {
 
     // Manual/preset resolutions pair with CSS scaling: HiDPI off when one is
     // set, on when reset — a derived write (not pinned), through the uniform
-    // path. A server lock always wins, so skip then.
+    // path. An explicit toggle or a locked/overridden server value pins HiDPI
+    // and stops the resolution buttons from re-deriving it.
     const deriveHidpiForResolution = (manual: boolean) => {
-        if (serverSettings?.use_css_scaling?.locked) return;
+        if (isSettingPinned(HIDPI_SPEC, serverSettings, readHidpiStored)) return;
         writeConditional(HIDPI_SPEC, !manual, setHidpiEnabled, { persist: false });
     };
 
@@ -842,17 +868,24 @@ export function Settings() {
     // the static fallback covers the no-server-settings window.
     const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v: string) => parseInt(v, 10))) || audioBitrateOptions;
     // UI scaling stops come from the server enum when connected; the static
-    // fallback covers the no-server-settings window. A single allowed value
-    // means the operator pinned the scaling, so the dropdown is inert.
+    // fallback covers the no-server-settings window.
     const dpiScalingChoices: { label: string; value: number }[] = (serverSettings?.scaling_dpi?.allowed?.map((v: string) => {
         const value = parseInt(v, 10);
         return { label: `${Math.round((value / 96) * 100)}%`, value };
     })) || dpiScalingOptions;
-    const dpiScalingDisabled = !serverSettings || serverSettings.scaling_dpi?.allowed?.length <= 1;
+    // A single allowed stop, or an operator-set DPI (the server drops client DPI
+    // syncs while scaling_dpi is overridden), leaves nothing the picker can change.
+    const dpiScalingDisabled = !serverSettings || serverSettings.scaling_dpi?.allowed?.length <= 1
+        || serverSettings.scaling_dpi?.overridden === true;
     const activeEncoder = isWebrtc ? encoderRTC : encoder;
     const isH264 = H264_ENCODERS.includes(activeEncoder);
     const showJpegOptions = !isWebrtc && activeEncoder === 'jpeg';
-    const showRateControl = (renderableSettings.enableRateControl ?? true) && isH264;
+    const showRateControl = rateControlEnabled && isH264;
+    // The quality slider must belong to the mode the encoder is actually using:
+    // with rate control disabled that is the server's mode, not the dashboard's.
+    const appliedRateControlMode = rateControlEnabled
+        ? rateControlMode
+        : (serverSettings?.rate_control_mode?.value ?? rateControlMode);
     const encoderRenderable = isWebrtc
         ? (renderableSettings.encoderRtc ?? true)
         : (renderableSettings.encoder ?? true);
@@ -1161,7 +1194,7 @@ export function Settings() {
                                 </div>
                                 )}
 
-                                {rateControlMode === 'cbr' && (renderableSettings.videoBitrate ?? true) && (
+                                {appliedRateControlMode === 'cbr' && (renderableSettings.videoBitrate ?? true) && (
                                 <div className="space-y-2">
                                     <label className="text-sm font-medium">{tl('sections.video.bitrateLabel', { bitrate: formatBitrate(videoBitRate) })}</label>
                                     <div className="flex items-center gap-2">
@@ -1181,7 +1214,7 @@ export function Settings() {
                                 </div>
                                 )}
 
-                                {rateControlMode === 'crf' && (renderableSettings.videoCRF ?? true) && (
+                                {appliedRateControlMode === 'crf' && (renderableSettings.videoCRF ?? true) && (
                                 <div className="space-y-2">
                                     <label className="text-sm font-medium">{tl('sections.video.crfLabel', { crf: videoCRF })}</label>
                                     <div className="flex items-center gap-2">

@@ -28,7 +28,7 @@ import argparse
 import shutil
 
 from aiohttp import web
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .rtc import RTCApp, ClientType
 from . import selkies as selkies_module
@@ -291,7 +291,7 @@ class WebRTCService(BaseStreamingService):
             self.media_pipeline.rc_mode = RateControlMode(self.args.rate_control_mode)
         else:
             # WS parity: with rate control disabled the engine runs CRF on both
-            # transports (the WebRTC constructor defaulted to CBR).
+            # transports.
             self.media_pipeline.rc_mode = RateControlMode.CRF
 
         # Fetch rtc configuration
@@ -415,6 +415,7 @@ class WebRTCService(BaseStreamingService):
                 # Dimensions arrive through the client's first resize message.
                 entry = self.display_clients.setdefault(display_id, {"width": 0, "height": 0})
                 entry["position"] = display_position
+                self._seed_display_settings(entry)
             await self.rtc_app.start_rtc_connection(session_peer_id, client_type, client_token, display_id)
             # Initialize stats location directory
             if self.args.enable_webrtc_statistics and self.metrics:
@@ -530,8 +531,10 @@ class WebRTCService(BaseStreamingService):
         self.input_handler.on_update_rate_control_mode = self.handle_rate_control_change
         self.input_handler.on_update_crf = self.handle_crf_change
         # Offers resolve their codec/SDP munging per display, so displays can run
-        # different encoders.
+        # different encoders and chroma formats (a live full-colour toggle has to
+        # reach the profile every later offer advertises).
         self.rtc_app.get_encoder_for_display = self._encoder_for_display
+        self.rtc_app.get_fullcolor_for_display = self._fullcolor_for_display
         # Per-peer tab-visibility pause (data-channel STOP_VIDEO/START_VIDEO)
         # and the consumer-set re-check on peer departure.
         self.rtc_app.on_video_consumer_active = self.handle_video_consumer_active
@@ -670,13 +673,26 @@ class WebRTCService(BaseStreamingService):
             logger.warning(f"remote resizing disabled, skipping resize to {res}")
             return
         if display_id != "primary" or self.display_clients:
-            dims = parse_resize_dims(res)
-            if dims is None:
-                logger.error(f"Invalid resize request: {res}")
-                return
-            w, h = dims
-            if self._display_setting(display_id, "force_aligned_resolution"):
-                w, h = align_dims_16(w, h)
+            locked_dims = self._server_locked_dims()
+            if locked_dims is not None:
+                # The layout path must honor the admin's manual-resolution lock the
+                # way the single-display path does: every display follows the
+                # server's geometry (websockets parity), so a second screen cannot
+                # be the way a client escapes the lock. A locked size is the
+                # server's own, so a client-side alignment toggle cannot alter it.
+                logger.warning(
+                    f"Client attempted to resize to {res} but server is in manual resolution mode. "
+                    f"Using the configured {locked_dims[0]}x{locked_dims[1]} instead."
+                )
+                w, h = locked_dims
+            else:
+                dims = parse_resize_dims(res)
+                if dims is None:
+                    logger.error(f"Invalid resize request: {res}")
+                    return
+                w, h = dims
+                if self._display_setting(display_id, "force_aligned_resolution"):
+                    w, h = align_dims_16(w, h)
             if display_id == "primary":
                 self._primary_dims = (w, h)
             else:
@@ -690,14 +706,35 @@ class WebRTCService(BaseStreamingService):
         self._primary_dims = None
         await self._resize_primary_display(res)
 
+    def _server_locked_dims(self) -> Optional[Tuple[int, int]]:
+        """The geometry an admin-configured manual-resolution lock pins the desktop
+        to, or None when the server sets no lock. Derived on every read from the
+        server settings (never from the client-writable args, whose manual trio is
+        the client's own manual/auto toggle) and from the dimensions startup
+        realized, so the lock cannot drift with client state."""
+        server_is_manual, _ = self.settings.is_manual_resolution_mode
+        if not server_is_manual:
+            return None
+        if self._manual_dims:
+            return self._manual_dims
+        # The settings layer guarantees positive manual dimensions while the lock
+        # is on; its own defaults stand in if one is somehow unusable, so a locked
+        # server never falls back to honoring the client's request.
+        width = int(getattr(self.settings, "manual_width", 0) or 0)
+        height = int(getattr(self.settings, "manual_height", 0) or 0)
+        if width <= 0:
+            width = 1024
+        if height <= 0:
+            height = 768
+        return (width - (width % 2), height - (height % 2))
+
     async def _resize_primary_display(self, res: str) -> None:
         """Handle change of resolution change"""
         # Only an admin-configured manual-resolution lock (server config) blocks client
         # resizes, mirroring the WebSocket handler. The client's own manual/auto toggle
         # lives in self.args and must NOT gate here: in client manual mode the chosen
         # resolution is delivered through this same resize path.
-        server_is_manual, _ = self.settings.is_manual_resolution_mode
-        if server_is_manual:
+        if self._server_locked_dims() is not None:
             logger.warning(
                 f"Client attempted to resize to {res} but server is in manual resolution mode. Request ignored."
             )
@@ -1629,6 +1666,21 @@ class WebRTCService(BaseStreamingService):
         "video_paintover_burst_frames": lambda p, v: p.set_video_paintover_burst_frames(int(v)),
     }
 
+    def _seed_display_settings(self, entry: Dict[str, Any]) -> None:
+        """Give a joining secondary display its own copy of every client-tunable
+        video setting, taken from the args at join time (websockets parity: a
+        display registers with a full seeded snapshot). Sharing the args instead
+        would make a later primary change move what the secondary reports as its
+        current value while its stream keeps running the old one, and the equality
+        guards on its own controls would then compare against a value that display
+        never ran."""
+        for key in list(self._VIDEO_SETTING_APPLIERS) + ["force_aligned_resolution"]:
+            if key in entry:
+                continue
+            value = getattr(self.args, key, None)
+            if value is not None:
+                entry[key] = value
+
     def _display_setting(self, display_id: str, key: str) -> Any:
         """A display's current value for a client-tunable setting: the primary
         reads the service args; a secondary reads its own stored overrides,
@@ -1668,6 +1720,9 @@ class WebRTCService(BaseStreamingService):
 
     def _encoder_for_display(self, display_id: str) -> str:
         return str(self._display_setting(display_id, "encoder_rtc") or self.args.encoder_rtc)
+
+    def _fullcolor_for_display(self, display_id: str) -> bool:
+        return bool(self._display_setting(display_id, "video_fullcolor"))
 
     async def handle_update_settings(self, settings_json: dict, display_id: str = "primary") -> None:
         # Every entry needs server-side backing: a live setter dispatched below, or state

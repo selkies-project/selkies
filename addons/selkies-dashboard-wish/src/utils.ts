@@ -20,14 +20,18 @@ export function getRoutePrefix(): string {
 
 // --- Storage Key Prefixing ---
 
-// Must mirror the streaming core's PER_DISPLAY_SETTINGS list so the
-// dashboard and core agree on which keys get the _display2 suffix.
+// Union of both streaming cores' PER_DISPLAY_SETTINGS lists so the dashboard
+// and whichever core is running agree on which keys get the _display2 suffix.
+// The websockets core owns 'encoder'/'jpeg_quality'/'paint_over_jpeg_quality'
+// and the WebRTC core owns 'encoder_rtc'; a key the running core ignores is
+// inert, while a missing one would make the secondary display write the
+// primary's key.
 const PER_DISPLAY_SETTINGS = [
   'framerate', 'video_crf', 'video_fullcolor',
   'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
   'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
   'is_manual_resolution_mode', 'manual_width', 'manual_height',
-  'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
+  'encoder', 'encoder_rtc', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
   'video_bitrate', 'force_aligned_resolution',
 ];
 

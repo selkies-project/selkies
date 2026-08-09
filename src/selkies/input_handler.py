@@ -458,8 +458,33 @@ class _X11ClipboardMonitor:
         # loop, sometimes while the server is disrupted — the exact moment an
         # unbounded connection setup would freeze the loop.
         self._d = display.Display(display_name, blocking_timeout=INPUT_X_REPLY_TIMEOUT_S)
-        if not self._d.has_extension('XFIXES'):
+        self._cmd_r = self._cmd_w = -1
+        try:
+            self._build()
+        except BaseException:
+            # Every statement below is a round trip on a connection with a bounded
+            # reply wait, so a disrupted server raises part-way through. The caller
+            # retries on a timer, and a connection stranded per attempt exhausts the
+            # server's client slots within minutes, after which every unrelated
+            # component fails to reach the display.
+            self._release_resources()
+            raise
+
+    def _release_resources(self):
+        for fd in (self._cmd_r, self._cmd_w):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        self._cmd_r = self._cmd_w = -1
+        try:
             self._d.close()
+        except Exception:
+            pass
+
+    def _build(self):
+        if not self._d.has_extension('XFIXES'):
             raise RuntimeError("XFixes not available")
         self._d.xfixes_query_version()
         screen = self._d.screen()
@@ -815,10 +840,7 @@ class _X11ClipboardMonitor:
             pass
         # Let the event thread leave its select() before the display closes under it.
         self._thread.join(timeout=2.0)
-        try:
-            self._d.close()
-        except Exception:
-            pass
+        self._release_resources()
 
 
 class _XTestKeyboard:
@@ -847,6 +869,7 @@ class _XTestKeyboard:
         # or German keymap): prefer ISO_Level3_Shift, fall back to Mode_switch.
         self._altgr_kc = (xdisplay.keysym_to_keycode(0xfe03)
                           or xdisplay.keysym_to_keycode(0xff7e))
+        self._effective_mod_keycodes = self._read_effective_modifiers()
         # keysym -> the modifier keycodes press() synthesized for it. release() undoes
         # only these, so a modifier the client is physically holding (injected via the
         # XTEST fast path) is never force-released here.
@@ -998,6 +1021,21 @@ class _XTestKeyboard:
         self._shift_r_kc = d.keysym_to_keycode(0xffe2)
         self._altgr_kc = (d.keysym_to_keycode(0xfe03)
                           or d.keysym_to_keycode(0xff7e))
+        self._effective_mod_keycodes = self._read_effective_modifiers()
+
+    def _read_effective_modifiers(self):
+        """Keycodes the server actually treats as modifiers.
+
+        Holding a key only selects a shifted level when that keycode is bound in
+        the modifier map. A keymap can carry the Shift keysym without binding it
+        (a bare Xvfb with no keymap is the common case), and injecting Shift there
+        types the level-0 glyph instead: every capital arrives lowercase.
+        """
+        try:
+            return {kc for row in self._d.get_modifier_mapping() for kc in row if kc}
+        except Exception as e:
+            logger_webrtc_input.debug(f"modifier map unreadable ({e}); assuming it binds what it names")
+            return None
 
     def invalidate_mapping(self):
         """A foreign keymap change (setxkbmap, desktop layout switcher) wiped
@@ -1033,7 +1071,22 @@ class _XTestKeyboard:
             mods.append(self._shift_kc)
         if level & 2 and self._altgr_kc:
             mods.append(self._altgr_kc)
+        if mods and not self._modifiers_engage(mods):
+            # The level this glyph sits at is unreachable on this keymap, so bind
+            # the keysym itself to a spare keycode at level 0 and type that. The
+            # glyph then carries its own case instead of depending on a modifier
+            # the server will not act on.
+            overlay_kc = self._overlay_keycode(keysym)
+            if overlay_kc:
+                return overlay_kc, ()
         return kc, tuple(mods)
+
+    def _modifiers_engage(self, mods):
+        """Whether holding these keycodes actually selects a shifted level."""
+        effective = getattr(self, "_effective_mod_keycodes", None)
+        if effective is None:
+            return True
+        return all(kc in effective for kc in mods)
 
     def _shift_down(self):
         # Logical Shift state: one round trip on the already-open display,
@@ -2674,6 +2727,12 @@ class WebRTCInput:
             self.mouse = _XTestMouse(self.xdisplay)
     def __mouse_disconnect(self):
         if self.mouse: del self.mouse; self.mouse = None
+        if self.uinput_mouse_socket is not None:
+            try:
+                self.uinput_mouse_socket.close()
+            except OSError:
+                pass
+            self.uinput_mouse_socket = None
     def __mouse_emit(self, *args, **kwargs):
         if self.uinput_mouse_socket_path:
             cmd = {"args": args, "kwargs": kwargs}
@@ -2871,8 +2930,17 @@ class WebRTCInput:
         await self.release_mouse_buttons()
         self.__mouse_disconnect()
         self._disarm_x_event_watcher()
-        if self.xdisplay: self.xdisplay = None
-        
+        # Closed, not just dropped: the keyboard shim holds the same Display and
+        # python-xlib's root-window back-reference makes the graph a cycle with no
+        # finalizer, so a dropped connection keeps its X client slot until a cyclic
+        # collection happens to run. Every transport switch builds a new handler.
+        old_display, self.xdisplay, self.keyboard = self.xdisplay, None, None
+        if old_display is not None:
+            try:
+                await asyncio.to_thread(old_display.close)
+            except Exception as e:
+                logger_webrtc_input.debug(f"closing the input X connection failed: {e}")
+
         if self.keyboard_worker_task:
             self.keyboard_worker_task.cancel()
             self.keyboard_worker_task = None

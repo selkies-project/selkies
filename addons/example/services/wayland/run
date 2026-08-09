@@ -43,4 +43,9 @@ export WLR_BACKENDS=wayland
 export WLR_WL_OUTPUTS="${SELKIES_WAYLAND_OUTPUTS:-2}"
 [ -n "${SELKIES_WAYLAND_RENDERER}" ] && export WLR_RENDERER="${SELKIES_WAYLAND_RENDERER}"
 
+# sway refuses to start when it sees the proprietary NVIDIA driver, which does not
+# apply here: WLR_BACKENDS=wayland makes it a client of the capture compositor, so
+# it never drives the GPU. The flag only suppresses that refusal, so it is passed
+# unconditionally rather than probed for.
+[ "${SELKIES_WAYLAND_COMPOSITOR}" = "sway" ] && exec sway --unsupported-gpu
 exec "${SELKIES_WAYLAND_COMPOSITOR}"

@@ -302,25 +302,31 @@ def x_read_clipboard(timeout=8.0):
     from selkies.Xlib import display as xdisp, X
     from selkies.Xlib.protocol import event as xevent
     d2 = xdisp.Display(TEST_DISPLAY)
-    s2 = d2.screen()
-    w2 = s2.root.create_window(0, 0, 1, 1, 0, s2.root_depth, window_class=X.InputOutput)
-    clip2 = d2.get_atom("CLIPBOARD")
-    utf82 = d2.get_atom("UTF8_STRING")
-    prop = d2.get_atom("SELKIES_PROBE")
-    w2.convert_selection(clip2, utf82, prop, X.CurrentTime)
-    d2.flush()
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if d2.pending_events():
-            e = d2.next_event()
-            if isinstance(e, xevent.SelectionNotify):
-                if e.property == X.NONE:
-                    return None
-                v = w2.get_full_property(e.property, X.AnyPropertyType)
-                return bytes(v.value).decode(errors="replace") if v else None
-        else:
-            time.sleep(0.02)
-    return None
+    # Closed on every path: an X server allows a bounded number of clients, and
+    # a helper called once per clipboard assertion exhausts it part-way through a
+    # full run, which surfaces as unrelated suites failing to reach the display.
+    try:
+        s2 = d2.screen()
+        w2 = s2.root.create_window(0, 0, 1, 1, 0, s2.root_depth, window_class=X.InputOutput)
+        clip2 = d2.get_atom("CLIPBOARD")
+        utf82 = d2.get_atom("UTF8_STRING")
+        prop = d2.get_atom("SELKIES_PROBE")
+        w2.convert_selection(clip2, utf82, prop, X.CurrentTime)
+        d2.flush()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if d2.pending_events():
+                e = d2.next_event()
+                if isinstance(e, xevent.SelectionNotify):
+                    if e.property == X.NONE:
+                        return None
+                    v = w2.get_full_property(e.property, X.AnyPropertyType)
+                    return bytes(v.value).decode(errors="replace") if v else None
+            else:
+                time.sleep(0.02)
+        return None
+    finally:
+        d2.close()
 
 
 def x_key_watcher():

@@ -1153,7 +1153,14 @@ class AppSettings:
                             else:
                                 # Entirely-invalid override (e.g. a stale env
                                 # baked into a container image): no restriction —
-                                # full allowed list, built-in default.
+                                # full allowed list, built-in default. The value
+                                # is the built-in one, so the setting must read
+                                # as not-provided too: an operator intent the
+                                # server just discarded cannot go on suppressing
+                                # client changes or the client's own conditional
+                                # default.
+                                is_override = False
+                                overrides[name] = False
                                 if user_items:
                                     logging.warning(
                                         f"Invalid value(s) '{raw_value_str}' for {name}; "
@@ -1308,7 +1315,33 @@ class AppSettings:
 
     def _post_process_settings(self):
         """Additional processing of config data after initial parsing."""
-        if not self._overridden.get("rate_control_mode"):
+        if not self.enable_rate_control[0]:
+            # Rate control locked off means the engine runs constant quality on
+            # both transports, so the resolved mode and the menu published to
+            # clients are CRF alone: an encoder-derived "cbr" would leave the
+            # dashboards showing a bitrate slider the encoder ignores and hiding
+            # the CRF slider that is actually in force.
+            if (
+                self._overridden.get("rate_control_mode")
+                and self.rate_control_mode != "crf"
+            ):
+                logging.warning(
+                    "Ignoring rate_control_mode=%s: enable_rate_control is false, "
+                    "so the encoder runs CRF.",
+                    self.rate_control_mode,
+                )
+            self.rate_control_mode = "crf"
+            rc_definition = next(
+                (
+                    setting
+                    for setting in self._setting_definitions
+                    if setting["name"] == "rate_control_mode"
+                ),
+                None,
+            )
+            if rc_definition is not None:
+                rc_definition["meta"]["allowed"] = ["crf"]
+        elif not self._overridden.get("rate_control_mode"):
             active_encoder = (
                 self.encoder if self.mode == "websockets" else self.encoder_rtc
             )
@@ -1344,6 +1377,11 @@ settings = AppSettings(SETTING_DEFINITIONS)
 # Settings never broadcast to clients: server-local paths and lifecycle hooks.
 # Server-local listener, filesystem and hook settings: a browser has no use for
 # them and they disclose host layout.
+# Non-bool settings the server stops accepting client updates for once an
+# operator sets them explicitly. They are published as locked so a dashboard
+# renders them read-only instead of offering a control the server ignores.
+OPERATOR_LOCKED_WHEN_OVERRIDDEN = ("scaling_dpi",)
+
 CLIENT_PAYLOAD_EXCLUDED = [
     'port', 'addr', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',
     'audio_device_name', 'watermark_path', 'recording_socket',
@@ -1403,6 +1441,8 @@ def build_client_settings_payload():
         # default (e.g. HiDPI-off when a manual resolution is set) should
         # apply or defer to the operator's explicit setting.
         payload_entry['overridden'] = bool(settings._overridden.get(name, False))
+        if name in OPERATOR_LOCKED_WHEN_OVERRIDDEN and payload_entry['overridden']:
+            payload_entry['locked'] = True
         if setting_def['type'] == 'range':
             payload_entry['min'], payload_entry['max'] = value
             if 'meta' in setting_def and 'default_value' in setting_def['meta']:

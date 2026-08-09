@@ -30,8 +30,7 @@ env:
   NODE_VERSION: "26"
   # Linters are pinned to a minor line so a new rule in a released version
   # cannot turn a green branch red without a deliberate bump here
-  RUFF_VERSION: "0.16.*"
-  CODESPELL_VERSION: "2.4.*"
+  PRE_COMMIT_VERSION: "4.4.*"
   ACTIONLINT_VERSION: "1.7.12"
 
 jobs:
@@ -45,16 +44,15 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - name: Ruff
-        # Rule selection lives in pyproject.toml
+      - name: Run the Python pre-commit hooks
+        # The same config contributors install locally, so a green commit hook
+        # and a green CI lint cannot diverge. Tool revisions live in
+        # .pre-commit-config.yaml. The web hook runs in its own job, which is
+        # what keeps the slow npm install off this one.
         run: |
-          python3 -m pip install "ruff==${RUFF_VERSION}"
-          ruff check
-      - name: Codespell
-        # Skip list and dictionary exceptions live in .codespellrc
-        run: |
-          python3 -m pip install "codespell==${CODESPELL_VERSION}"
-          codespell
+          python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
+          pre-commit run --all-files --show-diff-on-failure ruff-check
+          pre-commit run --all-files --show-diff-on-failure codespell
       - name: Lint the workflow files
         # actionlint validates the expression syntax and runs shellcheck over
         # every `run:` block; shellcheck is preinstalled on the runner image
@@ -80,8 +78,10 @@ jobs:
             addons/selkies-dashboard/package.json
             addons/selkies-dashboard-wish/package.json
       - name: ESLint and TypeScript
-        # Same script the pre-commit hook runs
-        run: ./scripts/ci/lint-web.sh
+        # Through pre-commit so the hook definition is the single source of truth
+        run: |
+          python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
+          pre-commit run --all-files --show-diff-on-failure web-lint
 
   python-compat:
     name: Python ${{ matrix.python-version }}
@@ -104,14 +104,12 @@ jobs:
     name: Test suites
     # The wheels are a dependency, not just an ordering constraint: the suites
     # run against the same main-HEAD capture stack the artifacts ship
-    needs: [lint, web-lint, python-compat, pixelflux-pcmflux]
+    needs: [python-compat, pixelflux-pcmflux]
     # Stated rather than left to the default: the wheels are built on pushes
     # only, and a skip carries down the whole chain from wherever it starts. On
     # a pull request the suites resolve the capture stack from PyPI instead.
     if: >-
       ${{ !cancelled()
-          && needs.lint.result == 'success'
-          && needs['web-lint'].result == 'success'
           && needs.python-compat.result == 'success'
           && contains(fromJSON('["success", "skipped"]'), needs['pixelflux-pcmflux'].result) }}
     # The browser tier runs nightly from tests.yaml; this keeps the push and
@@ -125,7 +123,7 @@ jobs:
 
   wheel:
     name: Build wheel
-    needs: [lint, web-lint, python-compat]
+    needs: [python-compat]
     permissions:
       contents: read
     uses: ./.github/workflows/build-wheel.yaml

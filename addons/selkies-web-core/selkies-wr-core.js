@@ -34,6 +34,7 @@ import { createFileUploader } from "./lib/file-upload.js";
 // no separate hashed file to place next to whichever chunk references it.
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
+import { storageKeyForServerKey } from './lib/conditional-settings.js';
 
 // Best-effort local keyboard layout, resolved once at script init so the value
 // is ready by the time signaling + ICE bring the data channel up (getLayoutMap
@@ -607,7 +608,12 @@ export default function webrtc() {
 		for (const key in serverSettings) {
 			if (!serverSettings.hasOwnProperty(key)) continue;
 			const setting = serverSettings[key];
-			const finalKey = storageKeyFor(key);
+			// The user's pick may live under a different name than the server's key
+			// (HiDPI stores as useCssScaling), and the override check must read the
+			// key the dashboard actually writes, or an unlocked operator value wins
+			// forever.
+			const storeKey = storageKeyForServerKey(key);
+			const finalKey = storageKeyFor(storeKey);
 			const wasUnset = window.localStorage.getItem(finalKey) === null;
 
 			if (setting.min !== undefined && setting.max !== undefined) {
@@ -615,7 +621,7 @@ export default function webrtc() {
 				// parsed as ints — that reads "0.5" as 0, flags it out of range,
 				// and wipes the pick back to the server default on every connect.
 				// In-range stored values are kept verbatim (no write-back).
-				const clientValue = getFloatParam(key, setting.default);
+				const clientValue = getFloatParam(storeKey, setting.default);
 				if (wasUnset) {
 					window[key] = clientValue;
 				} else if (clientValue < setting.min || clientValue > setting.max) {
@@ -630,8 +636,8 @@ export default function webrtc() {
 			else if (setting.allowed !== undefined) {
 				const isNumericEnum = !isNaN(parseFloat(setting.allowed[0]));
 				const clientValueStr = isNumericEnum
-					? getIntParam(key, parseInt(setting.value, 10)).toString()
-					: getStringParam(key, setting.value);
+					? getIntParam(storeKey, parseInt(setting.value, 10)).toString()
+					: getStringParam(storeKey, setting.value);
 				const applyRuntime = (val) => { window[key] = isNumericEnum ? parseInt(val, 10) : val; };
 				if (wasUnset) {
 					applyRuntime(setting.value);
@@ -642,14 +648,14 @@ export default function webrtc() {
 					changes[key] = setting.value;
 				} else {
 					applyRuntime(clientValueStr);
-					if (isNumericEnum) setIntParam(key, parseInt(clientValueStr, 10));
-					else setStringParam(key, clientValueStr);
+					if (isNumericEnum) setIntParam(storeKey, parseInt(clientValueStr, 10));
+					else setStringParam(storeKey, clientValueStr);
 				}
 			}
 			else if (typeof setting.value === 'boolean') {
 				const serverValue = setting.value;
 				if (setting.locked) {
-					const clientValue = getBoolParam(key, !serverValue);
+					const clientValue = getBoolParam(storeKey, !serverValue);
 					if (clientValue !== serverValue) {
 						console.log(`Sanitizing '${key}': setting is locked by server. Client value ${clientValue} is being overwritten with ${serverValue}.`);
 						changes[key] = serverValue;
@@ -666,9 +672,9 @@ export default function webrtc() {
 						changes[key] = serverValue;
 					}
 				} else {
-					const clientValue = getBoolParam(key, serverValue);
+					const clientValue = getBoolParam(storeKey, serverValue);
 					window[key] = clientValue;
-					setBoolParam(key, clientValue);
+					setBoolParam(storeKey, clientValue);
 				}
 			}
 		}
@@ -1080,8 +1086,12 @@ export default function webrtc() {
 				if (typeof message.value === 'boolean') {
 					const changed = useCssScaling !== message.value;
 					useCssScaling = message.value;
-					setBoolParam('useCssScaling', useCssScaling);
-					console.log(`Set useCssScaling to ${useCssScaling} and persisted.`);
+					// persist === false marks a server-authored value: apply it, but
+					// leave the user's own key alone so their pick survives the lock.
+					if (message.persist !== false) {
+						setBoolParam('useCssScaling', useCssScaling);
+					}
+					console.log(`Set useCssScaling to ${useCssScaling}${message.persist === false ? '.' : ' and persisted.'}`);
 					if (input && typeof input.updateCssScaling === 'function') {
 						input.updateCssScaling(useCssScaling);
 					}
@@ -1297,11 +1307,20 @@ export default function webrtc() {
 		}
 	}
 
-	function handleSettingsMessage(settings) {
+	function handleSettingsMessage(settings, fromServer) {
+		// A server-authored payload (the locked/overridden values replayed on every
+		// connect) is applied to the runtime but never written to the user's own
+		// keys, where it would outlive the lock and masquerade as their pick. Only a
+		// dashboard-authored payload persists.
+		const storeInt = fromServer ? () => {} : setIntParam;
+		const storeBool = fromServer ? () => {} : setBoolParam;
+		const storeString = fromServer ? () => {} : setStringParam;
 		// Debug toggle parity with the websockets core: persist and reload so the
 		// verbose log buffers/flips apply at every layer (server push included).
 		if (settings.debug !== undefined) {
 			debug = settings.debug;
+			// Persisted even for a server-authored value: the reload below only
+			// settles once the flag is already in storage.
 			setBoolParam('debug', debug);
 			console.log(`Applied debug setting: ${debug}. Reloading...`);
 			setTimeout(() => { window.location.reload(); }, 700);
@@ -1330,23 +1349,23 @@ export default function webrtc() {
 		if (settings.video_bitrate !== undefined) {
 			videoBitRate = parseInt(settings.video_bitrate, 10);
 			webrtc.sendDataChannelMessage(`vb,${videoBitRate}`);
-			setIntParam('video_bitrate', videoBitRate);
+			storeInt('video_bitrate', videoBitRate);
 		}
 		if (settings.framerate !== undefined) {
 			videoFramerate = parseInt(settings.framerate);
 			webrtc.sendDataChannelMessage(`_arg_fps,${videoFramerate}`);
-			setIntParam('framerate', videoFramerate);
+			storeInt('framerate', videoFramerate);
 		}
 		if (settings.audio_bitrate !== undefined) {
 			audioBitRate = parseInt(settings.audio_bitrate);
 			webrtc.sendDataChannelMessage(`ab,${audioBitRate}`);
-			setIntParam('audio_bitrate', audioBitRate);
+			storeInt('audio_bitrate', audioBitRate);
 		}
 		if (settings.encoder_rtc !== undefined) {
 			// The server restarts the pipeline with the new encoder (forwarded via the
 			// SETTINGS passthrough above); track it locally for the decode path.
 			encoder = settings.encoder_rtc;
-			setStringParam('encoder_rtc', encoder);
+			storeString('encoder_rtc', encoder);
 			console.log("Encoder switched to:", encoder);
 		}
 		if (settings.scaling_dpi !== undefined) {
@@ -1364,16 +1383,16 @@ export default function webrtc() {
 		if (settings.enable_binary_clipboard !== undefined) {
 			enable_binary_clipboard = !!settings.enable_binary_clipboard;
 			webrtc.sendDataChannelMessage(`_ebc,${enable_binary_clipboard}`);
-			setBoolParam('enable_binary_clipboard', enable_binary_clipboard);
+			storeBool('enable_binary_clipboard', enable_binary_clipboard);
 			console.log(`Binary clipboard support ${enable_binary_clipboard ? 'enabled' : 'disabled'}`);
 		}
 		if (settings.clipboard_in_enabled !== undefined) {
 			clipboard_in_enabled = !!settings.clipboard_in_enabled;
-			setBoolParam('clipboard_in_enabled', clipboard_in_enabled);
+			storeBool('clipboard_in_enabled', clipboard_in_enabled);
 		}
 		if (settings.clipboard_out_enabled !== undefined) {
 			clipboard_out_enabled = !!settings.clipboard_out_enabled;
-			setBoolParam('clipboard_out_enabled', clipboard_out_enabled);
+			storeBool('clipboard_out_enabled', clipboard_out_enabled);
 		}
 		if (settings.use_css_scaling !== undefined) {
 			// Route a server-locked/overridden HiDPI value through the same flow
@@ -1381,7 +1400,7 @@ export default function webrtc() {
 			// setting reaches every layer that reacts to the toggle.
 			handleMessage({
 				origin: window.location.origin,
-				data: { type: 'setUseCssScaling', value: !!settings.use_css_scaling },
+				data: { type: 'setUseCssScaling', value: !!settings.use_css_scaling, persist: !fromServer },
 			});
 		}
 		if (settings.use_browser_cursors !== undefined) {
@@ -1396,18 +1415,18 @@ export default function webrtc() {
 			rateControlMode = settings.rate_control_mode;
 			webrtc.sendDataChannelMessage(`_rc,${rateControlMode}`);
 			sendRespectiveRCvalue(rateControlMode);
-			setStringParam('rate_control_mode', rateControlMode);
+			storeString('rate_control_mode', rateControlMode);
 			console.log(`Rate control mode set to ${rateControlMode}`);
 		}
 		if (settings.video_crf !== undefined) {
 			crf = parseInt(settings.video_crf, 10);
 			webrtc.sendDataChannelMessage(`_crf,${crf}`);
-			setIntParam('video_crf', crf);
+			storeInt('video_crf', crf);
 			console.log(`H264 CRF set to ${crf}`);
 		}
 		if (settings.force_aligned_resolution !== undefined) {
 			force_aligned_resolution = !!settings.force_aligned_resolution;
-			setBoolParam('force_aligned_resolution', force_aligned_resolution);
+			storeBool('force_aligned_resolution', force_aligned_resolution);
 			// Re-assert the current resolution so the stream snaps to the new
 			// alignment without waiting for the next window resize.
 			if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
@@ -2306,7 +2325,7 @@ export default function webrtc() {
 				window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
 				if (Object.keys(changes).length > 0) {
 					console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
-					handleSettingsMessage(changes);
+					handleSettingsMessage(changes, true);
 				}
 				if (obj.settings.is_manual_resolution_mode && obj.settings.is_manual_resolution_mode.value === true) {
 					console.log("Server settings payload confirms manual mode. Switching to manual resize handlers.");

@@ -19,13 +19,18 @@ import { getRoutePrefix } from "../utils.js";
 const urlHash = window.location.hash;
 const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
 
+// Union of both streaming cores' PER_DISPLAY_SETTINGS lists so the dashboard and
+// whichever core is running agree on which keys get the _display2 suffix. The
+// websockets core owns 'encoder'/'jpeg_quality'/'paint_over_jpeg_quality' and the
+// WebRTC core owns 'encoder_rtc'; a key the running core ignores is inert, while a
+// missing one would make the secondary display write the primary's key.
 const PER_DISPLAY_SETTINGS = [
     'framerate', 'video_crf', 'video_fullcolor',
     'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
     'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
     'is_manual_resolution_mode', 'manual_width', 'manual_height', 'encoder',
-    'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode', 'video_bitrate',
-    'force_aligned_resolution'
+    'encoder_rtc', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
+    'video_bitrate', 'force_aligned_resolution'
 ];
 
 const encoderOptions = [
@@ -99,7 +104,7 @@ const DEFAULT_SCALING_DPI = 96;
 const deriveDpiFromDpr = () => {
   const dpr = window.devicePixelRatio || 1;
   const target = Math.round(dpr * 4) * 24;
-  return (dpr > 1 && [120, 144, 168, 192, 216, 240, 288].includes(target)) ? target : DEFAULT_SCALING_DPI;
+  return (dpr > 1 && [120, 144, 168, 192, 216, 240, 264, 288].includes(target)) ? target : DEFAULT_SCALING_DPI;
 };
 
 const STATS_READ_INTERVAL_MS = 500;
@@ -699,12 +704,26 @@ const getPrefixedKey = (key) => {
 
 const readStored = (key) => localStorage.getItem(getPrefixedKey(key));
 
+// The cores persist every value they are told to apply, so the stored key alone
+// cannot tell a user's explicit pick from one the dashboard derived (HiDPI from
+// the resolution mode, rate control from the encoder). An explicit choice writes
+// a marker beside the value; the settings that are also derived read storage
+// through this reader, so a derived write never pins them.
+const EXPLICIT_CHOICE_SUFFIX = "_explicit_choice";
+// Suffixed onto the already-prefixed value key so the marker inherits the
+// per-display suffix and a secondary display keeps its own choice.
+const explicitChoiceKey = (spec) => `${getPrefixedKey(spec.storageKey)}${EXPLICIT_CHOICE_SUFFIX}`;
+const isExplicitChoice = (spec) => localStorage.getItem(explicitChoiceKey(spec)) === "true";
+const readExplicitStored = (spec) => (key) => (isExplicitChoice(spec) ? readStored(key) : null);
+const readHidpiStored = readExplicitStored(HIDPI_SPEC);
+const readRateControlStored = readExplicitStored(RATE_CONTROL_CBR_DEFAULT_SPEC);
+
 // Drives a conditional setting: lazy init + re-resolve whenever the server
 // settings or any dependency in `deps` changes (server-sync AND encoder/manual-
 // resolution re-derivation, uniformly). The resolver honors explicit choices,
 // so a re-resolve never clobbers a pinned value. Returns [value, setValue].
-function useConditionalSetting(spec, serverSettings, ctx, deps) {
-  const compute = () => resolveSpec(spec, serverSettings, ctx, readStored);
+function useConditionalSetting(spec, serverSettings, ctx, deps, read = readStored) {
+  const compute = () => resolveSpec(spec, serverSettings, ctx, read);
   const [value, setValue] = useState(compute);
   // Re-resolving writes state rather than deriving during render because the
   // caller edits this value afterwards; deriving would discard their choice.
@@ -871,13 +890,20 @@ function Sidebar() {
     newRenderable.microphoneToggle = isRenderable('microphone_enabled');
     newRenderable.gamepadToggle = isRenderable('gamepad_enabled');
 
-    newRenderable.enableRateControl = s.enable_rate_control?.value ?? false;
+    // Rate control is on by default server-side, so a payload without the key
+    // (older server build) must still offer the dropdown.
+    newRenderable.enableRateControl = s.enable_rate_control?.value ?? true;
     const ftSetting = s.file_transfers;
     newRenderable.fileUpload = ftSetting ? ftSetting.value.includes('upload') : true;
     newRenderable.fileDownload = ftSetting ? ftSetting.value.includes('download') : true;
 
     return newRenderable;
   }, [serverSettings]);
+
+  // With rate control disabled the server ignores rate_control_mode entirely and
+  // keeps the encoder on its built-in default, so the dashboard neither pushes a
+  // mode nor lets its own pick decide which quality slider is shown.
+  const rateControlEnabled = renderableSettings.enableRateControl ?? true;
 
   const launchWindow = (direction, screen = null) => {
     const url = `${window.location.href.split('#')[0]}#display2-${direction}`;
@@ -1079,9 +1105,9 @@ function Sidebar() {
   // like the encoder/resolution) flow through writeConditional below, which
   // sets state, persists, and propagates uniformly.
   const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
-    HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
   const [rateControlMode, setRateControlMode] = useConditionalSetting(
-    RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
   const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
     USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [videoFullColor, setVideoFullColor] = useConditionalSetting(
@@ -1223,6 +1249,7 @@ function Sidebar() {
     if (opts.persist) {
       localStorage.setItem(getPrefixedKey(spec.storageKey),
         spec.serialize ? spec.serialize(uiValue) : String(uiValue));
+      localStorage.setItem(explicitChoiceKey(spec), "true");
     }
     spec.propagate(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
   };
@@ -1376,9 +1403,19 @@ function Sidebar() {
   // server's value and post nothing.
   useEffect(() => {
     if (!serverSettings) return;
-    if (isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readStored)) return;
+    if (serverSettings.enable_rate_control?.value === false) return;
+    const rcKey = RATE_CONTROL_CBR_DEFAULT_SPEC.storageKey;
     const resolved = resolveSpec(
-      RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, readStored);
+      RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, readRateControlStored);
+    // The core persists every mode it is told to apply and resends it on the next
+    // connect. Without an explicit pick that stored echo is not a choice: drop it
+    // once it stops matching what the ladder resolves, or it would outlive the
+    // derivation — and an operator override with it.
+    if (!isExplicitChoice(RATE_CONTROL_CBR_DEFAULT_SPEC)
+      && readStored(rcKey) !== null && readStored(rcKey) !== resolved) {
+      localStorage.removeItem(getPrefixedKey(rcKey));
+    }
+    if (isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readRateControlStored)) return;
     const serverValue = serverSettings[RATE_CONTROL_CBR_DEFAULT_SPEC.serverKey]?.value;
     if (resolved && serverValue !== undefined && resolved !== serverValue) {
       writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, resolved, setRateControlMode, { persist: false });
@@ -1693,10 +1730,11 @@ function Sidebar() {
     }
     // Rate control follows the encoder unless pinned (explicit client/server
     // choice). A derived change is not persisted, so it keeps following.
-    if (!isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readStored)) {
+    if (rateControlEnabled
+      && !isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readRateControlStored)) {
       const rcResolved = resolveSpec(
         RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings,
-        { ...conditionalCtx, activeEncoder: selectedEncoder }, readStored);
+        { ...conditionalCtx, activeEncoder: selectedEncoder }, readRateControlStored);
       if (rcResolved !== rateControlMode) {
         writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, rcResolved, setRateControlMode, { persist: false });
       }
@@ -1805,15 +1843,16 @@ function Sidebar() {
         );
     }
   };
+  // A half-typed size stays in component state: the stored manual_width/
+  // manual_height mean "a manual resolution is applied", which the HiDPI and
+  // UI-scaling derivations read, so only Set/preset/Reset may write them.
   const handleManualWidthChange = (event) => {
     setManualWidth(event.target.value);
     setPresetValue("");
-    localStorage.setItem(getPrefixedKey("manual_width"), event.target.value);
   };
   const handleManualHeightChange = (event) => {
     setManualHeight(event.target.value);
     setPresetValue("");
-    localStorage.setItem(getPrefixedKey("manual_height"), event.target.value);
   };
   const handleScaleLocallyToggle = () => {
     const newState = !scaleLocally;
@@ -1829,10 +1868,11 @@ function Sidebar() {
     writeConditional(HIDPI_SPEC, !hidpiEnabled, setHidpiEnabled, { persist: true });
   };
   // Manual/preset resolutions pair with CSS scaling: HiDPI off when one is set,
-  // on when reset — a derived write (not pinned), through the uniform path. A
-  // server lock always wins, so skip then.
+  // on when reset — a derived write (not pinned), through the uniform path. An
+  // explicit toggle or a locked/overridden server value pins HiDPI and stops the
+  // resolution buttons from re-deriving it.
   const deriveHidpiForResolution = (manual) => {
-    if (serverSettings?.use_css_scaling?.locked) return;
+    if (isSettingPinned(HIDPI_SPEC, serverSettings, readHidpiStored)) return;
     writeConditional(HIDPI_SPEC, !manual, setHidpiEnabled, { persist: false });
   };
   // Reset-to-window also returns UI scaling to its derived (devicePixelRatio-
@@ -2516,6 +2556,11 @@ function Sidebar() {
   const showH264Options = H264_ENCODERS.includes(activeEncoder);
   const showJpegOptions = encoder === 'jpeg';
   const showPaintOverQualityToggle = showH264Options || showJpegOptions;
+  // The quality slider must belong to the mode the encoder is actually using:
+  // with rate control disabled that is the server's mode, not the dashboard's.
+  const appliedRateControlMode = rateControlEnabled
+    ? rateControlMode
+    : (serverSettings?.rate_control_mode?.value ?? rateControlMode);
 
   // CBR stops: sub-Mbps kbps steps for constrained links, whole-Mbps steps to
   // 100000, then the coarse steps to 1000000.
@@ -2870,7 +2915,7 @@ function Sidebar() {
                     </select>
                   </div>
                 )}
-                {(renderableSettings.enableRateControl ?? true) && showH264Options && (
+                {rateControlEnabled && showH264Options && (
                   <div className="dev-setting-item">
                     <label htmlFor="rateControlSelect">
                       {t("sections.video.rateControlLabel")}
@@ -2908,7 +2953,7 @@ function Sidebar() {
                     />
                   </div>
                 )}
-                {showH264Options && rateControlMode === RATE_CONTROL_CBR && (renderableSettings.video_bitrate ?? true) && (
+                {showH264Options && appliedRateControlMode === RATE_CONTROL_CBR && (renderableSettings.video_bitrate ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="videoBitrateSlider">
                       {t("sections.video.bitrateLabel", {
@@ -2950,7 +2995,7 @@ function Sidebar() {
                     )}
                   </>
                 )}
-                {showCRF && rateControlMode === RATE_CONTROL_CRF && (renderableSettings.video_crf ?? true) && (
+                {showCRF && appliedRateControlMode === RATE_CONTROL_CRF && (renderableSettings.video_crf ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="videoCRFSlider">
                       {t("sections.video.crfLabel", { crf: video_crf })}
@@ -3219,7 +3264,8 @@ function Sidebar() {
                           id="uiScalingSelect"
                           value={selectedDpi}
                           onChange={handleDpiScalingChange}
-                          disabled={!serverSettings || serverSettings.scaling_dpi?.allowed?.length <= 1}
+                          disabled={!serverSettings || serverSettings.scaling_dpi?.allowed?.length <= 1
+                            || serverSettings.scaling_dpi?.overridden === true}
                         >
                           {(serverSettings?.scaling_dpi?.allowed || []).map((dpiValue) => {
                             const percent = Math.round((parseInt(dpiValue, 10) / 96) * 100);
