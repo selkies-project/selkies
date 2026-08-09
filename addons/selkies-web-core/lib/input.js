@@ -2073,22 +2073,15 @@ export class Input {
         // Iterated per codepoint so an astral character (emoji, rare CJK) is sent
         // as one keysym instead of two lone surrogates the server cannot type.
         for (const char of text) {
-            const isUpperCase = char >= 'A' && char <= 'Z';
-            if (isUpperCase) {
-                this.send("kd," + KeyTable.XK_Shift_L);
-                const lowerChar = char.toLowerCase();
-                const letterKeysym = Keysyms.lookup(lowerChar.codePointAt(0));
-                if (letterKeysym) {
-                    this.send("kd," + letterKeysym);
-                    this.send("ku," + letterKeysym);
-                }
-                this.send("ku," + KeyTable.XK_Shift_L);
-            } else {
-                const keysym = Keysyms.lookup(char.codePointAt(0));
-                if (keysym) {
-                    this.send("kd," + keysym);
-                    this.send("ku," + keysym);
-                }
+            // Send the character's own keysym and let the server resolve the shift
+            // level, the same way the physical-keyboard path does. The previous
+            // uppercase branch injected Shift_L + the lowercase keysym instead, which
+            // dropped the case on deployments whose X keymap does not bind Shift as a
+            // real modifier, so pasted or typed capitals arrived lowercase (#295).
+            const keysym = Keysyms.lookup(char.codePointAt(0));
+            if (keysym) {
+                this.send("kd," + keysym);
+                this.send("ku," + keysym);
             }
         }
         event.target.value = '';
