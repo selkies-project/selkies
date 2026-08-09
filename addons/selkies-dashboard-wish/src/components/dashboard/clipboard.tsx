@@ -134,7 +134,8 @@ export function Clipboard() {
 				className="allow-native-input resize-none bg-background/95 overflow-y-auto max-h-[150px]"
 			/>
 
-			{/* Image Upload Section */}
+			{/* Image writes need the binary clipboard: the server drops them otherwise. */}
+			{(renderableSettings.binaryClipboard ?? true) && enableBinaryClipboard && (
 			<div className="flex flex-col gap-2">
 				<div className="flex gap-2">
 					<Button
@@ -175,6 +176,7 @@ export function Clipboard() {
 					</div>
 				)}
 			</div>
+			)}
 		</div>
 	);
 }

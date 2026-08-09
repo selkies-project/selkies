@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 
 from .rtc import RTCApp, ClientType
 from . import selkies as selkies_module
-from .selkies import current_session_tokens
+from .selkies import current_session_tokens, SCALING_DPI_MIN, SCALING_DPI_MAX
 from .media_pipeline import (MediaPipelinePixel, RateControlMode,
                              ScreenCapture as PixelfluxScreenCapture)
 from .webrtc.codecs import configure_multiopus
@@ -372,6 +372,7 @@ class WebRTCService(BaseStreamingService):
             enable_basic_auth=using_basic_auth,
             basic_auth_user=username,
             basic_auth_password=password,
+            server_token=getattr(self.settings, "master_token", None),
         )
         return client
 
@@ -490,7 +491,7 @@ class WebRTCService(BaseStreamingService):
         self.rtc_app.on_data_close = lambda: logger.info("Data channel closed")
         self.rtc_app.on_data_error = lambda e: logger.error(f"Data channel error: {e}")
         self.rtc_app.on_data_message = self.input_handler.on_message
-        self.rtc_app.on_peer_gone = self.input_handler.release_gamepads_for_conn
+        self.rtc_app.on_peer_gone = self.handle_peer_gone
         self.input_handler.on_request_keyframe = self.request_idr_for_display
 
         # Input handler callbacks
@@ -979,6 +980,24 @@ class WebRTCService(BaseStreamingService):
         except Exception:
             return False
 
+    async def _realized_wayland_dims(self, did: str):
+        """(width, height) the compositor currently has for this display's
+        output, or None when it cannot be read."""
+        if not IS_WAYLAND:
+            return None
+        pipeline = (self.media_pipeline if did == "primary"
+                    else self.display_pipelines.get(did))
+        module = getattr(pipeline, "capture_module", None)
+        if module is None or not hasattr(module, "get_realized_geometry"):
+            return None
+        try:
+            w, h, _scale = await asyncio.to_thread(
+                module.get_realized_geometry, wayland_output_id(did))
+        except Exception as e:
+            logger.warning(f"Wayland realized-geometry read failed for '{did}': {e}")
+            return None
+        return (w, h) if w > 0 and h > 0 else None
+
     async def _push_wayland_realized_geometry(self, did: str, pipeline) -> None:
         """Read what the pixelflux compositor actually realized on this
         display's output after a capture (re)start (it may even-mask dimensions
@@ -1053,6 +1072,36 @@ class WebRTCService(BaseStreamingService):
             if (p.get("display_id") or "primary") == display_id
         ]
 
+    async def handle_peer_gone(self, peer_id, peer=None) -> None:
+        """Release the input a departing peer may still be holding, matching the
+        websockets disconnect cleanup. Gamepad slots are per-connection, so they
+        are always released. Held keys and pointer buttons are one global desktop
+        state instead: they are force-released only when the departing peer could
+        drive input and no input-capable peer is left, so a viewer (or a second
+        display's peer) leaving never drops the controller's held keys or its
+        in-flight drag. A controller that vanishes while others remain is covered
+        by the input handler's heartbeat stale-sweep."""
+        if self.input_handler is None:
+            return
+        try:
+            await self.input_handler.release_gamepads_for_conn(peer_id)
+        except Exception as e:
+            logger.warning(f"Gamepad release for departed peer {peer_id} failed: {e}")
+        if self.rtc_app is None or not self.rtc_app.peer_holds_input_authority(peer):
+            return
+        if (peer.get("display_id") or "primary") != "primary":
+            # The departing peer is already out of peer_connections at every call
+            # site, so this walks the survivors only.
+            for survivor in list(self.rtc_app.peer_connections.values()):
+                if self.rtc_app.peer_holds_input_authority(survivor):
+                    return
+        for release in (self.input_handler.release_mouse_buttons,
+                        self.input_handler.reset_keyboard):
+            try:
+                await release()
+            except Exception as e:
+                logger.warning(f"Input release for departed peer {peer_id} failed: {e}")
+
     async def handle_video_consumer_active(self, peer_id, display_id: str, active: bool) -> None:
         """Tab-visibility pause/resume for ONE peer (data-channel STOP_VIDEO /
         START_VIDEO, websockets parity). The peer's own RTP sender gates its
@@ -1103,7 +1152,8 @@ class WebRTCService(BaseStreamingService):
         """Token-update reconciliation for LIVE WebRTC peers (websockets
         reconcile_clients parity): a revoked or role-changed token closes the
         peer (signaling verdict 4002 + pipeline stop); an mk-token handoff
-        pushes the new collab verdict to every viewer over its data channel.
+        pushes the new input verdict to every surviving peer over its data
+        channel, controllers included (a handoff strips their authority too).
         Per-message input authority already reads the live store — this covers
         the media stream and the client-side grant, which otherwise persist
         until the peer disconnects itself."""
@@ -1113,7 +1163,8 @@ class WebRTCService(BaseStreamingService):
         for peer_id, peer in list(self.rtc_app.peer_connections.items()):
             token = peer.get("client_token")
             if not token:
-                continue  # legacy (token-less) peer: governed by its URL role only
+                # Legacy (token-less) peer: governed by its URL role only.
+                continue
             ctype = peer.get("client_type")
             role_now = "controller" if ctype == ClientType.CONTROLLER else "viewer"
             new_perms = tokens.get(token)
@@ -1126,10 +1177,7 @@ class WebRTCService(BaseStreamingService):
                 except Exception:
                     logger.warning(f"stop_rtc_connection failed for {peer_id}", exc_info=True)
                 continue
-            if ctype == ClientType.VIEWER:
-                self.rtc_app._send_collab_state(
-                    peer.get("data_channel"), ClientType.VIEWER, token
-                )
+            self.rtc_app._send_collab_state(peer.get("data_channel"), ctype, token)
             # A slot-only change keeps the peer but must reach its client
             # (websockets ROLE_UPDATE parity): the gamepad slot mapping lives
             # client-side and would silently desync otherwise.
@@ -1249,6 +1297,10 @@ class WebRTCService(BaseStreamingService):
                 if self.display_layouts:
                     self.display_layouts = {}
                     p_w, p_h = self._primary_dims or (self.media_pipeline.width, self.media_pipeline.height)
+                    # The layout no longer diverts the primary's resolution; the
+                    # pipeline dimensions below become its authority again, and a
+                    # later secondary re-derives the layout from them.
+                    self._primary_dims = None
                     if IS_WAYLAND:
                         # The secondary's compositor output goes away (its windows
                         # relocate to the primary) and the primary re-anchors at
@@ -1273,6 +1325,14 @@ class WebRTCService(BaseStreamingService):
                     self.media_pipeline.width, self.media_pipeline.height = p_w, p_h
                     if self.media_pipeline.is_media_pipeline_running():
                         await self.media_pipeline.restart_screen_capture()
+                elif self._primary_dims is not None:
+                    # No laid-out secondary (one is registered but has no
+                    # dimensions yet, or its layout was unrealizable), so there is
+                    # nothing to compute: the primary's diverted resolution
+                    # request goes straight to the real display.
+                    await self._resize_primary_display(
+                        "{}x{}".format(*self._primary_dims)
+                    )
                 self._broadcast_display_config()
                 return
             did, info = secondary
@@ -1282,6 +1342,14 @@ class WebRTCService(BaseStreamingService):
                 # pipeline dimensions (kept current by the single-display path),
                 # falling back to the live screen resolution.
                 p_w, p_h = self.media_pipeline.width, self.media_pipeline.height
+                if IS_WAYLAND:
+                    # The compositor lays the secondary out against its own output
+                    # rects and rejects an overlap, so its realized geometry -- not
+                    # the capture size, which may still trail a resize -- is what
+                    # the offset has to be computed from.
+                    realized = await self._realized_wayland_dims("primary")
+                    if realized is not None:
+                        p_w, p_h = realized
                 if p_w <= 0 or p_h <= 0:
                     if IS_WAYLAND:
                         # No X server to ask: the pipeline dimensions are the only
@@ -1458,6 +1526,16 @@ class WebRTCService(BaseStreamingService):
         )
 
     async def handle_scaling(self, dpi_value: float) -> None:
+        # Fractional DPI is legal on the shared verb (websockets parity); the
+        # desktop DPI property itself is integral. Bounded by the declared
+        # scaling_dpi span so a client cannot drive xrdb — and, with it, the
+        # cursor size and the Wayland compositor scale — to an arbitrary value.
+        try:
+            dpi_value = min(SCALING_DPI_MAX,
+                            max(SCALING_DPI_MIN, int(round(float(dpi_value)))))
+        except (TypeError, ValueError, OverflowError):
+            logger.warning(f"Ignoring malformed DPI sync: {dpi_value!r}")
+            return
         if settings._overridden.get("scaling_dpi", False):
             # An operator-set DPI (CLI/env) governs the desktop: client DPI
             # syncs must not clobber it.

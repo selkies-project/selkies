@@ -1067,15 +1067,19 @@ const KeyboardUtil = {
 
         if (key in DOMKeyTable) {
             let location = evt.location;
-            if ((browser.isSafari() && key === 'Meta' && location === 0) || // Safari 12.0.3 (Mojave) MetaRight has location 0
-                (browser.isChrome() && key === 'Meta' && location === 0 && KeyboardUtil.getKeyCode(evt) === 'MetaRight')) { // Chrome (Linux) MetaRight has location 0
-                location = 2; // DOM_KEY_LOCATION_RIGHT
+            // Safari on Mojave and Chrome on Linux both report MetaRight with
+            // location 0; force DOM_KEY_LOCATION_RIGHT for them.
+            if ((browser.isSafari() && key === 'Meta' && location === 0) ||
+                (browser.isChrome() && key === 'Meta' && location === 0 && KeyboardUtil.getKeyCode(evt) === 'MetaRight')) {
+                location = 2;
             }
 
-            if ((key === 'Clear') && (location === 3)) { // Numpad
+            // Numpad Clear: with NumLock on the key is the standard-location
+            // Clear, so report DOM_KEY_LOCATION_STANDARD.
+            if ((key === 'Clear') && (location === 3)) {
                 let code = KeyboardUtil.getKeyCode(evt);
-                if (code === 'NumLock') { // Clear key when numlock is on.
-                    location = 0; // DOM_KEY_LOCATION_STANDARD
+                if (code === 'NumLock') {
+                    location = 0;
                 }
             }
             if ((location === undefined) || (location > 3)) {
@@ -1119,7 +1123,8 @@ const KeyboardUtil = {
     getKeysymFromCode: function(code) {
         if (!code) return null;
         if (/^Key[A-Z]$/.test(code)) {
-            return Keysyms.lookup(code.charCodeAt(3) + 32); // 'KeyA' -> 'a'
+            // 'KeyA' -> 'a'.
+            return Keysyms.lookup(code.charCodeAt(3) + 32);
         }
         if (/^Digit[0-9]$/.test(code)) {
             return Keysyms.lookup(code.charCodeAt(5));
@@ -1230,7 +1235,8 @@ export class Input {
         this._guacKeyboardID = Input._nextGuacID++;
         this._EVENT_MARKER = '_GUAC_KEYBOARD_HANDLED_BY_' + this._guacKeyboardID;
 
-        this._keyDownList = {}; // Maps event.code -> keysym
+        // Maps event.code -> keysym for every key currently held.
+        this._keyDownList = {};
         // While any key is held, heartbeat the held keysyms so the server can
         // auto-release them if a key-up is lost to congestion (stuck keys).
         this._keyHeartbeatTimer = null;
@@ -1726,7 +1732,8 @@ export class Input {
         if (browser.isMac() || browser.isIOS()) {
             switch (keysym) {
                 case KeyTable.XK_Super_L: keysym = KeyTable.XK_Alt_L; break;
-                case KeyTable.XK_Super_R: keysym = KeyTable.XK_Super_L; break; // Should be Alt_R, but X11 convention...
+                // X11 convention maps the right Command key onto Super_L.
+                case KeyTable.XK_Super_R: keysym = KeyTable.XK_Super_L; break;
                 case KeyTable.XK_Alt_L: keysym = KeyTable.XK_Mode_switch; break;
                 case KeyTable.XK_Alt_R: keysym = KeyTable.XK_ISO_Level3_Shift; break;
             }
@@ -1741,7 +1748,8 @@ export class Input {
             return;
         }
 
-        if (code in this._keyDownList) { // Key already pressed
+        // The key is already pressed; reuse the keysym it went down with.
+        if (code in this._keyDownList) {
             keysym = this._keyDownList[code];
         }
 
@@ -1852,7 +1860,8 @@ export class Input {
             }
         }
 
-        if (this._altGrArmed) { // Abort AltGr if keyup is not AltRight
+        // Abort the armed AltGr sequence: this key-up is not AltRight.
+        if (this._altGrArmed) {
             this._altGrArmed = false;
             clearTimeout(this._altGrTimeout);
             this._sendKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
@@ -1875,21 +1884,25 @@ export class Input {
         const oldValue = this.compositionString;
         const newValue = newText || "";
 
+        // Diffed per codepoint, not per UTF-16 unit: an astral character (emoji,
+        // rare CJK) is one keysym and one backspace on the server side, and its
+        // surrogate halves are not valid keysyms on their own.
+        const oldChars = Array.from(oldValue);
+        const newChars = Array.from(newValue);
         let diff_start = 0;
-        while (diff_start < oldValue.length && diff_start < newValue.length && oldValue[diff_start] === newValue[diff_start]) {
+        while (diff_start < oldChars.length && diff_start < newChars.length && oldChars[diff_start] === newChars[diff_start]) {
             diff_start++;
         }
 
         // Synthetic composition chars: use momentary kd/ku (like _handleTextInput) to
         // skip per-character heartbeat churn from _sendKeyEvent.
-        const backspaces = oldValue.length - diff_start;
+        const backspaces = oldChars.length - diff_start;
         for (let i = 0; i < backspaces; i++) {
             this._sendMomentaryKey(KeyTable.XK_BackSpace);
         }
 
-        const newChars = newValue.substring(diff_start);
-        for (let i = 0; i < newChars.length; i++) {
-            const keysym = Keysyms.lookup(newChars.charCodeAt(i));
+        for (let i = diff_start; i < newChars.length; i++) {
+            const keysym = Keysyms.lookup(newChars[i].codePointAt(0));
             if (keysym) {
                 this._sendMomentaryKey(keysym);
             }
@@ -1978,10 +1991,11 @@ export class Input {
         // text echo of it must not ALSO type the letter.
         if (this._chordModifierHeld()) return;
 
+        // Iterated per codepoint so an astral character (emoji, rare CJK) is sent
+        // as one keysym instead of two lone surrogates the server cannot type.
         const text = event.data;
-        for (let i = 0; i < text.length; i++) {
-            const codepoint = text.charCodeAt(i);
-            const keysym = Keysyms.lookup(codepoint);
+        for (const char of text) {
+            const keysym = Keysyms.lookup(char.codePointAt(0));
             if (keysym) {
                 // Synthetic text: send kd/ku directly, not via _sendKeyEvent, to skip
                 // per-character heartbeat churn.
@@ -2056,20 +2070,21 @@ export class Input {
             event.target.value = '';
             return;
         }
-        for (let i = 0; i < text.length; i++) {
-            const char = text[i];
+        // Iterated per codepoint so an astral character (emoji, rare CJK) is sent
+        // as one keysym instead of two lone surrogates the server cannot type.
+        for (const char of text) {
             const isUpperCase = char >= 'A' && char <= 'Z';
             if (isUpperCase) {
                 this.send("kd," + KeyTable.XK_Shift_L);
                 const lowerChar = char.toLowerCase();
-                const letterKeysym = Keysyms.lookup(lowerChar.charCodeAt(0));
+                const letterKeysym = Keysyms.lookup(lowerChar.codePointAt(0));
                 if (letterKeysym) {
                     this.send("kd," + letterKeysym);
                     this.send("ku," + letterKeysym);
                 }
                 this.send("ku," + KeyTable.XK_Shift_L);
             } else {
-                const keysym = Keysyms.lookup(char.charCodeAt(0));
+                const keysym = Keysyms.lookup(char.codePointAt(0));
                 if (keysym) {
                     this.send("kd," + keysym);
                     this.send("ku," + keysym);
@@ -2160,7 +2175,8 @@ export class Input {
             if (this._applySinkCoordinates(event.clientX, event.clientY, canvas, videoEle)) {
                 // Absolute coords mapped against the active sink (ws-core canvas or
                 // wr-core <video>); this.x/this.y were set by the helper.
-            } else { // Auto resolution mode (non-manual)
+            } else {
+                // Auto resolution mode (non-manual).
                 if (!this.m) {
                     this._windowMath();
                 }
@@ -2429,7 +2445,8 @@ export class Input {
         // now", not "geometry changed". Measure the visible mirror instead,
         // falling back to the last valid rect (resize handlers re-show the
         // canvas, so a real geometry change is re-measured on the next event).
-        let rect = sink.getBoundingClientRect(); // CSS logical size
+        // CSS logical size.
+        let rect = sink.getBoundingClientRect();
         if (!(rect.width > 0 && rect.height > 0)) {
             // Cache the mirror lookups (this runs per pointer event while the
             // canvas is hidden); re-query if a cached node left the DOM
@@ -2470,7 +2487,8 @@ export class Input {
                 boxLeft += (rect.width - boxW) / 2;
                 boxTop += (rect.height - boxH) / 2;
             }
-            const scaleX = sinkW / boxW; // stream px / CSS px
+            // Stream px per CSS px.
+            const scaleX = sinkW / boxW;
             const scaleY = sinkH / boxH;
             this.x = Math.max(0, Math.min(sinkW, Math.round((clientX - boxLeft) * scaleX)));
             this.y = Math.max(0, Math.min(sinkH, Math.round((clientY - boxTop) * scaleY)));
@@ -2485,14 +2503,16 @@ export class Input {
         this._updateCursorPosition(touchPoint.clientX, touchPoint.clientY);
         this._latestMouseX = touchPoint.clientX;
         this._latestMouseY = touchPoint.clientY;
-        const client_dpr = window.devicePixelRatio || 1; // Actual client DPR
+        // Actual client DPR.
+        const client_dpr = window.devicePixelRatio || 1;
         const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || window.isManualResolutionMode || this.isSharedMode) ? 1 : client_dpr;
         let canvas = document.getElementById('videoCanvas');
         let videoEle = document.getElementById('stream');
 
         if (this._applySinkCoordinates(touchPoint.clientX, touchPoint.clientY, canvas, videoEle)) {
             // Sink-mapped absolute coords (covers wr-core manual mode on touch too).
-        } else { // Auto resolution mode (non-manual)
+        } else {
+            // Auto resolution mode (non-manual).
             if (!this.m) this._windowMath();
             if (this.m) {
                 let logicalX_on_element = this._clientToServerX(touchPoint.clientX);
@@ -2934,11 +2954,13 @@ export class Input {
     _wheelNotches(deltaY, deltaMode) {
         const magnitude = Math.abs(Math.trunc(deltaY));
         if (magnitude === 0) { return 0; }
-        if (deltaMode === 1) { // DOM_DELTA_LINE
+        // DOM_DELTA_LINE.
+        if (deltaMode === 1) {
             if (magnitude < this._smallestLineDeltaY) { this._smallestLineDeltaY = magnitude; }
             return magnitude / this._smallestLineDeltaY;
         }
-        if (deltaMode === 2) { // DOM_DELTA_PAGE: at least one full notch per page
+        // DOM_DELTA_PAGE: at least one full notch per page.
+        if (deltaMode === 2) {
             return Math.max(1, magnitude);
         }
         // DOM_DELTA_PIXEL
@@ -3069,6 +3091,22 @@ export class Input {
         return Math.round(serverY);
     }
 
+    /**
+     * Base64-encodes a gamepad name for the 'js,c' message. The server decodes it
+     * as latin-1, so codepoints outside that range (localized vendor names) are
+     * replaced rather than handed to btoa, which throws on them.
+     * @param {string} id Gamepad id reported by the browser.
+     * @returns {string} Base64 of the latin-1-safe name.
+     */
+    _encodeGamepadId(id) {
+        const safeId = String(id || 'Gamepad').replace(/[^\x00-\xFF]/g, '?');
+        try {
+            return btoa(safeId);
+        } catch (e) {
+            return btoa('Gamepad');
+        }
+    }
+
     _gamepadConnected(event) {
         // Reject negatives too (e.g. a controllerSlot of 0 yields -1): button/axis
         // sends refuse such an index, so connecting it would create a phantom slot
@@ -3080,7 +3118,7 @@ export class Input {
         }
         // Counts are advisory: the server presents a fixed Xbox pad regardless, and
         // Firefox's non-standard axis layout is normalized in _gamepadButton/_gamepadAxis.
-        const connectMsg = "js,c," + server_gp_index + "," + btoa(event.gamepad.id) + "," + event.gamepad.axes.length + "," + event.gamepad.buttons.length;
+        const connectMsg = "js,c," + server_gp_index + "," + this._encodeGamepadId(event.gamepad.id) + "," + event.gamepad.axes.length + "," + event.gamepad.buttons.length;
         this.send(connectMsg);
         if (this.ongamepadconnected !== null) { this.ongamepadconnected(event.gamepad.id); }
     }
@@ -3306,7 +3344,8 @@ export class Input {
         for (const pad of pads) {
             if (pad && pad.connected) {
                 this._gamepadConnected({ gamepad: pad });
-                break; // one manager polls all pads; the connect message is per-slot
+                // One manager polls all pads; the connect message is per-slot.
+                break;
             }
         }
     }
@@ -3395,7 +3434,8 @@ function addListener(obj, name, func, ctx, useCapture = false) {
         return null;
     }
     const newFunc = ctx ? func.bind(ctx) : func;
-    const options = { capture: useCapture, passive: false }; // Set passive: false for preventDefault
+    // passive: false keeps preventDefault() available in the handler.
+    const options = { capture: useCapture, passive: false };
     obj.addEventListener(name, newFunc, options);
     return [obj, name, newFunc, options];
 }

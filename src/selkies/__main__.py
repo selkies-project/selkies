@@ -4,6 +4,7 @@
 
 import os
 import sys
+import signal
 import asyncio
 import logging
 
@@ -26,10 +27,50 @@ async def wait_for_app_ready(ready_file, app_wait_ready=False):
         await asyncio.sleep(0.2)
 
 
+def _install_shutdown_signal_handlers():
+    """Make a service-manager stop (systemd, `docker stop`, `kill`) unwind the same
+    way Ctrl-C does: cancelling the main task raises CancelledError through the
+    server loop, so the streaming service is stopped, the unix socket is removed and
+    the disconnect hooks run. Without this SIGTERM is fatal by default, and as
+    container PID 1 it is ignored outright until SIGKILL.
+
+    The first signal wins: later ones are absorbed while the teardown runs, since
+    cancelling the main task again would raise CancelledError at an await inside
+    the cleanup path and leave the rest of it (listener shutdown, unix-socket
+    removal) undone. The handlers stay installed so an impatient orchestrator's
+    repeat SIGTERM cannot fall through to the default fatal disposition either.
+    """
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+    if main_task is None:
+        return
+    shutting_down = False
+
+    def _request_shutdown(signal_name):
+        nonlocal shutting_down
+        if shutting_down:
+            logger.info("Ignoring %s: shutdown already in progress", signal_name)
+            return
+        shutting_down = True
+        logger.info("Received %s, shutting down", signal_name)
+        main_task.cancel()
+
+    for signal_name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, signal_name, None)
+        if sig is None:
+            continue
+        try:
+            loop.add_signal_handler(sig, _request_shutdown, signal_name)
+        except (NotImplementedError, RuntimeError, ValueError):
+            logger.debug("Cannot install a %s handler on this platform", signal_name)
+
+
 async def run():
     """
     Main entry point for the Selkies streaming server.
     """
+    _install_shutdown_signal_handlers()
+
     # Publish the resolved gamepad-socket directory so the LD_PRELOAD interposer in
     # app processes (which reads SELKIES_JS_SOCKET_PATH) writes/reads sockets in the
     # same directory selkies uses, regardless of how the setting was configured.
@@ -75,6 +116,8 @@ def main():
         asyncio.run(run())
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
+    except asyncio.CancelledError:
+        logger.info("Server stopped by signal")
     except Exception as e:
         logger.error(f"Error in main: {e}", exc_info=True)
         sys.exit(1)

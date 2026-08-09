@@ -259,7 +259,8 @@ export class WebRTCClient {
 	 */
 	_onSignalingICE(icecandidate) {
 		this._setDebug("received ice candidate from signaling server: " + JSON.stringify(icecandidate));
-		if (this.forceTurn && JSON.stringify(icecandidate).indexOf("relay") < 0) { // if no relay address is found, assuming it means no TURN server
+		// No relay address in the candidate means no TURN server was used.
+		if (this.forceTurn && JSON.stringify(icecandidate).indexOf("relay") < 0) {
 			this._setDebug("Rejecting non-relay ICE candidate: " + JSON.stringify(icecandidate));
 			return;
 		}
@@ -685,53 +686,54 @@ export class WebRTCClient {
 	 */
 	getConnectionStats() {
 		var pc = this.peerConnection;
+		// Shape of the report filled in below from getStats(): 'general' comes from
+		// the transport and candidate-pair reports (connectionType resolves through
+		// the pair's remote-candidate), 'video' and 'audio' from inbound-rtp (their
+		// codecName through the linked codec report), and 'data' from the
+		// data-channel report.
 		var connectionDetails = {
-			// General connection stats
 			general: {
-				bytesReceived: 0, // from transport or candidate-pair
-				bytesSent: 0, // from transport or candidate-pair
-				connectionType: "NA", // from candidate-pair => remote-candidate
-				currentRoundTripTime: null, // from candidate-pair
-				availableReceiveBandwidth: 0, // from candidate-pair
+				bytesReceived: 0,
+				bytesSent: 0,
+				connectionType: "NA",
+				currentRoundTripTime: null,
+				availableReceiveBandwidth: 0,
 			},
 
-			// Video stats
 			video: {
-				bytesReceived: 0, //from incoming-rtp
-				decoder: "NA", // from incoming-rtp
-				frameHeight: 0, // from incoming-rtp
-				frameWidth: 0, // from incoming-rtp
-				framesPerSecond: 0, // from incoming-rtp
-				packetsReceived: 0, // from incoming-rtp
-				packetsLost: 0, // from incoming-rtp
-				codecName: "NA", // from incoming-rtp => codec
-				jitterBufferDelay: 0, // from incoming-rtp.jitterBufferDelay
-				jitterBufferEmittedCount: 0, // from incoming-rtp.jitterBufferEmittedCount
+				bytesReceived: 0,
+				decoder: "NA",
+				frameHeight: 0,
+				frameWidth: 0,
+				framesPerSecond: 0,
+				packetsReceived: 0,
+				packetsLost: 0,
+				codecName: "NA",
+				jitterBufferDelay: 0,
+				jitterBufferEmittedCount: 0,
 			},
 
-			// Audio stats
 			audio: {
-				bytesReceived: 0, // from incoming-rtp
-				packetsReceived: 0, // from incoming-rtp
-				packetsLost: 0, // from incoming-rtp
-				codecName: "NA", // from incoming-rtp => codec
-				jitterBufferDelay: 0, // from incoming-rtp.jitterBufferDelay
-				jitterBufferEmittedCount: 0, // from incoming-rtp.jitterBufferEmittedCount
+				bytesReceived: 0,
+				packetsReceived: 0,
+				packetsLost: 0,
+				codecName: "NA",
+				jitterBufferDelay: 0,
+				jitterBufferEmittedCount: 0,
 				// NetEQ concealment counters — the RED before/after acceptance metric. Chrome
 				// reports opus+red under codecName 'opus', so RED presence is confirmed via
 				// SDP/packet size, not codecName.
-				concealedSamples: 0, // from incoming-rtp
-				concealmentEvents: 0, // from incoming-rtp
-				totalSamplesReceived: 0, // from incoming-rtp
-				packetsDiscarded: 0, // from incoming-rtp
+				concealedSamples: 0,
+				concealmentEvents: 0,
+				totalSamplesReceived: 0,
+				packetsDiscarded: 0,
 			},
 
-			// DataChannel stats
 			data: {
-				bytesReceived: 0, // from data-channel
-				bytesSent: 0, // from data-channel
-				messagesReceived: 0, // from data-channel
-				messagesSent: 0, // from data-channel
+				bytesReceived: 0,
+				bytesSent: 0,
+				messagesReceived: 0,
+				messagesSent: 0,
 			}
 		};
 

@@ -17,6 +17,18 @@ const VALID_MAPPINGS = new Set([
   'leftx', 'lefty', 'rightx', 'righty'
 ]);
 
+// The SDL DB carries one line per platform for the same vendor-product GUID and
+// the raw button/axis indices differ between them, so each mapping is written
+// into a per-platform subdirectory that lib/gamepad.js selects by user agent.
+// Platforms outside this set have no browser target and are skipped.
+const PLATFORM_DIRS = {
+  'windows': 'windows',
+  'mac os x': 'mac',
+  'linux': 'linux',
+  'android': 'android',
+  'ios': 'ios'
+};
+
 function parseSdlLine(line) {
   if (line.startsWith('#') || line.trim() === '') {
     return null;
@@ -27,9 +39,14 @@ function parseSdlLine(line) {
 
   if (guid.length < 20) return null;
 
+  const platformPart = parts.find((p) => p.trim().toLowerCase().startsWith('platform:'));
+  if (!platformPart) return null;
+  const platformDir = PLATFORM_DIRS[platformPart.split(':')[1].trim().toLowerCase()];
+  if (!platformDir) return null;
+
   const vendor = (guid.substring(10, 12) + guid.substring(8, 10)).toLowerCase();
   const product = (guid.substring(18, 20) + guid.substring(16, 18)).toLowerCase();
-  const filename = `${vendor}-${product}.json`;
+  const filename = path.join(platformDir, `${vendor}-${product}.json`);
 
   const mapping = {};
 
@@ -82,16 +99,12 @@ async function main() {
   console.log('Starting conversion...');
 
   // Clean before writing: stale mappings from an older SDL DB revision must not
-  // linger next to fresh ones (which is exactly how the two dashboards' jsdb
-  // trees drifted apart).
-  if (fs.existsSync(OUTPUT_DIR)) {
-    for (const f of fs.readdirSync(OUTPUT_DIR)) {
-      if (f.endsWith('.json')) fs.unlinkSync(path.join(OUTPUT_DIR, f));
-    }
-  } else {
-    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-    console.log(`Created output directory: ${OUTPUT_DIR}`);
+  // linger next to fresh ones, and the dashboards copy this tree verbatim.
+  fs.rmSync(OUTPUT_DIR, { recursive: true, force: true });
+  for (const dir of new Set(Object.values(PLATFORM_DIRS))) {
+    fs.mkdirSync(path.join(OUTPUT_DIR, dir), { recursive: true });
   }
+  console.log(`Prepared output directory: ${OUTPUT_DIR}`);
 
   const lines = fileContent.split('\n');
 
@@ -112,7 +125,7 @@ async function main() {
 
   console.log(`\nConversion complete!`);
   console.log(`  Successfully converted and wrote ${convertedCount} mapping files.`);
-  console.log(`  Skipped ${skippedCount} lines (comments, empty, or invalid).`);
+  console.log(`  Skipped ${skippedCount} lines (comments, empty, invalid, or an unsupported platform).`);
 }
 
 main();

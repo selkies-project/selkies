@@ -260,9 +260,10 @@ class RTCApp:
         self.on_data_close = lambda: logger.warning('unhandled on_data_close')
         self.on_data_error = lambda e=None: logger.warning('unhandled on_data_error')
         self.on_data_message = lambda msg, display_id='primary', conn_id=None: logger.warning('unhandled on_data_message')
-        # Late-bound async hook fired when a peer reaches 'closed'; carries the
-        # peer id so per-connection input state (gamepad associations) can be
-        # released even when the client never sent a graceful disconnect.
+        # Late-bound async hook fired when a peer reaches 'closed', called as
+        # (peer_id, peer_entry): the id releases per-connection input state
+        # (gamepad associations) when the client never sent a graceful
+        # disconnect, the entry says what input authority left with it.
         self.on_peer_gone = None
 
         # WebRTC ICE and SDP events
@@ -967,17 +968,22 @@ class RTCApp:
         return consumer
 
     def _send_collab_state(self, channel, client_type, client_token):
-        """Send a viewer its mk-token collab verdict over the data channel as a
+        """Send a peer its mk-token input verdict over the data channel as a
         `system` action (the channel is JSON-typed): `mk_access,1` attaches the
-        client's input context, `mk_access,0` detaches it. No-op outside secure
-        mode and for controllers (websockets MK_ACCESS parity). Gated on secure
-        mode itself, NOT on an mk token existing — an mk handoff that clears the
-        token must still push the 0 that detaches the previous holder."""
-        if client_type is not ClientType.VIEWER:
-            return
+        client's input context, `mk_access,0` detaches it. Sent to controllers
+        as well as viewers (websockets MK_ACCESS parity) — an mk handoff strips
+        a controller's input authority too, and without the verdict its page
+        keeps a live input UI whose messages the server drops. No-op outside
+        secure mode. Gated on secure mode itself, NOT on an mk token existing —
+        a handoff that clears the token must still push the 0 that detaches the
+        previous holder."""
         if not app_settings.master_token:
             return
-        granted = self._viewer_is_collaborator(client_token)
+        granted = (
+            self._viewer_is_collaborator(client_token)
+            if client_type == ClientType.VIEWER
+            else self._mk_input_authorized(client_token)
+        )
         try:
             channel.send(json.dumps(
                 {"type": "system", "data": {"action": f"mk_access,{1 if granted else 0}"}}))
@@ -1013,6 +1019,31 @@ class RTCApp:
         _, mk = current_session_tokens()
         return mk is not None and client_token == mk
 
+    def _mk_input_authorized(self, client_token):
+        """Token-level input authority in secure mode: the active mk-token holder,
+        or a controller-role token while no mk token is provisioned."""
+        tokens, mk = current_session_tokens()
+        if mk is not None:
+            return bool(client_token) and client_token == mk
+        perms = tokens.get(client_token) if client_token else None
+        return bool(perms) and perms.get("role") == "controller"
+
+    def peer_holds_input_authority(self, peer):
+        """Whether a peer entry may drive keyboard/mouse input, composing the two
+        gates on_data_message applies: a viewer needs to be a read-write
+        collaborator, and in secure mode every peer is additionally held to the
+        token check. Used for session-wide input cleanup (held keys and pointer
+        buttons are one global desktop state), so it is deliberately fail-safe:
+        an unknown peer holds nothing."""
+        if not peer:
+            return False
+        client_token = peer.get("client_token")
+        if peer.get("client_type") == ClientType.VIEWER and not self._viewer_is_collaborator(client_token):
+            return False
+        if not app_settings.master_token:
+            return True
+        return self._mk_input_authorized(client_token)
+
     def _secure_input_denied(self, msg, client_token):
         """Secure-mode (master token configured) input authority, mirroring the WS
         gate: cmd and the keyboard/mouse/clipboard set are admitted only from the
@@ -1030,12 +1061,7 @@ class RTCApp:
             return False
         if msg.split(",", 1)[0] not in ("cmd", "co") and not msg.startswith(VIEWER_COLLAB_EXTRA_PREFIXES):
             return False
-        tokens, mk = current_session_tokens()
-        if mk is not None:
-            authorized = bool(client_token) and client_token == mk
-        else:
-            perms = tokens.get(client_token) if client_token else None
-            authorized = bool(perms) and perms.get("role") == "controller"
+        authorized = self._mk_input_authorized(client_token)
         if not authorized:
             logger.warning("Dropping unauthorized secure-mode input: %s", msg[:32])
         return not authorized
@@ -1178,8 +1204,10 @@ class RTCApp:
                 # Identity-gated like the pop above: when a reconnect re-registered
                 # this client_peer_id, the id's input state (gamepad associations)
                 # belongs to the successor and must survive the old peer's close.
+                # The popped entry rides along: the hook needs the departing peer's
+                # type and token to judge what input authority left with it.
                 try:
-                    await self.on_peer_gone(client_peer_id)
+                    await self.on_peer_gone(client_peer_id, removed)
                 except Exception:
                     logger.exception("on_peer_gone hook failed")
             # This peer is done either way; its never-established channels emit
@@ -1552,7 +1580,7 @@ class RTCApp:
                 # released here — SESSION_END arrives as soon as the client's
                 # signaling socket drops, long before ICE gives up on the peer.
                 try:
-                    await self.on_peer_gone(client_peer_id)
+                    await self.on_peer_gone(client_peer_id, removed)
                 except Exception:
                     logger.exception("on_peer_gone hook failed")
 

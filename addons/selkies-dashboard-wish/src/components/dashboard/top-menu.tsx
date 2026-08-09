@@ -85,13 +85,14 @@ export function TopMenu({
   const [isDragging, setIsDragging] = React.useState(false);
   const [isSystemMonitoringDragging, setIsSystemMonitoringDragging] = React.useState(false);
   const [position, setPosition] = React.useState(() => {
-    // Start with a rough center estimate, will be adjusted after mount
-    const x = window.innerWidth / 2 - 200; // Reduced from 300 to better estimate actual menu width
+    // Rough centering off an assumed ~400px menu; the measured width recentres
+    // it after mount.
+    const x = window.innerWidth / 2 - 200;
     return { x, y: 0 };
   });
   const [systemMonitoringPosition, setSystemMonitoringPosition] = React.useState(() => {
-    // Start with top-left position
-    return { x: 16, y: 64 }; // 16px from left, 64px from top (below menu bar)
+    // Top-left, below the menu bar.
+    return { x: 16, y: 64 };
   });
 
   // --- Server Settings & UI Customization ---
@@ -234,10 +235,11 @@ export function TopMenu({
       const newX = e.clientX - startPosRef.current.x;
       const newY = e.clientY - startPosRef.current.y;
 
-      // Get the actual dimensions of the menu element
+      // Measured menu dimensions bound the drag; the constants stand in until
+      // the element is available.
       const menuElement = dragRef.current;
-      const menuWidth = menuElement ? menuElement.offsetWidth : 600; // fallback to 600
-      const menuHeight = menuElement ? menuElement.offsetHeight : 100; // fallback to 100
+      const menuWidth = menuElement ? menuElement.offsetWidth : 600;
+      const menuHeight = menuElement ? menuElement.offsetHeight : 100;
 
       const maxX = window.innerWidth - menuWidth;
       const maxY = window.innerHeight - menuHeight;
@@ -281,8 +283,8 @@ export function TopMenu({
 
       // Get the actual dimensions of the system monitoring element
       const systemMonitoringElement = systemMonitoringRef.current;
-      const panelWidth = systemMonitoringElement ? systemMonitoringElement.offsetWidth : 300; // fallback to 300
-      const panelHeight = systemMonitoringElement ? systemMonitoringElement.offsetHeight : 200; // fallback to 200
+      const panelWidth = systemMonitoringElement ? systemMonitoringElement.offsetWidth : 300;
+      const panelHeight = systemMonitoringElement ? systemMonitoringElement.offsetHeight : 200;
 
       const maxX = window.innerWidth - panelWidth;
       const maxY = window.innerHeight - panelHeight;

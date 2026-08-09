@@ -3,6 +3,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import os
+import hmac
 import json
 import uuid
 import logging
@@ -575,6 +576,21 @@ class WebRTCPeerManagement:
         tokens, _ = current_session_tokens()
         return not client_token or client_token not in tokens
 
+    def _secure_server_token_rejected(self, server_token) -> bool:
+        """Secure mode: the server peer owns the media graph for every client, and a
+        server peer leaving closes all of them, so registering as one is an
+        administrative act. Only the in-process signaling client (and anything else
+        holding the master token) may claim it — the auth middleware forwards WS
+        upgrades without Basic in secure mode, so this is the gate that stands between
+        an unauthenticated socket and impersonating the streaming server."""
+        if not app_settings.master_token:
+            return False
+        if not server_token or not isinstance(server_token, str):
+            return True
+        return not hmac.compare_digest(
+            server_token.encode("utf-8"), str(app_settings.master_token).encode("utf-8")
+        )
+
     def _secure_effective_client_type(self, client_type, client_token):
         """Secure mode: the token's provisioned role is authoritative (client_type is
         self-asserted over signaling). Coerce a viewer-role token's 'controller' claim
@@ -612,6 +628,7 @@ class WebRTCPeerManagement:
         client_slot = None
         client_strict_viewer = None
         client_token = None
+        server_token = None
         display_id = "primary"
         display_position = "right"
         # Partner notifications for evicted dead peers: collected under the lock but
@@ -646,6 +663,7 @@ class WebRTCPeerManagement:
                         client_slot = json_metadata.get("client_slot")
                         client_strict_viewer = json_metadata.get("client_strict_viewer")
                         client_token = json_metadata.get("client_token")
+                        server_token = json_metadata.get("server_token")
                         display_id = json_metadata.get("display_id") or "primary"
                         pos = json_metadata.get("display_position")
                         display_position = pos if pos in ("right", "left", "up", "down") else "right"
@@ -687,6 +705,11 @@ class WebRTCPeerManagement:
                     await ws.close(code=4001, message=b"Invalid authentication token")
                     raise Exception(
                         "Rejecting client from {!r}: missing or invalid token in secure mode".format(raddr)
+                    )
+                if peer_type == "server" and self._secure_server_token_rejected(server_token):
+                    await ws.close(code=4001, message=b"Invalid authentication token")
+                    raise Exception(
+                        "Rejecting server peer from {!r}: missing or invalid master token in secure mode".format(raddr)
                     )
 
                 if peer_type == "client":
@@ -881,8 +904,8 @@ class WebRTCPeerManagement:
                     )
         # Send HELLO outside the lock so a slow client socket can't serialize other
         # handshakes. Reached only on success (validation failures raise above). The
-        # peer is already registered; if the send fails, unregister it so we don't
-        # leak a half-open peer (matches the old send-before-register failure path).
+        # peer is already registered; if the send fails, unregister it so a half-open
+        # peer never stays in the table.
         try:
             await ws.send_str("HELLO")
         except Exception:

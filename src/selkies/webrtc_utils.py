@@ -372,7 +372,8 @@ class RTCConfigFileMonitor(FileSystemEventHandler):
     def _shutdown_observer(self):
         if self.observer.is_alive():
             self.observer.stop()
-            self.observer.join()  # Wait for the thread to terminate
+            # Wait for the watchdog thread to terminate.
+            self.observer.join()
 
     async def stop(self):
         if not self.enabled:

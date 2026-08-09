@@ -21,3 +21,7 @@ tests/tools/uinput_abi_truth
 tests/tools/gamepad/jsread
 tests/tools/gamepad/sdlenum
 tests/tools/gamepad/udevscan
+
+# Written by pytest --junitxml
+suites-report.xml
+unit-report.xml

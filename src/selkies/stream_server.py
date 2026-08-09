@@ -9,6 +9,7 @@ import hmac
 import json
 import html
 import stat
+import hashlib
 import time
 import shutil
 import base64
@@ -40,6 +41,45 @@ logger = logging.getLogger("stream_server")
 # slice completes well within this on any usable link), so only transfers
 # whose client is truly gone are reaped.
 UPLOAD_PART_TTL_SECONDS = 3600
+
+# Uploads are written to a hidden staging sibling of their destination and
+# renamed onto it, so a destination is only ever replaced by a complete file.
+UPLOAD_STAGING_PREFIX = ".selkies-upload-"
+
+
+def _upload_staging_path(dest: str, token: str) -> str:
+    """Staging file for an upload to `dest`: a fixed-length hidden sibling living
+    in the destination's own directory.
+
+    The name is derived from `token` instead of being appended to the destination
+    basename, so a filename that is legal but sits close to the filesystem's
+    NAME_MAX still uploads; staying in the same directory keeps the finalizing
+    os.replace atomic and intra-filesystem.
+    """
+    return os.path.join(os.path.dirname(dest), f"{UPLOAD_STAGING_PREFIX}{token}.part")
+
+
+def _upload_staging_token(dest: str) -> str:
+    """Staging token every slice of a chunked transfer to `dest` resolves to, so
+    the .part file is found again across the separate requests that append to it."""
+    return hashlib.sha256(os.fsencode(dest)).hexdigest()[:16]
+
+
+def _carry_destination_mode(staging: str, dest: str):
+    """Give the staged upload the permission bits of the file it is about to
+    replace, so re-uploading over an existing file keeps its mode: an executable
+    script stays executable and a private file stays private. A new destination,
+    or one that is not a regular file, keeps the staging file's creation mode."""
+    try:
+        st = os.lstat(dest)
+    except OSError:
+        return
+    if not stat.S_ISREG(st.st_mode):
+        return
+    try:
+        os.chmod(staging, stat.S_IMODE(st.st_mode))
+    except OSError as e:
+        logger.debug(f"Could not carry the mode of {dest} onto the staged upload: {e}")
 
 
 def _unix_socket_is_live(path: str) -> bool:
@@ -676,7 +716,8 @@ class CentralizedStreamServer:
         """
         origin = request.headers.get("Origin")
         if not origin:
-            return True  # native/non-browser clients omit Origin
+            # Native/non-browser clients omit Origin.
+            return True
         allowed = {
             o.strip()
             for o in (getattr(settings, "allowed_origins", "") or "").split(",")
@@ -912,7 +953,22 @@ class CentralizedStreamServer:
             ),
         }
 
+    @staticmethod
+    def _viewer_ceiling(request: web.Request) -> bool:
+        """Whether the credential that authenticated this request caps it at the
+        viewer role (the view-only basic-auth password). The control-plane
+        endpoints that change host or session state — the streaming-mode switch
+        and file uploads — refuse those requests the way the streaming plane
+        refuses input from a viewer. Read-only endpoints stay available: a viewer
+        is already watching the session."""
+        return request.get("auth_role_ceiling") == "viewer"
+
     async def handle_switch(self, request: web.Request) -> web.Response:
+        if self._viewer_ceiling(request):
+            return web.json_response(
+                {"status": "error", "message": "View-only credentials cannot switch streaming mode"},
+                status=403,
+            )
         dual_mode = getattr(self.settings, "enable_dual_mode", (False,))[0]
         if not dual_mode:
             return web.json_response(
@@ -993,8 +1049,9 @@ class CentralizedStreamServer:
 
         Two request shapes share the endpoint:
 
-        - Plain: one POST carrying the whole file, no chunk headers — written
-          straight onto the destination.
+        - Plain: one POST carrying the whole file, no chunk headers — staged in a
+          hidden sibling of the destination and renamed onto it when the body is
+          complete.
         - Chunked (the client slices files above its 64 MiB threshold so no
           single request body exceeds a fronting proxy's per-request cap, e.g.
           Cloudflare's 100 MB): sequential POSTs for the same X-Upload-Path,
@@ -1003,15 +1060,24 @@ class CentralizedStreamServer:
             X-Upload-Offset: absolute byte offset of this slice
             X-Upload-Total:  final file size in bytes
             X-Upload-Final:  "1" on the last slice
-          Slices accumulate in "<dest>.part". Offset 0 (re)creates the .part —
-          which is also how a stale one from an abandoned transfer for the same
-          path gets replaced — and non-zero offsets must exactly continue the
-          tracked transfer (same id, offset equal to the bytes already banked,
-          matching .part size) or the transfer is discarded with 409. The final
-          slice validates the accumulated size against X-Upload-Total and
-          renames the .part onto the destination atomically. Transfers idle
-          past UPLOAD_PART_TTL_SECONDS are expired on the next chunked request.
+          Slices accumulate in the staging sibling this destination derives
+          (_upload_staging_path). Offset 0 (re)creates it — which is also how a
+          stale one from an abandoned transfer for the same path gets replaced —
+          and non-zero offsets must exactly continue the tracked transfer (same
+          id, offset equal to the bytes already banked, matching staged size) or
+          the transfer is discarded with 409. The final slice validates the
+          accumulated size against X-Upload-Total and renames the staged file
+          onto the destination atomically. Transfers idle past
+          UPLOAD_PART_TTL_SECONDS are expired on the next chunked request.
+
+        Both shapes carry the mode of the file they replace onto the replacement
+        and are refused for view-only credentials.
         """
+        if self._viewer_ceiling(request):
+            return web.json_response(
+                {"status": "error", "message": "View-only credentials cannot upload files"},
+                status=403,
+            )
         settings = request.app["settings"]
         if "upload" not in settings.file_transfers:
             return web.json_response({"status": "error", "message": "uploads disabled"}, status=403)
@@ -1047,15 +1113,27 @@ class CentralizedStreamServer:
             )
 
         if upload_id is None:
-            # Plain single-POST upload.
+            # Plain single-POST upload: staged next to the destination and renamed
+            # onto it once the whole body landed, so an aborted transfer leaves any
+            # file already at that path intact.
+            staging = _upload_staging_path(dest, os.urandom(8).hex())
             try:
-                written = await self._stream_upload_body(request, dest, append=False)
+                written = await self._stream_upload_body(request, staging, append=False)
             except Exception as e:
                 try:
-                    os.remove(dest)
+                    os.remove(staging)
                 except OSError:
                     pass
                 return web.json_response({"status": "error", "message": str(e)}, status=400)
+            _carry_destination_mode(staging, dest)
+            try:
+                os.replace(staging, dest)
+            except OSError as e:
+                try:
+                    os.remove(staging)
+                except OSError:
+                    pass
+                return web.json_response({"status": "error", "message": f"finalize failed: {e}"}, status=500)
             logger.info(f"HTTP upload finished: {dest} ({written} bytes)")
             return web.json_response({"status": "success", "bytes": written})
 
@@ -1068,7 +1146,7 @@ class CentralizedStreamServer:
         if offset < 0 or ("X-Upload-Total" in request.headers and total < 0):
             return web.json_response({"status": "error", "message": "malformed chunk headers"}, status=400)
         final = request.headers.get("X-Upload-Final") == "1"
-        part_path = dest + ".part"
+        part_path = _upload_staging_path(dest, _upload_staging_token(dest))
 
         self._expire_stale_chunked_uploads()
 
@@ -1124,6 +1202,7 @@ class CentralizedStreamServer:
                 {"status": "error", "message": f"size mismatch: received {received}, expected {total}"},
                 status=400,
             )
+        _carry_destination_mode(part_path, dest)
         try:
             os.replace(part_path, dest)
         except OSError as e:

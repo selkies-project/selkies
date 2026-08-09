@@ -153,14 +153,17 @@ function InitUI() {
 export default function webrtc() {
 	let appName;
 	let crf = 23;
-	let videoBitRate = 8000;   // in kbps
+	// Video bitrate in kbps.
+	let videoBitRate = 8000;
 	let videoFramerate = 60;
-	let audioBitRate = 128000; // in bps
+	// Audio bitrate in bps.
+	let audioBitRate = 128000;
 	let showStart = false;
 	let showDrawer = false;
 	// Log/debug entries are retained in capped ring buffers (devtools inspection via
 	// window.selkiesLogs); everything is also mirrored to the console as it happens.
-	const MAX_LOG_ENTRIES = 1000; // cap so the buffers can't grow for the whole session
+	// Cap so the log buffers can't grow for the whole session.
+	const MAX_LOG_ENTRIES = 1000;
 	const pushCapped = (arr, v) => { arr.push(v); if (arr.length > MAX_LOG_ENTRIES) arr.shift(); };
 	let logEntries = [];
 	let debugEntries = [];
@@ -216,7 +219,8 @@ export default function webrtc() {
 	let playButtonElement = null;
 	let statusDisplayElement = null;
 	let rtime = null;
-	let rdelta = 500; // time in milliseconds
+	// Resize debounce delay in milliseconds.
+	let rdelta = 500;
 	let rtimeout = false;
 	let manualWidth, manualHeight = 0;
 	window.isManualResolutionMode = false;
@@ -269,7 +273,11 @@ export default function webrtc() {
 	// localStorage keys, same dashboard messages).
 	let antiAliasingEnabled = true;
 	let trackpadMode = false;
-	let useBrowserCursors = false;
+	// Cursor-rendering preference in force. Seeded from localStorage at connect,
+	// then updated by an explicit dashboard pick (which persists) or by a
+	// server-pushed value (which does not, so a later server-side change stays
+	// re-pushable). The effective value adds the multi-monitor override.
+	let useBrowserCursors = true;
 	// Whether a secondary display page is connected (server display_config_update
 	// broadcast). Multi-monitor forces browser-cursor rendering: the server-drawn
 	// cursor overlay only tracks one capture region.
@@ -432,11 +440,10 @@ export default function webrtc() {
 	// secondary is connected) — the server-drawn cursor overlay only tracks one
 	// capture region. Mirrors the websockets core.
 	function applyEffectiveCursorSetting() {
-		const userPreference = getBoolParam('use_browser_cursors', true);
+		const userPreference = useBrowserCursors;
 		const isDisplay2 = window.location.hash.startsWith('#display2');
 		const isMultiMonitorActive = (isDisplay2 || isSecondaryDisplayConnected);
 		const finalSetting = isMultiMonitorActive ? true : userPreference;
-		useBrowserCursors = finalSetting;
 		if (input && typeof input.setUseBrowserCursors === 'function') {
 			console.log(`Applying effective cursor setting. Multi-monitor: ${isMultiMonitorActive}, User Pref: ${userPreference}, Final: ${finalSetting}`);
 			input.setUseBrowserCursors(finalSetting);
@@ -503,6 +510,10 @@ export default function webrtc() {
 				hiddenVideoPauseTimer = setTimeout(() => {
 					hiddenVideoPauseTimer = null;
 					if (!document.hidden || videoPausedForHiddenTab || !webrtc) return;
+					// A feed the user already stopped from the dashboard is left
+					// alone: pausing it here would make the resume on show
+					// resurrect a stream the user turned off.
+					if (!isVideoPipelineActive) return;
 					videoPausedForHiddenTab = true;
 					try { webrtc.sendDataChannelMessage('STOP_VIDEO'); } catch (_) {}
 					console.log("Tab hidden: sent STOP_VIDEO to pause this peer's feed.");
@@ -787,7 +798,7 @@ export default function webrtc() {
 			videoElement.style.height = `${cssHeight}px`;
 			videoElement.style.top = `${topOffset}px`;
 			videoElement.style.left = `${leftOffset}px`;
-			videoElement.style.objectFit = 'contain'; // Should be 'fill' if CSS handles aspect ratio
+			videoElement.style.objectFit = 'contain';
 			console.log(`Applied manual style (Scaled): CSS ${cssWidth}x${cssHeight}, Pos ${leftOffset},${topOffset}`);
 		} else {
 			// Center the exact-size box too (ws-core parity): a viewport larger
@@ -799,7 +810,8 @@ export default function webrtc() {
 			videoElement.style.height = `${targetHeight}px`;
 			videoElement.style.top = `${topOffset}px`;
 			videoElement.style.left = `${leftOffset}px`;
-			videoElement.style.objectFit = 'fill'; // Use 'fill' to ignore aspect ratio
+			// 'fill' ignores the aspect ratio; the stream already matches the box.
+			videoElement.style.objectFit = 'fill';
 			console.log(`Applied manual style (Exact): CSS ${targetWidth}x${targetHeight}, Pos ${leftOffset},${topOffset}`);
 		}
 		updateVideoImageRendering();
@@ -1027,12 +1039,13 @@ export default function webrtc() {
 			case "resetResolutionToWindow":
 				if (isSharedMode) { break; }
 				console.log("Resetting to window size");
-				manualHeight = manualWidth = 0; // clear manual W&H
+				// Clear the manual dimensions before re-deriving from the window.
+				manualHeight = manualWidth = 0;
 				let currentWindowRes = input.getWindowResolution();
 				resetToWindowResolution(...currentWindowRes);
 				sendResolutionToServer(...currentWindowRes);
 				enableAutoResize();
-				// Use snake_case keys (read at init); the old camelCase keys were never read back.
+				// snake_case keys: these are the ones read back at init.
 				setIntParam('manual_width', null);
 				setIntParam('manual_height', null);
 				setBoolParam('is_manual_resolution_mode', false);
@@ -1249,6 +1262,7 @@ export default function webrtc() {
 				break;
 			case 'setUseBrowserCursors':
 				if (typeof message.value === 'boolean') {
+					useBrowserCursors = message.value;
 					setBoolParam('use_browser_cursors', message.value);
 					// The multi-monitor override may force the effective value on.
 					applyEffectiveCursorSetting();
@@ -1363,12 +1377,20 @@ export default function webrtc() {
 		}
 		if (settings.use_css_scaling !== undefined) {
 			// Route a server-locked/overridden HiDPI value through the same flow
-			// as the dashboard toggle (ws-core parity): without this the sanitize
-			// changes were silently dropped and the operator's setting ignored.
+			// as the dashboard toggle (websockets core parity), so the operator's
+			// setting reaches every layer that reacts to the toggle.
 			handleMessage({
 				origin: window.location.origin,
 				data: { type: 'setUseCssScaling', value: !!settings.use_css_scaling },
 			});
+		}
+		if (settings.use_browser_cursors !== undefined) {
+			// Server-pushed (locked/overridden) value: applied to the input layer
+			// through the same re-derivation as the dashboard toggle, but never
+			// written to the user's key, where it would masquerade as their pick
+			// after an unlock. Only the setUseBrowserCursors message persists.
+			useBrowserCursors = !!settings.use_browser_cursors;
+			applyEffectiveCursorSetting();
 		}
 		if (settings.rate_control_mode !== undefined) {
 			rateControlMode = settings.rate_control_mode;
@@ -1430,8 +1452,10 @@ export default function webrtc() {
 		var previousAudioJitterBufferDelay = 0.0;
 		var previousAudioJitterBufferEmittedCount = 0;
 		var statsStart = new Date().getTime() / 1000;
-		if (statsLoopId !== null) return; // already running; non-racy gate
-		statWatchEnabled = true; // set synchronously before async work
+		// Non-racy gate: already running.
+		if (statsLoopId !== null) return;
+		// Set synchronously, before any async work.
+		statWatchEnabled = true;
 		let statsTickBusy = false;
 		statsLoopId = setInterval(async () => {
 			// Skip a tick whose predecessor still awaits getStats() (busy pc, GC
@@ -2045,7 +2069,8 @@ export default function webrtc() {
 				sendClientPersistedSettings();
 
 				// Send client-side metrics over data channel every 5 seconds
-				if (metricsLoopId !== null) clearInterval(metricsLoopId); // avoid duplicate on data channel reopen
+				// Avoid a duplicate loop when the data channel reopens.
+				if (metricsLoopId !== null) clearInterval(metricsLoopId);
 				metricsLoopId = setInterval(async () => {
 					if (connectionStat.connectionFrameRate === parseInt(connectionStat.connectionFrameRate, 10)) {
 						webrtc.sendDataChannelMessage(`_f,${connectionStat.connectionFrameRate}`);
@@ -2399,7 +2424,7 @@ export default function webrtc() {
 			}
 			clipboardWorker = null;
 
-			// temporary workaround to nullify/reset the variables
+			// Reset the session-scoped state so a later connect starts clean.
 			appName = null;
 			videoBitRate = 8000;
 			videoFramerate = 60;

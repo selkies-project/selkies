@@ -367,11 +367,17 @@ def x_key_watcher():
 
 
 def x_root_size():
+    """Current root dimensions, read on a fresh connection.
+
+    The size rides the connection handshake, so a new one is what picks up a
+    RandR resize; it is closed here because callers poll this in a loop.
+    """
     from selkies.Xlib import display as xdisp
     d = xdisp.Display(TEST_DISPLAY)
-    w = d.screen().width_in_pixels
-    h = d.screen().height_in_pixels
-    return w, h
+    try:
+        return d.screen().width_in_pixels, d.screen().height_in_pixels
+    finally:
+        d.close()
 
 
 # ------------- Wayland helpers -------------

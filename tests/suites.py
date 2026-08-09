@@ -36,6 +36,7 @@ SUITES = [
     {"path": "integration/test_switch_stress.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_webrtc_unix_socket.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_wayland_multi_output.py", "tier": "integration", "timeout": 600},
+    {"path": "integration/test_two_display_pixels.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_keymap_parity.py", "tier": "integration", "timeout": 300},
 
     # --- e2e --------------------------------------------------------------
@@ -50,6 +51,8 @@ SUITES = [
     {"path": "e2e/test_clipboard_large.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_cross_transition.py", "tier": "e2e", "timeout": 900},
+    {"path": "e2e/test_two_displays.py", "tier": "e2e", "timeout": 1200,
+     "selectors": ["websockets-x11", "webrtc-x11", "websockets-wl", "webrtc-wl"]},
     {"path": "e2e/test_gamepad_uinput.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_regressions.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["matrix", "switch", "clipboard", "pacer"]},

@@ -19,6 +19,8 @@ const simpleInterpolate = (str, variables) => {
 const en = {
     selkiesLogoAlt: "Selkies Logo",
     toggleThemeTitle: "Toggle Theme",
+    openDashboardTitle: "Open Dashboard",
+    closeDashboardTitle: "Close Dashboard",
     fullscreenTitle: "Enter Fullscreen",
     gamingModeTitle: "Gaming Mode",
     trackpadModeTitle: "Trackpad Mode",
@@ -168,7 +170,13 @@ const en = {
             citeNotice: "Cite our paper academically",
         },
         sharing: {
-            title: "Sharing"
+            title: "Sharing",
+            viewerLabel: "Read only viewer",
+            viewerTooltip: "Read only client for viewing, as many clients as needed can connect to this endpoint and see the live session",
+            controllerLabel: "Controller {n}",
+            controllerTooltip: "Player {n} gamepad input, this endpoint has full control over the player {n} gamepad",
+            openLinkTitle: "Open {label} link in new tab",
+            copyLinkTitle: "Copy {label} link",
         }
     },
     resolutionPresets: {
@@ -230,6 +238,8 @@ const en = {
 const es = {
     selkiesLogoAlt: "Logo de Selkies",
     toggleThemeTitle: "Cambiar Tema",
+    openDashboardTitle: "Abrir el panel",
+    closeDashboardTitle: "Cerrar el panel",
     fullscreenTitle: "Entrar en Pantalla Completa",
     gamingModeTitle: "Modo Juego",
     trackpadModeTitle: "Modo Trackpad",
@@ -379,7 +389,13 @@ const es = {
             citeNotice: "Cita nuestro artículo académicamente",
         },
         sharing: {
-            title: "Compartir"
+            title: "Compartir",
+            viewerLabel: "Visor de solo lectura",
+            viewerTooltip: "Cliente de solo lectura para ver; se pueden conectar tantos clientes como sean necesarios a este punto de acceso y ver la sesión en directo",
+            controllerLabel: "Mando {n}",
+            controllerTooltip: "Entrada del mando del jugador {n}; este punto de acceso tiene control total sobre el mando del jugador {n}",
+            openLinkTitle: "Abrir el enlace de {label} en una pestaña nueva",
+            copyLinkTitle: "Copiar el enlace de {label}",
         }
     },
     resolutionPresets: {
@@ -394,7 +410,7 @@ const es = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "Iniciar",
         closeAlt: "Cerrar modal de aplicaciones",
         loading: "Cargando aplicaciones...",
@@ -441,6 +457,8 @@ const es = {
 const zh = {
     selkiesLogoAlt: "Selkies 徽标",
     toggleThemeTitle: "切换主题",
+    openDashboardTitle: "打开仪表板",
+    closeDashboardTitle: "关闭仪表板",
     fullscreenTitle: "进入全屏",
     gamingModeTitle: "游戏模式",
     trackpadModeTitle: "触控板模式",
@@ -590,7 +608,13 @@ const zh = {
             citeNotice: "学术引用我们的论文",
         },
         sharing: {
-            title: "共享"
+            title: "共享",
+            viewerLabel: "只读观看端",
+            viewerTooltip: "仅供观看的只读客户端，任意数量的客户端都可以连接到此端点并观看实时会话",
+            controllerLabel: "手柄 {n}",
+            controllerTooltip: "玩家 {n} 的手柄输入，此端点对玩家 {n} 的手柄拥有完全控制权",
+            openLinkTitle: "在新标签页中打开 {label} 链接",
+            copyLinkTitle: "复制 {label} 链接",
         }
     },
     resolutionPresets: {
@@ -605,7 +629,7 @@ const zh = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "启动",
         closeAlt: "关闭应用程序模态框",
         loading: "正在加载应用程序...",
@@ -652,6 +676,8 @@ const zh = {
 const hi = {
     selkiesLogoAlt: "सेल्कीस लोगो",
     toggleThemeTitle: "थीम बदलें",
+    openDashboardTitle: "डैशबोर्ड खोलें",
+    closeDashboardTitle: "डैशबोर्ड बंद करें",
     fullscreenTitle: "फुलस्क्रीन दर्ज करें",
     gamingModeTitle: "गेमिंग मोड",
     trackpadModeTitle: "ट्रैकपैड मोड",
@@ -801,7 +827,13 @@ const hi = {
             citeNotice: "हमारे शोधपत्र को अकादमिक रूप से उद्धृत करें",
         },
         sharing: {
-            title: "साझा करना"
+            title: "साझा करना",
+            viewerLabel: "केवल-पढ़ने वाला व्यूअर",
+            viewerTooltip: "देखने के लिए केवल-पढ़ने वाला क्लाइंट, जितने चाहें उतने क्लाइंट इस एंडपॉइंट से जुड़कर लाइव सत्र देख सकते हैं",
+            controllerLabel: "कंट्रोलर {n}",
+            controllerTooltip: "प्लेयर {n} का गेमपैड इनपुट, इस एंडपॉइंट का प्लेयर {n} के गेमपैड पर पूरा नियंत्रण होता है",
+            openLinkTitle: "{label} लिंक नए टैब में खोलें",
+            copyLinkTitle: "{label} लिंक कॉपी करें",
         }
     },
     resolutionPresets: {
@@ -816,7 +848,7 @@ const hi = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "लॉन्च करें",
         closeAlt: "ऐप्स मोडल बंद करें",
         loading: "ऐप्स लोड हो रहे हैं...",
@@ -863,6 +895,8 @@ const hi = {
 const pt = {
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Alternar Tema",
+    openDashboardTitle: "Abrir o painel",
+    closeDashboardTitle: "Fechar o painel",
     fullscreenTitle: "Entrar em Tela Cheia",
     gamingModeTitle: "Modo de Jogo",
     trackpadModeTitle: "Modo Trackpad",
@@ -1012,7 +1046,13 @@ const pt = {
             citeNotice: "Cite nosso artigo academicamente",
         },
         sharing: {
-            title: "Compartilhamento"
+            title: "Compartilhamento",
+            viewerLabel: "Visualizador somente leitura",
+            viewerTooltip: "Cliente somente leitura para visualização; quantos clientes forem necessários podem se conectar a este endpoint e ver a sessão ao vivo",
+            controllerLabel: "Controle {n}",
+            controllerTooltip: "Entrada do gamepad do jogador {n}; este endpoint tem controle total sobre o gamepad do jogador {n}",
+            openLinkTitle: "Abrir o link de {label} em uma nova aba",
+            copyLinkTitle: "Copiar o link de {label}",
         }
     },
     resolutionPresets: {
@@ -1027,7 +1067,7 @@ const pt = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "Iniciar",
         closeAlt: "Fechar modal de aplicativos",
         loading: "Carregando aplicativos...",
@@ -1074,6 +1114,8 @@ const pt = {
 const fr = {
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Changer de thème",
+    openDashboardTitle: "Ouvrir le tableau de bord",
+    closeDashboardTitle: "Fermer le tableau de bord",
     fullscreenTitle: "Passer en plein écran",
     gamingModeTitle: "Mode Jeu",
     trackpadModeTitle: "Mode Trackpad",
@@ -1223,7 +1265,13 @@ const fr = {
             citeNotice: "Citez notre article académiquement",
         },
         sharing: {
-            title: "Partage"
+            title: "Partage",
+            viewerLabel: "Spectateur en lecture seule",
+            viewerTooltip: "Client en lecture seule pour le visionnage ; autant de clients que nécessaire peuvent se connecter à ce point d'accès et voir la session en direct",
+            controllerLabel: "Manette {n}",
+            controllerTooltip: "Entrée de la manette du joueur {n} ; ce point d'accès a le contrôle total de la manette du joueur {n}",
+            openLinkTitle: "Ouvrir le lien {label} dans un nouvel onglet",
+            copyLinkTitle: "Copier le lien {label}",
         }
     },
     resolutionPresets: {
@@ -1238,7 +1286,7 @@ const fr = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "Lancer",
         closeAlt: "Fermer la modale des applications",
         loading: "Chargement des applications...",
@@ -1273,7 +1321,8 @@ const fr = {
     alerts: {
         invalidResolution: "Veuillez entrer des entiers positifs valides pour la Largeur et la Hauteur.",
     },
-    byteUnits: ['Octets', 'Ko', 'Mo', 'Go', 'To', 'Po', 'Eo', 'Zo', 'Yo'], // French often uses 'o' for octet
+    // French commonly uses 'o' for octet instead of 'B' for byte.
+    byteUnits: ['Octets', 'Ko', 'Mo', 'Go', 'To', 'Po', 'Eo', 'Zo', 'Yo'],
     zeroBytes: "0 Octets",
     filesModal: {
         closeAlt: "Fermer la modale des fichiers",
@@ -1285,6 +1334,8 @@ const fr = {
 const ru = {
     selkiesLogoAlt: "Логотип Selkies",
     toggleThemeTitle: "Переключить тему",
+    openDashboardTitle: "Открыть панель",
+    closeDashboardTitle: "Закрыть панель",
     fullscreenTitle: "Войти в полноэкранный режим",
     gamingModeTitle: "Игровой режим",
     trackpadModeTitle: "Режим трекпада",
@@ -1434,7 +1485,13 @@ const ru = {
             citeNotice: "Цитируйте нашу статью в научных работах",
         },
         sharing: {
-            title: "Общий доступ"
+            title: "Общий доступ",
+            viewerLabel: "Зритель (только просмотр)",
+            viewerTooltip: "Клиент только для просмотра: к этой точке подключения может подсоединиться любое количество клиентов и наблюдать за сеансом в реальном времени",
+            controllerLabel: "Геймпад {n}",
+            controllerTooltip: "Ввод геймпада игрока {n}: эта точка подключения полностью управляет геймпадом игрока {n}",
+            openLinkTitle: "Открыть ссылку «{label}» в новой вкладке",
+            copyLinkTitle: "Копировать ссылку «{label}»",
         }
     },
     resolutionPresets: {
@@ -1449,7 +1506,7 @@ const ru = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "Запустить",
         closeAlt: "Закрыть модальное окно приложений",
         loading: "Загрузка приложений...",
@@ -1484,7 +1541,7 @@ const ru = {
     alerts: {
         invalidResolution: "Пожалуйста, введите действительные положительные целые числа для Ширины и Высоты.",
     },
-    byteUnits: ['Байты', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ', 'ЭБ', 'ЗБ', 'ЙБ'], // Russian uses Cyrillic abbreviations
+    byteUnits: ['Байты', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ', 'ЭБ', 'ЗБ', 'ЙБ'],
     zeroBytes: "0 Байт",
     filesModal: {
         closeAlt: "Закрыть модальное окно файлов",
@@ -1496,6 +1553,8 @@ const ru = {
 const de = {
     selkiesLogoAlt: "Selkies-Logo",
     toggleThemeTitle: "Theme wechseln",
+    openDashboardTitle: "Dashboard öffnen",
+    closeDashboardTitle: "Dashboard schließen",
     fullscreenTitle: "Vollbildmodus aktivieren",
     gamingModeTitle: "Gaming-Modus",
     trackpadModeTitle: "Trackpad-Modus",
@@ -1645,7 +1704,13 @@ const de = {
             citeNotice: "Zitieren Sie unser Paper wissenschaftlich",
         },
         sharing: {
-            title: "Teilen"
+            title: "Teilen",
+            viewerLabel: "Nur-Lesen-Betrachter",
+            viewerTooltip: "Client nur zum Zusehen; beliebig viele Clients können sich mit diesem Endpunkt verbinden und die laufende Sitzung sehen",
+            controllerLabel: "Controller {n}",
+            controllerTooltip: "Gamepad-Eingabe von Spieler {n}; dieser Endpunkt hat die volle Kontrolle über das Gamepad von Spieler {n}",
+            openLinkTitle: "Link „{label}“ in neuem Tab öffnen",
+            copyLinkTitle: "Link „{label}“ kopieren",
         }
     },
     resolutionPresets: {
@@ -1660,7 +1725,7 @@ const de = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "Starten",
         closeAlt: "Anwendungsmodal schließen",
         loading: "Anwendungen werden geladen...",
@@ -1707,6 +1772,8 @@ const de = {
 const tr = {
     selkiesLogoAlt: "Selkies Logosu",
     toggleThemeTitle: "Temayı Değiştir",
+    openDashboardTitle: "Paneli aç",
+    closeDashboardTitle: "Paneli kapat",
     fullscreenTitle: "Tam Ekrana Gir",
     gamingModeTitle: "Oyun Modu",
     trackpadModeTitle: "Dokunmatik Yüzey Modu",
@@ -1856,7 +1923,13 @@ const tr = {
             citeNotice: "Makalemize akademik atıfta bulunun",
         },
         sharing: {
-            title: "Paylaşım"
+            title: "Paylaşım",
+            viewerLabel: "Salt okunur izleyici",
+            viewerTooltip: "İzlemek için salt okunur istemci; bu uç noktaya istenildiği kadar istemci bağlanıp canlı oturumu görebilir",
+            controllerLabel: "Kumanda {n}",
+            controllerTooltip: "Oyuncu {n} oyun kumandası girişi; bu uç nokta oyuncu {n} kumandası üzerinde tam denetime sahiptir",
+            openLinkTitle: "{label} bağlantısını yeni sekmede aç",
+            copyLinkTitle: "{label} bağlantısını kopyala",
         }
     },
     resolutionPresets: {
@@ -1871,7 +1944,7 @@ const tr = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "Başlat",
         closeAlt: "Uygulama modalını kapat",
         loading: "Uygulamalar yükleniyor...",
@@ -1918,6 +1991,8 @@ const tr = {
 const it = {
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Cambia Tema",
+    openDashboardTitle: "Apri la dashboard",
+    closeDashboardTitle: "Chiudi la dashboard",
     fullscreenTitle: "Entra in Schermo Intero",
     gamingModeTitle: "Modalità Gioco",
     trackpadModeTitle: "Modalità Trackpad",
@@ -2067,7 +2142,13 @@ const it = {
             citeNotice: "Cita il nostro articolo accademicamente",
         },
         sharing: {
-            title: "Condivisione"
+            title: "Condivisione",
+            viewerLabel: "Spettatore in sola lettura",
+            viewerTooltip: "Client di sola lettura per la visione; a questo endpoint può connettersi un numero qualsiasi di client per vedere la sessione dal vivo",
+            controllerLabel: "Controller {n}",
+            controllerTooltip: "Input del gamepad del giocatore {n}; questo endpoint ha il controllo completo del gamepad del giocatore {n}",
+            openLinkTitle: "Apri il link {label} in una nuova scheda",
+            copyLinkTitle: "Copia il link {label}",
         }
     },
     resolutionPresets: {
@@ -2082,7 +2163,7 @@ const it = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "Avvia",
         closeAlt: "Chiudi modale applicazioni",
         loading: "Caricamento applicazioni...",
@@ -2129,6 +2210,8 @@ const it = {
 const nl = {
     selkiesLogoAlt: "Selkies-logo",
     toggleThemeTitle: "Thema wisselen",
+    openDashboardTitle: "Dashboard openen",
+    closeDashboardTitle: "Dashboard sluiten",
     fullscreenTitle: "Volledig scherm openen",
     gamingModeTitle: "Gaming Modus",
     trackpadModeTitle: "Trackpad-modus",
@@ -2278,7 +2361,13 @@ const nl = {
             citeNotice: "Citeer ons artikel academisch",
         },
         sharing: {
-            title: "Delen"
+            title: "Delen",
+            viewerLabel: "Alleen-lezen kijker",
+            viewerTooltip: "Alleen-lezen client om mee te kijken; zoveel clients als nodig kunnen verbinding maken met dit eindpunt en de live sessie zien",
+            controllerLabel: "Controller {n}",
+            controllerTooltip: "Gamepad-invoer van speler {n}; dit eindpunt heeft volledige controle over de gamepad van speler {n}",
+            openLinkTitle: "{label}-link in een nieuw tabblad openen",
+            copyLinkTitle: "{label}-link kopiëren",
         }
     },
     resolutionPresets: {
@@ -2293,7 +2382,7 @@ const nl = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "Starten",
         closeAlt: "Applicatiemodal sluiten",
         loading: "Applicaties laden...",
@@ -2340,6 +2429,8 @@ const nl = {
 const ar = {
     selkiesLogoAlt: "شعار Selkies",
     toggleThemeTitle: "تبديل السمة",
+    openDashboardTitle: "فتح لوحة التحكم",
+    closeDashboardTitle: "إغلاق لوحة التحكم",
     fullscreenTitle: "الدخول في وضع ملء الشاشة",
     gamingModeTitle: "وضع الألعاب",
     trackpadModeTitle: "وضع لوحة اللمس",
@@ -2475,7 +2566,7 @@ const ar = {
             physicalHiddenForTouch: "يتم إخفاء عرض لوحة الألعاب الفعلية أثناء تنشيط لوحة ألعاب اللمس.",
             noActivityMobileOrEnableTouch: "لا توجد لوحات ألعاب فعلية. قم بتمكين لوحة ألعاب اللمس أو قم بتوصيل وحدة تحكم."
         },
-        apps: { // New section for "Apps"
+        apps: {
           title: "التطبيقات",
           openButtonTitle: "إدارة التطبيقات",
           openButton: "إدارة التطبيقات"
@@ -2489,7 +2580,13 @@ const ar = {
             citeNotice: "استشهد بورقتنا البحثية أكاديميًا",
         },
         sharing: {
-            title: "المشاركة"
+            title: "المشاركة",
+            viewerLabel: "مُشاهد للقراءة فقط",
+            viewerTooltip: "عميل للقراءة فقط بغرض المشاهدة، ويمكن لأي عدد من العملاء الاتصال بنقطة النهاية هذه ومشاهدة الجلسة المباشرة",
+            controllerLabel: "وحدة التحكم {n}",
+            controllerTooltip: "إدخال ذراع تحكم اللاعب {n}، وتمتلك نقطة النهاية هذه تحكمًا كاملاً في ذراع تحكم اللاعب {n}",
+            openLinkTitle: "فتح رابط {label} في علامة تبويب جديدة",
+            copyLinkTitle: "نسخ رابط {label}",
         }
     },
     resolutionPresets: {
@@ -2504,7 +2601,7 @@ const ar = {
         "640x480": "640 × 480 (VGA 4:3)",
         "320x240": "320 × 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "تشغيل",
         closeAlt: "إغلاق نافذة التطبيقات",
         loading: "جارٍ تحميل التطبيقات...",
@@ -2551,6 +2648,8 @@ const ar = {
 const ko = {
     selkiesLogoAlt: "Selkies 로고",
     toggleThemeTitle: "테마 전환",
+    openDashboardTitle: "대시보드 열기",
+    closeDashboardTitle: "대시보드 닫기",
     fullscreenTitle: "전체 화면 시작",
     gamingModeTitle: "게임 모드",
     trackpadModeTitle: "트랙패드 모드",
@@ -2700,7 +2799,13 @@ const ko = {
             citeNotice: "논문을 학술적으로 인용하기",
         },
         sharing: {
-            title: "공유"
+            title: "공유",
+            viewerLabel: "읽기 전용 뷰어",
+            viewerTooltip: "보기 전용 클라이언트로, 필요한 만큼의 클라이언트가 이 엔드포인트에 연결해 실시간 세션을 볼 수 있습니다",
+            controllerLabel: "컨트롤러 {n}",
+            controllerTooltip: "플레이어 {n} 게임패드 입력이며, 이 엔드포인트는 플레이어 {n} 게임패드를 완전히 제어합니다",
+            openLinkTitle: "{label} 링크를 새 탭에서 열기",
+            copyLinkTitle: "{label} 링크 복사",
         }
     },
     resolutionPresets: {
@@ -2715,7 +2820,7 @@ const ko = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "실행",
         closeAlt: "앱 모달 닫기",
         loading: "앱 로드 중...",
@@ -2762,6 +2867,8 @@ const ko = {
 const ja = {
     selkiesLogoAlt: "Selkies ロゴ",
     toggleThemeTitle: "テーマを切り替え",
+    openDashboardTitle: "ダッシュボードを開く",
+    closeDashboardTitle: "ダッシュボードを閉じる",
     fullscreenTitle: "フルスクリーンに入る",
     gamingModeTitle: "ゲームモード",
     trackpadModeTitle: "トラックパッドモード",
@@ -2911,7 +3018,13 @@ const ja = {
             citeNotice: "論文の学術的引用はこちら",
         },
         sharing: {
-            title: "共有"
+            title: "共有",
+            viewerLabel: "閲覧専用ビューア",
+            viewerTooltip: "閲覧専用のクライアントです。必要な数だけクライアントがこのエンドポイントに接続してライブセッションを視聴できます",
+            controllerLabel: "コントローラー {n}",
+            controllerTooltip: "プレイヤー {n} のゲームパッド入力です。このエンドポイントはプレイヤー {n} のゲームパッドを完全に制御します",
+            openLinkTitle: "{label} のリンクを新しいタブで開く",
+            copyLinkTitle: "{label} のリンクをコピー",
         }
     },
     resolutionPresets: {
@@ -2926,7 +3039,7 @@ const ja = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "起動",
         closeAlt: "アプリモーダルを閉じる",
         loading: "アプリを読み込み中...",
@@ -2973,6 +3086,8 @@ const ja = {
 const vi = {
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Chuyển đổi Chủ đề",
+    openDashboardTitle: "Mở bảng điều khiển",
+    closeDashboardTitle: "Đóng bảng điều khiển",
     fullscreenTitle: "Vào Toàn màn hình",
     gamingModeTitle: "Chế độ Chơi game",
     trackpadModeTitle: "Chế độ Bàn di chuột",
@@ -3122,7 +3237,13 @@ const vi = {
             citeNotice: "Trích dẫn học thuật bài báo của chúng tôi",
         },
         sharing: {
-            title: "Chia sẻ"
+            title: "Chia sẻ",
+            viewerLabel: "Người xem chỉ đọc",
+            viewerTooltip: "Ứng dụng khách chỉ xem; bao nhiêu máy khách cũng có thể kết nối tới điểm cuối này và xem phiên trực tiếp",
+            controllerLabel: "Tay cầm {n}",
+            controllerTooltip: "Đầu vào tay cầm của người chơi {n}; điểm cuối này toàn quyền điều khiển tay cầm của người chơi {n}",
+            openLinkTitle: "Mở liên kết {label} trong tab mới",
+            copyLinkTitle: "Sao chép liên kết {label}",
         }
     },
     resolutionPresets: {
@@ -3137,7 +3258,7 @@ const vi = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "Khởi chạy",
         closeAlt: "Đóng modal ứng dụng",
         loading: "Đang tải ứng dụng...",
@@ -3184,6 +3305,8 @@ const vi = {
 const th = {
     selkiesLogoAlt: "โลโก้ Selkies",
     toggleThemeTitle: "สลับธีม",
+    openDashboardTitle: "เปิดแดชบอร์ด",
+    closeDashboardTitle: "ปิดแดชบอร์ด",
     fullscreenTitle: "เข้าสู่โหมดเต็มหน้าจอ",
     gamingModeTitle: "โหมดเกมมิ่ง",
     trackpadModeTitle: "โหมดแทร็คแพด",
@@ -3333,7 +3456,13 @@ const th = {
             citeNotice: "อ้างอิงบทความของเราเชิงวิชาการ",
         },
         sharing: {
-            title: "การแชร์"
+            title: "การแชร์",
+            viewerLabel: "ผู้ชมแบบอ่านอย่างเดียว",
+            viewerTooltip: "ไคลเอ็นต์แบบอ่านอย่างเดียวสำหรับการรับชม ไคลเอ็นต์จำนวนเท่าใดก็ได้สามารถเชื่อมต่อกับปลายทางนี้และดูเซสชันสดได้",
+            controllerLabel: "คอนโทรลเลอร์ {n}",
+            controllerTooltip: "อินพุตเกมแพดของผู้เล่น {n} ปลายทางนี้ควบคุมเกมแพดของผู้เล่น {n} ได้อย่างสมบูรณ์",
+            openLinkTitle: "เปิดลิงก์ {label} ในแท็บใหม่",
+            copyLinkTitle: "คัดลอกลิงก์ {label}",
         }
     },
     resolutionPresets: {
@@ -3348,7 +3477,7 @@ const th = {
         "640x480": "640 x 480 (VGA 4:3)",
         "320x240": "320 x 240 (QVGA 4:3)",
     },
-    appsModal: { // New section for "AppsModal"
+    appsModal: {
         launchButton: "เปิด",
         closeAlt: "ปิดหน้าต่างแอป",
         loading: "กำลังโหลดแอป...",
@@ -3395,6 +3524,8 @@ const th = {
 const fil = {
     selkiesLogoAlt: "Logo ng Selkies",
     toggleThemeTitle: "I-toggle ang Tema",
+    openDashboardTitle: "Buksan ang dashboard",
+    closeDashboardTitle: "Isara ang dashboard",
     fullscreenTitle: "Pumasok sa Fullscreen",
     gamingModeTitle: "Modo ng Paglalaro",
     trackpadModeTitle: "Modo ng Trackpad",
@@ -3544,7 +3675,13 @@ const fil = {
             citeNotice: "Banggitin ang aming papel nang akademiko",
         },
         sharing: {
-            title: "Pagbabahagi"
+            title: "Pagbabahagi",
+            viewerLabel: "Read-only na manonood",
+            viewerTooltip: "Read-only na kliyente para sa panonood; kasindami ng kliyenteng kailangan ang puwedeng kumonekta sa endpoint na ito at makita ang live na sesyon",
+            controllerLabel: "Controller {n}",
+            controllerTooltip: "Input ng gamepad ng player {n}; buong kontrol ng endpoint na ito ang gamepad ng player {n}",
+            openLinkTitle: "Buksan ang link ng {label} sa bagong tab",
+            copyLinkTitle: "Kopyahin ang link ng {label}",
         }
     },
     resolutionPresets: {
@@ -3606,6 +3743,8 @@ const fil = {
 const da = {
     selkiesLogoAlt: "Selkies-logo",
     toggleThemeTitle: "Skift tema",
+    openDashboardTitle: "Åbn dashboardet",
+    closeDashboardTitle: "Luk dashboardet",
     fullscreenTitle: "Start Fuldskærm",
     gamingModeTitle: "Spiltilstand",
     trackpadModeTitle: "Trackpad-tilstand",
@@ -3755,7 +3894,13 @@ const da = {
             citeNotice: "Citér vores artikel akademisk",
         },
         sharing: {
-            title: "Deling"
+            title: "Deling",
+            viewerLabel: "Skrivebeskyttet fremviser",
+            viewerTooltip: "Skrivebeskyttet klient til visning; så mange klienter som nødvendigt kan oprette forbindelse til dette endepunkt og se den aktive session",
+            controllerLabel: "Controller {n}",
+            controllerTooltip: "Gamepad-input for spiller {n}; dette endepunkt har fuld kontrol over spiller {n}'s gamepad",
+            openLinkTitle: "Åbn {label}-linket i en ny fane",
+            copyLinkTitle: "Kopiér {label}-linket",
         }
     },
     resolutionPresets: {
@@ -3838,7 +3983,8 @@ const translations = {
 // Function to get translations based on language code
 // Falls back to 'en' if the language or specific key is missing
 export const getTranslator = (langCode = 'en') => {
-    const baseLang = langCode.split('-')[0].toLowerCase(); // Get 'en' from 'en-US'
+    // Reduce a full tag to its base language, so 'en-US' resolves to 'en'.
+    const baseLang = langCode.split('-')[0].toLowerCase();
     // Use the specific language dictionary if available, otherwise default to English
     const langDict = translations[baseLang] || translations.en;
     // Always use English as the ultimate fallback if a key is missing even in the selected language
@@ -3853,14 +3999,14 @@ export const getTranslator = (langCode = 'en') => {
         const keys = key.split('.');
         let text = langDict;
         let fallbackText = fallbackDict;
-        let keyFoundInLang = true; // Check if found in the selected language
+        let keyFoundInLang = true;
 
         // Traverse the nested objects for the selected language
         for (const k of keys) {
             if (text && typeof text === 'object' && Object.prototype.hasOwnProperty.call(text, k)) {
                 text = text[k];
             } else {
-                text = null; // Key not found in selected language
+                text = null;
                 keyFoundInLang = false;
                 break;
             }
@@ -3873,7 +4019,7 @@ export const getTranslator = (langCode = 'en') => {
                 if (fallbackText && typeof fallbackText === 'object' && Object.prototype.hasOwnProperty.call(fallbackText, k)) {
                     fallbackText = fallbackText[k];
                 } else {
-                    fallbackText = null; // Key also not found in fallback
+                    fallbackText = null;
                     keyFoundInFallback = false;
                     break;
                 }

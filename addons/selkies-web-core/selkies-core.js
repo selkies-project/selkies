@@ -54,10 +54,11 @@ const safeSetItem = (key, value) => {
         if (staleKeys.length) {
             console.log(`Selkies: removed ${staleKeys.length} stale token-scoped localStorage keys.`);
         }
-        // No-op when the buggy regex produced the same prefix (nothing to migrate).
+        // Nothing to migrate when both prefixes resolve to the same string.
         if (oldAppName === storageAppName) return;
         const migratedFlagKey = `${storageAppName}_storage_key_migrated`;
-        if (localStorage.getItem(migratedFlagKey) !== null) return; // already migrated
+        // Already migrated.
+        if (localStorage.getItem(migratedFlagKey) !== null) return;
 
         const oldPrefix = `${oldAppName}_`;
         const newPrefix = `${storageAppName}_`;

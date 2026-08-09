@@ -49,7 +49,8 @@ def inflate_gz_bounded(payload):
     Raises ValueError for a payload that inflates past the cap, is truncated,
     or does not decode as UTF-8.
     """
-    d = zlib.decompressobj(wbits=31)  # gzip container
+    # wbits=31 selects the gzip container.
+    d = zlib.decompressobj(wbits=31)
     inflated = d.decompress(payload, WS_MAX_MESSAGE_BYTES + 1)
     if len(inflated) > WS_MAX_MESSAGE_BYTES:
         raise ValueError(
@@ -1130,8 +1131,7 @@ class AppSettings:
                             # a single in-range value that happens to equal a curated
                             # stop must still keep the full menu (the whole point of
                             # value_range is that the server accepts more than the UI
-                            # shows). Excluding on-stop values collapsed the dropdown
-                            # to that one option.
+                            # shows).
                             if stype == "enum" and vr and len(user_items) == 1:
                                 try:
                                     n = float(user_items[0])
@@ -1145,7 +1145,8 @@ class AppSettings:
                                 except ValueError:
                                     pass
                             if in_range_value is not None:
-                                processed_value = in_range_value  # allowed stays the curated stops
+                                # `allowed` stays the curated stops.
+                                processed_value = in_range_value
                             elif valid_items:
                                 setting["meta"]["allowed"] = valid_items
                                 processed_value = valid_items[0] if stype == "enum" else valid_items
@@ -1344,10 +1345,42 @@ settings = AppSettings(SETTING_DEFINITIONS)
 # Server-local listener, filesystem and hook settings: a browser has no use for
 # them and they disclose host layout.
 CLIENT_PAYLOAD_EXCLUDED = [
-    'port', 'addr', 'unix_socket', 'web_root', 'encode_dri', 'debug',
+    'port', 'addr', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',
     'audio_device_name', 'watermark_path', 'recording_socket',
     'file_manager_path', 'run_after_connect', 'run_after_disconnect',
+    'https_cert', 'rtc_config_json', 'app_ready_file', 'js_socket_path',
+    'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind',
+    'wayland_host_display', 'app_wayland_display',
 ]
+
+
+def _published_enum_allowed(setting_def, value):
+    """The `allowed` list a client is told about for an enum, with the server's
+    resolved value merged in when it sits off the curated stops.
+
+    A numeric enum declaring meta.value_range accepts admin values the UI menu
+    does not list (SELKIES_AUDIO_BITRATE=6000 against stops starting at 32000).
+    Publishing the applied value as a stop keeps every dashboard's control on the
+    value the server is actually running, instead of falling back to the first
+    entry because the applied one is absent. Numeric lists stay sorted so slider
+    stops keep ascending."""
+    allowed = setting_def.get('meta', {}).get('allowed', [])
+    value_str = str(value)
+    if not allowed or value_str in allowed:
+        return allowed
+    vr = setting_def.get('meta', {}).get('value_range')
+    if not vr:
+        return allowed
+    try:
+        numeric = float(value_str)
+        numbers = [float(item) for item in allowed]
+    except (TypeError, ValueError):
+        return allowed
+    if not (vr[0] <= numeric <= vr[1]):
+        return allowed
+    merged = allowed + [value_str]
+    numbers.append(numeric)
+    return [item for _, item in sorted(zip(numbers, merged), key=lambda pair: pair[0])]
 
 
 def build_client_settings_payload():
@@ -1376,7 +1409,11 @@ def build_client_settings_payload():
                 payload_entry['default'] = setting_def['meta']['default_value']
         elif setting_def['type'] in ('enum', 'list'):
             if 'meta' in setting_def and 'allowed' in setting_def['meta']:
-                payload_entry['allowed'] = setting_def['meta']['allowed']
+                payload_entry['allowed'] = (
+                    _published_enum_allowed(setting_def, value)
+                    if setting_def['type'] == 'enum'
+                    else setting_def['meta']['allowed']
+                )
         out[name] = payload_entry
     # Booleans the client gates its clipboard UI/handlers on, derived from
     # the single enable_clipboard policy string.
@@ -1421,7 +1458,8 @@ def sanitize_client_setting(name, client_value, source, log):
             return min_val if min_val == max_val else setting_def.get('meta', {}).get('default_value')
         elif setting_def['type'] == 'bool':
             return server_limit[0]
-        else:  # enum, list, str, int
+        else:
+            # enum, list, str and int all resolve to the server value as-is.
             return server_limit
     try:
         if setting_def['type'] == 'range':
@@ -1440,7 +1478,15 @@ def sanitize_client_setting(name, client_value, source, log):
             if str(client_value) in allowed_values:
                 # Normalize to str so later equality checks don't flip on str-vs-int.
                 return str(client_value)
-            server_default = allowed_values[0] if allowed_values else setting_def['default']
+            # The server's own resolved value (an admin override, or the built-in
+            # default) is the fallback: the first entry of `allowed` is merely one end
+            # of the curated stops, so echoing a stale stored value must not land the
+            # client on the cheapest or slowest option in the menu. That value is
+            # published as a stop of its own (_published_enum_allowed), so a client
+            # echoing it back is agreeing with the server, not proposing anything.
+            server_default = str(server_limit) if server_limit else str(setting_def['default'])
+            if str(client_value) == server_default:
+                return server_default
             log.warning(
                 f"Client value for '{name}' ('{client_value}') is not in the allowed list {allowed_values}. Using server default '{server_default}'."
             )

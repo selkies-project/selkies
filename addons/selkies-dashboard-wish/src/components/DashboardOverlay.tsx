@@ -72,8 +72,8 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
 
   // Pipeline toggles post the request and let the core's status echoes
   // (pipelineStatusUpdate / sidebarButtonStatusUpdate) flip the state, so the
-  // menu never claims a change the active transport didn't perform (WebRTC
-  // ignores video/audio pipelineControl).
+  // menu never claims a change the active transport didn't perform: whichever
+  // core applies the change is the one that echoes it back.
   const handleVideoToggle = () => {
     window.postMessage({ type: 'pipelineControl', pipeline: 'video', enabled: !isVideoActive }, window.location.origin);
   };

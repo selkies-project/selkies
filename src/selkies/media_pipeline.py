@@ -272,8 +272,9 @@ class MediaPipelinePixel(MediaPipeline):
         if self.use_cpu == use_cpu:
             return
         self.use_cpu = use_cpu
+        # With no capture running the value applies at the next start_screen_capture().
         if not self._is_screen_capturing or self.capture_module is None:
-            return  # applied on the next start_screen_capture()
+            return
         logger.info(f"use_cpu -> {use_cpu}; restarting screen capture")
         await self.restart_screen_capture()
 

@@ -151,11 +151,16 @@ class _WaylandKeymapOwner:
             raise RuntimeError("empty compositor keymap")
         self._input = wayland_input
         self._base_text = base_keymap_text
-        self._map = {}            # keysym -> (keycode, level)
-        self._overlay = {}        # keysym -> overlay keycode
-        self._overlay_order = []  # round-robin recycle order
-        self._pressed = {}        # keysym -> (keycode, modifier keycodes)
-        self._mod_refs = {}       # modifier keycode -> holders
+        # _map: keysym -> (keycode, level)
+        # _overlay: keysym -> overlay keycode
+        # _overlay_order: round-robin recycle order
+        # _pressed: keysym -> (keycode, modifier keycodes)
+        # _mod_refs: modifier keycode -> holders
+        self._map = {}
+        self._overlay = {}
+        self._overlay_order = []
+        self._pressed = {}
+        self._mod_refs = {}
         self._build_map()
 
     def _build_map(self):
@@ -163,8 +168,9 @@ class _WaylandKeymapOwner:
         if not ctx:
             raise RuntimeError("xkb_context_new failed")
         try:
+            # Trailing arguments are TEXT_V1 and NO_FLAGS.
             km = libxkb.xkb_keymap_new_from_string(
-                ctx, self._base_text.encode(), 1, 0)  # TEXT_V1, NO_FLAGS
+                ctx, self._base_text.encode(), 1, 0)
             if not km:
                 raise RuntimeError("keymap compile failed")
             try:
@@ -497,7 +503,8 @@ class _X11ClipboardMonitor:
         self._pending_target = None
         self._reply = None
         self._reply_done = threading.Event()
-        self._read_lock = threading.Lock()  # one in-flight conversion at a time
+        # One in-flight conversion at a time.
+        self._read_lock = threading.Lock()
         # Owned-selection payload, staged by offer() and served by the event thread.
         self._own_data = None
         self._own_mime_atom = None
@@ -847,10 +854,13 @@ class _XTestKeyboard:
         # Dynamic-overlay state (lazy): spare keycodes, keysym->keycode bindings,
         # and the keycode used at PRESS so release replays it (never re-resolves,
         # matching neko's XKeyEntryGet — the layout may shift mid-keystroke).
+        # _overlay: keysym -> keycode
+        # _overlay_order: round-robin recycle order
+        # _pressed_kc: keysym -> keycode injected at press
         self._spare_keycodes = None
-        self._overlay = {}          # keysym -> keycode
-        self._overlay_order = []    # round-robin recycle order
-        self._pressed_kc = {}       # keysym -> keycode injected at press
+        self._overlay = {}
+        self._overlay_order = []
+        self._pressed_kc = {}
 
     def _find_spare_keycodes(self):
         """Every keycode whose every level is NoSymbol — free to repurpose. The
@@ -1051,7 +1061,8 @@ class _XTestKeyboard:
         if synth:
             self._synth_mods[keysym] = synth
         xtest.fake_input(self._d, Xlib.X.KeyPress, kc)
-        self._pressed_kc[keysym] = kc  # replay this exact keycode on release
+        # Replay this exact keycode on release.
+        self._pressed_kc[keysym] = kc
         self._d.flush()
 
     def release(self, keysym):
@@ -1086,9 +1097,8 @@ class _XTestMouse:
 
     def scroll(self, dx, dy):
         d = self._d
-        # X core pointer scroll buttons: 4=up, 5=down, 6=left, 7=right. Sign
-        # convention matches the callers (positive dy = up, positive dx = right),
-        # so the end-to-end wheel direction is unchanged from the prior Controller.
+        # X core pointer scroll buttons: 4=up, 5=down, 6=left, 7=right. The sign
+        # convention is the callers': positive dy scrolls up, positive dx right.
         def _clicks(btn, n):
             for _ in range(int(abs(n))):
                 xtest.fake_input(d, Xlib.X.ButtonPress, btn)
@@ -1159,28 +1169,36 @@ BTN_SIDE = 0x113
 BTN_EXTRA = 0x114
 
 # Gamepad Button Codes
-BTN_A = 0x130       # Or BTN_SOUTH
-BTN_B = 0x131       # Or BTN_EAST
-BTN_C = 0x132       # Typically BTN_C in evdev, for matching XBox360 bitmask
-BTN_X = 0x133       # Or BTN_NORTH
-BTN_Y = 0x134       # Or BTN_WEST
-BTN_Z = 0x135       # Typically BTN_Z in evdev, for matching XBox360 bitmask
-BTN_TL = 0x136      # Left Bumper
-BTN_TR = 0x137      # Right Bumper
-BTN_SELECT = 0x13a  # Back button
-BTN_START = 0x13b   # Start button
-BTN_MODE = 0x13c    # Xbox/Guide button
-BTN_THUMBL = 0x13d  # Left Thumbstick click
-BTN_THUMBR = 0x13e  # Right Thumbstick click
+# BTN_A/BTN_B/BTN_X/BTN_Y are also known as BTN_SOUTH/BTN_EAST/BTN_NORTH/BTN_WEST.
+# BTN_C and BTN_Z are typically named that way in evdev and are kept here for
+# matching the XBox360 bitmask.
+BTN_A = 0x130
+BTN_B = 0x131
+BTN_C = 0x132
+BTN_X = 0x133
+BTN_Y = 0x134
+BTN_Z = 0x135
+# Left and right bumpers.
+BTN_TL = 0x136
+BTN_TR = 0x137
+# Back, Start and Xbox/Guide buttons.
+BTN_SELECT = 0x13a
+BTN_START = 0x13b
+BTN_MODE = 0x13c
+# Left and right thumbstick clicks.
+BTN_THUMBL = 0x13d
+BTN_THUMBR = 0x13e
 
 
 # Absolute Axis Codes
 ABS_X = 0x00
 ABS_Y = 0x01
-ABS_Z = 0x02      # Often Left Trigger
+# Often Left Trigger.
+ABS_Z = 0x02
 ABS_RX = 0x03
 ABS_RY = 0x04
-ABS_RZ = 0x05     # Often Right Trigger
+# Often Right Trigger.
+ABS_RZ = 0x05
 ABS_HAT0X = 0x10
 ABS_HAT0Y = 0x11
 
@@ -1201,9 +1219,9 @@ C_INTERPOSER_STRUCT_SIZE = 1360
 CLIPBOARD_CHUNK_SIZE = ((WS_MAX_MESSAGE_BYTES - 4096) * 3) // 4 
 
 # For mouse input to send fake back and forward events
-KEYSYM_ALT_L = 0xFFE9     # Left Alt keysym
-KEYSYM_LEFT_ARROW = 0xFF51 # Left Arrow keysym
-KEYSYM_RIGHT_ARROW = 0xFF53# Right Arrow keysym
+KEYSYM_ALT_L = 0xFFE9
+KEYSYM_LEFT_ARROW = 0xFF51
+KEYSYM_RIGHT_ARROW = 0xFF53
 
 # Import keysyms
 try:
@@ -1216,33 +1234,38 @@ except ImportError:
     )
     X11_KEYSYM_MAP = {}
 
+# Cyrillic (ЙЦУКЕН) keysyms mapped to the QWERTY keysym sitting at the same
+# physical key, row by row:
+#   Й Ц У К Е Н Г Ш Щ З -> q w e r t y u i o p
+#   Ф Ы В А П Р О Л Д -> a s d f g h j k l
+#   Я Ч С М И Т Ь -> z x c v b n m
 CYRILLIC_TO_QWERTY_KEYSYM = {
-    0x06CA: 0x0071, # Й -> q
-    0x06C3: 0x0077, # Ц -> w
-    0x06D5: 0x0065, # У -> e
-    0x06CB: 0x0072, # К -> r
-    0x06C5: 0x0074, # Е -> t
-    0x06CE: 0x0079, # Н -> y
-    0x06C7: 0x0075, # Г -> u
-    0x06DB: 0x0069, # Ш -> i
-    0x06DD: 0x006F, # Щ -> o
-    0x06DA: 0x0070, # З -> p
-    0x06C6: 0x0061, # Ф -> a
-    0x06D9: 0x0073, # Ы -> s
-    0x06D7: 0x0064, # В -> d
-    0x06C1: 0x0066, # А -> f
-    0x06D0: 0x0067, # П -> g
-    0x06D2: 0x0068, # Р -> h
-    0x06CF: 0x006A, # О -> j
-    0x06CC: 0x006B, # Л -> k
-    0x06C4: 0x006C, # Д -> l
-    0x06D1: 0x007A, # Я -> z
-    0x06DE: 0x0078, # Ч -> x
-    0x06D3: 0x0063, # С -> c
-    0x06CD: 0x0076, # М -> v
-    0x06C9: 0x0062, # И -> b
-    0x06D4: 0x006E, # Т -> n
-    0x06D8: 0x006D, # Ь -> m
+    0x06CA: 0x0071,
+    0x06C3: 0x0077,
+    0x06D5: 0x0065,
+    0x06CB: 0x0072,
+    0x06C5: 0x0074,
+    0x06CE: 0x0079,
+    0x06C7: 0x0075,
+    0x06DB: 0x0069,
+    0x06DD: 0x006F,
+    0x06DA: 0x0070,
+    0x06C6: 0x0061,
+    0x06D9: 0x0073,
+    0x06D7: 0x0064,
+    0x06C1: 0x0066,
+    0x06D0: 0x0067,
+    0x06D2: 0x0068,
+    0x06CF: 0x006A,
+    0x06CC: 0x006B,
+    0x06C4: 0x006C,
+    0x06D1: 0x007A,
+    0x06DE: 0x0078,
+    0x06D3: 0x0063,
+    0x06CD: 0x0076,
+    0x06C9: 0x0062,
+    0x06D4: 0x006E,
+    0x06D8: 0x006D,
 }
 
 class JsConfigCtypes(ctypes.Structure):
@@ -1265,8 +1288,10 @@ logging.info(f"Expected C js_config_t size (from ctypes): {EXPECTED_C_STRUCT_SIZ
 
 ABS_MIN_VAL = -32767
 ABS_MAX_VAL = 32767
-ABS_TRIGGER_MIN_VAL = 0 # Triggers often 0-255 or 0-1023 for EVDEV
-ABS_TRIGGER_MAX_VAL = 255 # Or 1023, or ABS_MAX_VAL depending on driver expectation
+# EVDEV triggers are often 0-255 or 0-1023; the maximum may also be ABS_MAX_VAL
+# depending on what the driver expects.
+ABS_TRIGGER_MIN_VAL = 0
+ABS_TRIGGER_MAX_VAL = 255
 ABS_HAT_MIN_VAL = -1
 ABS_HAT_MAX_VAL = 1
 
@@ -1276,66 +1301,77 @@ STANDARD_XPAD_CONFIG = {
     "product_id": 0x028e,
     "version": 0x0114,
 
-    # EVDEV codes. The order here defines our internal abstract button indices.
+    # EVDEV codes. The order here defines our internal abstract button indices:
+    # 0 A, 1 B, 2 X, 3 Y, 4 Left Bumper, 5 Right Bumper, 6 Back, 7 Start,
+    # 8 Xbox Guide, 9 Left Stick Click, 10 Right Stick Click.
     "btn_map": [
-        BTN_A,      # Internal abstract button 0
-        BTN_B,      # Internal abstract button 1
-        BTN_X,      # Internal abstract button 2
-        BTN_Y,      # Internal abstract button 3
-        BTN_TL,     # Internal abstract button 4 (Left Bumper)
-        BTN_TR,     # Internal abstract button 5 (Right Bumper)
-        BTN_SELECT, # Internal abstract button 6 (Back)
-        BTN_START,  # Internal abstract button 7 (Start)
-        BTN_MODE,   # Internal abstract button 8 (Xbox Guide)
-        BTN_THUMBL, # Internal abstract button 9 (Left Stick Click)
-        BTN_THUMBR, # Internal abstract button 10 (Right Stick Click)
+        BTN_A,
+        BTN_B,
+        BTN_X,
+        BTN_Y,
+        BTN_TL,
+        BTN_TR,
+        BTN_SELECT,
+        BTN_START,
+        BTN_MODE,
+        BTN_THUMBL,
+        BTN_THUMBR,
     ],
 
-    # EVDEV codes for axes. The order defines internal abstract axis indices.
+    # EVDEV codes for axes. The order defines internal abstract axis indices:
+    # 0 Left Stick X, 1 Left Stick Y, 2 Left Trigger, 3 Right Stick X,
+    # 4 Right Stick Y, 5 Right Trigger, 6 D-Pad X, 7 D-Pad Y.
     "axes_map": [
-        ABS_X,     # Internal abstract axis 0 (Left Stick X)
-        ABS_Y,     # Internal abstract axis 1 (Left Stick Y)
-        ABS_Z,     # Internal abstract axis 2 (Left Trigger)
-        ABS_RX,    # Internal abstract axis 3 (Right Stick X)
-        ABS_RY,    # Internal abstract axis 4 (Right Stick Y)
-        ABS_RZ,    # Internal abstract axis 5 (Right Trigger)
-        ABS_HAT0X, # Internal abstract axis 6 (D-Pad X)
-        ABS_HAT0Y  # Internal abstract axis 7 (D-Pad Y)
+        ABS_X,
+        ABS_Y,
+        ABS_Z,
+        ABS_RX,
+        ABS_RY,
+        ABS_RZ,
+        ABS_HAT0X,
+        ABS_HAT0Y
     ],
 
     "mapping": {
-        # Maps client button numbers to our internal abstract button *indices*.
-        "btns": { # client_btn_idx -> internal_abstract_btn_idx
-            0: 0,  # Client A -> internal index 0 (BTN_A)
-            1: 1,  # Client B -> internal index 1 (BTN_B)
-            2: 2,  # Client X -> internal index 2 (BTN_X)
-            3: 3,  # Client Y -> internal index 3 (BTN_Y)
-            4: 4,  # Client LB -> internal index 4 (BTN_TL)
-            5: 5,  # Client RB -> internal index 5 (BTN_TR)
-            8: 6,  # Client Select/Back -> internal index 6 (BTN_SELECT)
-            9: 7,  # Client Start -> internal index 7 (BTN_START)
-            10: 9, # Client Left Stick Press -> internal index 9 (BTN_THUMBL)
-            11: 10,# Client Right Stick Press -> internal index 10 (BTN_THUMBR)
-            16: 8, # Client Xbox/Home -> internal index 8 (BTN_MODE)
+        # Maps client button numbers to our internal abstract button *indices*
+        # (client_btn_idx -> internal_abstract_btn_idx). Client A, B, X, Y, LB and
+        # RB are 0-5; Select/Back is 8, Start 9, Left Stick Press 10, Right Stick
+        # Press 11 and Xbox/Home 16.
+        "btns": {
+            0: 0,
+            1: 1,
+            2: 2,
+            3: 3,
+            4: 4,
+            5: 5,
+            8: 6,
+            9: 7,
+            10: 9,
+            11: 10,
+            16: 8,
         },
-        "axes": { # client_axis_idx -> internal_abstract_axis_idx
-            0: 0, # Client Left Stick X  -> internal index 0 (ABS_X)
-            1: 1, # Client Left Stick Y  -> internal index 1 (ABS_Y)
-            2: 3, # Client Right Stick X -> internal index 3 (ABS_RX)
-            3: 4, # Client Right Stick Y -> internal index 4 (ABS_RY)
+        # client_axis_idx -> internal_abstract_axis_idx. Client Left Stick X and Y
+        # are 0 and 1; Right Stick X and Y are 2 and 3.
+        "axes": {
+            0: 0,
+            1: 1,
+            2: 3,
+            3: 4,
         },
-        # Client buttons that map to an internal abstract axis
+        # Client buttons that map to an internal abstract axis: client button 6 is
+        # LT (internal axis 2, ABS_Z) and 7 is RT (internal axis 5, ABS_RZ).
         "client_btns_to_internal_axes": {
-            6: 2, # Client Btn 6 (LT) -> internal axis 2 (ABS_Z)
-            7: 5, # Client Btn 7 (RT) -> internal axis 5 (ABS_RZ)
+            6: 2,
+            7: 5,
         },
         # Client DPad buttons map to internal abstract HAT axes
         "dpad_to_hat": {
             # client_btn_idx -> (internal_abstract_axis_idx_for_HAT, hat_direction_value)
-            12: (7, -1), # Up    -> internal axis 7 (ABS_HAT0Y), value -1
-            13: (7, 1),  # Down  -> internal axis 7 (ABS_HAT0Y), value 1
-            14: (6, -1), # Left  -> internal axis 6 (ABS_HAT0X), value -1
-            15: (6, 1),  # Right -> internal axis 6 (ABS_HAT0X), value 1
+            # Client buttons 12-15 are Up, Down, Left and Right.
+            12: (7, -1),
+            13: (7, 1),
+            14: (6, -1),
+            15: (6, 1),
         },
         "trigger_internal_abstract_axis_indices": [2, 5],
         "hat_internal_abstract_axis_indices": [6, 7],
@@ -1348,7 +1384,8 @@ def get_js_event_packed(ev_type, number, value):
     # struct js_event { __u32 time; __s16 value; __u8 type; __u8 number; };
     # `type` is __u8, so pack it as 'B' — 'b' (signed) raises struct.error the
     # moment the 0x80 JS_EVENT_INIT flag is OR'd into the type (value >= 128).
-    ts_ms = int(time.time() * 1000) & 0xFFFFFFFF # Ensure it fits in u32
+    # Mask so the millisecond timestamp fits in u32.
+    ts_ms = int(time.time() * 1000) & 0xFFFFFFFF
     return struct.pack("=IhBB", ts_ms, int(value), ev_type, number)
 
 def get_evdev_events_packed(ev_type, ev_code, ev_value, client_arch_bits):
@@ -1362,12 +1399,15 @@ def get_evdev_events_packed(ev_type, ev_code, ev_value, client_arch_bits):
     ts_sec = int(now)
     ts_usec = int((now - ts_sec) * 1_000_000)
 
-    if client_arch_bits == 64: # Assuming 'long' is 8 bytes for timeval members on 64-bit client
-        timeval_fmt = "qq" # tv_sec (long long), tv_usec (long long)
-    else: # Assuming 'long' is 4 bytes for timeval members on 32-bit client
-        timeval_fmt = "ll" # tv_sec (long), tv_usec (long)
+    # Assume 'long' is 8 bytes for timeval members on a 64-bit client, so tv_sec and
+    # tv_usec are long long, and 4 bytes (plain long) on a 32-bit client.
+    if client_arch_bits == 64:
+        timeval_fmt = "qq"
+    else:
+        timeval_fmt = "ll"
     
-    event_fmt = f"={timeval_fmt}HHi" # Native byte order, timeval, type, code, value
+    # Native byte order, timeval, type, code, value.
+    event_fmt = f"={timeval_fmt}HHi"
 
     event_data = struct.pack(event_fmt, ts_sec, ts_usec, ev_type, ev_code, int(ev_value))
     syn_event_data = struct.pack(event_fmt, ts_sec, ts_usec, EV_SYN, SYN_REPORT, 0)
@@ -1386,7 +1426,8 @@ def normalize_axis_value(client_value, is_trigger, is_hat, for_js_event=False):
         else:
             # For EVDEV, HAT values are -1, 0, or 1
             return hat_val
-    if is_trigger: # Client sends 0.0 to 1.0
+    # The client sends 0.0 to 1.0 for triggers.
+    if is_trigger:
         # For JS and EVDEV, triggers are often treated as regular axes.
         # Map 0..1 to -32k..+32k for consistency, some drivers map to 0..255.
         # This mapping ensures it works like an analog input.
@@ -1405,7 +1446,8 @@ class GamepadMapper:
         is_trigger_axis = False
         is_hat_axis = False
         target_evdev_type = None
-        final_value = 0 # This will be the raw value from the client or dpad direction
+        # final_value ends up as the raw value from the client or the dpad direction.
+        final_value = 0
 
         if is_button_event:
             if client_event_idx in self.config["mapping"]["dpad_to_hat"]:
@@ -1422,7 +1464,8 @@ class GamepadMapper:
                 internal_abstract_idx = self.config["mapping"]["btns"].get(client_event_idx)
                 target_evdev_type = EV_KEY
                 final_value = int(client_value)
-        else: # Axis event
+        # Axis event.
+        else:
             internal_abstract_idx = self.config["mapping"]["axes"].get(client_event_idx)
             is_trigger_axis = internal_abstract_idx in self.config["mapping"]["trigger_internal_abstract_axis_indices"]
             is_hat_axis = internal_abstract_idx in self.config["mapping"]["hat_internal_abstract_axis_indices"]
@@ -1440,7 +1483,8 @@ class GamepadMapper:
         if target_evdev_type == EV_KEY:
             if 0 <= internal_abstract_idx < len(self.config["btn_map"]):
                 evdev_code = self.config["btn_map"][internal_abstract_idx]
-                js_event_value = evdev_event_value = final_value # 0 or 1
+                # Button values are 0 or 1.
+                js_event_value = evdev_event_value = final_value
             else: return None
         elif target_evdev_type == EV_ABS:
             if 0 <= internal_abstract_idx < len(self.config["axes_map"]):
@@ -1664,13 +1708,16 @@ class SelkiesGamepad:
         self.uinput_enabled = uinput_enabled
         self.uinput = None
         
-        self.mapper = None # Set by set_config
-        self.config_payload_cache = None # Cache for js_config_t
+        # Both are populated by set_config: the button/axis mapper for this pad
+        # and the cached js_config_t payload handed to interposer clients.
+        self.mapper = None
+        self.config_payload_cache = None
 
         self.js_server = None
         self.evdev_server = None
-        self.js_clients = {} # {writer: {'arch_bits': bits}}
-        self.evdev_clients = {} # {writer: {'arch_bits': bits}}
+        # Both client maps are {writer: {'arch_bits': bits}}.
+        self.js_clients = {}
+        self.evdev_clients = {}
         
         # Bounded so a single stalled gamepad client (slow writer.drain) can't let
         # this queue grow without limit and wedge event delivery for every client.
@@ -1781,22 +1828,25 @@ class SelkiesGamepad:
                 vendor_id = int(raw_vendor, 16)
             elif isinstance(raw_vendor, int):
                 vendor_id = raw_vendor
-            else: # Default if key missing or type is wrong
-                vendor_id = 0x045e # Default Xbox vendor
+            # Fall back to the Xbox vendor if the key is missing or the type is wrong.
+            else:
+                vendor_id = 0x045e
             raw_product = controller_config.get("product_id")
             if isinstance(raw_product, str):
                 product_id = int(raw_product, 16)
             elif isinstance(raw_product, int):
                 product_id = raw_product
-            else: # Default
-                product_id = 0x028e # Default Xbox product
-            raw_version = controller_config.get("version") # Using "version" as the key
+            # Fall back to the Xbox product.
+            else:
+                product_id = 0x028e
+            raw_version = controller_config.get("version")
             if isinstance(raw_version, str):
                 version_id = int(raw_version, 16)
             elif isinstance(raw_version, int):
                 version_id = raw_version
-            else: # Default
-                version_id = 0x0114 # Default Xbox version
+            # Fall back to the Xbox version.
+            else:
+                version_id = 0x0114
 
             buttons_evdev_codes = controller_config.get("buttons", [])
             axes_evdev_codes = controller_config.get("axes", [])
@@ -1826,7 +1876,8 @@ class SelkiesGamepad:
             base_struct_fmt = f"={CONTROLLER_NAME_MAX_LEN}sxHHHHH{INTERPOSER_MAX_BTNS}H{INTERPOSER_MAX_AXES}B"
             
             # Calculate size of the base structure without any explicit end padding
-            size_without_explicit_end_padding = struct.calcsize(base_struct_fmt) # Should be 1353
+            # (1353 bytes with the current constants)
+            size_without_explicit_end_padding = struct.calcsize(base_struct_fmt)
 
             # Calculate how much padding is needed to reach the C struct's total size
             padding_needed = C_INTERPOSER_STRUCT_SIZE - size_without_explicit_end_padding
@@ -1857,18 +1908,23 @@ class SelkiesGamepad:
 
             logging.debug(f"Using final struct_fmt: '{struct_fmt}' for js_config, packing to size {python_final_packed_size}")
 
+            # In C js_config_t order: char name[CONTROLLER_NAME_MAX_LEN], uint16_t
+            # vendor, uint16_t product, uint16_t version, uint16_t num_btns and
+            # uint16_t num_axes (both actual counts).
             payload_args = [
-                name_bytes_for_pack,    # char name[CONTROLLER_NAME_MAX_LEN]
-                vendor_id,              # uint16_t vendor
-                product_id,             # uint16_t product
-                version_id,             # uint16_t version
-                num_actual_btns,        # uint16_t num_btns (actual count)
-                num_actual_axes,        # uint16_t num_axes (actual count)
+                name_bytes_for_pack,
+                vendor_id,
+                product_id,
+                version_id,
+                num_actual_btns,
+                num_actual_axes,
             ]
-            # Add elements of the padded button map array
-            payload_args.extend(padded_btn_map_for_pack) # uint16_t btn_map[INTERPOSER_MAX_BTNS]
-            # Add elements of the padded axes map array
-            payload_args.extend(padded_axes_map_for_pack)  # uint8_t axes_map[INTERPOSER_MAX_AXES]
+            # Add elements of the padded button map array, uint16_t
+            # btn_map[INTERPOSER_MAX_BTNS]
+            payload_args.extend(padded_btn_map_for_pack)
+            # Add elements of the padded axes map array, uint8_t
+            # axes_map[INTERPOSER_MAX_AXES]
+            payload_args.extend(padded_axes_map_for_pack)
             # The 'x' padding specifier in struct_fmt does not take arguments in payload_args
 
             payload = struct.pack(struct_fmt, *payload_args)
@@ -2084,7 +2140,8 @@ class SelkiesGamepad:
         while self.running:
             try:
                 event_package = await self.events_queue.get()
-                if event_package is None: # Sentinel for shutdown
+                # None is the sentinel for shutdown.
+                if event_package is None:
                     self.events_queue.task_done()
                     break
                 
@@ -2242,20 +2299,28 @@ class WebRTCInput:
         }
         self.active_modifiers = set()
         self.atomically_typed_keys = set()
-        self.translated_keys = set() # Track translated keysyms
+        # Tracks translated keysyms.
+        self.translated_keys = set()
         self.ACTION_MODIFIER_KEYSYMS = {65507, 65508, 65513, 65514, 65511, 65512,
                                         65515, 65516, 65517, 65518}
         self.MODIFIER_KEYSYMS = {
-            65505, 65506,  # Shift_L, Shift_R
-            65507, 65508,  # Control_L, Control_R
-            65513, 65514,  # Alt_L, Alt_R
-            65027,        # ISO_Level3_Shift (AltGr)
-            65511, 65512,  # Meta_L, Meta_R
+            # Shift_L, Shift_R
+            65505, 65506,
+            # Control_L, Control_R
+            65507, 65508,
+            # Alt_L, Alt_R
+            65513, 65514,
+            # ISO_Level3_Shift (AltGr)
+            65027,
+            # Meta_L, Meta_R
+            65511, 65512,
             # The client maps the Meta/Windows key to Super, not Meta, so Super
             # (and Hyper) must be treated as modifiers too — otherwise they get
             # armed for auto-repeat and misrouted as ordinary keys.
-            65515, 65516,  # Super_L, Super_R
-            65517, 65518,  # Hyper_L, Hyper_R
+            # Super_L, Super_R
+            65515, 65516,
+            # Hyper_L, Hyper_R
+            65517, 65518,
         }
         self.rtc_app = rtc_app
         self.loop = asyncio.get_running_loop()
@@ -2352,9 +2417,10 @@ class WebRTCInput:
         self._x11_clipboard_monitor = None
         # Debounce REQUEST_CLIPBOARD (Ctrl/Cmd+C): coalesce bursts so a keypress
         # storm can't stack clipboard reads. Keyed per requesting connection so
-        # one client's copy can't suppress another client's read.
-        self._last_clipboard_request_ts = {}  # conn key -> last request (monotonic)
-        self._clipboard_request_debounce = 0.25  # seconds
+        # one client's copy can't suppress another client's read. The map is
+        # conn key -> last request (monotonic) and the debounce is in seconds.
+        self._last_clipboard_request_ts = {}
+        self._clipboard_request_debounce = 0.25
         # Strong refs for fire-and-forget tasks: asyncio only weakly references
         # running tasks, so an unreferenced one can be garbage-collected mid-flight.
         self._bg_tasks = set()
@@ -2362,16 +2428,18 @@ class WebRTCInput:
         self.keyboard_worker_task = None
         # Stuck-key recovery: client heartbeats each held key ('kh'); the sweep
         # auto-releases any key whose heartbeat stops (key-up lost to congestion).
-        self.pressed_keys = {}            # keysym -> last heartbeat (monotonic)
+        # keysym -> last heartbeat (monotonic).
+        self.pressed_keys = {}
         # Atomic (non-alpha) keys reaped by the sweep were never physically held, so
         # a late 'ku' would emit a spurious X11 keyup. Track them to swallow it; a
         # fresh 'kd' clears the entry (the key is live again).
         self.reaped_atomic_keys = set()
         # Cap tracked held keys so a kd-flood can't grow the dict unbounded.
         self.max_pressed_keys = 1024
-        # Stale window: client heartbeats every 100ms but hidden tabs throttle to
-        # >=1s, so 2.0s avoids false-releasing a held key while backgrounded.
-        self.key_stale_window = 2.0       # release a key unseen for this long
+        # Stale window: a key unseen for this long is released. Clients heartbeat
+        # every 100ms but hidden tabs throttle to >=1s, so 2.0s avoids
+        # false-releasing a held key while backgrounded.
+        self.key_stale_window = 2.0
         self.key_sweep_interval = 0.1
         self.key_sweep_task = None
         # Server-side key auto-repeat (X11 only). XTEST/xdotool
@@ -2381,13 +2449,16 @@ class WebRTCInput:
         # virtual-keyboard keys itself via wl_keyboard repeat_info, so a server-side
         # repeat would double it.
         self.key_repeat_enabled = not self.is_wayland
-        self.key_repeat_delay = 0.5        # seconds a key must stay held before repeating
-        self.key_repeat_interval = 0.04    # seconds between repeats (~25 Hz)
-        self.key_repeat_tick = 0.02        # repeat-loop poll period
+        # Seconds a key must stay held before repeating, seconds between repeats
+        # (~25 Hz), and the repeat loop's poll period.
+        self.key_repeat_delay = 0.5
+        self.key_repeat_interval = 0.04
+        self.key_repeat_tick = 0.02
         # Pause repeat when the held key's last heartbeat is older than this (stalled
         # stream / hidden tab). Keep >~3x the client's 100ms heartbeat.
         self.key_repeat_heartbeat_grace = 0.3
-        self.key_repeat_state = {}         # keysym -> monotonic time of next due repeat
+        # keysym -> monotonic time of its next due repeat.
+        self.key_repeat_state = {}
         self.key_repeat_task = None
         # MappingNotify consumer for sessions where the cursor monitor (the
         # normal X event consumer) is disabled.
@@ -2651,7 +2722,8 @@ class WebRTCInput:
                 await self.__gamepad_disconnect(idx)
 
     async def __gamepad_disconnect(self, gamepad_idx=None):
-        if gamepad_idx is None: # Disassociate all if no specific index
+        # Disassociate all if no specific index.
+        if gamepad_idx is None:
             indices_to_disassociate = list(self.client_gamepad_associations.keys())
             logger_webrtc_input.info("Disassociating all client gamepads from persistent slots.")
         elif not (0 <= gamepad_idx < self.num_gamepads):
@@ -2674,7 +2746,8 @@ class WebRTCInput:
                     f"Client controller '{associated_info.get('client_name', 'Unknown')}' "
                     f"disassociated from persistent virtual gamepad slot {idx}."
                 )
-            elif gamepad_idx is not None: # Only log if a specific, non-associated index was requested
+            # Only log if a specific, non-associated index was requested.
+            elif gamepad_idx is not None:
                  logger_webrtc_input.warning(
                     f"Client disassociation: No active client association found for gamepad slot {idx} to disassociate."
                 )
@@ -2744,10 +2817,12 @@ class WebRTCInput:
                 logger_webrtc_input.info(f"Created directory for gamepad sockets: {self.js_socket_path_prefix}")
             except OSError as e:
                 logger_webrtc_input.error(f"Failed to create directory {self.js_socket_path_prefix} for gamepad sockets: {e}")
-                return # Cannot proceed if directory creation fails
+                # Cannot proceed if directory creation fails.
+                return
 
         for i in range(self.num_gamepads):
-            if i in self.gamepad_instances: # Should not happen on initial call but good for robustness
+            # Should not happen on the initial call, but good for robustness.
+            if i in self.gamepad_instances:
                 logger_webrtc_input.warning(f"Gamepad instance for index {i} already exists. Skipping re-initialization.")
                 continue
 
@@ -2780,7 +2855,7 @@ class WebRTCInput:
 
             self._spawn_task(gamepad.run_servers())
             _persistent_gamepads[i] = gamepad
-            self.gamepad_instances[i] = gamepad # Store by index i
+            self.gamepad_instances[i] = gamepad
             logger_webrtc_input.info(f"Initialized and started persistent gamepad instance for index {i} (Name: '{gamepad_name_for_interposer}', JS: {js_ip_sock_path}, EVDEV: {evdev_ip_sock_path}).")
 
     async def disconnect(self):
@@ -2791,6 +2866,9 @@ class WebRTCInput:
         logger_webrtc_input.info("Releasing gamepad associations (persistent instances stay up).")
         await self.__gamepad_disconnect()
         self.gamepad_instances = {}
+        # Before the pointer backends go away: a button still held here would
+        # otherwise stay pressed in the desktop with nothing left to release it.
+        await self.release_mouse_buttons()
         self.__mouse_disconnect()
         self._disarm_x_event_watcher()
         if self.xdisplay: self.xdisplay = None
@@ -2881,10 +2959,11 @@ class WebRTCInput:
         most-recently-pressed still-held repeatable key at key_repeat_interval after an
         initial key_repeat_delay -- exactly like a physical keyboard, where only the last
         key pressed repeats and releasing it resumes the previously-held one. Modifiers
-        and atomically-typed (single-shot) keys are never armed, so the repeated key
-        carries whatever modifiers are currently held (Shift+Arrow selection,
-        Ctrl+Backspace word-delete, Ctrl+Z, etc. all repeat like native -- no special
-        shortcut suppression). Repeats are KeyPress-only (no synthetic KeyRelease),
+        are never armed, so the repeated key carries whatever modifiers are currently
+        held (Shift+Arrow selection, Ctrl+Backspace word-delete, Ctrl+Z, etc. all repeat
+        like native -- no special shortcut suppression); atomically-typed keys
+        (digits/punctuation) are armed and repeat through the atomic path below.
+        Repeats are KeyPress-only (no synthetic KeyRelease),
         matching X11 detectable auto-repeat, so state-based games keep the key held with
         no movement stutter and ignore the extra presses. Wayland is excluded (the
         focused app repeats held virtual-keyboard keys itself via wl_keyboard
@@ -2965,7 +3044,7 @@ class WebRTCInput:
                 # Release common modifiers
                 # Ctrl, Shift, Alt, AltGr, Meta, Super, Hyper (the client maps the
                 # Meta/Windows key to Super, so Super must be released here too).
-                modifiers = [65507, 65505, 65513, 65508, 65506, 65027,
+                modifiers = [65507, 65505, 65513, 65508, 65506, 65514, 65027,
                              65511, 65512, 65515, 65516, 65517, 65518]
                 owner = self._wl_keymap_owner
                 if owner is not None:
@@ -3025,11 +3104,12 @@ class WebRTCInput:
             logger_webrtc_input.warning("Cannot reset keyboard, X display or keyboard controller not available.")
             return
         logger_webrtc_input.info("Resetting keyboard modifiers.")
-        lctrl, lshift, lalt, rctrl, rshift, ralt = 65507, 65505, 65513, 65508, 65506, 65027
+        lctrl, lshift, lalt, altgr = 65507, 65505, 65513, 65027
+        rctrl, rshift, ralt = 65508, 65506, 65514
         lmeta, rmeta, keyf, keyF, keym, keyM, escape = 65511, 65512, 102, 70, 109, 77, 65307
         # Super/Hyper included: the client maps the Meta/Windows key to Super.
         lsuper, rsuper, lhyper, rhyper = 65515, 65516, 65517, 65518
-        for k in [lctrl, lshift, lalt, rctrl, rshift, ralt, lmeta, rmeta,
+        for k in [lctrl, lshift, lalt, altgr, rctrl, rshift, ralt, lmeta, rmeta,
                   lsuper, rsuper, lhyper, rhyper, keyf, keyF, keym, keyM, escape]:
             try: await self.send_x11_keypress(k, down=False)
             except Exception as e: logger_webrtc_input.warning(f"Error resetting key {k}: {e}")
@@ -3075,6 +3155,23 @@ class WebRTCInput:
         self.reaped_atomic_keys.clear()
         self.key_repeat_state.clear()
 
+    async def release_mouse_buttons(self):
+        """Release every pointer button still held server-side.
+
+        The ungraceful pointer path, mirroring release_gamepads_for_conn and the
+        key stale-sweep: a client that dies mid-drag never sends the mask with the
+        button cleared, so the desktop would keep the drag or selection alive until
+        some future client happens to diff the bit away. The releases ride the
+        normal mask-diff loop, so X11 and Wayland both heal; the zero-delta
+        relative move leaves the pointer exactly where it is (and injects no motion
+        at all on Wayland)."""
+        if not self.button_mask:
+            return
+        try:
+            await self.send_x11_mouse(0, 0, 0, 0, relative=True)
+        except Exception as e:
+            logger_webrtc_input.warning(f"Failed to release held mouse buttons: {e}")
+
     def send_mouse(self, action, data):
         if action == MOUSE_POSITION:
             if self.mouse: self.mouse.position = data
@@ -3099,9 +3196,14 @@ class WebRTCInput:
             if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_WHEEL, 1)
             elif self.mouse: self.mouse.scroll(0, 1)
         elif action == MOUSE_SCROLL_LEFT:
-            if self.mouse: self.mouse.scroll(-1, 0)
+            # Horizontal wheel goes through the same device as the vertical one.
+            # REL_HWHEEL is signed the way the client names it (negative = left),
+            # matching X core buttons 6/7, so no direction flip is needed here.
+            if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_HWHEEL, -1)
+            elif self.mouse: self.mouse.scroll(-1, 0)
         elif action == MOUSE_SCROLL_RIGHT:
-            if self.mouse: self.mouse.scroll(1, 0)
+            if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_HWHEEL, 1)
+            elif self.mouse: self.mouse.scroll(1, 0)
         elif action == MOUSE_BUTTON: 
             btn_map_key = "uinput" if self.uinput_mouse_socket_path else "x11"
             btn_uinput_or_x11 = MOUSE_BUTTON_MAP[data[1]][btn_map_key]
@@ -3502,7 +3604,8 @@ class WebRTCInput:
                 char_code = ord(keysym_name_from_xlib)
                 if char_code >= 0x80 or (char_code == keysym_number and char_code != 0x00):
                     xdotool_key_arg = f"U{char_code:04X}"
-            elif keysym_number == 0x00a3: # XK_sterling
+            # XK_sterling.
+            elif keysym_number == 0x00a3:
                 xdotool_key_arg = "sterling"
                 if not char_for_type_cmd_fallback:
                     try: char_for_type_cmd_fallback = chr(0xA3)
@@ -3546,6 +3649,13 @@ class WebRTCInput:
             scroll_magnitude = max(0, min(int(scroll_magnitude), 64))
         except (TypeError, ValueError):
             scroll_magnitude = 0
+        # A pen eraser arrives as Pointer Events button 5. Neither the X11 core
+        # pointer nor wl_pointer has an eraser button, so fold it into the primary
+        # button: eraser contact clicks and drags like the pen tip instead of
+        # injecting nothing. OR-ing it (rather than giving it its own button)
+        # keeps press/release balanced if the tip bit is set at the same time.
+        if button_mask & MOUSE_MASK_BIT_ERASER:
+            button_mask = (button_mask | MOUSE_MASK_BIT_PRIMARY) & ~MOUSE_MASK_BIT_ERASER
         if relative:
             final_x = self.last_x + x
             final_y = self.last_y + y
@@ -3598,11 +3708,14 @@ class WebRTCInput:
                         state = 1 if is_pressed_now else 0
                         mag = float(max(1, scroll_magnitude))
 
-                        if bit_index == 0: # Left
+                        # Left.
+                        if bit_index == 0:
                             self.wayland_input.inject_mouse_button(272, state)
-                        elif bit_index == 1: # Middle
+                        # Middle.
+                        elif bit_index == 1:
                             self.wayland_input.inject_mouse_button(274, state)
-                        elif bit_index == 2: # Right
+                        # Right.
+                        elif bit_index == 2:
                             self.wayland_input.inject_mouse_button(273, state)
                         
                         elif bit_index == 3:
@@ -3737,7 +3850,8 @@ class WebRTCInput:
             logger_webrtc_input.info(f"Binary clipboard setting changing to: {enabled}. Restarting monitor.")
             self.enable_binary_clipboard = new_setting_str
             if self.clipboard_monitor_task and not self.clipboard_monitor_task.done():
-                self.stop_clipboard()  # Signal the loop to exit
+                # Signal the loop to exit.
+                self.stop_clipboard()
                 self.clipboard_monitor_task.cancel()
                 try:
                     await self.clipboard_monitor_task
@@ -4310,7 +4424,8 @@ class WebRTCInput:
                         changed = False
                     else:
                         await asyncio.sleep(0.5)
-                        changed = True  # poll cadence: read + compare below
+                        # Poll cadence: read + compare below.
+                        changed = True
 
                     has_consumers = self._clipboard_has_consumers()
                     if has_consumers and not had_consumers:
@@ -4530,9 +4645,9 @@ class WebRTCInput:
                         "XFIXES extension not supported, cannot fetch current cursor"
                     )
                     return None
-            # XFixes requires per-connection version negotiation before any
-            # other request; the cursor monitor used to do it at startup, but
-            # this on-demand fetch must not depend on the monitor running.
+            # XFixes requires per-connection version negotiation before any other
+            # request, and this on-demand fetch runs whether or not the cursor
+            # monitor is up, so it negotiates once itself.
             if not getattr(self, "_xfixes_negotiated", False):
                 self.xdisplay.xfixes_query_version()
                 self._xfixes_negotiated = True
@@ -4876,6 +4991,10 @@ class WebRTCInput:
         elif msg_type == "kh":
             # Heartbeat for held keys: refresh timestamps only (no injection),
             # so it costs nothing but keeps the stale-sweep from releasing them.
+            # Atomically-typed keys (digits/punctuation on X11) are refreshed like
+            # any other held key: the client heartbeats only what it still holds,
+            # and the X11 repeat loop pauses on a stale heartbeat, so skipping them
+            # here would kill their auto-repeat before the first repeat is due.
             now = time.monotonic()
             # Cap the fan-out at the tracked-key limit: refreshing more keys than we
             # can track is meaningless and a client could otherwise pack one frame
@@ -4884,13 +5003,6 @@ class WebRTCInput:
                 try:
                     keysym = int(tok)
                 except ValueError:
-                    continue
-                # Atomically-typed keys (X11) were never physically held; do not
-                # let an ongoing heartbeat pin their lingering pressed_keys entry
-                # past the stale window — let the sweep reap it. Safe because atomic
-                # (non-alpha printable) keys are single-shot: typed once via co,end on
-                # kd and never held, so they have no real heartbeat to preserve.
-                if keysym in self.atomically_typed_keys:
                     continue
                 if keysym in self.pressed_keys:
                     self.pressed_keys[keysym] = now
@@ -5329,17 +5441,25 @@ MOUSE_SCROLL_RIGHT = 23
 MOUSE_BUTTON_PRESS = 30
 MOUSE_BUTTON_RELEASE = 31
 MOUSE_BUTTON = 40
-MOUSE_BUTTON_LEFT_ID = 41 
+MOUSE_BUTTON_LEFT_ID = 41
 MOUSE_BUTTON_MIDDLE_ID = 42
 MOUSE_BUTTON_RIGHT_ID = 43
+
+# Bits of the client button mask that need translation before the per-bit
+# press/release diff: the pen eraser (Pointer Events button 5) has no pointer
+# button of its own on either backend and drives the primary button.
+MOUSE_MASK_BIT_PRIMARY = 1 << 0
+MOUSE_MASK_BIT_ERASER = 1 << 5
 
 # UINPUT constants if uinput_mouse_socket_path is used
 UINPUT_BTN_LEFT = (EV_KEY, BTN_LEFT) 
 UINPUT_BTN_MIDDLE = (EV_KEY, BTN_MIDDLE) 
 UINPUT_BTN_RIGHT = (EV_KEY, BTN_RIGHT) 
-UINPUT_REL_X = (EV_REL, 0x00) # REL_X
-UINPUT_REL_Y = (EV_REL, 0x01) # REL_Y
-UINPUT_REL_WHEEL = (EV_REL, 0x08) # REL_WHEEL
+# Relative axes: REL_X, REL_Y, REL_HWHEEL, REL_WHEEL.
+UINPUT_REL_X = (EV_REL, 0x00)
+UINPUT_REL_Y = (EV_REL, 0x01)
+UINPUT_REL_HWHEEL = (EV_REL, 0x06)
+UINPUT_REL_WHEEL = (EV_REL, 0x08)
 
 # X core pointer button numbers used by XTEST fake_input (1=left, 2=middle, 3=right).
 XBUTTON_LEFT = 1

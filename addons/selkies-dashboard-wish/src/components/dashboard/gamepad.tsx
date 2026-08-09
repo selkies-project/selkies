@@ -105,7 +105,8 @@ export function Gamepad({ isGamepadEnabled, onGamepadToggle }: GamepadProps) {
             }, window.location.origin);
             setIsTouchGamepadSetup(true);
             console.log("Dashboard: Touch Gamepad SETUP sent, targetDivId:", TOUCH_GAMEPAD_HOST_DIV_ID, "visible: true");
-        } else if (isTouchGamepadSetup) { // Only send visibility if setup has occurred
+        } else if (isTouchGamepadSetup) {
+            // Visibility only means anything once the overlay has been set up.
             window.postMessage({
                 type: 'TOUCH_GAMEPAD_VISIBILITY',
                 payload: { visible: newActiveState, targetDivId: TOUCH_GAMEPAD_HOST_DIV_ID }
@@ -114,55 +115,9 @@ export function Gamepad({ isGamepadEnabled, onGamepadToggle }: GamepadProps) {
         }
     }, [isTouchGamepadActive, isTouchGamepadSetup]);
 
-    // Add touch gamepad handler
-    const handleTouchGamepad = React.useCallback((e: TouchEvent) => {
-        if (!isGamepadEnabled) return;
-        const touch = e.touches[0];
-        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-        const x = (touch.clientX - rect.left) / rect.width;
-        const y = (touch.clientY - rect.top) / rect.height;
-        const data = {
-            type: 'gamepad',
-            data: {
-                leftStick: { x, y },
-                rightStick: { x: 0, y: 0 },
-                buttons: { A: false, B: false, X: false, Y: false }
-            }
-        };
-        window.parent.postMessage(data, window.location.origin);
-    }, [isGamepadEnabled]);
-
-    // Add touch event listeners
-    React.useEffect(() => {
-        const handleTouchStart = (e: TouchEvent) => handleTouchGamepad(e);
-        const handleTouchMove = (e: TouchEvent) => handleTouchGamepad(e);
-        const handleTouchEnd = () => {
-            const data = {
-                type: 'gamepad',
-                data: {
-                    leftStick: { x: 0, y: 0 },
-                    rightStick: { x: 0, y: 0 },
-                    buttons: { A: false, B: false, X: false, Y: false }
-                }
-            };
-            window.parent.postMessage(data, window.location.origin);
-        };
-
-        const touchGamepadHost = document.getElementById(TOUCH_GAMEPAD_HOST_DIV_ID);
-        if (touchGamepadHost) {
-            touchGamepadHost.addEventListener('touchstart', handleTouchStart);
-            touchGamepadHost.addEventListener('touchmove', handleTouchMove);
-            touchGamepadHost.addEventListener('touchend', handleTouchEnd);
-        }
-
-        return () => {
-            if (touchGamepadHost) {
-                touchGamepadHost.removeEventListener('touchstart', handleTouchStart);
-                touchGamepadHost.removeEventListener('touchmove', handleTouchMove);
-                touchGamepadHost.removeEventListener('touchend', handleTouchEnd);
-            }
-        };
-    }, [handleTouchGamepad]);
+    // Touch input on the host div belongs to universalTouchGamepad's own overlay,
+    // which it attaches on TOUCH_GAMEPAD_SETUP; this component only drives the
+    // setup/visibility messaging.
 
     const handleShowVirtualKeyboard = () => {
         window.postMessage({ type: 'showVirtualKeyboard' }, window.location.origin);

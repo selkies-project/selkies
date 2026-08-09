@@ -63,7 +63,8 @@ function extractOpusFrames(arrayBuffer) {
     lens.push(field & 0x3ff);
     pos += 4;
   }
-  pos += 1; // primary header
+  // Skip the primary header byte.
+  pos += 1;
   // The header guard above only covers the fixed part; the declared block
   // lengths must also fit the actual payload, or slice() silently clamps and a
   // truncated Opus frame (plus an empty primary) reaches the decoder. The
@@ -128,7 +129,8 @@ let videoFrameBuffer = [];
 // underrun (a paint tick that found nothing to paint mid-stream), decaying back after a
 // stall-free period. Chrome-class decoders therefore keep minimal latency.
 const VIDEO_CUSHION_HOLD_MS = 2000;
-let lastVideoUnderrunTime = -VIDEO_CUSHION_HOLD_MS; // no cushion until a real underrun
+// Seeded a full hold in the past: no cushion is applied until a real underrun.
+let lastVideoUnderrunTime = -VIDEO_CUSHION_HOLD_MS;
 let videoPaintedSinceLastTick = false;
 // Diagnostics: how often arrivals underran the painter and whether the cushion is
 // currently held (readable from the console / tests).
@@ -230,7 +232,8 @@ const BACKPRESSURE_INTERVAL_MS = 50;
 // receive cap; the server advertises its real ceiling (ws_max_message_bytes) in
 // server_settings and this is recomputed to fill the frame.
 let wsMaxMessageBytes = 4 * 1024 * 1024;
-let CLIPBOARD_CHUNK_SIZE = ((wsMaxMessageBytes - 4096) * 3) >> 2; // raw bytes pre-base64
+// Raw bytes per chunk, before base64 expansion.
+let CLIPBOARD_CHUNK_SIZE = ((wsMaxMessageBytes - 4096) * 3) >> 2;
 const applyWsMessageBudget = (bytes) => {
   if (!Number.isFinite(bytes) || bytes < 65536) return;
   wsMaxMessageBytes = bytes;
@@ -252,9 +255,12 @@ let scalingDPI = 96;
 let antiAliasingEnabled = true;
 let clipboard_in_enabled = true;
 let clipboard_out_enabled = true;
-let use_browser_cursors = false;
+// Cursor-rendering preference in force. Seeded from localStorage at init, then
+// updated by an explicit dashboard pick (which persists) or by a server-pushed
+// value (which does not, so a later server-side change stays re-pushable).
+let use_browser_cursors = true;
 function applyEffectiveCursorSetting() {
-    const userPreference = getBoolParam('use_browser_cursors', true);
+    const userPreference = use_browser_cursors;
     const isMultiMonitorActive = (displayId === 'display2' || (displayId === 'primary' && isSecondaryDisplayConnected));
     const finalSetting = isMultiMonitorActive ? true : userPreference;
     if (window.webrtcInput && typeof window.webrtcInput.setUseBrowserCursors === 'function') {
@@ -304,11 +310,26 @@ let playerInputTargetIndex = 0;
 const urlParams = new URLSearchParams(window.location.search);
 const authToken = urlParams.get('token');
 
+const hash = window.location.hash;
+// The secondary-display page is identified by its hash in every auth mode
+// (WebRTC core parity): a token-authenticated #display2 page must connect as
+// display2, otherwise the server sees a second 'primary' and supersedes the
+// page that already holds it.
+if (hash.startsWith('#display2')) {
+    displayId = 'display2';
+    const parts = hash.split('-');
+    if (parts.length > 1) {
+        const position = parts[1];
+        if (['left', 'right', 'up', 'down'].includes(position)) {
+            displayPosition = position;
+        }
+    }
+}
+
 if (authToken) {
     isTokenAuthMode = true;
     console.log("Client is running in Token Authentication mode.");
 } else {
-    const hash = window.location.hash;
     if (hash === '#shared') {
         detectedSharedModeType = 'shared';
         playerInputTargetIndex = undefined;
@@ -321,18 +342,10 @@ if (authToken) {
     } else if (hash === '#player4') {
         detectedSharedModeType = 'player4';
         playerInputTargetIndex = 3;
-    } else if (hash.startsWith('#display2')) {
-        displayId = 'display2';
-        const parts = hash.split('-');
-        if (parts.length > 1) {
-            const position = parts[1];
-            if (['left', 'right', 'up', 'down'].includes(position)) {
-                displayPosition = position;
-            }
-        }
     }
 }
-let sharedClientState = 'idle'; // Possible states: 'idle', 'ready', 'error'
+// Shared-viewer handshake state: 'idle', 'ready' or 'error'.
+let sharedClientState = 'idle';
 // Whether this shared viewer has paused its own video feed on tab-hide (the
 // server drops just this socket from the broadcast; control/cursor/audio stay).
 let sharedVideoPaused = false;
@@ -668,9 +681,6 @@ if (getStringParam('scaling_dpi', null) === null) {
 }
 antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 use_browser_cursors = getBoolParam('use_browser_cursors', true);
-if (displayId === 'display2') {
-    use_browser_cursors = true;
-}
 enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 clipboard_in_enabled = getBoolParam('clipboard_in_enabled', true);
 clipboard_out_enabled = getBoolParam('clipboard_out_enabled', true);
@@ -751,8 +761,11 @@ let videoWorker = null;
 let videoWorkerCanvas = null;
 let videoWorkerActive = false;
 let videoWorkerReady = false;
-let videoWorkerMode = null;            // 'vtg' | 'canvas' | null (decided by the worker's self-probe)
-let videoWorkerTrack = null;           // VTG track transferred from the worker (vtg mode)
+// Sink the worker reported from its self-probe: 'vtg', 'canvas', or null while
+// the handshake is still in flight.
+let videoWorkerMode = null;
+// VideoTrackGenerator track transferred back from the worker in 'vtg' mode.
+let videoWorkerTrack = null;
 let videoWorkerCanvasTransferred = false;
 let videoWorkerLastGeom = null;
 // Backpressure: cap frames in flight (worker acks each consumed frame); drop+close new
@@ -777,9 +790,12 @@ const VIDEO_WORKER_SRC = `
 // supported as a fallback during decoder warm-up.
 let mode = null, oc = null, ctx = null, writer = null, closed = false, presented = false;
 let dec = null, decKey = false, decNeedKey = false;
-let sinkDrops = 0;   // consecutive backpressure drops; a stalled consumer never resumes on its own
-const OVERLOAD_QUEUE = 24;   // decode backlog (frames) above which deltas are dropped
-let lastNeedKey = 0;   // keyframe-request throttle while decode is backed up
+// Consecutive backpressure drops; a stalled consumer never resumes on its own.
+let sinkDrops = 0;
+// Decode backlog (frames) above which deltas are dropped.
+const OVERLOAD_QUEUE = 24;
+// Keyframe-request throttle while decode is backed up.
+let lastNeedKey = 0;
 const sendNeedKey = (reason) => {
   const now = Date.now();
   if (now - lastNeedKey < 800) return;
@@ -791,7 +807,8 @@ const ack = () => self.postMessage({ ack: true });
 // Present one decoded VideoFrame on the active sink. Consumes/closes the frame.
 function present(f) {
   if (mode === 'vtg' && writer && !closed) {
-    if (writer.desiredSize !== null && writer.desiredSize <= 0) {   // drop on sink backpressure
+    // Drop on sink backpressure.
+    if (writer.desiredSize !== null && writer.desiredSize <= 0) {
       f.close();
       if (++sinkDrops >= 30) { closed = true; self.postMessage({ type: 'error' }); }
       return;
@@ -843,16 +860,19 @@ self.onmessage = (e) => {
       const cfg = { codec: m.codec, codedWidth: m.codedWidth, codedHeight: m.codedHeight, optimizeForLatency: true };
       if (m.software) cfg.hardwareAcceleration = 'prefer-software';
       dec.configure(cfg);
-      decNeedKey = true;   // a keyframe is required after (re)configure
+      // A keyframe is required after (re)configure.
+      decNeedKey = true;
     } catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); }
     return;
   }
   if (m.type === 'closeDecoder') { closeDecoder(); return; }
   if (m.type === 'chunk') {
-    if (!dec || dec.state !== 'configured') return;   // not ready yet; the page will resend a keyframe
+    // Not ready yet; the page will resend a keyframe.
+    if (!dec || dec.state !== 'configured') return;
     if (m.key) { decKey = true; decNeedKey = false; }
     else {
-      if (!decKey || decNeedKey) { sendNeedKey('no_key'); return; }     // no usable keyframe yet
+      // No usable keyframe yet.
+      if (!decKey || decNeedKey) { sendNeedKey('no_key'); return; }
       // Decode is falling behind: drop the delta (a fresh IDR cannot unclog the
       // queue) and request a throttled resync keyframe.
       if (dec.decodeQueueSize > OVERLOAD_QUEUE) { decNeedKey = true; sendNeedKey('overload'); return; }
@@ -861,7 +881,8 @@ self.onmessage = (e) => {
     catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); }
     return;
   }
-  if (m.frame) {   // fallback: a main-thread-decoded frame transferred in
+  // Fallback: a main-thread-decoded frame transferred in.
+  if (m.frame) {
     present(m.frame);
     ack();
   }
@@ -871,7 +892,8 @@ self.onmessage = (e) => {
 // video worker, not here.
 function createVideoTrackGenerator() {
   try {
-    if (typeof MediaStreamTrackGenerator !== 'undefined') {       // Chromium, main thread
+    // Chromium exposes the constructor on the main thread.
+    if (typeof MediaStreamTrackGenerator !== 'undefined') {
       const g = new MediaStreamTrackGenerator({ kind: 'video' });
       return { track: g, writable: g.writable };
     }
@@ -918,7 +940,8 @@ function presentFrameToVideo(frame) {
   if (!ensureMstgWriter()) return false;
   if (!mstgActive) {
     mstgActive = true;
-    mstgLastGeom = null; // force the box to be re-mirrored onto <video> below
+    // Force the box to be re-mirrored onto <video> below.
+    mstgLastGeom = null;
     mstgRendered = false;
     if (videoElement) {
       videoElement.style.display = 'block';
@@ -931,7 +954,8 @@ function presentFrameToVideo(frame) {
           if (canvas) canvas.style.display = 'none';
         });
       } else {
-        mstgRendered = true;   // can't observe rendering; assume presented
+        // Rendering can't be observed here; assume the frame was presented.
+        mstgRendered = true;
       }
     }
   }
@@ -981,7 +1005,8 @@ function presentFrameToVideo(frame) {
 // Returns true once a sink is wired; until then frames fall back to the main canvas.
 function ensureVideoWorker() {
   if (videoWorkerReady) return true;
-  if (videoWorker) return false;   // created, handshake still in flight
+  // Created, handshake still in flight.
+  if (videoWorker) return false;
   try {
     // The Worker keeps its own reference to the fetched script, so the object URL (and
     // the source string behind it) is revoked immediately; ensureVideoWorker() runs again
@@ -995,8 +1020,10 @@ function ensureVideoWorker() {
       const m = e.data;
       if (!m) return;
       if (m.ack) { if (videoWorkerInFlight > 0) videoWorkerInFlight--; return; }
-      if (m.type === 'error') { deactivateVideoWorker(); return; }   // VTG writable errored
-      if (m.type === 'presented') {                                  // worker canvas has real content now
+      // The VideoTrackGenerator writable errored.
+      if (m.type === 'error') { deactivateVideoWorker(); return; }
+      // The worker canvas has real content now.
+      if (m.type === 'presented') {
         videoWorkerRendered = true;
         if (videoWorkerActive && canvas) canvas.style.display = 'none';
         return;
@@ -1041,7 +1068,8 @@ function ensureVideoWorker() {
         }
       }
     };
-    return false;   // not ready until the worker reports its mode
+    // Not ready until the worker reports its mode.
+    return false;
   } catch (e) {
     console.warn('video worker init failed, using main canvas:', e);
     deactivateVideoWorker();
@@ -1097,7 +1125,8 @@ function activateWorkerSinkDisplay() {
           if (canvas) canvas.style.display = 'none';
         });
       } else {
-        videoWorkerRendered = true;   // can't observe rendering; assume presented
+        // Rendering can't be observed here; assume the frame was presented.
+        videoWorkerRendered = true;
       }
     }
     // canvas mode: revealed by the worker's one-time 'presented' message
@@ -1165,7 +1194,8 @@ function logWorkerDecoderConfig(codec, w, h) {
 // is transferred. Returns true if handled there; false to fall back to main-thread decode.
 function feedWorkerDecoder(isKey, dataBuf, w, h, codec) {
   if (workerDecodeFailed) return false;
-  if (!ensureVideoWorker()) return false;            // worker still handshaking
+  // The worker is still handshaking.
+  if (!ensureVideoWorker()) return false;
   if (!activateWorkerSinkDisplay()) return false;
   // (Re)configure the worker decoder when the codec or coded dimensions change.
   if (codec !== workerDecoderCodec || w !== workerDecoderW || h !== workerDecoderH) {
@@ -1173,7 +1203,8 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec) {
     try { videoWorker.postMessage({ type: 'decoderConfig', codec: codec, codedWidth: w, codedHeight: h, software: preferSoftwareDecode }); }
     catch (e) { return false; }
     workerDecoderCodec = codec; workerDecoderW = w; workerDecoderH = h;
-    requestKeyframe();   // WebCodecs needs a keyframe right after (re)configure
+    // WebCodecs needs a keyframe right after (re)configure.
+    requestKeyframe();
   }
   try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: dataBuf, timestamp: performance.now() * 1000 }, [dataBuf]); }
   catch (e) { return false; }
@@ -1255,7 +1286,8 @@ const parseAvcCodecFromAnnexB = (bytes) => {
       }
       return null;
     }
-    i = nalStart; // skip past this start code and keep scanning for the SPS
+    // Skip past this start code and keep scanning for the SPS.
+    i = nalStart;
   }
   return null;
 };
@@ -1304,7 +1336,9 @@ const maybeReconfigureMainDecoderFromSps = (keyframeBytes) => {
 
 const updateCanvasImageRendering = () => {
   if (!canvas) return;
-  canvasGeomDirty = true;  // image-rendering is part of cssText -> re-mirror to <video>/worker
+  // image-rendering is part of cssText, so the box is re-mirrored to the
+  // <video>/worker sink.
+  canvasGeomDirty = true;
   if (!antiAliasingEnabled) {
     if (canvas.style.imageRendering !== 'pixelated') {
       console.log("Anti-aliasing disabled by setting. Forcing 'pixelated' rendering.");
@@ -1582,7 +1616,8 @@ function syncSinkToCanvasStyle() {
     rendered = videoWorkerRendered;
   }
   if (!target) return;
-  const geom = canvas.style.cssText;   // capture while the canvas is visible
+  // Captured while the canvas is still visible.
+  const geom = canvas.style.cssText;
   target.style.cssText = geom;
   target.style.display = 'block';
   target.style.objectFit = 'fill';
@@ -1600,7 +1635,8 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     console.warn(`Cannot apply manual canvas style: Invalid target dimensions ${targetWidth}x${targetHeight}`);
     return;
   }
-  canvasGeomDirty = true;  // canvas box changes below -> re-mirror onto the <video>/worker canvas
+  // The canvas box changes below and is re-mirrored onto the <video>/worker canvas.
+  canvasGeomDirty = true;
   // Geometry changed: the per-stripe-row keys (keyed by startY) are now stale, so
   // drop them to bound this map's growth — same guard resetCanvasStyle applies.
   lastDrawnJpegStripeFrameId = {};
@@ -1688,7 +1724,8 @@ function resetCanvasStyle(streamWidth, streamHeight) {
   // Geometry changed: the per-stripe-row keys (keyed by startY) are now stale, so drop them
   // to bound this map's growth across a session of resizes (JPEG stripe mode).
   lastDrawnJpegStripeFrameId = {};
-  canvasGeomDirty = true;  // re-mirror the canvas box onto the <video>/worker canvas
+  // Re-mirror the canvas box onto the <video>/worker canvas.
+  canvasGeomDirty = true;
 
   const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1); 
   const internalBufferWidth = alignResolution(streamWidth * dpr);
@@ -2173,79 +2210,6 @@ function handleDecodedVncStripeFrame(yPos, frame) {
   });
 }
 
-async function handleAdvancedAudioClick() {
-  console.log("Advanced Audio Settings button clicked.");
-  if (!audioDeviceSettingsDivElement || !audioInputSelectElement || !audioOutputSelectElement) {
-    console.error("Audio device UI elements not found in dev sidebar.");
-    return;
-  }
-  const isHidden = audioDeviceSettingsDivElement.classList.contains('hidden');
-  if (isHidden) {
-    console.log("Settings are hidden, attempting to show and populate...");
-    const supportsSinkId = typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
-    const outputLabel = document.getElementById('audioOutputLabel');
-    if (!supportsSinkId) {
-      console.warn('Browser does not support selecting audio output device (setSinkId). Hiding output selection.');
-      if (outputLabel) outputLabel.classList.add('hidden');
-      audioOutputSelectElement.classList.add('hidden');
-    } else {
-      if (outputLabel) outputLabel.classList.remove('hidden');
-      audioOutputSelectElement.classList.remove('hidden');
-    }
-    try {
-      console.log("Requesting microphone permission for device listing...");
-      const tempStream = await navigator.mediaDevices.getUserMedia({
-        audio: true
-      });
-      tempStream.getTracks().forEach(track => track.stop());
-      console.log("Microphone permission granted or already available (temporary stream stopped).");
-      console.log("Enumerating media devices...");
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      console.log("Devices found:", devices);
-      audioInputSelectElement.innerHTML = '';
-      audioOutputSelectElement.innerHTML = '';
-      let inputCount = 0;
-      let outputCount = 0;
-      devices.forEach(device => {
-        if (device.kind === 'audioinput') {
-          inputCount++;
-          const option = document.createElement('option');
-          option.value = device.deviceId;
-          option.textContent = device.label || `Microphone ${inputCount}`;
-          audioInputSelectElement.appendChild(option);
-        } else if (device.kind === 'audiooutput' && supportsSinkId) {
-          outputCount++;
-          const option = document.createElement('option');
-          option.value = device.deviceId;
-          option.textContent = device.label || `Speaker ${outputCount}`;
-          audioOutputSelectElement.appendChild(option);
-        }
-      });
-      console.log(`Populated ${inputCount} input devices and ${outputCount} output devices.`);
-      audioDeviceSettingsDivElement.classList.remove('hidden');
-    } catch (err) {
-      console.error('Error getting media devices or permissions:', err);
-      audioDeviceSettingsDivElement.classList.add('hidden');
-      alert(`Could not list audio devices. Please ensure microphone permissions are granted.\nError: ${err.message || err.name}`);
-    }
-  } else {
-    console.log("Settings are visible, hiding...");
-    audioDeviceSettingsDivElement.classList.add('hidden');
-  }
-}
-
-function handleAudioDeviceChange(event) {
-  const selectedDeviceId = event.target.value;
-  const isInput = event.target.id === 'audioInputSelect';
-  const contextType = isInput ? 'input' : 'output';
-  console.log(`Dev Sidebar: Audio device selected - Type: ${contextType}, ID: ${selectedDeviceId}. Posting message...`);
-  window.postMessage({
-    type: 'audioDeviceSelected',
-    context: contextType,
-    deviceId: selectedDeviceId
-  }, window.location.origin);
-}
-
 // HTTP uploads + drag-drop/file-picker plumbing live in the shared factory
 // (see lib/file-upload.js); shared sessions must not upload.
 const fileUploader = createFileUploader({ canUpload: () => !isSharedMode });
@@ -2548,13 +2512,12 @@ async function applyOutputDevice() {
     console.log("No preferred output device set, using default.");
     return;
   }
-  const supportsSinkId = (typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype) ||
-    (audioElement && typeof audioElement.setSinkId === 'function');
+  // Audio plays out of the AudioContext here (no media element carries it), so
+  // routing needs AudioContext.setSinkId; where it is missing the preference is
+  // simply not applied and playback stays on the default device.
+  const supportsSinkId = typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
   if (!supportsSinkId) {
     console.warn("Browser does not support setSinkId, cannot apply output device preference.");
-    if (audioOutputSelectElement) audioOutputSelectElement.classList.add('hidden');
-    const outputLabel = document.getElementById('audioOutputLabel');
-    if (outputLabel) outputLabel.classList.add('hidden');
     return;
   }
   if (audioContext) {
@@ -3197,8 +3160,11 @@ function handleSettingsMessage(settings) {
     receiveMessage({ origin: window.location.origin, data: messageData });
   }
   if (settings.use_browser_cursors !== undefined) {
+    // Server-pushed (locked/overridden) value: applied to the input layer through
+    // the same re-derivation as the dashboard toggle, but never written to the
+    // user's key, where it would masquerade as their pick after an unlock. Only
+    // the setUseBrowserCursors message persists.
     use_browser_cursors = !!settings.use_browser_cursors;
-    setBoolParam('use_browser_cursors', use_browser_cursors);
     applyEffectiveCursorSetting();
   }
   if (settings.debug !== undefined) {
@@ -3415,6 +3381,9 @@ function initWebsockets() {
     }
   };
   let hiddenVideoStopTimer = null;
+  // Only a pause this handler performed is resumed when the tab comes back: a
+  // stream the user stopped with the dashboard toggle stays stopped.
+  let videoPausedForHiddenTab = false;
   document.addEventListener('visibilitychange', async () => {
     if (isSharedMode) {
       // A shared viewer pauses its OWN video feed on tab-hide: the server drops
@@ -3431,14 +3400,22 @@ function initWebsockets() {
           window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
           console.log("Shared mode: tab hidden, sent STOP_VIDEO to pause this viewer's feed.");
         }
-      } else if (sharedVideoPaused) {
-        sharedVideoPaused = false;
-        try { websocket.send('START_VIDEO'); } catch (_) {}
-        // The server replies with PIPELINE_RESETTING (re-inits the decoder) + an
-        // IDR; arm the watchdog to recover if the resume request is lost.
-        armStartVideoWatchdog();
-        window.postMessage({ type: 'pipelineStatusUpdate', video: true }, window.location.origin);
-        console.log("Shared mode: tab visible, sent START_VIDEO to resume this viewer's feed.");
+      } else {
+        if (sharedVideoPaused) {
+          sharedVideoPaused = false;
+          try { websocket.send('START_VIDEO'); } catch (_) {}
+          // The server replies with PIPELINE_RESETTING (re-inits the decoder) + an
+          // IDR; arm the watchdog to recover if the resume request is lost.
+          armStartVideoWatchdog();
+          window.postMessage({ type: 'pipelineStatusUpdate', video: true }, window.location.origin);
+          console.log("Shared mode: tab visible, sent START_VIDEO to resume this viewer's feed.");
+        }
+        // The browser drops the sentinel on hide, so a shared viewer re-takes it
+        // too — after the resume send, never in front of it.
+        if (wakeLockSentinel === null) {
+          console.log('Tab is visible again, re-acquiring Wake Lock.');
+          await requestWakeLock();
+        }
       }
       return;
     }
@@ -3456,6 +3433,7 @@ function initWebsockets() {
             if (isVideoPipelineActive) {
               websocket.send('STOP_VIDEO');
               isVideoPipelineActive = false;
+              videoPausedForHiddenTab = true;
               window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
               console.log("Tab hidden: Sent STOP_VIDEO. Clearing canvas visually. Server will send PIPELINE_RESETTING for full state reset.");
               if (canvasContext && canvas) {
@@ -3470,16 +3448,13 @@ function initWebsockets() {
       }
     } else {
       if (hiddenVideoStopTimer !== null) { clearTimeout(hiddenVideoStopTimer); hiddenVideoStopTimer = null; }
-      console.log('Tab is visible, requesting video pipeline start if it was inactive.');
       // No decoder re-init here: shared mode returned above, and the lazy init in
       // the frame sink re-creates a background-reclaimed decoder on the next frame.
-      if (websocket && websocket.readyState === WebSocket.OPEN) {
-        if (!isVideoPipelineActive) {
+      if (videoPausedForHiddenTab) {
+        videoPausedForHiddenTab = false;
+        console.log('Tab is visible, resuming the video pipeline paused on hide.');
+        if (websocket && websocket.readyState === WebSocket.OPEN && !isVideoPipelineActive) {
           websocket.send('START_VIDEO');
-          if (wakeLockSentinel === null) {
-            console.log('Tab is visible again, re-acquiring Wake Lock.');
-            await requestWakeLock();
-          }
           isVideoPipelineActive = true;
           // START_VIDEO can be lost (server never restarts encode -> black stream);
           // watch for the first VIDEO_STARTED / video chunk and recover if none lands.
@@ -3493,6 +3468,14 @@ function initWebsockets() {
             } catch (e) { console.error("Error clearing canvas on tab visible/start:", e); }
           }
         }
+      }
+      // After the resume: the wake lock is a permission-backed round trip, and
+      // nothing about the first frame depends on it, so it must not sit in front
+      // of START_VIDEO. Re-acquired whether or not the pipeline was paused,
+      // since the browser releases the sentinel whenever the tab is hidden.
+      if (wakeLockSentinel === null) {
+        console.log('Tab is visible again, re-acquiring Wake Lock.');
+        await requestWakeLock();
       }
     }
   });
@@ -3628,7 +3611,8 @@ function initWebsockets() {
           try { decodedStripesQueue[i].frame.close(); } catch (e) {}
         }
         const frame = decodedStripesQueue[lastIdx].frame;
-        decodedStripesQueue.length = 0;  // single truncation, no per-element reindex
+        // Single truncation, no per-element reindex.
+        decodedStripesQueue.length = 0;
         if (supportsWindowMSTG && presentFrameToVideo(frame)) {
           // handed to the main-thread <video> track generator (zero-copy)
         } else if (USE_OFFSCREEN_WORKER && presentFrameToWorker(frame)) {
@@ -3895,7 +3879,8 @@ function initWebsockets() {
 
                 if (this.audioBufferQueue.length === 0 && this.currentAudioData === null) {
                     zeroFill(0);
-                    this.underrunSamples += samplesPerBuffer;   // full-buffer concealment
+                    // Full-buffer concealment.
+                    this.underrunSamples += samplesPerBuffer;
                     return true;
                 }
 
@@ -3911,7 +3896,8 @@ function initWebsockets() {
                             this.currentAudioData = null;
                             this.currentDataOffset = 0;
                             zeroFill(sampleIndex);
-                            this.underrunSamples += (samplesPerBuffer - sampleIndex);   // partial concealment
+                            // Partial concealment.
+                            this.underrunSamples += (samplesPerBuffer - sampleIndex);
                             return true;
                         }
                     }
@@ -4158,7 +4144,6 @@ function initWebsockets() {
       const settingsPrefix = `${storageAppName}_`;
       const settingsToSend = {};
       const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
-      const isSetBySpecificKey = {};
 
       const knownSettings = [
         'framerate', 'video_crf', 'encoder', 'is_manual_resolution_mode',
@@ -4186,13 +4171,13 @@ function initWebsockets() {
           const isSpecific = displayId !== 'primary' && unprefixedKey.endsWith(displaySuffix);
           const baseKey = isSpecific ? unprefixedKey.slice(0, -displaySuffix.length) : unprefixedKey;
 
-          if (!isSpecific && isSetBySpecificKey[baseKey]) {
+          // A secondary display keeps its own per-display picks: the un-suffixed
+          // key belongs to the primary and is never inherited, matching what the
+          // getters and the dashboard read on this page (WebRTC core parity).
+          if (!isSpecific && displayId !== 'primary' && PER_DISPLAY_SETTINGS.includes(baseKey)) {
             continue;
           }
           if (knownSettings.includes(baseKey)) {
-            if (!isSpecific && isSetBySpecificKey[baseKey]) {
-              continue;
-            }
             let value = localStorage.getItem(key);
             if (booleanSettingKeys.includes(baseKey)) {
               value = (value === 'true');
@@ -4201,9 +4186,6 @@ function initWebsockets() {
               if (isNaN(value)) continue;
             }
             settingsToSend[baseKey] = value;
-            if (isSpecific) {
-              isSetBySpecificKey[baseKey] = true;
-            }
           }
         }
       }
@@ -5562,13 +5544,17 @@ function buildMultiopusDescription(channels) {
   const buf = new ArrayBuffer(21 + channels);
   const u8 = new Uint8Array(buf);
   const dv = new DataView(buf);
-  u8.set([0x4f, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64]); // "OpusHead"
-  u8[8] = 1;                    // version
+  // OpusHead: magic, version 1, channel count, a zero pre-skip (live stream,
+  // nothing to trim), the 48 kHz input rate, zero output gain and mapping
+  // family 1 (multistream), followed by the stream/coupled counts and the
+  // channel mapping table.
+  u8.set([0x4f, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64]);
+  u8[8] = 1;
   u8[9] = channels;
-  dv.setUint16(10, 0, true);    // pre-skip: live stream, nothing to trim
+  dv.setUint16(10, 0, true);
   dv.setUint32(12, 48000, true);
-  dv.setInt16(16, 0, true);     // output gain
-  u8[18] = 1;                   // mapping family 1 (multistream)
+  dv.setInt16(16, 0, true);
+  u8[18] = 1;
   u8[19] = layout.streams;
   u8[20] = layout.coupled;
   u8.set(layout.mapping, 21);
@@ -5593,11 +5579,11 @@ const audioDecoderWorkerCode = `
     decoderAudio = new AudioDecoder({
       output: handleDecodedAudioFrameInWorker,
       error: (e) => {
+        // A fatal decoder error is not re-initialized from here: a persistent
+        // failure would spin. The page drives recovery with its 'reinitialize'
+        // message, which also re-checks the codec configuration.
         console.error('[AudioWorker] AudioDecoder error:', e.message, e);
         currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize -1);
-        if (e.message.includes('fatal') || (decoderAudio && (decoderAudio.state === 'closed' || decoderAudio.state === 'unconfigured'))) {
-          // initializeDecoderInWorker(); // Avoid rapid re-init loops on persistent errors
-        }
       },
     });
     try {
@@ -5784,7 +5770,8 @@ async function startMicrophoneCapture() {
       const pcm16Buffer = event.data;
       if (!(micEncoder && micEncoder.state === 'configured' && isMicrophoneActive)) return;
       if (!pcm16Buffer || !(pcm16Buffer instanceof ArrayBuffer) || pcm16Buffer.byteLength === 0) return;
-      const numFrames = pcm16Buffer.byteLength / 2;   // mono s16
+      // Mono s16: two bytes per frame.
+      const numFrames = pcm16Buffer.byteLength / 2;
       const audioData = new AudioData({
         format: 's16', sampleRate: 24000, numberOfFrames: numFrames,
         numberOfChannels: 1, timestamp: micTimestampUs, data: pcm16Buffer

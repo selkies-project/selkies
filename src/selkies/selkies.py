@@ -221,6 +221,17 @@ def current_session_tokens():
     return user_tokens, active_mk_token
 
 
+def _perms_hold_input_authority(perms, token=None):
+    """The single input-authority rule: while an mk token is active only its
+    holder may drive keyboard/mouse (and the commands and clipboard that ride the
+    same gate), otherwise any controller-role client may. `token` covers callers
+    holding a user_tokens entry, which carries no token field of its own."""
+    perms = perms or {}
+    if active_mk_token is not None:
+        return (perms.get("token") if token is None else token) == active_mk_token
+    return perms.get("role", "viewer") == "controller"
+
+
 # Set by the WebRTC service at init so a token update also reconciles LIVE
 # WebRTC peers (revocation closes them; mk handoffs push over the data
 # channel). reconcile_clients() itself only walks websockets sockets.
@@ -449,6 +460,19 @@ def _path_is_within(directory, target):
         return False
 
 
+_background_tasks = set()
+
+
+def _spawn_background_task(coro, name=None):
+    """Run a fire-and-forget coroutine with a strong reference held until it
+    finishes: the event loop keeps only weak references, so an unreferenced task
+    can be garbage-collected mid-flight."""
+    task = asyncio.create_task(coro, name=name)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 def _close_abandoned_ws(client):
     """Close a dropped socket in the background: close() can itself block
     draining the same paused transport that stalled the send, so it must
@@ -458,7 +482,7 @@ def _close_abandoned_ws(client):
             await asyncio.wait_for(client.close(), timeout=2.0)
         except Exception:
             pass
-    asyncio.create_task(_close())
+    _spawn_background_task(_close())
 
 
 async def _broadcast_to_clients(clients, message, per_client_timeout=None):
@@ -1023,9 +1047,12 @@ class DataStreamingServer(BaseStreamingService):
         # Fallback pixelflux handle for Wayland output management when no
         # primary capture module exists yet (any handle reaches the shared backend).
         self._wayland_ctl_module = None
-        self._last_keyframe_request = {}  # display_id -> monotonic, rate-limits client IDR requests
-        self._last_keyframe_log = {}      # display_id -> monotonic, throttles the log line (not the IDR request)
-        self._keyframe_log_suppressed = {} # display_id -> int, requests elided between log lines
+        # display_id -> monotonic: rate-limits client IDR requests.
+        self._last_keyframe_request = {}
+        # display_id -> monotonic: throttles the log line, not the IDR request.
+        self._last_keyframe_log = {}
+        # display_id -> int: requests elided between log lines.
+        self._keyframe_log_suppressed = {}
 
         # pcmflux audio capture state
         self.audio_device_name = self.cli_args.audio_device_name
@@ -1270,8 +1297,15 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.info(f"Applied audio bitrate live: {self.app.audio_bitrate} bps")
             except Exception as e:
                 data_logger.warning(f"Live audio bitrate update failed ({e}); restarting audio pipeline.")
-                await self._stop_pcmflux_pipeline()
-                await self._start_pcmflux_pipeline()
+                # Serialized like every other audio pipeline start/stop: a
+                # concurrent guarded op (RED re-gate, START_AUDIO, disconnect)
+                # must not interleave here and orphan a second AudioCapture.
+                # Re-checked under the guard, so a pipeline stopped meanwhile
+                # stays stopped.
+                async with self._reconfigure_guard():
+                    if self.is_pcmflux_capturing:
+                        await self._stop_pcmflux_pipeline()
+                        await self._start_pcmflux_pipeline()
 
     async def _handle_opcode_rate_control(self, mode, display_id='primary'):
         """Rate-control switch for the '_rc' verb: structural like the SETTINGS
@@ -1403,13 +1437,15 @@ class DataStreamingServer(BaseStreamingService):
                     try:
                         q.put_nowait(item)
                     except asyncio.QueueFull:
-                        pass  # drop rather than grow unbounded
+                        # Drop the chunk rather than grow the queue unbounded.
+                        pass
                 # Guard the schedule: the loop can close between the check above and
                 # here, and the RuntimeError would surface in pcmflux's C thread.
                 try:
                     loop.call_soon_threadsafe(_do_put)
                 except RuntimeError:
-                    pass  # loop closed mid-teardown; drop the chunk
+                    # Loop closed mid-teardown: drop the chunk.
+                    pass
     
     async def _pcmflux_send_audio_chunks(self):
         """
@@ -1559,7 +1595,8 @@ class DataStreamingServer(BaseStreamingService):
             return True
         except Exception as e:
             data_logger.error(f"Failed to start pcmflux audio pipeline: {e}", exc_info=True)
-            await self._stop_pcmflux_pipeline() # Attempt cleanup on failure
+            # Clean up whatever the partial start left behind.
+            await self._stop_pcmflux_pipeline()
             return False
 
     async def _stop_pcmflux_pipeline(self):
@@ -1567,7 +1604,8 @@ class DataStreamingServer(BaseStreamingService):
             return True
         
         data_logger.info("Stopping pcmflux audio pipeline...")
-        self.is_pcmflux_capturing = False # Prevent new items from being queued
+        # Cleared first: the capture-thread callback stops queueing new chunks.
+        self.is_pcmflux_capturing = False
 
         if self.pcmflux_send_task:
             self.pcmflux_send_task.cancel()
@@ -1730,6 +1768,55 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.info(f"New frame backpressure task started for display '{display_id}'.")
         else:
             data_logger.warning(f"Backpressure task for '{display_id}' was already running. Not starting a new one.")
+
+    def _active_primary_consumers(self, exclude=None):
+        """Sockets still consuming the primary broadcast: every client except the
+        secondary displays' owners, minus the paused ones. A paused viewer with a
+        deferred rejoin pending counts as active — it keeps the capture alive under
+        a waking viewer, while genuinely hidden ones let an all-tabs-hidden session
+        stop encoding. `exclude` drops the socket whose STOP_VIDEO is in flight."""
+        secondary_ws = {
+            info.get('ws')
+            for did, info in self.display_clients.items()
+            if did != 'primary'
+        }
+        waking = set(self._deferred_viewer_rejoins)
+        consumers = self.clients - secondary_ws - (self.video_paused_clients - waking)
+        if exclude is not None:
+            consumers.discard(exclude)
+        return consumers
+
+    def _primary_reconnect_pending(self):
+        """Whether the primary display entry is being held for a socket that is
+        already gone: the reconnect grace keeps the capture warm so a reloading
+        page resumes on it instead of paying a full pipeline rebuild."""
+        entry = self.display_clients.get('primary')
+        return entry is not None and entry.get('ws') not in self.clients
+
+    async def _stop_primary_if_unconsumed(self, reason: str):
+        """Stop the primary capture once nothing decodes it — the last unpaused
+        consumer hid its tab or disconnected. Hiding and disconnecting take the
+        same verdict here; only a pending reconnect grace keeps the capture warm.
+        A resume restarts it (START_VIDEO from the display owner, or the viewer
+        path's capture ensure)."""
+        if 'primary' not in self.capture_instances:
+            return
+        if self._active_primary_consumers() or self._primary_reconnect_pending():
+            return
+        data_logger.info(f"{reason} Stopping the 'primary' capture.")
+        primary_entry = self.display_clients.get('primary')
+        if primary_entry is not None:
+            primary_entry['video_active'] = False
+        await self._stop_capture_for_display('primary')
+
+    def _cancel_deferred_rejoin(self, websocket):
+        """Drop a pending deferred rejoin for this socket. A STOP_VIDEO (or a
+        disconnect) arriving after a throttled resume supersedes it: the rejoin
+        would otherwise un-pause a tab that is hidden again, and the socket would
+        keep counting as a live consumer until it fired."""
+        rejoin_task = self._deferred_viewer_rejoins.pop(websocket, None)
+        if rejoin_task is not None:
+            rejoin_task.cancel()
 
     def _schedule_deferred_viewer_rejoin(self, websocket, delay: float):
         """Rejoin a rapid-resume-throttled viewer once the resume floor passes.
@@ -2443,6 +2530,13 @@ class DataStreamingServer(BaseStreamingService):
         if self.supervisor:
             self.supervisor.set_clients_present(bool(self.clients))
 
+    def _holds_input_authority(self, websocket, perms=None):
+        """Whether this socket may drive keyboard/mouse input. `perms` supplies the
+        entry for a socket already removed from client_permissions."""
+        if perms is None:
+            perms = client_permissions.get(websocket)
+        return _perms_hold_input_authority(perms)
+
     async def ws_handler(self, websocket: web.WebSocketResponse, remote_address, token = "", query_role = "", query_slot = None):
         if self.is_secure_mode:
             await self.config_gate.wait()
@@ -2602,9 +2696,7 @@ class DataStreamingServer(BaseStreamingService):
 
         gpu_id_for_stats = getattr(self.app, "gpu_id", GPU_ID_DEFAULT)
         # Stats must describe the GPU the pipeline captures/encodes on.
-        dri_node_for_stats = (
-            getattr(getattr(self.app, "cli_args", None), "encode_dri", "") or ""
-        )
+        dri_node_for_stats = str(getattr(self.cli_args, "encode_dri", "") or "")
 
         pulse = None
         try:
@@ -2708,7 +2800,8 @@ class DataStreamingServer(BaseStreamingService):
                     if not msg.data:
                         continue
                     msg_type, payload = msg.data[0], msg.data[1:]
-                    if msg_type == 0x02:  # Mic data
+                    # Opcode 0x02 carries mic PCM.
+                    if msg_type == 0x02:
                         # Only a controller or a viewer with collab (m/k)
                         # authority may speak into the desktop mixer; the verdict
                         # mirrors the text-input gate (including its collab escape
@@ -2813,7 +2906,9 @@ class DataStreamingServer(BaseStreamingService):
                                 ps.channels = 1
                                 ps.latency_ms = 40
                                 await asyncio.to_thread(_pb.start, ps)
-                                mic_playback = _pb  # only after a successful start
+                                # Published only once the stream really started, so a
+                                # failed start is retried on the next chunk.
+                                mic_playback = _pb
                             mic_playback.write(payload)
                         except Exception as e_rust_mic:
                             data_logger.error(
@@ -2998,7 +3093,11 @@ class DataStreamingServer(BaseStreamingService):
                                      'rate_control_mode': self.rc_mode.value,
                                      'video_bitrate': self._initial_video_bitrate,
                                      'force_aligned_resolution': self.cli_args.force_aligned_resolution[0],
-                                     'scaling_dpi': int(float(getattr(app_settings, "scaling_dpi", "96") or 96)),
+                                     # Seeded in the shared sanitizer's normalized form
+                                     # (an enum, so str): a str-vs-int mismatch would
+                                     # read the first SETTINGS as a DPI change and
+                                     # re-apply xrdb, cursor size, and Wayland scale.
+                                     'scaling_dpi': str(int(float(getattr(app_settings, "scaling_dpi", "96") or 96))),
                                      # Seed from the configured DPI so a Wayland
                                      # first load captures at the intended scale
                                      # before any client DPI sync arrives.
@@ -3254,23 +3353,16 @@ class DataStreamingServer(BaseStreamingService):
                             except (ConnectionResetError, OSError, RuntimeError):
                                 pass
                         elif stop_entry is not None:
+                            self._cancel_deferred_rejoin(websocket)
                             # The primary's capture feeds every shared viewer:
                             # the controller hiding its tab must not stop the
                             # encoder while viewers still consume the broadcast
                             # — pause just the controller's socket instead (the
                             # fan-out already excludes video_paused_clients).
-                            display_sockets = {
-                                info.get('ws') for info in self.display_clients.values()
-                            }
-                            # A viewer with a deferred rejoin pending is still in
-                            # video_paused_clients; counting it keeps the capture alive
-                            # under a waking viewer, while genuinely hidden viewers still
-                            # let an all-tabs-hidden session stop encoding.
-                            waking = set(self._deferred_viewer_rejoins)
                             remaining_viewers = (
-                                self.clients - display_sockets
-                                - (self.video_paused_clients - waking)
-                            ) if client_display_id == 'primary' else set()
+                                self._active_primary_consumers(exclude=websocket)
+                                if client_display_id == 'primary' else set()
+                            )
                             if remaining_viewers:
                                 data_logger.info(
                                     f"STOP_VIDEO for 'primary' with {len(remaining_viewers)} shared "
@@ -3291,8 +3383,15 @@ class DataStreamingServer(BaseStreamingService):
                             # the primary video broadcast. Capture keeps running
                             # for everyone else, and the socket stays connected for
                             # control, cursor, and audio.
+                            self._cancel_deferred_rejoin(websocket)
                             self.video_paused_clients.add(websocket)
                             data_logger.info(f"STOP_VIDEO from shared client ({remote_address}): pausing its video feed.")
+                            # Whichever tab hides last ends the encoding: with the
+                            # primary's owner (if any) already paused and no viewer
+                            # left unpaused, nothing decodes the broadcast anymore.
+                            await self._stop_primary_if_unconsumed(
+                                "Last unpaused consumer of 'primary' hid its tab."
+                            )
                             try:
                                 await websocket.send_str("VIDEO_STOPPED")
                             except (ConnectionResetError, OSError, RuntimeError):
@@ -3340,7 +3439,12 @@ class DataStreamingServer(BaseStreamingService):
                                 )
                                 if not settings.audio_enabled[0]:
                                     data_logger.info("START_AUDIO: Audio is disabled by server settings. Sending AUDIO_DISABLED.")
-                                    await websocket.send_str("AUDIO_DISABLED")
+                                    # The requester may already be gone: this runs as its
+                                    # own task, so a dead socket must end it quietly.
+                                    try:
+                                        await websocket.send_str("AUDIO_DISABLED")
+                                    except (ConnectionResetError, OSError, RuntimeError):
+                                        pass
                                     return
                                 if PCMFLUX_AVAILABLE:
                                     started = False
@@ -3354,7 +3458,10 @@ class DataStreamingServer(BaseStreamingService):
                                         await _broadcast_to_clients(self.clients, "AUDIO_STARTED", per_client_timeout=2.0)
                                 else:
                                     data_logger.warning("START_AUDIO: Cannot start server-to-client audio (pcmflux not available).")
-                                    await websocket.send_str("AUDIO_DISABLED")
+                                    try:
+                                        await websocket.send_str("AUDIO_DISABLED")
+                                    except (ConnectionResetError, OSError, RuntimeError):
+                                        pass
                         # Track per-connection: a re-request supersedes the pending
                         # one, and disconnect cleanup cancels whatever is in flight.
                         if start_audio_task_ws and not start_audio_task_ws.done():
@@ -3504,18 +3611,9 @@ class DataStreamingServer(BaseStreamingService):
 
                         # Secure mode: 'cmd' needs input authority (active mk-token
                         # holder, or a controller when no mk-token is set).
-                        if self.is_secure_mode:
-                            cmd_perms = client_permissions.get(websocket)
-                            cmd_token = cmd_perms.get("token") if cmd_perms else None
-                            if active_mk_token is not None:
-                                if cmd_token != active_mk_token:
-                                    data_logger.warning(f"BLOCK (Secure Mode): 'cmd' from {remote_address} dropped; client is not the active controller.")
-                                    continue
-                            else:
-                                cmd_role = cmd_perms.get("role") if cmd_perms else "viewer"
-                                if cmd_role != "controller":
-                                    data_logger.warning(f"BLOCK (Secure Mode): 'cmd' from {remote_address} dropped; client is not a controller.")
-                                    continue
+                        if self.is_secure_mode and not self._holds_input_authority(websocket):
+                            data_logger.warning(f"BLOCK (Secure Mode): 'cmd' from {remote_address} dropped; client does not hold input authority.")
+                            continue
 
                         toks = message.split(',')
                         if len(toks) > 1:
@@ -3566,17 +3664,9 @@ class DataStreamingServer(BaseStreamingService):
                         # direction-gates it on enable_clipboard (out). Viewer-role drops above
                         # still apply.
                         if self.is_secure_mode and message.split(',', 1)[0] in ["kd", "ku", "kh", "kr", "m", "m2", "co", "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "REQUEST_CLIPBOARD"]:
-                            perms = client_permissions.get(websocket)
-                            token = perms.get("token") if perms else None
-                            
-                            if active_mk_token is not None:
-                                if token != active_mk_token:
-                                    continue
-                            else:
-                                role = perms.get("role") if perms else "viewer"
-                                if role != "controller":
-                                    continue
- 
+                            if not self._holds_input_authority(websocket):
+                                continue
+
                         if self.input_handler and hasattr(
                             self.input_handler, "on_message"
                         ):
@@ -3594,10 +3684,11 @@ class DataStreamingServer(BaseStreamingService):
             self.last_start_video_request_times.pop(websocket, None)
             self.last_viewer_keyframe_request_times.pop(websocket, None)
             self.video_paused_clients.discard(websocket)
-            rejoin_task = self._deferred_viewer_rejoins.pop(websocket, None)
-            if rejoin_task is not None:
-                rejoin_task.cancel()
-            client_permissions.pop(websocket, None)
+            self._cancel_deferred_rejoin(websocket)
+            departing_perms = client_permissions.pop(websocket, None) or {}
+            # Dropped from the client set before the cleanup below reads it: the
+            # authority and consumer verdicts must see the remaining clients only.
+            self.clients.discard(websocket)
             data_logger.info(f"Cleaning up Data WS handler for {raddr} (Display ID: {client_display_id})...")
             # Release gamepad slots this connection associated: a tab that dies
             # mid-press never sends 'js,d', and a held button would stay stuck on
@@ -3608,7 +3699,31 @@ class DataStreamingServer(BaseStreamingService):
                 except Exception as e:
                     data_logger.warning(f"Gamepad release on disconnect failed: {e}")
 
-            self.clients.discard(websocket)
+            # Held keys, modifiers and pointer buttons are one global desktop state,
+            # so a departing socket may force-release them only if it could drive
+            # input AND it was the one whose state is now unowned: the primary
+            # display's owner (the session's main input source) always qualifies,
+            # anything else only as the last input-capable client — a shared viewer
+            # or a second display's window leaving must not drop the keys or the
+            # in-progress drag of a client that is still connected.
+            _primary_entry = self.display_clients.get('primary')
+            departing_input_authority = self._holds_input_authority(websocket, departing_perms) and (
+                (_primary_entry is not None and _primary_entry.get('ws') is websocket)
+                or not any(self._holds_input_authority(ws) for ws in self.clients)
+            )
+
+            # A tab that dies mid-drag never sends the button-up mask, which would
+            # leave the pointer button held down for whoever connects next.
+            if (
+                self.input_handler
+                and departing_input_authority
+                and hasattr(self.input_handler, "release_mouse_buttons")
+            ):
+                try:
+                    await self.input_handler.release_mouse_buttons()
+                except Exception as e:
+                    data_logger.warning(f"Mouse button release on disconnect failed: {e}")
+
             # Drop this socket's video relays now rather than at the next
             # fan-out: with an idle capture (JPEG / streaming mode off) no
             # chunk flows to prune them, and a dead relay would pin its
@@ -3670,11 +3785,11 @@ class DataStreamingServer(BaseStreamingService):
                     data_logger.info(f"Client for '{did}' did not return within the grace period. Removing and triggering full display reconfiguration.")
                     await self.reconfigure_displays()
                     # A viewer-started capture has no owning display client, so the
-                    # reconfigure above never stops it: stop it when the last
-                    # consumer leaves (no-op when a controller's reconfigure did).
-                    if not self.clients and not self.display_clients and 'primary' in self.capture_instances:
-                        data_logger.info("Last consumer disconnected; stopping viewer-started primary capture.")
-                        await self._stop_capture_for_display('primary')
+                    # reconfigure above never stops it: stop it when nothing is left
+                    # to decode it (no-op when a controller's reconfigure did).
+                    await self._stop_primary_if_unconsumed(
+                        "No unpaused consumer of 'primary' left after the grace period."
+                    )
                     if not self.clients:
                         data_logger.info("Last client gone after the grace period. Tearing down singleton collectors and pipelines.")
                         for _singleton_attr in (
@@ -3699,11 +3814,13 @@ class DataStreamingServer(BaseStreamingService):
                 _teardown_task.add_done_callback(self._display_teardown_tasks.discard)
             else:
                 data_logger.info(f"Unregistered client at {raddr} disconnected. No display reconfiguration needed.")
-                # A viewer-started capture has no owning display client, so
-                # nothing else stops it: stop it when the last consumer leaves.
-                if not self.clients and not self.display_clients and 'primary' in self.capture_instances:
-                    data_logger.info("Last consumer disconnected; stopping viewer-started primary capture.")
-                    await self._stop_capture_for_display('primary')
+                # Nothing else stops the primary capture for a socket that owns no
+                # display: leaving and hiding weigh the same, so a departing last
+                # unpaused viewer ends the encoding even while a paused display
+                # owner stays connected.
+                await self._stop_primary_if_unconsumed(
+                    "Last unpaused consumer of 'primary' disconnected."
+                )
 
             # Cancel only the per-connection tasks; the singleton collectors
             # are torn down on last-client disconnect (cancelling here breaks remaining clients).
@@ -3712,12 +3829,21 @@ class DataStreamingServer(BaseStreamingService):
                 start_audio_task_ws,
             ]
             for _task_to_cancel in monitor_tasks:
-                if _task_to_cancel and not _task_to_cancel.done():
-                    _task_to_cancel.cancel()
-                    try:
-                        await _task_to_cancel
-                    except asyncio.CancelledError:
-                        pass
+                if not _task_to_cancel:
+                    continue
+                _task_to_cancel.cancel()
+                # Awaited unconditionally (cancelling a finished task is a no-op):
+                # a task that already failed on its dying socket has its exception
+                # retrieved here, and neither it nor a failure during cancellation
+                # may abort the remaining teardown below.
+                try:
+                    await _task_to_cancel
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e_conn_task:
+                    data_logger.debug(
+                        f"Per-connection task for {raddr} ended with an error: {e_conn_task}"
+                    )
 
             # Rust mic playback (if used) owns its PA stream on a worker thread; stop()
             # joins it and releases the sink deterministically (UAF-safe internally).
@@ -3756,7 +3882,11 @@ class DataStreamingServer(BaseStreamingService):
                     )
 
 
-            if self.input_handler:
+            # Same authority verdict as the pointer release above. Held keys this
+            # gate leaves alone belong to a client that is still connected, and a
+            # crashed one's keys are healed by the input handler's heartbeat
+            # stale-sweep, which is what the WebRTC path relies on.
+            if self.input_handler and departing_input_authority:
                 try:
                     await self.input_handler.reset_keyboard()
                     data_logger.info(f"Keyboard reset completed ({raddr}) disconnect.")
@@ -4540,7 +4670,9 @@ class DataStreamingServer(BaseStreamingService):
                 try:
                     alive = bool(module.is_capturing)
                 except Exception:
-                    alive = True  # can't tell -> don't churn a possibly-healthy stream
+                    # Unknown state: assume alive rather than churn a possibly
+                    # healthy stream.
+                    alive = True
             if alive:
                 # Nudge a fresh IDR so a reconnecting/woken client gets a decodable frame
                 # immediately instead of stalling until the next scheduled keyframe.
@@ -4600,8 +4732,10 @@ class DataStreamingServer(BaseStreamingService):
 
                     def do_fanout():
                         group = self.video_relay_groups.get(display_id)
+                        # No relay group means the capture is stopping: the chunk is
+                        # dropped and its buffer freed with the frame.
                         if group is None:
-                            return  # capture stopping -> chunk drops, buffer freed
+                            return
                         pc_ws = None
                         if display_id == 'primary':
                             secondary_ws = {
@@ -4721,7 +4855,8 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e:
             data_logger.error(f"Failed to start capture for '{display_id}': {e}", exc_info=True)
             self._close_video_relays(display_id)
-            return False  # signal failure so callers don't report a false VIDEO_STARTED
+            # Failure is reported so callers do not ack a false VIDEO_STARTED.
+            return False
 
     def _get_capture_settings(self, display_id, width, height, x, y):
         """Helper to create CaptureSettings for a specific display region."""
@@ -4958,7 +5093,7 @@ class DataStreamingServer(BaseStreamingService):
         if not self.config_gate.is_set():
             self.config_gate.set()
             logger.info("Configuration gate is now open. WebSocket server will accept connections.")
-        asyncio.create_task(reconcile_clients())
+        _spawn_background_task(reconcile_clients())
         return web.Response(status=200, text="OK")
 
     async def data_ws_handler(self, request: web.Request):
@@ -5116,7 +5251,8 @@ async def _send_stats_periodically_ws(websocket, shared_data, server_instance, i
             gpu_stats = shared_data.get("gpu")
             network_stats = server_instance._shared_network_stats.get("network")
             try:
-                if not websocket:  # Check if websocket is still valid
+                # The socket may have been dropped since the last tick.
+                if not websocket:
                     data_logger.info("Stats sender: WS closed or invalid.")
                     break
                 if system_stats:
@@ -5275,13 +5411,7 @@ async def reconcile_clients():
             # new_perms is None when the token was revoked; nothing below
             # applies to a client being disconnected.
             continue
-        has_mk_access = False
-        if active_mk_token is not None:
-            if token == active_mk_token:
-                has_mk_access = True
-        elif new_perms.get("role") == "controller":
-            has_mk_access = True
-        
+        has_mk_access = _perms_hold_input_authority(new_perms, token=token)
         mk_msg = "MK_ACCESS,1" if has_mk_access else "MK_ACCESS,0"
         try:
             await ws.send_str(mk_msg)

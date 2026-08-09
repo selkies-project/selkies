@@ -28,12 +28,14 @@ import threading
 
 try:
     import pynvml
-except ImportError:  # the nvidia-smi subprocess fallback covers its absence
+except ImportError:
+    # The nvidia-smi subprocess fallback covers its absence.
     pynvml = None
 
 try:
     from aitop.core.gpu.factory import GPUMonitorFactory
-except Exception:  # universal-vendor telemetry; sysfs backfill covers its absence
+except Exception:
+    # Universal-vendor telemetry; the sysfs backfill covers its absence.
     GPUMonitorFactory = None
 
 logger = logging.getLogger("gpu_stats")
@@ -163,10 +165,11 @@ def _nvidia_gpus():
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 3:
             continue
+        # CSV field order: utilization percent (0..100), total MiB, used MiB.
         try:
-            util = float(parts[0])          # percent 0..100
-            mem_total = float(parts[1])     # MiB
-            mem_used = float(parts[2])      # MiB
+            util = float(parts[0])
+            mem_total = float(parts[1])
+            mem_used = float(parts[2])
         except ValueError:
             continue
         pci = _normalize_pci(parts[3]) if len(parts) > 3 else None
@@ -246,8 +249,9 @@ def _drm_sysfs_gpus(root=None):
     root = root or _SYSFS_DRM_ROOT
     gpus = []
     for card in sorted(glob.glob(os.path.join(root, "card[0-9]*"))):
+        # Connector nodes (cardN-HDMI-A-1) are not devices.
         if "-" in os.path.basename(card):
-            continue  # connector nodes (cardN-HDMI-A-1), not devices
+            continue
         device = os.path.join(card, "device")
         try:
             driver = os.path.basename(os.readlink(os.path.join(device, "driver")))

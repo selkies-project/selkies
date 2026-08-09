@@ -59,6 +59,7 @@ class WebRTCSignalingClient:
         enable_basic_auth: bool = False,
         basic_auth_user: Optional[str] = None,
         basic_auth_password: Optional[str] = None,
+        server_token: Optional[str] = None,
     ) -> None:
         """Initialize the signaling client.
 
@@ -68,6 +69,8 @@ class WebRTCSignalingClient:
             enable_basic_auth: Whether to use HTTP Basic Authentication.
             basic_auth_user: Username for basic auth.
             basic_auth_password: Password for basic auth.
+            server_token: Master token proving this peer may claim the server
+                role; required by the signaling server in secure mode.
         """
         self.server = server
         self.peer_type = "server"
@@ -75,6 +78,7 @@ class WebRTCSignalingClient:
         self.enable_basic_auth = enable_basic_auth
         self.basic_auth_user = basic_auth_user
         self.basic_auth_password = basic_auth_password
+        self.server_token = server_token
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._ws: Optional[ClientWebSocketResponse] = None
@@ -111,6 +115,18 @@ class WebRTCSignalingClient:
         self._stop_event.clear()
         self._task = asyncio.create_task(self.connect_and_listen())
 
+    def _hello_message(self) -> str:
+        """Registration line for this peer.
+
+        In secure mode the signaling server only lets a peer claim the server
+        role when it presents the master token, so carry it in the metadata
+        object whenever one is configured.
+        """
+        if not self.server_token:
+            return "HELLO {}".format(self.peer_type)
+        metadata = json.dumps({"server_token": self.server_token})
+        return "HELLO {} {}".format(self.peer_type, metadata)
+
     async def connect_and_listen(self) -> None:
         """Connect to the signaling server and listen for messages.
 
@@ -124,8 +140,11 @@ class WebRTCSignalingClient:
 
         headers: Optional[Dict[str, str]] = None
         if self.enable_basic_auth and self.basic_auth_user and self.basic_auth_password:
+            # UTF-8 credentials, matching the server's Basic-auth comparison and
+            # its advertised charset: an ASCII encode would raise here, outside
+            # the retry loop, and kill the connect task for a non-ASCII password.
             auth64 = base64.b64encode(
-                f"{self.basic_auth_user}:{self.basic_auth_password}".encode("ascii")
+                f"{self.basic_auth_user}:{self.basic_auth_password}".encode("utf-8")
             ).decode("ascii")
             headers = {"Authorization": f"Basic {auth64}"}
 
@@ -139,7 +158,7 @@ class WebRTCSignalingClient:
                     ssl=ssl_ctx,
                     heartbeat=30,
                 )
-                await self._ws.send_str(f"HELLO {self.peer_type}")
+                await self._ws.send_str(self._hello_message())
                 await self._listen()
             except asyncio.CancelledError:
                 pass
@@ -302,15 +321,13 @@ class WebRTCSignalingClient:
             try:
                 client_peer_id, message = message.split(" ", maxsplit=1)
                 data = json.loads(message)
-            except json.JSONDecodeError:
-                await self.on_error(
-                    WebRTCSignalingError(f"error parsing message as JSON: {message}")
-                )
-                return
             except ValueError:
-                await self.on_error(
-                    WebRTCSignalingError(f"failed to parse message: {message}")
-                )
+                # Neither a peer-prefixed payload nor valid JSON (JSONDecodeError
+                # subclasses ValueError). Any client's text is relayed here
+                # verbatim, so a malformed one is ignored like the non-object and
+                # unrecognized cases below rather than reported as a transport
+                # failure, which would tear down every peer's session.
+                logger.warning(f"ignoring unparseable signaling message: {message}")
                 return
 
             if not isinstance(data, dict):

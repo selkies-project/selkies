@@ -131,12 +131,14 @@ const STREAM_MODE_WEBSOCKETS = "websockets";
 const STREAMING_MODES= [STREAM_MODE_WEBSOCKETS, STREAM_MODE_WEBRTC]
 const DEFAULT_STREAM_MODE = STREAM_MODE_WEBSOCKETS;
 const DEFAULT_WEBRTC_ENCODER = "h264enc";
-const DEFAULT_AUDIO_BITRATE = 128000;  // in bps (global default, matches server + wish)
+// Global default in bps, matching the server and the wish dashboard.
+const DEFAULT_AUDIO_BITRATE = 128000;
 // Opus target bitrate stops mirroring the server's audio_bitrate allowed enum
 // (settings.py); the fallback list before serverSettings arrives. 510k is
 // libopus's hard maximum.
 const audioBitrateOptions = [32000, 48000, 64000, 96000, 128000, 192000, 256000, 320000, 384000, 510000];
-const DEFAULT_VIDEO_BITRATE = 8000;   // in kbps
+// Expressed in kbps.
+const DEFAULT_VIDEO_BITRATE = 8000;
 const RATE_CONTROL_CBR = "cbr";
 const RATE_CONTROL_CRF = "crf";
 // Rate control resolves through the shared precedence ladder with CBR as the
@@ -714,7 +716,8 @@ function useConditionalSetting(spec, serverSettings, ctx, deps) {
 // The toggle handle's inline `top` positions its center (Overlay.css keeps the
 // translateY(-50%)), so clamp by half the handle height to keep it fully
 // inside the viewport, expressed as a percentage of the viewport height.
-const TOGGLE_HANDLE_HEIGHT_PX = 60; // keep in sync with .toggle-handle in Overlay.css
+// Keep the height in sync with .toggle-handle in Overlay.css.
+const TOGGLE_HANDLE_HEIGHT_PX = 60;
 const clampToggleHandleTopPct = (pct) => {
   const safePct = Number.isFinite(pct) ? pct : 50;
   // A zero/undefined viewport height (headless, pre-layout, test env) would make
@@ -1623,28 +1626,16 @@ function Sidebar() {
   const sharingLinks = [
     {
       id: "shared",
-      label: "Read only viewer",
-      tooltip: "Read only client for viewing, as many clients as needed can connect to this endpoint and see the live session",
+      label: t("sections.sharing.viewerLabel"),
+      tooltip: t("sections.sharing.viewerTooltip"),
       hash: "#shared",
     },
-    {
-      id: "player2",
-      label: "Controller 2",
-      tooltip: "Player 2 gamepad input, this endpoint has full control over the player 2 gamepad",
-      hash: "#player2",
-    },
-    {
-      id: "player3",
-      label: "Controller 3",
-      tooltip: "Player 3 gamepad input, this endpoint has full control over the player 3 gamepad",
-      hash: "#player3",
-    },
-    {
-      id: "player4",
-      label: "Controller 4",
-      tooltip: "Player 4 gamepad input, this endpoint has full control over the player 4 gamepad",
-      hash: "#player4",
-    },
+    ...[2, 3, 4].map((n) => ({
+      id: `player${n}`,
+      label: t("sections.sharing.controllerLabel", { n }),
+      tooltip: t("sections.sharing.controllerTooltip", { n }),
+      hash: `#player${n}`,
+    })),
   ];
   const handleCopyLink = async (textToCopy, label) => {
     if (!navigator.clipboard) {
@@ -2001,6 +1992,9 @@ function Sidebar() {
   const toggleTheme = () => {
     const newTheme = theme === "dark" ? "light" : "dark";
     setTheme(newTheme);
+    // Not session-prefixed: the theme is a per-browser preference shared by
+    // every session of this dashboard.
+    localStorage.setItem("theme", newTheme);
   };
   const handleStreamModeChange = async (event) => {
     const newMode = event.target.value;
@@ -2280,11 +2274,16 @@ function Sidebar() {
             setDashboardClipboardContent(message.text);
             setDashboardClipboardTruncated(message.truncated === true);
           }
-        } else if (message.type === "audioDeviceStatusUpdate") {
-          if (message.inputDeviceId !== undefined)
-            setSelectedInputDeviceId(message.inputDeviceId || "default");
-          if (message.outputDeviceId !== undefined)
-            setSelectedOutputDeviceId(message.outputDeviceId || "default");
+        } else if (message.type === "audioDeviceSelected") {
+          // Mirror the dashboard's own selection back into the dropdowns, so
+          // the displayed device always matches what the core was told
+          // (wish dashboard parity).
+          if (message.deviceId) {
+            if (message.context === "input")
+              setSelectedInputDeviceId(message.deviceId);
+            else if (message.context === "output")
+              setSelectedOutputDeviceId(message.deviceId);
+          }
         } else if (
           message.type === "gamepadButtonUpdate" ||
           message.type === "gamepadAxisUpdate"
@@ -2341,7 +2340,7 @@ function Sidebar() {
                   ...prev,
                   {
                     id,
-                    fileName: "Warning",
+                    fileName: t("notifications.warningPrefix"),
                     status: "warn",
                     message: errMsg,
                     timestamp: Date.now(),
@@ -2391,7 +2390,7 @@ function Sidebar() {
               } else if (status === "warning") {
                   un[exIdx] = {
                     ...cn,
-                    fileName: "Warning",
+                    fileName: t("notifications.warningPrefix"),
                     status: "warn",
                     message: errMsg,
                     timestamp: Date.now(),
@@ -2410,10 +2409,6 @@ function Sidebar() {
                   ? encoders
                   : (isWebrtc? encoderOptionsWR: encoderOptions);
               setDynamicEncoderOptions(newEncoderOptions);
-          }
-          if (typeof message.enableBinaryClipboard === 'boolean') {
-            setEnableBinaryClipboard(message.enableBinaryClipboard);
-            console.log("Dashboard: Received enableBinaryClipboard setting from server:", message.enableBinaryClipboard);
           }
         } else if (message.type === "trackpadModeUpdate") {
           if (typeof message.enabled === 'boolean') {
@@ -2562,7 +2557,7 @@ function Sidebar() {
           onPointerUp={handleTogglePointerUp}
           onPointerCancel={handleTogglePointerUp}
           style={{ top: `${toggleHandleTopPct}%`, touchAction: 'none' }}
-          title={`${isOpen ? 'Close' : 'Open'} Dashboard`}
+          title={isOpen ? t("closeDashboardTitle") : t("openDashboardTitle")}
         >
           <div className="toggle-indicator"></div>
         </div>
@@ -4050,7 +4045,7 @@ function Sidebar() {
                               target="_blank"
                               rel="noopener noreferrer"
                               className="sharing-link"
-                              title={`Open ${link.label} link in new tab`}
+                              title={t("sections.sharing.openLinkTitle", { label: link.label })}
                             >
                               {fullUrl}
                             </a>
@@ -4058,7 +4053,7 @@ function Sidebar() {
                               type="button"
                               onClick={() => handleCopyLink(fullUrl, link.label)}
                               className="copy-button"
-                              title={`Copy ${link.label} link`}
+                              title={t("sections.sharing.copyLinkTitle", { label: link.label })}
                             >
                               <CopyIcon />
                             </button>
@@ -4339,11 +4334,11 @@ function Sidebar() {
           <button
             className="files-modal-close"
             onClick={toggleFilesModal}
-            aria-label="Close files modal"
+            aria-label={t("filesModal.closeAlt")}
           >
             &times;
           </button>
-          <iframe src="./api/files/" title="Downloadable Files" />
+          <iframe src="./api/files/" title={t("filesModal.iframeTitle")} />
         </div>
       )}
       {isAppsModalOpen && (

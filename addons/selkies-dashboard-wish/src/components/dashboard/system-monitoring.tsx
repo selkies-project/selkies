@@ -202,22 +202,6 @@ export function SystemMonitoring() {
 	const [bandwidthMbps, setBandwidthMbps] = useState(0);
 	const [maxBandwidthMbps, setMaxBandwidthMbps] = useState(configuredMaxBandwidthMbps);
 	const [latencyMs, setLatencyMs] = useState(0);
-	const [isWebrtc, setIsWebrtc] = useState(() =>
-		localStorage.getItem(getPrefixedKey('stream_mode')) === 'webrtc'
-	);
-
-	// Track live streaming-mode switches (the loader reloads shortly after,
-	// but reflect the change immediately).
-	useEffect(() => {
-		const handleMessage = (event: MessageEvent) => {
-			if (event.origin !== window.location.origin) return;
-			if (event.data?.type === 'mode') {
-				setIsWebrtc(event.data.mode === 'webrtc');
-			}
-		};
-		window.addEventListener('message', handleMessage);
-		return () => window.removeEventListener('message', handleMessage);
-	}, []);
 
 	// Read stats periodically
 	useEffect(() => {
@@ -268,26 +252,30 @@ export function SystemMonitoring() {
 	// Performance status helper functions
 	const getPerformanceStatus = (value: number, type: 'percentage' | 'fps' | 'latency' | 'audio' | 'bandwidth') => {
 		switch (type) {
-			case 'percentage': // For CPU, GPU, Memory usage
+			// CPU, GPU, and memory usage
+			case 'percentage':
 				if (value <= 60) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
 				if (value <= 80) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
 				return { status: 'high', color: 'text-red-500', bg: 'bg-red-500/10' };
 
-			case 'fps': // For frame rate
+			case 'fps':
 				if (value >= 50) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
 				if (value >= 30) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
 				return { status: 'low', color: 'text-red-500', bg: 'bg-red-500/10' };
 
-			case 'latency': // For network latency (ms)
+			// Network latency in ms
+			case 'latency':
 				if (value <= 50) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
 				if (value <= 100) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
 				return { status: 'high', color: 'text-red-500', bg: 'bg-red-500/10' };
 
-			case 'audio': // Output level (0-100%): activity indicator, not a pressure gauge
+			// Output level (0-100%): activity indicator, not a pressure gauge
+			case 'audio':
 				if (value >= 95) return { status: 'clipping', color: 'text-red-500', bg: 'bg-red-500/10' };
 				return { status: 'ok', color: 'text-green-500', bg: 'bg-green-500/10' };
 
-			case 'bandwidth': // For bandwidth (Mbps)
+			// Bandwidth in Mbps
+			case 'bandwidth':
 				if (value >= 50) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
 				if (value >= 25) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
 				return { status: 'low', color: 'text-red-500', bg: 'bg-red-500/10' };

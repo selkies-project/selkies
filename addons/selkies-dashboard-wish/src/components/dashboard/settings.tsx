@@ -124,7 +124,8 @@ const RATE_CONTROL_CBR_DEFAULT_SPEC = {
     conditional: () => "cbr",
     fallback: "cbr",
 };
-const DEFAULT_VIDEO_BITRATE = 8000;   // in kbps
+// Expressed in kbps
+const DEFAULT_VIDEO_BITRATE = 8000;
 
 const roundDownToEven = (num: number) => {
     const n = parseInt(num.toString(), 10);
@@ -328,8 +329,8 @@ export function Settings() {
             if (event.data?.type === "effectiveCursorState" && typeof event.data.value === "boolean") {
                 setEffectiveCursor(event.data.value);
             }
-            // Keep the dropdowns in sync when a device is picked elsewhere
-            // (e.g. the core's dev sidebar posts the same message type).
+            // Mirror the dashboard's own selection back into the dropdowns, so
+            // the displayed device always matches what the core was told.
             if (event.data?.type === "audioDeviceSelected" && event.data.deviceId) {
                 if (event.data.context === "input") {
                     setSelectedInputDeviceId(event.data.deviceId);
@@ -486,8 +487,13 @@ export function Settings() {
         }
     }, [serverSettings, streamMode]);
 
-    // Audio device population
-    useEffect(() => {
+    // Audio device population. Enumerating labelled devices needs a getUserMedia
+    // grant, so it is deferred until the Audio tab is actually shown: merely
+    // opening Settings must not raise a microphone permission prompt.
+    const audioDevicesRequested = React.useRef(false);
+    const ensureAudioDevices = useCallback(() => {
+        if (audioDevicesRequested.current) return;
+        audioDevicesRequested.current = true;
         const populateAudioDevices = async () => {
             setIsLoadingAudioDevices(true);
             setAudioDeviceError(null);
@@ -814,12 +820,35 @@ export function Settings() {
         const above = videoBitrateOptions.findIndex(v => v >= videoBitRate);
         return above >= 0 ? above : videoBitrateOptions.length - 1;
     })();
+    // CRF stops clipped to the server-allowed span. The list descends (higher
+    // quality to the right), so the nearest fallback for an off-stop value
+    // (server default, clamp) is the first stop at or below it.
+    const videoCRFChoices = (() => {
+        const min = serverSettings?.video_crf?.min ?? 5;
+        const max = serverSettings?.video_crf?.max ?? 50;
+        const stops = videoCRFOptions.filter(v => v >= min && v <= max);
+        return stops.length ? stops : [min];
+    })();
+    const videoCRFIndex = (() => {
+        const exact = videoCRFChoices.indexOf(videoCRF);
+        if (exact >= 0) return exact;
+        const below = videoCRFChoices.findIndex(v => v <= videoCRF);
+        return below >= 0 ? below : videoCRFChoices.length - 1;
+    })();
     const formatBitrate = (v: number) => `${v / 1000} Mbps`;
 
     // --- Render Gating ---
     // Audio stops come from the server enum when connected (Opus enum list);
     // the static fallback covers the no-server-settings window.
     const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v: string) => parseInt(v, 10))) || audioBitrateOptions;
+    // UI scaling stops come from the server enum when connected; the static
+    // fallback covers the no-server-settings window. A single allowed value
+    // means the operator pinned the scaling, so the dropdown is inert.
+    const dpiScalingChoices: { label: string; value: number }[] = (serverSettings?.scaling_dpi?.allowed?.map((v: string) => {
+        const value = parseInt(v, 10);
+        return { label: `${Math.round((value / 96) * 100)}%`, value };
+    })) || dpiScalingOptions;
+    const dpiScalingDisabled = !serverSettings || serverSettings.scaling_dpi?.allowed?.length <= 1;
     const activeEncoder = isWebrtc ? encoderRTC : encoder;
     const isH264 = H264_ENCODERS.includes(activeEncoder);
     const showJpegOptions = !isWebrtc && activeEncoder === 'jpeg';
@@ -832,6 +861,12 @@ export function Settings() {
     const showAudioTab = renderableSettings.audioSettings !== false;
     const showResolutionTab = renderableSettings.screenSettings !== false;
     const visibleTabCount = [showVideoTab, showAudioTab, showResolutionTab].filter(Boolean).length;
+    const defaultTab = showVideoTab ? "video" : showAudioTab ? "audio" : "resolution";
+
+    // Audio is the mount-time tab whenever Video is hidden, so it counts as shown.
+    useEffect(() => {
+        if (defaultTab === "audio") ensureAudioDevices();
+    }, [defaultTab, ensureAudioDevices]);
 
     if (visibleTabCount === 0) {
         return null;
@@ -839,7 +874,11 @@ export function Settings() {
 
     return (
         <Card className="w-[300px] p-0 pb-4 bg-background/95 backdrop-blur-sm border shadow-sm">
-            <Tabs defaultValue={showVideoTab ? "video" : showAudioTab ? "audio" : "resolution"} className="w-full">
+            <Tabs
+                defaultValue={defaultTab}
+                onValueChange={(value) => { if (value === "audio") ensureAudioDevices(); }}
+                className="w-full"
+            >
                 <TabsList className={`grid w-full bg-muted/50 ${visibleTabCount === 3 ? 'grid-cols-3' : visibleTabCount === 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
                     {showVideoTab && <TabsTrigger value="video">{t('settingsTabs.video')}</TabsTrigger>}
                     {showAudioTab && <TabsTrigger value="audio">{t('settingsTabs.audio')}</TabsTrigger>}
@@ -904,13 +943,13 @@ export function Settings() {
                                         <label className="text-sm font-medium">{t('sections.screen.uiScalingLabel')}</label>
                                         <DropdownMenu>
                                             <DropdownMenuTrigger asChild>
-                                                <Button variant="outline" className="w-full justify-between">
-                                                    {dpiScalingOptions.find(option => option.value === selectedDpi)?.label || "100%"}
+                                                <Button variant="outline" className="w-full justify-between" disabled={dpiScalingDisabled}>
+                                                    {dpiScalingChoices.find(option => option.value === selectedDpi)?.label || "100%"}
                                                     <ChevronUp className="h-4 w-4 rotate-180" />
                                                 </Button>
                                             </DropdownMenuTrigger>
                                             <DropdownMenuContent className="w-full">
-                                                {dpiScalingOptions.map((option) => (
+                                                {dpiScalingChoices.map((option) => (
                                                     <DropdownMenuItem
                                                         key={option.value}
                                                         onClick={() => handleDpiScalingChange(option.value.toString())}
@@ -1148,14 +1187,14 @@ export function Settings() {
                                     <div className="flex items-center gap-2">
                                         <Slider
                                             min={0}
-                                            max={videoCRFOptions.length - 1}
+                                            max={videoCRFChoices.length - 1}
                                             step={1}
-                                            value={[videoCRFOptions.indexOf(videoCRF)]}
+                                            value={[videoCRFIndex]}
                                             onValueChange={(value) => {
-                                                const index = value[0];
-                                                const newCRF = videoCRFOptions[index];
-                                                handleVideoCRFChange(newCRF);
+                                                const newCRF = videoCRFChoices[value[0]];
+                                                if (newCRF !== undefined) handleVideoCRFChange(newCRF);
                                             }}
+                                            disabled={!serverSettings || serverSettings.video_crf?.min === serverSettings.video_crf?.max}
                                             className="flex-1"
                                         />
                                     </div>

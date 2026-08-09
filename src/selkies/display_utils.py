@@ -7,8 +7,10 @@ import io
 import re
 import os
 import signal
+import stat
 import struct
 import sys
+import tempfile
 import zlib
 from asyncio import subprocess
 import asyncio
@@ -658,7 +660,8 @@ def _sync_wm_name():
             d = _module_display()
             root = d.screen().root
             check_atom = d.intern_atom('_NET_SUPPORTING_WM_CHECK')
-            prop = root.get_full_property(check_atom, 33)  # XA_WINDOW
+            # 33 is XA_WINDOW, the property type _NET_SUPPORTING_WM_CHECK carries.
+            prop = root.get_full_property(check_atom, 33)
             if not prop or not prop.value:
                 return ""
             wm_win = d.create_resource_object('window', int(prop.value[0]))
@@ -903,9 +906,9 @@ async def _get_new_res_xrandr(res_str):
     return curr_res, new_res, resolutions, max_res_str, screen_name
 
 
-async def resize_display(res_str):  # e.g., res_str is "2560x1280"
-    """Resizes the display to res_str: native RandR first (mode created from
-    CVT-RB timings when absent), xrandr/cvt subprocess chain as fallback.
+async def resize_display(res_str):
+    """Resizes the display to res_str (e.g. "2560x1280"): native RandR first
+    (mode created from CVT-RB timings when absent), xrandr/cvt subprocess chain as fallback.
     Returns the realized (width, height) — CVT cell alignment may make it
     wider than requested — or None on failure. Callers must capture and
     report the realized size, not the request."""
@@ -1137,19 +1140,74 @@ async def generate_xrandr_gtf_modeline(res_wh_str, refresh_hz=60):
 # AUTO_GPU render-node detection lives in pixelflux (the device library owns
 # hardware detection); selkies forwards only explicit --render-dri/--encode-dri paths.
 
+def _atomic_write_text(path, content):
+    """Install `content` at `path` by writing a temporary file in the same
+    directory and renaming it over the target.
+
+    Nothing can observe a truncated or half-written file: a write that fails
+    part-way (a full filesystem, an I/O error, the process dying) leaves the
+    existing target untouched. A symlinked path is resolved first so a dotfile
+    managed as a link into a dotfiles repository stays a link, and an existing
+    target's permission bits are carried onto the replacement.
+    """
+    target = os.path.realpath(path)
+    fd, tmp_path = tempfile.mkstemp(prefix=".selkies-", dir=os.path.dirname(target) or ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            mode = stat.S_IMODE(os.stat(target).st_mode)
+        except OSError:
+            mode = 0o644
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, target)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _write_xresources_dpi(xresources_path_str, dpi_value):
+    """Persist Xft.dpi in the user's Xresources file, rewriting only that resource.
+
+    Every other line the user keeps there (colors, terminal settings, keyboard
+    resources) is preserved, so a DPI change never costs them their session
+    configuration. A missing file is created with just the DPI line. Blocking
+    file I/O: callers on the event loop run it on an executor.
+    """
+    try:
+        with open(xresources_path_str, "r") as f:
+            lines = [
+                line for line in f.read().splitlines()
+                if not re.match(r"^\s*Xft\.dpi\s*:", line)
+            ]
+    except FileNotFoundError:
+        lines = []
+    lines.append(f"Xft.dpi:   {dpi_value}")
+    _atomic_write_text(xresources_path_str, "\n".join(lines) + "\n")
+
+
 async def _run_xrdb(dpi_value, logger):
     """Helper function to apply DPI via xrdb and xsettingsd."""
     if not which("xrdb"):
         logger.debug("xrdb not found. Skipping Xresources DPI setting.")
         return False
-        
+
     xresources_path_str = os.path.expanduser("~/.Xresources")
-    try:    
-        with open(xresources_path_str, "w") as f:
-            f.write(f"Xft.dpi:   {dpi_value}\n")
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(
+            None, _write_xresources_dpi, xresources_path_str, dpi_value
+        )
         logger.info(f"Wrote 'Xft.dpi:   {dpi_value}' to {xresources_path_str}.")
 
-        cmd_xrdb = ["xrdb", xresources_path_str]
+        # Merged, never loaded wholesale: the running resource database keeps every
+        # resource this file does not define.
+        cmd_xrdb = ["xrdb", "-merge", xresources_path_str]
         process = await subprocess.create_subprocess_exec(
             *cmd_xrdb,
             stdout=subprocess.PIPE,
@@ -1174,8 +1232,9 @@ async def _run_xrdb(dpi_value, logger):
             f"Xft/DPI {xsettings_dpi}\n"
         )
         
-        with open(xsettingsd_config_path, "w") as f:
-            f.write(config_content)
+        await loop.run_in_executor(
+            None, _atomic_write_text, xsettingsd_config_path, config_content
+        )
         logger.info(f"Wrote font and DPI settings to {xsettingsd_config_path}.")
 
         if not which("pgrep"):
@@ -1324,7 +1383,8 @@ async def _run_mate_gsettings(dpi_value, logger):
         else:
             mate_window_scaling_factor = 1 
         
-        mate_window_scaling_factor = max(1, mate_window_scaling_factor) # Ensure it's at least 1
+        # The scaling factor is a positive integer.
+        mate_window_scaling_factor = max(1, mate_window_scaling_factor)
 
         cmd_gsettings_mate_window_scale = [
             "gsettings", "set",
@@ -1349,12 +1409,12 @@ async def _run_mate_gsettings(dpi_value, logger):
     except Exception as e:
         logger.error(f"Error running gsettings for MATE window-scaling-factor: {e}")
 
-    # MATE: org.mate.font-rendering dpi
+    # MATE: org.mate.font-rendering dpi, which takes the direct DPI value.
     try:
         cmd_gsettings_mate_font_dpi = [
             "gsettings", "set",
             "org.mate.font-rendering", "dpi",
-            str(dpi_value) # MATE font rendering takes the direct DPI value
+            str(dpi_value)
         ]
         result_mate_font_dpi = await subprocess.create_subprocess_exec(
             *cmd_gsettings_mate_font_dpi,
@@ -1404,7 +1464,8 @@ async def set_dpi(dpi_setting):
         return False
 
     any_method_succeeded = False
-    de_name_for_log = "Unknown" # For logging which DE path was taken
+    # Names which DE path was taken, for the logs below.
+    de_name_for_log = "Unknown"
 
     # DE Detection and Action Order: KDE -> XFCE -> MATE -> i3 -> Openbox
     if which("startplasma-x11"):
@@ -1435,7 +1496,7 @@ async def set_dpi(dpi_setting):
         if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
             
-    elif which("openbox-session") or which("openbox"): # Check for openbox binary as well
+    elif which("openbox-session") or which("openbox"):
         de_name_for_log = "Openbox"
         logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
         if await _run_xrdb(dpi_value, logger_app_resize):

@@ -17,7 +17,10 @@
 # tests/e2e/test_browsers.py alongside the other profile prefs).
 set -eu
 
-PROFILE="${E2E_FIREFOX_PROFILE:-${E2E_WORKDIR:-/tmp/selkies-e2e}/firefox-profile}"
+# Defaults track tests/helpers.py's WORKDIR, which is what test_browsers.py
+# resolves the profile against; a different fallback here installs the plugin
+# where the suite does not look and the firefox-wr block skips.
+PROFILE="${E2E_FIREFOX_PROFILE:-${E2E_WORKDIR:-${TMPDIR:-/tmp}/selkies-tests}/firefox-profile}"
 
 case "$(uname -m)" in
     x86_64) TARGET=Linux_x86_64-gcc3 ;;
