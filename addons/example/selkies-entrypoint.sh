@@ -13,7 +13,9 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 [ -f "${XDG_RUNTIME_DIR}/container-env" ] && . "${XDG_RUNTIME_DIR}/container-env"
 
 # Wait for the X11 socket in the X11 backend; the Wayland backend owns its own
-# headless compositor and needs no display server to wait for.
+# headless compositor and needs no display server to wait for. The toggle is compared
+# against one spelling because container-entrypoint.sh canonicalizes it, whatever case
+# the operator typed, before any service reads it.
 if [ "${SELKIES_WAYLAND:-false}" != "true" ]; then
   export DISPLAY="${DISPLAY:-:20}"
   echo 'Waiting for X Socket'

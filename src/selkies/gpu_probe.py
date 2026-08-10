@@ -49,7 +49,7 @@ def recommend(report, allow_x11=True):
 def main():
     # Imported here so the module stays usable where pixelflux is absent, and so
     # the settings parser never sees this tool's own invocation.
-    from .settings import settings
+    from .settings import parse_bool, settings
     try:
         import pixelflux
         report = pixelflux.probe_wayland_gpu(
@@ -62,7 +62,7 @@ def main():
         print(f"Wayland backend: GPU support cannot be determined ({e})", file=sys.stderr)
         return 1
     backend, reason = recommend(
-        report, os.environ.get(X11_FALLBACK_ENV, "true").lower() != "false")
+        report, parse_bool(os.environ.get(X11_FALLBACK_ENV), default=True))
     print(reason, file=sys.stderr)
     print(backend)
     return 0

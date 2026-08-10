@@ -182,5 +182,21 @@ env, _ = run("x11", env={"PIXELFLUX_WAYLAND": "true"})
 check("the legacy Wayland toggle is judged too", env.get("SELKIES_WAYLAND") == "false",
       env.get("SELKIES_WAYLAND"))
 
+# However the operator spelled it, the services and the server downstream read one
+# value -- they compare against a single spelling and cannot each re-derive it.
+for spelling in ("True", "TRUE", "1", " true "):
+    env, _ = run("wayland", env={"SELKIES_WAYLAND": spelling})
+    check(f"SELKIES_WAYLAND={spelling!r} is honoured and canonicalized",
+          env.get("SELKIES_WAYLAND") == "true" and env.get("_probe_ran") is True,
+          env.get("SELKIES_WAYLAND"))
+for spelling in ("False", "FALSE", "0", "no"):
+    env, _ = run("wayland", env={"SELKIES_WAYLAND": spelling})
+    check(f"SELKIES_WAYLAND={spelling!r} stays X11",
+          env.get("SELKIES_WAYLAND") == "false" and env.get("_probe_ran") is False,
+          env.get("SELKIES_WAYLAND"))
+env, _ = run("wayland", env={"PIXELFLUX_WAYLAND": "TRUE"})
+check("the legacy alias is read case-insensitively too",
+      env.get("SELKIES_WAYLAND") == "true", env.get("SELKIES_WAYLAND"))
+
 print(f"[wl-fallback] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

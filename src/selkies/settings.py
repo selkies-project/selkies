@@ -965,6 +965,24 @@ def _range_number(text):
     return int(value) if value.is_integer() else value
 
 
+def parse_bool(value, default=False):
+    """A configured value's truth: "true" or "1", case-insensitively, ahead of any
+    "|locked" suffix. Everything else is false.
+
+    Environment variables carry whatever case the operator typed, so every reader
+    of one -- here, the container entrypoint, and the tools it calls -- has to agree
+    on this rule or the same deployment is configured two ways at once. An unset or
+    empty value keeps `default`, which is what lets an image neutralize a variable
+    baked into a base layer.
+    """
+    if value is None:
+        return bool(default)
+    text = str(value).strip()
+    if not text:
+        return bool(default)
+    return text.split("|")[0].strip().lower() in ("true", "1")
+
+
 class AppSettings:
     """
     Parses and stores application settings from command-line arguments and
@@ -1096,13 +1114,11 @@ class AppSettings:
             processed_value = None
             try:
                 if stype == "bool":
-                    parts = [
+                    suffixes = [
                         part.strip()
-                        for part in str(raw_value).strip().lower().split("|")
+                        for part in str(raw_value).strip().lower().split("|")[1:]
                     ]
-                    is_locked = "locked" in parts[1:]
-                    bool_value = parts[0] in ["true", "1"]
-                    processed_value = (bool_value, is_locked)
+                    processed_value = (parse_bool(raw_value), "locked" in suffixes)
                 elif stype in ["enum", "list"]:
                     if is_override:
                         master_list = setting.get("meta", {}).get("allowed", [])
@@ -1117,9 +1133,15 @@ class AppSettings:
                                 # Historical name from base images still shipping
                                 # SELKIES_ENCODER=x264enc in their env.
                                 user_items = [
-                                    "h264enc" if item == "x264enc" else item
+                                    "h264enc" if item.lower() == "x264enc" else item
                                     for item in user_items
                                 ]
+                            # Matched case-insensitively and carried forward in the
+                            # spelling `allowed` uses, so an operator's SELKIES_ENCODER=JPEG
+                            # selects the encoder every consumer compares against rather
+                            # than being dropped as unknown.
+                            canonical = {item.lower(): item for item in master_list}
+                            user_items = [canonical.get(item.lower(), item) for item in user_items]
                             valid_items = [item for item in user_items if item in master_list]
                             # A numeric enum may declare meta.value_range: an admin-set
                             # single value inside that span is taken verbatim as the
@@ -1355,6 +1377,15 @@ class AppSettings:
                 "Microphone support requires audio to be enabled. Disabling microphone support."
             )
             self.microphone_enabled = (False, self.microphone_enabled[1])
+
+        # One spelling of the transport for every consumer. The service registry is
+        # keyed on this value, so a differently-cased one would otherwise abort the
+        # server at startup rather than selecting the transport it names.
+        mode = str(self.mode).strip().lower()
+        if mode not in ("websockets", "webrtc"):
+            logging.warning("Invalid mode value %r; using 'websockets'.", self.mode)
+            mode = "websockets"
+        self.mode = mode
 
         # The single clipboard policy knob for both transports; normalize so
         # every consumer sees exactly one of the four values.

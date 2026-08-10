@@ -14,6 +14,17 @@
 
 set -e
 
+# A configured value's truth, read exactly as selkies.settings.parse_bool reads it:
+# "true" or "1", case-insensitively, ahead of any "|locked" suffix. Environment
+# variables carry whatever case the operator typed, and a stricter reading here would
+# configure the container one way and the server it starts another.
+is_true() {
+  local value="${1%%|*}"
+  value="${value,,}"
+  value="${value//[[:space:]]/}"
+  [ "${value}" = "true" ] || [ "${value}" = "1" ]
+}
+
 # Wait for XDG_RUNTIME_DIR to exist (created by the image ENV or the caller)
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 mkdir -pm700 "${XDG_RUNTIME_DIR}"
@@ -50,7 +61,11 @@ fi
 # Backend switch. Selkies resolves SELKIES_WAYLAND first and falls back to
 # PIXELFLUX_WAYLAND, so the service set below has to follow the same order or
 # the container would start an X11 session for a Wayland capture.
-export SELKIES_WAYLAND="${SELKIES_WAYLAND:-${PIXELFLUX_WAYLAND:-false}}"
+if is_true "${SELKIES_WAYLAND:-${PIXELFLUX_WAYLAND:-false}}"; then
+  export SELKIES_WAYLAND=true
+else
+  export SELKIES_WAYLAND=false
+fi
 
 # Hardware OpenGL. On NVIDIA, Zink routes GL through the Vulkan driver; other
 # vendors reach the GPU through the display server's render node instead (see
@@ -58,7 +73,7 @@ export SELKIES_WAYLAND="${SELKIES_WAYLAND:-${PIXELFLUX_WAYLAND:-false}}"
 # passed in, and a working nvidia-smi proves the driver stack matches it. Set
 # DISABLE_ZINK=true for llvmpipe. Settled before the backend is, so the probe
 # below sees the GL environment the session will actually run with.
-if [ "${DISABLE_ZINK:-false}" != "true" ] && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+if ! is_true "${DISABLE_ZINK:-false}" && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   export LIBGL_KOPPER_DRI2=1
   export MESA_LOADER_DRIVER_OVERRIDE=zink
   export GALLIUM_DRIVER=zink
@@ -88,6 +103,9 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
   # compositor to add window management and XWayland, neither of which the
   # capture compositor provides. "none" keeps applications on the capture
   # compositor alone — Wayland clients only, unmanaged.
+  # Lowercased so the value reads the same however it was typed: every compositor
+  # binary and the "none" sentinel are spelled in lower case.
+  SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR,,}"
   if [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
     for wm in labwc sway; do
       command -v "${wm}" >/dev/null 2>&1 && SELKIES_WAYLAND_COMPOSITOR="${wm}" && break
@@ -156,7 +174,7 @@ external_turn_configured() {
 }
 
 export SELKIES_ENABLE_INTERNAL_TURN=false
-if [ "${SELKIES_MODE:-websockets}" = "webrtc" ] || [ "${SELKIES_ENABLE_DUAL_MODE:-false}" = "true" ]; then
+if [ "${SELKIES_MODE,,}" = "webrtc" ] || is_true "${SELKIES_ENABLE_DUAL_MODE:-false}"; then
   if ! external_turn_configured; then
     export SELKIES_ENABLE_INTERNAL_TURN=true
     TURN_RANDOM_PASSWORD="$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 24)"
@@ -197,8 +215,8 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
 else
   drop_service wayland
 fi
-[ "${START_LXQT:-true}" = "true" ] || drop_service lxqt
-if [ "${SELKIES_ENABLE_INTERNAL_TURN}" != "true" ]; then
+is_true "${START_LXQT:-true}" || drop_service lxqt
+if ! is_true "${SELKIES_ENABLE_INTERNAL_TURN}"; then
   rm -rf /etc/service/coturn 2>/dev/null || sudo-root rm -rf /etc/service/coturn 2>/dev/null || true
 fi
 
