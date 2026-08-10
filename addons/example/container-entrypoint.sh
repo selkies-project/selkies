@@ -197,9 +197,24 @@ env | sort | while IFS= read -r kv; do
 done > "${ENV_FILE}"
 
 # Derive the service set from the environment toggles
-drop_service() {
-  rm -rf "/etc/service/$1" 2>/dev/null || sudo-root rm -rf "/etc/service/$1" 2>/dev/null || true
+# Held down rather than deleted, and every service is released first, so the set is
+# derived from the environment on each start. A container that is stopped and started
+# again keeps its filesystem: a service removed here would be gone from the image copy
+# for good, and no later change of SELKIES_WAYLAND or of which compositors are installed
+# could bring it back.
+write_service_flag() {
+  { : > "/etc/service/$1/down"; } 2>/dev/null ||
+    sudo-root sh -c ": > '/etc/service/$1/down'" 2>/dev/null || true
 }
+
+drop_service() {
+  [ -d "/etc/service/$1" ] || return 0
+  write_service_flag "$1"
+}
+
+for service in /etc/service/*/; do
+  rm -f "${service}down" 2>/dev/null || sudo-root rm -f "${service}down" 2>/dev/null || true
+done
 
 if [ "${SELKIES_WAYLAND}" = "true" ]; then
   drop_service xvfb
@@ -217,7 +232,7 @@ else
 fi
 is_true "${START_LXQT:-true}" || drop_service lxqt
 if ! is_true "${SELKIES_ENABLE_INTERNAL_TURN}"; then
-  rm -rf /etc/service/coturn 2>/dev/null || sudo-root rm -rf /etc/service/coturn 2>/dev/null || true
+  drop_service coturn
 fi
 
 # Hand over to s6 service supervision

@@ -242,6 +242,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     if ! apt-get install --no-install-recommends -y labwc; then \
         apt-get install --no-install-recommends -y sway; \
     fi && \
+    # wayland-info reads how many outputs the capture compositor drives, which is what
+    # tells the session compositor whether the spare screen belongs in the layout.
+    apt-get install --no-install-recommends -y wayland-utils && \
     # The LXQt Wayland session, where the distribution packages it (LXQt 2.1+).
     # The Qt platform plugin is installed only alongside it, never on its own:
     # without layer-shell behind it, Qt picking Wayland gives a session whose

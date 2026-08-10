@@ -1077,10 +1077,15 @@ function ensureVideoWorker() {
             videoElement.srcObject = new MediaStream([m.track]);
             const p = videoElement.play(); if (p && p.catch) p.catch(() => {});
           } catch (err) { console.warn('VTG srcObject failed:', err); deactivateVideoWorker(); return; }
+          console.info('[Selkies] video sink: VideoTrackGenerator in the video worker.');
           videoWorkerReady = true;
         } else {
           // Fallback: hand the worker an OffscreenCanvas to composite on.
           videoWorkerMode = 'canvas';
+          console.info('[Selkies] video sink: OffscreenCanvas in the video worker — '
+            + 'this browser exposes no VideoTrackGenerator to a worker and no '
+            + 'MediaStreamTrackGenerator on the page, so frames are composited rather '
+            + 'than handed to a <video> element.');
           if (!videoWorkerCanvas) { deactivateVideoWorker(); return; }
           try {
             const off = videoWorkerCanvas.transferControlToOffscreen();
@@ -1909,6 +1914,19 @@ const initializeUI = () => {
     ? (offscreenWorkerUrlParam.toLowerCase() === 'true')
     : getBoolParam('offscreen_worker', true);
   USE_OFFSCREEN_WORKER = !supportsWindowMSTG && offscreenWorkerEnabled;
+  // Which sink the page settled on, said once at startup: a generator feeding a <video>
+  // presents decoded frames without a per-frame draw, so knowing a session fell back to a
+  // canvas is the difference between explaining its CPU cost and guessing at it. The
+  // worker reports its own choice when its handshake lands.
+  if (supportsWindowMSTG) {
+    console.info('[Selkies] video sink: MediaStreamTrackGenerator on the page.');
+  } else if (!USE_OFFSCREEN_WORKER) {
+    console.info('[Selkies] video sink: 2D canvas on the page — '
+      + (offscreenWorkerEnabled
+          ? 'no MediaStreamTrackGenerator in this browser and no video worker.'
+          : 'the video worker is disabled (offscreen_worker=false).')
+      + ' Every frame is drawn by hand, which costs more CPU than a <video> sink.');
+  }
 
   // Sibling <video> for either generator path (hidden until full-frame H.264 frames are
   // routed to it; the canvas stays the fallback): main-thread MSTG (Chromium) or a
@@ -4894,7 +4912,14 @@ function initWebsockets() {
           }
           if (obj.type === 'system_stats') window.system_stats = obj;
           else if (obj.type === 'gpu_stats') window.gpu_stats = obj;
-          else if (obj.type === 'network_stats') window.network_stats = obj;
+          else if (obj.type === 'network_stats') {
+            window.network_stats = obj;
+            // The server measures the round trip to this client and the bytes it sent;
+            // WebRTC reads the equivalent from RTCStats, so feeding them in here is what
+            // gives the dashboard a live figure on both transports.
+            if (typeof obj.latency_ms === 'number') networkStat.latencyMs = obj.latency_ms;
+            if (typeof obj.bandwidth_mbps === 'number') networkStat.bandwidthMbps = obj.bandwidth_mbps;
+          }
           else if (obj.type === 'server_settings') {
               if (displayId !== 'primary' && obj.settings.second_screen && obj.settings.second_screen.value === false) {
                   console.error("Server configuration prohibits secondary displays. This client will not function.");

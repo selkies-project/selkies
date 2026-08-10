@@ -64,6 +64,60 @@ if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
     export XDG_MENU_PREFIX=lxqt-
     echo "[lxqt] session draws on ${WAYLAND_DISPLAY} natively"
   else
+    # sway has no notion of an X11 dock: it manages the panel as an ordinary window and
+    # centres it, ignoring both the edge it asks for and the space it reserves, which
+    # leaves the panel floating across the middle of the screen. Put it back on the edge
+    # its strut names, and follow the screen when a client resizes it. Only sway needs
+    # this — labwc places X11 docks where they ask — and only the bases with no labwc
+    # package run sway, so the loop exits at once everywhere else.
+    if [ "${SELKIES_WAYLAND_COMPOSITOR}" = "sway" ] && command -v swaymsg >/dev/null 2>&1; then
+      (
+        asked=""
+        while sleep 3; do
+          sock="$(ls "${XDG_RUNTIME_DIR}"/sway-ipc.*.sock 2>/dev/null | head -1)"
+          [ -n "${sock}" ] || continue
+          id="$(wmctrl -l -x 2>/dev/null | awk '$3 ~ /^lxqt-panel/ { print $1; exit }')"
+          [ -n "${id}" ] || continue
+          # xwininfo rather than wmctrl: wmctrl doubles the y of an unreparented window.
+          # shellcheck disable=SC2046  # the geometry fields are deliberately split
+          set -- $(xwininfo -id "${id}" 2>/dev/null |
+                   awk '/Absolute upper-left Y/ {y=$4} /^  Height/ {h=$2} END {print y, h}')
+          [ -n "${2:-}" ] || continue
+          panel_y="$1"; panel_h="$2"
+          screen_h="$(xrandr 2>/dev/null | awk '/^Screen /{gsub(/,/, ""); print $10; exit}')"
+          [ "${screen_h:-0}" -gt 0 ] 2>/dev/null || continue
+          # _NET_WM_STRUT_PARTIAL is left, right, top, bottom: whichever is set names
+          # the edge the panel reserves space against.
+          bottom="$(xprop -id "${id}" _NET_WM_STRUT_PARTIAL 2>/dev/null |
+                    sed -n 's/.*= *//p' | cut -d, -f4 | tr -d ' ')"
+          if [ "${bottom:-0}" -gt 0 ] 2>/dev/null; then
+            target=$((screen_h - panel_h))
+          else
+            target=0
+          fi
+          [ "${panel_y}" = "${target}" ] && { asked=""; continue; }
+          # sway positions a floating window by its frame, which is not where the window
+          # itself lands, so the request is corrected by the error it produced rather than
+          # computed from a decoration size this has no way to know. One round converges,
+          # and re-reading the screen every pass is what follows a client resizing it.
+          if [ -n "${asked}" ]; then
+            asked=$((asked + target - panel_y))
+          else
+            asked="${target}"
+          fi
+          SWAYSOCK="${sock}" swaymsg "[class=\"lxqt-panel\"] border none" >/dev/null 2>&1
+          SWAYSOCK="${sock}" swaymsg "[class=\"lxqt-panel\"] move position 0 ${asked}" \
+            >/dev/null 2>&1
+        done
+      ) &
+    fi
+
+    # The session really is an X11 one from here on, so it has to say so: left naming
+    # Wayland, Qt looks for a platform plugin this distribution does not ship and every
+    # component starts by failing to load it, and anything else keying off the session
+    # type reasons about a protocol its own windows are not on. WAYLAND_DISPLAY stays
+    # exported so an application that speaks Wayland can still choose it.
+    export XDG_SESSION_TYPE=x11
     echo "[lxqt] session draws through the compositor's XWayland on ${DISPLAY}"
     # Only this session places its desktop as a managed window, and LXQt sizes one
     # desktop across every screen together, sometimes anchoring it on the last
@@ -91,6 +145,23 @@ else
   # The multi-monitor layout code drives Openbox, so the session runs it
   session_wm=openbox
 fi
+# LXQt keeps its stock configuration — the panel's plugin list, the session and
+# window-manager defaults — under /usr/share/lxqt, which is a data directory rather
+# than a config one: only the startlxqt wrapper puts it on the config path, and this
+# service runs lxqt-session directly. Left off, the panel finds no plugin list and
+# comes up as an empty bar with no menu, no task list and no clock.
+if [ -z "${XDG_CONFIG_DIRS}" ]; then
+  XDG_CONFIG_DIRS="/etc:/etc/xdg:/usr/share"
+else
+  for dir in /etc /etc/xdg /usr/share; do
+    case ":${XDG_CONFIG_DIRS}:" in
+      *":${dir}:"*) ;;
+      *) XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS}:${dir}" ;;
+    esac
+  done
+fi
+export XDG_CONFIG_DIRS
+
 # Both of these are derived from the system defaults on every start, so the
 # session is the same on a fresh container and a reused home directory. The
 # pcmanfm-qt one has to go for the desktop to be drawn at all: it rewrites its
@@ -98,12 +169,12 @@ fi
 # when nothing else is configured, and that user file then shadows
 # /etc/xdg/pcmanfm-qt for good.
 rm -rf "${HOME}/.config/lxqt" "${HOME}/.config/pcmanfm-qt"
-# Name the window manager in the session's own settings. lxqt-session takes it
-# only from there, and the distribution ships no default: left unset it asks
-# interactively which of the installed managers to run, which in a container
-# nobody answers, so the session sits with no window manager and nothing paints
-# the root. Written under HOME because the packaged session.conf lives in a
-# data directory that only the startlxqt wrapper puts on XDG_CONFIG_DIRS.
+# Name the window manager in the session's own settings, which is the only place
+# lxqt-session takes it from. The packaged default names one this session does not
+# run, and an unresolvable name makes it ask interactively which of the installed
+# managers to use — a question nobody answers in a container, leaving the session
+# with no window manager and nothing painting the root. Written under HOME so it
+# outranks the packaged file for this session alone.
 mkdir -p "${HOME}/.config/lxqt"
 printf '[General]\nwindow_manager=%s\n' "${session_wm}" > "${HOME}/.config/lxqt/session.conf"
 # The panel, desktop, runner and PolicyKit agent are autostart entries carrying
