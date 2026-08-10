@@ -1,12 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="460" height="460" viewBox="0 0 460 460">
   <defs>
-    <!-- Gradient adapted from LSIO.svg: crisp #EF5C9C held solid to 43%, fading through
-         #D5499A into violet. Final stop uses LSIO's own #6051A2 (instead of #422E83) so
-         every stop keeps >= 3:1 contrast on both white and black backgrounds. -->
+    <!-- Gradient adapted from LSIO.svg, rebalanced so every stop has >= 4:1 WCAG
+         contrast on BOTH white and black backgrounds. Start reuses LSIO's own
+         #D5499A (4.0:1 white / 5.3:1 black) instead of #EF5C9C (only 3.1:1 on
+         white); mid #C34AA2 keeps the ramp's "pink hold" (4.4 / 4.8); end #7967C5
+         is LSIO's violet #6051A2 (hue 251) lightened and re-saturated for a
+         balanced 4.6:1 white / 4.6:1 black instead of 6.6 / 3.2. -->
     <linearGradient id="selkies-gradient" x1="0" y1="1" x2="0" y2="0">
-      <stop offset="0.4293" stop-color="#EF5C9C"/>
-      <stop offset="0.6263" stop-color="#D5499A"/>
-      <stop offset="0.9945" stop-color="#6051A2"/>
+      <stop offset="0.4293" stop-color="#D5499A"/>
+      <stop offset="0.6263" stop-color="#C34AA2"/>
+      <stop offset="0.9945" stop-color="#7967C5"/>
     </linearGradient>
   </defs>
   <g transform="translate(0,460) scale(0.1,-0.1)">

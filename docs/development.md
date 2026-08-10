@@ -133,6 +133,17 @@ description: One sentence, shown under the title and in search results.
 
 Links between pages are written the way GitHub resolves them (`start.md`, or `component.md#encoders`) and are rewritten to site URLs during the build. Images live in `docs/assets` and are referenced relative to the file.
 
+### Logo assets
+
+Every image in the repository is the Selkies logo, and all of them are generated from two hand-authored sources: `docs/assets/logo/selkies.svg` (the mark) and `wordmark.svg` (the lettering). Everything else is composed from those — the two lockups that set the mark beside or above the wordmark, the favicons, the PWA and touch icons, the dashboards' copies of the mark, and the PNG lockups. Edit a source and regenerate; do not edit the outputs:
+
+```bash
+python3 scripts/build-logo-assets.py           # rewrite every generated image
+python3 scripts/build-logo-assets.py --check   # report which ones are stale
+```
+
+It needs `rsvg-convert` (librsvg) and Pillow. Only layout lives in the script: the canvas each lockup uses and the transform it places the mark and the wordmark at, so the mark can never end up embedded twice with two different gradients. The app icons are composed the same way — the mark on an opaque white disc, so a launcher that masks icons to a circle crops nothing.
+
 Previewing the site needs nothing but [Node.js](https://nodejs.org):
 
 ```bash

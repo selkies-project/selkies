@@ -338,9 +338,9 @@ const SelkiesLogo = ({ width = 30, height = 30, className, t, ...props }) => {
     >
       <defs>
         <linearGradient id={id} x1="0" y1="1" x2="0" y2="0">
-          <stop offset="0.4293" stopColor="#EF5C9C" />
-          <stop offset="0.6263" stopColor="#D5499A" />
-          <stop offset="0.9945" stopColor="#6051A2" />
+          <stop offset="0.4293" stopColor="#D5499A" />
+          <stop offset="0.6263" stopColor="#C34AA2" />
+          <stop offset="0.9945" stopColor="#7967C5" />
         </linearGradient>
       </defs>
       <g transform="translate(0,460) scale(0.1,-0.1)">
