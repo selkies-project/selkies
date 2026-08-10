@@ -105,9 +105,8 @@ jobs:
     # The wheels are a dependency, not just an ordering constraint: the suites
     # run against the same main-HEAD capture stack the artifacts ship
     needs: [python-compat, pixelflux-pcmflux]
-    # Stated rather than left to the default: the wheels are built on pushes
-    # only, and a skip carries down the whole chain from wherever it starts. On
-    # a pull request the suites resolve the capture stack from PyPI instead.
+    # Stated rather than left to the default: the wheel build above is gated on
+    # pushes, and a skip carries down the whole chain from wherever it starts
     if: >-
       ${{ !cancelled()
           && needs.python-compat.result == 'success'
@@ -119,7 +118,12 @@ jobs:
     uses: ./.github/workflows/tests.yaml
     with:
       tiers: unit or integration
-      wheels_ready: true
+      # Read from the job that actually builds them rather than asserted: the
+      # build is gated on pushes, so on a pull request it skips and this is
+      # false, which is what lets tests.yaml fall back to building the wheels
+      # itself. Claiming true there would leave the suites on the last PyPI
+      # release of the capture stack instead of main HEAD.
+      wheels_ready: ${{ needs['pixelflux-pcmflux'].result == 'success' }}
 
   wheel:
     name: Build wheel
