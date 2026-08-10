@@ -79,3 +79,7 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
           retention-days: 14
+          # A wheel is a deflated zip already, so the archive this is wrapped in
+          # cannot compress it further: levelling off spends no CPU re-deflating
+          # it for a size that does not move.
+          compression-level: 0
