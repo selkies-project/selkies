@@ -51,7 +51,7 @@ from .input_handler import (
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
-from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, inflate_gz_bounded, sanitize_client_setting
+from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, effective_use_cpu, inflate_gz_bounded, sanitize_client_setting
 from .settings import settings as app_settings
 from .stream_server import BaseStreamingService
 from .webrtc_utils import Metrics
@@ -117,23 +117,6 @@ AUDIO_CHANNELS_DEFAULT = 2
 # before narrowing, or a fractional in-range value aborts module import.
 AUDIO_BITRATE_DEFAULT = int(float(settings.audio_bitrate))
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "openh264enc"]
-# Encoders with no hardware path: selecting one implies software encoding
-# regardless of what the client asked for.
-CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped", "openh264enc")
-
-
-def effective_use_cpu(encoder, requested, default):
-    """Software-encode flag for an encoder choice.
-
-    A CPU-only encoder implies software encoding, but that is a property of the
-    encoder rather than a decision the client made: any other encoder honours the
-    client's own request, falling back to the server default when it never made
-    one. Deriving it this way is what lets a display return to hardware encoding
-    after a spell on JPEG.
-    """
-    if encoder in CPU_ONLY_ENCODERS:
-        return True
-    return bool(default) if requested is None else bool(requested)
 
 LOGLEVEL = logging.INFO
 logging.basicConfig(level=LOGLEVEL)

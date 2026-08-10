@@ -1382,6 +1382,25 @@ settings = AppSettings(SETTING_DEFINITIONS)
 # renders them read-only instead of offering a control the server ignores.
 OPERATOR_LOCKED_WHEN_OVERRIDDEN = ("scaling_dpi",)
 
+# Encoders with no hardware path: selecting one implies software encoding
+# regardless of what the client asked for.
+CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped", "openh264enc")
+
+
+def effective_use_cpu(encoder, requested, default):
+    """Software-encode flag for an encoder choice.
+
+    A CPU-only encoder implies software encoding, but that is a property of the
+    encoder rather than a decision the client made: any other encoder honours the
+    client's own request, falling back to the server default when it never made
+    one. Deriving it this way is what lets a display return to hardware encoding
+    after a spell on JPEG.
+    """
+    if encoder in CPU_ONLY_ENCODERS:
+        return True
+    return bool(default) if requested is None else bool(requested)
+
+
 CLIENT_PAYLOAD_EXCLUDED = [
     'port', 'addr', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',
     'audio_device_name', 'watermark_path', 'recording_socket',

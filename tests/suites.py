@@ -22,6 +22,9 @@ SUITES = [
     {"path": "unit/test_uinput_abi.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_uinput_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_i18n_keys.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_client_typing.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_wayland_gpu_fallback.py", "tier": "unit", "timeout": 180},
+    {"path": "unit/test_turn_address.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_encoder_cpu_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},
 
@@ -38,6 +41,7 @@ SUITES = [
     {"path": "integration/test_switch_stress.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_webrtc_unix_socket.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_wayland_multi_output.py", "tier": "integration", "timeout": 600},
+    {"path": "integration/test_gpu_probe.py", "tier": "integration", "timeout": 180},
     {"path": "integration/test_two_display_pixels.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_retype_case.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_x_connection_leak.py", "tier": "integration", "timeout": 300},

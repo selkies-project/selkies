@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 
-from selkies.selkies import CPU_ONLY_ENCODERS, effective_use_cpu  # noqa: E402
+from selkies.settings import CPU_ONLY_ENCODERS, effective_use_cpu  # noqa: E402
 
 
 class Results:

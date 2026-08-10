@@ -28,12 +28,21 @@ export LD_PRELOAD="${SELKIES_INTERPOSER}:${FAKE_UDEV_LIB}${LD_PRELOAD:+:${LD_PRE
 export SDL_JOYSTICK_DEVICE=/dev/input/js0
 mkdir -pm1777 /dev/input || sudo-root mkdir -pm1777 /dev/input || echo 'Failed to create joystick interposer device directory'
 
+# The interposer's device nodes, made directly where this container runs privileged
+# enough and through the image's setuid helper where it does not. Best effort: a
+# session without them loses gamepad support and nothing else.
+make_node() {
+  mknod "$1" c "$2" "$3" || sudo-root mknod "$1" c "$2" "$3" || echo "Failed to create device file $1"
+}
+
 if [ -d /dev/input ]; then
   for i in 0 1 2 3; do
-    mknod "/dev/input/js${i}" c 13 "${i}" || sudo-root mknod "/dev/input/js${i}" c 13 "${i}" || echo "Failed to create joystick device file ${i}"
-    mknod "/dev/input/event100${i}" c 13 "106${i}" || sudo-root mknod "/dev/input/event100${i}" c 13 "106${i}" || echo "Failed to create event device file 100${i}"
+    make_node "/dev/input/js${i}" 13 "${i}"
+    make_node "/dev/input/event100${i}" 13 "106${i}"
   done
-  chmod 0666 /dev/input/js* /dev/input/event* || sudo-root chmod 0666 /dev/input/js* /dev/input/event* || echo 'Failed to change permission for joystick interposer devices'
+  chmod 0666 /dev/input/js* /dev/input/event* ||
+    sudo-root chmod 0666 /dev/input/js* /dev/input/event* ||
+    echo 'Failed to change permission for joystick interposer devices'
 else
   echo 'Skipping joystick interposer device files creation since /dev/input is unavailable'
 fi
@@ -42,6 +51,34 @@ fi
 # PIXELFLUX_WAYLAND, so the service set below has to follow the same order or
 # the container would start an X11 session for a Wayland capture.
 export SELKIES_WAYLAND="${SELKIES_WAYLAND:-${PIXELFLUX_WAYLAND:-false}}"
+
+# Hardware OpenGL. On NVIDIA, Zink routes GL through the Vulkan driver; other
+# vendors reach the GPU through the display server's render node instead (see
+# services/xvfb/run). Both signals are required: the device nodes prove a GPU was
+# passed in, and a working nvidia-smi proves the driver stack matches it. Set
+# DISABLE_ZINK=true for llvmpipe. Settled before the backend is, so the probe
+# below sees the GL environment the session will actually run with.
+if [ "${DISABLE_ZINK:-false}" != "true" ] && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+  export LIBGL_KOPPER_DRI2=1
+  export MESA_LOADER_DRIVER_OVERRIDE=zink
+  export GALLIUM_DRIVER=zink
+  echo 'NVIDIA GPU detected: OpenGL runs through Zink on the NVIDIA Vulkan driver'
+fi
+
+# A GPU the Wayland session cannot reach is a reason to run X11 instead: under Xvfb the
+# session still gets it (through Zink on NVIDIA, or the server's own render node
+# elsewhere), while a compositor with no working GBM/EGL stack composites in software.
+# selkies-gpu-probe weighs that up and names the backend, printing its reason; it stays
+# silent about the backend when no report can be had (an older pixelflux, a driver that
+# refuses to answer), which leaves the session exactly as it was asked for.
+if [ "${SELKIES_WAYLAND}" = "true" ]; then
+  case "$(timeout 60 selkies-gpu-probe || true)" in
+    x11) export SELKIES_WAYLAND=false ;;
+    # A compositor rendering in software shares no dmabuf, so a GL client aimed at
+    # the Vulkan driver produces buffers it cannot accept and draws nothing.
+    wayland-software) unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 ;;
+  esac
+fi
 
 # Default display for the X11 backend. In Wayland mode the session compositor's
 # XWayland server owns it instead, and takes the first free number.
@@ -74,29 +111,58 @@ export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR}}"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
 
-# Hardware OpenGL. On NVIDIA, Zink routes GL through the Vulkan driver; other
-# vendors reach the GPU through the display server's render node instead (see
-# services/xvfb/run). Both signals are required: the device nodes prove a GPU was
-# passed in, and a working nvidia-smi proves the driver stack matches it. Set
-# DISABLE_ZINK=true for llvmpipe.
-if [ "${DISABLE_ZINK:-false}" != "true" ] && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-  export LIBGL_KOPPER_DRI2=1
-  export MESA_LOADER_DRIVER_OVERRIDE=zink
-  export GALLIUM_DRIVER=zink
-  echo 'NVIDIA GPU detected: OpenGL runs through Zink on the NVIDIA Vulkan driver'
-fi
-
 # Compute the shared session environment, including embedded coTURN defaults
 ENV_FILE="${XDG_RUNTIME_DIR}/container-env"
 : > "${ENV_FILE}"
 
+# The address a browser outside this container would reach it on. Asked of a public
+# resolver, which is the only party that can see it; an IPv6 answer is bracketed for
+# use in a URL. Falls back to the container's own address, which is right for a LAN
+# and at least routable for a local test.
+public_address() {
+  local answer
+  for family in -4 -6; do
+    answer="$(dig "${family}" TXT +short @ns1.google.com o-o.myaddr.l.google.com 2>/dev/null \
+              | tr -d '"' | grep -v '^;;' | head -n 1)"
+    [ -z "${answer}" ] && continue
+    [ "${family}" = "-6" ] && answer="[${answer}]"
+    echo "${answer}"
+    return
+  done
+  answer="$(hostname -I 2>/dev/null | awk '{print $1; exit}')"
+  echo "${answer:-127.0.0.1}"
+}
+
+# coTURN binds an address, not a name, so a hostname has to be resolved for it.
+resolved_address() {
+  local host answer
+  host="$(echo "$1" | tr -d '[]')"
+  answer="$(getent ahostsv4 "${host}" 2>/dev/null | awk '{print $1; exit}')"
+  if [ -z "${answer}" ]; then
+    answer="$(getent ahostsv6 "${host}" 2>/dev/null | awk '{print "[" $1 "]"; exit}')"
+  fi
+  echo "${answer}"
+}
+
+# Whether an external TURN server is configured well enough to be used: a REST service
+# to fetch credentials from, or a host and port together with credentials — a username
+# and password, or a shared secret to derive them from. Anything short of that and the
+# container runs its own, since a half-configured TURN server is no TURN server.
+external_turn_configured() {
+  [ -n "${SELKIES_TURN_REST_URI}" ] && return 0
+  [ -n "${SELKIES_TURN_HOST}" ] && [ -n "${SELKIES_TURN_PORT}" ] || return 1
+  [ -n "${SELKIES_TURN_SHARED_SECRET}" ] && return 0
+  [ -n "${SELKIES_TURN_USERNAME}" ] && [ -n "${SELKIES_TURN_PASSWORD}" ]
+}
+
 export SELKIES_ENABLE_INTERNAL_TURN=false
 if [ "${SELKIES_MODE:-websockets}" = "webrtc" ] || [ "${SELKIES_ENABLE_DUAL_MODE:-false}" = "true" ]; then
-  if [ -z "${SELKIES_TURN_REST_URI}" ] && { { [ -z "${SELKIES_TURN_USERNAME}" ] || [ -z "${SELKIES_TURN_PASSWORD}" ]; } && [ -z "${SELKIES_TURN_SHARED_SECRET}" ] || [ -z "${SELKIES_TURN_HOST}" ] || [ -z "${SELKIES_TURN_PORT}" ]; }; then
+  if ! external_turn_configured; then
     export SELKIES_ENABLE_INTERNAL_TURN=true
-    export TURN_RANDOM_PASSWORD="$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 24)"
-    export SELKIES_TURN_HOST="${SELKIES_TURN_HOST:-$(dig -4 TXT +short @ns1.google.com o-o.myaddr.l.google.com 2>/dev/null | { read output; if [ -z "$output" ] || echo "$output" | grep -q '^;;'; then exit 1; else echo "$(echo $output | sed 's,",,g')"; fi } || dig -6 TXT +short @ns1.google.com o-o.myaddr.l.google.com 2>/dev/null | { read output; if [ -z "$output" ] || echo "$output" | grep -q '^;;'; then exit 1; else echo "[$(echo $output | sed 's,",,g')]"; fi } || hostname -I 2>/dev/null | awk '{print $1; exit}' || echo '127.0.0.1')}"
-    export TURN_EXTERNAL_IP="${TURN_EXTERNAL_IP:-$(getent ahostsv4 $(echo ${SELKIES_TURN_HOST} | tr -d '[]') 2>/dev/null | awk '{print $1; exit}' || getent ahostsv6 $(echo ${SELKIES_TURN_HOST} | tr -d '[]') 2>/dev/null | awk '{print "[" $1 "]"; exit}')}"
+    TURN_RANDOM_PASSWORD="$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 24)"
+    export TURN_RANDOM_PASSWORD
+    export SELKIES_TURN_HOST="${SELKIES_TURN_HOST:-$(public_address)}"
+    export TURN_EXTERNAL_IP="${TURN_EXTERNAL_IP:-$(resolved_address "${SELKIES_TURN_HOST}")}"
     export SELKIES_TURN_PORT="${SELKIES_TURN_PORT:-3478}"
     export SELKIES_TURN_USERNAME="selkies"
     export SELKIES_TURN_PASSWORD="${TURN_RANDOM_PASSWORD}"

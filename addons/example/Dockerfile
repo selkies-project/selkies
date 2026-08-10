@@ -396,6 +396,11 @@ ENV SELKIES_WAYLAND_COMPOSITOR=""
 # Screens the nested compositor opens. The room has to exist before a second
 # display's client connects, and the spare screen is idle until one does
 ENV SELKIES_WAYLAND_OUTPUTS=2
+# Run X11 instead when a GPU is present but the Wayland compositor cannot reach
+# it, so the session keeps hardware acceleration. Without a GPU both backends
+# render in software and Wayland stays; set false to keep Wayland either way,
+# which renders the whole session in software
+ENV SELKIES_WAYLAND_X11_FALLBACK=true
 # Start the LXQt session (set to false to run only the display server)
 ENV START_LXQT=true
 # Web interface port

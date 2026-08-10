@@ -61,6 +61,7 @@ Homepage = "https://github.com/selkies-project/selkies"
 [project.scripts]
 selkies = "selkies.__main__:main"
 selkies-resize = "selkies.display_utils:entrypoint"
+selkies-gpu-probe = "selkies.gpu_probe:main"
 
 # Package Static web files as part of distribution wheel
 [tool.setuptools.package-data]

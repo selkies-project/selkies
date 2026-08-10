@@ -178,6 +178,10 @@ A second display needs no configuration. The nested compositor takes its screen 
 
 Neither applies with `SELKIES_WAYLAND_COMPOSITOR=none`: applications sit on the capture compositor itself and simply see outputs appear and disappear as Selkies creates them.
 
+A Wayland session asked for on a GPU it cannot reach starts as X11 instead. The compositor needs a working GBM/EGL stack on a DRM render node; where there is none — no `/dev/dri` in the container, an NVIDIA runtime without the `graphics` driver capability, a node with no allocator behind it — it composites in software and hands its clients no dmabuf either, while the same container under Xvfb still reaches the GPU. Because device paths do not answer whether that stack works, the container runs the compositor's own renderer bring-up at startup and switches backend on what it finds. With no GPU present at all both backends render in software, so Wayland stays. The check ships as `selkies-gpu-probe`, which prints the backend it recommends and why, so any container can make the same decision (and you can ask it yourself with `docker exec <container> selkies-gpu-probe`).
+
+`-e SELKIES_WAYLAND_X11_FALLBACK=false` keeps Wayland regardless. The session then renders in software throughout: a compositor without a GPU shares no dmabuf, so applications pointed at the GPU's driver produce buffers it cannot accept and draw nothing at all.
+
 Read the [Development](development.md) section for customizing this container for your own usage.
 
 Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8080** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **set `DISTRIB_RELEASE` to `ubuntu24.04`, `ubuntu26.04`, `bookworm`, or `trixie`, and replace `main` to `latest` for the latest stable release**):

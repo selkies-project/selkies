@@ -1985,24 +1985,31 @@ export class Input {
         }, 0);
     }
 
+    /**
+     * Type a string as momentary key presses: one keysym per codepoint, so an astral
+     * character (emoji, rare CJK) is sent whole rather than as two lone surrogates the
+     * server cannot type. Each character carries its OWN keysym and the server resolves
+     * the shift level for it; injecting Shift around the unshifted keysym instead would
+     * lose the case wherever the X keymap does not bind Shift as a real modifier. Sent
+     * as raw kd/ku rather than through _sendKeyEvent to skip per-character heartbeat
+     * churn.
+     */
+    _typeText(text) {
+        for (const char of text) {
+            const keysym = Keysyms.lookup(char.codePointAt(0));
+            if (keysym) {
+                this.send("kd," + keysym);
+                this.send("ku," + keysym);
+            }
+        }
+    }
+
     _handleTextInput(event) {
         if (!event.data) return;
         // A chord (Ctrl/Alt/Meta held) is sent by the keydown path; the browser's
         // text echo of it must not ALSO type the letter.
         if (this._chordModifierHeld()) return;
-
-        // Iterated per codepoint so an astral character (emoji, rare CJK) is sent
-        // as one keysym instead of two lone surrogates the server cannot type.
-        const text = event.data;
-        for (const char of text) {
-            const keysym = Keysyms.lookup(char.codePointAt(0));
-            if (keysym) {
-                // Synthetic text: send kd/ku directly, not via _sendKeyEvent, to skip
-                // per-character heartbeat churn.
-                this.send("kd," + keysym);
-                this.send("ku," + keysym);
-            }
-        }
+        this._typeText(event.data);
         this._clearCompositionHostSoon();
     }
 
@@ -2070,27 +2077,7 @@ export class Input {
             event.target.value = '';
             return;
         }
-        // Iterated per codepoint so an astral character (emoji, rare CJK) is sent
-        // as one keysym instead of two lone surrogates the server cannot type.
-        for (const char of text) {
-            const isUpperCase = char >= 'A' && char <= 'Z';
-            if (isUpperCase) {
-                this.send("kd," + KeyTable.XK_Shift_L);
-                const lowerChar = char.toLowerCase();
-                const letterKeysym = Keysyms.lookup(lowerChar.codePointAt(0));
-                if (letterKeysym) {
-                    this.send("kd," + letterKeysym);
-                    this.send("ku," + letterKeysym);
-                }
-                this.send("ku," + KeyTable.XK_Shift_L);
-            } else {
-                const keysym = Keysyms.lookup(char.codePointAt(0));
-                if (keysym) {
-                    this.send("kd," + keysym);
-                    this.send("ku," + keysym);
-                }
-            }
-        }
+        this._typeText(text);
         event.target.value = '';
     }
 
