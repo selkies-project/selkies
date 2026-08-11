@@ -4929,9 +4929,9 @@ function initWebsockets() {
           }
           else if (obj.type === 'server_settings') {
               if (displayId !== 'primary' && obj.settings.second_screen && obj.settings.second_screen.value === false) {
-                  console.error("Server configuration prohibits secondary displays. This client will not function.");
+                  console.error("The server reports no second display is available. This client will not function.");
                   if (statusDisplayElement) {
-                      statusDisplayElement.textContent = 'Error: Secondary displays are disabled on the server.';
+                      statusDisplayElement.textContent = 'Error: A second display is not available on this server.';
                       statusDisplayElement.classList.remove('hidden');
                   }
                   if (websocket) {

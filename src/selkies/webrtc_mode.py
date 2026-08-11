@@ -177,6 +177,10 @@ class WebRTCService(BaseStreamingService):
         # primary pipeline has no live capture module (any handle reaches the
         # shared compositor backend).
         self._wayland_ctl_module = None
+        # Host-capture mode: how many outputs the host compositor can back displays
+        # with; None until a query answers, and never populated when self-compositing
+        # (outputs are minted on demand there).
+        self._host_output_capacity = None
         # Last (w, h) a client asked the primary to become. The realized size
         # may legitimately differ (CVT cell alignment widens the mode), so
         # idempotence must be judged against the request, not just the result.
@@ -399,17 +403,19 @@ class WebRTCService(BaseStreamingService):
         )
         try:
             if display_id != "primary" and client_type == "controller":
-                second_screen_enabled, _ = self.settings.second_screen
-                if not second_screen_enabled:
+                # Authoritative gate (the published setting can lag a host-side
+                # change): re-read the capacity, then refuse with the concrete
+                # reason.
+                await self._refresh_second_screen_capacity()
+                available, reason = self._second_screen_availability()
+                if not available:
                     logger.warning(
-                        "Secondary display '%s' refused: second screens are disabled by server settings.",
-                        display_id,
+                        "Secondary display '%s' refused: %s", display_id, reason,
                     )
                     # Fatal verdict: a bare return leaves the signaling socket
                     # open and the page on "Connecting..." forever.
                     await self._close_peer_signaling_ws(
-                        session_peer_id, 4000,
-                        b"Second screens are disabled on this server.",
+                        session_peer_id, 4000, reason.encode(),
                     )
                     return
                 # Dimensions arrive through the client's first resize message.
@@ -555,12 +561,61 @@ class WebRTCService(BaseStreamingService):
         self.gpu_monitor.on_stats = self.handle_gpu_stats
         self.system_monitor.on_timer = self.handle_system_monitor
 
+    def _second_screen_availability(self):
+        """Whether this session can actually attach a second display, and the
+        reason when it cannot (websockets-mode parity). The admin flag gates
+        first; past it, X11 and the self-composited Wayland backend mint another
+        output on demand, while host capture is bounded by the host compositor's
+        real output count (unknown until a pipeline start establishes the host
+        session)."""
+        enabled, _ = self.settings.second_screen
+        if not enabled:
+            return False, "Second screens are disabled on this server."
+        if not IS_WAYLAND or not (self.settings.wayland_host_display or "").strip():
+            return True, ""
+        capacity = self._host_output_capacity
+        if capacity is None or capacity < 0:
+            return False, "The host compositor's outputs are not known yet."
+        if capacity < 2:
+            return False, "The host compositor has a single output, so a second display has nothing to capture."
+        return True, ""
+
+    async def _refresh_second_screen_capacity(self) -> bool:
+        """Host-capture mode only: re-read how many outputs the host exposes.
+        True when the answer changed, i.e. the second-screen availability that
+        clients were told may have flipped."""
+        if not IS_WAYLAND or not (self.settings.wayland_host_display or "").strip():
+            return False
+        module = self._wayland_capture_handle()
+        if module is None or not hasattr(module, "output_capacity"):
+            return False
+        try:
+            capacity = int(await asyncio.to_thread(module.output_capacity))
+        except Exception as e:
+            logger.warning(f"Wayland output capacity query failed: {e}")
+            return False
+        changed = capacity != self._host_output_capacity
+        self._host_output_capacity = capacity
+        return changed
+
+    def _server_settings_payload(self) -> dict:
+        """get_server_settings with second_screen published as EFFECTIVE
+        availability — the admin flag AND the backend's real capacity — so
+        dashboards never offer a second display the server would immediately
+        refuse."""
+        payload = get_server_settings()
+        available, _ = self._second_screen_availability()
+        entry = payload.get("settings", {}).get("second_screen")
+        if isinstance(entry, dict) and entry.get("value") and not available:
+            payload["settings"]["second_screen"] = dict(entry, value=False)
+        return payload
+
     def handle_data_channel_open(self, channel=None) -> None:
         logger.info("opened peer data channel for user input to X11")
         # Greet the peer that just joined (every display page and viewer needs the
         # server settings for conditional UI, the current cursor, and the display
         # roster) on ITS channel; without one, fall back to broadcasting.
-        server_settings_payload = get_server_settings()
+        server_settings_payload = self._server_settings_payload()
         if channel is not None:
             self.rtc_app.send_message_to_channel(
                 channel, "server_settings", server_settings_payload
@@ -886,6 +941,14 @@ class WebRTCService(BaseStreamingService):
         message), which trigger the layout pass that creates its pipeline."""
         if display_id == "primary" and self.media_pipeline:
             await self.media_pipeline.start_media_pipeline()
+            # The pipeline start is what establishes the host session in
+            # host-capture mode, so the host's output count (and with it the
+            # second-screen availability already announced on channel open) can
+            # first become known here.
+            if await self._refresh_second_screen_capacity() and self.rtc_app:
+                self.rtc_app.send_media_data_over_channel(
+                    "server_settings", self._server_settings_payload()
+                )
 
     async def stop_display_media(self, display_id: str) -> None:
         if display_id == "primary":
