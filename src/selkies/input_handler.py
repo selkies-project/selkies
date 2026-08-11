@@ -2325,7 +2325,7 @@ class WebRTCInput:
         self.wayland_socket_index = wayland_socket_index
         # Socket of the compositor apps run under (input + clipboard target) when
         # it differs from the pixelflux capture compositor; resolved lazily since
-        # a nested session (labwc/kwin) comes up after this process.
+        # a nested session comes up after this process.
         self.app_wayland_display = app_wayland_display
         self._app_wl_display_cached = None
         self._x_reconnect_thread = None
@@ -3944,7 +3944,7 @@ class WebRTCInput:
     def _app_wayland_display(self):
         """Socket of the compositor applications run under — the target for input
         injection and clipboard. It equals the capture compositor for a plain
-        pixelflux session, but a nested session (labwc/kwin) that pixelflux
+        pixelflux session, but a nested session that pixelflux
         captures owns the apps on its own socket, so input and clipboard aimed at
         the capture compositor never reach them. Resolution order: the explicit
         app_wayland_display setting; else the single other wayland-* socket in
