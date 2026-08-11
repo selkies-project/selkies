@@ -110,12 +110,12 @@ FILE_INDEX_HEADER = """<!DOCTYPE html>
         :root {
             --page-bg: #282c34;
             --text-color: #abb2bf;
-            --header-color: #61dafb;
+            --header-color: #F59DC4;
             --border-color: #3a3f47;
             --table-header-bg: #3a3f47;
             --table-row-hover-bg: #454b54;
-            --link-color: #61dafb;
-            --link-hover-color: #a4d9f5;
+            --link-color: #F59DC4;
+            --link-hover-color: #F5AECE;
             --shadow-color: rgba(0, 0, 0, 0.5);
 
             --container-max-width: 960px;
@@ -707,6 +707,21 @@ class CentralizedStreamServer:
         )
 
     @staticmethod
+    def _basic_auth_challenge(text: str = "Invalid Credentials") -> web.Response:
+        """A 401 that re-opens the browser's login prompt.
+
+        Wrong credentials carry the challenge too: without one the browser renders this
+        body as a page instead of asking again, so a mistyped password ends the session.
+        """
+        return web.Response(
+            status=401,
+            headers={
+                "WWW-Authenticate": 'Basic realm="Selkies Restricted", charset="UTF-8"'
+            },
+            text=text,
+        )
+
+    @staticmethod
     def _is_ws_origin_allowed(request: web.Request, settings) -> bool:
         """Whether a WebSocket upgrade's Origin is permitted.
 
@@ -815,17 +830,11 @@ class CentralizedStreamServer:
                     "browser clients behind proxies).",
                     request.remote,
                 )
-            return web.Response(
-                status=401,
-                headers={
-                    "WWW-Authenticate": 'Basic realm="Selkies Restricted", charset="UTF-8"'
-                },
-                text="Authorization Required",
-            )
+            return self._basic_auth_challenge("Authorization Required")
         try:
             auth_decoded = self._b64_decode(auth_header[6:])
             if ":" not in auth_decoded:
-                return web.Response(status=401, text="Invalid Credentials")
+                return self._basic_auth_challenge()
             username, password = auth_decoded.split(":", 1)
             # Compare as UTF-8 bytes; hmac.compare_digest rejects non-ASCII str.
             user_ok = hmac.compare_digest(
@@ -847,12 +856,12 @@ class CentralizedStreamServer:
                 logger.warning(
                     f"Invalid credentials provided for user: {settings.basic_auth_user}"
                 )
-                return web.Response(status=401, text="Invalid Credentials")
+                return self._basic_auth_challenge()
             request["auth_role_ceiling"] = (
                 "viewer" if (viewonly_ok and not main_ok) else "controller"
             )
         except Exception:
-            return web.Response(status=401, text="Invalid Credentials")
+            return self._basic_auth_challenge()
         return await handler(request)
 
     def _require_configured_credentials(self):

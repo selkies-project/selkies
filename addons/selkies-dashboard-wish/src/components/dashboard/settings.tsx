@@ -43,14 +43,17 @@ const dpiScalingOptions = [
     { label: "275%", value: 264 },
     { label: "300%", value: 288 },
 ];
-const DEFAULT_SCALING_DPI = 96;
 // scaling_dpi DEFAULT synced to the local display scaling (devicePixelRatio) so the remote
 // desktop's fonts/UI match the local environment; an explicit slider value diverges (wins).
-// Same formula as the core (selkies-wr-core autoDeriveDpi). Independent of the resolution.
+// Same formula as the core (autoDeriveDpi). Independent of the resolution.
+// Snapping to the NEAREST option puts a density the options do not name on the
+// closest one, and clamps at both ends.
 const deriveDpiFromDpr = (): number => {
     const dpr = window.devicePixelRatio || 1;
     const target = Math.round(dpr * 4) * 24;
-    return (dpr > 1 && [120, 144, 168, 192, 216, 240, 264, 288].includes(target)) ? target : DEFAULT_SCALING_DPI;
+    return dpiScalingOptions.reduce((prev, curr) =>
+        Math.abs(curr.value - target) < Math.abs(prev.value - target) ? curr : prev
+    ).value;
 };
 
 const commonResolutionValues = [

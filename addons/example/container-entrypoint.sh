@@ -107,7 +107,10 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
   # binary and the "none" sentinel are spelled in lower case.
   SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR,,}"
   if [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
-    for wm in labwc sway; do
+    # sway, whose `create_output` is what lets a second display appear and leave
+    # while the session runs. Another compositor can be named, but only sway
+    # tracks the capture outputs.
+    for wm in sway; do
       command -v "${wm}" >/dev/null 2>&1 && SELKIES_WAYLAND_COMPOSITOR="${wm}" && break
     done
   elif [ "${SELKIES_WAYLAND_COMPOSITOR}" != "none" ] && ! command -v "${SELKIES_WAYLAND_COMPOSITOR}" >/dev/null 2>&1; then

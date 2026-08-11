@@ -47,6 +47,7 @@ SUITES = [
     {"path": "integration/test_retype_case.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_x_connection_leak.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_keymap_parity.py", "tier": "integration", "timeout": 300},
+    {"path": "integration/test_basic_auth_challenge.py", "tier": "integration", "timeout": 120},
 
     # --- e2e --------------------------------------------------------------
     {"path": "e2e/test_matrix.py", "tier": "e2e", "timeout": 1200,
@@ -63,6 +64,7 @@ SUITES = [
     {"path": "e2e/test_two_displays.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["websockets-x11", "webrtc-x11", "websockets-wl", "webrtc-wl"]},
     {"path": "e2e/test_gamepad_uinput.py", "tier": "e2e", "timeout": 900},
+    {"path": "e2e/test_dpi_accuracy.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_regressions.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["matrix", "switch", "clipboard", "pacer"]},
     {"path": "e2e/test_software_decode.py", "tier": "e2e", "timeout": 900,

@@ -16,7 +16,7 @@
 .theme-dark {
     --sidebar-bg: #282c34;
     --sidebar-text: #abb2bf;
-    --sidebar-header-color: #FBB2FF;
+    --sidebar-header-color: #F59DC4;
     --sidebar-border: #3a3f47;
     --sidebar-shadow: rgba(0, 0, 0, 0.5);
     --section-bg: #3a3f47;
@@ -24,9 +24,9 @@
     --input-bg: #454b54;
     --input-text: #abb2bf;
     --input-border: #5a606b;
-    --button-bg: #FBB2FF;
+    --button-bg: #F59DC4;
     --button-text: #282c34;
-    --button-hover-bg: #FCBCFF;
+    --button-hover-bg: #F5AECE;
     --pre-bg: #3a3f47;
     --pre-text: #abb2bf;
 
@@ -739,8 +739,8 @@ body {
 .gp-vis-button,
 .gp-vis-dpad,
 .gp-vis-bumper {
-    fill: #FAA3FF;
-    stroke: #FCBAFF;
+    fill: #F490BC;
+    stroke: #F5A6C9;
     stroke-width: 0.5;
     transition: fill 0.05s linear;
 }
@@ -757,8 +757,8 @@ body {
 }
 /* Style for triggers, default low opacity. */
 .gp-vis-trigger {
-    fill: #FAA3FF;
-    stroke: #FCBAFF;
+    fill: #F490BC;
+    stroke: #F5A6C9;
     stroke-width: 0.5;
     transition: opacity 0.05s linear;
     opacity: 0.5;
@@ -1749,7 +1749,7 @@ a.cite-link:active {
 
 /* Active state for the toggle switch (e.g., "ON"). */
 .toggle-button-sidebar.active {
-  background-color: var(--sidebar-header-color, #FBB2FF);
+  background-color: var(--sidebar-header-color, #F59DC4);
 }
 
 /* Moves the knob to the right when the toggle is active. */

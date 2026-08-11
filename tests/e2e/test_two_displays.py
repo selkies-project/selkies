@@ -22,6 +22,22 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 
+def desktop_window():
+    """(x, y, w, h) of the session's desktop window, or None when it has none.
+
+    A session drawing natively on Wayland has no X11 desktop window at all, which
+    is not the same as one that is misplaced.
+    """
+    env = {**os.environ, "DISPLAY": H.TEST_DISPLAY}
+    listing = subprocess.run(["wmctrl", "-l", "-G", "-x"], capture_output=True,
+                             text=True, env=env).stdout
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) >= 7 and fields[6].startswith("pcmanfm-qt"):
+            return tuple(int(v) for v in fields[2:6])
+    return None
+
+
 def wait_secondary_ready(mode, secondary_id="display2", timeout=45):
     """Block until the server has started the secondary capture.
 
@@ -103,6 +119,22 @@ def run(mode, wayland):
             else:
                 res.check("secondary output has its own geometry",
                           sec["w"] > 0 and sec["h"] > 0, sec)
+
+            # A root that matches the monitors still shows a broken desktop when the
+            # desktop window itself is placed off the layout origin: the far screen
+            # is then left with no wallpaper, icons or menu, and the root's own far
+            # edge is uncovered.
+            desktop = desktop_window()
+            if desktop is None:
+                res.skip("desktop window covers the layout",
+                         "no X11 desktop window (a native Wayland session has none)")
+            else:
+                x, y, w, h = desktop
+                root_w, root_h = H.x_root_size()
+                res.check("desktop window covers the layout",
+                          x == 0 and y == 0 and w >= root_w and h >= root_h,
+                          "desktop {}x{}@{},{} root {}x{}".format(
+                              w, h, x, y, root_w, root_h))
 
             dpage.close()
             time.sleep(2.0)

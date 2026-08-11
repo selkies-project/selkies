@@ -13,8 +13,8 @@
 # Reference minimal example container for Selkies.
 #
 #   - LXQt desktop on X11 (Xvfb, Openbox) by default; the same desktop on the
-#     headless Wayland backend with SELKIES_WAYLAND=true, where a nested labwc
-#     (sway on Bookworm) supplies window management and XWayland
+#     headless Wayland backend with SELKIES_WAYLAND=true, where a nested sway
+#     supplies window management and XWayland
 #   - s6 service supervision, running as PID 1 or below a foreign init
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) built
 #     in-tree and wired with LD_PRELOAD
@@ -178,6 +178,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         obconf-qt \
         qterminal \
         pcmanfm-qt \
+        # qterminal is the session's terminal; xterm backs the callers that spawn
+        # a terminal by hardcoded name (libfm-qt, GLib's Terminal=true handling)
+        xterm \
         # Recommends of the packages above, named here because the image installs
         # none of them by default and each is load-bearing rather than optional:
         # lxqt-qtplugin is the platform theme QT_QPA_PLATFORMTHEME=lxqt loads, so
@@ -185,18 +188,26 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # lxqt-config supplies the settings backend the session reads; and an icon
         # theme is named by LXQt rather than shipped, so every icon is blank
         # without one. The notification and PolicyKit agents are what applications
-        # expect a session to provide. Deliberately still dropped: the screen
-        # lockers, gvfs, and the KDE portal, none of which a container session has
-        # any use for.
+        # expect a session to provide. pavucontrol-qt is the panel volume plugin's
+        # mixer, and lximage-qt the image handler and screenshot tool. Deliberately
+        # still dropped: screen lockers and power management (a container session
+        # suspends nothing), gvfs, and the KDE portal.
         adwaita-icon-theme \
         lxqt-qtplugin \
         lxqt-config \
         lxqt-notificationd \
         lxqt-policykit \
+        pavucontrol-qt \
+        lximage-qt \
         # Translations for each shipped component, which are Recommends too
+        lxqt-about-l10n \
+        lxqt-config-l10n \
+        lxqt-notificationd-l10n \
         lxqt-panel-l10n \
+        lxqt-policykit-l10n \
         lxqt-runner-l10n \
         lxqt-session-l10n \
+        obconf-qt-l10n \
         pcmanfm-qt-l10n \
         qterminal-l10n \
         # GPU support: Mesa (llvmpipe fallback, VA-API) and Vulkan/GL plumbing
@@ -235,16 +246,20 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         apt-get install --no-install-recommends -y \
             intel-media-va-driver intel-gpu-tools; \
     fi && \
-    # Session compositor for the Wayland backend. labwc is the Openbox-alike of
-    # the wlroots family and matches the X11 session's window manager; Debian
-    # Bookworm predates it and takes sway. Not wayfire: it demands a DRM file
-    # descriptor the nested Wayland backend has none of without a GPU.
-    if ! apt-get install --no-install-recommends -y labwc; then \
-        apt-get install --no-install-recommends -y sway; \
-    fi && \
+    # Session compositor for the Wayland backend. sway, because `create_output`
+    # lets the session gain and lose a screen while it runs, which is what a second
+    # display appearing on demand needs. sway-backgrounds supplies the wallpaper the
+    # packaged config names, whose absence is a parse error that greets every session
+    # with sway's error dialog. Not wayfire: it demands a DRM file descriptor the
+    # nested Wayland backend has none of without a GPU.
+    apt-get install --no-install-recommends -y sway sway-backgrounds && \
     # wayland-info reads how many outputs the capture compositor drives, which is what
     # tells the session compositor whether the spare screen belongs in the layout.
     apt-get install --no-install-recommends -y wayland-utils && \
+    # The session's own portal backend, which answers the file-chooser and
+    # screen-share requests toolkits make of a desktop. Debian Bookworm predates
+    # it, and a session without a portal still runs.
+    { apt-get install --no-install-recommends -y xdg-desktop-portal-lxqt || true; } && \
     # The LXQt Wayland session, where the distribution packages it (LXQt 2.1+).
     # The Qt platform plugin is installed only alongside it, never on its own:
     # without layer-shell behind it, Qt picking Wayland gives a session whose
@@ -284,17 +299,28 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 # and a photograph costs far more of the stream than a single tone.
 # Both names are taken from what is installed rather than asserted, so a
 # distribution that renames or drops one still produces a session that paints.
+#
+# The terminal goes with them: libfm-qt compiles in `xterm` and libqt5xdg/libqt6xdg
+# ship /etc/xdg/qtxdg.conf naming xterm.desktop, so "Open Terminal" and every
+# Terminal=true launcher reach for the wrong one. Only the LXQt scope
+# (lxqt-qtxdg.conf) is packaged correctly.
 RUN set -eu; \
     first_installed() { \
         base="$1"; shift; \
         for name in "$@"; do [ -d "${base}/${name}" ] && { printf '%s' "${name}"; return; }; done; \
     }; \
+    first_on_path() { \
+        for name in "$@"; do command -v "${name}" >/dev/null 2>&1 && { printf '%s' "${name}"; return; }; done; \
+    }; \
     ICON_THEME="$(first_installed /usr/share/icons Adwaita breeze oxygen hicolor)"; \
     THEME="$(first_installed /usr/share/lxqt/themes ambiance system light Leech)"; \
-    echo "LXQt defaults: icon_theme=${ICON_THEME} theme=${THEME}"; \
+    TERMINAL="$(first_on_path qterminal x-terminal-emulator xterm)"; \
+    echo "LXQt defaults: icon_theme=${ICON_THEME} theme=${THEME} terminal=${TERMINAL}"; \
     mkdir -pm755 /etc/xdg/lxqt /etc/xdg/pcmanfm-qt/lxqt; \
     printf '[General]\nicon_theme=%s\ntheme=%s\n' "${ICON_THEME}" "${THEME}" > /etc/xdg/lxqt/lxqt.conf; \
-    printf '[Desktop]\nWallpaperMode=color\nBgColor=#2e3436\nFgColor=#ffffff\n' > /etc/xdg/pcmanfm-qt/lxqt/settings.conf
+    printf '[Desktop]\nWallpaperMode=color\nBgColor=#2e3436\nFgColor=#ffffff\n[System]\nTerminal=%s\n' \
+        "${TERMINAL}" > /etc/xdg/pcmanfm-qt/lxqt/settings.conf; \
+    printf 'TerminalEmulator=%s.desktop\n' "${TERMINAL}" > /etc/xdg/qtxdg.conf
 
 # NVIDIA runtime wiring. The container toolkit injects the host driver, but only
 # the capabilities requested below (pixelflux's NVENC path needs `video`, the GL
@@ -360,7 +386,8 @@ COPY --from=xvfb / /
 # Install the joystick interposer and fake-udev libraries (container-only)
 COPY --from=add-ons /opt/add-ons/lib/ /usr/lib/
 
-# Keeps a sway session behaving like the labwc ones; inert where labwc is used
+# Makes the sway session look like the Openbox one: floating windows, no bar of
+# its own, and XWayland for the X11-only applications
 COPY --chown=1000:1000 addons/example/sway.conf /etc/sway/config.d/99-selkies.conf
 
 # Copy the startup scripts and s6 service definitions (same /etc/service/<svc>/run layout as runit, supervised by s6-supervise)
@@ -396,9 +423,10 @@ ENV SELKIES_WAYLAND=false
 # the installed one, "none" leaves applications on the capture compositor with
 # no window management and no XWayland
 ENV SELKIES_WAYLAND_COMPOSITOR=""
-# Screens the nested compositor opens. The room has to exist before a second
-# display's client connects, and the spare screen is idle until one does
-ENV SELKIES_WAYLAND_OUTPUTS=2
+# Screens the nested compositor opens at startup. Empty is on demand: the session
+# gains a screen when a second display's client connects and loses it when that
+# client leaves. Setting this opens that many outright instead.
+ENV SELKIES_WAYLAND_OUTPUTS=""
 # Run X11 instead when a GPU is present but the Wayland compositor cannot reach
 # it, so the session keeps hardware acceleration. Without a GPU both backends
 # render in software and Wayland stays; set false to keep Wayland either way,

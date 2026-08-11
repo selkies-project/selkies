@@ -34,48 +34,61 @@ export WAYLAND_DISPLAY
 echo "${WAYLAND_DISPLAY}" > "${XDG_RUNTIME_DIR}/selkies-capture-display"
 
 export WLR_BACKENDS=wayland
-# The nested backend takes its screen count at startup and none of these compositors
-# can add one later, so the room for the second display Selkies supports is made here.
-# Selkies holds the spare clear of every capture output and moves it onto the second
-# output the moment that output exists.
-export WLR_WL_OUTPUTS="${SELKIES_WAYLAND_OUTPUTS:-2}"
+# A screen the session holds before a client asks for it is one it lays out anyway:
+# XWayland's root — and with it the desktop, its icons and every "centre of the
+# screen" — spans twice the area anything shows. So screens are made on demand below.
+# WLR_WL_OUTPUTS is read once at startup and honoured only up to wlroots 0.18, and is
+# set only for a session that asks for a fixed count.
+[ -n "${SELKIES_WAYLAND_OUTPUTS}" ] && export WLR_WL_OUTPUTS="${SELKIES_WAYLAND_OUTPUTS}"
 
-# A spare screen is free to capture but not to the desktop: the session compositor lays
-# it out beside the first, so XWayland's screen — and with it the desktop, its icons and
-# every "centre of the screen" — spans twice the area anything shows. sway can hold an
-# output out of the layout and put it back, so the spare is parked until the capture
-# compositor really drives two outputs. labwc accepts the same request and then refuses
-# to re-enable, which would cost the second display for the life of the session, so it
-# keeps both outputs and the wider desktop instead.
-# $1 is the capture compositor's socket, which is what the output count is read from;
-# this shell's own WAYLAND_DISPLAY is about to belong to sway's clients instead. sway
-# names its IPC socket after its pid, and it inherits this script's through the exec
-# below, so the name is known before it exists.
-park_spare_output() {
+# Keeps the session's screen count equal to the number of outputs Selkies captures, so
+# a second display appears when its client connects and leaves with it. A screen is only
+# added where it can also be taken away: `unplug` needs sway 1.9 or newer, and older sway
+# accepts `disable` and a position off the layout without acting on either, so a screen
+# added there would widen the desktop for the life of the session. Those sessions stay
+# at one screen unless SELKIES_WAYLAND_OUTPUTS asked for more up front.
+# $1 is the capture compositor's socket, which is what the count is read from; this
+# shell's own WAYLAND_DISPLAY is about to belong to sway's clients instead. sway names
+# its IPC socket after its pid, and it inherits this script's through the exec below,
+# so the name is known before it exists.
+track_capture_outputs() {
   command -v swaymsg >/dev/null 2>&1 || return 0
-  local capture_display="$1" spare="" state="" wanted outputs
+  local capture_display="$1" want have last
   export SWAYSOCK="${XDG_RUNTIME_DIR}/sway-ipc.$(id -u).$$.sock"
-  # The last output is the spare: Selkies drives the first and adds the second only
-  # when a client arrives for it.
-  until [ -n "${spare}" ]; do
-    sleep 2
-    spare="$(swaymsg -t get_outputs -r 2>/dev/null |
-             sed -n 's/.*"name": "\(WL-[0-9]*\)".*/\1/p' | sort | tail -1)"
-  done
+  until swaymsg -t get_outputs >/dev/null 2>&1; do sleep 1; done
+  # `unplug` needs sway 1.9. Below it a screen cannot be taken away at all — the
+  # verb does not parse, and `disable` and a position off the layout are both
+  # accepted without being acted on — so one added there would widen the desktop
+  # for the life of the session.
+  case "$(sway --version 2>/dev/null)" in
+    *"version 1."[0-8] | *"version 1."[0-8].*)
+      echo "[wayland] this sway cannot remove a screen it added; staying at one"
+      return 0
+      ;;
+  esac
   while :; do
-    outputs="$(WAYLAND_DISPLAY="${capture_display}" wayland-info 2>/dev/null |
-               grep -c "interface: 'wl_output'")"
-    if [ "${outputs:-1}" -ge 2 ] 2>/dev/null; then wanted=enable; else wanted=disable; fi
-    if [ "${wanted}" != "${state}" ] && swaymsg output "${spare}" "${wanted}" >/dev/null 2>&1; then
-      echo "[wayland] spare output ${spare} ${wanted}d (capture drives ${outputs:-1})"
-      state="${wanted}"
-    fi
+    want="$(WAYLAND_DISPLAY="${capture_display}" wayland-info 2>/dev/null |
+            grep -c "interface: 'wl_output'")"
+    [ "${want:-0}" -ge 1 ] 2>/dev/null || want=1
+    have="$(swaymsg -t get_outputs 2>/dev/null | grep -c '"name": "WL-')"
+    while [ "${have:-0}" -lt "${want}" ]; do
+      swaymsg create_output >/dev/null 2>&1 || break
+      echo "[wayland] added a screen (capture drives ${want})"
+      have=$((have + 1))
+    done
+    while [ "${have:-0}" -gt "${want}" ]; do
+      last="$(swaymsg -t get_outputs 2>/dev/null |
+              sed -n 's/.*"name": "\(WL-[0-9]*\)".*/\1/p' | sort -V | tail -1)"
+      [ -n "${last}" ] && swaymsg output "${last}" unplug >/dev/null 2>&1 || break
+      echo "[wayland] removed screen ${last} (capture drives ${want})"
+      have=$((have - 1))
+    done
     sleep 3
   done
 }
 
-if [ "${SELKIES_WAYLAND_COMPOSITOR}" = "sway" ] && [ "${WLR_WL_OUTPUTS}" -gt 1 ] 2>/dev/null; then
-  park_spare_output "${WAYLAND_DISPLAY}" &
+if [ "${SELKIES_WAYLAND_COMPOSITOR}" = "sway" ]; then
+  track_capture_outputs "${WAYLAND_DISPLAY}" &
 fi
 [ -n "${SELKIES_WAYLAND_RENDERER}" ] && export WLR_RENDERER="${SELKIES_WAYLAND_RENDERER}"
 

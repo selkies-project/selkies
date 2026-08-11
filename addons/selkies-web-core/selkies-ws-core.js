@@ -253,6 +253,16 @@ let currentEncoderMode = 'h264enc-striped';
 let useCssScaling = false;
 let trackpadMode = false;
 let scalingDPI = 96;
+// scaling_dpi stops, in 25% steps. Snapping to the NEAREST puts a density the
+// stops do not name (a 3.5x phone, a 133% desktop) on the closest one, and
+// clamps at both ends.
+const DPI_STOPS = [96, 120, 144, 168, 192, 216, 240, 264, 288];
+function autoDeriveDpi() {
+  const dpr = window.devicePixelRatio || 1;
+  const target = Math.round(dpr * 4) * 24;
+  return DPI_STOPS.reduce((prev, cur) =>
+    Math.abs(cur - target) < Math.abs(prev - target) ? cur : prev);
+}
 let antiAliasingEnabled = true;
 let clipboard_in_enabled = true;
 let clipboard_out_enabled = true;
@@ -695,10 +705,7 @@ trackpadMode = getBoolParam('trackpadMode', false);
 rateControlMode = getStringParam('rate_control_mode', rateControlMode);
 videoBitrate = getIntParam('video_bitrate', videoBitrate);
 if (getStringParam('scaling_dpi', null) === null) {
-  const dpr = window.devicePixelRatio || 1;
-  const target = Math.round(dpr * 4) * 24;
-  const presets = [120, 144, 168, 192, 216, 240, 264, 288];
-  scalingDPI = (dpr > 1 && presets.includes(target)) ? target : 96;
+  scalingDPI = autoDeriveDpi();
 } else {
   scalingDPI = getIntParam('scaling_dpi', 96);
 }

@@ -850,10 +850,16 @@ export default function webrtc() {
 
 	// scaling_dpi synced to the local display scaling (devicePixelRatio), NOT the resolution:
 	// dpr 1.5 -> 144 (150%), 2 -> 192 (200%); 96 (100%) otherwise. Snapped to the DPI presets.
+	// scaling_dpi stops, in 25% steps. Snapping to the NEAREST puts a density the
+	// stops do not name (a 3.5x phone, a 133% desktop) on the closest one, and
+	// clamps at both ends.
+	const DPI_STOPS = [96, 120, 144, 168, 192, 216, 240, 264, 288];
+
 	function autoDeriveDpi() {
 		const dpr = window.devicePixelRatio || 1;
 		const target = Math.round(dpr * 4) * 24;
-		return (dpr > 1 && [120, 144, 168, 192, 216, 240, 264, 288].includes(target)) ? target : 96;
+		return DPI_STOPS.reduce((prev, cur) =>
+			Math.abs(cur - target) < Math.abs(prev - target) ? cur : prev);
 	}
 
 	function sendResolutionToServer(width, height) {
