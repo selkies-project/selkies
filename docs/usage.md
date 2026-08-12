@@ -11,11 +11,15 @@ description: Keyboard shortcuts, clipboard behaviour, and the command-line optio
 
 **Open Side Menu: Ctrl + Shift + M or Side Button**
 
+**On-Screen Touch Gamepad: `Control + Shift + G`**
+
 Fullscreen mode is available with the shortcut `Control + Shift + F`, or by pressing the fullscreen button in the configuration menu. Press `Escape` for at least two seconds to exit fullscreen mode.
 
 The cursor can be locked into the web interface using `Control + Shift + Left Click` in web browsers supporting the Pointer Lock API. Press `Escape` to exit this remote cursor mode. This remote cursor capability is useful for most games or graphics applications where the cursor must be confined to the remote screen.
 
 The configuration menu is available by clicking the small button on the right side of the interface with the fullscreen turned off, or by using the shortcut `Control + Shift + M`.
+
+`Control + Shift + G` toggles the on-screen touch gamepad overlay (the [Universal Touch Gamepad](component.md#universal-touch-gamepad)), which is also available from the configuration menu.
 
 ## Clipboard
 

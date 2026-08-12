@@ -157,7 +157,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            xvfb x11-xserver-utils x11-utils xauth xcvt \
+            xvfb x11-xserver-utils x11-utils xauth xcvt wmctrl \
             wl-clipboard \
             pulseaudio pulseaudio-utils \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \

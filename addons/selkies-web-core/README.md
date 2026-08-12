@@ -122,7 +122,7 @@ All messages sent to the client must be JavaScript objects with a `type` propert
     *   **Description:** Requests the client to immediately compile and post a `stats` message back to the dashboard.
 *   **`sidebarVisibilityChanged`**
     *   **Payload:** `{ type: 'sidebarVisibilityChanged', isOpen: <boolean> }`
-    *   **Description:** Notifies the client if the dashboard sidebar is open (used to throttle/enable stat calculations to save CPU).
+    *   **Description:** Notifies the client whether the dashboard sidebar is open. Accepted as an informational signal; the CPU saving itself comes from the dashboard side — the stock dashboards skip their stats rendering while the sidebar is closed, and an external dashboard should do the same (e.g. stop polling `getStats`).
 
 ---
 
@@ -188,7 +188,7 @@ An external dashboard needs to implement the following to fully control the ifra
     *   Implement inputs for manual width/height and send `setManualResolution`.
     *   Implement a checkbox for "Scale Locally" and send `setScaleLocally`.
     *   Implement a "Reset" button sending `resetResolutionToWindow`.
-5.  **Stats Display:** Send a `getStats` message on a timer (e.g., every 1 second) and listen for the `stats` response event to populate your dashboard charts/metrics. Send `sidebarVisibilityChanged` to tell the client when to bother calculating these.
+5.  **Stats Display:** Send a `getStats` message on a timer (e.g., every 1 second) and listen for the `stats` response event to populate your dashboard charts/metrics. Only poll while your stats UI is visible — the client also exposes rolling telemetry on `window` globals (`window.system_stats`, `window.gpu_stats`, `window.network_stats`, `window.fps`), which is what the stock dashboards read.
 6.  **Server Clipboard:**
     *   Display text received via the `clipboardContentUpdate` message.
     *   Allow editing and send changes back using the `clipboardUpdateFromUI` message.

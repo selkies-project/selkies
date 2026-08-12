@@ -100,7 +100,6 @@ let decoder;
 let configuredMainCodec = null;
 let mainDecoderCodedWidth = 0;
 let mainDecoderCodedHeight = 0;
-let isSidebarOpen = false;
 let isSecondaryDisplayConnected = false;
 let audioDecoderWorker = null;
 let canvas = null;
@@ -505,6 +504,7 @@ let firstFrameRecoveryTimer = null;
 let inputInitialized = false;
 let scaleLocallyManual;
 window.fps = 0;
+window.videoChunksReceived = 0;
 let frameCount = 0;
 let uniqueStripedFrameIdsThisPeriod = new Set();
 let lastStripedFpsUpdateTime = performance.now();
@@ -2629,7 +2629,9 @@ function receiveMessage(event) {
       }
       break;
     case 'sidebarVisibilityChanged':
-      isSidebarOpen = !!message.isOpen;
+      // Accepted so frontends can signal visibility; the client itself has
+      // nothing to throttle — the stock dashboards skip their own stats
+      // rendering while the sidebar is closed.
       break;
     case 'setScaleLocally':
       if (isSharedMode) {
@@ -4374,10 +4376,14 @@ function initWebsockets() {
       const dataTypeByte = dataView.getUint8(0);
 
       // Any video chunk (JPEG stripe or H.264) proves the pipeline came back after
-      // a visibility-triggered START_VIDEO; stand the watchdog down.
-      if (startVideoWatchdogTimer !== null &&
-          (dataTypeByte === 0x03 || dataTypeByte === 0x04)) {
-        clearStartVideoWatchdog();
+      // a visibility-triggered START_VIDEO; stand the watchdog down. The cumulative
+      // count is the "did encoded video ever arrive" signal (a canvas sized from
+      // layout messages alone is not), for any sink and any role.
+      if (dataTypeByte === 0x03 || dataTypeByte === 0x04) {
+        window.videoChunksReceived++;
+        if (startVideoWatchdogTimer !== null) {
+          clearStartVideoWatchdog();
+        }
       }
       if (isSharedMode && (dataTypeByte === 0x03 || dataTypeByte === 0x04)) {
         lastSharedVideoChunkTime = performance.now();

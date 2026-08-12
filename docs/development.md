@@ -57,7 +57,7 @@ These people make structural decisions for this project and press the `Merge Pul
 
 [Seungmin Kim](https://github.com/ehfd): Co-Owner, Head Maintainer (Apr 2022 -), Academia Representative (Yonsei University College of Medicine, San Diego Supercomputer Center)
 
-[Ryan Kuba](https://github.com/): Co-Owner, Head Maintainer (Jun 2025 -), [LinuxServer.io](https://www.linuxserver.io) Representative.
+[Ryan Kuba](https://github.com/thelamer): Co-Owner, Head Maintainer (Jun 2025 -), [LinuxServer.io](https://www.linuxserver.io) Representative.
 
 [Dan Isla](https://github.com/danisla): Project Founder, Co-Owner, Industry Representative (ex-Google, ex-NASA, ex-itopia)
 

@@ -100,9 +100,14 @@ def benign_console(console_errors, not_found):
 
 
 def wait_ws_video(page, timeout=15):
+    """A stream-sized canvas alone is not proof of video: the client sizes it
+    from layout messages before any frame arrives, and a capture that failed to
+    start never sends one. Require a received video chunk as well, mirroring the
+    decoded-frame requirement wait_wr_video gets from videoWidth."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         info = page.evaluate("""(() => {
+          if (!(window.videoChunksReceived > 0)) return null;
           const cs = document.querySelectorAll('canvas');
           for (const c of cs) { if (c.width >= 640) return {w: c.width, h: c.height}; }
           return null;

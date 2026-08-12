@@ -13,7 +13,7 @@ None of these capabilities have to be behind proprietary walls, the community ca
 
 **Moonlight, Google Stadia, or GeForce NOW in noVNC form factor for Linux X11 and Wayland, in any HTML5 web interface you wish to embed inside, with at least 60 frames per second on Full HD resolution.**
 
-Selkies is an open-source low-latency high-performance Linux-native GPU/CPU-accelerated WebRTC HTML5 remote desktop streaming platform, for self-hosting, containers, Kubernetes, or Cloud/HPC platforms, [started out first by Google engineers](https://web.archive.org/web/20210310083658/https://cloud.google.com/solutions/gpu-accelerated-streaming-using-webrtc), then expanded by academic researchers.
+Selkies is an open-source low-latency high-performance Linux-native GPU/CPU-accelerated HTML5 remote desktop streaming platform, for self-hosting, containers, Kubernetes, or Cloud/HPC platforms, [started out first by Google engineers](https://web.archive.org/web/20210310083658/https://cloud.google.com/solutions/gpu-accelerated-streaming-using-webrtc), then expanded by academic researchers and [LinuxServer.io](https://www.linuxserver.io). It streams over plain WebSockets by default, with WebRTC available as an opt-in transport.
 
 Selkies is designed for researchers, including people in the graphical AI/robotics/autonomous driving/drug discovery fields, SLURM supercomputer/HPC system administrators, Jupyter/Kubernetes/Docker®/Coder infrastructure administrators, and Linux cloud gaming enthusiasts.
 

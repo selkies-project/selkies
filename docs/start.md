@@ -33,7 +33,7 @@ git clone https://github.com/selkies-project/selkies.git
 cd selkies && sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall .
 ```
 
-Either method installs the `selkies` and `selkies-resize` console commands.
+Either method installs the `selkies`, `selkies-resize`, and `selkies-gpu-probe` console commands.
 
 **3. Set your `DISPLAY` and `PULSE_SERVER` environment variables for the X.Org X11 display server or PulseAudio audio server.**
 

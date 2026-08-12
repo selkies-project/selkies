@@ -12,6 +12,7 @@ integration/test_two_display_pixels.py.
 """
 import ast
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -124,8 +125,10 @@ def run(mode, wayland):
             # desktop window itself is placed off the layout origin: the far screen
             # is then left with no wallpaper, icons or menu, and the root's own far
             # edge is uncovered.
-            desktop = desktop_window()
-            if desktop is None:
+            if shutil.which("wmctrl") is None:
+                res.skip("desktop window covers the layout",
+                         "wmctrl not installed; cannot list X11 windows")
+            elif (desktop := desktop_window()) is None:
                 res.skip("desktop window covers the layout",
                          "no X11 desktop window (a native Wayland session has none)")
             else:

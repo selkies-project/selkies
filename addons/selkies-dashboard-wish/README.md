@@ -41,11 +41,11 @@ This example dashboard showcases how to implement a wide array of functionalitie
 
 *   **Video Settings:**
     *   Controls for Encoder, Framerate, Video Bitrate, and CRF (Constant Rate Factor) where applicable.
-    *   *Interaction:* Sends ```window.postMessage({ type: 'settings', settings: { ... } })``` to selkies-core. Receives available encoder options via ```initialClientSettings``` or ```serverSettings``` messages from selkies-core. Settings are persisted in ```localStorage```.
+    *   *Interaction:* Sends ```window.postMessage({ type: 'settings', settings: { ... } })``` to selkies-core. Receives available encoder options and per-setting constraints via ```serverSettings``` messages from selkies-core. Settings are persisted in ```localStorage```.
 
 *   **Audio Settings:**
     *   Selection of audio input (microphone) and output (speaker) devices.
-    *   *Interaction:* Uses ```navigator.mediaDevices.enumerateDevices()``` to list devices (after permission). Sends ```window.postMessage({ type: 'audioDeviceSelected', context: 'input'/'output', deviceId: '...' })``` to selkies-core. Listens for ```audioDeviceStatusUpdate``` messages from selkies-core.
+    *   *Interaction:* Uses ```navigator.mediaDevices.enumerateDevices()``` to list devices (after permission). Sends ```window.postMessage({ type: 'audioDeviceSelected', context: 'input'/'output', deviceId: '...' })``` to selkies-core, and mirrors the same ```audioDeviceSelected``` messages back into its dropdowns so the displayed device always matches what the core was told.
 
 *   **Screen & Resolution Management:**
     *   Allows selection from resolution presets or manual input of width and height.
@@ -192,8 +192,9 @@ src/
 │       └── ...
 ├── lib/
 │   └── utils.ts           # Utility functions
-└── styles/
-    └── globals.css        # Global styles and CSS variables
+├── styles/
+│   └── Overlay.css        # Overlay widget styles shared with the default dashboard
+└── index.css              # Global styles and CSS variables
 ```
 
 By studying and experimenting with this modern example, developers can gain practical knowledge of contemporary React development practices and a solid starting point for building their own sophisticated, interactive, and branded dashboards for video streaming applications.

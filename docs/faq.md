@@ -16,7 +16,7 @@ First of all, ensure that there is a running PulseAudio or PipeWire-Pulse sessio
 
 **Then, if you are using WebRTC mode, please read [WebRTC and Firewall Issues](firewall.md).**
 
-In WebRTC mode, also check that the video codec (set with `--encoder-rtc`) is supported in your web browser. H.264 and VP8 are supported by all major web browsers.
+In WebRTC mode, also check that H.264 decoding is available in your web browser; both `--encoder-rtc` choices (`h264enc` and `openh264enc`) produce H.264, which all major web browsers support.
 
 Moreover, if using HTTP but not HTTPS on a remote host that is not `localhost`, use port forwarding to `localhost` as much as possible. Many browsers do not support WebRTC or relevant features including pointer and keyboard lock in HTTP outside localhost.
 
@@ -41,7 +41,7 @@ Moreover, always make sure that there are minimal background network processes, 
 
 Ensure the latency to your TURN server from the server and the client is ideally under 50-75 ms. If the latency is too high, your connection might be too laggy for most interactive 3D applications.
 
-Next, there currently exists a current issue with CPU congestion from the web interface when the side panel is open. Please make sure to test your experience when the side panel is closed.
+Next, the client compiles statistics for the side panel only while it is open, so keep the panel closed when comparing latency or client CPU usage.
 
 Also note that a higher framerate will improve performance if you have sufficient bandwidth. This is because one screen refresh from a 60 fps screen takes 16.67 ms at a time, while one screen refresh from a 15 fps screen inevitably takes 66.67 ms, and therefore inherently causes a visible lag. Also try to keep the total bitrate reasonable, keeping around your service level agreement (SLA) bandwidth (which might be different from your maximum bandwidth contract).
 
@@ -124,12 +124,14 @@ This is a setting from the client operating system and will show the same behavi
 
 </details>
 
-## I want to pass multiple screens within a server to another client using the WebRTC HTML5 web interface.
+## I want to use multiple screens from one server in the HTML5 web interface.
 
 <details>
   <summary>Open Answer</summary>
 
-You can start a new instance of Selkies by changing the `DISPLAY` environment variable (or even use the same one for multiple instances) and setting a different web interface port in a different terminal to pass a different screen simultaneously to your current screen. Reverse proxy server/web servers supporting WebSocket such as `nginx` can be utilized to expose the interfaces to multiple users in different paths.
+Selkies has built-in second-display support on both transports: the **Add Screen** button under the side menu's screen settings opens a companion browser window that joins the session as the second screen (the window carries a `#display2-<position>` URL fragment naming which side of the primary it extends), and closing it removes the screen again. Place each window on one of your physical monitors for a dual-screen remote desktop. The `--second-screen` option (`SELKIES_SECOND_SCREEN`) turns the capability off. The headless Wayland backend creates capture outputs on demand, so it needs no preparation (the [Example Container](component.md#example-container) describes how its nested desktop session follows them); only when capturing an external Wayland compositor must that compositor itself expose a second output.
+
+To stream more screens than that, or separate X11 displays, start one Selkies instance per display by changing the `DISPLAY` environment variable and the web interface port in different terminals. Reverse proxy servers/web servers supporting WebSocket such as `nginx` can expose the instances to multiple users under different paths.
 
 </details>
 

@@ -62,7 +62,7 @@ sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall .
 selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
-Installing the wheel also installs the `selkies` and `selkies-resize` console commands.
+Installing the wheel also installs the `selkies`, `selkies-resize`, and `selkies-gpu-probe` console commands.
 
 #### Web Client
 
