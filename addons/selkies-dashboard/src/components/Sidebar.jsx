@@ -144,15 +144,6 @@ const audioBitrateOptions = [32000, 48000, 64000, 96000, 128000, 192000, 256000,
 const DEFAULT_VIDEO_BITRATE = 8000;
 const RATE_CONTROL_CBR = "cbr";
 const RATE_CONTROL_CRF = "crf";
-// Rate control resolves through the shared precedence ladder with CBR as the
-// dashboard default for every encoder (the conditional layer and the
-// no-server-settings fallback alike); locked/pinned/server-explicit values and
-// the server's allowed list still win, and CRF stays user-selectable.
-const RATE_CONTROL_CBR_DEFAULT_SPEC = {
-  ...RATE_CONTROL_SPEC,
-  conditional: () => RATE_CONTROL_CBR,
-  fallback: RATE_CONTROL_CBR,
-};
 
 // Sub-Mbps CBR stops (kbps) for constrained links, ahead of the whole-Mbps
 // range (1000-kbps steps).
@@ -714,7 +705,7 @@ const explicitChoiceKey = (spec) => `${getPrefixedKey(spec.storageKey)}${EXPLICI
 const isExplicitChoice = (spec) => localStorage.getItem(explicitChoiceKey(spec)) === "true";
 const readExplicitStored = (spec) => (key) => (isExplicitChoice(spec) ? readStored(key) : null);
 const readHidpiStored = readExplicitStored(HIDPI_SPEC);
-const readRateControlStored = readExplicitStored(RATE_CONTROL_CBR_DEFAULT_SPEC);
+const readRateControlStored = readExplicitStored(RATE_CONTROL_SPEC);
 
 // Drives a conditional setting: lazy init + re-resolve whenever the server
 // settings or any dependency in `deps` changes (server-sync AND encoder/manual-
@@ -1105,7 +1096,7 @@ function Sidebar() {
   const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
     HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
   const [rateControlMode, setRateControlMode] = useConditionalSetting(
-    RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
+    RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
   const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
     USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [videoFullColor, setVideoFullColor] = useConditionalSetting(
@@ -1402,21 +1393,21 @@ function Sidebar() {
   useEffect(() => {
     if (!serverSettings) return;
     if (serverSettings.enable_rate_control?.value === false) return;
-    const rcKey = RATE_CONTROL_CBR_DEFAULT_SPEC.storageKey;
+    const rcKey = RATE_CONTROL_SPEC.storageKey;
     const resolved = resolveSpec(
-      RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, conditionalCtx, readRateControlStored);
+      RATE_CONTROL_SPEC, serverSettings, conditionalCtx, readRateControlStored);
     // The core persists every mode it is told to apply and resends it on the next
     // connect. Without an explicit pick that stored echo is not a choice: drop it
     // once it stops matching what the ladder resolves, or it would outlive the
     // derivation — and an operator override with it.
-    if (!isExplicitChoice(RATE_CONTROL_CBR_DEFAULT_SPEC)
+    if (!isExplicitChoice(RATE_CONTROL_SPEC)
       && readStored(rcKey) !== null && readStored(rcKey) !== resolved) {
       localStorage.removeItem(getPrefixedKey(rcKey));
     }
-    if (isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readRateControlStored)) return;
-    const serverValue = serverSettings[RATE_CONTROL_CBR_DEFAULT_SPEC.serverKey]?.value;
+    if (isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readRateControlStored)) return;
+    const serverValue = serverSettings[RATE_CONTROL_SPEC.serverKey]?.value;
     if (resolved && serverValue !== undefined && resolved !== serverValue) {
-      writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, resolved, setRateControlMode, { persist: false });
+      writeConditional(RATE_CONTROL_SPEC, resolved, setRateControlMode, { persist: false });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverSettings]);
@@ -1729,12 +1720,12 @@ function Sidebar() {
     // Rate control follows the encoder unless pinned (explicit client/server
     // choice). A derived change is not persisted, so it keeps following.
     if (rateControlEnabled
-      && !isSettingPinned(RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings, readRateControlStored)) {
+      && !isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readRateControlStored)) {
       const rcResolved = resolveSpec(
-        RATE_CONTROL_CBR_DEFAULT_SPEC, serverSettings,
+        RATE_CONTROL_SPEC, serverSettings,
         { ...conditionalCtx, activeEncoder: selectedEncoder }, readRateControlStored);
       if (rcResolved !== rateControlMode) {
-        writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, rcResolved, setRateControlMode, { persist: false });
+        writeConditional(RATE_CONTROL_SPEC, rcResolved, setRateControlMode, { persist: false });
       }
     }
   };
@@ -1796,7 +1787,7 @@ function Sidebar() {
   };
   const handleRateControlChange = (event) => {
     // Explicit choice: pin it (persist) so encoder changes stop overriding.
-    writeConditional(RATE_CONTROL_CBR_DEFAULT_SPEC, event.target.value, setRateControlMode, { persist: true });
+    writeConditional(RATE_CONTROL_SPEC, event.target.value, setRateControlMode, { persist: true });
   };
   const handleAudioInputChange = (event) => {
     const deviceId = event.target.value;

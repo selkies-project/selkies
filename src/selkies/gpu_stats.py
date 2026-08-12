@@ -45,7 +45,9 @@ logger = logging.getLogger("gpu_stats")
 if GPUMonitorFactory is not None:
     logging.getLogger("aitop.core.gpu.factory").setLevel(logging.WARNING)
 
-_nvml_ready = False
+# None = not attempted, True = initialized, False = failed (terminal for this
+# process: the shared library cannot appear after startup, so never retry).
+_nvml_ready = None
 
 # utilization.gpu is a percentage; memory.* are MiB (nounits strips the suffix);
 # pci.bus_id keys the stats to the render node the pipeline encodes on.
@@ -104,14 +106,15 @@ def _vendor_of_node(dri_node, root=None):
 def _nvml_gpus():
     """NVIDIA via NVML: no subprocess, exact per-device PCI identity."""
     global _nvml_ready
-    if pynvml is None:
+    if pynvml is None or _nvml_ready is False:
         return []
-    if not _nvml_ready:
+    if _nvml_ready is None:
         try:
             pynvml.nvmlInit()
             _nvml_ready = True
         except Exception as exc:
-            logger.debug("NVML init failed: %s", exc)
+            _nvml_ready = False
+            logger.debug("NVML init failed (will not retry): %s", exc)
             return []
     gpus = []
     try:

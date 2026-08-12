@@ -1324,12 +1324,12 @@ class AppSettings:
         """
         return bool(getattr(self, "_overridden", {}).get(name, False))
 
-    # Rate-control default per encoder: the striped software encoder and jpeg
-    # are quality-driven (CRF), the single-slice software encoders target a
-    # bandwidth (CBR). An explicit rate_control_mode override wins; encoders
-    # not listed keep the built-in default.
+    # Rate-control default per encoder: the H.264 encoders and jpeg are
+    # quality-driven (CRF), except openh264enc, which targets a bandwidth
+    # (CBR). An explicit rate_control_mode override wins; encoders not
+    # listed keep the built-in default.
     ENCODER_RC_DEFAULTS = {
-        "h264enc": "cbr",
+        "h264enc": "crf",
         "openh264enc": "cbr",
         "h264enc-striped": "crf",
         "jpeg": "crf",

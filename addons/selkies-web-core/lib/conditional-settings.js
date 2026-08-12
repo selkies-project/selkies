@@ -4,11 +4,11 @@
 // and (via the dashboards' thin useConditionalSetting hook) init + server-sync +
 // dependency re-derivation are all generic. Adding a setting is one more spec.
 
-// Rate-control default per encoder when nothing explicit is chosen: the striped
-// software encoder and jpeg are quality-driven (CRF); the single-slice software
-// encoders target a bandwidth (CBR).
+// Rate-control default per encoder when nothing explicit is chosen: the H.264
+// encoders and jpeg are quality-driven (CRF), except openh264enc, which targets
+// a bandwidth (CBR).
 export const ENCODER_RC_DEFAULTS = {
-    "h264enc": "cbr",
+    "h264enc": "crf",
     "openh264enc": "cbr",
     "h264enc-striped": "crf",
     "jpeg": "crf",
