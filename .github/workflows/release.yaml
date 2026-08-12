@@ -10,9 +10,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag (semver without the leading v, e.g. 1.2.3)
+        description: Release tag without the leading v (e.g. 1.2.3 or 2.0.0rc0)
         type: string
         required: true
+      latest_tags:
+        description: Move the floating `latest` image tags onto this release
+        type: choice
+        options:
+          - auto
+          - always
+          - never
+        default: auto
 
 concurrency:
   group: ${{ github.workflow }}
@@ -27,15 +35,37 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      prerelease: ${{ steps.ver.outputs.prerelease }}
+      floating_tags: ${{ steps.ver.outputs.floating_tags }}
     steps:
       - id: ver
         env:
           TAG: ${{ inputs.tag }}
+          LATEST_TAGS: ${{ inputs.latest_tags }}
         run: |
           set -e
           ver="${TAG#v}"
-          echo "${ver}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "tag must be semver (e.g. 1.2.3)" >&2; exit 1; }
-          echo "version=${ver}" >> "${GITHUB_OUTPUT}"
+          # The tag becomes the wheel version, so it is PEP 440: X.Y.Z with an
+          # optional pre-release, post-release, or dev suffix
+          echo "${ver}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+|\.post[0-9]+|\.dev[0-9]+)?$' \
+            || { echo "tag must be a PEP 440 version (e.g. 1.2.3 or 2.0.0rc0)" >&2; exit 1; }
+          # A pre-release is marked as such on the GitHub release
+          case "${ver}" in
+            *[ab]*|*rc*|*dev*) prerelease=true ;;
+            *) prerelease=false ;;
+          esac
+          # A release takes the floating `latest` image tags and a pre-release
+          # leaves them on the last full release, unless this run says otherwise
+          case "${LATEST_TAGS:-auto}" in
+            always) floating=true ;;
+            never) floating=false ;;
+            *) if [ "${prerelease}" = "true" ]; then floating=false; else floating=true; fi ;;
+          esac
+          {
+            echo "version=${ver}"
+            echo "prerelease=${prerelease}"
+            echo "floating_tags=${floating}"
+          } >> "${GITHUB_OUTPUT}"
 
   wheel:
     name: Build wheel
@@ -64,6 +94,7 @@ jobs:
     uses: ./.github/workflows/images.yaml
     with:
       tag_prefix: v${{ needs.validate.outputs.version }}
+      floating_tags: ${{ needs.validate.outputs.floating_tags == 'true' }}
       wheel_artifact: selkies-wheel
 
   packages:
@@ -107,5 +138,6 @@ jobs:
           tag_name: v${{ needs.validate.outputs.version }}
           name: v${{ needs.validate.outputs.version }}
           draft: true
+          prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
           generate_release_notes: true
           files: release/*

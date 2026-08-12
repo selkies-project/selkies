@@ -3,12 +3,12 @@
   "pages": [
     "README",
     "design",
-    "citation",
     "start",
     "usage",
     "faq",
     "firewall",
     "component",
-    "development"
+    "development",
+    "citation"
   ]
 }

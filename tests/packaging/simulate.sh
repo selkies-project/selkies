@@ -93,6 +93,10 @@ EOF
   chmod +x "$SB/stubs/$t"
 done
 
+# Each packager orders a PEP 440 pre-release only in its own spelling, so the
+# version each one is handed is checked along with the staging.
+declare -A WANT_VERSION=([deb]="0.0.0~dev0" [rpm]="0.0.0~dev0" [apk]="0.0.0_alpha0" [arch]="0.0.0.dev0")
+
 failures=0
 STAMP="$SB/log/stamp"; : > "$STAMP"
 for name in deb rpm apk arch; do
@@ -103,10 +107,25 @@ for name in deb rpm apk arch; do
   rc=$?
   leaked="$(find "$SB/repo" -newer "$STAMP" 2>/dev/null | head -3)"
   shebang="$(head -1 "$SB/pkg-root/opt/selkies/bin/selkies" 2>/dev/null)"
-  printf '%-10s exit=%-3s repo-writes=%-5s shebang=%-58s out=%s\n' \
+  # A pip install and a native package have to put the same commands on PATH.
+  # The links resolve at the install path, so they dangle until then.
+  unlinked="$(cd "$SB/pkg-root/opt/selkies/bin" 2>/dev/null &&
+    for c in selkies*; do [ -L "$SB/pkg-root/usr/bin/$c" ] || printf '%s ' "$c"; done)"
+  case "$name" in
+    # fpm takes the version on its command line, abuild and makepkg from the
+    # recipe the script stages
+    deb|rpm) got="$(sed -n 's/.*--version \([^ ]*\).*/\1/p' "$SB/log/calls" | head -1)" ;;
+    apk) got="$(sed -n 's/^pkgver=//p' "$SB/build/apk/APKBUILD" 2>/dev/null)" ;;
+    arch) got="$(sed -n 's/^pkgver=//p' "$SB/build/arch/PKGBUILD" 2>/dev/null)" ;;
+  esac
+  [ "$got" = "${WANT_VERSION[$name]}" ] && badver="" || badver="want ${WANT_VERSION[$name]}"
+  printf '%-10s exit=%-3s repo-writes=%-5s version=%-13s commands=%-9s shebang=%-58s out=%s\n' \
     "$name" "$rc" "$([ -z "$leaked" ] && echo none || echo LEAK)" \
+    "${got:-<none>}" "$([ -z "$unlinked" ] && echo linked || echo UNLINKED)" \
     "${shebang:-<none>}" "$(ls "$SB/out" 2>/dev/null | tr '\n' ' ')"
-  if [ "$rc" -ne 0 ] || [ -n "$leaked" ]; then
+  [ -z "$badver" ] || echo "       | version ${got:-<none>}, ${badver}" >&2
+  [ -z "$unlinked" ] || echo "       | not on PATH: ${unlinked}" >&2
+  if [ "$rc" -ne 0 ] || [ -n "$leaked" ] || [ -n "$badver" ] || [ -n "$unlinked" ]; then
     failures=$((failures + 1))
     tail -6 "$SB/log/$name.out" | sed 's/^/       | /'
   fi

@@ -147,6 +147,13 @@ export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 # LD_PRELOAD here: selkies itself must keep seeing the real device nodes.
 export SELKIES_INTERPOSER="${HERE}/usr/lib/selkies_joystick_interposer.so"
 
+# A help query prints and exits, so it starts no display or audio server
+for arg in "$@"; do
+    case "${arg}" in
+        -h|--help) exec "${ENV_BIN}/selkies" "$@" ;;
+    esac
+done
+
 # X11 mode streams an existing display; start a virtual one when none is up.
 # Wayland mode starts its own compositor and needs nothing here.
 if [ "${SELKIES_WAYLAND:-false}" != "true" ]; then

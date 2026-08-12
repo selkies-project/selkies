@@ -14,7 +14,7 @@ container images below (`ubuntu24.04`, `ubuntu26.04`, `bookworm`, or `trixie`). 
 inside the image, so it is a free choice and not a property of the host:
 
 ```bash
-export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')"
+export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/^v//')"
 export DISTRIB_RELEASE="ubuntu24.04"
 ```
 
@@ -28,7 +28,9 @@ docker run --rm --privileged tonistiigi/binfmt:latest --install all
 
 At runtime, Selkies is a **single Python application** — the `selkies` wheel. The HTML5 web client is bundled into it, and screen/audio capture and encoding are provided by the `pixelflux` and `pcmflux` extensions, which are installed automatically as dependencies of the wheel.
 
-All release components are available for download from the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
+Every release carries the same build in each medium below. The [Releases](https://github.com/selkies-project/selkies/releases) page holds the architecture-independent wheel, a `.deb` for Ubuntu 24.04 and 26.04 and for Debian bookworm and trixie, an `.rpm` for Fedora and Enterprise Linux 9, an Alpine `.apk`, an Arch `.pkg.tar.zst`, a self-contained AppImage, and the `noarch` conda package the AppImage environment is built from (`pixelflux`, `pcmflux`, `pulsectl-asyncio`, and `aitop` have no conda-forge builds, so a conda install of it still needs those from pip). Each of those is built for both `x86_64` and `aarch64`, except the Arch package, which Arch Linux publishes for `x86_64` alone. The container images below are published to `ghcr.io` instead: the example image as `v${SELKIES_VERSION}-${DISTRIB_RELEASE}`, the coTURN and TURN-REST addons as `v${SELKIES_VERSION}`, each beside its floating `latest` tag.
+
+A pre-release ships the same media under a tag such as `2.0.0rc0` and is marked as a pre-release: the floating `latest` image tags stay on the last full release by default, the `releases/latest` API keeps pointing at it, and `pip` resolves the pre-release only when asked with `--pre` or an exact version.
 
 For the most recent unreleased commit, download the Build Artifacts of the `CI`, `Images`, or `Packages` workflows for that commit from the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions). Build Artifacts can also be downloaded using the [GitHub CLI](https://cli.github.com) command [`gh run download`](https://cli.github.com/manual/gh_run_download).
 

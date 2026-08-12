@@ -22,6 +22,9 @@ build:
   number: 0
   noarch: python
   script:
+    # Same version in the package and in the metadata the installed Selkies
+    # reports, which the wheel build stamps the same way
+    - sed -i "s|^version =.*|version = \"${PKG_VERSION}\"|" pyproject.toml
     - ./scripts/ci/build-web.sh
     - python -m pip install . --no-deps --no-build-isolation -vv
 

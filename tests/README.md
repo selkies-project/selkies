@@ -71,8 +71,8 @@ Unix-socket suite puts in front of a server with no TCP listener.
 
 `tests/packaging/simulate.sh` runs `infra/packaging/*.sh` against a genuinely
 read-only `/repo` with the root-only tools stubbed, on any host, with no
-container runtime. It takes seconds and catches the staging and read-only-mount
-mistakes that otherwise only surface in the release job:
+container runtime. It takes seconds and catches the staging, read-only-mount and
+package-version mistakes that otherwise only surface in the release job:
 
 ```bash
 python3 -m build            # or drop a wheel in dist/

@@ -28,6 +28,7 @@ SUITES = [
     {"path": "unit/test_env_case.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_encoder_cpu_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_release_version.py", "tier": "unit", "timeout": 120},
 
     # --- integration ------------------------------------------------------
     {"path": "integration/test_uinput_backend.py", "tier": "integration", "timeout": 300},

@@ -35,5 +35,10 @@ if grep -rIl /pkg-root /pkg-root/opt/selkies/bin; then
   echo "the staging path leaked into the packaged prefix" >&2
   exit 1
 fi
-ln -s /opt/selkies/bin/selkies /pkg-root/usr/bin/selkies
-ln -s /opt/selkies/bin/selkies-resize /pkg-root/usr/bin/selkies-resize
+# Every console script the wheel installs, so a native package puts the same
+# commands on PATH as a pip install does. The links point at the install path,
+# so they resolve once the package is unpacked rather than here.
+for cmd in /pkg-root/opt/selkies/bin/selkies*; do
+  name="$(basename "${cmd}")"
+  ln -s "/opt/selkies/bin/${name}" "/pkg-root/usr/bin/${name}"
+done

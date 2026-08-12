@@ -22,7 +22,7 @@ For hardware-accelerated H.264 encoding, additionally install the relevant GPU d
 **2. Install the Selkies Python package**, which bundles the HTML5 web client (fill in `SELKIES_VERSION`):
 
 ```bash
-export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')"
+export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/^v//')"
 cd /tmp && curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-py3-none-any.whl" && sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall "selkies-${SELKIES_VERSION}-py3-none-any.whl" && rm -f "selkies-${SELKIES_VERSION}-py3-none-any.whl"
 ```
 
@@ -120,6 +120,26 @@ For more information, check the [Components](component.md) section.
 
 The [All-In-One Desktop Containers](#desktop-container) support unprivileged self-hosted Kubernetes clusters and Docker®/Podman.
 
+### Install from a native package or the AppImage
+
+Each release also carries the same build as a native package for the distributions below, all attached to the [Releases](https://github.com/selkies-project/selkies/releases) page for `x86_64` and `aarch64` (Arch Linux for `x86_64` alone). A native package installs a private Python environment at `/opt/selkies`, the web client and the `pixelflux`/`pcmflux` extensions included, puts the `selkies`, `selkies-resize`, and `selkies-gpu-probe` commands on `PATH`, and carries the [Joystick Interposer](component.md#joystick-interposer), so steps 2 and 3 below are already done and only the display and audio servers are left to set up:
+
+```bash
+# The suffix on the .deb and .rpm names the distribution it was built in:
+# ubuntu24.04, ubuntu26.04, bookworm, or trixie, and fc or el9
+sudo apt-get install -y "./selkies_${SELKIES_VERSION}-1~trixie_amd64.deb"    # Ubuntu, Debian
+sudo dnf install -y "./selkies-${SELKIES_VERSION}-1.fc.x86_64.rpm"           # Fedora, Enterprise Linux
+sudo apk add --allow-untrusted "./selkies-${SELKIES_VERSION}-r0-x86_64.apk"  # Alpine
+sudo pacman -U "./selkies-${SELKIES_VERSION}-1-x86_64.pkg.tar.zst"           # Arch Linux
+```
+
+The AppImage installs nothing and runs from wherever you put it. It carries its own Python environment and the interposer, starts a virtual display with the host's `Xvfb` when the display it is pointed at is not up, and starts its own bundled PulseAudio server when none is listening:
+
+```bash
+chmod +x "./selkies-${SELKIES_VERSION}-x86_64.AppImage"
+"./selkies-${SELKIES_VERSION}-x86_64.AppImage" --addr=0.0.0.0 --port=8080 --enable-basic-auth=true --basic-auth-user=user --basic-auth-password=mypasswd
+```
+
 ### Install the packaged version on self-hosted standalone machines, cloud instances, or virtual machines
 
 **NOTE: STUN/TURN is only relevant to the opt-in WebRTC transport (`--mode=webrtc`). The default WebSocket transport uses a single TCP port. If you use WebRTC mode and both your server and client have closed ports or a restrictive firewall, you will need an external STUN/TURN server capable of `srflx` or `relay` type ICE connections; either open the UDP and TCP port ranges 49152-65535 of your server, or follow the instructions from [WebRTC and Firewall Issues](firewall.md).**
@@ -137,7 +157,7 @@ If using supported NVIDIA GPUs, NVENC is bundled with the GPU driver (`libnvidia
 Retrieve the latest `SELKIES_VERSION` release for the steps below:
 
 ```bash
-export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/[^0-9\.\-]*//g')"
+export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/^v//')"
 ```
 
 **2. Install the Selkies Python package** (this component is pure Python, bundles the HTML5 web client, and any operating system is compatible, fill in `SELKIES_VERSION`)**:**

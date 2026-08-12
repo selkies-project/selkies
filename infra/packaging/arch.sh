@@ -15,7 +15,8 @@ rm -rf /build
 mkdir -p /build /out
 cp -r /repo/infra/packaging/arch /build/arch
 chmod -R u+w /build/arch
-# Arch pkgver forbids hyphens
+# makepkg forbids hyphens in pkgver. pacman sorts a PEP 440 pre-release suffix
+# below the bare release on its own, so nothing else here needs translating.
 PKGVER="$(printf '%s' "${SELKIES_VERSION:-0.0.0}" | tr '-' '.')"
 sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" /build/arch/PKGBUILD
 # makepkg refuses to run as root

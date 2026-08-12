@@ -16,6 +16,10 @@ on:
         description: Tag prefix for the images
         type: string
         default: main
+      floating_tags:
+        description: Also move the floating `latest` tags onto this build
+        type: boolean
+        default: true
       wheel_artifact:
         description: Artifact name of a prebuilt wheel (skips the wheel build when set)
         type: string
@@ -26,6 +30,10 @@ on:
         description: Tag prefix for the images (e.g. v1.2.3 or latest)
         type: string
         default: main
+      floating_tags:
+        description: Also move the floating `latest` tags onto this build
+        type: boolean
+        default: true
       wheel_artifact:
         description: Artifact name of a prebuilt wheel (skips the wheel build when set)
         type: string
@@ -183,12 +191,14 @@ jobs:
         working-directory: /tmp/digests
         env:
           TAG_PREFIX: ${{ inputs.tag_prefix }}
+          FLOATING_TAGS: ${{ inputs.floating_tags }}
           FLAVOR: ${{ matrix.flavor }}
         run: |
           set -e
           IMGTAGS=("-t" "${IMAGE_NAME}:${TAG_PREFIX}-${FLAVOR}")
-          if [ "${TAG_PREFIX}" != "main" ]; then
-            # Release builds also carry the floating `latest-*` tags
+          if [ "${TAG_PREFIX}" != "main" ] && [ "${FLOATING_TAGS}" = "true" ]; then
+            # Release builds also carry the floating `latest-*` tags, unless
+            # the caller holds them back
             IMGTAGS+=("-t" "${IMAGE_NAME}:latest-${FLAVOR}")
           fi
           # One empty file per pushed digest, named after it
@@ -270,13 +280,15 @@ jobs:
         working-directory: /tmp/digests
         env:
           TAG_PREFIX: ${{ inputs.tag_prefix }}
+          FLOATING_TAGS: ${{ inputs.floating_tags }}
           ADDON: ${{ matrix.addon }}
         run: |
           set -e
           IMAGE="${REGISTRY_NAMESPACE}/${ADDON}"
           IMGTAGS=("-t" "${IMAGE}:${TAG_PREFIX}")
-          if [ "${TAG_PREFIX}" != "main" ]; then
-            # Release builds also carry the floating `latest` tag
+          if [ "${TAG_PREFIX}" != "main" ] && [ "${FLOATING_TAGS}" = "true" ]; then
+            # Release builds also carry the floating `latest` tag, unless the
+            # caller holds it back
             IMGTAGS+=("-t" "${IMAGE}:latest")
           fi
           # One empty file per pushed digest, named after it

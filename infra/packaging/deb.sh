@@ -21,6 +21,7 @@ if [ "$(dpkg --print-architecture)" = "amd64" ]; then
     apt-get install --no-install-recommends -y gcc-multilib
 fi
 gem install --no-document fpm
+. /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
 # dpkg knows the Debian name for whatever this is running on, so a new
@@ -30,7 +31,7 @@ mkdir -p /out
 cd /out
 fpm -s dir -t deb \
     --name selkies \
-    --version "${SELKIES_VERSION:-0.0.0}" \
+    --version "$(tilde_version "${SELKIES_VERSION:-0.0.0}")" \
     --iteration "1~${DISTRO_TAG:-linux}" \
     --architecture "${DEB_ARCH}" \
     --description "Low-latency HTML5 remote desktop streaming (WebSocket and WebRTC)" \
