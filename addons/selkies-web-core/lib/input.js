@@ -1300,6 +1300,10 @@ export class Input {
 
     static _nextGuacID = 0;
 
+    // Cleared the first time an engine refuses raw pointer movement, so the
+    // option costs one refused request per page instead of one per lock.
+    static _unadjustedMovement = true;
+
     _drawAndScaleCursor() {
         if (!this._cursorImageBitmap) {
             return;
@@ -2129,13 +2133,9 @@ export class Input {
         }
         if (down && event.button === 0 && event.ctrlKey && event.shiftKey) {
             const targetElement = event.target.requestPointerLock ? event.target : this.element;
-            // requestPointerLock() returns undefined (not a Promise) on older
-            // engines (Safari, Firefox < 122); failures there surface via the
-            // pointerlockerror event instead.
-            const lockPromise = targetElement.requestPointerLock();
-            if (lockPromise && typeof lockPromise.catch === 'function') {
-                lockPromise.catch(err => console.error("Pointer lock failed:", err));
-            }
+            const lock = () => this._requestPointerLock(targetElement, lock,
+                (err) => console.error("Pointer lock failed:", err));
+            lock();
             this.cursorDiv.style.visibility = 'hidden';
             event.preventDefault();
             return;
@@ -3158,6 +3158,34 @@ export class Input {
     }
 
     /**
+     * Take pointer lock on an element, asking for raw movement deltas.
+     *
+     * Locked motion is relayed as relative motion, which the remote desktop
+     * accelerates again on injection, so the OS curve the engine applies to
+     * movementX/Y compounds with it and a flick travels much further remotely
+     * than it did locally. unadjustedMovement asks for the deltas before that
+     * curve. Engines that cannot deliver them (every engine on Linux, and
+     * Android) reject the option with NotSupportedError, and the first refusal
+     * turns it off for the page; `again` re-runs the request the way its caller
+     * would, so guarded callers re-check their guards. Engines older than the
+     * promise-returning API report failures through pointerlockerror instead.
+     */
+    _requestPointerLock(element, again, onFailure) {
+        const lockPromise = Input._unadjustedMovement
+            ? element.requestPointerLock({ unadjustedMovement: true })
+            : element.requestPointerLock();
+        if (!lockPromise || typeof lockPromise.catch !== 'function') return;
+        lockPromise.catch((err) => {
+            if (err && err.name === 'NotSupportedError' && Input._unadjustedMovement) {
+                Input._unadjustedMovement = false;
+                again();
+                return;
+            }
+            onFailure(err);
+        });
+    }
+
+    /**
      * Acquire pointer lock for the fullscreen stream. Chrome rejects a
      * request made while the fullscreen transition is still settling
      * (WrongDocumentError), so retry over a few short intervals.
@@ -3165,19 +3193,13 @@ export class Input {
     _armPointerLock(attempt = 0) {
         if (this.isSharedMode || !this._isStreamFullscreen()) return;
         if (document.pointerLockElement === this.element) return;
-        // requestPointerLock() returns undefined (not a Promise) on older engines
-        // (Safari, Firefox < 122); there the transition-race retry cannot run and
-        // failures surface via the pointerlockerror event instead.
-        const lockPromise = this.element.requestPointerLock();
-        if (lockPromise && typeof lockPromise.catch === 'function') {
-            lockPromise.catch((err) => {
-                if (attempt < 5) {
-                    setTimeout(() => this._armPointerLock(attempt + 1), 60);
-                } else {
-                    console.warn("Pointer lock failed on fullscreen:", err);
-                }
-            });
-        }
+        this._requestPointerLock(this.element, () => this._armPointerLock(attempt), (err) => {
+            if (attempt < 5) {
+                setTimeout(() => this._armPointerLock(attempt + 1), 60);
+            } else {
+                console.warn("Pointer lock failed on fullscreen:", err);
+            }
+        });
     }
 
     _onFullscreenChange() {
