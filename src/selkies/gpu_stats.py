@@ -181,6 +181,29 @@ def _aitop_vendor(monitor):
     return type(monitor).__name__.replace("GPUMonitor", "").replace("NPUMonitor", "").lower()
 
 
+# aitop monitor -> the CLI its readings come from. A monitor whose tool is absent
+# can never produce data, and the NVIDIA/AMD ones log an ERROR every poll cycle
+# when a DRM-visible card has no userspace in the container (a bare /dev/dri
+# mount without the vendor toolkit); NPU/Apple monitors read other sources.
+_AITOP_MONITOR_TOOLS = {
+    "NvidiaGPUMonitor": ("nvidia-smi",),
+    "AMDGPUMonitor": ("rocm-smi", "amd-smi"),
+    "IntelGPUMonitor": ("intel_gpu_top",),
+}
+
+
+def _aitop_monitor_usable(monitor):
+    tools = _AITOP_MONITOR_TOOLS.get(type(monitor).__name__)
+    if tools is None or any(shutil.which(tool) for tool in tools):
+        return True
+    logger.info(
+        "%s GPU visible but %s not installed; skipping its stats monitor",
+        _aitop_vendor(monitor),
+        "/".join(tools),
+    )
+    return False
+
+
 _aitop_monitors_cache = None
 _aitop_monitors_lock = threading.Lock()
 
@@ -196,7 +219,11 @@ def _aitop_monitors():
         with _aitop_monitors_lock:
             if _aitop_monitors_cache is None:
                 try:
-                    _aitop_monitors_cache = GPUMonitorFactory.create_monitors()
+                    _aitop_monitors_cache = [
+                        monitor
+                        for monitor in GPUMonitorFactory.create_monitors()
+                        if _aitop_monitor_usable(monitor)
+                    ]
                 except Exception as exc:
                     logger.warning("aitop monitor detection failed: %s", exc)
                     _aitop_monitors_cache = []
