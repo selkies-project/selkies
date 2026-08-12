@@ -39,19 +39,18 @@ export function ThemeProvider({
   useEffect(() => {
     const root = window.document.documentElement
 
-    root.classList.remove("light", "dark")
+    root.classList.remove("light", "dark", "theme-light", "theme-dark")
 
-    if (theme === "system") {
-      const systemTheme = window.matchMedia("(prefers-color-scheme: dark)")
-        .matches
-        ? "dark"
-        : "light"
+    const resolved =
+      theme === "system"
+        ? window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light"
+        : theme
 
-      root.classList.add(systemTheme)
-      return
-    }
-
-    root.classList.add(theme)
+    // Overlay.css widgets (gamepad visualizer, notifications) theme off
+    // theme-dark/theme-light, so mirror the Tailwind class onto that scheme.
+    root.classList.add(resolved, `theme-${resolved}`)
   }, [theme])
 
   const value = {

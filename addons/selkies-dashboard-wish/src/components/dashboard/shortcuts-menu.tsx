@@ -41,7 +41,7 @@ export function ShortcutsMenu() {
 					<ul className="list-disc pl-5 text-foreground">
 						<li>
 							<a
-								className="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+								className="text-violet-600 hover:text-violet-800 dark:text-violet-400 dark:hover:text-violet-300"
 								target="_blank"
 								rel="noopener noreferrer"
 								href="https://selkies-project.github.io/selkies/citation/"

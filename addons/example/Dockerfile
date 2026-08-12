@@ -233,9 +233,12 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         libvdpau-va-gl1 \
         vulkan-tools \
         radeontop \
-        # Fonts
+        # Fonts: DejaVu/Liberation for Latin, Noto for worldwide script and emoji coverage
         fonts-dejavu-core \
         fonts-liberation \
+        fonts-noto-core \
+        fonts-noto-cjk \
+        fonts-noto-color-emoji \
         # Python runtime and the embedded coTURN server (WebRTC mode)
         python3 \
         python3-pip \
