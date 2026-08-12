@@ -72,91 +72,12 @@ if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
     export XDG_SESSION_TYPE=x11
     echo "[lxqt] session draws through the compositor's XWayland on ${DISPLAY}"
 
-    # sway manages the session's two shell windows as ordinary ones. The panel asks for
-    # an edge and reserves space against it and is given neither, so it floats across the
-    # middle of the screen. The desktop is a single window LXQt sizes across every screen
-    # at once, and sway centres it on the one screen it manages it from, so on a
-    # two-screen layout its left edge goes negative and the far screen is left with no
-    # icons and no desktop menu. Both are put back for as long as the session runs: a
-    # screen arriving or leaving, or a client resizing one, displaces them again.
-    #
-    # sway positions a floating window by its frame, which is not where the window itself
-    # lands, so each request is corrected by the error the previous one produced rather
-    # than computed from a decoration size this has no way to know; one round converges.
-    # The moves go through sway because nothing else can make them: XWayland here has no
-    # window manager of its own, leaving _NET_MOVERESIZE_WINDOW with nobody to act on it.
-    anchor_panel() {
-      local id panel_y panel_h screen_h bottom target
-      id="$(wmctrl -l -x 2>/dev/null | awk '$3 ~ /^lxqt-panel/ { print $1; exit }')"
-      [ -n "${id}" ] || return
-      # xwininfo rather than wmctrl: wmctrl doubles the y of an unreparented window.
-      # shellcheck disable=SC2046  # the geometry fields are deliberately split
-      set -- $(xwininfo -id "${id}" 2>/dev/null |
-               awk '/Absolute upper-left Y/ {y=$4} /^  Height/ {h=$2} END {print y, h}')
-      [ -n "${2:-}" ] || return
-      panel_y="$1"; panel_h="$2"
-      screen_h="$(xrandr 2>/dev/null | awk '/^Screen /{gsub(/,/, ""); print $10; exit}')"
-      [ "${screen_h:-0}" -gt 0 ] 2>/dev/null || return
-      # _NET_WM_STRUT_PARTIAL is left, right, top, bottom: whichever is set names the
-      # edge the panel reserves space against.
-      bottom="$(xprop -id "${id}" _NET_WM_STRUT_PARTIAL 2>/dev/null |
-                sed -n 's/.*= *//p' | cut -d, -f4 | tr -d ' ')"
-      if [ "${bottom:-0}" -gt 0 ] 2>/dev/null; then
-        target=$((screen_h - panel_h))
-      else
-        target=0
-      fi
-      [ "${panel_y}" = "${target}" ] && { panel_asked=""; return; }
-      if [ -n "${panel_asked}" ]; then
-        panel_asked=$((panel_asked + target - panel_y))
-      else
-        panel_asked="${target}"
-      fi
-      swaymsg "[class=\"lxqt-panel\"] border none" >/dev/null 2>&1
-      swaymsg "[class=\"lxqt-panel\"] move position 0 ${panel_asked}" >/dev/null 2>&1
-    }
-
-    anchor_desktop() {
-      local id
-      id="$(wmctrl -l -x 2>/dev/null | awk '$3 ~ /^pcmanfm-qt/ { print $1; exit }')"
-      [ -n "${id}" ] || return
-      # shellcheck disable=SC2046  # the geometry fields are deliberately split
-      set -- $(xwininfo -id "${id}" 2>/dev/null |
-               awk '/Absolute upper-left X/ {x=$4} /Absolute upper-left Y/ {y=$4}
-                    END {print x, y}')
-      [ -n "${2:-}" ] || return
-      # Moving a desktop that is already at the origin makes pcmanfm-qt rebuild it for
-      # nothing, so the request is only sent while it is displaced.
-      [ "$1" = "0" ] && [ "$2" = "0" ] && { desktop_ax=""; desktop_ay=""; return; }
-      if [ -n "${desktop_ax}" ]; then
-        desktop_ax=$((desktop_ax - $1)); desktop_ay=$((desktop_ay - $2))
-      else
-        desktop_ax=0; desktop_ay=0
-      fi
-      swaymsg "[class=\"pcmanfm-qt\"] border none" >/dev/null 2>&1
-      swaymsg "[class=\"pcmanfm-qt\"] move position ${desktop_ax} ${desktop_ay}" \
-        >/dev/null 2>&1
-    }
-
+    # sway manages the session's shell windows as ordinary floating ones; the
+    # keeper anchors the panel to its edge and keeps the desktop tiled below it.
+    # A restarted service would otherwise leave the previous keeper running.
     if [ "${SELKIES_WAYLAND_COMPOSITOR}" = "sway" ] && command -v swaymsg >/dev/null 2>&1; then
-      (
-        uid="$(id -u)"; panel_asked=""; desktop_ax=""; desktop_ay=""
-        while sleep 3; do
-          # sway names its IPC socket after its own pid, so the live compositor is what
-          # the name is taken from: a session that has been restarted leaves the socket
-          # of the one before it in place.
-          SWAYSOCK=""
-          for pid in $(pgrep -x sway 2>/dev/null); do
-            [ -S "${XDG_RUNTIME_DIR}/sway-ipc.${uid}.${pid}.sock" ] || continue
-            SWAYSOCK="${XDG_RUNTIME_DIR}/sway-ipc.${uid}.${pid}.sock"
-            break
-          done
-          [ -n "${SWAYSOCK}" ] || continue
-          export SWAYSOCK
-          anchor_panel
-          anchor_desktop
-        done
-      ) &
+      pkill -f '/etc/service/lxqt/anchor.sh' 2>/dev/null
+      bash /etc/service/lxqt/anchor.sh &
     fi
   fi
 else

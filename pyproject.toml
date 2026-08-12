@@ -32,8 +32,8 @@ dependencies = [
     "psutil",
     "watchdog",
     "Pillow",
-    "pixelflux",
-    "pcmflux",
+    "pixelflux>=2.1.0",
+    "pcmflux>=2.1.0",
     # PulseAudio Microphone
     "pulsectl-asyncio",
     # WebRTC
