@@ -100,20 +100,19 @@ def run():
             ok = wait_log_from(st, "3912", 6)
             res.check("F5: 'vb,3912' live bitrate applied", ok, "")
 
-            # structural: rate control change restarts the capture (h264enc
-            # defaults to CBR, so toggle to CRF)
-            st = loglen()
-            await ws.send("_rc,crf")
-            ok = wait_log_from(st, "Applied rate-control via '_rc'", 8) or \
-                 wait_log_from(st, "Restarting its capture stream", 8)
-            res.check("F5: '_rc,crf' triggers structural restart", ok, "")
-            # and back
+            # structural: rate control change restarts the capture (websockets
+            # defaults h264enc to CRF, so toggle to CBR)
             st = loglen()
             await ws.send("_rc,cbr")
+            ok = wait_log_from(st, "Applied rate-control via '_rc'", 8) or \
+                 wait_log_from(st, "Restarting its capture stream", 8)
+            res.check("F5: '_rc,cbr' triggers structural restart", ok, "")
+            # and back
+            st = loglen()
+            await ws.send("_rc,crf")
             await asyncio.sleep(5)
-            txt = H.server_log()
-            res.check("F5: '_rc,cbr' toggles back to CBR",
-                      wait_log_from(st, "Applied rate-control via '_rc': cbr", 8), "")
+            res.check("F5: '_rc,crf' toggles back to CRF",
+                      wait_log_from(st, "Applied rate-control via '_rc': crf", 8), "")
 
             await ws.send("STOP_VIDEO")
             await asyncio.sleep(1.0)

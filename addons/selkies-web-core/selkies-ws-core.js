@@ -767,8 +767,12 @@ const isChromium = (() => {
                 (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
   const isCriOS = /CriOS/.test(navigator.userAgent);
+  // userAgentData brands are the authoritative Chromium signal; window.chrome
+  // is only a fallback for older engines, as not every Chromium build defines it.
+  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+  const isChromiumBrand = brands.some((b) => /Chromium|Google Chrome/.test(b.brand));
   const hasChromeObj = typeof window.chrome !== 'undefined';
-  return hasChromeObj && !isIOS && !isFirefox && !isCriOS;
+  return (isChromiumBrand || hasChromeObj) && !isIOS && !isFirefox && !isCriOS;
 })();
 
 // MediaStreamTrackGenerator is Chromium-only and exposed on Window (the main thread).

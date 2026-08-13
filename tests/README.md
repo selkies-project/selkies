@@ -28,7 +28,7 @@ firefox webkit`.
 
 | Tier | Needs |
 | --- | --- |
-| `unit` | The source tree and `gcc` for `tests/tools`. The audits of the web client (translations, typing, pointer lock) also want `node`, and report themselves skipped without it. The example session scripts are parsed with `bash -n` and, where installed, checked for `shellcheck` errors. The transport-dependent rate-control defaults and the one-shot NVML probe are covered here too. |
+| `unit` | The source tree and `gcc` for `tests/tools`. The audits of the web client (translations, typing, pointer lock) also want `node`, and report themselves skipped without it. The example session scripts are parsed with `bash -n` and, where installed, checked for `shellcheck` errors. The transport-dependent rate-control defaults, the one-shot NVML probe, and the clipboard-paste typing route (for compositors without `zwp_virtual_keyboard`, such as KWin) are covered here too. |
 | `integration` | An X display (`E2E_DISPLAY`, default `:99`) or the Wayland backend, PulseAudio, and `selkies` importable with `pixelflux`/`pcmflux`. |
 | `e2e` | The above plus Playwright browsers, the built web client (`scripts/ci/build-web.sh`), `wl-clipboard` for the Wayland clipboard checks, `wmctrl` for the two-display desktop-window check (skipped with a notice when absent), and `tests/tools/fetch-openh264.sh` for the Firefox WebRTC block. |
 | `perf` | A long constrained-link pacer benchmark, plus `xterm` and `xdotool` for the screen-damage load generator. Run on request. |

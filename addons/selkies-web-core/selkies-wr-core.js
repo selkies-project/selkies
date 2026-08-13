@@ -308,7 +308,12 @@ export default function webrtc() {
 			(navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 		const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
 		const isCriOS = /CriOS/.test(navigator.userAgent);
-		return typeof window.chrome !== 'undefined' && !isIOS && !isFirefox && !isCriOS;
+		// userAgentData brands are the authoritative Chromium signal;
+		// window.chrome is only a fallback for older engines, as not every
+		// Chromium build defines it.
+		const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+		const isChromiumBrand = brands.some((b) => /Chromium|Google Chrome/.test(b.brand));
+		return (isChromiumBrand || typeof window.chrome !== 'undefined') && !isIOS && !isFirefox && !isCriOS;
 	})();
 
 	const hash = window.location.hash;

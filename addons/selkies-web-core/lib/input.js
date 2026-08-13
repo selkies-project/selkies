@@ -948,7 +948,11 @@ const browser = {
     isIOS: function() { return /iPod|iPhone|iPad/.test(navigator.platform); },
     isWindows: function() { return /Win/.test(navigator.platform); },
     isLinux: function() { return /Linux/.test(navigator.platform); },
-    isChrome: function() { return !!window.chrome && (!!window.chrome.webstore || !!window.chrome.runtime); },
+    isChrome: function() {
+        const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+        if (brands.some((b) => /Chromium|Google Chrome/.test(b.brand))) return true;
+        return !!window.chrome && (!!window.chrome.webstore || !!window.chrome.runtime);
+    },
     isSafari: function() { return /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent); },
 };
 

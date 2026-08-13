@@ -2463,6 +2463,11 @@ class WebRTCInput:
         # re-probed on a cooldown only, so per-keystroke fallbacks stay cheap.
         self._wl_typer_lock = asyncio.Lock()
         self._wl_typer_retry_at = 0.0
+        # Clipboard-paste text injection (the KWin route): serialized so one
+        # save/write/paste/restore cycle finishes before the next, with a
+        # reentrancy latch so the paste chord's own key path can't recurse.
+        self._clipboard_inject_lock = asyncio.Lock()
+        self._clipboard_inject_active = False
         # Change-detection baseline shared by the monitor AND write_clipboard: content
         # this server just wrote must never be re-broadcast (client<->server echo loop),
         # and the baseline survives client reconnects so nothing is resent unchanged.
@@ -3311,7 +3316,7 @@ class WebRTCInput:
                     logger_webrtc_input.warning(
                         f"Wayland keymap injection failed for keysym {keysym}; falling back: {e}"
                     )
-            await self._xdotool_fallback(keysym, down)
+            await self._type_keysym_fallback(keysym, down)
             return
 
         is_printable = (0x20 <= keysym <= 0xFF) or ((keysym & 0xFF000000) == 0x01000000)
@@ -3403,7 +3408,7 @@ class WebRTCInput:
         if use_keyboard_for_printable or not command:
             try:
                 if not self.keyboard:
-                    await self._xdotool_fallback(keysym, down)
+                    await self._type_keysym_fallback(keysym, down)
                     return
 
                 # Inject the printable keysym through the bundled Xlib XTEST
@@ -3416,7 +3421,7 @@ class WebRTCInput:
             except Exception as e:
                 if self._is_x_conn_closed(e):
                     self._reconnect_xdisplay()
-                await self._xdotool_fallback(keysym, down)
+                await self._type_keysym_fallback(keysym, down)
 
     def _type_text_xtest(self, text):
         """Type a string in-process via the XTEST shim: each char as a press+release
@@ -3565,9 +3570,10 @@ class WebRTCInput:
 
     async def _wl_type_text(self, text):
         """Inject text through the app compositor's zwp_virtual_keyboard_manager_v1
-        via pixelflux's one-shot client (the in-process wtype equivalent). Raises
-        when the compositor lacks the protocol or the injection fails, so callers
-        can degrade the same way they would on any injection error."""
+        via pixelflux's one-shot in-process client: the first fallback rung under
+        the seat keymap, above the clipboard paste. Raises when the compositor
+        lacks the protocol or the injection fails, so callers can drop to the
+        next rung the same way they would on any injection error."""
         async with self._wl_typer_lock:
             if time.monotonic() < self._wl_typer_retry_at:
                 raise RuntimeError(
@@ -3588,7 +3594,71 @@ class WebRTCInput:
                     self._invalidate_app_wl_display()
                 raise
 
-    async def _xdotool_fallback(self, keysym_number, down=True):
+    async def _inject_text_via_clipboard(self, text):
+        """Type `text` by replacing the clipboard with it, pasting via
+        Shift+Insert, and restoring what was copied before. The route for
+        compositors with no zwp_virtual_keyboard (KWin): the chord's two
+        keysyms exist in every base layout, so this needs nothing beyond the
+        data-control clipboard and ordinary key events. Held modifiers are
+        lifted around the chord so they cannot corrupt the paste, and
+        write_clipboard's baseline keeps the monitor from echoing the injected
+        text back to clients. Returns True once the paste chord is sent."""
+        if self._clipboard_inject_active:
+            return False
+        async with self._clipboard_inject_lock:
+            self._clipboard_inject_active = True
+            shift_keysym = 0xFFE1
+            insert_keysym = 0xFF63
+            held_modifiers = list(self.active_modifiers)
+            try:
+                for mod_keysym in held_modifiers:
+                    await self.send_x11_keypress(mod_keysym, down=False)
+                old_data, old_mime = await self.read_clipboard(use_binary=True)
+                if not await self.write_clipboard(text):
+                    return False
+                # The write returns with the selection taken; the sleeps are the
+                # margins for the focused app to receive the new offer and to
+                # finish fetching the payload before the selection is restored.
+                await asyncio.sleep(0.02)
+                await self.send_x11_keypress(shift_keysym, down=True)
+                await self.send_x11_keypress(insert_keysym, down=True)
+                await self.send_x11_keypress(insert_keysym, down=False)
+                await self.send_x11_keypress(shift_keysym, down=False)
+                await asyncio.sleep(0.05)
+                if old_data is not None:
+                    await self.write_clipboard(old_data, old_mime or "text/plain")
+                elif self.is_wayland:
+                    await self._clear_injected_clipboard()
+                return True
+            except Exception as e:
+                logger_webrtc_input.error(f"Clipboard text injection failed: {e}")
+                return False
+            finally:
+                for mod_keysym in held_modifiers:
+                    if mod_keysym in self.active_modifiers:
+                        await self.send_x11_keypress(mod_keysym, down=True)
+                self._clipboard_inject_active = False
+
+    async def _clear_injected_clipboard(self):
+        """Drop the selection the injection left behind when there was nothing
+        to restore (an empty clipboard stays empty for the user)."""
+        try:
+            if self._has_separate_app_compositor():
+                clear_fn = getattr(self.wayland_input, 'clipboard_clear_app', None)
+                if clear_fn is not None:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, clear_fn, self._app_wayland_display())
+            else:
+                self.wayland_input.set_clipboard("text/plain", b"")
+        except Exception as e:
+            logger_webrtc_input.debug(f"post-injection clipboard clear failed: {e}")
+
+    async def _type_keysym_fallback(self, keysym_number, down=True):
+        """Deliver a keysym the primary injector could not, resolving the newest
+        mechanism first and degrading rung by rung. Wayland is subprocess-free:
+        the keysym becomes text and goes through the in-process virtual-keyboard
+        client, then the clipboard paste. X11 falls from the in-process XTEST
+        shim to an xdotool key, then an xdotool type of the plain character."""
         if self.is_wayland:
             if not down:
                 return
@@ -3629,7 +3699,8 @@ class WebRTCInput:
                 try:
                     await self._wl_type_text(char_to_type)
                 except Exception as e:
-                    logger_webrtc_input.warning(f"virtual-keyboard fallback failed: {e}")
+                    if not await self._inject_text_via_clipboard(char_to_type):
+                        logger_webrtc_input.warning(f"virtual-keyboard fallback failed: {e}")
 
             return
 
@@ -4839,11 +4910,18 @@ class WebRTCInput:
                 # Buffered text is, by construction, the non-layout-representable keysyms
                 # (Latin-1 accents, Euro, Unicode plane) and IME composition strings.
                 # Inject it as text through zwp_virtual_keyboard — never through the
-                # keymap, whose overlay swap is a non-op outside the English layout.
+                # keymap, whose overlay swap is a non-op outside the English layout —
+                # and on a compositor without that protocol (KWin), paste it through
+                # the clipboard instead.
                 try:
                     await self._wl_type_text(combined_text)
+                    return
                 except Exception as e:
-                    logger_webrtc_input.warning(f"Batched virtual-keyboard injection failed: {e}")
+                    logger_webrtc_input.debug(
+                        f"virtual-keyboard batch failed ({e}); pasting via clipboard")
+                if not await self._inject_text_via_clipboard(combined_text):
+                    logger_webrtc_input.warning(
+                        f"Batched text injection failed; {len(combined_text)} chars dropped.")
 
         while True:
             try:
