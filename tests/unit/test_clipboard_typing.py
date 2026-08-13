@@ -10,11 +10,14 @@ clipboards under their mime, clearing when there was nothing to restore, and
 dropping nothing silently unless both engines fail.
 """
 import asyncio
+import os
 import sys
 
-sys.path.insert(0, "src")
+TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.dirname(TESTS)
+sys.path.insert(0, os.path.join(REPO, "src"))
 
-from selkies.input_handler import PixelfluxVkUnavailable, WebRTCInput
+from selkies.input_handler import PixelfluxVkUnavailable, WebRTCInput  # noqa: E402
 
 SHIFT_L = 0xFFE1
 INSERT = 0xFF63
