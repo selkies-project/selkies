@@ -53,6 +53,8 @@ def make_handler(vk_error=True, separate=True, clipboard=None, write_ok=True):
     h.wayland_input = FakeWaylandInput()
     h.active_modifiers = set()
     h.atomically_typed_keys = set()
+    h._wl_text_routed = {}
+    h.max_pressed_keys = 1024
     h.keyboard_queue = asyncio.Queue()
     h._clipboard_inject_lock = asyncio.Lock()
     h._clipboard_inject_active = False
@@ -85,6 +87,10 @@ def make_handler(vk_error=True, separate=True, clipboard=None, write_ok=True):
 
     h._has_separate_app_compositor = lambda: separate
     h._app_wayland_display = lambda: "wayland-app"
+
+    async def no_owner():
+        return None
+    h._ensure_wayland_keymap_owner = no_owner
     return h
 
 

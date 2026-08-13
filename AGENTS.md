@@ -30,8 +30,11 @@ to 13 or higher. Update the translations as well (and write/update additional en
 Injection and clipboard mechanisms form fallback ladders that resolve the newest architecture first and degrade rung
 by rung: ext- before zwlr-data-control; on Wayland the seat keymap, then the in-process virtual-keyboard client, then
 the data-control clipboard paste; on X11 in-process XTEST before an xdotool fork. Cooldowns re-probe the top rung
-rather than latching into a fallback. The Wayland path is subprocess-free by design — never reintroduce wtype,
-wl-copy or similar forks where the in-process pixelflux harness exists.
+rather than latching into a fallback. Under a NESTED app compositor the seat rung only carries keysyms the base
+layout resolves — the seat overlay never survives the inner compositor's own keymap — so the keyboard worker routes
+character-bearing keysyms the base lacks (Cyrillic/Arabic/legacy planes, the Unicode plane) onto the
+virtual-keyboard text batch by classification, not by failure. The Wayland path is subprocess-free by design — never
+reintroduce wtype, wl-copy or similar forks where the in-process pixelflux harness exists.
 A defect that predates the change you are making is still in scope: finding it does not make it someone else's,
 and "pre-existing" is not a reason to leave it. Fix it, or say precisely what is broken, what you ruled out, and
 what you would do next. The same applies to a failure you cannot reproduce yet -- narrow it until it is either

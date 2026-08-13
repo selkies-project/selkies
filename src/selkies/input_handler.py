@@ -74,6 +74,8 @@ try:
         ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
         ctypes.POINTER(ctypes.POINTER(ctypes.c_uint32))]
     libxkb.xkb_keymap_key_get_syms_by_level.restype = ctypes.c_int
+    libxkb.xkb_utf32_to_keysym.argtypes = [ctypes.c_uint32]
+    libxkb.xkb_utf32_to_keysym.restype = ctypes.c_uint32
 except Exception:
     libxkb = None
 
@@ -119,6 +121,9 @@ VIEWER_ALLOWED_PREFIXES = (
 )
 VIEWER_COLLAB_EXTRA_PREFIXES = (
     "kd", "ku", "kh", "kr", "m", "m2",
+    # co,end is keyboard input like kd/ku: IME commits and atomic typing arrive
+    # this way, so blocking it strips composed text from a collaborator.
+    "co,",
     "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr",
     "REQUEST_CLIPBOARD",
 )
@@ -215,7 +220,21 @@ class _WaylandKeymapOwner:
             libxkb.xkb_context_unref(ctx)
         # Modifier keycodes for level synthesis; conventional evdev+8 fallbacks.
         self._shift_kc = self._map.get(0xFFE1, (50, 0))[0]
+        self._shift_r_kc = self._map.get(0xFFE2, (62, 0))[0]
         self._altgr_kc = self._map.get(0xFE03, (108, 0))[0]
+
+    def resolves(self, keysym):
+        """Whether the base keymap carries this keysym on some key/level — i.e.
+        it can be injected without an overlay bind."""
+        return keysym in self._map
+
+    def _held_conflicts(self, required):
+        """Shift/AltGr keycodes currently down (client-pressed or synthesized)
+        that the target level does not want: held, they would shift the injected
+        key onto a different glyph."""
+        down = {kc for kc, _ in self._pressed.values()} | set(self._mod_refs)
+        return [kc for kc in (self._shift_kc, self._shift_r_kc, self._altgr_kc)
+                if kc and kc in down and kc not in required]
 
     # XF86 vendor keysym block: media and browser keys a streamed session does not
     # need, so their keycodes can be shadowed by the overlay. Matched numerically —
@@ -356,15 +375,22 @@ class _WaylandKeymapOwner:
         for kc, state in events:
             self._input.inject_key(kc, state)
 
-    def type_text(self, text):
+    def type_text(self, text, neutralize=False):
         """Type text as momentary taps, resolving every missing keysym in ONE keymap
         swap (no per-char swap storm) — through the compositor's batch API when it
         offers one, else through the local overlay, which batches the same way.
-        Returns False, having typed nothing, when a char cannot be bound at all."""
+        Each char prefers its canonical layout keysym (a ru layout types ф on its
+        own key) before falling to the overlay. With neutralize, conflicting held
+        Shift/AltGr are lifted around the whole run so the taps land on their
+        resolved levels. Returns False, having typed nothing, when a char cannot
+        be bound at all."""
         keysyms = []
         for ch in text:
-            cp = ord(ch)
-            keysyms.append(cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp))
+            ks = character_to_layout_keysym(ch)
+            if ks not in self._map:
+                cp = ord(ch)
+                ks = cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp)
+            keysyms.append(ks)
         missing = [ks for ks in dict.fromkeys(keysyms) if ks not in self._map]
         overlay = self._overlay_bind_many(missing) if missing else {}
         events = []
@@ -377,10 +403,13 @@ class _WaylandKeymapOwner:
             else:
                 return False
             self._tap(kc, self._mods_for_level(level), into=events)
-        self._inject_run(events)
+        lifted = self._held_conflicts(()) if neutralize else []
+        run = ([(kc, 0) for kc in lifted] + events
+               + [(kc, 1) for kc in reversed(lifted)])
+        self._inject_run(run)
         return True
 
-    def press(self, keysym):
+    def press(self, keysym, neutralize=False):
         held = self._pressed.get(keysym)
         if held is not None:
             # Auto-repeat re-press: re-inject the key only; modifier refcounts and
@@ -398,12 +427,21 @@ class _WaylandKeymapOwner:
                 # Injecting keycode 0 would press a key that does not exist.
                 return
             mods = ()
+        # A held Shift/AltGr the target level does not want would move the key
+        # onto a different glyph (a client layout's Shift pairing rarely matches
+        # the seat layout's): lift it for the press, restore it after. Chords are
+        # exempt via neutralize so Ctrl+Shift+X passes through untouched.
+        lifted = self._held_conflicts(set(mods)) if neutralize else []
+        for m in lifted:
+            self._input.inject_key(m, 0)
         for m in mods:
             self._mod_refs[m] = self._mod_refs.get(m, 0) + 1
             if self._mod_refs[m] == 1:
                 self._input.inject_key(m, 1)
         self._pressed[keysym] = (kc, mods)
         self._input.inject_key(kc, 1)
+        for m in reversed(lifted):
+            self._input.inject_key(m, 1)
 
     def release(self, keysym):
         held = self._pressed.pop(keysym, None)
@@ -1106,8 +1144,32 @@ class _XTestKeyboard:
         bits = self._d.query_keymap()
         return bool(bits[kc // 8] & (1 << (kc % 8)))
 
-    def press(self, keysym):
+    def _mods_to_lift(self, required):
+        """Held Shift/AltGr keycodes the target level does not want. One keymap
+        query covers all candidates; each Shift side is checked separately so
+        only the one actually down is lifted."""
+        bits = self._d.query_keymap()
+
+        def down(kc):
+            return bool(kc and bits[kc // 8] & (1 << (kc % 8)))
+
+        lift = []
+        if self._shift_kc not in required:
+            lift.extend(kc for kc in (self._shift_kc, self._shift_r_kc)
+                        if down(kc))
+        if self._altgr_kc and self._altgr_kc not in required and down(self._altgr_kc):
+            lift.append(self._altgr_kc)
+        return lift
+
+    def press(self, keysym, neutralize=False):
         kc, mods = self._resolve(keysym)
+        # A held Shift/AltGr the level does not want selects a different glyph
+        # (and pushes an overlay bind onto its empty AltGr levels): lift it for
+        # the press, restore it after. Chords pass neutralize=False so
+        # Ctrl+Shift+X keeps its held modifiers.
+        lifted = self._mods_to_lift(set(mods)) if neutralize else []
+        for m in lifted:
+            xtest.fake_input(self._d, Xlib.X.KeyRelease, m)
         # Synthesize only modifiers not already held; release only those on release().
         synth = [m for m in mods if not self._mod_down(m)]
         for m in synth:
@@ -1117,6 +1179,8 @@ class _XTestKeyboard:
         xtest.fake_input(self._d, Xlib.X.KeyPress, kc)
         # Replay this exact keycode on release.
         self._pressed_kc[keysym] = kc
+        for m in reversed(lifted):
+            xtest.fake_input(self._d, Xlib.X.KeyPress, m)
         self._d.flush()
 
     def release(self, keysym):
@@ -1321,6 +1385,61 @@ CYRILLIC_TO_QWERTY_KEYSYM = {
     0x06D4: 0x006E,
     0x06D8: 0x006D,
 }
+
+
+def keysym_to_character(keysym):
+    """The printable character a keysym types, or None for keysyms that are not
+    plain text (modifiers, navigation, anything decoding to a control code).
+    Latin-1 and Unicode-plane keysyms decode directly; the legacy planes
+    (Cyrillic, Arabic, Hebrew, Greek, Thai, ...) resolve through libxkbcommon,
+    with python-Xlib's table as the fallback."""
+    char = None
+    if (keysym & 0xFF000000) == 0x01000000:
+        codepoint = keysym & 0x00FFFFFF
+        if 0 <= codepoint <= 0x10FFFF:
+            try:
+                char = chr(codepoint)
+            except ValueError:
+                return None
+    elif 0x20 <= keysym <= 0xFF:
+        char = chr(keysym)
+    elif keysym == 0x20AC:
+        char = '€'
+    else:
+        if libxkb is not None:
+            try:
+                buf = ctypes.create_string_buffer(8)
+                if libxkb.xkb_keysym_to_utf8(keysym, buf, 8) > 0:
+                    char = buf.value.decode('utf-8')
+            except Exception:
+                char = None
+        if not char and XK is not None:
+            try:
+                name = XK.keysym_to_string(keysym)
+                if name and len(name) == 1:
+                    char = name
+            except Exception:
+                char = None
+    if char and (ord(char[0]) < 0x20 or 0x7F <= ord(char[0]) <= 0x9F):
+        return None
+    return char or None
+
+
+def character_to_layout_keysym(char):
+    """The canonical keysym for a character (the one a physical keyboard layout
+    binds: Cyrillic_ef for ф, not its Unicode-plane alias), so text typed onto a
+    seat whose layout carries the script lands on real layout keys instead of
+    overlay binds. Falls back to the Latin-1/Unicode-plane encoding."""
+    codepoint = ord(char)
+    if libxkb is not None:
+        try:
+            keysym = libxkb.xkb_utf32_to_keysym(codepoint)
+            if keysym:
+                return keysym
+        except Exception:
+            pass
+    return codepoint if 0x20 <= codepoint <= 0xFF else (0x01000000 | codepoint)
+
 
 class JsConfigCtypes(ctypes.Structure):
     _fields_ = [
@@ -2488,6 +2607,9 @@ class WebRTCInput:
         self._bg_tasks = set()
         self.keyboard_queue = asyncio.Queue(maxsize=4096)
         self.keyboard_worker_task = None
+        # Keysyms whose kd became buffered text on the Wayland worker (nested app
+        # compositor): their ku must be swallowed, not released.
+        self._wl_text_routed = {}
         # Stuck-key recovery: client heartbeats each held key ('kh'); the sweep
         # auto-releases any key whose heartbeat stops (key-up lost to congestion).
         # keysym -> last heartbeat (monotonic).
@@ -3301,6 +3423,12 @@ class WebRTCInput:
                 self.translated_keys.discard(keysym)
                 keysym = CYRILLIC_TO_QWERTY_KEYSYM[keysym]
 
+        # A conflicting client-held Shift/AltGr is lifted around plain
+        # keystrokes only: while a chord modifier (Ctrl/Alt/Super/...) is down,
+        # every held modifier is part of the chord and must pass through.
+        neutralize = (keysym not in self.MODIFIER_KEYSYMS
+                      and not (self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS))
+
         if self.is_wayland and self.wayland_input:
             # Wayland keymap contract: selkies owns keysym policy; the compositor
             # exposes only inject_key + set_keymap_string. Layout keys resolve with
@@ -3312,7 +3440,7 @@ class WebRTCInput:
             if owner is not None:
                 try:
                     if down:
-                        owner.press(keysym)
+                        owner.press(keysym, neutralize=neutralize)
                     else:
                         owner.release(keysym)
                     return
@@ -3389,7 +3517,7 @@ class WebRTCInput:
                         # whose transient rebind floods MappingNotify and lags
                         # the whole input queue behind real typing.
                         if down:
-                            self.keyboard.press(keysym)
+                            self.keyboard.press(keysym, neutralize=neutralize)
                         else:
                             self.keyboard.release(keysym)
                         return
@@ -3419,7 +3547,7 @@ class WebRTCInput:
                 # keyboard shim; on an unmapped keysym it raises and we fall
                 # back to xdotool below.
                 if down:
-                    self.keyboard.press(keysym)
+                    self.keyboard.press(keysym, neutralize=neutralize)
                 else:
                     self.keyboard.release(keysym)
             except Exception as e:
@@ -3427,12 +3555,14 @@ class WebRTCInput:
                     self._reconnect_xdisplay()
                 await self._type_keysym_fallback(keysym, down)
 
-    def _type_text_xtest(self, text):
+    def _type_text_xtest(self, text, neutralize=False):
         """Type a string in-process via the XTEST shim: each char as a press+release
         of its keysym (mapped -> shift-synthesized; unmapped -> spare-keycode
-        overlay). Returns True on full success, False (having typed nothing) if the
-        shim is unavailable or any char can't be resolved, so the caller can fall
-        back to xdotool without double-typing."""
+        overlay). With neutralize, conflicting held Shift/AltGr are lifted around
+        the whole run (one keymap query, not one per char). Returns True on full
+        success, False (having typed nothing) if the shim is unavailable or any
+        char can't be resolved, so the caller can fall back to xdotool without
+        double-typing."""
         if not self.keyboard or not text:
             return False
         # Pre-resolve every char so a mid-string failure doesn't type a partial line.
@@ -3445,9 +3575,18 @@ class WebRTCInput:
             # broadcasts instead of one per char); nothing typed on failure.
             if not self.keyboard.prebind(keysyms):
                 return False
-            for ks in keysyms:
-                self.keyboard.press(ks)
-                self.keyboard.release(ks)
+            lifted = self.keyboard._mods_to_lift(set()) if neutralize else []
+            for m in lifted:
+                xtest.fake_input(self.keyboard._d, Xlib.X.KeyRelease, m)
+            try:
+                for ks in keysyms:
+                    self.keyboard.press(ks)
+                    self.keyboard.release(ks)
+            finally:
+                for m in reversed(lifted):
+                    xtest.fake_input(self.keyboard._d, Xlib.X.KeyPress, m)
+                if lifted:
+                    self.keyboard._d.flush()
             return True
         except Exception as e:
             logger_webrtc_input.debug(f"in-process type failed ({e}); falling back to xdotool")
@@ -3666,38 +3805,7 @@ class WebRTCInput:
         if self.is_wayland:
             if not down:
                 return
-            char_to_type = None
-            if (keysym_number & 0xFF000000) == 0x01000000:
-                unicode_codepoint = keysym_number & 0x00FFFFFF
-                if 0 <= unicode_codepoint <= 0x10FFFF:
-                    try:
-                        char_to_type = chr(unicode_codepoint)
-                    except ValueError:
-                        pass
-            elif 0x20 <= keysym_number <= 0xFF:
-                try:
-                    char_to_type = chr(keysym_number)
-                except ValueError:
-                    pass
-            elif keysym_number == 0x20AC:
-                char_to_type = '€'
-            else:
-                if libxkb is not None:
-                    try:
-                        buf = ctypes.create_string_buffer(8)
-                        res = libxkb.xkb_keysym_to_utf8(keysym_number, buf, 8)
-                        if res > 0:
-                            char_to_type = buf.value.decode('utf-8')
-                    except Exception:
-                        pass
-
-                if not char_to_type and XK is not None:
-                    try:
-                        keysym_name = XK.keysym_to_string(keysym_number)
-                        if keysym_name and len(keysym_name) == 1:
-                            char_to_type = keysym_name
-                    except Exception:
-                        pass
+            char_to_type = keysym_to_character(keysym_number)
 
             if char_to_type:
                 try:
@@ -4969,6 +5077,14 @@ class WebRTCInput:
         """
         self._keyboard_enqueue(("chord", tuple(keys)))
 
+    def _route_key_as_text(self, keysym):
+        """Record a keysym whose kd became buffered text, so its ku is swallowed
+        instead of releasing a key that was never pressed. Bounded like
+        pressed_keys, evicting the oldest entry."""
+        if len(self._wl_text_routed) >= self.max_pressed_keys:
+            self._wl_text_routed.pop(next(iter(self._wl_text_routed)), None)
+        self._wl_text_routed[keysym] = True
+
     async def _keyboard_worker(self):
         unicode_buffer = []
 
@@ -5033,6 +5149,7 @@ class WebRTCInput:
                             try:
                                 char_to_type = chr(unicode_codepoint)
                                 unicode_buffer.append(char_to_type)
+                                self._route_key_as_text(keysym)
                                 continue
                             except ValueError:
                                 pass
@@ -5040,6 +5157,30 @@ class WebRTCInput:
                         if keysym == 65288 and unicode_buffer:
                             unicode_buffer.pop()
                             continue
+
+                        if (not is_unicode_fallback
+                                and keysym is not None and not native_inject()
+                                and keysym not in self.MODIFIER_KEYSYMS
+                                and not ((self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS)
+                                         and keysym in CYRILLIC_TO_QWERTY_KEYSYM)):
+                            # Legacy-plane keysyms (Cyrillic, Arabic, Hebrew, Greek,
+                            # Thai, ...) the base layout lacks would need a seat
+                            # overlay bind, which a nested app compositor
+                            # re-translates through its OWN keymap — the key
+                            # arrives with no symbol at best. Any such keysym that
+                            # spells a character rides the text batch to the app
+                            # compositor instead; chord-translated Cyrillic stays
+                            # on the seat, where its QWERTY keysym resolves under
+                            # any latin-based keymap. Control/navigation keysyms
+                            # spell no character, so the owner is never consulted
+                            # for them.
+                            char_to_type = keysym_to_character(keysym)
+                            if char_to_type is not None:
+                                owner = await self._ensure_wayland_keymap_owner()
+                                if owner is None or not owner.resolves(keysym):
+                                    unicode_buffer.append(char_to_type)
+                                    self._route_key_as_text(keysym)
+                                    continue
 
                         await flush_buffer()
 
@@ -5049,6 +5190,11 @@ class WebRTCInput:
                         await self.send_x11_keypress(keysym, down=True)
 
                     elif msg_type == "ku":
+                        if keysym is not None and self._wl_text_routed.pop(keysym, None):
+                            # Its kd became buffered text: typed atomically, so
+                            # there is no held key to release — regardless of how
+                            # the topology looks by now.
+                            continue
                         if is_unicode_fallback and not native_inject():
                             # Buffered text was typed atomically; there is no held key.
                             continue
@@ -5074,6 +5220,7 @@ class WebRTCInput:
                             await self.send_x11_keypress(chord_keysym, down=down)
 
                     elif msg_type == "kr":
+                        self._wl_text_routed.clear()
                         await flush_buffer()
                         await self.reset_keyboard()
 
@@ -5088,7 +5235,9 @@ class WebRTCInput:
                             if owner is not None:
                                 try:
                                     typed = await asyncio.to_thread(
-                                        owner.type_text, data)
+                                        owner.type_text, data,
+                                        not (self.active_modifiers
+                                             & self.ACTION_MODIFIER_KEYSYMS))
                                 except Exception as e:
                                     logger_webrtc_input.warning(
                                         f"Batched Wayland composition type failed; "
@@ -5573,7 +5722,10 @@ class WebRTCInput:
                 text_to_type = msg[7:]
                 if self.is_wayland:
                     self._keyboard_enqueue(("co_end", text_to_type))
-                elif self._type_text_xtest(text_to_type):
+                elif self._type_text_xtest(
+                        text_to_type,
+                        neutralize=not (self.active_modifiers
+                                        & self.ACTION_MODIFIER_KEYSYMS)):
                     # Injected in-process via XTEST (mapped chars with shift synthesis,
                     # unmapped Unicode via the spare-keycode overlay) — no per-char
                     # xdotool fork. Falls through to xdotool below only if that fails.
