@@ -178,10 +178,6 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         obconf-qt \
         qterminal \
         pcmanfm-qt \
-        # Application menu definitions for the panel and the file manager.
-        # Newer lxqt-panel packaging recommends rather than depends on them,
-        # and a session without them shows empty application menus.
-        lxqt-menu-data \
         # qterminal is the session's terminal; xterm backs the callers that spawn
         # a terminal by hardcoded name (libfm-qt, GLib's Terminal=true handling)
         xterm \
@@ -267,6 +263,11 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     # screen-share requests toolkits make of a desktop. Debian Bookworm predates
     # it, and a session without a portal still runs.
     { apt-get install --no-install-recommends -y xdg-desktop-portal-lxqt || true; } && \
+    # Application menu definitions for the panel and the file manager. Newer
+    # lxqt-panel packaging recommends rather than depends on them, and a session
+    # without them shows empty application menus. Debian Bookworm predates the
+    # package; its panel still pulls the menu definitions in through lxmenu-data.
+    { apt-get install --no-install-recommends -y lxqt-menu-data || true; } && \
     # The LXQt Wayland session, where the distribution packages it (LXQt 2.1+).
     # The Qt platform plugin is installed only alongside it, never on its own:
     # without layer-shell behind it, Qt picking Wayland gives a session whose
