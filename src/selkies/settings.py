@@ -1324,19 +1324,47 @@ class AppSettings:
         """
         return bool(getattr(self, "_overridden", {}).get(name, False))
 
-    # Rate-control default per encoder: the striped software encoder and jpeg
-    # are quality-driven (CRF), the single-slice software encoders target a
-    # bandwidth (CBR). An explicit rate_control_mode override wins; encoders
-    # not listed keep the built-in default.
+    # Rate-control default per encoder for websockets streams: quality-driven
+    # (CRF) except openh264enc, which targets a bandwidth (CBR). WebRTC streams
+    # default to CBR regardless of encoder (resolve_rate_control_default): a
+    # congestion-controlled transport needs the encoder holding a bandwidth
+    # target. An explicit rate_control_mode override wins; encoders not listed
+    # keep the built-in default.
     ENCODER_RC_DEFAULTS = {
-        "h264enc": "cbr",
+        "h264enc": "crf",
         "openh264enc": "cbr",
         "h264enc-striped": "crf",
         "jpeg": "crf",
     }
 
+    def resolve_rate_control_default(self):
+        """Apply the transport's rate-control default for the current mode.
+
+        A no-op when the operator pinned rate_control_mode or disabled rate
+        control. Called again on a live transport switch so an unpinned mode
+        tracks the transport actually streaming.
+        """
+        if not self.enable_rate_control[0] or self.was_provided("rate_control_mode"):
+            return
+        if self.mode == "webrtc":
+            self.rate_control_mode = "cbr"
+        else:
+            self.rate_control_mode = self.ENCODER_RC_DEFAULTS.get(
+                self.encoder, self.rate_control_mode
+            )
+
     def _post_process_settings(self):
         """Additional processing of config data after initial parsing."""
+        # One spelling of the transport for every consumer, normalized before
+        # anything branches on it. The service registry is keyed on this value,
+        # so a differently-cased one would otherwise abort the server at startup
+        # rather than selecting the transport it names.
+        mode = str(self.mode).strip().lower()
+        if mode not in ("websockets", "webrtc"):
+            logging.warning("Invalid mode value %r; using 'websockets'.", self.mode)
+            mode = "websockets"
+        self.mode = mode
+
         if not self.enable_rate_control[0]:
             # Rate control locked off means the engine runs constant quality on
             # both transports, so the resolved mode and the menu published to
@@ -1363,13 +1391,8 @@ class AppSettings:
             )
             if rc_definition is not None:
                 rc_definition["meta"]["allowed"] = ["crf"]
-        elif not self._overridden.get("rate_control_mode"):
-            active_encoder = (
-                self.encoder if self.mode == "websockets" else self.encoder_rtc
-            )
-            self.rate_control_mode = self.ENCODER_RC_DEFAULTS.get(
-                active_encoder, self.rate_control_mode
-            )
+        else:
+            self.resolve_rate_control_default()
 
         audio_enabled = self.audio_enabled[0]
         if not audio_enabled and self.microphone_enabled[0]:
@@ -1377,15 +1400,6 @@ class AppSettings:
                 "Microphone support requires audio to be enabled. Disabling microphone support."
             )
             self.microphone_enabled = (False, self.microphone_enabled[1])
-
-        # One spelling of the transport for every consumer. The service registry is
-        # keyed on this value, so a differently-cased one would otherwise abort the
-        # server at startup rather than selecting the transport it names.
-        mode = str(self.mode).strip().lower()
-        if mode not in ("websockets", "webrtc"):
-            logging.warning("Invalid mode value %r; using 'websockets'.", self.mode)
-            mode = "websockets"
-        self.mode = mode
 
         # The single clipboard policy knob for both transports; normalize so
         # every consumer sees exactly one of the four values.

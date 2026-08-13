@@ -29,6 +29,8 @@ SUITES = [
     {"path": "unit/test_env_case.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_example_session_scripts.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_encoder_cpu_policy.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_rate_control_defaults.py", "tier": "unit", "timeout": 180},
+    {"path": "unit/test_nvml_failfast.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_release_version.py", "tier": "unit", "timeout": 120},
 

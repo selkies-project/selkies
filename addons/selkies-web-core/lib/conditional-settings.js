@@ -4,11 +4,13 @@
 // and (via the dashboards' thin useConditionalSetting hook) init + server-sync +
 // dependency re-derivation are all generic. Adding a setting is one more spec.
 
-// Rate-control default per encoder when nothing explicit is chosen: the striped
-// software encoder and jpeg are quality-driven (CRF); the single-slice software
-// encoders target a bandwidth (CBR).
+// Rate-control default per encoder for websockets streams when nothing
+// explicit is chosen: quality-driven (CRF) except openh264enc, which targets
+// a bandwidth (CBR). WebRTC streams default to CBR regardless of encoder
+// (the conditional below): a congestion-controlled transport needs the
+// encoder holding a bandwidth target.
 export const ENCODER_RC_DEFAULTS = {
-    "h264enc": "cbr",
+    "h264enc": "crf",
     "openh264enc": "cbr",
     "h264enc-striped": "crf",
     "jpeg": "crf",
@@ -89,7 +91,7 @@ export const RATE_CONTROL_SPEC = {
     id: "rate_control_mode",
     serverKey: "rate_control_mode",
     storageKey: "rate_control_mode",
-    conditional: (ctx) => ENCODER_RC_DEFAULTS[ctx.activeEncoder],
+    conditional: (ctx) => (ctx.streamMode === "webrtc" ? "cbr" : ENCODER_RC_DEFAULTS[ctx.activeEncoder]),
     isValid: (v, ctx) => ctx.allowedRateControl.includes(v),
     fallback: "crf",
     propagate: (mode, _ctx, io) => io.postSetting({ rate_control_mode: mode }),

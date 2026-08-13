@@ -901,6 +901,10 @@ class CentralizedStreamServer:
 
             await self._stop_service()
             logger.info(f"Starting service: {mode_name}")
+            # The service reads the settings at start, so an unpinned
+            # rate_control_mode follows the transport it is about to stream on.
+            self.settings.mode = mode_name
+            self.settings.resolve_rate_control_default()
             service = self.services[mode_name]
             task = asyncio.create_task(service.start())
             self.active_task = task
