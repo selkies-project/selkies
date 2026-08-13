@@ -34,22 +34,36 @@ def check(label, ok, detail=""):
     print(f"{'PASS' if ok else 'FAIL'}  [env-case] {label}  {detail}", flush=True)
 
 
-def shell_is_true(value):
-    """The entrypoint's own is_true, run on a value."""
+def shell_functions():
+    """The entrypoint's own parsing helpers, extracted verbatim."""
     body = open(ENTRYPOINT).read()
-    begin = body.index("is_true() {")
-    end = body.index("\n}\n", begin) + 3
+    parts = []
+    for name in ("setting_value() {", "is_true() {"):
+        begin = body.index(name)
+        parts.append(body[begin:body.index("\n}\n", begin) + 3])
+    return "\n".join(parts)
+
+
+def run_shell(script, env=None, *args):
     with tempfile.TemporaryDirectory() as tmp:
-        script = os.path.join(tmp, "lib.sh")
-        with open(script, "w") as f:
-            f.write(body[begin:end] + '\nif is_true "$1"; then echo yes; else echo no; fi\n')
-        return subprocess.run(["bash", script, value], capture_output=True,
-                              text=True, timeout=60).stdout.strip() == "yes"
+        path = os.path.join(tmp, "lib.sh")
+        with open(path, "w") as f:
+            f.write(shell_functions() + "\n" + script + "\n")
+        return subprocess.run(["bash", path, *args], capture_output=True,
+                              text=True, timeout=60, env=env).stdout.strip()
 
 
-# Every spelling an operator might reasonably type, and the ones that must stay false.
-TRUE_FORMS = ["true", "True", "TRUE", "tRuE", "1", " true ", "true|locked", "TRUE|LOCKED"]
-FALSE_FORMS = ["false", "False", "FALSE", "0", "no", "yes", "on", "", "  ", "truthy"]
+def shell_is_true(value):
+    return run_shell('if is_true "$1"; then echo yes; else echo no; fi',
+                     None, value) == "yes"
+
+
+# Every spelling an operator might reasonably type, and the ones that must stay
+# false — including internal whitespace, which trimming must not erase.
+TRUE_FORMS = ["true", "True", "TRUE", "tRuE", "1", " true ", "true|locked",
+              "TRUE|LOCKED", " 1 |x"]
+FALSE_FORMS = ["false", "False", "FALSE", "0", "no", "yes", "on", "", "  ",
+               "truthy", "t rue", "true stuff", "|true"]
 
 for value in TRUE_FORMS:
     check(f"python reads {value!r} as true", parse_bool(value) is True)
@@ -57,6 +71,53 @@ for value in TRUE_FORMS:
 for value in FALSE_FORMS:
     check(f"python reads {value!r} as false", parse_bool(value) is False)
     check(f"shell reads {value!r} as false", not shell_is_true(value))
+
+# The backend switch resolves SELKIES_WAYLAND ahead of the legacy spelling the
+# way settings.py does: a variable that is set but blank is still an override,
+# neutralizing to the default rather than falling through to the other name.
+CHAIN_LINE = next(line for line in open(ENTRYPOINT)
+                  if 'is_true "${SELKIES_WAYLAND' in line)
+CHAIN_EXPR = CHAIN_LINE.strip().removeprefix("if ").removesuffix("; then")
+CHAIN_CASES = [
+    (None, None, "x11"),
+    (None, "True|locked", "wayland"),
+    ("", "true", "x11"),
+    ("  ", "TRUE", "x11"),
+    ("tRuE", None, "wayland"),
+    ("false", "true", "x11"),
+]
+for sel, legacy, expected in CHAIN_CASES:
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    if sel is not None:
+        env["SELKIES_WAYLAND"] = sel
+    if legacy is not None:
+        env["PIXELFLUX_WAYLAND"] = legacy
+    out = run_shell(f'if {CHAIN_EXPR}; then echo wayland; else echo x11; fi', env)
+    check(f"chain SELKIES_WAYLAND={sel!r} PIXELFLUX_WAYLAND={legacy!r} -> {expected}",
+          out == expected, out)
+    raw = sel if sel is not None else (legacy if legacy is not None else "false")
+    py = "wayland" if parse_bool("false" if raw.strip() == "" else raw) else "x11"
+    check(f"python resolves the same chain to {expected}", py == expected, py)
+
+# The session choice follows the same reading: trimmed, case-insensitive,
+# |suffix ignored, blank neutralizing to auto instead of the legacy spelling.
+body = open(ENTRYPOINT).read()
+begin = body.index('SELKIES_LXQT_SESSION="$(setting_value')
+SESSION_BLOCK = body[begin:body.index("\n", body.index("export SELKIES_LXQT_SESSION", begin))]
+for sel, legacy, expected in [
+    (" X11 |locked", None, "x11"),
+    (None, " Native ", "native"),
+    ("", "x11", "auto"),
+    (None, None, "auto"),
+]:
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    if sel is not None:
+        env["SELKIES_LXQT_SESSION"] = sel
+    if legacy is not None:
+        env["PIXELFLUX_LXQT_SESSION"] = legacy
+    out = run_shell(SESSION_BLOCK + '\necho "${SELKIES_LXQT_SESSION}"', env)
+    check(f"session SELKIES={sel!r} PIXELFLUX={legacy!r} -> {expected}",
+          out == expected, out)
 
 # An empty value keeps the default, which is what lets an image neutralize a
 # variable baked into a base layer without knowing what the default is.

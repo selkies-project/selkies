@@ -18,10 +18,21 @@ set -e
 # "true" or "1", case-insensitively, ahead of any "|locked" suffix. Environment
 # variables carry whatever case the operator typed, and a stricter reading here would
 # configure the container one way and the server it starts another.
-is_true() {
+# A configured value as settings.py reads one: the field before any |suffix,
+# trimmed of surrounding whitespace. Every reader has to agree on this rule
+# or the same deployment is configured two ways at once.
+setting_value() {
   local value="${1%%|*}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  printf '%s' "${value%"${value##*[![:space:]]}"}"
+}
+
+# Mirrors settings.py parse_bool: "true" or "1", case-insensitively; anything
+# else — a blank value included — is false.
+is_true() {
+  local value
+  value="$(setting_value "$1")"
   value="${value,,}"
-  value="${value//[[:space:]]/}"
   [ "${value}" = "true" ] || [ "${value}" = "1" ]
 }
 
@@ -60,12 +71,32 @@ fi
 
 # Backend switch. Selkies resolves SELKIES_WAYLAND first and falls back to
 # PIXELFLUX_WAYLAND, so the service set below has to follow the same order or
-# the container would start an X11 session for a Wayland capture.
-if is_true "${SELKIES_WAYLAND:-${PIXELFLUX_WAYLAND:-false}}"; then
+# the container would start an X11 session for a Wayland capture. A variable
+# that is set but blank counts as set — it neutralizes to the default rather
+# than falling through to the legacy spelling, exactly as settings.py
+# resolves it.
+if is_true "${SELKIES_WAYLAND-${PIXELFLUX_WAYLAND-false}}"; then
   export SELKIES_WAYLAND=true
 else
   export SELKIES_WAYLAND=false
 fi
+
+# Transport mode, canonicalized the way settings.py reads its enum values, so
+# the service set below and selkies itself see the same choice. Left unset
+# when not configured: the settings default applies.
+SELKIES_MODE="$(setting_value "${SELKIES_MODE-}")"
+SELKIES_MODE="${SELKIES_MODE,,}"
+if [ -n "${SELKIES_MODE}" ]; then
+  export SELKIES_MODE
+fi
+
+# Which LXQt session the lxqt service runs on the Wayland backend: auto
+# prefers the native Wayland session where the components can anchor
+# themselves, x11 forces the XWayland one. Resolved like the backend switch,
+# SELKIES_ spelling first, a set-but-blank value neutralizing to the default.
+SELKIES_LXQT_SESSION="$(setting_value "${SELKIES_LXQT_SESSION-${PIXELFLUX_LXQT_SESSION-}}")"
+SELKIES_LXQT_SESSION="${SELKIES_LXQT_SESSION,,}"
+export SELKIES_LXQT_SESSION="${SELKIES_LXQT_SESSION:-auto}"
 
 # Hardware OpenGL. On NVIDIA, Zink routes GL through the Vulkan driver; other
 # vendors reach the GPU through the display server's render node instead (see
@@ -73,7 +104,7 @@ fi
 # passed in, and a working nvidia-smi proves the driver stack matches it. Set
 # DISABLE_ZINK=true for llvmpipe. Settled before the backend is, so the probe
 # below sees the GL environment the session will actually run with.
-if ! is_true "${DISABLE_ZINK:-false}" && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+if ! is_true "${DISABLE_ZINK-false}" && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   export LIBGL_KOPPER_DRI2=1
   export MESA_LOADER_DRIVER_OVERRIDE=zink
   export GALLIUM_DRIVER=zink
@@ -105,6 +136,7 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
   # compositor alone — Wayland clients only, unmanaged.
   # Lowercased so the value reads the same however it was typed: every compositor
   # binary and the "none" sentinel are spelled in lower case.
+  SELKIES_WAYLAND_COMPOSITOR="$(setting_value "${SELKIES_WAYLAND_COMPOSITOR-}")"
   SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR,,}"
   if [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
     # sway, whose `create_output` is what lets a second display appear and leave
@@ -177,7 +209,7 @@ external_turn_configured() {
 }
 
 export SELKIES_ENABLE_INTERNAL_TURN=false
-if [ "${SELKIES_MODE,,}" = "webrtc" ] || is_true "${SELKIES_ENABLE_DUAL_MODE:-false}"; then
+if [ "${SELKIES_MODE}" = "webrtc" ] || is_true "${SELKIES_ENABLE_DUAL_MODE-false}"; then
   if ! external_turn_configured; then
     export SELKIES_ENABLE_INTERNAL_TURN=true
     TURN_RANDOM_PASSWORD="$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 24)"
@@ -233,6 +265,7 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
 else
   drop_service wayland
 fi
+START_LXQT="$(setting_value "${START_LXQT-}")"
 is_true "${START_LXQT:-true}" || drop_service lxqt
 if ! is_true "${SELKIES_ENABLE_INTERNAL_TURN}"; then
   drop_service coturn

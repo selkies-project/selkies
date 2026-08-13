@@ -43,7 +43,12 @@ import time
 try:
     from selkies.Xlib import X, display as xdisplay
 except ImportError:
-    from Xlib import X, display as xdisplay
+    try:
+        from Xlib import X, display as xdisplay
+    except ImportError:
+        print("[wmbridge] no python Xlib available; maximize, minimize and "
+              "activation stay missing from the session", file=sys.stderr)
+        sys.exit(1)
 
 
 def find_swaysock():
@@ -145,6 +150,23 @@ class Bridge:
             self.dpy.flush()
         except Exception:
             pass
+
+    def adopt_existing(self):
+        """Windows mapped before the bridge started still need the verb stamp
+        the taskbar menu is built from; their geometry is already settled, so
+        only the stamp is applied."""
+        adopted = 0
+        for child in self.root.query_tree().children:
+            try:
+                attrs = child.get_attributes()
+                if attrs.map_state != X.IsViewable or attrs.override_redirect:
+                    continue
+                if self.managed(child.id):
+                    self.stamp_actions(child.id)
+                    adopted += 1
+            except Exception:
+                continue
+        return adopted
 
     def set_hidden(self, xid, hidden):
         try:
@@ -390,6 +412,9 @@ class Bridge:
         sub = self._subscribe()
         x_fd = self.dpy.fileno()
         sway_fd = sub.stdout.fileno()
+        adopted = self.adopt_existing()
+        print(f"[wmbridge] serving {self.dpy.get_display_name()}, "
+              f"{adopted} windows adopted", file=sys.stderr, flush=True)
         self.sweep()
         while True:
             if sub.poll() is not None:

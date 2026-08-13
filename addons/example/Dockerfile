@@ -268,6 +268,12 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     # without them shows empty application menus. Debian Bookworm predates the
     # package; its panel still pulls the menu definitions in through lxmenu-data.
     { apt-get install --no-install-recommends -y lxqt-menu-data || true; } && \
+    # Qt loads SVG rendering through plugins that Qt 5 ships inside libqt5svg5,
+    # a panel dependency, but Qt 6 splits into qt6-svg-plugins with nothing
+    # depending on it. Without the SVG icon engine every scalable icon in the
+    # session — menu entries, the panel's menu button, tray icons — is
+    # silently blank.
+    { apt-get install --no-install-recommends -y qt6-svg-plugins || true; } && \
     # The LXQt Wayland session, where the distribution packages it (LXQt 2.1+).
     # The Qt platform plugin is installed only alongside it, never on its own:
     # without layer-shell behind it, Qt picking Wayland gives a session whose
@@ -277,6 +283,13 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     if apt-get install --no-install-recommends -y lxqt-wayland-session; then \
         apt-get install --no-install-recommends -y qt6-wayland || \
         apt-get install --no-install-recommends -y qtwayland5 || true; \
+    # The session package can be missing for release timing alone while the
+    # components themselves are built against layer-shell — the LayerShellQt
+    # client library they link is the capability signal then. layer-shell-qt
+    # rides along for its shell-integration plugin, which the library package
+    # does not carry.
+    elif ls /usr/lib/*/libLayerShellQtInterface.so* >/dev/null 2>&1; then \
+        apt-get install --no-install-recommends -y qt6-wayland layer-shell-qt || true; \
     fi && \
     # Ubuntu carries nvtop in universe, which is enabled; Debian puts it in
     # contrib, which is not, so that component is added on the second attempt
@@ -425,8 +438,10 @@ ENV PULSE_RUNTIME_PATH="${XDG_RUNTIME_DIR}/pulse"
 ENV PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/pulse/native"
 # dbus-daemon to the below address is required during startup
 ENV DBUS_SYSTEM_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/dbus-system-bus"
-# X11 (Xvfb) by default; set to true for the headless Wayland backend
-ENV SELKIES_WAYLAND=false
+# X11 (Xvfb) by default; set SELKIES_WAYLAND=true — or the legacy
+# PIXELFLUX_WAYLAND spelling — for the headless Wayland backend. Deliberately
+# not baked as an ENV: in the resolution order every reader follows, a set
+# SELKIES_WAYLAND would shadow the legacy spelling for good.
 # Session compositor nested inside the Wayland capture compositor: empty picks
 # the installed one, "none" leaves applications on the capture compositor with
 # no window management and no XWayland
