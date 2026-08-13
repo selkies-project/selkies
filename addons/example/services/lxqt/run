@@ -49,15 +49,30 @@ if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
   # only the environment is wanted, not its exec). With either missing, Qt finds
   # no Wayland plugin to load and reaches the compositor's XWayland by itself,
   # which is where a session predating layer-shell has to draw anyway.
+  # The platform plugin alone is not enough: xdg-shell support is a separate
+  # plugin shipped by the qtwayland package, and newer Qt packaging moves the
+  # platform plugin into the client library that other packages pull in
+  # anyway. A session started with the platform but no shell integration
+  # aborts every Qt application at startup, so both are required here.
   qt_has_wayland_plugin() {
-    for dir in /usr/lib/*/qt[0-9]*/plugins/platforms; do
-      for plugin in "${dir}"/libqwayland*.so; do
-        [ -e "${plugin}" ] && return 0
+    local have_platform=1 have_shell=1
+    for dir in /usr/lib/*/qt[0-9]*/plugins; do
+      for plugin in "${dir}"/platforms/libqwayland*.so; do
+        [ -e "${plugin}" ] && have_platform=0
+      done
+      for shell in "${dir}"/wayland-shell-integration/libxdg-shell*.so; do
+        [ -e "${shell}" ] && have_shell=0
       done
     done
-    return 1
+    return $((have_platform || have_shell))
   }
-  if command -v startlxqtwayland >/dev/null 2>&1 && qt_has_wayland_plugin; then
+  # The native session hands window management to sway's own model, which
+  # drops the maximize and minimize requests a Wayland taskbar sends
+  # (wlr-foreign-toplevel); the X11 session keeps those verbs through the
+  # keeper's bridge. SELKIES_LXQT_SESSION=x11 chooses the X11 session on a
+  # distribution that could run natively; auto (the default) prefers native.
+  if [ "${SELKIES_LXQT_SESSION:-auto}" != "x11" ] \
+      && command -v startlxqtwayland >/dev/null 2>&1 && qt_has_wayland_plugin; then
     export XDG_SESSION_TYPE=wayland
     export XDG_CURRENT_DESKTOP="LXQt:${SELKIES_WAYLAND_COMPOSITOR:-sway}:wlroots"
     export QT_QPA_PLATFORMTHEME=lxqt
@@ -73,11 +88,17 @@ if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
     echo "[lxqt] session draws through the compositor's XWayland on ${DISPLAY}"
 
     # sway manages the session's shell windows as ordinary floating ones; the
-    # keeper anchors the panel to its edge and keeps the desktop tiled below it.
-    # A restarted service would otherwise leave the previous keeper running.
+    # keeper anchors the panel to its edge and keeps the desktop tiled below it,
+    # and the bridge supplies the EWMH verbs sway's i3 model lacks (maximize,
+    # minimize, taskbar activation, windows stranded by an unplugged output).
+    # A restarted service would otherwise leave the previous instances running.
     if [ "${SELKIES_WAYLAND_COMPOSITOR}" = "sway" ] && command -v swaymsg >/dev/null 2>&1; then
       pkill -f '/etc/service/lxqt/anchor.sh' 2>/dev/null
       bash /etc/service/lxqt/anchor.sh &
+      if command -v python3 >/dev/null 2>&1; then
+        pkill -f '/etc/service/lxqt/wmbridge.py' 2>/dev/null
+        python3 /etc/service/lxqt/wmbridge.py &
+      fi
     fi
   fi
 else
@@ -118,6 +139,33 @@ rm -rf "${HOME}/.config/lxqt" "${HOME}/.config/pcmanfm-qt"
 # outranks the packaged file for this session alone.
 mkdir -p "${HOME}/.config/lxqt"
 printf '[General]\nwindow_manager=%s\n' "${session_wm}" > "${HOME}/.config/lxqt/session.conf"
+# LXQt names its widget theme and icon theme rather than shipping them, and two
+# packaged defaults break an LXQt 2 session visibly: the Clearlooks panel
+# stylesheet never renders the fancymenu button, leaving no menu button at all,
+# and an icon theme that is not installed leaves menu and button icons blank.
+# Both are corrected against what is actually installed, in the session copy
+# alone, and only where the LXQt 2 themes exist — older sessions keep their
+# packaged defaults.
+if grep -qs '#FancyMenu' /usr/share/lxqt/themes/light/lxqt-panel.qss; then
+  lxqt_theme=$(sed -n 's/^theme=//p' /etc/xdg/lxqt/lxqt.conf /usr/share/lxqt/lxqt.conf 2>/dev/null | head -1)
+  lxqt_icons=$(sed -n 's/^icon_theme=//p' /etc/xdg/lxqt/lxqt.conf /usr/share/lxqt/lxqt.conf 2>/dev/null | head -1)
+  theme_fix=""
+  icons_fix=""
+  [ "${lxqt_theme:-Clearlooks}" = "Clearlooks" ] && theme_fix=light
+  if [ -n "${lxqt_icons}" ] && [ ! -d "/usr/share/icons/${lxqt_icons}" ]; then
+    for icons in Adwaita breeze hicolor; do
+      [ -d "/usr/share/icons/${icons}" ] && icons_fix="${icons}" && break
+    done
+  fi
+  if [ -n "${theme_fix}" ] || [ -n "${icons_fix}" ]; then
+    {
+      printf '[General]\n'
+      [ -n "${theme_fix}" ] && printf 'theme=%s\n' "${theme_fix}"
+      [ -n "${icons_fix}" ] && printf 'icon_theme=%s\n' "${icons_fix}"
+    } > "${HOME}/.config/lxqt/lxqt.conf"
+    echo "[lxqt] session settings correct the packaged defaults:${theme_fix:+ theme=${theme_fix}}${icons_fix:+ icon theme=${icons_fix}}"
+  fi
+fi
 # The panel, desktop, runner and PolicyKit agent are autostart entries carrying
 # OnlyShowIn=LXQt, and a session started outside a display manager has nobody
 # else to name the desktop

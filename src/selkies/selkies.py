@@ -2513,12 +2513,14 @@ class DataStreamingServer(BaseStreamingService):
                         await set_cursor_size(new_cursor_size)
                     if IS_WAYLAND:
                         # DPI realizes as the pixelflux compositor output scale
-                        # (set_dpi is a no-op on Wayland). Applied unconditionally
-                        # — WebRTC-mode parity; the capture restart below (via the
-                        # scaling_dpi restart trigger) reads it. No compositor
-                        # detection: pixelflux owns the session and implements no
-                        # wlr-output-management, so external tools cannot set it.
-                        display_state['scale'] = float(new_dpi) / 96.0
+                        # only while pixelflux renders the applications itself;
+                        # under a nested session compositor set_dpi has already
+                        # carried it into the session as Xft resources and the
+                        # output keeps its full logical size. The capture
+                        # restart below (scaling_dpi restart trigger) reads it.
+                        display_state['scale'] = (
+                            self.input_handler.wayland_capture_scale(new_dpi)
+                            if self.input_handler else float(new_dpi) / 96.0)
                         self._update_wayland_cursor_cap(new_dpi)
                         await self._apply_wayland_cursor_size(new_dpi)
 

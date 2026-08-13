@@ -1191,8 +1191,10 @@ def _write_xresources_dpi(xresources_path_str, dpi_value):
     _atomic_write_text(xresources_path_str, "\n".join(lines) + "\n")
 
 
-async def _run_xrdb(dpi_value, logger):
-    """Helper function to apply DPI via xrdb and xsettingsd."""
+async def _run_xrdb(dpi_value, logger, env=None):
+    """Helper function to apply DPI via xrdb and xsettingsd. env overrides the
+    subprocess environment (the Wayland backend points DISPLAY at the session's
+    XWayland server)."""
     if not which("xrdb"):
         logger.debug("xrdb not found. Skipping Xresources DPI setting.")
         return False
@@ -1211,7 +1213,8 @@ async def _run_xrdb(dpi_value, logger):
         process = await subprocess.create_subprocess_exec(
             *cmd_xrdb,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stderr=subprocess.PIPE,
+            env=env
         )
         stdout, stderr = await _communicate_or_kill(process)
         
@@ -1447,13 +1450,47 @@ def _is_wayland():
         return False
 
 
-async def set_dpi(dpi_setting):
+def _wayland_session_display():
+    """DISPLAY of the app session's XWayland server on the Wayland backend.
+
+    A nested session compositor runs the only X server there, so a single live
+    X socket names it. More than one means selkies shares /tmp with foreign X
+    servers; DPI is then only applied where SELKIES_APP_X_DISPLAY says, never
+    guessed — merging Xft resources into an unrelated desktop would reskin it.
+    """
+    override = os.environ.get("SELKIES_APP_X_DISPLAY", "").strip()
+    if override:
+        return override if override.startswith(":") else f":{override}"
+    sockets = []
+    try:
+        for name in os.listdir("/tmp/.X11-unix"):
+            if not name.startswith("X") or not name[1:].isdigit():
+                continue
+            path = os.path.join("/tmp/.X11-unix", name)
+            if stat.S_ISSOCK(os.stat(path).st_mode):
+                sockets.append(int(name[1:]))
+    except OSError:
+        return None
+    if len(sockets) == 1:
+        return f":{sockets[0]}"
+    if len(sockets) > 1:
+        logger_app_resize.debug(
+            f"Multiple X sockets {sorted(sockets)}; set SELKIES_APP_X_DISPLAY "
+            "to route session DPI.")
+    return None
+
+
+async def set_dpi(dpi_setting, x_display=None):
     """
     Sets the display DPI using DE-specific methods based on a defined detection order.
     The dpi_setting is expected to be an integer or a string representing an integer.
+
+    On the Wayland backend the DPI belongs to the nested app session: it is
+    merged as Xft resources into that session's XWayland display (x_display, or
+    the discovered one), the same realization the X11 backend uses. Without a
+    session X display — pixelflux rendering applications directly — DPI is
+    already realized as the compositor output scale and nothing applies here.
     """
-    if _is_wayland():
-        return True
     try:
         dpi_value = int(str(dpi_setting))
         if dpi_value <= 0:
@@ -1461,6 +1498,21 @@ async def set_dpi(dpi_setting):
             return False
     except ValueError:
         logger_app_resize.error(f"Invalid DPI format: '{dpi_setting}'. Must be convertible to a positive integer.")
+        return False
+
+    if _is_wayland():
+        display = x_display or _wayland_session_display()
+        if not display:
+            logger_app_resize.info(
+                "Wayland backend: no session X display; DPI realizes as the "
+                "compositor output scale.")
+            return False
+        env = {**os.environ, "DISPLAY": display}
+        if await _run_xrdb(dpi_value, logger_app_resize, env=env):
+            logger_app_resize.info(
+                f"Applied DPI {dpi_value} to the Wayland session's X display "
+                f"{display}.")
+            return True
         return False
 
     any_method_succeeded = False

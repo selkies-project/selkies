@@ -314,11 +314,6 @@ class WebRTCService(BaseStreamingService):
         self.rtc_app.media_pipeline = self.media_pipeline
         self.rtc_app.provision_virtual_mic = self._provision_webrtc_virtual_mic
         self.display_pipelines["primary"] = self.media_pipeline
-        if IS_WAYLAND:
-            # Seed the compositor capture scale from the configured DPI so the
-            # FIRST pipeline start honors it; handle_scaling updates it on later
-            # client DPI syncs.
-            self.media_pipeline.scale = float(getattr(settings, "scaling_dpi", "96") or 96) / 96.0
 
         # Input handler
         self.input_handler = WebRTCInput(
@@ -347,6 +342,14 @@ class WebRTCService(BaseStreamingService):
             data_server_instance=self,
         )
         self.input_handler.initialize_upload_dir()
+        if IS_WAYLAND:
+            # Seed the compositor capture scale from the configured DPI so the
+            # FIRST pipeline start honors it; handle_scaling updates it on later
+            # client DPI syncs. The input handler owns the policy: a nested app
+            # session keeps the output at scale 1.0 and takes its DPI as Xft
+            # resources instead.
+            self.media_pipeline.scale = self.input_handler.wayland_capture_scale(
+                getattr(settings, "scaling_dpi", "96") or 96)
 
         # Initialize monitoring instances
         self.system_monitor = SystemMonitor()
@@ -1658,7 +1661,8 @@ class WebRTCService(BaseStreamingService):
         # read, mirroring the WS path which threads scale through CaptureSettings
         # per display.
         if IS_WAYLAND:
-            new_scale = float(dpi_value) / 96.0
+            new_scale = (self.input_handler.wayland_capture_scale(dpi_value)
+                         if self.input_handler else float(dpi_value) / 96.0)
             for did, pipeline in list(self.display_pipelines.items()):
                 if pipeline is None or pipeline.scale == new_scale:
                     continue
@@ -2051,9 +2055,11 @@ class WebRTCService(BaseStreamingService):
 
         # Apply the configured desktop DPI at startup so the first session sees
         # it even before any client syncs its own (96 is the X default — skip
-        # the xrdb churn when nothing diverges).
+        # the xrdb churn when nothing diverges). On Wayland the same call
+        # reaches a nested session's XWayland display; with none up yet, the
+        # input handler re-applies when it adopts the session compositor.
         startup_dpi = int(float(getattr(settings, "scaling_dpi", "96") or 96))
-        if not IS_WAYLAND and startup_dpi != 96:
+        if startup_dpi != 96:
             if await set_dpi(startup_dpi):
                 self._last_applied_dpi = startup_dpi
 

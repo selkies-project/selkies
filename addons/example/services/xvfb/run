@@ -4,7 +4,17 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 export DISPLAY="${DISPLAY:-:20}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
-until [ -d "${XDG_RUNTIME_DIR}" ]; do sleep 0.5; done
+until [ -f "${XDG_RUNTIME_DIR}/container-env" ]; do sleep 0.5; done
+# shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
+. "${XDG_RUNTIME_DIR}/container-env"
+
+# The Wayland backend has its own display servers: the capture compositor and
+# the session compositor's XWayland. A framebuffer X server would only burn a
+# core probing GLX against GPU stacks it never uses, so the service parks.
+if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
+  echo "[xvfb] Wayland backend active; the X11 framebuffer stays parked"
+  exec sleep infinity
+fi
 
 # Zink belongs to the GL applications in the session, not to the display server:
 # this is a virtual framebuffer with no GPU output. Inheriting it makes the

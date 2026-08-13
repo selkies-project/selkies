@@ -49,6 +49,13 @@ for path in SCRIPTS:
     r = subprocess.run([bash, "-n", path], capture_output=True, text=True)
     check(f"parse {rel}", r.returncode == 0, r.stderr.strip()[:200])
 
+PY_HELPERS = sorted(glob.glob(os.path.join(EXAMPLE, "services", "*", "*.py")))
+for path in PY_HELPERS:
+    rel = os.path.relpath(path, REPO)
+    r = subprocess.run([sys.executable, "-m", "py_compile", path],
+                       capture_output=True, text=True)
+    check(f"compile {rel}", r.returncode == 0, r.stderr.strip()[:200])
+
 shellcheck = shutil.which("shellcheck")
 if shellcheck:
     for path in SCRIPTS:

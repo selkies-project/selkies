@@ -178,6 +178,10 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         obconf-qt \
         qterminal \
         pcmanfm-qt \
+        # Application menu definitions for the panel and the file manager.
+        # Newer lxqt-panel packaging recommends rather than depends on them,
+        # and a session without them shows empty application menus.
+        lxqt-menu-data \
         # qterminal is the session's terminal; xterm backs the callers that spawn
         # a terminal by hardcoded name (libfm-qt, GLib's Terminal=true handling)
         xterm \

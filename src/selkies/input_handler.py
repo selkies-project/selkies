@@ -41,6 +41,7 @@ from .display_utils import (
     pixelflux_x11_cursor,
     unpremultiply_rgba,
     cursor_content_handle,
+    set_dpi,
 )
 from .media_pipeline import RateControlMode
 from .settings import settings, WS_MAX_MESSAGE_BYTES
@@ -2473,6 +2474,9 @@ class WebRTCInput:
         # and the baseline survives client reconnects so nothing is resent unchanged.
         self._clipboard_last_bytes = None
         self._x11_clipboard_monitor = None
+        self._x11_monitor_retry_at = 0.0
+        self._x11_monitor_unavail_logged = False
+        self._xclip_missing_warned = False
         # Debounce REQUEST_CLIPBOARD (Ctrl/Cmd+C): coalesce bursts so a keypress
         # storm can't stack clipboard reads. Keyed per requesting connection so
         # one client's copy can't suppress another client's read. The map is
@@ -4097,6 +4101,7 @@ class WebRTCInput:
             except Exception as e:
                 logger_webrtc_input.debug(
                     f"pixelflux set_app_wayland_display failed: {e}")
+            self._schedule_session_dpi()
         return resolved
 
     def _invalidate_app_wl_display(self):
@@ -4120,6 +4125,53 @@ class WebRTCInput:
         settled."""
         self._app_wayland_display()
         return self._app_wl_is_separate
+
+    def wayland_capture_scale(self, dpi):
+        """How a DPI setting realizes on the Wayland backend: as the capture
+        output scale while pixelflux renders applications itself, but as 1.0
+        under a nested app compositor — a scaled output would halve the nested
+        desktop's logical size and upscale its buffers, so there the DPI
+        reaches applications as Xft resources in the session instead
+        (set_dpi)."""
+        try:
+            separate = self._has_separate_app_compositor()
+        except Exception:
+            separate = False
+        if separate:
+            return 1.0
+        try:
+            return max(0.1, float(dpi) / 96.0)
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _schedule_session_dpi(self):
+        """A nested session was just adopted: carry the effective DPI into it
+        once its XWayland display answers. An operator-set DPI governs the
+        desktop (client syncs never reach set_dpi then); otherwise the last
+        client-synced DPI does. 96 needs nothing merged — it is the X
+        default."""
+        try:
+            if settings._overridden.get("scaling_dpi", False):
+                dpi = int(float(settings.scaling_dpi))
+            else:
+                dpi = int(float(getattr(self, "system_dpi", 96) or 96))
+        except (TypeError, ValueError, AttributeError):
+            return
+        if dpi == 96:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._apply_session_dpi(dpi))
+
+    async def _apply_session_dpi(self, dpi):
+        for _ in range(30):
+            if await set_dpi(dpi):
+                return
+            await asyncio.sleep(1.0)
+        logger_webrtc_input.info(
+            f"Session X display never appeared; DPI {dpi} stays compositor-side.")
 
     async def _get_file(self, file_path, target_mime):
         max_clipboard_file_size = 10 * 1024 * 1024
@@ -4291,6 +4343,13 @@ class WebRTCInput:
                 if proc_text.returncode == 0:
                     return stdout_text.decode(), 'text/plain'
             return None, None
+        except FileNotFoundError:
+            if not self._xclip_missing_warned:
+                self._xclip_missing_warned = True
+                logger_webrtc_input.warning(
+                    "xclip is not installed; the clipboard polling rung has "
+                    "nothing to read with.")
+            return None, None
         except Exception as e:
             logger_webrtc_input.warning(f"Error reading clipboard with xclip: {e}", exc_info=True)
             return None, None
@@ -4368,6 +4427,13 @@ class WebRTCInput:
         except asyncio.TimeoutError:
             logger_webrtc_input.warning("Timeout waiting for xclip process to terminate.")
             return False
+        except FileNotFoundError:
+            if not self._xclip_missing_warned:
+                self._xclip_missing_warned = True
+                logger_webrtc_input.warning(
+                    "xclip is not installed; the clipboard polling rung has "
+                    "nothing to write with.")
+            return False
         except Exception:
             logger_webrtc_input.warning("Error writing to clipboard with xclip", exc_info=True)
             return False
@@ -4379,9 +4445,13 @@ class WebRTCInput:
             return None
         try:
             self._x11_clipboard_monitor = _X11ClipboardMonitor()
+            self._x11_monitor_unavail_logged = False
             logger_webrtc_input.info("X11 clipboard: XFixes event monitor active (no polling).")
         except Exception as e:
-            logger_webrtc_input.info(f"X11 clipboard: XFixes monitor unavailable ({e}); falling back to polling.")
+            log = (logger_webrtc_input.debug if self._x11_monitor_unavail_logged
+                   else logger_webrtc_input.info)
+            log(f"X11 clipboard: XFixes monitor unavailable ({e}); falling back to polling.")
+            self._x11_monitor_unavail_logged = True
             self._x11_clipboard_monitor = None
         return self._x11_clipboard_monitor
 
@@ -4389,13 +4459,20 @@ class WebRTCInput:
         """Off-loop get-or-create: construction opens its own X connection, and a
         server disrupted mid-session (the respawn case) would stall the event loop
         for the whole bounded handshake. The lock keeps concurrent callers from
-        racing two monitors into existence."""
+        racing two monitors into existence. A failed build backs off before the
+        next attempt, so pollers do not hammer a dead display with connection
+        attempts — and a display that comes up later is still re-probed."""
         if self._x11_clipboard_monitor is not None:
             return self._x11_clipboard_monitor
+        if time.monotonic() < self._x11_monitor_retry_at:
+            return None
         async with self._x11_monitor_build_lock:
             if self._x11_clipboard_monitor is not None:
                 return self._x11_clipboard_monitor
-            return await asyncio.to_thread(self._ensure_x11_clipboard_monitor)
+            monitor = await asyncio.to_thread(self._ensure_x11_clipboard_monitor)
+            if monitor is None:
+                self._x11_monitor_retry_at = time.monotonic() + 10.0
+            return monitor
 
     def _arm_wayland_native_clipboard(self):
         """Register the compositor clipboard callback (fork-free watch+read);
@@ -4562,8 +4639,11 @@ class WebRTCInput:
                         await asyncio.sleep(0.5)
                         changed = False
                     else:
+                        # Poll cadence: read + compare below. The XFixes rung is
+                        # re-probed on its cooldown, so an X server that answers
+                        # later upgrades polling back to events.
+                        x11_monitor = await self._ensure_x11_clipboard_monitor_async()
                         await asyncio.sleep(0.5)
-                        # Poll cadence: read + compare below.
                         changed = True
 
                     has_consumers = self._clipboard_has_consumers()
