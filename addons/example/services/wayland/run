@@ -43,7 +43,4 @@ export WLR_BACKENDS=wayland
 export WLR_WL_OUTPUTS="${SELKIES_WAYLAND_OUTPUTS:-2}"
 [ -n "${SELKIES_WAYLAND_RENDERER}" ] && export WLR_RENDERER="${SELKIES_WAYLAND_RENDERER}"
 
-# sway refuses to start against the proprietary NVIDIA driver, which nothing
-# here drives: every compositor runs as a client of the capture compositor.
-[ "${SELKIES_WAYLAND_COMPOSITOR}" = "sway" ] && exec sway --unsupported-gpu
 exec "${SELKIES_WAYLAND_COMPOSITOR}"
