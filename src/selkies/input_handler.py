@@ -19,6 +19,7 @@
 
 import ctypes
 import fcntl
+import functools
 import logging
 import select
 import struct
@@ -160,13 +161,16 @@ class _WaylandKeymapOwner:
         # _map: keysym -> (keycode, level)
         # _overlay: keysym -> overlay keycode
         # _overlay_order: round-robin recycle order
-        # _pressed: keysym -> (keycode, modifier keycodes)
-        # _mod_refs: modifier keycode -> holders
+        # _pressed: keysym -> (keycode, SYNTHESIZED modifier keycodes)
+        # _mod_refs: synthesized modifier keycode -> holders
+        # _down: every keycode currently injected down — the one live view
+        # synth-skip and conflict-lift decisions read (no compositor query)
         self._map = {}
         self._overlay = {}
         self._overlay_order = []
         self._pressed = {}
         self._mod_refs = {}
+        self._down = set()
         self._build_map()
 
     def _build_map(self):
@@ -231,10 +235,21 @@ class _WaylandKeymapOwner:
     def _held_conflicts(self, required):
         """Shift/AltGr keycodes currently down (client-pressed or synthesized)
         that the target level does not want: held, they would shift the injected
-        key onto a different glyph."""
-        down = {kc for kc, _ in self._pressed.values()} | set(self._mod_refs)
-        return [kc for kc in (self._shift_kc, self._shift_r_kc, self._altgr_kc)
-                if kc and kc in down and kc not in required]
+        key onto a different glyph. A required Shift is satisfied by either
+        side, so neither is lifted then."""
+        shift_wanted = self._shift_kc in required
+        out = []
+        for kc in (self._shift_kc, self._shift_r_kc, self._altgr_kc):
+            if not kc or kc not in self._down or kc in required:
+                continue
+            if shift_wanted and kc in (self._shift_kc, self._shift_r_kc):
+                continue
+            out.append(kc)
+        return out
+
+    def _inject(self, kc, state):
+        (self._down.add if state else self._down.discard)(kc)
+        self._input.inject_key(kc, state)
 
     # XF86 vendor keysym block: media and browser keys a streamed session does not
     # need, so their keycodes can be shadowed by the overlay. Matched numerically —
@@ -287,7 +302,8 @@ class _WaylandKeymapOwner:
             raise RuntimeError("unbalanced xkb_symbols section")
         parts.append(rest[:close_at])
         for keysym, kc in self._overlay.items():
-            parts.append(f"\tkey <UC{kc:03}> {{ [ {keysym:#x} ] }};\n")
+            parts.append(
+                f"\tkey <UC{kc:03}> {{ [ {overlay_bind_keysym(keysym):#x} ] }};\n")
         parts.append(rest[close_at:])
         return "".join(parts)
 
@@ -328,7 +344,8 @@ class _WaylandKeymapOwner:
             # need it while this loop is never blocked on the compositor. The
             # splice hands over just the binds; the fallback rebuilds and re-sends
             # the whole keymap text, which costs a redundant compile on the far side.
-            binds = [(kc, sym) for sym, kc in self._overlay.items()]
+            binds = [(kc, overlay_bind_keysym(sym))
+                     for sym, kc in self._overlay.items()]
             splice = getattr(self._input, "set_keymap_overlay", None)
             if splice is not None:
                 splice(binds)
@@ -340,20 +357,25 @@ class _WaylandKeymapOwner:
         return self._overlay_bind_many([keysym])[keysym]
 
     def _tap(self, kc, mods, into=None):
-        """Momentary press+release with refcounted modifier synthesis.
+        """Momentary press+release with refcounted modifier synthesis; a
+        modifier the client itself holds down is left alone.
 
         With `into`, the events are appended to that list instead of injected, so a
         caller typing a run of characters can hand the compositor one ordered batch —
         an event at a time costs a channel send and a calloop wake each, on the thread
         that also renders."""
         out = [] if into is None else into
+        synthed = []
         for m in mods:
+            if m in self._down and m not in self._mod_refs:
+                continue
             self._mod_refs[m] = self._mod_refs.get(m, 0) + 1
             if self._mod_refs[m] == 1:
                 out.append((m, 1))
+            synthed.append(m)
         out.append((kc, 1))
         out.append((kc, 0))
-        for m in reversed(mods):
+        for m in reversed(synthed):
             refs = self._mod_refs.get(m, 0) - 1
             if refs <= 0:
                 self._mod_refs.pop(m, None)
@@ -368,6 +390,8 @@ class _WaylandKeymapOwner:
         compositor accepts a batch."""
         if not events:
             return
+        for kc, state in events:
+            (self._down.add if state else self._down.discard)(kc)
         batch = getattr(self._input, "inject_keys", None)
         if batch is not None:
             batch(events)
@@ -393,20 +417,25 @@ class _WaylandKeymapOwner:
             keysyms.append(ks)
         missing = [ks for ks in dict.fromkeys(keysyms) if ks not in self._map]
         overlay = self._overlay_bind_many(missing) if missing else {}
-        events = []
+        # Resolve everything before touching any state, so the False path
+        # really has typed nothing (and charged no modifier refs).
+        resolved_keys = []
         for ks in keysyms:
             resolved = self._map.get(ks)
-            if resolved is not None:
-                kc, level = resolved
-            elif overlay.get(ks):
-                kc, level = overlay[ks], 0
-            else:
+            if resolved is None and overlay.get(ks):
+                resolved = (overlay[ks], 0)
+            if resolved is None:
                 return False
-            self._tap(kc, self._mods_for_level(level), into=events)
+            resolved_keys.append(resolved)
+        # Lift conflicts BEFORE building the taps: with the lift reflected in
+        # _down, a shifted char inside the run synthesizes its Shift normally.
         lifted = self._held_conflicts(()) if neutralize else []
-        run = ([(kc, 0) for kc in lifted] + events
-               + [(kc, 1) for kc in reversed(lifted)])
-        self._inject_run(run)
+        for kc in lifted:
+            self._inject(kc, 0)
+        events = []
+        for kc, level in resolved_keys:
+            self._tap(kc, self._mods_for_level(level), into=events)
+        self._inject_run(events + [(kc, 1) for kc in reversed(lifted)])
         return True
 
     def press(self, keysym, neutralize=False):
@@ -414,7 +443,7 @@ class _WaylandKeymapOwner:
         if held is not None:
             # Auto-repeat re-press: re-inject the key only; modifier refcounts and
             # the held map were charged by the first press.
-            self._input.inject_key(held[0], 1)
+            self._inject(held[0], 1)
             return
         resolved = self._map.get(keysym)
         if resolved is not None:
@@ -433,27 +462,35 @@ class _WaylandKeymapOwner:
         # exempt via neutralize so Ctrl+Shift+X passes through untouched.
         lifted = self._held_conflicts(set(mods)) if neutralize else []
         for m in lifted:
-            self._input.inject_key(m, 0)
+            self._inject(m, 0)
+        # Synthesize only modifiers not already down; a modifier the client
+        # holds as its own key is neither charged nor released here.
+        synthed = []
         for m in mods:
+            already = (m in self._down
+                       or (m == self._shift_kc and self._shift_r_kc in self._down))
+            if already and m not in self._mod_refs:
+                continue
             self._mod_refs[m] = self._mod_refs.get(m, 0) + 1
             if self._mod_refs[m] == 1:
-                self._input.inject_key(m, 1)
-        self._pressed[keysym] = (kc, mods)
-        self._input.inject_key(kc, 1)
+                self._inject(m, 1)
+            synthed.append(m)
+        self._pressed[keysym] = (kc, tuple(synthed))
+        self._inject(kc, 1)
         for m in reversed(lifted):
-            self._input.inject_key(m, 1)
+            self._inject(m, 1)
 
     def release(self, keysym):
         held = self._pressed.pop(keysym, None)
         if held is None:
             return
         kc, mods = held
-        self._input.inject_key(kc, 0)
+        self._inject(kc, 0)
         for m in reversed(mods):
             refs = self._mod_refs.get(m, 0) - 1
             if refs <= 0:
                 self._mod_refs.pop(m, None)
-                self._input.inject_key(m, 0)
+                self._inject(m, 0)
             else:
                 self._mod_refs[m] = refs
 
@@ -466,10 +503,11 @@ class _WaylandKeymapOwner:
                 self._pressed.pop(keysym, None)
         for m in list(self._mod_refs):
             try:
-                self._input.inject_key(m, 0)
+                self._inject(m, 0)
             except Exception:
                 pass
         self._mod_refs.clear()
+        self._down.clear()
 
 
 class _X11ClipboardMonitor:
@@ -917,22 +955,56 @@ class _XTestKeyboard:
         # and the keycode used at PRESS so release replays it (never re-resolves,
         # matching neko's XKeyEntryGet — the layout may shift mid-keystroke).
         # _overlay: keysym -> keycode
+        # _overlay_value_kc: bound VALUE (overlay_bind_keysym) -> keycode,
+        # kept in step with _overlay so value lookups need no scan
         # _overlay_order: round-robin recycle order
         # _pressed_kc: keysym -> keycode injected at press
+        # _dirty_spares: reclaimed keycodes whose first bind needs a settle
         self._spare_keycodes = None
+        self._spare_set = frozenset()
         self._overlay = {}
+        self._overlay_value_kc = {}
         self._overlay_order = []
         self._pressed_kc = {}
+        self._dirty_spares = set()
 
     def _find_spare_keycodes(self):
-        """Every keycode whose every level is NoSymbol — free to repurpose. The
-        full range is scanned (not a fixed cap): more slots make recycling — the
-        only case where a slow app can mistranslate a rebound keycode — rare."""
+        """Every keycode free to repurpose: all levels NoSymbol, or carrying a
+        previous overlay bind — every level the SAME Unicode-plane keysym, a
+        shape no real layout produces (the server echoes a two-sym bind back
+        expanded across all levels). Overlay binds persist on the X server
+        across a handler restart, so without reclaiming them each restart
+        would shrink the pool until typing beyond the layout starves.
+        Modifier-mapped keycodes are never spare: pressing one would toggle
+        its modifier under the typed char. The full range is scanned (not a
+        fixed cap): more slots make recycling — the only case where a slow
+        app can mistranslate a rebound keycode — rare."""
         info = self._d.display.info
         lo, hi = info.min_keycode, info.max_keycode
         mapping = self._d.get_keyboard_mapping(lo, hi - lo + 1)
-        return [lo + i for i, syms in enumerate(mapping)
-                if all(s == 0 for s in syms)]
+        try:
+            mod_keycodes = {kc for row in self._d.get_modifier_mapping()
+                            for kc in row if kc}
+        except Exception:
+            mod_keycodes = set()
+        spares = []
+        for i, syms in enumerate(mapping):
+            kc = lo + i
+            if kc in mod_keycodes:
+                continue
+            bound = {s for s in syms if s}
+            if not bound:
+                spares.append(kc)
+            elif len(bound) == 1:
+                sym = next(iter(bound))
+                if (sym & 0xFF000000) == 0x01000000:
+                    # Clients may still translate this keycode by its old
+                    # value until they process the rebind's MappingNotify, so
+                    # its first bind needs the same settle as a recycle.
+                    spares.append(kc)
+                    self._dirty_spares.add(kc)
+        self._spare_set = frozenset(spares)
+        return spares
 
     def _free_spares(self):
         if self._spare_keycodes is None:
@@ -940,21 +1012,44 @@ class _XTestKeyboard:
         used = set(self._overlay.values())
         return [kc for kc in self._spare_keycodes if kc not in used]
 
+    def _layout_keycode(self, keysym):
+        """keysym_to_keycode, distrusting hits on spare-pool keycodes: the
+        display's cached lookup can name a keycode whose bind belongs to a
+        previous handler — or to a DIFFERENT keysym after this pool re-purposed
+        it — so on a pool keycode only this shim's own live bind carrying
+        exactly this value counts. Only keysym forms an overlay bind can carry
+        (Latin-1 high half, Unicode plane) can hit the pool, so everything
+        else skips the discovery."""
+        kc = self._d.keysym_to_keycode(keysym)
+        if not kc:
+            return 0
+        if (keysym & 0xFF000000) == 0x01000000 or 0xA0 <= keysym <= 0xFF:
+            if self._spare_keycodes is None:
+                self._spare_keycodes = self._find_spare_keycodes()
+            if kc in self._spare_set:
+                return self._overlay_value_kc.get(keysym, 0)
+        return kc
+
     def _alloc_overlay_keycode(self, keysym):
         """Reserve a spare keycode for keysym (recycling the oldest binding when
-        full) and record the binding. Returns (keycode, recycled) — the mapping
+        full) and record the binding. Returns (keycode, needs_settle) — True
+        when clients may still hold a previous mapping for the keycode (an
+        in-process recycle, or a reclaimed spare's first bind). The mapping
         request itself is the caller's (single vs batched)."""
         free = self._free_spares()
         if free:
             kc = free[0]
-            recycled = False
+            needs_settle = kc in self._dirty_spares
+            self._dirty_spares.discard(kc)
         else:
             oldest = self._overlay_order.pop(0)
             kc = self._overlay.pop(oldest)
-            recycled = True
+            self._overlay_value_kc.pop(overlay_bind_keysym(oldest), None)
+            needs_settle = True
         self._overlay[keysym] = kc
+        self._overlay_value_kc[overlay_bind_keysym(keysym)] = kc
         self._overlay_order.append(keysym)
-        return kc, recycled
+        return kc, needs_settle
 
     def _overlay_keycode(self, keysym):
         """Bind an unmapped keysym to a spare keycode (recycling the oldest) and
@@ -965,11 +1060,12 @@ class _XTestKeyboard:
             self._spare_keycodes = self._find_spare_keycodes()
         if not self._spare_keycodes:
             return None
-        kc, recycled = self._alloc_overlay_keycode(keysym)
+        kc, needs_settle = self._alloc_overlay_keycode(keysym)
         # Assign the keysym at levels 0 and 1 so an accidental Shift can't change it.
-        self._d.change_keyboard_mapping(kc, [[keysym, keysym]])
+        bind_value = overlay_bind_keysym(keysym)
+        self._d.change_keyboard_mapping(kc, [[bind_value, bind_value]])
         self._d.sync()
-        if recycled:
+        if needs_settle:
             time.sleep(self._RECYCLE_SETTLE_S)
         return kc
 
@@ -982,7 +1078,7 @@ class _XTestKeyboard:
         d = self._d
         missing = []
         for ks in dict.fromkeys(keysyms):
-            if ks not in self._overlay and not d.keysym_to_keycode(ks):
+            if ks not in self._overlay and not self._layout_keycode(ks):
                 missing.append(ks)
         if not missing:
             return True
@@ -1010,14 +1106,17 @@ class _XTestKeyboard:
             if len(picked) >= len(missing):
                 break
             picked.extend(run[:len(missing) - len(picked)])
-        recycled_any = False
+        recycled_any = any(kc in self._dirty_spares for kc in picked)
+        self._dirty_spares.difference_update(picked)
         while len(picked) < len(missing):
             oldest = self._overlay_order.pop(0)
             picked.append(self._overlay.pop(oldest))
+            self._overlay_value_kc.pop(overlay_bind_keysym(oldest), None)
             recycled_any = True
         assigns = []
         for ks, kc in zip(missing, picked):
             self._overlay[ks] = kc
+            self._overlay_value_kc[overlay_bind_keysym(ks)] = kc
             self._overlay_order.append(ks)
             assigns.append((kc, ks))
         assigns.sort()
@@ -1027,7 +1126,8 @@ class _XTestKeyboard:
             while j + 1 < len(assigns) and assigns[j + 1][0] == assigns[j][0] + 1:
                 j += 1
             d.change_keyboard_mapping(
-                assigns[i][0], [[ks, ks] for _kc, ks in assigns[i:j + 1]])
+                assigns[i][0],
+                [[overlay_bind_keysym(ks)] * 2 for _kc, ks in assigns[i:j + 1]])
             i = j + 1
         d.sync()
         if recycled_any:
@@ -1046,7 +1146,7 @@ class _XTestKeyboard:
         try:
             for ks, kc in self._overlay.items():
                 syms = self._d.get_keyboard_mapping(kc, 1)[0]
-                if not len(syms) or syms[0] != ks:
+                if not len(syms) or syms[0] != overlay_bind_keysym(ks):
                     return False
             return True
         except Exception:
@@ -1083,8 +1183,11 @@ class _XTestKeyboard:
         modifier keycodes. Held keys are kept: release replays the exact
         press-time keycode."""
         self._overlay.clear()
+        self._overlay_value_kc.clear()
         self._overlay_order.clear()
         self._spare_keycodes = None
+        self._spare_set = frozenset()
+        self._dirty_spares.clear()
         self.refresh_modifier_keycodes()
 
     def _resolve(self, keysym):
@@ -1093,7 +1196,7 @@ class _XTestKeyboard:
         sits at, so a glyph bound above the Shift level (e.g. AltGr '@') types correctly
         instead of falling through to its level-0 glyph."""
         d = self._d
-        kc = d.keysym_to_keycode(keysym)
+        kc = self._layout_keycode(keysym)
         if not kc:
             # Not in the layout: map it to a spare keycode in-process (no xdotool
             # fork). Overlay keysyms sit at level 0, so they never need modifiers.
@@ -1127,51 +1230,49 @@ class _XTestKeyboard:
             return True
         return all(kc in effective for kc in mods)
 
-    def _shift_down(self):
-        # Logical Shift state: one round trip on the already-open display,
-        # queried only for shifted keysyms.
-        bits = self._d.query_keymap()
-        return any(kc and bits[kc // 8] & (1 << (kc % 8))
-                   for kc in (self._shift_kc, self._shift_r_kc))
+    def _down_mod_keycodes(self, held_keysyms):
+        """Shift/AltGr keycodes currently down: the client-held keysyms the
+        handler tracks, plus this shim's own synthesized holds. Tracked state
+        only — the old per-press query_keymap round trip is gone."""
+        down = set()
+        for mods in self._synth_mods.values():
+            down.update(mods)
+        for ks in held_keysyms:
+            if ks == 0xFFE1:
+                down.add(self._shift_kc)
+            elif ks == 0xFFE2:
+                down.add(self._shift_r_kc)
+            elif ks in (0xFE03, 0xFF7E):
+                down.add(self._altgr_kc)
+        down.discard(0)
+        return down
 
-    def _mod_down(self, kc):
-        # Is this modifier keycode already held (by the client, via the fast path)?
-        # Shift may be held on either Shift_L or Shift_R.
-        if not kc:
-            return False
-        if kc == self._shift_kc:
-            return self._shift_down()
-        bits = self._d.query_keymap()
-        return bool(bits[kc // 8] & (1 << (kc % 8)))
-
-    def _mods_to_lift(self, required):
-        """Held Shift/AltGr keycodes the target level does not want. One keymap
-        query covers all candidates; each Shift side is checked separately so
-        only the one actually down is lifted."""
-        bits = self._d.query_keymap()
-
-        def down(kc):
-            return bool(kc and bits[kc // 8] & (1 << (kc % 8)))
-
+    def _mods_to_lift(self, required, down):
+        """Down Shift/AltGr keycodes the target level does not want. A required
+        Shift is satisfied by either side, so neither is lifted then."""
         lift = []
         if self._shift_kc not in required:
             lift.extend(kc for kc in (self._shift_kc, self._shift_r_kc)
-                        if down(kc))
-        if self._altgr_kc and self._altgr_kc not in required and down(self._altgr_kc):
+                        if kc in down)
+        if self._altgr_kc and self._altgr_kc not in required and self._altgr_kc in down:
             lift.append(self._altgr_kc)
         return lift
 
-    def press(self, keysym, neutralize=False):
+    def press(self, keysym, neutralize=False, held_keysyms=()):
         kc, mods = self._resolve(keysym)
+        down = self._down_mod_keycodes(held_keysyms)
         # A held Shift/AltGr the level does not want selects a different glyph
         # (and pushes an overlay bind onto its empty AltGr levels): lift it for
         # the press, restore it after. Chords pass neutralize=False so
         # Ctrl+Shift+X keeps its held modifiers.
-        lifted = self._mods_to_lift(set(mods)) if neutralize else []
+        lifted = self._mods_to_lift(set(mods), down) if neutralize else []
         for m in lifted:
             xtest.fake_input(self._d, Xlib.X.KeyRelease, m)
-        # Synthesize only modifiers not already held; release only those on release().
-        synth = [m for m in mods if not self._mod_down(m)]
+        # Synthesize only modifiers not already down (a required Shift held on
+        # either side counts); release only those on release().
+        synth = [m for m in mods
+                 if m not in down
+                 and not (m == self._shift_kc and self._shift_r_kc in down)]
         for m in synth:
             xtest.fake_input(self._d, Xlib.X.KeyPress, m)
         if synth:
@@ -1387,12 +1488,14 @@ CYRILLIC_TO_QWERTY_KEYSYM = {
 }
 
 
+@functools.lru_cache(maxsize=4096)
 def keysym_to_character(keysym):
     """The printable character a keysym types, or None for keysyms that are not
     plain text (modifiers, navigation, anything decoding to a control code).
     Latin-1 and Unicode-plane keysyms decode directly; the legacy planes
     (Cyrillic, Arabic, Hebrew, Greek, Thai, ...) resolve through libxkbcommon,
-    with python-Xlib's table as the fallback."""
+    with python-Xlib's table as the fallback. Cached: a session types the same
+    keysyms over and over, and each miss costs a ctypes round trip."""
     char = None
     if (keysym & 0xFF000000) == 0x01000000:
         codepoint = keysym & 0x00FFFFFF
@@ -1425,6 +1528,7 @@ def keysym_to_character(keysym):
     return char or None
 
 
+@functools.lru_cache(maxsize=4096)
 def character_to_layout_keysym(char):
     """The canonical keysym for a character (the one a physical keyboard layout
     binds: Cyrillic_ef for ф, not its Unicode-plane alias), so text typed onto a
@@ -1439,6 +1543,45 @@ def character_to_layout_keysym(char):
         except Exception:
             pass
     return codepoint if 0x20 <= codepoint <= 0xFF else (0x01000000 | codepoint)
+
+
+@functools.lru_cache(maxsize=4096)
+def overlay_bind_keysym(keysym):
+    """The keysym VALUE an overlay slot carries for `keysym`. An overlay bind is
+    a key we invent, not one a layout author chose, and the receiving toolkits'
+    tables for legacy national/publishing keysyms disagree across versions
+    (permille, signifblank and the angle brackets die or mistranslate on a
+    legacy bind) — while Latin-1 and Unicode-plane keysyms translate
+    algorithmically everywhere. So any keysym that spells one character is
+    bound in that universal form; charless keysyms (XF86, F-keys) keep their
+    semantic value."""
+    if (keysym & 0xFF000000) == 0x01000000 or 0x20 <= keysym <= 0xFF:
+        return keysym
+    char = keysym_to_character(keysym)
+    if char is not None and len(char) == 1:
+        return 0x01000000 | ord(char)
+    return keysym
+
+
+def text_to_wayland_keysyms(text):
+    """One keysym per typeable char for the virtual-keyboard typer, in the same
+    universal Latin-1/Unicode-plane forms overlay binds carry. This is the
+    policy half of vk typing — pixelflux's type_keysyms_wayland taps whatever
+    it is given — so which keysym spells a character is decided (and tweaked)
+    here, never in the transport."""
+    out = []
+    for char in text:
+        if char in ('\n', '\r'):
+            out.append(0xFF0D)
+        elif char == '\t':
+            out.append(0xFF09)
+        else:
+            codepoint = ord(char)
+            if 0x20 <= codepoint <= 0xFF:
+                out.append(codepoint)
+            elif codepoint >= 0x100:
+                out.append(0x01000000 | codepoint)
+    return out
 
 
 class JsConfigCtypes(ctypes.Structure):
@@ -2476,6 +2619,10 @@ class WebRTCInput:
         self.translated_keys = set()
         self.ACTION_MODIFIER_KEYSYMS = {65507, 65508, 65513, 65514, 65511, 65512,
                                         65515, 65516, 65517, 65518}
+        # Shift_L/R, ISO_Level3_Shift, Mode_switch: the level-selecting
+        # modifiers whose client-held state the injectors consult in place of a
+        # per-press server query.
+        self.LEVEL_MODIFIER_KEYSYMS = frozenset({0xFFE1, 0xFFE2, 0xFE03, 0xFF7E})
         self.MODIFIER_KEYSYMS = {
             # Shift_L, Shift_R
             65505, 65506,
@@ -3208,7 +3355,10 @@ class WebRTCInput:
                                 # level and synthesizes Shift/AltGr (and overlay-binds
                                 # unmapped keysyms). A self-contained press+release since
                                 # the 'ku' path injects no key-up for atomic keys.
-                                self.keyboard.press(keysym)
+                                self.keyboard.press(
+                                    keysym,
+                                    held_keysyms=(self.active_modifiers
+                                                  & self.LEVEL_MODIFIER_KEYSYMS))
                                 self.keyboard.release(keysym)
                                 injected = True
                             except Exception as e:
@@ -3428,6 +3578,7 @@ class WebRTCInput:
         # every held modifier is part of the chord and must pass through.
         neutralize = (keysym not in self.MODIFIER_KEYSYMS
                       and not (self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS))
+        held_level_mods = frozenset(self.active_modifiers & self.LEVEL_MODIFIER_KEYSYMS)
 
         if self.is_wayland and self.wayland_input:
             # Wayland keymap contract: selkies owns keysym policy; the compositor
@@ -3517,7 +3668,8 @@ class WebRTCInput:
                         # whose transient rebind floods MappingNotify and lags
                         # the whole input queue behind real typing.
                         if down:
-                            self.keyboard.press(keysym, neutralize=neutralize)
+                            self.keyboard.press(keysym, neutralize=neutralize,
+                                                held_keysyms=held_level_mods)
                         else:
                             self.keyboard.release(keysym)
                         return
@@ -3547,7 +3699,8 @@ class WebRTCInput:
                 # keyboard shim; on an unmapped keysym it raises and we fall
                 # back to xdotool below.
                 if down:
-                    self.keyboard.press(keysym, neutralize=neutralize)
+                    self.keyboard.press(keysym, neutralize=neutralize,
+                                        held_keysyms=held_level_mods)
                 else:
                     self.keyboard.release(keysym)
             except Exception as e:
@@ -3575,7 +3728,11 @@ class WebRTCInput:
             # broadcasts instead of one per char); nothing typed on failure.
             if not self.keyboard.prebind(keysyms):
                 return False
-            lifted = self.keyboard._mods_to_lift(set()) if neutralize else []
+            lifted = []
+            if neutralize:
+                down = self.keyboard._down_mod_keycodes(
+                    self.active_modifiers & self.LEVEL_MODIFIER_KEYSYMS)
+                lifted = self.keyboard._mods_to_lift(set(), down)
             for m in lifted:
                 xtest.fake_input(self.keyboard._d, Xlib.X.KeyRelease, m)
             try:
@@ -3724,8 +3881,13 @@ class WebRTCInput:
                     " (retry pending)")
             display = self._app_wayland_display()
             try:
-                await asyncio.get_running_loop().run_in_executor(
-                    None, self.wayland_input.type_text_wayland, display, text)
+                typer = getattr(self.wayland_input, 'type_keysyms_wayland', None)
+                if typer is not None:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, typer, display, text_to_wayland_keysyms(text))
+                else:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, self.wayland_input.type_text_wayland, display, text)
             except PixelfluxVkUnavailable:
                 self._wl_typer_retry_at = time.monotonic() + 30.0
                 raise
@@ -3837,14 +3999,15 @@ class WebRTCInput:
             keysym_name_from_xlib = XK.keysym_to_string(keysym_number)
 
             if keysym_name_from_xlib is None:
-                if 0x20 <= keysym_number <= 0x7E or keysym_number >= 0xA0:
-                    try:
-                        keysym_name_from_xlib = chr(keysym_number)
-                        char_for_type_cmd_fallback = keysym_name_from_xlib
-                    except ValueError:
-                        return
-                else:
+                # A keysym is only a codepoint in the Latin-1 range; beyond it
+                # the number means nothing as a character, so the keysym is
+                # DECODED (legacy planes included) rather than chr()'d — the
+                # latter typed Gujarati for the publishing block.
+                char = keysym_to_character(keysym_number)
+                if char is None:
                     return
+                keysym_name_from_xlib = char
+                char_for_type_cmd_fallback = char
             else:
                 if len(keysym_name_from_xlib) == 1:
                     char_for_type_cmd_fallback = keysym_name_from_xlib
