@@ -17,7 +17,9 @@ WORKDIR /build
 COPY addons/selkies-web-core ./selkies-web-core
 COPY addons/selkies-dashboard ./selkies-dashboard
 COPY addons/universal-touch-gamepad ./universal-touch-gamepad
-# Web PWA icon/favicon are vendored in this repository, not downloaded
+# Web PWA icon/favicon are vendored in this repository, not downloaded. The
+# plated icon is the installed app's; the browser tab keeps the bare mark the
+# dashboard ships as icon.png
 COPY docs/assets /repo-assets
 
 RUN set -eux; \
@@ -34,8 +36,8 @@ RUN set -eux; \
     cp -r ../selkies-web-core/dist/jsdb dist/; \
     mkdir -p /webout; \
     cp -ar dist/. /webout/; \
-    printf '%s' '{"name":"Selkies","short_name":"Selkies","manifest_version":2,"version":"1.0.0","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon.png","type":"image/png","sizes":"512x512"}],"start_url":"/"}' > /webout/manifest.json; \
-    cp /repo-assets/logo/icon-512x512.png /webout/icon.png; \
+    printf '%s' '{"name":"Selkies","short_name":"Selkies","manifest_version":2,"version":"1.0.0","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon-512.png","type":"image/png","sizes":"512x512"}],"start_url":"/"}' > /webout/manifest.json; \
+    cp /repo-assets/logo/icon-512x512.png /webout/icon-512.png; \
     cp /repo-assets/logo/favicon.ico /webout/favicon.ico
 
 # 2) Build the Python wheel with the web client bundled

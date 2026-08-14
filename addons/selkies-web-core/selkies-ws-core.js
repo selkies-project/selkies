@@ -213,6 +213,9 @@ let startVideoWatchdogTimer = null;
 let startVideoWatchdogAttempts = 0;
 const START_VIDEO_WATCHDOG_MS = 3000;
 const START_VIDEO_WATCHDOG_MAX_ATTEMPTS = 3;
+// How long a tab that just became visible waits for a frame before treating the
+// stream as stopped rather than merely idle.
+const VISIBLE_FRAME_PROBE_MS = 2500;
 // Shared-mode stall watchdog: a shared viewer's stream can silently die
 // mid-session (e.g. the controller's tab-hide stops the broadcast encoder)
 // with no notification, and the one-shot START_VIDEO watchdog above is already
@@ -2160,6 +2163,25 @@ function clearStartVideoWatchdog() {
   startVideoWatchdogAttempts = 0;
 }
 
+// A tab returning to a stream it believes is still running has to prove it: a
+// reconnect or a reload while it was hidden can leave the server holding this
+// display stopped, and a screen with no damage since sends nothing to repaint
+// the cleared canvas with either way. A keyframe request answers the second; if
+// nothing arrives at all, the stream really is stopped and gets restarted.
+function armVisibleFrameProbe() {
+  if (isSharedMode) return;
+  const chunksBefore = window.videoChunksReceived;
+  requestKeyframe();
+  setTimeout(() => {
+    if (document.hidden || window.videoChunksReceived !== chunksBefore) return;
+    if (!isVideoPipelineActive) return;
+    if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+    console.warn('No video since the tab came back; restarting the stream.');
+    try { websocket.send('START_VIDEO'); } catch (_) { return; }
+    armStartVideoWatchdog();
+  }, VISIBLE_FRAME_PROBE_MS);
+}
+
 function onStartVideoWatchdogTimeout() {
   startVideoWatchdogTimer = null;
   // Tab hidden again (the visibilitychange path owns that state): stand down — a
@@ -3517,10 +3539,16 @@ function initWebsockets() {
       if (hiddenVideoStopTimer !== null) { clearTimeout(hiddenVideoStopTimer); hiddenVideoStopTimer = null; }
       // No decoder re-init here: shared mode returned above, and the lazy init in
       // the frame sink re-creates a background-reclaimed decoder on the next frame.
+      if (!videoPausedForHiddenTab && isVideoPipelineActive) armVisibleFrameProbe();
       if (videoPausedForHiddenTab) {
         videoPausedForHiddenTab = false;
         console.log('Tab is visible, resuming the video pipeline paused on hide.');
-        if (websocket && websocket.readyState === WebSocket.OPEN && !isVideoPipelineActive) {
+        // Keyed on the pause this handler performed, never on the pipeline
+        // flag: anything that reports the pipeline running while the tab is
+        // hidden (a status sync, a server VIDEO_STARTED) would otherwise skip
+        // the resume for good. A redundant START_VIDEO costs a reset and an
+        // IDR, which is what resuming needs anyway.
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
           websocket.send('START_VIDEO');
           isVideoPipelineActive = true;
           // START_VIDEO can be lost (server never restarts encode -> black stream);

@@ -40,102 +40,16 @@ if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
   # Window management belongs to the nested compositor; LXQt starting one of its
   # own would find the selection taken and leave the session half-built
   session_wm=/bin/true
-  # A panel and a desktop are shell surfaces: they have to anchor to an edge and
-  # reserve space, which on Wayland means wlr-layer-shell. LXQt grew that in 2.1,
-  # and a distribution that packages `startlxqtwayland` is one that carries it —
-  # so that binary and a Qt Wayland plugin together are what decides. With both,
-  # the session runs natively on the nested compositor, given the environment
-  # startlxqtwayland would have exported (the compositor itself is already up, so
-  # only the environment is wanted, not its exec). With either missing, Qt finds
-  # no Wayland plugin to load and reaches the compositor's XWayland by itself,
-  # which is where a session predating layer-shell has to draw anyway.
-  # The platform plugin alone is not enough: xdg-shell support is a separate
-  # plugin shipped by the qtwayland package, and newer Qt packaging moves the
-  # platform plugin into the client library that other packages pull in
-  # anyway. A session started with the platform but no shell integration
-  # aborts every Qt application at startup, so both are required here.
-  qt_has_wayland_plugin() {
-    local have_platform=1 have_shell=1
-    for dir in /usr/lib/*/qt[0-9]*/plugins; do
-      for plugin in "${dir}"/platforms/libqwayland*.so; do
-        [ -e "${plugin}" ] && have_platform=0
-      done
-      for shell in "${dir}"/wayland-shell-integration/libxdg-shell*.so; do
-        [ -e "${shell}" ] && have_shell=0
-      done
-    done
-    return $((have_platform || have_shell))
-  }
-  # Whether the LXQt components can anchor their shell surfaces natively:
-  # panel and desktop link the LayerShellQt client library when built with
-  # layer-shell support. The packaged wayland-session wrapper is not what
-  # decides — this session joins a compositor that is already running, and
-  # the wrapper can be missing for release timing alone while the components
-  # are fully capable.
-  lxqt_anchors_natively() {
-    for lib in /usr/lib/*/libLayerShellQtInterface.so*; do
-      [ -e "${lib}" ] && return 0
-    done
-    return 1
-  }
-  # The native session is the default wherever the components are capable.
-  # sway's own model drops the maximize and minimize requests a Wayland
-  # taskbar sends (wlr-foreign-toplevel), so the session reaches the
-  # compositor through a proxy that performs those verbs over sway IPC and
-  # forwards every other byte verbatim. SELKIES_LXQT_SESSION=x11 chooses the
-  # X11 session, whose verbs come from the keeper's bridge instead.
-  if [ "${SELKIES_LXQT_SESSION:-auto}" != "x11" ] \
-      && lxqt_anchors_natively && qt_has_wayland_plugin; then
-    export XDG_SESSION_TYPE=wayland
-    export XDG_CURRENT_DESKTOP="LXQt:${SELKIES_WAYLAND_COMPOSITOR:-sway}:wlroots"
-    export QT_QPA_PLATFORMTHEME=lxqt
-    export XDG_MENU_PREFIX=lxqt-
-    if [ "${SELKIES_WAYLAND_COMPOSITOR:-sway}" = "sway" ] \
-        && command -v python3 >/dev/null 2>&1; then
-      pkill -f '/etc/service/lxqt/wmproxy.py' 2>/dev/null
-      python3 /etc/service/lxqt/wmproxy.py &
-      for _ in $(seq 1 25); do
-        [ -S "${XDG_RUNTIME_DIR}/wayland-wm" ] && break
-        sleep 0.2
-      done
-      if [ -S "${XDG_RUNTIME_DIR}/wayland-wm" ]; then
-        export WAYLAND_DISPLAY=wayland-wm
-        echo "[lxqt] window verbs travel through the wayland-wm proxy"
-      fi
-    fi
-    echo "[lxqt] session draws on ${WAYLAND_DISPLAY} natively"
-  else
-    # The session really is an X11 one from here on, so it has to say so: left naming
-    # Wayland, Qt looks for a platform plugin this distribution does not ship and every
-    # component starts by failing to load it, and anything else keying off the session
-    # type reasons about a protocol its own windows are not on. WAYLAND_DISPLAY stays
-    # exported so an application that speaks Wayland can still choose it.
-    export XDG_SESSION_TYPE=x11
-    # Naming the session type is not enough where a Qt Wayland plugin is
-    # installed: with a Wayland socket in the environment Qt picks Wayland
-    # regardless, which puts the panel's window verbs back on the protocol the
-    # compositor drops and hangs the session behind a native dialog. GTK
-    # prefers the socket the same way. Both toolkits are pinned to X11; an
-    # application can still choose Wayland for itself against the exported
-    # WAYLAND_DISPLAY.
-    export QT_QPA_PLATFORM=xcb
-    export GDK_BACKEND=x11
-    echo "[lxqt] session draws through the compositor's XWayland on ${DISPLAY}"
-
-    # sway manages the session's shell windows as ordinary floating ones; the
-    # keeper anchors the panel to its edge and keeps the desktop tiled below it,
-    # and the bridge supplies the EWMH verbs sway's i3 model lacks (maximize,
-    # minimize, taskbar activation, windows stranded by an unplugged output).
-    # A restarted service would otherwise leave the previous instances running.
-    if [ "${SELKIES_WAYLAND_COMPOSITOR}" = "sway" ] && command -v swaymsg >/dev/null 2>&1; then
-      pkill -f '/etc/service/lxqt/anchor.sh' 2>/dev/null
-      bash /etc/service/lxqt/anchor.sh &
-      if command -v python3 >/dev/null 2>&1; then
-        pkill -f '/etc/service/lxqt/wmbridge.py' 2>/dev/null
-        python3 /etc/service/lxqt/wmbridge.py &
-      fi
-    fi
-  fi
+  # The session draws natively on the nested compositor: its panel and desktop
+  # are wlr-layer-shell surfaces (LXQt 2.1+), its window verbs are the ones
+  # labwc performs itself, and the environment is what `startlxqtwayland` would
+  # have exported — the compositor is already up, so only the environment is
+  # wanted, not its exec.
+  export XDG_SESSION_TYPE=wayland
+  export XDG_CURRENT_DESKTOP="LXQt:${SELKIES_WAYLAND_COMPOSITOR:-labwc}:wlroots"
+  export QT_QPA_PLATFORMTHEME=lxqt
+  export XDG_MENU_PREFIX=lxqt-
+  echo "[lxqt] session draws on ${WAYLAND_DISPLAY} natively"
 else
   export DISPLAY="${DISPLAY:-:20}"
   until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done

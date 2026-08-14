@@ -69,15 +69,9 @@ jobs:
       fail-fast: false
       matrix:
         flavor:
-          - name: ubuntu24.04
-            image: ubuntu
-            release: "24.04"
           - name: ubuntu26.04
             image: ubuntu
             release: "26.04"
-          - name: bookworm
-            image: debian
-            release: bookworm
           - name: trixie
             image: debian
             release: trixie
@@ -172,7 +166,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [ubuntu24.04, ubuntu26.04, bookworm, trixie]
+        flavor: [ubuntu26.04, trixie]
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4

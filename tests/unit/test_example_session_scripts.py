@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""The example container's session shell scripts stay parseable and lint-clean.
+"""The example container's shell stays parseable and lint-clean.
 
-These scripts run only inside the container against a live sway and X server, so
-CI cannot exercise their behaviour. It can still guard the failure that reaches
-a user as a session that will not paint: a quoting or syntax slip in the panel
-keeper or a service `run`. Every script is parsed with `bash -n`, and — where
-shellcheck is installed — checked for shellcheck errors (its warning level is
-style, and the example scripts predate a clean pass at that level, so gating on
-it here would fail on debt this suite did not introduce).
+These scripts run only inside the container against a live compositor and X
+server, so CI cannot exercise their behaviour. It can still guard the failure
+that reaches a user as a session that will not paint — or, for the Dockerfile,
+as a build that dies minutes in: a quoting or syntax slip. Every service script
+is parsed with `bash -n`, so is the shell inside each Dockerfile `RUN`, and —
+where shellcheck is installed — the scripts are checked for shellcheck errors
+(its warning level is style, and these predate a clean pass at that level, so
+gating on it here would fail on debt this suite did not introduce).
 """
 import glob
 import os
@@ -23,7 +24,7 @@ SCRIPTS = sorted(
     glob.glob(os.path.join(EXAMPLE, "*.sh"))
     + glob.glob(os.path.join(EXAMPLE, "services", "*", "run"))
     + glob.glob(os.path.join(EXAMPLE, "services", "*", "finish"))
-    + [os.path.join(EXAMPLE, "services", "lxqt", "anchor.sh")]
+    + glob.glob(os.path.join(EXAMPLE, "services", "*", "*.sh"))
 )
 
 passed = failed = 0
@@ -48,6 +49,34 @@ for path in SCRIPTS:
     rel = os.path.relpath(path, REPO)
     r = subprocess.run([bash, "-n", path], capture_output=True, text=True)
     check(f"parse {rel}", r.returncode == 0, r.stderr.strip()[:200])
+
+# A RUN's shell is what the build actually executes: Docker drops the comment
+# lines inside one and joins the continuations into a single command.
+def run_bodies(dockerfile):
+    bodies, current = [], None
+    for line in open(dockerfile).read().splitlines():
+        if line.strip().startswith("#"):
+            continue
+        if current is None:
+            if line.startswith("RUN "):
+                current = [line[4:]]
+            else:
+                continue
+        else:
+            current.append(line)
+        if not current[-1].rstrip().endswith("\\"):
+            bodies.append("\n".join(current).replace("\\" + "\n", " "))
+            current = None
+    return bodies
+
+
+for dockerfile in (os.path.join(EXAMPLE, "Dockerfile"), os.path.join(REPO, "Dockerfile")):
+    rel = os.path.relpath(dockerfile, REPO)
+    bodies = run_bodies(dockerfile)
+    check(f"{rel} has RUN blocks", bool(bodies), str(len(bodies)))
+    for i, body in enumerate(bodies, 1):
+        r = subprocess.run([bash, "-n"], input=body, capture_output=True, text=True)
+        check(f"parse {rel} RUN #{i}", r.returncode == 0, r.stderr.strip()[:200])
 
 PY_HELPERS = sorted(glob.glob(os.path.join(EXAMPLE, "services", "*", "*.py")))
 for path in PY_HELPERS:

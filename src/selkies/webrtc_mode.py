@@ -44,6 +44,7 @@ from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_
                             clear_selkies_monitors, clamp_primary_feedback,
                             current_wm_name, wait_for_wm,
                             wayland_output_id, wayland_reposition_primary,
+                            session_screen_index,
                             parse_resize_dims, cursor_size_for_dpi, align_dims_16)
 from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
 from .settings import (settings, AppSettings, SETTING_DEFINITIONS,
@@ -348,7 +349,7 @@ class WebRTCService(BaseStreamingService):
             # client DPI syncs. The input handler owns the policy: a nested app
             # session keeps the output at scale 1.0 and takes its DPI as Xft
             # resources instead.
-            self.media_pipeline.scale = self.input_handler.wayland_capture_scale(
+            self.media_pipeline.scale = await self.input_handler.realize_wayland_dpi(
                 getattr(settings, "scaling_dpi", "96") or 96)
 
         # Initialize monitoring instances
@@ -1564,8 +1565,15 @@ class WebRTCService(BaseStreamingService):
                 else:
                     pipeline.rc_mode = self.media_pipeline.rc_mode
                 # Compositor output scale follows the session DPI (Wayland only;
-                # a no-op field on X11).
-                pipeline.scale = getattr(self.media_pipeline, "scale", 1.0)
+                # a no-op field on X11). The ladder runs for this display's own
+                # screen rather than copying whatever the primary was left with.
+                if IS_WAYLAND and self.input_handler is not None:
+                    pipeline.scale = await self.input_handler.realize_wayland_dpi(
+                        getattr(self, "_last_applied_dpi", None)
+                        or getattr(settings, "scaling_dpi", 96) or 96,
+                        session_screen_index(did))
+                else:
+                    pipeline.scale = getattr(self.media_pipeline, "scale", 1.0)
                 # The native-cursor toggle is global across displays: a secondary
                 # joining after the toggle starts with the primary's current state.
                 pipeline.capture_cursor = self.media_pipeline.capture_cursor
@@ -1650,21 +1658,26 @@ class WebRTCService(BaseStreamingService):
         if getattr(self, "_last_applied_dpi", None) == int(dpi_value):
             logger.debug(f"DPI already {int(dpi_value)}; skipping re-apply.")
             return
-        if await set_dpi(int(dpi_value)):
-            self._last_applied_dpi = int(dpi_value)
-            logger.info(f"Successfully set DPI to {dpi_value}")
-        else:
-            logger.error(f"Failed to set DPI to {dpi_value}")
+        if not IS_WAYLAND:
+            if await set_dpi(int(dpi_value)):
+                self._last_applied_dpi = int(dpi_value)
+                logger.info(f"Successfully set DPI to {dpi_value}")
+            else:
+                logger.error(f"Failed to set DPI to {dpi_value}")
 
-        # On Wayland, DPI maps to the pixelflux compositor output scale (set_dpi
-        # is a no-op there). Restart every display's capture so the new scale is
-        # read, mirroring the WS path which threads scale through CaptureSettings
-        # per display.
+        # On Wayland a DPI runs the scale ladder per display: the session
+        # compositor scales the screen backing it, and only what it leaves
+        # becomes that display's capture scale, whose change restarts the
+        # capture — the WS path threads the same scale through CaptureSettings.
         if IS_WAYLAND:
-            new_scale = (self.input_handler.wayland_capture_scale(dpi_value)
-                         if self.input_handler else float(dpi_value) / 96.0)
+            self._last_applied_dpi = int(dpi_value)
             for did, pipeline in list(self.display_pipelines.items()):
-                if pipeline is None or pipeline.scale == new_scale:
+                if pipeline is None:
+                    continue
+                new_scale = (await self.input_handler.realize_wayland_dpi(
+                    dpi_value, session_screen_index(did))
+                    if self.input_handler else float(dpi_value) / 96.0)
+                if pipeline.scale == new_scale:
                     continue
                 pipeline.scale = new_scale
                 if pipeline.is_media_pipeline_running():
@@ -2054,13 +2067,17 @@ class WebRTCService(BaseStreamingService):
             )
 
         # Apply the configured desktop DPI at startup so the first session sees
-        # it even before any client syncs its own (96 is the X default — skip
-        # the xrdb churn when nothing diverges). On Wayland the same call
-        # reaches a nested session's XWayland display; with none up yet, the
-        # input handler re-applies when it adopts the session compositor.
+        # it even before any client syncs its own (96 is unity — skip the churn
+        # when nothing diverges). On Wayland it becomes the session compositor's
+        # output scale; with none up yet, the input handler re-applies when it
+        # adopts one.
         startup_dpi = int(float(getattr(settings, "scaling_dpi", "96") or 96))
         if startup_dpi != 96:
-            if await set_dpi(startup_dpi):
+            if IS_WAYLAND:
+                if self.input_handler is not None:
+                    await self.input_handler.realize_wayland_dpi(startup_dpi)
+                self._last_applied_dpi = startup_dpi
+            elif await set_dpi(startup_dpi):
                 self._last_applied_dpi = startup_dpi
 
         # Apply an explicit --cursor-size to the X server at startup (handle_scaling

@@ -10,12 +10,12 @@ Selkies is composed of a small number of core components plus several optional a
 **Refer to [Getting Started](start.md) on how you can get on board.**
 
 Retrieve the latest `SELKIES_VERSION` release, and pick the `DISTRIB_RELEASE` flavor of the
-container images below (`ubuntu24.04`, `ubuntu26.04`, `bookworm`, or `trixie`). The flavor names the distribution
+container images below (`ubuntu26.04` or `trixie`). The flavor names the distribution
 inside the image, so it is a free choice and not a property of the host:
 
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/^v//')"
-export DISTRIB_RELEASE="ubuntu24.04"
+export DISTRIB_RELEASE="ubuntu26.04"
 ```
 
 When instructed to install [binfmt](https://github.com/tonistiigi/binfmt), use the following command with Docker/Podman:
@@ -172,11 +172,11 @@ The [Selkies Dashboard](https://github.com/selkies-project/selkies/tree/main/add
 
 #### Example Container
 
-The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal. The container defaults to an X11 (Xvfb) session; set `SELKIES_WAYLAND=true` to switch it to the headless Wayland backend instead. Under the Wayland backend the LXQt session runs natively wherever the LXQt components are built with layer-shell support (LXQt 2.1+), connected through a proxy that supplies the window verbs (maximize, minimize) sway's window model drops; elsewhere it draws through the nested compositor's XWayland, where a bridge supplies the same verbs. `SELKIES_LXQT_SESSION=x11` (or the `PIXELFLUX_LXQT_SESSION` spelling) forces the XWayland session on natively-capable distributions.
+The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal. The container defaults to an X11 (Xvfb) session; set `SELKIES_WAYLAND=true` to switch it to the headless Wayland backend instead. Under the Wayland backend the LXQt session runs natively on the nested compositor, anchoring its panel and desktop through layer-shell and controlling its windows through wlr-foreign-toplevel.
 
-The same LXQt desktop runs on either backend. On Wayland the capture compositor Selkies owns serves Wayland clients and manages no windows, so the container nests [sway](https://swaywm.org) inside it. That compositor supplies window management and an XWayland server, so X11-only applications keep working, and Selkies detects its socket and aims input and clipboard at it. `-e SELKIES_WAYLAND_COMPOSITOR=none` skips it: applications then connect to the capture compositor directly, which is leaner for a single Wayland-native application but leaves no window management, no XWayland, and no desktop session.
+The same LXQt desktop runs on either backend. On Wayland the capture compositor Selkies owns serves Wayland clients and manages no windows, so the container nests [labwc](https://labwc.github.io) inside it. That compositor supplies window management, the titlebar controls every window carries, and an XWayland server, so X11-only applications keep working; Selkies detects its socket and aims input, clipboard and display scaling at it. `-e SELKIES_WAYLAND_COMPOSITOR=<name>` runs another compositor there instead, and `-e SELKIES_WAYLAND_COMPOSITOR=none` skips the nested compositor entirely: applications then connect to the capture compositor directly, which is leaner for a single Wayland-native application but leaves no window management, no XWayland, and no desktop session.
 
-A second display needs no configuration. The nested session keeps as many screens as Selkies has capture outputs: one arrives when a client connects for it and goes when that client leaves, so the desktop is never wider than what is being shown. Taking a screen away needs sway 1.9 or newer; below that the session stays at one screen, since a screen added there could not be removed again. `-e SELKIES_WAYLAND_OUTPUTS=2` instead fixes the count at startup, which every sway that honours it applies before any client connects.
+A second display needs no configuration. A nested compositor cannot gain or lose a screen while it runs, so the session opens both at startup and Selkies holds the second at a token size until a client connects for it — the desktop stays the shape of what is being shown, and the screen grows to the second display's size the moment it is opened and shrinks back when it closes. `-e SELKIES_WAYLAND_OUTPUTS=N` fixes a different count.
 
 Neither applies with `SELKIES_WAYLAND_COMPOSITOR=none`: applications sit on the capture compositor itself and simply see outputs appear and disappear as Selkies creates them.
 
@@ -186,7 +186,7 @@ A Wayland session asked for on a GPU it cannot reach starts as X11 instead. The 
 
 Read the [Development](development.md) section for customizing this container for your own usage.
 
-Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8080** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **set `DISTRIB_RELEASE` to `ubuntu24.04`, `ubuntu26.04`, `bookworm`, or `trixie`, and replace `main` to `latest` for the latest stable release**):
+Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8080** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **set `DISTRIB_RELEASE` to `ubuntu26.04` or `trixie`, and replace `main` to `latest` for the latest stable release**):
 
 ```bash
 docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8080:8080 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/example:main-${DISTRIB_RELEASE}

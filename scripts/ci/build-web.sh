@@ -39,9 +39,11 @@ cp -ar addons/selkies-dashboard/dist src/selkies/selkies_web
 
 # start_url is relative so an installed client launches back into the subfolder
 # it was served from, which an absolute "/" would discard.
-printf '%s' '{"name":"Selkies","short_name":"Selkies","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon.png","type":"image/png","sizes":"512x512"}],"start_url":"."}' > src/selkies/selkies_web/manifest.json
-# PWA icon/favicon are vendored in this repository, not downloaded
-cp docs/assets/logo/icon-512x512.png src/selkies/selkies_web/icon.png
+printf '%s' '{"name":"Selkies","short_name":"Selkies","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon-512.png","type":"image/png","sizes":"512x512"}],"start_url":"."}' > src/selkies/selkies_web/manifest.json
+# PWA icon/favicon are vendored in this repository, not downloaded. The plated
+# icon belongs to the installed app alone; icon.png stays the bare mark the
+# dashboard ships, because that is what the browser tab draws.
+cp docs/assets/logo/icon-512x512.png src/selkies/selkies_web/icon-512.png
 cp docs/assets/logo/favicon.ico src/selkies/selkies_web/favicon.ico
 
 test -f src/selkies/selkies_web/index.html

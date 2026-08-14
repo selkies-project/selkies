@@ -204,6 +204,10 @@ export default function webrtc() {
 
 	var videoElement = null;
 	var audioElement = null;
+	// Set on a fatal server verdict (4000/4001): blocks every recovery reload —
+	// the peer-connection one and the resume watchdog's — so a superseded page
+	// cannot re-enter the takeover loop.
+	let fatalConnectionHalt = false;
 	// Last stream resolution asked of the server, in physical stream pixels;
 	// compared against the track's intrinsic size to detect a realized size
 	// that differs from the request (mode snapping / rejected resize).
@@ -510,8 +514,58 @@ export default function webrtc() {
 	// stops once every consumer is paused).
 	let hiddenVideoPauseTimer = null;
 	let videoPausedForHiddenTab = false;
+	// The resume is one message on a data channel that can be closed exactly then,
+	// and a lost one is answered with nothing: the peer stays subscribed to a feed
+	// nobody encodes and the picture never returns. So a tab that came back proves
+	// the frames followed — the websockets core's START_VIDEO watchdog, on the
+	// signal WebRTC has: the element's playback clock.
+	let resumeWatchdogTimer = null;
+	let resumeWatchdogAttempts = 0;
+	const RESUME_WATCHDOG_MS = 3000;
+	const RESUME_WATCHDOG_MAX_ATTEMPTS = 3;
+
+	function clearResumeWatchdog() {
+		if (resumeWatchdogTimer !== null) {
+			clearTimeout(resumeWatchdogTimer);
+			resumeWatchdogTimer = null;
+		}
+		resumeWatchdogAttempts = 0;
+	}
+
+	function armResumeWatchdog() {
+		if (resumeWatchdogTimer !== null) clearTimeout(resumeWatchdogTimer);
+		const mark = videoElement ? videoElement.currentTime : 0;
+		resumeWatchdogTimer = setTimeout(() => checkResumed(mark), RESUME_WATCHDOG_MS);
+	}
+
+	function checkResumed(mark) {
+		resumeWatchdogTimer = null;
+		// Hidden again: the visibility path owns that state.
+		if (document.hidden || !webrtc) { resumeWatchdogAttempts = 0; return; }
+		if (videoElement && videoElement.currentTime > mark) {
+			resumeWatchdogAttempts = 0;
+			return;
+		}
+		// A media element the browser paused while the tab was away plays nothing
+		// however much RTP arrives.
+		if (videoElement && videoElement.paused) videoElement.play().catch(() => {});
+		resumeWatchdogAttempts++;
+		if (resumeWatchdogAttempts <= RESUME_WATCHDOG_MAX_ATTEMPTS) {
+			console.warn(`No video after resuming; resend attempt ${resumeWatchdogAttempts}/${RESUME_WATCHDOG_MAX_ATTEMPTS}.`);
+			try { webrtc.sendDataChannelMessage('START_VIDEO'); } catch (_) {}
+			armResumeWatchdog();
+			return;
+		}
+		resumeWatchdogAttempts = 0;
+		if (fatalConnectionHalt) return;
+		if (typeof window !== 'undefined' && window.__selkiesModeSwitching) return;
+		console.warn('[webrtc] no video after resuming; reloading to reconnect.');
+		location.reload();
+	}
+
 	async function handleVisibilityChange() {
 		if (document.hidden) {
+			clearResumeWatchdog();
 			if (hiddenVideoPauseTimer === null) {
 				hiddenVideoPauseTimer = setTimeout(() => {
 					hiddenVideoPauseTimer = null;
@@ -537,6 +591,11 @@ export default function webrtc() {
 				try { webrtc.sendDataChannelMessage('START_VIDEO'); } catch (_) {}
 			}
 			console.log("Tab visible: sent START_VIDEO to resume this peer's feed.");
+			armResumeWatchdog();
+		} else if (videoElement && videoElement.paused) {
+			// Nothing was paused here, but the browser can still have stopped the
+			// element itself while the tab was away.
+			videoElement.play().catch(() => {});
 		}
 		if (wakeLockSentinel === null) {
 			await requestWakeLock();
@@ -1904,9 +1963,7 @@ export default function webrtc() {
 			// Secure-mode token from the page URL (?token=...); the server matches it
 			// against the active mk token to grant a viewer read-write collaboration.
 			var authToken = new URLSearchParams(window.location.search).get('token') || undefined;
-			// Set on a fatal server verdict (4000/4001): blocks the pc-failure
-			// recovery reload so a superseded page can't re-enter the takeover loop.
-			let fatalConnectionHalt = false;
+			fatalConnectionHalt = false;
 			let pcRecoveryTimer = null;
 			var signaling = new WebRTCSignaling(url, clientRole, clientSlot, isStrictViewer, authToken, displayId, displayPosition);
 			// A plain GET on the signaling endpoint returns 409 exactly when the
@@ -2508,6 +2565,7 @@ export default function webrtc() {
 			// clear polling timers so they don't leak/fire on null webrtc after reconnect
 			if (statsLoopId !== null) { clearInterval(statsLoopId); statsLoopId = null; }
 			if (metricsLoopId !== null) { clearInterval(metricsLoopId); metricsLoopId = null; }
+			clearResumeWatchdog();
 			webrtc = null;
 			input = null;
 			useCssScaling = false;

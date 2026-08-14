@@ -30,7 +30,7 @@ services:
     # from the `selkies-py-build` image into `addons/example/wheels/` before
     # building this service; otherwise the latest PyPI release is installed.
     ###
-    image: selkies-example:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-24.04}
+    image: selkies-example:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
     build:
       # Repository root: the Dockerfile also pulls in addons/js-interposer and
       # addons/fake-udev
@@ -38,7 +38,7 @@ services:
       dockerfile: addons/example/Dockerfile
       args:
         DISTRIB_IMAGE: ${DISTRIB_IMAGE:-ubuntu}
-        DISTRIB_RELEASE: ${DISTRIB_RELEASE:-24.04}
+        DISTRIB_RELEASE: ${DISTRIB_RELEASE:-26.04}
         PYPI_PACKAGE: selkies
         # DRI3-capable Xvfb; see the Dockerfile for what overriding this costs
         XVFB_IMAGE: ${XVFB_IMAGE:-lscr.io/linuxserver/xvfb:debianbookworm}
@@ -68,10 +68,11 @@ services:
       # Use the headless Wayland backend instead of X11 (default: X11 Xvfb).
       SELKIES_WAYLAND: ${SELKIES_WAYLAND:-false}
       # Session compositor nested in the capture compositor, supplying window
-      # management and XWayland; empty picks the installed one, "none" drops it
+      # management, decorations and XWayland; empty picks labwc, "none" drops it
       SELKIES_WAYLAND_COMPOSITOR: ${SELKIES_WAYLAND_COMPOSITOR:-}
-      # Screens the nested compositor opens; 2 for a second display
-      SELKIES_WAYLAND_OUTPUTS: ${SELKIES_WAYLAND_OUTPUTS:-2}
+      # Screens the session opens, which is as many as it will ever have; empty
+      # opens the two Selkies can show and holds the second small until used
+      SELKIES_WAYLAND_OUTPUTS: ${SELKIES_WAYLAND_OUTPUTS:-}
       # Render/encode GPU selection; empty means auto-detect
       SELKIES_RENDER_DRI: ${SELKIES_RENDER_DRI:-}
       DRI_NODE: ${DRI_NODE:-}

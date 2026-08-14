@@ -77,9 +77,14 @@ ICONS = [(MARK, 256, "docs/assets/logo/favicon.ico"),
 
 # The app icons set the mark on an opaque white disc, so a launcher that masks
 # the icon to a circle crops nothing and one that does not still gets a shape
-# rather than a floating mark. Proportions are of the icon's side.
+# rather than a floating mark. That plate belongs to the installed-app icon
+# alone: a browser tab draws its icon on its own strip, where the bare mark is
+# the one that reads, so the dashboards keep both and point each consumer at
+# the right one. Proportions are of the icon's side.
 PLATED = [(MARK, 192, "docs/assets/logo/icon-192x192.png"),
-          (MARK, 512, "docs/assets/logo/icon-512x512.png")]
+          (MARK, 512, "docs/assets/logo/icon-512x512.png"),
+          (MARK, 512, "addons/selkies-dashboard/public/icon-512.png"),
+          (MARK, 512, "addons/selkies-dashboard-wish/public/icon-512.png")]
 PLATE_RADIUS = 0.4900
 MARK_WIDTH = 0.7400
 MARK_CENTRE = (0.5000, 0.4844)

@@ -99,25 +99,22 @@ for sel, legacy, expected in CHAIN_CASES:
     py = "wayland" if parse_bool("false" if raw.strip() == "" else raw) else "x11"
     check(f"python resolves the same chain to {expected}", py == expected, py)
 
-# The session choice follows the same reading: trimmed, case-insensitive,
-# |suffix ignored, blank neutralizing to auto instead of the legacy spelling.
+# The session compositor follows the same reading: trimmed, case-insensitive,
+# |suffix ignored, so a value reads the same however it was typed.
 body = open(ENTRYPOINT).read()
-begin = body.index('SELKIES_LXQT_SESSION="$(setting_value')
-SESSION_BLOCK = body[begin:body.index("\n", body.index("export SELKIES_LXQT_SESSION", begin))]
-for sel, legacy, expected in [
-    (" X11 |locked", None, "x11"),
-    (None, " Native ", "native"),
-    ("", "x11", "auto"),
-    (None, None, "auto"),
+begin = body.index('SELKIES_WAYLAND_COMPOSITOR="$(setting_value')
+COMPOSITOR_BLOCK = body[begin:body.index(
+    "\n", body.index('SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR,,}"', begin))]
+for value, expected in [
+    (" LabWC |locked", "labwc"),
+    ("NONE", "none"),
+    ("  sway  ", "sway"),
+    ("", ""),
 ]:
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
-    if sel is not None:
-        env["SELKIES_LXQT_SESSION"] = sel
-    if legacy is not None:
-        env["PIXELFLUX_LXQT_SESSION"] = legacy
-    out = run_shell(SESSION_BLOCK + '\necho "${SELKIES_LXQT_SESSION}"', env)
-    check(f"session SELKIES={sel!r} PIXELFLUX={legacy!r} -> {expected}",
-          out == expected, out)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+           "SELKIES_WAYLAND_COMPOSITOR": value}
+    out = run_shell(COMPOSITOR_BLOCK + '\necho "${SELKIES_WAYLAND_COMPOSITOR}"', env)
+    check(f"compositor {value!r} -> {expected!r}", out == expected, out)
 
 # An empty value keeps the default, which is what lets an image neutralize a
 # variable baked into a base layer without knowing what the default is.

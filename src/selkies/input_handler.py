@@ -42,7 +42,6 @@ from .display_utils import (
     pixelflux_x11_cursor,
     unpremultiply_rgba,
     cursor_content_handle,
-    set_dpi,
 )
 from .media_pipeline import RateControlMode
 from .settings import settings, WS_MAX_MESSAGE_BYTES
@@ -2774,7 +2773,7 @@ class WebRTCInput:
         self.key_sweep_interval = 0.1
         self.key_sweep_task = None
         # Server-side key auto-repeat (X11 only). XTEST/xdotool
-        # synthetic presses do NOT trigger the X server's native auto-repeat, so a held
+        # synthetic presses do not trigger the X server's native auto-repeat, so a held
         # key would emit a single character. We re-emit held repeatable keys here at the
         # configured rate. Disabled on Wayland: the focused app repeats held
         # virtual-keyboard keys itself via wl_keyboard repeat_info, so a server-side
@@ -3278,7 +3277,7 @@ class WebRTCInput:
                             # state discard until after the release so a concurrent kd still
                             # sees correct active_modifiers. The keysym was popped above, so a
                             # non-None entry here means a concurrent kd re-pressed it. That kd
-                            # already injected its own keydown, so on any re-press we MUST NOT
+                            # already injected its own keydown, so on any re-press we must not
                             # re-inject a down (would double-press); we just abandon our release.
                             if self.pressed_keys.get(keysym) is not None:
                                 # kd raced us before the keyup: skip both injections; the kd
@@ -4328,10 +4327,20 @@ class WebRTCInput:
                 if len(others) == 1:
                     resolved = others[0]
                 elif len(others) > 1:
-                    logger_webrtc_input.warning(
-                        "Multiple candidate app-compositor sockets %s; set "
-                        "app_wayland_display to choose. Using capture compositor.",
-                        others)
+                    # A compositor's socket is wayland-<N>; a differently named
+                    # one beside it is a relay a session listens on, not a
+                    # session of its own. Falling back to the capture compositor
+                    # over one aims every overlay keysym and the selection at a
+                    # keymap and clipboard the applications never see.
+                    numbered = [n for n in others
+                                if n[len("wayland-"):].isdigit()]
+                    if len(numbered) == 1:
+                        resolved = numbered[0]
+                    else:
+                        logger_webrtc_input.warning(
+                            "Multiple candidate app-compositor sockets %s; set "
+                            "app_wayland_display to choose. Using capture compositor.",
+                            others)
         except Exception as e:
             logger_webrtc_input.debug(f"App-compositor autodetect failed: {e}")
         if resolved and resolved != capture:
@@ -4372,7 +4381,8 @@ class WebRTCInput:
             except Exception as e:
                 logger_webrtc_input.debug(
                     f"pixelflux set_app_wayland_display failed: {e}")
-            self._schedule_session_dpi()
+            self._schedule_session_scale()
+            self._schedule_spare_screen_hold()
         return resolved
 
     def _invalidate_app_wl_display(self):
@@ -4397,30 +4407,77 @@ class WebRTCInput:
         self._app_wayland_display()
         return self._app_wl_is_separate
 
-    def wayland_capture_scale(self, dpi):
-        """How a DPI setting realizes on the Wayland backend: as the capture
-        output scale while pixelflux renders applications itself, but as 1.0
-        under a nested app compositor — a scaled output would halve the nested
-        desktop's logical size and upscale its buffers, so there the DPI
-        reaches applications as Xft resources in the session instead
-        (set_dpi)."""
+    async def realize_wayland_dpi(self, dpi, display_index=0):
+        """Apply a DPI on the Wayland backend and return the capture output
+        scale it leaves behind.
+
+        Applications draw larger when the compositor they are on scales its own
+        output, so a nested session is scaled through its output management and
+        the capture keeps 1.0: scaling the capture instead would halve the
+        logical size the session is handed and upscale the whole desktop. A
+        session that manages no outputs for clients (KWin) takes the capture
+        output's scale, which it follows, and so does a plain pixelflux session,
+        where the capture output is the only screen there is. XWayland
+        applications need nothing merged: they run in the compositor's logical
+        space and are scaled with it."""
         try:
-            separate = self._has_separate_app_compositor()
-        except Exception:
-            separate = False
-        if separate:
-            return 1.0
-        try:
-            return max(0.1, float(dpi) / 96.0)
+            scale = max(0.1, float(dpi) / 96.0)
         except (TypeError, ValueError):
             return 1.0
+        try:
+            if not self._has_separate_app_compositor():
+                return scale
+            display = self._app_wayland_display()
+            applied = await asyncio.to_thread(
+                self.wayland_input.set_app_output_scale, display, display_index, scale)
+        except Exception as e:
+            logger_webrtc_input.debug(f"Session output scale failed: {e}")
+            return scale
+        if applied:
+            logger_webrtc_input.info(
+                f"Session compositor screen {display_index} scaled to {scale}.")
+            return 1.0
+        return scale
 
-    def _schedule_session_dpi(self):
-        """A nested session was just adopted: carry the effective DPI into it
-        once its XWayland display answers. An operator-set DPI governs the
-        desktop (client syncs never reach set_dpi then); otherwise the last
-        client-synced DPI does. 96 needs nothing merged — it is the X
-        default."""
+    # A session screen held at a real screen's size while nothing watches it.
+    # Small enough to leave the desktop's centre on the screen that is shown,
+    # large enough for a compositor to lay out on.
+    SPARE_SCREEN_SIZE = (320, 240)
+
+    def _schedule_spare_screen_hold(self):
+        """A nested session opens the screens it was started with, whether or
+        not the capture drives that many: the extra ones stretch its desktop
+        onto a screen nobody sees, which is where a client that centres itself
+        then lands. Hold them small until a display arrives for them —
+        pixelflux resizes one to its full size the moment it gets an output,
+        and back when it loses one."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._hold_spare_screens())
+
+    async def _hold_spare_screens(self):
+        display = self._app_wayland_display()
+        try:
+            keep = max(1, len(await asyncio.to_thread(self.wayland_input.list_outputs)))
+            held = await asyncio.to_thread(
+                self.wayland_input.hold_spare_app_screens, display, keep,
+                *self.SPARE_SCREEN_SIZE)
+        except Exception as e:
+            logger_webrtc_input.debug(f"Holding spare session screens failed: {e}")
+            return
+        if held:
+            logger_webrtc_input.info(
+                f"Session compositor has {held} screen(s) with no capture output; "
+                f"held at {self.SPARE_SCREEN_SIZE[0]}x{self.SPARE_SCREEN_SIZE[1]}.")
+
+    def _schedule_session_scale(self):
+        """A session compositor was just adopted: hand it the effective DPI as
+        its output scale. A scale applied before it existed landed on the
+        capture output, which the session does not follow. An operator-set DPI
+        governs the desktop (client syncs never reach it then); otherwise the
+        last client-synced DPI does. 96 is unity, so nothing to apply."""
         try:
             if settings._overridden.get("scaling_dpi", False):
                 dpi = int(float(settings.scaling_dpi))
@@ -4434,15 +4491,7 @@ class WebRTCInput:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._apply_session_dpi(dpi))
-
-    async def _apply_session_dpi(self, dpi):
-        for _ in range(30):
-            if await set_dpi(dpi):
-                return
-            await asyncio.sleep(1.0)
-        logger_webrtc_input.info(
-            f"Session X display never appeared; DPI {dpi} stays compositor-side.")
+        loop.create_task(self.realize_wayland_dpi(dpi))
 
     async def _get_file(self, file_path, target_mime):
         max_clipboard_file_size = 10 * 1024 * 1024

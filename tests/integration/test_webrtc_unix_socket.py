@@ -20,7 +20,7 @@ from playwright.sync_api import sync_playwright
 SOCK = os.path.join(H.WORKDIR, "selkies-webrtc.sock")
 PORT = H.PORT
 
-subprocess.run(["pkill", "-f", H.SERVER_PATTERN], capture_output=True)
+H.server_stop()
 subprocess.run(["pkill", "-f", "tcp2unix.py"], capture_output=True)
 time.sleep(1.0)
 os.path.exists(SOCK) and os.unlink(SOCK)
@@ -31,11 +31,11 @@ env = {"PATH": os.environ.get("PATH", ""),
        "SELKIES_MODE": "webrtc", "SELKIES_ENABLE_BASIC_AUTH": "false",
        "SELKIES_WEB_ROOT": H.CORE_DIST,
        "SELKIES_TURN_REST_URI": ""}
-p = subprocess.Popen([H.PYTHON, "-m", "selkies",
-                      "--port", str(PORT), "--unix-socket", SOCK],
-                     env=env, cwd=H.WORKDIR,
-                     stdout=open(os.path.join(H.WORKDIR, "selkies-webrtc.log"), "w"),
-                     stderr=subprocess.STDOUT, start_new_session=True)
+server = subprocess.Popen(
+    [H.PYTHON, "-m", "selkies", "--port", str(PORT), "--unix-socket", SOCK],
+    env=env, cwd=H.WORKDIR,
+    stdout=open(os.path.join(H.WORKDIR, "selkies-webrtc.log"), "w"),
+    stderr=subprocess.STDOUT, start_new_session=True)
 proxy = subprocess.Popen([H.PYTHON, os.path.join(H.TOOLS, "tcp2unix.py"),
                           "127.0.0.1", str(PORT), SOCK],
                          env=dict(os.environ), cwd=H.WORKDIR,
@@ -50,8 +50,8 @@ try:
     res.check("server owns no TCP listener", not listeners, listeners[:1])
     res.check("unix socket bound", os.path.exists(SOCK), SOCK)
 
-    with sync_playwright() as p:
-        browser = C.chromium_launch(p)
+    with sync_playwright() as pw:
+        browser = C.chromium_launch(pw)
         ctx = browser.new_context(viewport={"width": 1280, "height": 720})
         ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'webrtc';")
         page = ctx.new_page()
@@ -67,7 +67,13 @@ try:
         res.check("console clean", not real_errors, str(real_errors[:2]))
         browser.close()
 finally:
-    subprocess.run(["pkill", "-f", "tcp2unix.py"], capture_output=True)
-    subprocess.run(["pkill", "-f", H.SERVER_PATTERN], capture_output=True)
+    # By pid: this server listens on a unix socket, so nothing else can find it,
+    # and a sweep by name would reach servers this suite never started.
+    for child in (proxy, server):
+        child.terminate()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
 
 sys.exit(0 if res.summary() else 1)

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Wayland-backend DPI: the capture-scale policy and the session Xft merge.
+"""Wayland-backend DPI: where a scale lands, and what X11 still merges.
 
-Under a nested app compositor, DPI must not become compositor output scale
-(that would halve the nested desktop's logical size and upscale its buffers);
-it reaches applications as Xft resources merged into the session's XWayland
-display instead — the same realization the X11 backend uses. These checks run
-set_dpi against a private X server and read the resource database back, and
-pin the wayland_capture_scale policy on both topologies.
+A nested session scales its own screen — scaling the capture instead would
+halve the logical size that session is handed and upscale the whole desktop —
+and the capture output carries the scale only for a session that manages no
+outputs of its own (KWin) or no session at all. Applications on XWayland get
+the DPI as Xft resources either way. These checks run set_dpi against a private
+X server and read the resource database back, and pin the realization policy on
+every topology.
 """
 import asyncio
 import os
@@ -35,31 +36,49 @@ from selkies import display_utils  # noqa: E402
 from selkies.input_handler import WebRTCInput  # noqa: E402
 
 
-def make_handler(separate):
+class FakeSession:
+    """The pixelflux ABI the policy calls, with a scriptable answer."""
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.calls = []
+
+    def set_app_output_scale(self, display, index, scale):
+        self.calls.append((display, index, scale))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+def make_handler(separate, answer=True):
     h = WebRTCInput.__new__(WebRTCInput)
     h._app_wl_is_separate = separate
     h._app_wayland_display = lambda: "wayland-9"
+    h._has_separate_app_compositor = lambda: separate
+    h.wayland_input = FakeSession(answer)
     return h
 
 
-check("nested session pins capture scale to 1.0",
-      make_handler(True).wayland_capture_scale(192) == 1.0)
-check("direct session keeps DPI/96 as capture scale",
-      make_handler(False).wayland_capture_scale(192) == 2.0)
-check("scale floor guards degenerate DPI",
-      make_handler(False).wayland_capture_scale(0) == 0.1)
-check("policy survives a detection failure", (lambda h: (
-    setattr(h, "_app_wayland_display",
-            lambda: (_ for _ in ()).throw(RuntimeError("down"))) or
-    h.wayland_capture_scale(144) == 1.5))(make_handler(False)))
+def realize(handler, dpi, index=0):
+    return asyncio.run(handler.realize_wayland_dpi(dpi, index))
 
-os.environ["SELKIES_APP_X_DISPLAY"] = "7"
-check("display override wins discovery",
-      display_utils._wayland_session_display() == ":7")
-os.environ["SELKIES_APP_X_DISPLAY"] = ":12"
-check("display override keeps an explicit colon form",
-      display_utils._wayland_session_display() == ":12")
-del os.environ["SELKIES_APP_X_DISPLAY"]
+
+nested = make_handler(True)
+check("a nested session takes the scale on its own screen",
+      realize(nested, 192) == 1.0
+      and nested.wayland_input.calls == [("wayland-9", 0, 2.0)])
+second = make_handler(True)
+realize(second, 144, 1)
+check("a second display scales the session's second screen",
+      second.wayland_input.calls == [("wayland-9", 1, 1.5)])
+check("a session that manages no outputs keeps the capture scale",
+      realize(make_handler(True, answer=False), 192) == 2.0)
+check("a refused configuration keeps the capture scale",
+      realize(make_handler(True, answer=RuntimeError("refused")), 192) == 2.0)
+check("no nested session leaves the scale on the capture output",
+      realize(make_handler(False), 192) == 2.0)
+check("scale floor guards degenerate DPI",
+      realize(make_handler(False), 0) == 0.1)
 
 if not shutil.which("Xvfb") or not shutil.which("xrdb"):
     print("SKIP Xvfb/xrdb not installed; resource-merge checks need an X server",
@@ -85,26 +104,18 @@ try:
                              capture_output=True, text=True).stdout
         return dict(line.split(":\t") for line in out.splitlines() if ":\t" in line)
 
+    os.environ["DISPLAY"] = DISP
     display_utils._is_wayland = lambda: True
-    ok = asyncio.run(display_utils.set_dpi(192, x_display=DISP))
-    check("wayland set_dpi merges Xft.dpi into the session display",
-          ok and query().get("Xft.dpi") == "192", query().get("Xft.dpi"))
-    check("xsettingsd config follows the merge",
-          "Xft/DPI 196608" in open(os.path.join(home, ".xsettingsd")).read())
-
-    ok = asyncio.run(display_utils.set_dpi(96, x_display=DISP))
-    check("wayland set_dpi retargets on change",
-          ok and query().get("Xft.dpi") == "96", query().get("Xft.dpi"))
-
-    display_utils._wayland_session_display = lambda: None
-    check("no session display reports failure, not success",
-          asyncio.run(display_utils.set_dpi(120)) is False)
+    check("wayland set_dpi merges nothing: the scale ladder owns the DPI",
+          asyncio.run(display_utils.set_dpi(192)) is False
+          and "Xft.dpi" not in query(), query().get("Xft.dpi"))
 
     display_utils._is_wayland = lambda: False
-    os.environ["DISPLAY"] = DISP
     ok = asyncio.run(display_utils.set_dpi(144))
     check("x11 backend path still merges through the DE ladder",
           ok and query().get("Xft.dpi") == "144", query().get("Xft.dpi"))
+    check("xsettingsd config follows the merge",
+          "Xft/DPI 147456" in open(os.path.join(home, ".xsettingsd")).read())
 finally:
     xvfb.terminate()
     xvfb.wait()

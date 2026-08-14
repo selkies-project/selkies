@@ -33,8 +33,14 @@ the data-control clipboard paste; on X11 in-process XTEST before an xdotool fork
 rather than latching into a fallback. Under a NESTED app compositor the seat rung only carries keysyms the base
 layout resolves — the seat overlay never survives the inner compositor's own keymap — so the keyboard worker routes
 character-bearing keysyms the base lacks (Cyrillic/Arabic/legacy planes, the Unicode plane) onto the
-virtual-keyboard text batch by classification, not by failure. The Wayland path is subprocess-free by design — never
-reintroduce wtype, wl-copy or similar forks where the in-process pixelflux harness exists.
+virtual-keyboard text batch by classification, not by failure. Which socket that batch and the selection are aimed at
+is auto-detected: the compositor is the live `wayland-<N>` socket beside the capture compositor's, never a
+differently named relay a session listens on, and aiming at the capture compositor instead is what silently kills
+every non-ASCII key. A DPI is an output scale on that same compositor (wlr-output-management, in-process), never Xft
+resources: XWayland runs in its logical space and is scaled with it, and scaling the CAPTURE output instead shrinks
+the session and upscales it. Only what that compositor leaves — a KWin session, or no session at all — becomes the
+capture scale, and only a changed capture scale restarts a capture. The Wayland path is subprocess-free by design — never reintroduce wtype, wl-copy or similar
+forks where the in-process pixelflux harness exists.
 A defect that predates the change you are making is still in scope: finding it does not make it someone else's,
 and "pre-existing" is not a reason to leave it. Fix it, or say precisely what is broken, what you ruled out, and
 what you would do next. The same applies to a failure you cannot reproduce yet -- narrow it until it is either

@@ -13,8 +13,8 @@
 # Reference minimal example container for Selkies.
 #
 #   - LXQt desktop on X11 (Xvfb, Openbox) by default; the same desktop on the
-#     headless Wayland backend with SELKIES_WAYLAND=true, where a nested sway
-#     supplies window management and XWayland
+#     headless Wayland backend with SELKIES_WAYLAND=true, where a nested labwc
+#     supplies window management, decorations and XWayland
 #   - s6 service supervision, running as PID 1 or below a foreign init
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) built
 #     in-tree and wired with LD_PRELOAD
@@ -23,15 +23,18 @@
 #   - Selkies installed with pip: from wheels dropped into `wheels/`, or from
 #     PyPI (latest release) when `wheels/` is empty
 #
-# Supported bases: Ubuntu 24.04 / 26.04, Debian Bookworm / Trixie and later
-# (select with --build-arg DISTRIB_IMAGE=ubuntu|debian DISTRIB_RELEASE=24.04|26.04|bookworm|trixie)
+# Supported bases: Ubuntu 26.04 and Debian Trixie, and later releases of both
+# (select with --build-arg DISTRIB_IMAGE=ubuntu|debian DISTRIB_RELEASE=26.04|trixie).
+# Both carry LXQt 2.1 or newer, which anchors its panel and desktop through
+# wlr-layer-shell: the Wayland session then runs natively, with none of the
+# XWayland detour older releases need.
 
 ARG DISTRIB_IMAGE=ubuntu
-ARG DISTRIB_RELEASE=24.04
+ARG DISTRIB_RELEASE=26.04
 ARG PYPI_PACKAGE=selkies
 # Xvfb with DRI3 (https://github.com/linuxserver/docker-xvfb): the distribution
 # server has none, so GL clients render in software even with a GPU present.
-# Built on the oldest base this image supports, whose glibc the newer ones
+# Built against an older glibc than either base carries, which they both
 # satisfy; override to match a different base or to opt out.
 ARG XVFB_IMAGE=lscr.io/linuxserver/xvfb:debianbookworm
 
@@ -70,7 +73,7 @@ FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
 LABEL org.opencontainers.image.title="Selkies Example Container"
-LABEL org.opencontainers.image.description="Reference minimal Selkies container: LXQt on X11 by default, the same desktop on headless Wayland with SELKIES_WAYLAND=true, s6 service supervision, embedded coTURN"
+LABEL org.opencontainers.image.description="Reference minimal Selkies container: LXQt on X11 by default, the same desktop on headless Wayland (labwc) with SELKIES_WAYLAND=true, s6 service supervision, embedded coTURN"
 LABEL org.opencontainers.image.source="https://github.com/selkies-project/selkies"
 LABEL org.opencontainers.image.licenses="MPL-2.0"
 
@@ -83,7 +86,12 @@ ARG PYPI_PACKAGE
 # losing the whole run. apt is configured once here so each of its later
 # invocations inherits it; curl and pip carry their own flags at each call.
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
-        > /etc/apt/apt.conf.d/99-selkies-retries
+        > /etc/apt/apt.conf.d/99-selkies-retries && \
+    # nvtop sits in Debian's contrib component, which its base image leaves off;
+    # Ubuntu ships it in universe, which is already enabled there.
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's/^Components: .*/& contrib/' /etc/apt/sources.list.d/debian.sources; \
+    fi
 
 ARG DEBIAN_FRONTEND=noninteractive
 # Configure rootless user environment for constrained conditions without escalated root privileges inside containers
@@ -232,7 +240,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         mesa-vdpau-drivers \
         libvdpau-va-gl1 \
         vulkan-tools \
+        # Per-vendor GPU monitors; nvtop sits in Debian's contrib, enabled above
         radeontop \
+        nvtop \
         # Fonts: DejaVu/Liberation for Latin, Noto for worldwide script and emoji coverage
         fonts-dejavu-core \
         fonts-liberation \
@@ -243,63 +253,36 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         python3 \
         python3-pip \
         coturn \
-        ssl-cert && \
+        ssl-cert \
+        # Session compositor for the Wayland backend: labwc, which draws
+        # server-side titlebars with the iconify/maximize/close buttons a desktop
+        # session is expected to have and performs the maximize and minimize
+        # requests a Wayland taskbar sends over wlr-foreign-toplevel. Its screen
+        # count is fixed at startup, which is what the wayland service and
+        # Selkies' spare-screen hold are built around. Not wayfire: it demands a
+        # DRM file descriptor the nested Wayland backend has none of without a GPU
+        labwc \
+        # What the LXQt session needs to draw on Wayland: the Qt platform plugin
+        # with its xdg-shell integration, and LayerShellQt, which is what anchors
+        # the panel and the desktop to their edges. Without the latter both are
+        # surfaces with nothing to anchor to and paint nothing at all
+        qt6-wayland \
+        layer-shell-qt \
+        # The session's own portal backend, which answers the file-chooser and
+        # screen-share requests toolkits make of a desktop
+        xdg-desktop-portal-lxqt \
+        # Application menu definitions for the panel and the file manager, which
+        # lxqt-panel recommends rather than depends on: without them the session's
+        # application menus are empty
+        lxqt-menu-data \
+        # Qt 6 splits SVG rendering into qt6-svg-plugins with nothing depending on
+        # it. Without the SVG icon engine every scalable icon in the session — menu
+        # entries, the panel's menu button, tray icons — is silently blank
+        qt6-svg-plugins && \
     # The Intel media stack exists for amd64 alone
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install --no-install-recommends -y \
             intel-media-va-driver intel-gpu-tools; \
-    fi && \
-    # Session compositor for the Wayland backend. sway, because `create_output`
-    # lets the session gain and lose a screen while it runs, which is what a second
-    # display appearing on demand needs. sway-backgrounds supplies the wallpaper the
-    # packaged config names, whose absence is a parse error that greets every session
-    # with sway's error dialog. Not wayfire: it demands a DRM file descriptor the
-    # nested Wayland backend has none of without a GPU.
-    apt-get install --no-install-recommends -y sway sway-backgrounds && \
-    # wayland-info reads how many outputs the capture compositor drives, which is what
-    # tells the session compositor whether the spare screen belongs in the layout.
-    apt-get install --no-install-recommends -y wayland-utils && \
-    # The session's own portal backend, which answers the file-chooser and
-    # screen-share requests toolkits make of a desktop. Debian Bookworm predates
-    # it, and a session without a portal still runs.
-    { apt-get install --no-install-recommends -y xdg-desktop-portal-lxqt || true; } && \
-    # Application menu definitions for the panel and the file manager. Newer
-    # lxqt-panel packaging recommends rather than depends on them, and a session
-    # without them shows empty application menus. Debian Bookworm predates the
-    # package; its panel still pulls the menu definitions in through lxmenu-data.
-    { apt-get install --no-install-recommends -y lxqt-menu-data || true; } && \
-    # Qt loads SVG rendering through plugins that Qt 5 ships inside libqt5svg5,
-    # a panel dependency, but Qt 6 splits into qt6-svg-plugins with nothing
-    # depending on it. Without the SVG icon engine every scalable icon in the
-    # session — menu entries, the panel's menu button, tray icons — is
-    # silently blank.
-    { apt-get install --no-install-recommends -y qt6-svg-plugins || true; } && \
-    # The LXQt Wayland session, where the distribution packages it (LXQt 2.1+).
-    # The Qt platform plugin is installed only alongside it, never on its own:
-    # without layer-shell behind it, Qt picking Wayland gives a session whose
-    # panel and desktop are surfaces with nothing to anchor to, and which
-    # therefore paint nothing at all. The service reads the same pair back to
-    # decide which session to run.
-    if apt-get install --no-install-recommends -y lxqt-wayland-session; then \
-        apt-get install --no-install-recommends -y qt6-wayland || \
-        apt-get install --no-install-recommends -y qtwayland5 || true; \
-    # The session package can be missing for release timing alone while the
-    # components themselves are built against layer-shell — the LayerShellQt
-    # client library they link is the capability signal then. layer-shell-qt
-    # rides along for its shell-integration plugin, which the library package
-    # does not carry.
-    elif ls /usr/lib/*/libLayerShellQtInterface.so* >/dev/null 2>&1; then \
-        apt-get install --no-install-recommends -y qt6-wayland layer-shell-qt || true; \
-    fi && \
-    # Ubuntu carries nvtop in universe, which is enabled; Debian puts it in
-    # contrib, which is not, so that component is added on the second attempt
-    if ! apt-get install --no-install-recommends -y nvtop; then \
-        if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-            sed -i 's/^Components: .*/& contrib/' /etc/apt/sources.list.d/debian.sources; \
-        elif [ -f /etc/apt/sources.list ]; then \
-            sed -i 's/ main/ main contrib/g' /etc/apt/sources.list; \
-        fi && \
-        apt-get update && apt-get install --no-install-recommends -y nvtop; \
     fi && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
@@ -360,24 +343,19 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 ENV __GL_SYNC_TO_VBLANK=0
 
-# Install Firefox from Mozilla's official APT repository, which serves real .deb
-# builds on both Debian and Ubuntu and takes priority over any
-# distribution-provided Firefox packages
+# The browsers, in one apt operation: Firefox from Mozilla's own APT repository,
+# which serves real .deb builds on both bases and is pinned over the
+# distribution package, and Google Chrome as a downloaded .deb for the
+# H.264/AV1 media stack the distribution Chromium builds do not carry. Chrome's
+# launcher is switched to the basic password store because the container runs no
+# keyring daemon to unlock, and it otherwise blocks on a prompt nobody can answer.
 RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d && \
     curl -o /etc/apt/keyrings/packages.mozilla.org.asc -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://packages.mozilla.org/apt/repo-signing-key.gpg" && \
     printf 'Types: deb\nURIs: https://packages.mozilla.org/apt\nSuites: mozilla\nComponents: main\nSigned-By: /etc/apt/keyrings/packages.mozilla.org.asc\n' > /etc/apt/sources.list.d/mozilla.sources && \
     printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla && \
-    apt-get clean && apt-get update && apt-get install --no-install-recommends -y firefox && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-
-# Google Chrome, for the H.264/AV1 media stack the Chromium builds in the
-# distribution registries do not carry. The launcher is switched to the basic
-# password store because the container runs no keyring daemon to unlock, and
-# Chrome otherwise blocks on a prompt nobody can answer.
-RUN cd /tmp && \
-    curl -o google-chrome-stable.deb -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb" && \
-    apt-get update && apt-get install --no-install-recommends -y ./google-chrome-stable.deb && \
-    rm -f google-chrome-stable.deb && \
+    curl -o /tmp/google-chrome-stable.deb -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb" && \
+    apt-get clean && apt-get update && \
+    apt-get install --no-install-recommends -y firefox /tmp/google-chrome-stable.deb && \
     sed -i '/^Exec=/ s/$/ --password-store=basic/' /usr/share/applications/google-chrome.desktop && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
@@ -407,9 +385,10 @@ COPY --from=xvfb / /
 # Install the joystick interposer and fake-udev libraries (container-only)
 COPY --from=add-ons /opt/add-ons/lib/ /usr/lib/
 
-# Makes the sway session look like the Openbox one: floating windows, no bar of
-# its own, and XWayland for the X11-only applications
-COPY --chown=1000:1000 addons/example/sway.conf /etc/sway/config.d/99-selkies.conf
+# Makes the session look like the Openbox one: floating windows with their usual
+# titlebar buttons, no bar of the compositor's own, and XWayland for the X11-only
+# applications
+COPY --chown=1000:1000 addons/example/labwc-rc.xml /etc/xdg/labwc/rc.xml
 
 # Copy the startup scripts and s6 service definitions (same /etc/service/<svc>/run layout as runit, supervised by s6-supervise)
 COPY --chown=1000:1000 addons/example/container-entrypoint.sh /etc/container-entrypoint.sh
@@ -443,12 +422,13 @@ ENV DBUS_SYSTEM_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/dbus-system-bus"
 # not baked as an ENV: in the resolution order every reader follows, a set
 # SELKIES_WAYLAND would shadow the legacy spelling for good.
 # Session compositor nested inside the Wayland capture compositor: empty picks
-# the installed one, "none" leaves applications on the capture compositor with
-# no window management and no XWayland
+# labwc, "none" leaves applications on the capture compositor with no window
+# management and no XWayland, and any other name runs that compositor as it is
+# installed
 ENV SELKIES_WAYLAND_COMPOSITOR=""
-# Screens the nested compositor opens at startup. Empty is on demand: the session
-# gains a screen when a second display's client connects and loses it when that
-# client leaves. Setting this opens that many outright instead.
+# Screens the nested compositor opens at startup, which is as many as it will
+# ever have. Empty opens the two Selkies can show; the second is held small
+# until a client connects for it.
 ENV SELKIES_WAYLAND_OUTPUTS=""
 # Run X11 instead when a GPU is present but the Wayland compositor cannot reach
 # it, so the session keeps hardware acceleration. Without a GPU both backends

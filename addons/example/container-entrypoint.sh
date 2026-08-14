@@ -14,13 +14,9 @@
 
 set -e
 
-# A configured value's truth, read exactly as selkies.settings.parse_bool reads it:
-# "true" or "1", case-insensitively, ahead of any "|locked" suffix. Environment
-# variables carry whatever case the operator typed, and a stricter reading here would
-# configure the container one way and the server it starts another.
 # A configured value as settings.py reads one: the field before any |suffix,
-# trimmed of surrounding whitespace. Every reader has to agree on this rule
-# or the same deployment is configured two ways at once.
+# trimmed of surrounding whitespace. Every reader has to agree on this rule or
+# the same deployment is configured two ways at once.
 setting_value() {
   local value="${1%%|*}"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -90,14 +86,6 @@ if [ -n "${SELKIES_MODE}" ]; then
   export SELKIES_MODE
 fi
 
-# Which LXQt session the lxqt service runs on the Wayland backend: auto
-# prefers the native Wayland session where the components can anchor
-# themselves, x11 forces the XWayland one. Resolved like the backend switch,
-# SELKIES_ spelling first, a set-but-blank value neutralizing to the default.
-SELKIES_LXQT_SESSION="$(setting_value "${SELKIES_LXQT_SESSION-${PIXELFLUX_LXQT_SESSION-}}")"
-SELKIES_LXQT_SESSION="${SELKIES_LXQT_SESSION,,}"
-export SELKIES_LXQT_SESSION="${SELKIES_LXQT_SESSION:-auto}"
-
 # Hardware OpenGL. On NVIDIA, Zink routes GL through the Vulkan driver; other
 # vendors reach the GPU through the display server's render node instead (see
 # services/xvfb/run). Both signals are required: the device nodes prove a GPU was
@@ -139,12 +127,10 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
   SELKIES_WAYLAND_COMPOSITOR="$(setting_value "${SELKIES_WAYLAND_COMPOSITOR-}")"
   SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR,,}"
   if [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
-    # sway, whose `create_output` is what lets a second display appear and leave
-    # while the session runs. Another compositor can be named, but only sway
-    # tracks the capture outputs.
-    for wm in sway; do
-      command -v "${wm}" >/dev/null 2>&1 && SELKIES_WAYLAND_COMPOSITOR="${wm}" && break
-    done
+    # labwc: it decorates windows the way a desktop session does and performs
+    # the maximize and minimize requests a Wayland taskbar sends. Another
+    # compositor can be named, and is then run as it is installed.
+    command -v labwc >/dev/null 2>&1 && SELKIES_WAYLAND_COMPOSITOR=labwc
   elif [ "${SELKIES_WAYLAND_COMPOSITOR}" != "none" ] && ! command -v "${SELKIES_WAYLAND_COMPOSITOR}" >/dev/null 2>&1; then
     echo "SELKIES_WAYLAND_COMPOSITOR=${SELKIES_WAYLAND_COMPOSITOR} is not installed; applications stay on the capture compositor"
     SELKIES_WAYLAND_COMPOSITOR=none
@@ -237,14 +223,10 @@ done > "${ENV_FILE}"
 # again keeps its filesystem: a service removed here would be gone from the image copy
 # for good, and no later change of SELKIES_WAYLAND or of which compositors are installed
 # could bring it back.
-write_service_flag() {
-  { : > "/etc/service/$1/down"; } 2>/dev/null ||
-    sudo-root sh -c ": > '/etc/service/$1/down'" 2>/dev/null || true
-}
-
 drop_service() {
   [ -d "/etc/service/$1" ] || return 0
-  write_service_flag "$1"
+  { : > "/etc/service/$1/down"; } 2>/dev/null ||
+    sudo-root sh -c ": > '/etc/service/$1/down'" 2>/dev/null || true
 }
 
 for service in /etc/service/*/; do

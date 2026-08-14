@@ -34,6 +34,7 @@ from .display_utils import (
     current_wm_name,
     wait_for_wm,
     wayland_output_id,
+    session_screen_index,
     wayland_reposition_primary,
     grow_framebuffer,
     set_dpi,
@@ -2507,19 +2508,18 @@ class DataStreamingServer(BaseStreamingService):
                     new_dpi = old_settings.get("scaling_dpi")
                 if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
                     data_logger.info(f"DPI changed from {old_settings.get('scaling_dpi')} to {new_dpi}. Applying system-level change.")
-                    await set_dpi(new_dpi)
-                    if CURSOR_SIZE is not None and not IS_WAYLAND:
-                        new_cursor_size = cursor_size_for_dpi(new_dpi, CURSOR_SIZE)
-                        await set_cursor_size(new_cursor_size)
+                    if not IS_WAYLAND:
+                        await set_dpi(new_dpi)
+                        if CURSOR_SIZE is not None:
+                            new_cursor_size = cursor_size_for_dpi(new_dpi, CURSOR_SIZE)
+                            await set_cursor_size(new_cursor_size)
                     if IS_WAYLAND:
-                        # DPI realizes as the pixelflux compositor output scale
-                        # only while pixelflux renders the applications itself;
-                        # under a nested session compositor set_dpi has already
-                        # carried it into the session as Xft resources and the
-                        # output keeps its full logical size. The capture
-                        # restart below (scaling_dpi restart trigger) reads it.
+                        # The session compositor takes the scale on its own
+                        # output; only what it leaves becomes the capture scale,
+                        # which the restart below (the 'scale' trigger) reads.
                         display_state['scale'] = (
-                            self.input_handler.wayland_capture_scale(new_dpi)
+                            await self.input_handler.realize_wayland_dpi(
+                                new_dpi, session_screen_index(display_id))
                             if self.input_handler else float(new_dpi) / 96.0)
                         self._update_wayland_cursor_cap(new_dpi)
                         await self._apply_wayland_cursor_size(new_dpi)
@@ -2533,7 +2533,7 @@ class DataStreamingServer(BaseStreamingService):
                     'video_paintover_burst_frames', 'use_paint_over_quality', 'rate_control_mode', 'video_bitrate'
                 ]
                 if IS_WAYLAND:
-                    video_params_list.append('scaling_dpi')
+                    video_params_list.append('scale')
 
                 video_params_changed = any(
                     display_state.get(key) != old_settings.get(key)
@@ -2555,9 +2555,10 @@ class DataStreamingServer(BaseStreamingService):
                     # per-frame tunables apply to the live capture with no restart.
                     restart_video_params = ['encoder', 'use_cpu', 'video_fullcolor', 'rate_control_mode']
                     if IS_WAYLAND:
-                        # A compositor scale change reconfigures the output; the
-                        # live-tunables path cannot apply it.
-                        restart_video_params.append('scaling_dpi')
+                        # A capture scale change reconfigures the output; the
+                        # live-tunables path cannot apply it. A DPI the session
+                        # compositor absorbed leaves this untouched.
+                        restart_video_params.append('scale')
                     video_restart_needed = any(
                         display_state.get(k) != old_settings.get(k) for k in restart_video_params
                     )
@@ -3215,11 +3216,21 @@ class DataStreamingServer(BaseStreamingService):
                                      # read the first SETTINGS as a DPI change and
                                      # re-apply xrdb, cursor size, and Wayland scale.
                                      'scaling_dpi': str(int(float(getattr(app_settings, "scaling_dpi", "96") or 96))),
-                                     # Seed from the configured DPI so a Wayland
-                                     # first load captures at the intended scale
-                                     # before any client DPI sync arrives.
-                                     'scale': float(getattr(app_settings, "scaling_dpi", "96") or 96) / 96.0,
+                                     # Replaced below by what the scale ladder
+                                     # leaves for this display; the X11 capture
+                                     # has no scale field.
+                                     'scale': 1.0,
                                 }
+                                if IS_WAYLAND and self.input_handler is not None:
+                                    # Nothing has scaled this display's screen
+                                    # yet: run the ladder from the configured DPI
+                                    # so the session compositor scales the screen
+                                    # backing it and the first capture starts at
+                                    # the intended scale, before any client sync.
+                                    self.display_clients[display_id]['scale'] = (
+                                        await self.input_handler.realize_wayland_dpi(
+                                            getattr(app_settings, "scaling_dpi", "96") or 96,
+                                            session_screen_index(display_id)))
                             else:
                                 data_logger.info(f"Client is taking over existing display '{display_id}'. Updating state for new connection.")
                                 display_state = self.display_clients[display_id]
@@ -3662,32 +3673,33 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
                                 continue
 
-                            scale_val = float(dpi_value) / 96.0
+                            data_logger.info(f"Received DPI setting from client: {dpi_value}")
 
-                            data_logger.info(f"Received DPI setting from client: {dpi_value} (Scale: {scale_val})")
-
-                            if await set_dpi(dpi_value):
-                                data_logger.info(f"Successfully set DPI to {dpi_value}")
-                            else:
-                                data_logger.error(f"Failed to set DPI to {dpi_value}")
+                            if not IS_WAYLAND:
+                                if await set_dpi(dpi_value):
+                                    data_logger.info(f"Successfully set DPI to {dpi_value}")
+                                else:
+                                    data_logger.error(f"Failed to set DPI to {dpi_value}")
 
                             if IS_WAYLAND and client_display_id:
-                                # DPI realizes as the pixelflux compositor output
-                                # scale, always (WebRTC-mode parity): thread it into
-                                # display state and restart the capture so the
-                                # compositor reconfigures its output. (No kwin /
-                                # wlr-randr detection: pixelflux owns the session
-                                # and implements no wlr-output-management, so no
-                                # external tool can apply the scale.)
-                                if client_display_id in self.display_clients:
-                                    self.display_clients[client_display_id]['scale'] = scale_val
+                                # A nested session scales its own screen and the
+                                # capture keeps 1.0; a plain pixelflux session
+                                # takes the scale on the capture output, which
+                                # only a restart re-reads.
+                                scale_val = await self.input_handler.realize_wayland_dpi(
+                                    dpi_value, session_screen_index(client_display_id))
+                                entry = self.display_clients.get(client_display_id)
+                                capture_scale_changed = (
+                                    entry is not None and entry.get('scale') != scale_val)
+                                if entry is not None:
+                                    entry['scale'] = scale_val
                                 self._update_wayland_cursor_cap(dpi_value)
                                 # A STOP_VIDEO'd display must stay stopped: only its
                                 # stored scale updates; the restart applies at the
                                 # next START_VIDEO.
                                 video_active = self.display_clients.get(client_display_id, {}).get('video_active', True)
-                                if video_active:
-                                    data_logger.info(f"Wayland: restarting stream with scale {scale_val} for {client_display_id}")
+                                if video_active and capture_scale_changed:
+                                    data_logger.info(f"Wayland: restarting capture at scale {scale_val} for {client_display_id}")
                                     await self._stop_capture_for_display(client_display_id)
                                     if hasattr(self, 'display_layouts') and client_display_id in self.display_layouts:
                                         layout = self.display_layouts[client_display_id]
@@ -5062,11 +5074,16 @@ class DataStreamingServer(BaseStreamingService):
             )
 
         # Apply the configured desktop DPI at startup so the first session sees
-        # it even before any client syncs its own (96 is the X default — skip
-        # the xrdb churn when nothing diverges).
+        # it even before any client syncs its own (96 is unity — skip the churn
+        # when nothing diverges). On Wayland that hands the session compositor
+        # its output scale, which a later capture start reads back.
         startup_dpi = int(float(getattr(settings, "scaling_dpi", "96") or 96))
-        if not IS_WAYLAND and startup_dpi != 96:
-            await set_dpi(startup_dpi)
+        if startup_dpi != 96:
+            if IS_WAYLAND:
+                if self.input_handler is not None:
+                    await self.input_handler.realize_wayland_dpi(startup_dpi)
+            else:
+                await set_dpi(startup_dpi)
 
         # Apply an explicit --cursor-size to the X server at startup (the DPI-change
         # handlers re-derive it on later changes); the Wayland compositor gets its

@@ -4,6 +4,7 @@ and the X11 and Wayland observation used to prove that input arrived."""
 import json
 import os
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -33,10 +34,71 @@ LOG = os.path.join(WORKDIR, "selkies-server.log")
 PIDFILE = os.path.join(WORKDIR, "selkies-server.pid")
 
 
-# pgrep/pkill pattern for the server under test. Bracketed so the harness's own
-# command line, which carries this string verbatim, never matches itself, and
-# interpreter-agnostic so a python3.12 or a venv python is caught too.
-SERVER_PATTERN = "[p]ython[0-9.]* -m selkies"
+def _cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _listener_pids(port):
+    """PIDs listening on `port`, read from /proc so no iproute2 is needed."""
+    inodes = set()
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as f:
+                lines = f.read().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != "0A":  # TCP_LISTEN
+                continue
+            try:
+                if int(fields[1].rsplit(":", 1)[1], 16) == port:
+                    inodes.add(fields[9])
+            except (IndexError, ValueError):
+                continue
+    if not inodes:
+        return set()
+    pids = set()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        fddir = f"/proc/{entry}/fd"
+        try:
+            for fd in os.listdir(fddir):
+                try:
+                    target = os.readlink(os.path.join(fddir, fd))
+                except OSError:
+                    continue
+                if target.startswith("socket:[") and target[8:-1] in inodes:
+                    pids.add(int(entry))
+                    break
+        except OSError:
+            continue
+    return pids
+
+
+def server_pids(port=PORT):
+    """The servers this harness is responsible for: the one it started, plus
+    whatever selkies is listening on the test port (a previous run that died
+    without cleaning up). Deliberately not every `python -m selkies` on the
+    machine — a real session streaming the host's own desktop is not the
+    harness's to kill, and sweeping by name has ended one."""
+    pids = set()
+    try:
+        with open(PIDFILE) as f:
+            recorded = int(f.read().strip())
+        if "selkies" in _cmdline(recorded):
+            pids.add(recorded)
+    except (OSError, ValueError):
+        pass
+    for pid in _listener_pids(port):
+        if "selkies" in _cmdline(pid):
+            pids.add(pid)
+    return pids
 
 
 def pulse_setup():
@@ -105,24 +167,30 @@ def server_start(mode="websockets", wayland=False, web_root=CORE_DIST,
         raise
     except Exception:
         pass
-    subprocess.run(["pkill", "-f", SERVER_PATTERN], capture_output=True)
+    server_stop(port=port)
     raise RuntimeError(f"selkies did not come up in time; see {log}")
 
 
-def server_stop():
-    """Fully stop any selkies server (two zombies must never share the port)."""
-    subprocess.run(["pkill", "-f", SERVER_PATTERN], capture_output=True)
+def _signal(pids, sig):
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
+def server_stop(port=PORT):
+    """Fully stop the server under test (two zombies must never share the port)."""
+    _signal(server_pids(port), signal.SIGTERM)
     deadline = time.time() + 10
     while time.time() < deadline:
-        r = subprocess.run(["pgrep", "-f", SERVER_PATTERN], capture_output=True)
-        if r.returncode != 0:
+        if not server_pids(port):
             return
         time.sleep(0.3)
-    subprocess.run(["pkill", "-9", "-f", SERVER_PATTERN], capture_output=True)
+    _signal(server_pids(port), signal.SIGKILL)
     deadline = time.time() + 8
     while time.time() < deadline:
-        r = subprocess.run(["pgrep", "-f", SERVER_PATTERN], capture_output=True)
-        if r.returncode != 0:
+        if not server_pids(port):
             return
         time.sleep(0.3)
     raise RuntimeError("server_stop: a selkies process survived SIGKILL")

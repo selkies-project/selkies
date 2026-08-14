@@ -41,8 +41,6 @@ if /usr/bin/Xvfb -help 2>&1 | grep -q 'vfbdevice'; then
   fi
 fi
 
-# Screen saver (-s 0) and DPMS (-dpms) are disabled at the server level so the
-# framebuffer can never go blank: capturing a black stream is never desirable,
 # A server that died leaves its lock and socket behind, and the replacement then
 # starts against a display number that still looks taken.
 DISPLAY_NUM="${DISPLAY#:}"
@@ -51,7 +49,9 @@ if [ -n "${DISPLAY_NUM}" ] && ! pgrep -f "Xvfb ${DISPLAY}( |$)" >/dev/null 2>&1;
     rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 fi
 
-# and no lock-screen component is installed in this image anyway
+# Screen saver (-s 0) and DPMS (-dpms) are off at the server level so the
+# framebuffer can never blank: a black stream is never what a viewer wants, and
+# nothing in this image unblanks one.
 # shellcheck disable=SC2086  # VFB_DEVICE is an option pair or empty
 /usr/bin/Xvfb "${DISPLAY}" -screen 0 "8192x4096x24" +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem -s 0 -dpms ${VFB_DEVICE} &
 XVFB_PID=$!

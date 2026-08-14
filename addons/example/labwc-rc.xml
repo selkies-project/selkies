@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<!--
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+  Session compositor settings, installed as /etc/xdg/labwc/rc.xml, which labwc
+  reads when the user has no rc.xml of their own.
+
+  The desktop behaves as it does on X11 under Openbox: every window floats with
+  a titlebar carrying the window menu, iconify, maximize and close, and X11-only
+  applications keep working through XWayland. LXQt draws the desktop and panel
+  itself, anchored through wlr-layer-shell, so labwc contributes no wallpaper or
+  bar of its own.
+-->
+<labwc_config>
+  <core>
+    <!-- Server-side decorations for every client that leaves the choice to the
+         compositor: a session where some windows carry buttons and others
+         carry none is the one thing a desktop must not look like. Clients that
+         draw their own (GTK) are unaffected — they never ask. -->
+    <decoration>server</decoration>
+    <!-- Keep the XWayland server up across the last X11 window closing, so the
+         next one starts against a server that is already there. -->
+    <xwaylandPersistence>yes</xwaylandPersistence>
+  </core>
+  <theme>
+    <titlebar>
+      <layout>icon:iconify,max,close</layout>
+    </titlebar>
+  </theme>
+  <!-- A new window lands beside the last rather than on top of it, which is
+       what Openbox does and what makes two terminals usable at once. -->
+  <placement>
+    <policy>cascade</policy>
+  </placement>
+</labwc_config>
