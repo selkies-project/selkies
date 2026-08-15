@@ -23,6 +23,15 @@ fi
 # its listening sockets without ever accepting, so clients hang instead of
 # failing. The session keeps its own Zink settings; only this process drops them.
 unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
+# The server's GLX initialisation probes EGL through GLVND. On NVIDIA-injected
+# runtimes (the container toolkit mounts the vendor libraries) that resolves to
+# libnvidia-egl-gbm, whose probing crashes this server outright. Pin the vendor
+# file to Mesa's: the framebuffer renders with the software stack here by design
+# (see the DRI3 note below), and the session's own EGL selection is untouched.
+MESA_EGL_VENDOR=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+if ls /dev/nvidia* >/dev/null 2>&1 && [ -f "${MESA_EGL_VENDOR}" ]; then
+  export __EGL_VENDOR_LIBRARY_FILENAMES="${MESA_EGL_VENDOR}"
+fi
 # DRI3: rendering through a DRM node is what gives GL clients the GPU, and only
 # the patched server in this image accepts -vfbdevice. The node is the one
 # Selkies renders on (--render-dri), so the X11 backend and the Wayland

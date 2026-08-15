@@ -359,6 +359,29 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
     sed -i '/^Exec=/ s/$/ --password-store=basic/' /usr/share/applications/google-chrome.desktop && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
+# Titlebar buttons for applications that draw their own client-side decoration.
+# The session runs no GNOME settings layer, so the compiled-in default applies
+# and it hides minimize and maximize: GNOME's button-layout default is
+# appmenu:close, which Firefox and other client-decorated GTK applications
+# adopt verbatim for their titlebars. The override changes just the default, so
+# a user's explicit settings still win.
+# glib-compile-schemas fails the whole build below when the overridden schema is
+# not on the base system, so its package is installed when nothing pulled it in.
+RUN set -eu; \
+    if [ ! -f /usr/share/glib-2.0/schemas/org.gnome.desktop.wm.preferences.gschema.xml ]; then \
+        apt-get update && apt-get install --no-install-recommends -y gsettings-desktop-schemas && \
+        apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*; \
+    fi; \
+    printf "[org.gnome.desktop.wm.preferences]\nbutton-layout=':minimize,maximize,close'\n" \
+        > /usr/share/glib-2.0/schemas/selkies-decoration.gschema.override && \
+    glib-compile-schemas /usr/share/glib-2.0/schemas/ && \
+    if [ -f /etc/gtk-3.0/settings.ini ] && grep -q '^\[Settings\]' /etc/gtk-3.0/settings.ini; then \
+        sed -i '/^\[Settings\]/a gtk-decoration-layout=minimize,maximize,close' /etc/gtk-3.0/settings.ini; \
+    else \
+        mkdir -pm755 /etc/gtk-3.0 && \
+        printf '[Settings]\ngtk-decoration-layout=minimize,maximize,close\n' > /etc/gtk-3.0/settings.ini; \
+    fi
+
 # Install Selkies with pip: from the wheels dropped into `wheels/`, or the
 # latest PyPI release when `wheels/` is empty. When fresh pixelflux/pcmflux
 # wheels (built from the main HEAD of selkies-project/pixelflux and
