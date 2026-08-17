@@ -2246,7 +2246,10 @@ document.addEventListener('DOMContentLoaded', () => {
     window.location.pathname.lastIndexOf('/') + 1
   );
 
-  window.addEventListener('focus', async () => {
+  // Read the local clipboard and forward it to the remote session. Runs on window
+  // focus (all browsers) and, for non-Chromium engines, on a real Ctrl/Cmd+V
+  // keydown as well -- see the keydown listener below for why.
+  async function readLocalClipboardAndSend() {
     if (isSharedMode || !window.clipboard_enabled || !clipboard_in_enabled) return;
 
     if (!enable_binary_clipboard) {
@@ -2255,11 +2258,11 @@ document.addEventListener('DOMContentLoaded', () => {
         .then((text) => {
           if (!text) return;
           sendClipboardData(text);
-          console.log("Sent clipboard text on focus via sendClipboardData");
+          console.log("Sent clipboard text via sendClipboardData");
         })
         .catch((err) => {
           if (err.name !== 'NotFoundError' && !err.message.includes('not focused')) {
-             console.warn(`Could not read text clipboard on focus: ${err.name} - ${err.message}`);
+             console.warn(`Could not read text clipboard: ${err.name} - ${err.message}`);
           }
         });
     } else {
@@ -2275,21 +2278,42 @@ document.addEventListener('DOMContentLoaded', () => {
           const blob = await clipboardItem.getType(imageType);
           const arrayBuffer = await blob.arrayBuffer();
           sendClipboardData(arrayBuffer, imageType);
-          console.log(`Sent binary clipboard on focus via sendClipboardData: ${imageType}, size: ${blob.size} bytes`);
+          console.log(`Sent binary clipboard via sendClipboardData: ${imageType}, size: ${blob.size} bytes`);
         } else if (clipboardItem.types.includes('text/plain')) {
           const blob = await clipboardItem.getType('text/plain');
           const text = await blob.text();
           if (!text) return;
           sendClipboardData(text);
-          console.log("Sent clipboard text (from binary-enabled path) on focus via sendClipboardData");
+          console.log("Sent clipboard text (from binary-enabled path) via sendClipboardData");
         }
       } catch (err) {
         if (err.name !== 'NotFoundError' && !err.message.includes('not focused')) {
-          console.warn(`Could not read clipboard using advanced API on focus: ${err.name} - ${err.message}`);
+          console.warn(`Could not read clipboard using advanced API: ${err.name} - ${err.message}`);
         }
       }
     }
-  });
+  }
+
+  window.addEventListener('focus', () => { readLocalClipboardAndSend(); });
+
+  // Firefox and Safari require real transient user activation before
+  // navigator.clipboard.read()/readText() may run; the focus listener above has
+  // none, so on those engines it silently fails or pops an ephemeral "Paste"
+  // permission prompt on every window focus instead (upstream issues #258,
+  // #234). Chromium has no such restriction and keeps using the focus listener
+  // alone. Mirror the sync onto the actual Ctrl/Cmd+V keydown for the other
+  // engines, which does carry transient activation. Never preventDefault: the
+  // keystroke must still reach the remote session.
+  if (!isChromium) {
+    window.addEventListener('keydown', (event) => {
+      if (isSharedMode || !window.clipboard_enabled || !clipboard_in_enabled) return;
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.repeat) return;
+      // event.code (physical key position), not event.key, so this still fires
+      // on non-QWERTY layouts (e.g. event.key is 'м' for V on a Cyrillic layout).
+      if (event.code !== 'KeyV') return;
+      readLocalClipboardAndSend();
+    }, true);
+  }
 
   document.addEventListener('visibilitychange', async () => {
     if (isSharedMode) {
