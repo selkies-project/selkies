@@ -1598,24 +1598,17 @@ export class Input {
         if (!text) {
             return;
         }
+        // Send each character's OWN keysym directly; the server resolves the shift
+        // level for it. The previous per-character Shift_L-wrap-around-lowercase-keysym
+        // approach (still used nowhere else in this file) depended on the X keymap
+        // correctly binding Shift as a real modifier -- when it doesn't, the Shift_L
+        // press/release around the lowercase keysym is silently swallowed and every
+        // uppercase character arrives lowercase.
         for (let i = 0; i < text.length; i++) {
-            const char = text[i];
-            const isUpperCase = char >= 'A' && char <= 'Z';
-            if (isUpperCase) {
-                this.send("kd," + KeyTable.XK_Shift_L);
-                const lowerChar = char.toLowerCase();
-                const letterKeysym = Keysyms.lookup(lowerChar.charCodeAt(0));
-                if (letterKeysym) {
-                    this.send("kd," + letterKeysym);
-                    this.send("ku," + letterKeysym);
-                }
-                this.send("ku," + KeyTable.XK_Shift_L);
-            } else {
-                const keysym = Keysyms.lookup(char.charCodeAt(0));
-                if (keysym) {
-                    this.send("kd," + keysym);
-                    this.send("ku," + keysym);
-                }
+            const keysym = Keysyms.lookup(text.charCodeAt(i));
+            if (keysym) {
+                this.send("kd," + keysym);
+                this.send("ku," + keysym);
             }
         }
         event.target.value = '';
