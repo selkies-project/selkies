@@ -11,7 +11,8 @@ import helpers as H
 import websockets
 
 
-def _settings_payload(**over):
+def _settings_payload(**over) -> dict:
+    """Build a primary-display SETTINGS payload with overrides applied on top."""
     base = {
         "displayId": "primary", "initialClientWidth": 1280, "initialClientHeight": 720,
         "is_manual_resolution_mode": False, "framerate": 60, "encoder": "h264enc",
@@ -22,11 +23,21 @@ def _settings_payload(**over):
     return base
 
 
-def loglen():
+def loglen() -> int:
     return len(H.server_log())
 
 
-def wait_log_from(mark, substr, timeout=8):
+def wait_log_from(mark: int, substr: str, timeout: float = 8) -> bool:
+    """Poll the server log for a substring appearing at or after an offset.
+
+    Args:
+        mark: Byte offset into the log where the search starts.
+        substr: Substring to wait for.
+        timeout: Seconds to keep polling before giving up.
+
+    Returns:
+        True when the substring appeared, False on timeout.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         txt = H.server_log()
@@ -37,7 +48,8 @@ def wait_log_from(mark, substr, timeout=8):
     return False
 
 
-def main():
+def main() -> "H.Results":
+    """Exercise the scaling opcode and framerate-seeding over one WS client."""
     H.server_start(mode="websockets", wayland=False)
     res = H.Results("parity-check")
 
@@ -48,7 +60,7 @@ def main():
             await ws.send("SETTINGS," + json.dumps(_settings_payload(framerate=60, video_bitrate=6000)))
             await asyncio.sleep(3.0)
 
-            # D3: 's,120' scaling opcode should not just warn "unhandled"
+            # D3: the 's,120' scaling opcode must be handled, not warned away.
             st = loglen()
             await ws.send("s,120")
             await asyncio.sleep(1.5)

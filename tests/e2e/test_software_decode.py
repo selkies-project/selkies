@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
 
+from typing import Callable, Optional
+
 # localStorage namespace the client derives from origin + pathname.
 STORAGE_KEY_JS = (
     "((location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_')"
@@ -24,7 +26,7 @@ STORAGE_KEY_JS = (
 )
 
 
-def shim_js(fail_mode):
+def shim_js(fail_mode: str) -> str:
     """Make every VideoDecoder in the page report an asynchronous decode error,
     either only on the default (hardware) path or on every path, and record the
     acceleration each decoder was configured with."""
@@ -91,7 +93,19 @@ ENCODER_JS = """
 """
 
 
-def open_client(pw, fail_mode="none", seed_preference=False, encoder=None):
+def open_client(pw, fail_mode: str = "none", seed_preference: bool = False,
+                encoder: Optional[str] = None):
+    """Launch Chromium with the decode-failure shim installed.
+
+    Args:
+        pw: Active Playwright instance.
+        fail_mode: ``none``, ``hardware``, or ``all`` decode failure injection.
+        seed_preference: Pre-store the software-decode preference key.
+        encoder: Optional encoder to pin in localStorage before load.
+
+    Returns:
+        Tuple of (browser, page) with the stream page loaded.
+    """
     browser = C.chromium_launch(pw)
     ctx = browser.new_context(viewport={"width": 1280, "height": 720},
                               device_scale_factor=1)
@@ -106,7 +120,7 @@ def open_client(pw, fail_mode="none", seed_preference=False, encoder=None):
     return browser, page
 
 
-def read_state(page, retries=6):
+def read_state(page, retries: int = 6) -> dict:
     """Page state, retried across the reloads the ladder triggers."""
     js = """(() => ({
       navs: Number(sessionStorage.getItem('__navs') || 0),
@@ -124,7 +138,8 @@ def read_state(page, retries=6):
             time.sleep(1)
 
 
-def wait_for(page, predicate, timeout=25):
+def wait_for(page, predicate: Callable[[dict], bool], timeout: float = 25) -> Optional[dict]:
+    """Poll the page state until the predicate holds; return the last state."""
     deadline = time.time() + timeout
     state = None
     while time.time() < deadline:
@@ -135,7 +150,7 @@ def wait_for(page, predicate, timeout=25):
     return state
 
 
-def block_retry(r):
+def block_retry(r: "H.Results") -> None:
     """Hardware decode fails: the client switches to software in place, keeps
     decoding, and does not reload."""
     from playwright.sync_api import sync_playwright
@@ -164,7 +179,7 @@ def block_retry(r):
         H.server_stop()
 
 
-def block_persisted(r):
+def block_persisted(r: "H.Results") -> None:
     """A remembered preference is applied to the first decoder, so a client with
     a broken hardware path pays no failed decode at all."""
     from playwright.sync_api import sync_playwright
@@ -190,7 +205,7 @@ def block_persisted(r):
         H.server_stop()
 
 
-def block_ladder(r):
+def block_ladder(r: "H.Results") -> None:
     """Software decode fails too: the ladder still runs, and the preference is
     dropped so the next load re-probes hardware."""
     from playwright.sync_api import sync_playwright
@@ -225,7 +240,7 @@ def block_ladder(r):
         H.server_stop()
 
 
-def block_healthy(r):
+def block_healthy(r: "H.Results") -> None:
     """Nothing is injected: the retry must be invisible — no software decoder and
     no stored preference on a client whose hardware decoder works."""
     from playwright.sync_api import sync_playwright
@@ -248,7 +263,7 @@ def block_healthy(r):
         H.server_stop()
 
 
-def block_striped(r):
+def block_striped(r: "H.Results") -> None:
     """The striped encoder runs a decoder per stripe and they fail together, so
     the errors still in flight when the switch happens must not reach the
     ladder."""

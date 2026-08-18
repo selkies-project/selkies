@@ -13,7 +13,15 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 
-def big_block(mode='websockets'):
+def big_block(mode: str = 'websockets') -> "H.Results":
+    """Push a ~2MB payload from the X clipboard to the page on one transport.
+
+    Args:
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+
+    Returns:
+        The Results accumulator for this transport's checks.
+    """
     tag = f"bigclip-{mode}"
     res = H.Results(tag)
     H.server_start(mode=mode, wayland=False)
@@ -49,7 +57,8 @@ def big_block(mode='websockets'):
     return res
 
 
-def main():
+def main() -> None:
+    """Run the large-clipboard block for the transports named on argv."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
     if which in ("all", "websockets"):

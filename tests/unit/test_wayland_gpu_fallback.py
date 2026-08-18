@@ -32,7 +32,7 @@ from selkies.gpu_probe import recommend  # noqa: E402
 passed = failed = 0
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     global passed, failed
     if ok:
         passed += 1
@@ -41,17 +41,30 @@ def check(label, ok, detail=""):
     print(f"{'PASS' if ok else 'FAIL'}  [wl-fallback] {label}  {detail}", flush=True)
 
 
-def report(accelerated=False, gpu=False, node="", renderer="", error=""):
+def report(accelerated: bool = False, gpu: bool = False, node: str = "",
+           renderer: str = "", error: str = "") -> dict:
+    """A GPU probe report shaped as selkies-gpu-probe emits it."""
     return {"accelerated": accelerated, "gpu": gpu, "node": node,
             "renderer": renderer, "error": error}
 
 
-def _sh_quote(text):
+def _sh_quote(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
-def run(probe_stdout, probe_rc=0, env=None):
-    """Run the entrypoint's environment phase and return what it exported."""
+def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
+    """Run the entrypoint's environment phase against a stubbed probe.
+
+    Args:
+        probe_stdout: What the stubbed selkies-gpu-probe prints.
+        probe_rc: Its exit code.
+        env: Extra environment for the entrypoint.
+
+    Returns:
+        `(exported, proc)`: the container-env exports plus `_stdout` and
+        `_probe_ran` markers, or `(None, None)` if the entrypoint lost the
+        structure this test relies on.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         stub_dir = os.path.join(tmp, "bin")
         os.mkdir(stub_dir)
@@ -128,7 +141,8 @@ check("the absent GPU is reported", "no GPU in this container" in why, why)
 
 if not shutil.which("bash"):
     print("SKIP bash not found, so the entrypoint cannot be run", flush=True)
-    sys.exit(77)  # helpers.SKIP_EXIT, without importing the e2e helper module
+    # helpers.SKIP_EXIT, without importing the e2e helper module
+    sys.exit(77)
 
 env, proc = run("wayland", env={"SELKIES_WAYLAND": "true", "GALLIUM_DRIVER": "zink"})
 if env is None:

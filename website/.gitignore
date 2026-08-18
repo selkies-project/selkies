@@ -5,6 +5,8 @@ package-lock.json
 # generated content
 .source
 /public/assets
+/selkies.json
+/.venv-docs
 
 # build
 /.next/

@@ -24,14 +24,26 @@ keeps whatever backend it was asked for instead of acting on a guess.
 
 import os
 import sys
+from typing import Any, Dict, Tuple
 
 # A container-level knob rather than a server setting: selkies runs whichever
 # backend it is handed, and only the entrypoint choosing that backend acts on this.
-X11_FALLBACK_ENV = "SELKIES_WAYLAND_X11_FALLBACK"
+X11_FALLBACK_ENV: str = "SELKIES_WAYLAND_X11_FALLBACK"
 
 
-def recommend(report, allow_x11=True):
-    """The backend a GPU report argues for, and the line explaining it."""
+def recommend(report: Dict[str, Any], allow_x11: bool = True) -> Tuple[str, str]:
+    """The backend a GPU report argues for, and the line explaining it.
+
+    Args:
+        report: A `pixelflux.probe_wayland_gpu` report (keys: `accelerated`,
+            `gpu`, `renderer`, `node`, `error`).
+        allow_x11: Whether an unaccelerated GPU may fall back to X11; when
+            False the session stays on Wayland and composites in software.
+
+    Returns:
+        A `(backend, reason)` pair: the backend name to print on stdout and
+        the human-readable explanation for stderr.
+    """
     node = report.get("node") or ""
     where = f" on {node}" if node else ""
     if report.get("accelerated"):
@@ -46,7 +58,13 @@ def recommend(report, allow_x11=True):
     return "wayland-software", f"Wayland backend: {reason}{where}; compositing in software"
 
 
-def main():
+def main() -> int:
+    """Probe the GPU via pixelflux and print the recommended backend.
+
+    Returns:
+        Process exit code: 0 with the backend on stdout, non-zero (and no
+        backend printed) when no report could be obtained.
+    """
     # Imported here so the module stays usable where pixelflux is absent, and so
     # the settings parser never sees this tool's own invocation.
     from .settings import parse_bool, settings

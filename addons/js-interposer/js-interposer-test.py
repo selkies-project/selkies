@@ -2,9 +2,15 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# write joystick events to an fd
+"""Manual test server for the Joystick Interposer.
 
-# import ctypes
+Serves the interposer's Unix-socket protocol by hand: it sends each connecting
+client the joystick config struct, then loops a walking button press/release
+pattern as `js_event` records so an interposed application can be watched
+responding to synthetic input. Events are printed as they are sent for
+debugging.
+"""
+
 import os
 import struct
 import time
@@ -117,7 +123,7 @@ MAX_AXES = 64
 # };
 
 # Map of client file descriptors to sockets.
-clients = {}
+clients: dict[int, socket.socket] = {}
 
 XPAD_CONFIG = {
     "name": "Xbox 360 Controller",
@@ -147,40 +153,52 @@ XPAD_CONFIG = {
 }
 
 
-def get_btn_event(btn_num, btn_val):
-    ts = int((time.time() * 1000) % 1000000000)
+def get_btn_event(btn_num: int, btn_val: int) -> bytes:
+    """Pack a button js_event record (layout in the struct comment above).
 
-    # see js_event struct definition above.
-    # https://docs.python.org/3/library/struct.html
+    Args:
+        btn_num: Button index within the config's btn_map.
+        btn_val: 1 for press, 0 for release.
+
+    Returns:
+        The packed 8-byte js_event, which is also printed for debugging.
+    """
+    ts = int((time.time() * 1000) % 1000000000)
     struct_format = 'IhBB'
     event = struct.pack(struct_format, ts, btn_val, JS_EVENT_BUTTON, btn_num)
-
-    # debug
     print(struct.unpack(struct_format, event))
-
     return event
 
 
-def get_axis_event(axis_num, axis_val):
-    ts = int((time.time() * 1000) % 1000000000)
+def get_axis_event(axis_num: int, axis_val: int) -> bytes:
+    """Pack an axis js_event record (layout in the struct comment above).
 
-    # see js_event struct definition above.
-    # https://docs.python.org/3/library/struct.html
+    Args:
+        axis_num: Axis index within the config's axes_map.
+        axis_val: Signed 16-bit axis position.
+
+    Returns:
+        The packed 8-byte js_event, which is also printed for debugging.
+    """
+    ts = int((time.time() * 1000) % 1000000000)
     struct_format = 'IhBB'
     event = struct.pack(struct_format, ts, axis_val, JS_EVENT_AXIS, axis_num)
-
-    # debug
     print(struct.unpack(struct_format, event))
-
     return event
 
 
-def make_config():
+def make_config() -> bytes:
+    """Pack XPAD_CONFIG into the fixed-size config struct the interposer reads.
+
+    Returns:
+        Packed struct of name, button/axis counts, and the button and axis
+        maps zero-filled to MAX_BTNS/MAX_AXES entries.
+    """
     cfg = XPAD_CONFIG
     num_btns = len(cfg["btn_map"])
     num_axes = len(cfg["axes_map"])
 
-    # zero fill array to max length.
+    # Zero-fill both maps to the fixed struct lengths.
     btn_map = [i for i in cfg["btn_map"]]
     axes_map = [i for i in cfg["axes_map"]]
 
@@ -198,7 +216,8 @@ def make_config():
     return data
 
 
-async def send_events():
+async def send_events() -> None:
+    """Loop a walking button press/release pattern to every connected client."""
     btn_num = 0
     btn_val = 0
     while True:
@@ -228,8 +247,9 @@ async def send_events():
             btn_num = (btn_num + 1) % 11
 
 
-async def run_server():
-    # remove the socket file if it already exists
+async def run_server() -> None:
+    """Accept interposer clients on SOCKET_PATH and feed them events."""
+    # Remove the socket file if it already exists.
     try:
         os.unlink(SOCKET_PATH)
     except OSError:
@@ -262,7 +282,7 @@ async def run_server():
         await asyncio.to_thread(server.shutdown, 1)
         await asyncio.to_thread(server.close)
 
-def entrypoint():
+def entrypoint() -> None:
     asyncio.run(run_server())
 
 if __name__ == "__main__":

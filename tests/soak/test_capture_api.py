@@ -25,14 +25,27 @@ CU_PORT = 9599
 REC_SOCK = os.path.join(H.WORKDIR, "pixelflux-rec.sock")
 
 
-def curl_json(url, body=None, timeout=15):
+def curl_json(url: str, body=None, timeout: float = 15) -> bytes:
+    """GET (or POST when a body is given) a URL and return the raw response."""
     data = body.encode() if isinstance(body, str) else body
     req = urllib.request.Request(url, data=data, method="POST" if body is not None else "GET")
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
 
-def make_settings(encoder, w=1024, h=640, **kw):
+def make_settings(encoder: str, w: int = 1024, h: int = 640, **kw):
+    """Build a CaptureSettings for the encoder, with overrides applied last.
+
+    Args:
+        encoder: ``jpeg``, ``h264enc``, ``h264enc-striped``, ``openh264enc``,
+            or ``nvenc``.
+        w: Capture width in pixels.
+        h: Capture height in pixels.
+        **kw: Extra CaptureSettings attributes set verbatim.
+
+    Returns:
+        A populated pixelflux.CaptureSettings.
+    """
     import pixelflux
     cs = pixelflux.CaptureSettings()
     cs.capture_width = w
@@ -63,7 +76,9 @@ def make_settings(encoder, w=1024, h=640, **kw):
 
 
 class FrameCounter:
-    def __init__(self):
+    """Thread-safe frame-callback sink that classifies stripes by wire header."""
+
+    def __init__(self) -> None:
         self.n = 0
         self.h264 = 0
         self.jpg = 0
@@ -72,7 +87,8 @@ class FrameCounter:
         self.raw_headers = set()
         self.lock = threading.Lock()
 
-    def __call__(self, frame):
+    def __call__(self, frame) -> None:
+        """Count one stripe, detecting H.264/JPEG headers and IDR NALs."""
         try:
             b = bytes(frame)
         except Exception:
@@ -101,13 +117,19 @@ class FrameCounter:
             elif b[0] == 0x03:
                 self.jpg += 1
 
-    def snap(self):
+    def snap(self) -> dict:
+        """A consistent snapshot of the counters."""
         with self.lock:
             return dict(n=self.n, h264=self.h264, jpg=self.jpg,
                         idr_nals=self.idr_nals, idr_flag=self.idr_flag)
 
 
-def run_x11(encoder, duration=3.0, **kw):
+def run_x11(encoder: str, duration: float = 3.0, **kw) -> tuple:
+    """Capture the X11 screen briefly, then request an IDR and capture more.
+
+    Returns:
+        Tuple of counter snapshots (before_idr_request, after_idr_request).
+    """
     import pixelflux
     caps = pixelflux.ScreenCapture()
     fc = FrameCounter()
@@ -122,7 +144,8 @@ def run_x11(encoder, duration=3.0, **kw):
     return before, after
 
 
-def main():
+def main() -> "H.Results":
+    """Sweep every public pixelflux and pcmflux capability once."""
     import pixelflux
     import pcmflux
 
@@ -151,7 +174,8 @@ def main():
         cap = pixelflux.ScreenCapture()
         fc = FrameCounter()
         cs = make_settings("h264enc", w=960, h=540)
-        cs.encode_node_index = 0  # first GPU
+        # Pin the encode to the first GPU node.
+        cs.encode_node_index = 0
         cap.start_capture(fc, cs)
         time.sleep(3.0)
         snap = fc.snap()
@@ -462,7 +486,7 @@ def main():
         pbs.sample_rate = 48000
         pbs.channels = 2
         pb.start(pbs)
-        # encode a short opus stream from the monitor and feed it back
+        # Encode a short opus stream from the monitor and feed it back.
         ps = pcmflux.AudioCaptureSettings()
         ps.device_name = "output.monitor"
         ps.sample_rate = 48000

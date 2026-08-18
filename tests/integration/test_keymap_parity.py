@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.join(H.REPO, "src"))
 XKB_KEYMAP_FORMAT_TEXT_V1 = 1
 
 
-def _xkb():
+def _xkb() -> ctypes.CDLL:
     """libxkbcommon entry points used as the ground truth for a keymap's contents."""
     lib = ctypes.CDLL("libxkbcommon.so.0")
     lib.xkb_context_new.restype = ctypes.c_void_p
@@ -41,7 +41,7 @@ def _xkb():
     return lib
 
 
-def syms_at(lib, keymap, keycode, level):
+def syms_at(lib: ctypes.CDLL, keymap, keycode: int, level: int) -> list[int]:
     """The keysyms the keymap binds at `keycode`/`level` (layout 0)."""
     out = ctypes.POINTER(ctypes.c_uint32)()
     n = lib.xkb_keymap_key_get_syms_by_level(
@@ -57,17 +57,20 @@ class Recorder:
     Resolution is always checked against the compositor's LIVE keymap rather than
     whatever text passed through here, so the assertions do not care which API ran."""
 
-    def __init__(self, inner):
+    def __init__(self, inner) -> None:
         self._inner = inner
-        self.swaps = 0
+        self.swaps: int = 0
 
-    def set_keymap_string(self, text):
+    def set_keymap_string(self, text: str):
         self.swaps += 1
         return self._inner.set_keymap_string(text)
 
     def set_keymap_overlay(self, binds):
-        # Fire-and-forget, like set_keymap_string: the call IS the swap, and nothing
-        # is awaited, so there is no return value to key off.
+        """Count and forward an overlay splice.
+
+        Fire-and-forget, like set_keymap_string: the call IS the swap, and
+        nothing is awaited, so there is no return value to key off.
+        """
         self.swaps += 1
         return self._inner.set_keymap_overlay(binds)
 
@@ -75,14 +78,14 @@ class Recorder:
         return getattr(self._inner, name)
 
 
-def live_keymap(lib, capture):
+def live_keymap(lib: ctypes.CDLL, capture):
     """Compile the keymap the compositor is currently delivering to clients."""
     text = capture.get_xkb_keymap_string()
     return lib.xkb_keymap_new_from_string(
         lib.xkb_context_new(0), (text or "").encode(), XKB_KEYMAP_FORMAT_TEXT_V1, 0)
 
 
-def main():
+def main() -> "H.Results":
     from pixelflux import ScreenCapture, ensure_wayland_display
     from selkies.input_handler import _WaylandKeymapOwner
 
@@ -150,7 +153,8 @@ def main():
     assigned = owner3._overlay_bind_many(first)
     held_sym = first[0]
     held_kc = assigned[held_sym]
-    owner3._pressed[held_sym] = (held_kc, ())        # pretend it is down
+    # Mark the keysym as held so the owner treats its keycode as in use.
+    owner3._pressed[held_sym] = (held_kc, ())
     later = owner3._overlay_bind_many([0x01000000 | (0x3000 + i) for i in range(8)])
     res.check("held keycode is not handed to a new keysym",
               held_kc not in later.values(), f"held={held_kc} new={sorted(later.values())}")
@@ -285,9 +289,10 @@ def main():
                     if sym not in syms_at(lib, okm, kc, lv))
         owner7._overlay[0x1004E2D] = owner7._overlay_codes[0]
         owner7._overlay_order.append(0x1004E2D)
+        # Local assembly is the fallback path when the compositor cannot splice.
         spliced = lib.xkb_keymap_new_from_string(
             lib.xkb_context_new(0), owner7._overlay_text().encode(),
-            XKB_KEYMAP_FORMAT_TEXT_V1, 0)  # local assembly is the fallback path
+            XKB_KEYMAP_FORMAT_TEXT_V1, 0)
         res.check(f"{layout}({variant or '-'}) [{options}] resolves and splices",
                   wrong == 0 and bool(spliced),
                   f"{len(owner7._map)} keysyms, wrong={wrong}, splice={bool(spliced)}")
@@ -299,9 +304,12 @@ def main():
     # Emoji and CJK have to land below that ceiling, and the keycodes borrowed to
     # get them there must not be ones the session still needs.
     LOAD_BEARING = {
-        0xFFE9, 0xFFEA, 0xFFE7, 0xFFE8, 0xFFEB, 0xFFEC,   # Alt/Meta/Super
-        0xFFE1, 0xFFE2, 0xFFE3, 0xFFE4, 0xFE03, 0xFE11,   # Shift/Ctrl/AltGr/Level5
-        0xFF61, 0xFF69, 0xFF66,                            # Print, Cancel, Redo
+        # Alt/Meta/Super.
+        0xFFE9, 0xFFEA, 0xFFE7, 0xFFE8, 0xFFEB, 0xFFEC,
+        # Shift/Ctrl/AltGr/Level5.
+        0xFFE1, 0xFFE2, 0xFFE3, 0xFFE4, 0xFE03, 0xFE11,
+        # Print, Cancel, Redo.
+        0xFF61, 0xFF69, 0xFF66,
     }
     for layout, variant in (("us", ""), ("de", ""), ("ru", ""), ("jp", "kana")):
         if not capture.set_xkb_layout(layout, variant):
@@ -349,11 +357,13 @@ def main():
     owner9._overlay_bind_many([0x01000000 | (0x1F600 + i) for i in range(8)])
     assembled = owner9._overlay_text()
 
-    def declared_max(text):
+    def declared_max(text: str) -> int:
+        """The keycode ceiling a keymap text declares."""
         at = text.index("maximum = ") + len("maximum = ")
         return int(text[at:text.index(";", at)].strip())
 
-    def bound_above_255(text):
+    def bound_above_255(text: str) -> int:
+        """Count keycode/level bindings above 255, or -1 if the text fails to compile."""
         km = lib.xkb_keymap_new_from_string(
             lib.xkb_context_new(0), text.encode(), XKB_KEYMAP_FORMAT_TEXT_V1, 0)
         if not km:

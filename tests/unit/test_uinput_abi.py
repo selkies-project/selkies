@@ -16,7 +16,9 @@ TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRUTH = os.path.join(TOOLS, "uinput_abi_truth")
 
 
-def kernel_truth():
+def kernel_truth() -> dict:
+    """Constants from `<linux/uinput.h>`, via the compiled truth tool (built
+    on demand)."""
     if not os.path.exists(TRUTH):
         subprocess.run(["make", "-C", TOOLS, "uinput_abi_truth"], check=True,
                        stdout=subprocess.DEVNULL)
@@ -24,11 +26,11 @@ def kernel_truth():
     return {k: int(v) for k, v in (line.split() for line in out.splitlines())}
 
 
-def main():
+def main() -> bool:
     truth = kernel_truth()
     fails = []
 
-    def check(name, got, want):
+    def check(name: str, got: int, want: int) -> None:
         ok = got == want
         print(f"{'PASS' if ok else 'FAIL'}  {name}: {got} (kernel {want})")
         if not ok:

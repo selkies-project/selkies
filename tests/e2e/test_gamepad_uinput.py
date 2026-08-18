@@ -14,7 +14,7 @@ sys.path.insert(0, H.SRC)
 import selkies.input_handler as ih
 
 
-PAD_INIT = """
+PAD_INIT: str = """
 window.__pad = {
   index: 0, id: "Selkies Test Pad (STANDARD GAMEPAD Vendor: 045e Product: 028e)",
   mapping: "standard", connected: true, timestamp: 1,
@@ -32,11 +32,29 @@ window.__padAxis = (i, v) => {
 };
 """
 
-def decode(path):
+def decode(path: str) -> list[tuple[int, int, int]]:
+    """Decode a uinput-shim event stream into (type, code, value) tuples.
+
+    Args:
+        path: Path to the shim's binary event stream file.
+
+    Returns:
+        One `(ev_type, ev_code, ev_value)` tuple per 24-byte input_event
+        record, timestamps stripped.
+    """
     blob = open(path, "rb").read()
     return [struct.unpack("=qqHHi", blob[o:o + 24])[2:] for o in range(0, len(blob) - 23, 24)]
 
-def launch(pw, mode):
+def launch(pw, mode: str):
+    """Launch Chromium with the synthetic pad injected and open the stream page.
+
+    Args:
+        pw: Active Playwright instance.
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+
+    Returns:
+        Tuple of (browser, page, console-error list).
+    """
     browser = C.chromium_launch(pw)
     ctx = browser.new_context(viewport={"width": 1280, "height": 720})
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
@@ -48,7 +66,13 @@ def launch(pw, mode):
     page.goto(H.BASE_URL + "/", wait_until="load")
     return browser, page, errors
 
-def run(mode, results):
+def run(mode: str, results: "H.Results") -> None:
+    """Drive pad input over one transport and verify the kernel-side record.
+
+    Args:
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+        results: Results accumulator shared across both transports.
+    """
     shim_env, STREAM, SHIMLOG = H.uinput_shim_env(f"e2e-{mode}")
     H.server_start(mode=mode, extra_env=shim_env)
     try:

@@ -19,7 +19,7 @@ import helpers as H
 RUNTIME = os.path.join(H.WORKDIR, "wl-multi-output")
 
 
-def compositor_env(socket):
+def compositor_env(socket: str) -> dict:
     """Environment for a nested wlroots compositor on our own socket."""
     env = dict(os.environ)
     env.update(WAYLAND_DISPLAY=socket, WLR_BACKENDS="wayland",
@@ -29,7 +29,7 @@ def compositor_env(socket):
     return env
 
 
-def windows_after(capture, count, timeout=20):
+def windows_after(capture, count: int, timeout: float = 20) -> list:
     """The window list once `count` of them have mapped, or whatever mapped."""
     deadline = time.time() + timeout
     windows = []
@@ -41,13 +41,15 @@ def windows_after(capture, count, timeout=20):
     return windows
 
 
-def nested(socket, outputs):
+def nested(socket: str, outputs: int) -> subprocess.Popen:
+    """Start labwc nested on the capture socket with the given screen count."""
     return subprocess.Popen(
         ["labwc"], env=dict(compositor_env(socket), WLR_WL_OUTPUTS=str(outputs)),
         stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
 
-def main():
+def main() -> "H.Results":
+    """Run the placement checks across output create/destroy transitions."""
     os.makedirs(RUNTIME, mode=0o700, exist_ok=True)
     os.environ["XDG_RUNTIME_DIR"] = RUNTIME
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
@@ -80,7 +82,7 @@ def main():
         except subprocess.TimeoutExpired:
             proc.kill()
 
-    # One screen must still open on the primary rather than being spread
+    # One screen must still open on the primary rather than being spread.
     capture.destroy_output(1)
     proc = nested(socket, 1)
     try:

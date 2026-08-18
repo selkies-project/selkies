@@ -11,6 +11,20 @@ documentation that describe arbitrary code changes of previous states compared t
 explanation. The code commenting should reflect the current state of the codebase and be used to convey information
 to an LLM bot or developer.
 
+Python follows a fixed documentation standard: Google-style docstrings plus type hints on signatures, kept as you
+touch code. Modules, classes, and any function that is not trivially self-describing carry a docstring (summary
+line, then `Args:`/`Returns:`/`Raises:` only where non-obvious; never pad trivial helpers). Rationale that explains
+a whole function belongs in its docstring, not in a block comment above it; contrasting with a rejected design
+alternative is good rationale, narrating the codebase's own past revisions is forbidden. Type hints must stay
+Python-3.9-safe: `Optional`/`Union` from `typing`, no `X | Y`, no new `from __future__ import annotations`, and
+conditionally imported types (pixelflux, pcmflux, Xlib) never appear in runtime-evaluated annotations — use `Any`
+rather than guess; a wrong hint is worse than none. The website's Developer Reference is generated from these
+docstrings at docs build time (fumadocs-python/griffe via `website/scripts/generate-python-docs.mjs`; output is
+gitignored, never committed), so docstrings are rendered as MDX: keep anything shaped like `<name>` or containing
+braces inside backticks. The vendored forks `src/selkies/Xlib`, `src/selkies/webrtc`, and `src/selkies/ice` are
+the exception — they keep upstream documentation style for diffability and are excluded from the reference; only
+Selkies-added comments there follow the rules above.
+
 Empirical testing is a very useful way to develop this project, and empirical testing is possible for EVERYTHING,
 including implementation, auditing, validation, or verification. A few such options are by utilizing the currently
 installed Firefox and Chrome, as well as the WebKit engine provided by Playwright/Selenium/Puppeteer/Cypress in place

@@ -25,7 +25,7 @@ from selkies.settings import parse_bool  # noqa: E402
 passed = failed = 0
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     global passed, failed
     if ok:
         passed += 1
@@ -34,7 +34,7 @@ def check(label, ok, detail=""):
     print(f"{'PASS' if ok else 'FAIL'}  [env-case] {label}  {detail}", flush=True)
 
 
-def shell_functions():
+def shell_functions() -> str:
     """The entrypoint's own parsing helpers, extracted verbatim."""
     body = open(ENTRYPOINT).read()
     parts = []
@@ -44,7 +44,8 @@ def shell_functions():
     return "\n".join(parts)
 
 
-def run_shell(script, env=None, *args):
+def run_shell(script: str, env=None, *args: str) -> str:
+    """Run `script` with the entrypoint helpers in scope; stripped stdout."""
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "lib.sh")
         with open(path, "w") as f:
@@ -53,7 +54,7 @@ def run_shell(script, env=None, *args):
                               text=True, timeout=60, env=env).stdout.strip()
 
 
-def shell_is_true(value):
+def shell_is_true(value: str) -> bool:
     return run_shell('if is_true "$1"; then echo yes; else echo no; fi',
                      None, value) == "yes"
 
@@ -122,8 +123,8 @@ check("an empty value keeps the default", parse_bool("", default=True) is True
       and parse_bool(None, default=True) is True)
 check("a set value overrides the default", parse_bool("false", default=True) is False)
 
-# The transport names a service registry key, so a mis-cased value used to abort
-# the server on lookup rather than selecting the transport it names.
+# The transport names a service registry key: a mis-cased value must select
+# the transport it names, not abort the server on the key lookup.
 for value in ("webrtc", "WebRTC", "WEBRTC", " WebRTC "):
     out = subprocess.run(
         [sys.executable, "-c",
@@ -149,7 +150,7 @@ out = subprocess.run(
              SELKIES_ENCODER="JPEG")).stdout.strip()
 check("an encoder resolves however it is cased", out == "jpeg", out)
 
-# The historical alias has to keep working in either case, for the same reason.
+# The legacy alias has to keep working in either case, for the same reason.
 out = subprocess.run(
     [sys.executable, "-c", "import selkies.settings as s; print(s.settings.encoder)"],
     capture_output=True, text=True, timeout=120,

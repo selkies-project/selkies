@@ -12,7 +12,17 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 
-def wheel_block(mode, wayland, block):
+def wheel_block(mode: str, wayland: bool, block: str) -> "H.Results":
+    """Scroll in a real browser and verify the events land server-side.
+
+    Args:
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+        wayland: True to run against the Wayland backend, False for X11.
+        block: Label for this block's Results; derived from mode when empty.
+
+    Returns:
+        The Results accumulator for this block's checks.
+    """
     tag = block or f"{mode}-{'wl' if wayland else 'x11'}"
     res = H.Results(tag)
     wl = "wayland-1"
@@ -63,8 +73,8 @@ def wheel_block(mode, wayland, block):
                 time.sleep(1.0)
                 ev = wl_obs.wait_for("ptr_axis", timeout=5)
                 res.check("Wayland: pointer axis reached compositor", ev is not None, ev)
-                # opposite direction: the compositor must see a second axis
-                # event rather than a repeat of the first
+                # Opposite direction: the compositor must see a second axis
+                # event rather than a repeat of the first.
                 page.mouse.wheel(0, -120)
                 time.sleep(0.8)
                 res.check("Wayland: second pointer axis reached compositor",
@@ -79,7 +89,8 @@ def wheel_block(mode, wayland, block):
     return res
 
 
-def main():
+def main() -> None:
+    """Run the wheel block for each transport/backend pair named on argv."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
     for mode, wl in (("websockets", False), ("webrtc", False), ("websockets", True), ("webrtc", True)):

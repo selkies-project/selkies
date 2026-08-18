@@ -16,7 +16,7 @@ REPO = os.path.dirname(TESTS)
 passed = failed = 0
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     global passed, failed
     if ok:
         passed += 1
@@ -30,7 +30,8 @@ def check(label, ok, detail=""):
 BASE_ENV = {k: v for k, v in os.environ.items() if not k.startswith("SELKIES_")}
 
 
-def probe(code, **env):
+def probe(code: str, **env: str) -> str:
+    """Run `code` against a freshly imported settings module; stripped stdout."""
     out = subprocess.run(
         [sys.executable, "-c", f"import selkies.settings as s; {code}"],
         capture_output=True, text=True, timeout=120,
@@ -38,7 +39,7 @@ def probe(code, **env):
     return out.stdout.strip()
 
 
-def resolved(**env):
+def resolved(**env: str) -> str:
     return probe("print(s.settings.rate_control_mode)", **env)
 
 

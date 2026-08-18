@@ -18,17 +18,17 @@ from selkies.settings import CPU_ONLY_ENCODERS, effective_use_cpu  # noqa: E402
 
 
 class Results:
-    def __init__(self):
+    def __init__(self) -> None:
         self.failed = 0
 
-    def check(self, name, ok, detail=""):
+    def check(self, name: str, ok, detail="") -> None:
         if not ok:
             self.failed += 1
         print(("PASS" if ok else "FAIL") + "  [encoder-cpu-policy] {}  {}".format(name, detail),
               flush=True)
 
 
-def main():
+def main() -> bool:
     res = Results()
 
     for enc in CPU_ONLY_ENCODERS:
@@ -37,7 +37,8 @@ def main():
     res.check("h264enc is not forced to software",
               effective_use_cpu("h264enc", None, False) is False)
 
-    # The sequence that used to strand a display on the CPU.
+    # The round trip that strands a display on the CPU if the jpeg-forced
+    # software state latches instead of being re-derived per call.
     requested = None
     state = effective_use_cpu("h264enc", requested, False)
     res.check("starts on hardware", state is False)

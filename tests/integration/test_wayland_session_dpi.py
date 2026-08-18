@@ -24,7 +24,8 @@ sys.path.insert(0, os.path.join(REPO, "src"))
 results = []
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail: str = "") -> None:
+    """Record and print one pass/fail result."""
     results.append((label, bool(ok)))
     print(f"{'PASS' if ok else 'FAIL'}  [session-dpi] {label}  {detail}", flush=True)
 
@@ -39,18 +40,29 @@ from selkies.input_handler import WebRTCInput  # noqa: E402
 class FakeSession:
     """The pixelflux ABI the policy calls, with a scriptable answer."""
 
-    def __init__(self, answer):
+    def __init__(self, answer) -> None:
         self.answer = answer
-        self.calls = []
+        self.calls: list[tuple[str, int, float]] = []
 
-    def set_app_output_scale(self, display, index, scale):
+    def set_app_output_scale(self, display: str, index: int, scale: float):
         self.calls.append((display, index, scale))
         if isinstance(self.answer, Exception):
             raise self.answer
         return self.answer
 
 
-def make_handler(separate, answer=True):
+def make_handler(separate: bool, answer=True) -> WebRTCInput:
+    """Build a bare WebRTCInput wired to a FakeSession.
+
+    Args:
+        separate: Whether the handler believes a nested app compositor exists.
+        answer: What the fake session returns from set_app_output_scale, or an
+            Exception instance to raise instead.
+
+    Returns:
+        A WebRTCInput constructed without __init__, carrying only the
+        attributes the DPI realization policy reads.
+    """
     h = WebRTCInput.__new__(WebRTCInput)
     h._app_wl_is_separate = separate
     h._app_wayland_display = lambda: "wayland-9"
@@ -59,7 +71,8 @@ def make_handler(separate, answer=True):
     return h
 
 
-def realize(handler, dpi, index=0):
+def realize(handler: WebRTCInput, dpi: float, index: int = 0) -> float:
+    """Run the async DPI realization policy and return the capture scale."""
     return asyncio.run(handler.realize_wayland_dpi(dpi, index))
 
 
@@ -99,7 +112,8 @@ try:
             break
         time.sleep(0.2)
 
-    def query():
+    def query() -> dict[str, str]:
+        """Read the private X server's resource database as a dict."""
         out = subprocess.run(["xrdb", "-query", "-display", DISP],
                              capture_output=True, text=True).stdout
         return dict(line.split(":\t") for line in out.splitlines() if ":\t" in line)

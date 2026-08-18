@@ -25,7 +25,7 @@ VERSION_SH = os.path.join(REPO, "infra", "packaging", "version.sh")
 passed = failed = 0
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     global passed, failed
     if ok:
         passed += 1
@@ -34,12 +34,12 @@ def check(label, ok, detail=""):
     print(f"{'PASS' if ok else 'FAIL'}  [release-version] {label}  {detail}", flush=True)
 
 
-def sh(script, *args):
+def sh(script: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["sh", "-c", script, "sh", *args],
                           capture_output=True, text=True, timeout=60)
 
 
-def validate_step():
+def validate_step() -> str:
     """The script the workflow's validate step runs, lifted out of the YAML."""
     lines = open(WORKFLOW).read().splitlines()
     start = next(i for i, ln in enumerate(lines) if ln.strip() == "- id: ver")
@@ -63,8 +63,8 @@ if not STEP.strip():
     sys.exit(1)
 
 
-def validate(tag, latest_tags="auto"):
-    """The validate step itself, run on a tag: (accepted, step outputs)."""
+def validate(tag: str, latest_tags: str = "auto") -> tuple:
+    """The validate step itself, run on a tag: `(accepted, step outputs)`."""
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "github_output")
         open(out, "w").close()
@@ -75,7 +75,7 @@ def validate(tag, latest_tags="auto"):
     return proc.returncode == 0, outputs
 
 
-def native(function, version):
+def native(function: str, version: str) -> str:
     """A translation from infra/packaging/version.sh, run on a version."""
     return sh(f'. "$1"; {function} "$2"', VERSION_SH, version).stdout.strip()
 

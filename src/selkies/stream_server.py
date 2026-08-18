@@ -2,6 +2,22 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+"""HTTP/HTTPS control-plane and static-content server.
+
+Hosts the single aiohttp application every deployment fronts: the ``/api``
+control-plane endpoints (status, health, streaming-mode switch, file
+upload/browse, metrics), the packaged or user-supplied web frontend, and the
+routes each streaming service registers for itself. ``CentralizedStreamServer``
+supervises the active streaming service (websockets or webrtc) so only one owns
+capture at a time, hot-reloads TLS certificates without dropping the listener,
+and serves on either a TCP address/port or a Unix domain socket. On Wayland
+deployments it also brings the pixelflux compositor socket up before any
+session app starts so early-launched apps find ``WAYLAND_DISPLAY``.
+
+All request handlers run on the event loop; disk-bound work (upload writes,
+static-content extraction, metrics generation) is pushed to executor threads so
+a slow disk never stalls streaming.
+"""
 
 import os
 import ssl
@@ -22,7 +38,7 @@ import tempfile
 from aiohttp import web
 from datetime import datetime
 from prometheus_client import generate_latest
-from typing import Optional, Dict, Any, List
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 try:
     # pyrefly: ignore[missing-import]
     import importlib_resources as importlib_resources  # pyright: ignore[reportMissingImports]
@@ -40,32 +56,40 @@ logger = logging.getLogger("stream_server")
 # upload request arrives. Generous relative to chunk cadence (one ≤64 MiB
 # slice completes well within this on any usable link), so only transfers
 # whose client is truly gone are reaped.
-UPLOAD_PART_TTL_SECONDS = 3600
+UPLOAD_PART_TTL_SECONDS: int = 3600
 
 # Uploads are written to a hidden staging sibling of their destination and
 # renamed onto it, so a destination is only ever replaced by a complete file.
-UPLOAD_STAGING_PREFIX = ".selkies-upload-"
+UPLOAD_STAGING_PREFIX: str = ".selkies-upload-"
 
 
 def _upload_staging_path(dest: str, token: str) -> str:
-    """Staging file for an upload to `dest`: a fixed-length hidden sibling living
-    in the destination's own directory.
+    """Return the staging file path for an upload to ``dest``.
 
-    The name is derived from `token` instead of being appended to the destination
-    basename, so a filename that is legal but sits close to the filesystem's
-    NAME_MAX still uploads; staying in the same directory keeps the finalizing
-    os.replace atomic and intra-filesystem.
+    The staging file is a fixed-length hidden sibling living in the
+    destination's own directory. Its name is derived from ``token`` instead of
+    being appended to the destination basename, so a filename that is legal but
+    sits close to the filesystem's NAME_MAX still uploads; staying in the same
+    directory keeps the finalizing ``os.replace`` atomic and intra-filesystem.
+
+    Args:
+        dest: Absolute destination path of the upload.
+        token: Opaque token that names the staging file.
+
+    Returns:
+        Path of the hidden ``.part`` staging sibling.
     """
     return os.path.join(os.path.dirname(dest), f"{UPLOAD_STAGING_PREFIX}{token}.part")
 
 
 def _upload_staging_token(dest: str) -> str:
-    """Staging token every slice of a chunked transfer to `dest` resolves to, so
-    the .part file is found again across the separate requests that append to it."""
+    """Return the staging token every slice of a chunked transfer to ``dest``
+    resolves to, so the .part file is found again across the separate requests
+    that append to it."""
     return hashlib.sha256(os.fsencode(dest)).hexdigest()[:16]
 
 
-def _carry_destination_mode(staging: str, dest: str):
+def _carry_destination_mode(staging: str, dest: str) -> None:
     """Give the staged upload the permission bits of the file it is about to
     replace, so re-uploading over an existing file keeps its mode: an executable
     script stays executable and a private file stays private. A new destination,
@@ -83,10 +107,10 @@ def _carry_destination_mode(staging: str, dest: str):
 
 
 def _unix_socket_is_live(path: str) -> bool:
-    """True when something accepts a connection on `path`, i.e. the socket file
-    belongs to a running listener rather than being a leftover from a dead one.
-    Anything other than a refusal counts as live: an error that does not prove
-    the path is dead must not license removing it."""
+    """Return True when something accepts a connection on ``path``, i.e. the
+    socket file belongs to a running listener rather than being a leftover from
+    a dead one. Anything other than a refusal counts as live: an error that does
+    not prove the path is dead must not license removing it."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.25)
         try:
@@ -99,7 +123,7 @@ def _unix_socket_is_live(path: str) -> bool:
 
 
 # Inlined header/footer HTML for the /api/files directory index.
-FILE_INDEX_HEADER = """<!DOCTYPE html>
+FILE_INDEX_HEADER: str = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
@@ -342,7 +366,7 @@ FILE_INDEX_HEADER = """<!DOCTYPE html>
         <h1>
 """
 
-FILE_INDEX_FOOTER = """    </div> <!-- closes .page-container -->
+FILE_INDEX_FOOTER: str = """    </div> <!-- closes .page-container -->
     <footer>
         <p>&copy; <script>document.write(new Date().getFullYear())</script> Selkies.</p>
     </footer>
@@ -428,25 +452,46 @@ FILE_INDEX_FOOTER = """    </div> <!-- closes .page-container -->
 
 
 class BaseStreamingService(metaclass=ABCMeta):
-    def __init__(self, name: str):
+    """Interface a streaming service (websockets or webrtc) implements so the
+    supervisor can start, stop, and route to either interchangeably."""
+
+    def __init__(self, name: str) -> None:
         self.mode = name
 
     @abstractmethod
-    async def start(self):
-        """Logic to setup and start the resource loops."""
+    async def start(self) -> None:
+        """Set up resources and run the service's loops until stopped."""
 
     @abstractmethod
-    async def stop(self):
-        """Logic to cleanup resources and stop loops."""
+    async def stop(self) -> None:
+        """Clean up resources and stop the service's loops."""
 
     @abstractmethod
-    def register_routes(self, api_prefix: str, main_router: web.UrlDispatcher):
-        """Service registers its absolute paths directly on the main router."""
+    def register_routes(self, api_prefix: str, main_router: web.UrlDispatcher) -> None:
+        """Register the service's absolute paths directly on the main router.
+
+        Args:
+            api_prefix: Deployment subfolder prefix (empty when serving at root).
+            main_router: The application's router to register routes on.
+        """
         pass
 
 
 class CentralizedStreamServer:
-    def __init__(self, settings, services: Optional[Dict[str, BaseStreamingService]] = None):
+    """Supervisor that owns the aiohttp application and the streaming services.
+
+    Exactly one registered service (websockets or webrtc) is active at a time;
+    ``switch_to_mode`` serializes transitions under a lock so capture is never
+    owned twice. The supervisor also serves the control-plane API, the static
+    frontend, file uploads/downloads, and — when HTTPS is enabled — hot-reloads
+    certificates by rebuilding the listening site without restarting the app.
+    """
+
+    def __init__(
+        self,
+        settings: Any,
+        services: Optional[Dict[str, BaseStreamingService]] = None,
+    ) -> None:
         self.settings = settings
         self.services = services or {}
         self.current_mode: Optional[str] = None
@@ -469,8 +514,8 @@ class CentralizedStreamServer:
         self._chunked_uploads: Dict[str, Dict[str, Any]] = {}
         self.web_files_ctx: Optional[tempfile.TemporaryDirectory] = None
 
-        self._clients_present = False
-        self._client_hook_tasks = set()
+        self._clients_present: bool = False
+        self._client_hook_tasks: Set[asyncio.Task] = set()
 
         # Wayland deployments: bring the compositor socket up now, before any capture
         # or session app starts, so early-launched apps find WAYLAND_DISPLAY. All
@@ -519,9 +564,16 @@ class CentralizedStreamServer:
             "svg": "image/svg+xml",
         }
 
-    def set_clients_present(self, present: bool):
-        """Both modes report client presence here; run the configured hook
-        command when the first client connects / the last one disconnects."""
+    def set_clients_present(self, present: bool) -> None:
+        """Record client presence and fire the configured presence hook.
+
+        Both streaming modes report here; the ``run_after_connect`` /
+        ``run_after_disconnect`` hook command runs when the first client
+        connects or the last one disconnects.
+
+        Args:
+            present: Whether at least one client is currently connected.
+        """
         if present == self._clients_present:
             return
         self._clients_present = present
@@ -533,7 +585,8 @@ class CentralizedStreamServer:
             self._client_hook_tasks.add(task)
             task.add_done_callback(self._client_hook_tasks.discard)
 
-    async def _run_client_hook(self, cmd: str, present: bool):
+    async def _run_client_hook(self, cmd: str, present: bool) -> None:
+        """Run a presence hook shell command, killing it if it wedges."""
         name = "run_after_connect" if present else "run_after_disconnect"
         try:
             proc = await asyncio.create_subprocess_shell(cmd)
@@ -555,7 +608,9 @@ class CentralizedStreamServer:
     def _b64_decode(self, data: str) -> str:
         return base64.b64decode(data).decode("utf-8")
 
-    def _get_https_certs(self):
+    def _get_https_certs(self) -> Tuple[Optional[str], Optional[str]]:
+        """Return absolute paths of the configured cert and key files, each None
+        when unset or missing on disk."""
         https_cert = getattr(self.settings, "https_cert", None)
         https_key = getattr(self.settings, "https_key", None)
         cert_pem = (
@@ -570,7 +625,15 @@ class CentralizedStreamServer:
         )
         return cert_pem, key_pem
 
-    def _create_ssl_context(self):
+    def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
+        """Build the server TLS context from the configured cert/key.
+
+        Returns:
+            The loaded context, or None when HTTPS is disabled.
+
+        Raises:
+            FileNotFoundError: HTTPS is enabled but the certificate is missing.
+        """
         enable_https = getattr(self.settings, "enable_https", None)
         if not enable_https or not enable_https[0]:
             return None
@@ -616,9 +679,13 @@ class CentralizedStreamServer:
         except OSError:
             return 0.0
 
-    async def _watch_and_reload_certs(self):
-        """Background task: periodically checks whether the TLS certificate or
-        private key files have changed on disk.
+    async def _watch_and_reload_certs(self) -> None:
+        """Poll the TLS cert/key mtimes and swap in a new listening site on change.
+
+        The new SSL context is built before the old site is stopped so a bad
+        certificate never takes the server offline, and the recorded mtime only
+        advances once the new site is up, so a failed reload is retried on the
+        next poll.
         """
         reload_interval = getattr(self.settings, "cert_reload_interval", 30)
         if reload_interval <= 0:
@@ -649,11 +716,6 @@ class CentralizedStreamServer:
                 last_mtime,
                 new_mtime,
             )
-            # last_mtime advances only once the new site is up (below), so a
-            # failed reload is retried on the next poll.
-
-            # Build the new SSL context *before* tearing down the old site so that
-            # a bad certificate never takes the server offline.
             try:
                 new_ssl_context = self._create_ssl_context()
             except Exception as exc:
@@ -695,8 +757,9 @@ class CentralizedStreamServer:
                 )
 
     @staticmethod
-    def _check_master_token(auth_header, master_token) -> bool:
-        """Timing-safe check of a `Bearer <master_token>` header (UTF-8 bytes so non-ASCII is safe)."""
+    def _check_master_token(auth_header: Optional[str], master_token: Any) -> bool:
+        """Timing-safe check of a ``Bearer <master_token>`` header, compared as
+        UTF-8 bytes so non-ASCII tokens are safe."""
         if not auth_header or not auth_header.startswith("Bearer "):
             return False
         parts = auth_header.split()
@@ -722,12 +785,12 @@ class CentralizedStreamServer:
         )
 
     @staticmethod
-    def _is_ws_origin_allowed(request: web.Request, settings) -> bool:
-        """Whether a WebSocket upgrade's Origin is permitted.
+    def _is_ws_origin_allowed(request: web.Request, settings: Any) -> bool:
+        """Return whether a WebSocket upgrade's Origin is permitted.
 
-        Empty allowed_origins means same-origin only (plus non-browser clients that
-        send no Origin); '*' allows any; otherwise the Origin must be listed or match
-        the Host header.
+        Empty ``allowed_origins`` means same-origin only (plus non-browser
+        clients that send no Origin); ``*`` allows any; otherwise the Origin
+        must be listed or match the Host header.
         """
         origin = request.headers.get("Origin")
         if not origin:
@@ -765,9 +828,19 @@ class CentralizedStreamServer:
         return False
 
     @web.middleware
-    async def _auth_middleware(self, request: web.Request, handler):
-        """
-        Global Guard: Handles Basic Auth for the entire server.
+    async def _auth_middleware(
+        self,
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
+        """Global auth guard for every route on the server.
+
+        Layered gates, in order: cross-site WebSocket upgrades are rejected by
+        Origin; health/liveness endpoints pass without credentials; the token
+        and mode-switch control endpoints accept the Bearer master token; and
+        everything else falls through to Basic Auth when enabled. A request
+        that authenticates with the view-only password is tagged with
+        ``auth_role_ceiling = "viewer"`` for downstream handlers to enforce.
         """
         settings = request.app["settings"]
         auth_header = request.headers.get("Authorization")
@@ -864,7 +937,7 @@ class CentralizedStreamServer:
             return self._basic_auth_challenge()
         return await handler(request)
 
-    def _require_configured_credentials(self):
+    def _require_configured_credentials(self) -> None:
         """Refuse to serve a login that nobody chose a password for.
 
         The built-in password is a placeholder, not a credential: reaching this point
@@ -887,9 +960,17 @@ class CentralizedStreamServer:
         )
         raise SystemExit(1)
 
-    async def switch_to_mode(self, mode_name: str):
-        """
-        Orchestrates the transition between services.
+    async def switch_to_mode(self, mode_name: str) -> None:
+        """Stop the active streaming service and start ``mode_name`` in its place.
+
+        Serialized under the supervisor lock so two switches can never overlap;
+        switching to the already-active mode is a no-op.
+
+        Args:
+            mode_name: Registered service name ("websockets" or "webrtc").
+
+        Raises:
+            ValueError: ``mode_name`` is not a registered service.
         """
         if mode_name not in self.services:
             raise ValueError(f"Service {mode_name} not found")
@@ -912,7 +993,7 @@ class CentralizedStreamServer:
 
             # Clear the stale mode if the service dies unexpectedly, and retrieve
             # the exception so asyncio doesn't log it as never-retrieved.
-            def _on_service_done(finished: asyncio.Task, mode=mode_name):
+            def _on_service_done(finished: asyncio.Task, mode: str = mode_name) -> None:
                 if finished.cancelled():
                     return
                 exc = finished.exception()
@@ -924,7 +1005,8 @@ class CentralizedStreamServer:
 
             task.add_done_callback(_on_service_done)
 
-    async def _stop_service(self):
+    async def _stop_service(self) -> None:
+        """Stop the active service, escalating to a forced cancel on timeout."""
         if not self.current_mode:
             return
         logger.info(f"Stopping service: {self.current_mode}")
@@ -952,7 +1034,7 @@ class CentralizedStreamServer:
         self.current_mode = None
         self.active_task = None
 
-    def _get_status(self):
+    def _get_status(self) -> Dict[str, Any]:
         return {
             "current_mode": self.current_mode,
             "available_modes": list(self.services.keys()),
@@ -968,15 +1050,21 @@ class CentralizedStreamServer:
 
     @staticmethod
     def _viewer_ceiling(request: web.Request) -> bool:
-        """Whether the credential that authenticated this request caps it at the
-        viewer role (the view-only basic-auth password). The control-plane
-        endpoints that change host or session state — the streaming-mode switch
-        and file uploads — refuse those requests the way the streaming plane
-        refuses input from a viewer. Read-only endpoints stay available: a viewer
-        is already watching the session."""
+        """Return whether the credential that authenticated this request caps it
+        at the viewer role (the view-only basic-auth password).
+
+        The control-plane endpoints that change host or session state — the
+        streaming-mode switch and file uploads — refuse those requests the way
+        the streaming plane refuses input from a viewer. Read-only endpoints
+        stay available: a viewer is already watching the session.
+        """
         return request.get("auth_role_ceiling") == "viewer"
 
     async def handle_switch(self, request: web.Request) -> web.Response:
+        """POST /api/switch: change the active streaming mode.
+
+        Refused for view-only credentials and when dual mode is disabled.
+        """
         if self._viewer_ceiling(request):
             return web.json_response(
                 {"status": "error", "message": "View-only credentials cannot switch streaming mode"},
@@ -1000,13 +1088,18 @@ class CentralizedStreamServer:
             return web.json_response({"status": "error", "message": str(e)}, status=400)
 
     async def _stream_upload_body(self, request: web.Request, path: str, append: bool) -> int:
-        """Stream a request body to `path` with executor-thread writes.
+        """Stream a request body to ``path`` with executor-thread writes.
 
-        Creates/truncates the file when `append` is False, appends when True;
+        Creates/truncates the file when ``append`` is False, appends when True;
         O_NOFOLLOW blocks a planted symlink either way. Enforces the declared
-        Content-Length. Returns the byte count written; on failure the handle
-        is closed and the exception propagates (the caller owns removal of the
-        target file).
+        Content-Length.
+
+        Returns:
+            The byte count written.
+
+        Raises:
+            Exception: Propagated from the read/write path after the handle is
+                closed; the caller owns removal of the target file.
         """
         declared = request.content_length
         loop = asyncio.get_running_loop()
@@ -1029,7 +1122,7 @@ class CentralizedStreamServer:
             raise
         return written
 
-    def _discard_chunked_upload(self, dest: str, part_path: str):
+    def _discard_chunked_upload(self, dest: str, part_path: str) -> None:
         """Drop a chunked transfer's tracking entry and its on-disk .part file."""
         self._chunked_uploads.pop(dest, None)
         try:
@@ -1037,7 +1130,7 @@ class CentralizedStreamServer:
         except OSError:
             pass
 
-    def _expire_stale_chunked_uploads(self):
+    def _expire_stale_chunked_uploads(self) -> None:
         """Reap transfers idle past UPLOAD_PART_TTL_SECONDS (entry + .part file)."""
         now = time.monotonic()
         for key in [k for k, s in self._chunked_uploads.items()
@@ -1226,10 +1319,12 @@ class CentralizedStreamServer:
         return web.json_response({"status": "success", "bytes": received, "complete": True})
 
     async def handle_status(self, _: web.Request) -> web.Response:
+        """GET /api/status: current mode, available modes, dual-mode flag."""
         status = self._get_status()
         return web.json_response(status)
 
-    async def handle_health(self, _) -> web.Response:
+    async def handle_health(self, _: web.Request) -> web.Response:
+        """GET /api/health: liveness probe, always 200."""
         return web.Response(text="OK")
 
     async def handle_metrics(self, request: web.Request) -> web.Response:
@@ -1246,6 +1341,16 @@ class CentralizedStreamServer:
         )
 
     async def _get_static_content_path(self) -> str:
+        """Resolve the directory the static frontend is served from.
+
+        A configured ``web_root`` wins when it holds an ``index.html``;
+        otherwise the packaged web files are extracted to a temporary directory
+        (importlib traversables are not guaranteed to be real files, and aiohttp
+        static routes need a filesystem path).
+
+        Returns:
+            The directory path, or an empty string when no usable content exists.
+        """
         web_path = ""
 
         web_root = getattr(self.settings, "web_root", "")
@@ -1259,7 +1364,6 @@ class CentralizedStreamServer:
         logger.info("Defaulting to packaged web files.")
         try:
             package_path = importlib_resources.files(self.STATIC_CONTENT_PATH)
-            # Create a temporary directory and copy contents
             self.web_files_ctx = tempfile.TemporaryDirectory(prefix="selkies_web")
             temp_path = pathlib.Path(self.web_files_ctx.name)
             await asyncio.to_thread(self._copy_traversable, package_path, temp_path)
@@ -1283,7 +1387,7 @@ class CentralizedStreamServer:
 
         return ""
 
-    def _copy_traversable(self, src: Any, dst: pathlib.Path):
+    def _copy_traversable(self, src: Any, dst: pathlib.Path) -> None:
         """Recursively copy a Traversable (file or directory) to a filesystem path."""
         if src.is_file():
             with src.open('rb') as f_src, open(dst, 'wb') as f_dst:
@@ -1293,9 +1397,15 @@ class CentralizedStreamServer:
             for child in src.iterdir():
                 self._copy_traversable(child, dst / child.name)
 
-    async def fancy_index_handler(self, request: web.Request):
-        # The index exists solely to download files, so the listing is gated
-        # with the bytes.
+    async def fancy_index_handler(self, request: web.Request) -> web.StreamResponse:
+        """GET /api/files/...: serve the file-manager tree for download.
+
+        Files are served with an attachment disposition; directories render a
+        styled HTML listing. The index exists solely to download files, so the
+        listing itself is gated behind the same "download" transfer permission
+        as the bytes. Path validation rejects any traversal before touching the
+        filesystem and re-checks the symlink-resolved path against the root.
+        """
         if "download" not in self.settings.file_transfers:
             return web.Response(status=403, text="Forbidden: downloads disabled")
         rel_path = request.match_info.get("path", "").lstrip("/")
@@ -1349,9 +1459,7 @@ class CentralizedStreamServer:
                 location += "?" + request.query_string
             raise web.HTTPMovedPermanently(location)
 
-        # If it's a directory, generate the "FancyIndex" HTML
-        items: List[dict[str, Any]] = []
-        # Add parent directory link if not at root
+        items: List[Dict[str, Any]] = []
         if full_path != self.upload_dir:
             items.append({"name": "../", "size": "-", "mtime": "-", "is_dir": True})
 
@@ -1381,10 +1489,9 @@ class CentralizedStreamServer:
         except PermissionError:
             return web.Response(status=403, text="Permission Denied")
 
-        # Sort: Directories first, then alphabetically
+        # Directories first, then case-insensitive alphabetical.
         items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
 
-        # Build Table Rows with proper escaping
         rows = ""
         for item in items:
             escaped_name = html.escape(item["name"])
@@ -1397,11 +1504,11 @@ class CentralizedStreamServer:
                 <td>{escaped_size}</td>
             </tr>"""
 
-        # Inject the current path into the H1 (which is left open in the header)
+        # The header template leaves the H1 open; the current path closes it here.
         escaped_rel_path = html.escape(rel_path)
         current_display_path = f"/api/files/{escaped_rel_path}"
 
-        # JavaScript string escaping for upload_dir
+        # json.dumps yields a safely quoted/escaped JavaScript string literal.
         js_safe_upload_dir = json.dumps(str(self.upload_dir))
         path_injection = f"<script>window.__SELKIES_INJECTED_PATH_PREFIX__ = {js_safe_upload_dir};</script>"
 
@@ -1426,16 +1533,19 @@ class CentralizedStreamServer:
 
         return web.Response(text=html_content, content_type="text/html")
 
-    async def initialize_app(self):
-        """Initialize the web application with routes and middleware."""
+    async def initialize_app(self) -> web.Application:
+        """Build the aiohttp application: auth middleware, API routes, service
+        routes, and the static frontend.
+
+        Returns:
+            The configured application (also stored on ``self.app``).
+        """
         self._require_configured_credentials()
 
-        # Create web application with auth middleware
         self.app = web.Application(middlewares=[self._auth_middleware])
         self.app["supervisor"] = self
         self.app["settings"] = self.settings
 
-        # Register API routes
         api_prefix = (
             ("/" + self.settings.subfolder.strip("/"))
             if self.settings.subfolder
@@ -1463,13 +1573,12 @@ class CentralizedStreamServer:
             routes.append(web.get(f"{api_prefix}/api/metrics", self.handle_metrics))
         self.app.add_routes(routes)
 
-        # Register service routes
         for service in self.services.values():
             service.register_routes(api_prefix, self.app.router)
 
         self.static_fs_path = await self._get_static_content_path()
         if self.static_fs_path:
-            async def index_handler(_):
+            async def index_handler(_: web.Request) -> web.FileResponse:
                 return web.FileResponse(os.path.join(self.static_fs_path, "index.html"))
 
             self.app.router.add_get(f"{api_prefix}/", index_handler)
@@ -1533,7 +1642,7 @@ class CentralizedStreamServer:
         except OSError:
             pass
 
-    def _build_site(self, ssl_context=None):
+    def _build_site(self, ssl_context: Optional[ssl.SSLContext] = None) -> web.BaseSite:
         """Build the aiohttp site for the configured listener: a Unix domain
         socket when ``unix_socket`` is set, otherwise the TCP addr/port pair."""
         sock_path = self._unix_socket_path()
@@ -1560,12 +1669,11 @@ class CentralizedStreamServer:
         https = getattr(self.settings, "enable_https", (False,))[0]
         return f"{'https' if https else 'http'}://{self.settings.addr}:{self.settings.port}"
 
-    async def start_server(self):
-        """Start the HTTP/HTTPS server."""
+    async def start_server(self) -> None:
+        """Start the HTTP/HTTPS server and, under HTTPS, the cert-reload watcher."""
         if not self.app:
             await self.initialize_app()
 
-        # Setup SSL if enabled
         https = getattr(self.settings, "enable_https", (False,))[0]
         if https:
             try:
@@ -1574,7 +1682,6 @@ class CentralizedStreamServer:
                 logger.error("Failed to create SSL context at startup: %s", exc)
                 raise
 
-        # Create and start runner
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
 
@@ -1587,12 +1694,12 @@ class CentralizedStreamServer:
         logger.info("Selkies server running on %s", self._site_endpoint())
         await self.site.start()
 
-        # Start certificate watcher if HTTPS is enabled
         if https:
             self.cert_watcher = asyncio.create_task(self._watch_and_reload_certs())
 
-    async def stop_server(self):
-        """Stop the server gracefully."""
+    async def stop_server(self) -> None:
+        """Stop the server gracefully: cert watcher, active service, listener,
+        extracted web files, and the runner, in that order."""
         if self.cert_watcher and not self.cert_watcher.done():
             self.cert_watcher.cancel()
             try:
@@ -1611,8 +1718,8 @@ class CentralizedStreamServer:
             await self.runner.cleanup()
             logger.info("Server cleanup complete.")
 
-    async def run(self):
-        """Main server loop - starts server and runs forever."""
+    async def run(self) -> None:
+        """Start the server and serve until cancelled, then clean up."""
         try:
             await self.start_server()
             await asyncio.Future()
@@ -1621,6 +1728,6 @@ class CentralizedStreamServer:
         finally:
             await self.stop_server()
 
-    def register_service(self, name: str, service: BaseStreamingService):
-        """Register a new streaming service."""
+    def register_service(self, name: str, service: BaseStreamingService) -> None:
+        """Register a streaming service under ``name`` for later activation."""
         self.services[name] = service

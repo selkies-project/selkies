@@ -11,7 +11,17 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 
-def run_block(mode, wayland, block=""):
+def run_block(mode: str, wayland: bool, block: str = "") -> "H.Results":
+    """Drive one transport/backend pair through the full e2e checklist.
+
+    Args:
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+        wayland: True to run against the Wayland backend, False for X11.
+        block: Label for this block's Results; derived from mode when empty.
+
+    Returns:
+        The Results accumulator for this block's checks.
+    """
     tag = block or f"{mode}-{'wl' if wayland else 'x11'}"
     res = H.Results(tag)
     wl_socket = "wayland-1"
@@ -218,7 +228,8 @@ def run_block(mode, wayland, block=""):
     return res
 
 
-def main():
+def main() -> None:
+    """Run the matrix blocks named on argv (default: all four)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
     if which in ("all", "ws-x11"):

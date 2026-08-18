@@ -1152,8 +1152,8 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         ]
         await asyncio.gather(*coros)
 
-        # Emits the bare track (the aiortc 1.x signature); the rtc.py listeners
-        # rely on receiving the track object itself.
+        # Emits the bare track rather than a wrapper event object; the rtc.py
+        # listeners rely on receiving the track object itself.
         for event in trackEvents:
             self.emit("track", event.track)
 

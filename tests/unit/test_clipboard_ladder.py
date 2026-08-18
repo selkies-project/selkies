@@ -22,17 +22,19 @@ from selkies.input_handler import WebRTCInput  # noqa: E402
 results = []
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     results.append((label, bool(ok)))
     print(f"{'PASS' if ok else 'FAIL'}  [clip-ladder] {label}  {detail}", flush=True)
 
 
 class Records(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.lines = []
+    """Captures (level, message) pairs so the checks can read the log."""
 
-    def emit(self, record):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines: list = []
+
+    def emit(self, record: logging.LogRecord) -> None:
         self.lines.append((record.levelno, record.getMessage()))
 
 
@@ -44,12 +46,15 @@ builds = []
 
 
 class FailingMonitor:
-    def __init__(self):
+    """Counts construction attempts and fails like a monitor with no display."""
+
+    def __init__(self) -> None:
         builds.append(1)
         raise RuntimeError("no display")
 
 
-def make_handler(is_wayland=False):
+def make_handler(is_wayland: bool = False) -> WebRTCInput:
+    """A WebRTCInput with only the clipboard-ladder state initialized."""
     h = WebRTCInput.__new__(WebRTCInput)
     h.is_wayland = is_wayland
     h._x11_clipboard_monitor = None
@@ -60,7 +65,7 @@ def make_handler(is_wayland=False):
     return h
 
 
-async def main():
+async def main() -> None:
     saved_monitor = ih._X11ClipboardMonitor
     saved_available = ih.X11_LIBS_AVAILABLE
     ih._X11ClipboardMonitor = FailingMonitor

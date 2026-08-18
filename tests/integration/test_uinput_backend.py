@@ -26,23 +26,36 @@ STREAM = os.environ["UINPUT_SHIM_STREAM"]
 SHIMLOG = os.environ["UINPUT_SHIM_LOG"]
 EV_SIZE = 24
 
-# (client index, value, is_button)
-SCRIPT = [
-    (0, 1, True), (0, 0, True),          # A press / release
-    (6, 0.5, True),                       # left trigger, half
-    (12, 1, True), (12, 0, True),         # dpad up press / release
-    (0, -1.0, False), (1, 0.25, False),   # left stick
-    (16, 1, True), (16, 0, True),         # guide
+# Entries are (client index, value, is_button).
+SCRIPT: list[tuple] = [
+    # A press / release.
+    (0, 1, True), (0, 0, True),
+    # Left trigger, half travel.
+    (6, 0.5, True),
+    # Dpad up press / release.
+    (12, 1, True), (12, 0, True),
+    # Left stick.
+    (0, -1.0, False), (1, 0.25, False),
+    # Guide button.
+    (16, 1, True), (16, 0, True),
 ]
 
-def unpack_stream(blob):
+def unpack_stream(blob: bytes) -> list[tuple[int, int, int]]:
+    """Decode raw input_event records into (type, code, value) tuples."""
     out = []
     for off in range(0, len(blob) - EV_SIZE + 1, EV_SIZE):
         _s, _u, t, c, v = struct.unpack("=qqHHi", blob[off:off + EV_SIZE])
         out.append((t, c, v))
     return out
 
-async def evdev_client(path, collected, ready):
+async def evdev_client(path: str, collected: list, ready: asyncio.Event) -> None:
+    """Connect to the interposer's evdev socket and collect its event bytes.
+
+    Args:
+        path: Unix socket path of the interposer's evdev endpoint.
+        collected: List that each raw 24-byte event record is appended to.
+        ready: Set once the handshake completes and collection is live.
+    """
     reader, writer = await asyncio.open_unix_connection(path)
     await reader.readexactly(ih.EXPECTED_C_STRUCT_SIZE)
     writer.write(struct.pack("=B", 8))
@@ -54,9 +67,10 @@ async def evdev_client(path, collected, ready):
     except (asyncio.IncompleteReadError, ConnectionResetError):
         pass
 
-COLLECTED = []
+COLLECTED: list[bytes] = []
 
-async def main():
+async def main() -> None:
+    """Run the gamepad servers, attach an evdev client, and play the script."""
     gp = ih.SelkiesGamepad(os.path.join(SOCK, "selkies_js0.sock"),
                            os.path.join(SOCK, "selkies_event1000.sock"),
                            asyncio.get_running_loop(), uinput_enabled=True)
@@ -66,7 +80,8 @@ async def main():
     collected, ready = COLLECTED, asyncio.Event()
     task = asyncio.create_task(evdev_client(os.path.join(SOCK, "selkies_event1000.sock"), collected, ready))
     await asyncio.wait_for(ready.wait(), 5)
-    await asyncio.sleep(0.3)  # let the server register the client writer
+    # Give the server a beat to register the client writer.
+    await asyncio.sleep(0.3)
     gp.ensure_uinput()
     for idx, value, is_button in SCRIPT:
         gp.send_event(idx, value, is_button)
@@ -78,8 +93,9 @@ async def main():
 asyncio.run(main())
 
 # ---- assertions ----
-fails = []
-def check(name, cond, detail=""):
+fails: list[str] = []
+def check(name: str, cond, detail: str = "") -> None:
+    """Record and print one pass/fail result."""
     print(f"{'PASS' if cond else 'FAIL'}  {name}  {detail}")
     if not cond:
         fails.append(name)
@@ -132,7 +148,7 @@ expected = [
 check("event semantics", uinput_events == expected,
       "" if uinput_events == expected else f"got {uinput_events}")
 
-# node resolution against a synthetic sysfs tree
+# Node resolution against a synthetic sysfs tree.
 with tempfile.TemporaryDirectory() as tmp:
     os.makedirs(os.path.join(tmp, "input999", "event42"))
     os.makedirs(os.path.join(tmp, "input999", "js3"))

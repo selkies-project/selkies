@@ -11,6 +11,7 @@ tier with the markers:
 import os
 import subprocess
 import sys
+from typing import Optional
 
 import pytest
 
@@ -20,7 +21,7 @@ import suites
 TESTS = os.path.dirname(os.path.abspath(__file__))
 PYTHON = os.environ.get("SELKIES_TEST_PYTHON", sys.executable)
 
-CASES = [
+CASES: list = [
     pytest.param(path, selector, timeout,
                  marks=getattr(pytest.mark, tier),
                  id=path[:-3].replace("/", ":") + (f"-{selector}" if selector else ""))
@@ -29,7 +30,8 @@ CASES = [
 
 
 @pytest.mark.parametrize("path,selector,timeout", CASES)
-def test_suite(path, selector, timeout):
+def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
+    """Run one suite as a subprocess and map its exit protocol onto pytest."""
     cmd = [PYTHON, os.path.join(TESTS, path)] + ([selector] if selector else [])
     proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,
                           timeout=timeout)

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Any, Iterable, NoReturn, Optional
 
 REPO = os.environ.get(
     "SELKIES_REPO",
@@ -34,7 +35,8 @@ LOG = os.path.join(WORKDIR, "selkies-server.log")
 PIDFILE = os.path.join(WORKDIR, "selkies-server.pid")
 
 
-def _cmdline(pid):
+def _cmdline(pid: int) -> str:
+    """Space-joined command line of `pid`, or "" if it is gone."""
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             return f.read().replace(b"\0", b" ").decode("utf-8", "replace")
@@ -42,7 +44,7 @@ def _cmdline(pid):
         return ""
 
 
-def _listener_pids(port):
+def _listener_pids(port: int) -> set:
     """PIDs listening on `port`, read from /proc so no iproute2 is needed."""
     inodes = set()
     for path in ("/proc/net/tcp", "/proc/net/tcp6"):
@@ -53,7 +55,8 @@ def _listener_pids(port):
             continue
         for line in lines:
             fields = line.split()
-            if len(fields) < 10 or fields[3] != "0A":  # TCP_LISTEN
+            # 0A is TCP_LISTEN in the /proc/net/tcp state column.
+            if len(fields) < 10 or fields[3] != "0A":
                 continue
             try:
                 if int(fields[1].rsplit(":", 1)[1], 16) == port:
@@ -81,7 +84,7 @@ def _listener_pids(port):
     return pids
 
 
-def server_pids(port=PORT):
+def server_pids(port: int = PORT) -> set:
     """The servers this harness is responsible for: the one it started, plus
     whatever selkies is listening on the test port (a previous run that died
     without cleaning up). Deliberately not every `python -m selkies` on the
@@ -101,7 +104,7 @@ def server_pids(port=PORT):
     return pids
 
 
-def pulse_setup():
+def pulse_setup() -> None:
     """Create the 'output' null sink the audio capture reads through its monitor
     source, matching the deployed layout. Module ids must not collide across
     restarts, so an existing sink is left alone. Without pactl the sink has to
@@ -119,8 +122,30 @@ def pulse_setup():
             capture_output=True, timeout=10)
 
 
-def server_start(mode="websockets", wayland=False, web_root=CORE_DIST,
-                 extra_env=None, port=PORT, log=LOG):
+def server_start(mode: str = "websockets", wayland: bool = False,
+                 web_root: str = CORE_DIST,
+                 extra_env: Optional[dict] = None,
+                 port: int = PORT, log: str = LOG) -> subprocess.Popen:
+    """Start a selkies server and wait until /api/status answers.
+
+    Any previous server on the port is stopped first; the environment is built
+    from scratch rather than inherited, so a variable set in the shell running
+    the tests cannot silently reconfigure the server under test.
+
+    Args:
+        mode: Transport, "websockets" or "webrtc".
+        wayland: Capture backend; False runs against the X test display.
+        web_root: Directory served as the web client.
+        extra_env: Extra environment variables merged over the base set.
+        port: HTTP port the server listens on.
+        log: File that receives the server's combined stdout/stderr.
+
+    Returns:
+        The server process, already answering on `/api/status`.
+
+    Raises:
+        RuntimeError: The server exited during startup or never came up.
+    """
     server_stop()
     pulse_setup()
     env = {
@@ -171,7 +196,7 @@ def server_start(mode="websockets", wayland=False, web_root=CORE_DIST,
     raise RuntimeError(f"selkies did not come up in time; see {log}")
 
 
-def _signal(pids, sig):
+def _signal(pids: Iterable[int], sig: int) -> None:
     for pid in pids:
         try:
             os.kill(pid, sig)
@@ -179,7 +204,7 @@ def _signal(pids, sig):
             pass
 
 
-def server_stop(port=PORT):
+def server_stop(port: int = PORT) -> None:
     """Fully stop the server under test (two zombies must never share the port)."""
     _signal(server_pids(port), signal.SIGTERM)
     deadline = time.time() + 10
@@ -196,7 +221,19 @@ def server_stop(port=PORT):
     raise RuntimeError("server_stop: a selkies process survived SIGKILL")
 
 
-def curl(path, method="GET", data=None, headers=None, timeout=10):
+def curl(path, method="GET", data=None, headers=None, timeout=10) -> tuple:
+    """HTTP request against the test server.
+
+    Args:
+        path: URL path, joined onto BASE_URL.
+        method: HTTP method.
+        data: Request body; a dict or list is sent as JSON, bytes as-is.
+        headers: Extra request headers.
+        timeout: Socket timeout in seconds.
+
+    Returns:
+        `(status, body_bytes)`.
+    """
     import urllib.request
     req = urllib.request.Request(BASE_URL + path, method=method)
     if headers:
@@ -212,7 +249,8 @@ def curl(path, method="GET", data=None, headers=None, timeout=10):
         return r.status, r.read()
 
 
-def server_log(log=LOG, tail=None):
+def server_log(log: str = LOG, tail: Optional[int] = None) -> str:
+    """The server log, optionally only its last `tail` lines."""
     try:
         with open(log) as f:
             txt = f.read()
@@ -227,10 +265,20 @@ UINPUT_SHIM = os.path.join(TOOLS, "uinput_shim.so")
 PAD_INIT_JS = os.path.join(TOOLS, "pad_init.js")
 
 
-def uinput_shim_env(tag):
+def uinput_shim_env(tag: str) -> tuple:
     """Environment that points the server at the /dev/uinput emulator in
     tests/tools, which records the ioctls and event writes a kernel gamepad
-    would receive. Returns (env, stream path, log path), both files truncated."""
+    would receive.
+
+    Args:
+        tag: Distinguishes this run's recording files in the workdir.
+
+    Returns:
+        `(env, stream_path, log_path)`, both files truncated.
+
+    Raises:
+        RuntimeError: The shim library has not been built.
+    """
     if not os.path.exists(UINPUT_SHIM):
         raise RuntimeError(f"{UINPUT_SHIM} is missing; run make -C tests/tools")
     stream = os.path.join(WORKDIR, f"uinput-{tag}-stream.bin")
@@ -246,13 +294,13 @@ def uinput_shim_env(tag):
     return env, stream, log
 
 
-def pad_init_js():
+def pad_init_js() -> str:
     """Browser init script installing a synthetic W3C Gamepad the tests drive."""
     with open(PAD_INIT_JS) as f:
         return f.read()
 
 
-def decode_input_events(path):
+def decode_input_events(path: str) -> list:
     """Unpack a struct input_event stream into (type, code, value) triples."""
     with open(path, "rb") as f:
         blob = f.read()
@@ -262,10 +310,10 @@ def decode_input_events(path):
 
 # Exit code for a suite whose subject is missing from the installed
 # dependencies; test_suites.py reports it as a pytest skip.
-SKIP_EXIT = 77
+SKIP_EXIT: int = 77
 
 
-def skip_suite(reason):
+def skip_suite(reason: str) -> NoReturn:
     """End the suite as skipped rather than failed. For a capability the
     installed capture stack does not expose at all, where every check would only
     report the same absence."""
@@ -274,25 +322,30 @@ def skip_suite(reason):
 
 
 class Results:
-    def __init__(self, block):
-        self.block = block
-        self.items = []
-        self.skipped = []
+    """Collects PASS/FAIL/SKIP check lines for one suite block and prints each
+    as it is recorded, in the line format test_suites.py parses."""
 
-    def check(self, name, ok, detail=""):
+    def __init__(self, block: str) -> None:
+        self.block = block
+        self.items: list = []
+        self.skipped: list = []
+
+    def check(self, name: str, ok: Any, detail: Any = "") -> None:
+        """Record one check; any truthy `ok` passes."""
         self.items.append((name, bool(ok), str(detail)[:160]))
         print(("PASS" if ok else "FAIL") + f"  [{self.block}] {name}  {str(detail)[:110]}", flush=True)
 
-    def skip(self, name, reason=""):
+    def skip(self, name: str, reason: Any = "") -> None:
         """Record a check the installed dependencies cannot observe. Not a
         failure: the behaviour is unproven here rather than known broken."""
         self.skipped.append((name, str(reason)[:160]))
         print(f"SKIP  [{self.block}] {name}  {str(reason)[:110]}", flush=True)
 
-    def failed(self):
+    def failed(self) -> list:
         return [i for i in self.items if not i[1]]
 
-    def summary(self):
+    def summary(self) -> bool:
+        """Print the block's pass count; True when every check passed."""
         f = self.failed()
         tail = f", {len(self.skipped)} skipped" if self.skipped else ""
         print(f"[{self.block}] {len(self.items) - len(f)}/{len(self.items)} passed{tail}", flush=True)
@@ -301,14 +354,21 @@ class Results:
 
 # ---------------- X11 helpers ----------------
 
-def x_display():
+def x_display() -> Any:
     """A selkies.Xlib Display connected to the test server."""
     from selkies.Xlib import display as xdisp
     return xdisp.Display(TEST_DISPLAY)
 
 
-def x_own_clipboard(payload: bytes):
-    """Own CLIPBOARD on the test X server and serve selection requests."""
+def x_own_clipboard(payload: bytes) -> tuple:
+    """Own CLIPBOARD on the test X server and serve selection requests.
+
+    Args:
+        payload: Bytes handed to any requestor asking for the selection.
+
+    Returns:
+        `(display, stop)` where setting `stop["flag"]` ends the serving thread.
+    """
     from selkies.Xlib import display as xdisp, X
     from selkies.Xlib.protocol import event as xevent
     ext = xdisp.Display(TEST_DISPLAY)
@@ -365,7 +425,7 @@ def x_own_clipboard(payload: bytes):
     return ext, stop
 
 
-def x_read_clipboard(timeout=8.0):
+def x_read_clipboard(timeout: float = 8.0) -> Optional[str]:
     """Read current CLIPBOARD text from the test X server."""
     from selkies.Xlib import display as xdisp, X
     from selkies.Xlib.protocol import event as xevent
@@ -397,11 +457,16 @@ def x_read_clipboard(timeout=8.0):
         d2.close()
 
 
-def x_key_watcher():
+def x_key_watcher() -> tuple:
     """Watch raw KeyPress/ButtonPress events on an override-redirect window on
     the test X server (a plain root event mask hits BadAccess: the streaming
     server already owns the core root mask; an override-redirect window maps
-    without a WM and receives pointer/button events under the cursor)."""
+    without a WM and receives pointer/button events under the cursor).
+
+    Returns:
+        `(display, events, stop)`: the events list fills from a daemon thread
+        until `stop["flag"]` is set or 30 seconds pass.
+    """
     from selkies.Xlib import display as xdisp, X
     d = xdisp.Display(TEST_DISPLAY)
     scr = d.screen()
@@ -440,7 +505,7 @@ def x_key_watcher():
     return d, events, stop
 
 
-def x_root_size():
+def x_root_size() -> tuple:
     """Current root dimensions, read on a fresh connection.
 
     The size rides the connection handshake, so a new one is what picks up a
@@ -456,22 +521,26 @@ def x_root_size():
 
 # ------------- Wayland helpers -------------
 
-def _wl_env(socket_name):
-    # Set through the environment rather than an `env` prefix: `env` exists even
-    # where wl-clipboard does not, and would turn a missing tool into an exit
-    # 127 with empty output, which reads as an empty clipboard rather than as
-    # the missing dependency it is.
+def _wl_env(socket_name: str) -> dict:
+    """Environment for a wl-clipboard call against `socket_name`.
+
+    Set through the environment rather than an `env` prefix: `env` exists even
+    where wl-clipboard does not, and would turn a missing tool into an exit
+    127 with empty output, which reads as an empty clipboard rather than as
+    the missing dependency it is.
+    """
     return {**os.environ, "WAYLAND_DISPLAY": socket_name,
             "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", WORKDIR)}
 
 
-def wl_paste(socket_name, timeout=6):
+def wl_paste(socket_name: str, timeout: float = 6) -> str:
+    """Current selection text on the compositor at `socket_name`."""
     r = subprocess.run(["wl-paste", "-n"], capture_output=True, text=True,
                        timeout=timeout, env=_wl_env(socket_name))
     return r.stdout
 
 
-def wl_copy(socket_name, text, timeout=10):
+def wl_copy(socket_name: str, text: str, timeout: float = 10) -> bool:
     """wl-copy against the compositor with one bounded retry: it can transiently
     stall on protocol dispatch when the compositor is under input load."""
     env = _wl_env(socket_name)
@@ -488,7 +557,7 @@ def wl_copy(socket_name, text, timeout=10):
     return False
 
 
-def wl_clear(socket_name, timeout=12):
+def wl_clear(socket_name: str, timeout: float = 12) -> None:
     """Clear the compositor's current selection."""
     subprocess.run(
         ["env", "WAYLAND_DISPLAY=" + socket_name, "wl-copy", "-c"],
@@ -497,17 +566,19 @@ def wl_clear(socket_name, timeout=12):
 
 
 class WlObs:
-    """Drive the pywayland observer client against the compositor."""
-    def __init__(self, socket_name):
+    """Drive the pywayland observer client (tests/tools/wlobs.py) against the
+    compositor and collect its JSONL event lines from a reader thread."""
+
+    def __init__(self, socket_name: str) -> None:
         self.proc = subprocess.Popen(
             [PYTHON, os.path.join(TOOLS, "wlobs.py"), socket_name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             env={**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", WORKDIR),
                  "WLOBS_DURATION": "60"})
-        self.lines = []
+        self.lines: list = []
         self._start_reader()
 
-    def _start_reader(self):
+    def _start_reader(self) -> None:
         import threading
         def read():
             for line in self.proc.stdout:
@@ -519,7 +590,8 @@ class WlObs:
                         pass
         threading.Thread(target=read, daemon=True).start()
 
-    def ready(self, timeout=10):
+    def ready(self, timeout: float = 10) -> bool:
+        """True once the observer surface is mapped and receiving events."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             if any(l.get("kind") == "mapped" for l in self.lines):
@@ -527,7 +599,8 @@ class WlObs:
             time.sleep(0.1)
         return False
 
-    def wait_for(self, kind, timeout=8, **match):
+    def wait_for(self, kind: str, timeout: float = 8, **match: Any) -> Optional[dict]:
+        """First event of `kind` whose fields equal `match`, or None on timeout."""
         deadline = time.time() + timeout
         seen = 0
         while time.time() < deadline:
@@ -540,7 +613,7 @@ class WlObs:
             time.sleep(0.05)
         return None
 
-    def stop(self):
+    def stop(self) -> None:
         try:
             self.proc.terminate()
         except Exception:

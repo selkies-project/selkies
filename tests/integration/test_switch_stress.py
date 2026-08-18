@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
 
-def main():
+def main() -> "H.Results":
+    """Flip the transport mode repeatedly and verify each switch lands cleanly."""
     H.server_start(mode="websockets", wayland=False)
     res = H.Results("switch")
     seq = ["webrtc", "websockets"] * 3
@@ -23,7 +24,6 @@ def main():
             res.check(f"switch {i}: mode={target}", st.get("current_mode") == target,
                       st.get("current_mode"))
         time.sleep(1.0)
-    # Last status
     st = json.loads(H.curl("/api/status")[1])
     res.check("final mode is websockets", st.get("current_mode") == "websockets", st)
     res.summary()

@@ -19,6 +19,16 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
+"""WebSocket signaling client for WebRTC session negotiation.
+
+Connects to the Selkies signaling server as the `server` peer, registers with
+a HELLO line (carrying the master token in secure mode), and relays
+SDP/ICE/session-lifecycle messages to consumer-assigned async callbacks. The
+connect loop reconnects automatically on transport failures, while malformed
+or unrecognized peer messages are logged and dropped — never allowed to tear
+down the signaling connection shared by all peers.
+"""
+
 import ssl
 import json
 import base64
@@ -199,6 +209,9 @@ class WebRTCSignalingClient:
             mlineindex: The media line index for the ICE candidate.
             candidate: The ICE candidate string.
             client_peer_id: The peer ID to send the candidate to.
+
+        Raises:
+            WebRTCSignalingError: If the WebSocket connection is not open.
         """
         if self._ws is None or self._ws.closed:
             raise WebRTCSignalingError("WebSocket connection not available")
@@ -213,6 +226,9 @@ class WebRTCSignalingClient:
             sdp_type: SDP type ('offer' or 'answer').
             sdp: The SDP content.
             client_peer_id: The peer ID to send the SDP to.
+
+        Raises:
+            WebRTCSignalingError: If the WebSocket connection is not open.
         """
         if self._ws is None or self._ws.closed:
             raise WebRTCSignalingError("WebSocket connection not available")
@@ -228,7 +244,6 @@ class WebRTCSignalingClient:
         logger.info("Stopping signaling client...")
         self._stop_event.set()
 
-        # Cancel the connection task if running
         if self._task is not None and not self._task.done():
             self._task.cancel()
             try:

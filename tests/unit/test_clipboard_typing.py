@@ -27,7 +27,7 @@ BACKSPACE = 0xFF08
 results = []
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     results.append((label, bool(ok)))
     print(f"{'PASS' if ok else 'FAIL'}  {label}  {detail}", flush=True)
 
@@ -36,18 +36,28 @@ class FakeWaylandInput:
     """No set_keymap_string, so the worker treats the seat as non-native and
     buffers unicode keysyms the way it does for a nested app compositor."""
 
-    def __init__(self):
-        self.cleared = []
-        self.set_calls = []
+    def __init__(self) -> None:
+        self.cleared: list = []
+        self.set_calls: list = []
 
-    def clipboard_clear_app(self, display):
+    def clipboard_clear_app(self, display: str) -> None:
         self.cleared.append(display)
 
-    def set_clipboard(self, mime, data):
+    def set_clipboard(self, mime: str, data) -> None:
         self.set_calls.append((mime, data))
 
 
-def make_handler(vk_error=True, separate=True, clipboard=None, write_ok=True):
+def make_handler(vk_error: bool = True, separate: bool = True,
+                 clipboard=None, write_ok: bool = True) -> WebRTCInput:
+    """A WebRTCInput whose injection dependencies are recording fakes.
+
+    Args:
+        vk_error: Whether the virtual keyboard raises PixelfluxVkUnavailable,
+            forcing the clipboard-paste fallback.
+        separate: Whether a nested app compositor is reported.
+        clipboard: The `(data, mime)` the pre-paste save reads, or None.
+        write_ok: Whether clipboard writes succeed.
+    """
     h = WebRTCInput.__new__(WebRTCInput)
     h.is_wayland = True
     h.wayland_input = FakeWaylandInput()
@@ -94,7 +104,8 @@ def make_handler(vk_error=True, separate=True, clipboard=None, write_ok=True):
     return h
 
 
-async def run_worker(h, items, settle=0.15):
+async def run_worker(h: WebRTCInput, items: list, settle: float = 0.15) -> None:
+    """Feed `items` through the keyboard worker, then cancel it after `settle`."""
     task = asyncio.create_task(h._keyboard_worker())
     for item in items:
         h.keyboard_queue.put_nowait(item)
@@ -106,14 +117,15 @@ async def run_worker(h, items, settle=0.15):
         pass
 
 
-def chord_of(keys):
+def chord_of(keys: list) -> list:
+    """Just the Shift/Insert events, for comparing against PASTE_CHORD."""
     return [k for k in keys if k[0] in (SHIFT_L, INSERT)]
 
 
 PASTE_CHORD = [(SHIFT_L, True), (INSERT, True), (INSERT, False), (SHIFT_L, False)]
 
 
-async def main():
+async def main() -> None:
     h = make_handler(clipboard=("before", "text/plain"))
     ks = [0x01000000 | ord(c) for c in "한국어"]
     await run_worker(h, [("kd", k) for k in ks] + [("ku", k) for k in ks])

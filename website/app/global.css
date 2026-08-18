@@ -1,6 +1,7 @@
 @import 'tailwindcss';
 @import 'fumadocs-ui/css/neutral.css';
 @import 'fumadocs-ui/css/preset.css';
+@import 'fumadocs-python/preset.css';
 
 /*
  * The accent is the logo gradient's magenta, darkened for the light surface

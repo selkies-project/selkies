@@ -23,12 +23,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
 
+from typing import Optional
+
 PRIMARY_RGB = (220, 30, 30)
 SECONDARY_RGB = (30, 60, 220)
 TOLERANCE = 60
 
 
-def settings_for(display_id, position="right"):
+def settings_for(display_id: str, position: str = "right") -> dict:
+    """Build a jpeg-encoder SETTINGS payload for the display."""
     return {
         "displayId": display_id, "initialClientWidth": 1280, "initialClientHeight": 720,
         "is_manual_resolution_mode": False, "framerate": 30, "encoder": "jpeg",
@@ -37,8 +40,8 @@ def settings_for(display_id, position="right"):
     }
 
 
-def server_layout():
-    """The layout the server last calculated, as {display_id: rect}."""
+def server_layout() -> Optional[dict]:
+    """The layout the server last calculated, as `{display_id: rect}`."""
     import ast
 
     out = subprocess.run(["grep", "-a", "Layout calculated", H.LOG],
@@ -49,7 +52,7 @@ def server_layout():
     return ast.literal_eval(tail[1]) if len(tail) > 1 else None
 
 
-def wait_root_width(width, timeout=30):
+def wait_root_width(width: int, timeout: float = 30) -> Optional[tuple]:
     """Block until the X root has grown to at least the union width."""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -60,7 +63,7 @@ def wait_root_width(width, timeout=30):
     return None
 
 
-def paint_regions(layout):
+def paint_regions(layout: dict):
     """Fill each display's region on the root with its own colour.
 
     Returns the connection; the drawing outlives it, but keeping it open costs
@@ -78,7 +81,7 @@ def paint_regions(layout):
     return d
 
 
-def mean_rgb(stripes):
+def mean_rgb(stripes: list) -> Optional[tuple]:
     """Mean colour of the most recently delivered stripe.
 
     Recency, not size: a screen change in flight produces a transitional frame
@@ -95,7 +98,7 @@ def mean_rgb(stripes):
     return tuple(round(sum(p[i] for p in px) / n) for i in range(3))
 
 
-async def collect(ws, seconds):
+async def collect(ws, seconds: float) -> list[bytes]:
     """JPEG stripe payloads received over this socket."""
     stripes = []
     deadline = time.time() + seconds
@@ -109,11 +112,12 @@ async def collect(ws, seconds):
     return stripes
 
 
-def near(sample, rgb):
+def near(sample: Optional[tuple], rgb: tuple) -> bool:
     return sample is not None and all(abs(sample[i] - rgb[i]) <= TOLERANCE for i in range(3))
 
 
-async def main():
+async def main() -> bool:
+    """Seed two displays, paint their regions, and decode what each receives."""
     import websockets
 
     res = H.Results("two-display-pixels")

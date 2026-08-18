@@ -25,7 +25,7 @@ BEGIN, END = "public_address() {", "export SELKIES_ENABLE_INTERNAL_TURN=false"
 passed = failed = 0
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     global passed, failed
     if ok:
         passed += 1
@@ -35,15 +35,27 @@ def check(label, ok, detail=""):
 
 
 def helpers():
-    """The address helpers as the entrypoint defines them."""
+    """The address helpers as the entrypoint defines them, or None if the
+    expected markers are gone."""
     body = open(ENTRYPOINT).read()
     if BEGIN not in body or END not in body:
         return None
     return body[body.index(BEGIN):body.index(END)]
 
 
-def ask(call, dig="exit 1", hostname="exit 1", getent="exit 1"):
-    """Run one helper with the lookups it depends on arranged."""
+def ask(call: str, dig: str = "exit 1", hostname: str = "exit 1",
+        getent: str = "exit 1") -> str:
+    """Run one helper with the lookups it depends on arranged.
+
+    Args:
+        call: The shell invocation of the helper under test.
+        dig: Stub body for `dig`; the default answers nothing.
+        hostname: Stub body for `hostname`.
+        getent: Stub body for `getent`.
+
+    Returns:
+        The helper's stdout, stripped.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         stub_dir = os.path.join(tmp, "bin")
         os.mkdir(stub_dir)
@@ -62,7 +74,8 @@ def ask(call, dig="exit 1", hostname="exit 1", getent="exit 1"):
 
 if not shutil.which("bash"):
     print("SKIP bash not found, so the entrypoint helpers cannot be run", flush=True)
-    sys.exit(77)  # helpers.SKIP_EXIT, without importing the e2e helper module
+    # helpers.SKIP_EXIT, without importing the e2e helper module
+    sys.exit(77)
 
 LIB = helpers()
 if LIB is None:
@@ -112,9 +125,12 @@ TURN_VARS = ("SELKIES_TURN_REST_URI", "SELKIES_TURN_USERNAME", "SELKIES_TURN_PAS
              "SELKIES_TURN_SHARED_SECRET", "SELKIES_TURN_HOST", "SELKIES_TURN_PORT")
 
 
-def internal_turn(**env):
-    # Every variable is set explicitly, so a stray one in the environment running
-    # the tests cannot decide the answer.
+def internal_turn(**env: str) -> bool:
+    """Whether the entrypoint would start its own TURN server under `env`.
+
+    Every variable is set explicitly, so a stray one in the environment running
+    the tests cannot decide the answer.
+    """
     setup = "".join(f'export {k}="{env.get(k, "")}"\n' for k in TURN_VARS)
     with tempfile.TemporaryDirectory() as tmp:
         script = os.path.join(tmp, "lib.sh")

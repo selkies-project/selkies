@@ -11,13 +11,30 @@ from playwright.sync_api import sync_playwright
 sys.path.insert(0, H.SRC)
 import selkies.input_handler as ih
 
-PAD = H.pad_init_js()
+PAD: str = H.pad_init_js()
 
-def decode(path):
+def decode(path: str) -> list[tuple[int, int, int]]:
+    """Decode a uinput-shim event stream into (type, code, value) tuples.
+
+    Args:
+        path: Path to the shim's binary event stream file.
+
+    Returns:
+        One `(ev_type, ev_code, ev_value)` tuple per 24-byte input_event
+        record, timestamps stripped.
+    """
     blob = open(path, "rb").read()
     return [struct.unpack("=qqHHi", blob[o:o + 24])[2:] for o in range(0, len(blob) - 23, 24)]
 
-def press(pw, mode, res, tag):
+def press(pw, mode: str, res: "H.Results", tag: str) -> None:
+    """Open a browser session in the given mode and press/release button Y.
+
+    Args:
+        pw: Active Playwright instance.
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+        res: Results accumulator to record checks into.
+        tag: Label prefix for the recorded checks.
+    """
     browser = C.chromium_launch(pw)
     ctx = browser.new_context(viewport={"width": 1280, "height": 720})
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")

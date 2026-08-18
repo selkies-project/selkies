@@ -14,7 +14,12 @@ import helpers as H
 import websockets
 
 
-def _settings(display_id, **over):
+def _settings(display_id: str, **over) -> dict:
+    """Build a SETTINGS payload for a display, with overrides applied on top.
+
+    The baseline deliberately omits ``framerate`` so callers control whether a
+    display declares one.
+    """
     base = {
         "displayId": display_id, "initialClientWidth": 1280, "initialClientHeight": 720,
         "is_manual_resolution_mode": False, "encoder": "h264enc",
@@ -25,17 +30,27 @@ def _settings(display_id, **over):
     return base
 
 
-def loglen():
+def loglen() -> int:
     return len(H.server_log())
 
 
-def status_lines(text):
+def status_lines(text: str) -> list[str]:
     """The capture module's per-display "Stream settings active" lines, which
     carry the settings a capture actually started with."""
     return [ln for ln in text.splitlines() if "Stream settings active" in ln]
 
 
-def wait_contains(mark, substr, timeout=12):
+def wait_contains(mark: int, substr: str, timeout: float = 12) -> bool:
+    """Poll the server log for a substring appearing at or after an offset.
+
+    Args:
+        mark: Byte offset into the log where the search starts.
+        substr: Substring to wait for.
+        timeout: Seconds to keep polling before giving up.
+
+    Returns:
+        True when the substring appeared, False on timeout.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         if substr in H.server_log()[mark:]:
@@ -44,7 +59,8 @@ def wait_contains(mark, substr, timeout=12):
     return False
 
 
-async def read_ws(ws, seconds):
+async def read_ws(ws, seconds: float) -> None:
+    """Drain incoming websocket messages for up to the given duration."""
     end = time.time() + seconds
     while time.time() < end:
         try:
@@ -53,13 +69,14 @@ async def read_ws(ws, seconds):
             return
 
 
-def main():
+def main() -> "H.Results":
+    """Declare 33fps on the primary, then check a bare display2 inherits it."""
     H.server_start(mode="websockets", wayland=False)
     res = H.Results("d4")
 
     async def drive():
         uri = f"ws://localhost:{H.PORT}/api/websockets"
-        # primary: SETTINGS WITHOUT framerate (fresh browser) then with 33
+        # The primary declares framerate 33 and bitrate 2200 explicitly.
         async with websockets.connect(uri, max_size=None) as p1:
             await asyncio.wait_for(p1.recv(), timeout=10)
             await p1.send("SETTINGS," + json.dumps(_settings("primary", framerate=33, video_bitrate=2200)))

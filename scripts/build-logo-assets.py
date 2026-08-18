@@ -7,10 +7,9 @@
 
 Every image here is the Selkies mark: the icon on its own, the icon on the round
 plate the app icons use, or one of the two lockups that set it beside or above
-the wordmark. They are committed rather than built at release time, so a change
-to the artwork otherwise has to be carried by hand into a dozen files and the
-ones nobody remembers keep the old logo -- which is exactly what happened to the
-gradient before this existed.
+the wordmark. They are committed rather than built at release time, so without
+this script a change to the artwork has to be carried by hand into a dozen
+files and the ones nobody remembers keep the old logo.
 
 Two sources are hand-authored; everything else here is composed from them:
 
@@ -96,15 +95,16 @@ MARK_CENTRE = (0.5000, 0.4844)
 STALE_THRESHOLD = 12.0
 
 
-def run(*args):
+def run(*args: str) -> None:
     subprocess.run(args, check=True, capture_output=True)
 
 
-def render(svg, width, height, out):
+def render(svg: str, width: int, height: int, out: str) -> None:
+    """Rasterize an SVG to a PNG at the given size via rsvg-convert."""
     run("rsvg-convert", "-w", str(width), "-h", str(height), "-o", out, svg)
 
 
-def mark_extent(svg, probe=1024):
+def mark_extent(svg: str, probe: int = 1024) -> tuple:
     """Where the artwork sits inside its own canvas, as fractions of it.
 
     Measured rather than read off the viewBox, because the mark does not fill
@@ -119,7 +119,7 @@ def mark_extent(svg, probe=1024):
     return (left / probe, top / probe, (right - left) / probe, (bottom - top) / probe)
 
 
-def plated_svg(svg, size, out):
+def plated_svg(svg: str, size: int, out: str) -> None:
     """A wrapper placing the mark, at the proportions above, on a white disc."""
     source = open(os.path.join(REPO, svg)).read()
     viewbox = re.search(r'viewBox="([^"]+)"', source).group(1)
@@ -141,12 +141,12 @@ def plated_svg(svg, size, out):
             f'</svg>\n')
 
 
-def inner(svg_text):
+def inner(svg_text: str) -> str:
     """A source SVG's contents, without its root element."""
     return svg_text[svg_text.index(">", svg_text.index("<svg")) + 1:svg_text.rindex("</svg>")]
 
 
-def build_lockup(spec):
+def build_lockup(spec: dict) -> str:
     """A lockup: the mark and the wordmark, each placed by its own transform."""
     mark = open(os.path.join(REPO, MARK)).read()
     wordmark = open(os.path.join(REPO, WORDMARK)).read()
@@ -164,7 +164,7 @@ def build_lockup(spec):
             f'</svg>\n')
 
 
-def check_sources():
+def check_sources() -> None:
     """The mark has to declare the ramp everything else is drawn from."""
     stops = re.findall(r'stop-color="(#[0-9A-Fa-f]{6})"',
                        open(os.path.join(REPO, MARK)).read())
@@ -176,7 +176,7 @@ def check_sources():
     print(f"mark gradient: {' '.join(stops)}")
 
 
-def generate(into):
+def generate(into: str) -> list[str]:
     """Write every image under `into` (the repository root, or a scratch copy)."""
     produced = []
     for spec in LOCKUPS:
@@ -197,7 +197,7 @@ def generate(into):
     # artwork and always call them clean.
     generated = {spec["dest"] for spec in LOCKUPS}
 
-    def source(svg):
+    def source(svg: str) -> str:
         return os.path.join(into if svg in generated else REPO, svg)
 
     for svg, w, h, dest in RENDERS:
@@ -226,7 +226,8 @@ def generate(into):
     return produced
 
 
-def main():
+def main() -> int:
+    """Regenerate the images in place, or report stale ones under --check."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true",
                         help="report stale images instead of writing them")
@@ -273,7 +274,7 @@ def main():
         return 0
 
 
-def mean_delta(a, b):
+def mean_delta(a: Image.Image, b: Image.Image) -> float:
     """Average per-channel difference between two images, 0..255."""
     from PIL import ImageChops
     pixels = list(ImageChops.difference(a, b).getdata())

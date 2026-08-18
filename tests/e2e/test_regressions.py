@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Integration checks for the current working tree.
+"""End-to-end regression checks over the transport/backend matrix.
 
-Covers the X11/Wayland x WebSockets/WebRTC matrix end to end plus the three
-regressions the audit turned up: Prometheus collector re-registration on a mode
-switch, the WebRTC pacer draining large packets, and multipart clipboard
-reassembly after a client cleanup.
+Covers the X11/Wayland x WebSockets/WebRTC matrix end to end plus three
+regression-prone paths: Prometheus collector re-registration on a mode switch,
+the WebRTC pacer draining large packets, and multipart clipboard reassembly
+after a client cleanup.
 
-Usage: python test_ci_fixes.py [matrix|switch|clipboard|pacer|all]
+Usage: python test_regressions.py [matrix|switch|clipboard|pacer|all]
 """
 import os
 import re
@@ -18,11 +18,13 @@ import helpers as H
 import core_lib as C
 
 
-def _log_has(pattern, log=H.LOG):
+def _log_has(pattern: str, log: str = H.LOG) -> bool:
+    """Whether the server log matches the regex, case-insensitively."""
     return re.search(pattern, H.server_log(log) or "", re.I) is not None
 
 
-def _wait_clip(page, text, timeout=30):
+def _wait_clip(page, text: str, timeout: float = 30) -> bool:
+    """Poll until the page's clipboard state carries the pushed text."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if C.server_clipboard_push_check(page, text):
@@ -31,7 +33,7 @@ def _wait_clip(page, text, timeout=30):
     return False
 
 
-def block_matrix(r):
+def block_matrix(r: "H.Results") -> None:
     """Every backend x transport combination streams video to a real browser."""
     from playwright.sync_api import sync_playwright
     for wayland in (False, True):
@@ -61,7 +63,7 @@ def block_matrix(r):
                 H.server_stop()
 
 
-def block_switch(r):
+def block_switch(r: "H.Results") -> None:
     """Switching transports twice must not trip DuplicateTimeseries.
 
     Metrics.unregister() has to release every collector it registered, or the
@@ -108,7 +110,7 @@ def block_switch(r):
         H.server_stop()
 
 
-def block_clipboard(r):
+def block_clipboard(r: "H.Results") -> None:
     """Server->client clipboard survives a client cleanup/reconnect cycle.
 
     The multipart assembler is built by a factory; a cleanup that replaces the
@@ -139,7 +141,7 @@ def block_clipboard(r):
         H.server_stop()
 
 
-def block_pacer(r):
+def block_pacer(r: "H.Results") -> None:
     """The WebRTC pacer must attach and keep draining, not wedge the stream."""
     from playwright.sync_api import sync_playwright
     H.server_start(mode="webrtc", extra_env={"SELKIES_WEBRTC_PACER": "true"})

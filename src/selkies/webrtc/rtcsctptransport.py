@@ -642,9 +642,11 @@ class InboundStream:
                 if chunk.tsn != expected_tsn:
                     # Gap inside the message being reassembled.
                     if ordered:
-                        break  # the missing TSN is guaranteed to arrive; wait
+                        # The missing TSN is guaranteed to arrive; wait.
+                        break
+                    # Unordered: rescan this position as a fresh head.
                     start_pos = None
-                    continue  # unordered: rescan this position as a fresh head
+                    continue
 
             if chunk.flags & SCTP_DATA_LAST_FRAG:
                 message_chunks = []
@@ -754,11 +756,11 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         self._remote_verification_tag = 0
 
         # inbound
-        # 4 MiB (was aiortc's 1 MiB): browser->server bulk transfers (uploads)
-        # are window-capped at rwnd/RTT once past slow start, so 1 MiB throttled
-        # any high-RTT path (TURN relays especially) to a crawl. The cost is a
-        # larger worst-case reassembly buffer per association, bounded below by
-        # the same flow control that always applied.
+        # 4 MiB receive window: browser->server bulk transfers (uploads) are
+        # window-capped at rwnd/RTT once past slow start, so a small window
+        # (e.g. 1 MiB) throttles any high-RTT path (TURN relays especially) to
+        # a crawl. The cost is a larger worst-case reassembly buffer per
+        # association, bounded by the same flow control.
         self._advertised_rwnd = 4 * 1024 * 1024
         self._inbound_streams: dict[int, InboundStream] = {}
         self._inbound_streams_count = 0

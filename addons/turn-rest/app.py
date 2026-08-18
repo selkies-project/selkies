@@ -2,6 +2,15 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+"""TURN REST credential service.
+
+A minimal Flask app implementing the TURN REST API: it mints time-limited
+HMAC-SHA1 credentials (coturn's ``use-auth-secret`` scheme) from a shared
+secret, optionally gated behind an API key, and returns the TURN URI list a
+WebRTC client feeds into its RTCPeerConnection configuration. All deployment
+knobs come from `TURN_*` environment variables read at import time.
+"""
+
 from flask import Flask, request, jsonify
 import os
 import time
@@ -10,6 +19,8 @@ import hashlib
 import base64
 import secrets
 import string
+
+from typing import Any, Optional
 
 shared_secret = os.environ.get('TURN_SHARED_SECRET', 'openrelayprojectsecret')
 turn_api_key = os.environ.get('TURN_API_KEY', '')
@@ -22,7 +33,8 @@ turn_ttl_default = os.environ.get('TURN_TTL', '86400')
 app = Flask(__name__)
 
 
-def parse_port(value, fallback):
+def parse_port(value, fallback: int) -> int:
+    """Parse a TCP/UDP port number, falling back on anything out of range."""
     try:
         port = int(value)
         if 1 <= port <= 65535:
@@ -32,7 +44,8 @@ def parse_port(value, fallback):
     return fallback
 
 
-def parse_ttl(value, fallback):
+def parse_ttl(value, fallback: int) -> int:
+    """Parse a positive credential TTL in seconds, falling back otherwise."""
     try:
         ttl = int(value)
         if ttl > 0:
@@ -42,7 +55,8 @@ def parse_ttl(value, fallback):
     return fallback
 
 
-def parse_bool(value, fallback=False):
+def parse_bool(value, fallback: bool = False) -> bool:
+    """Parse a permissive boolean string; unrecognized values take the fallback."""
     if value is None:
         return fallback
     value = str(value).strip().lower()
@@ -53,23 +67,27 @@ def parse_bool(value, fallback=False):
     return fallback
 
 
-def parse_protocol(value, fallback='udp'):
+def parse_protocol(value, fallback: str = 'udp') -> str:
+    """Normalize a transport protocol string to ``tcp`` or ``udp``."""
     candidate = (value or fallback or 'udp').strip().lower()
     return 'tcp' if candidate == 'tcp' else 'udp'
 
 
-def format_ice_host(host):
+def format_ice_host(host: str) -> str:
+    """Bracket a bare IPv6 literal so it is valid inside a TURN URI."""
     if host and ":" in host and not (host.startswith("[") and host.endswith("]")):
         return f"[{host}]"
     return host
 
 
-def random_username(length=16):
+def random_username(length: int = 16) -> str:
+    """A random lowercase-alphanumeric username for anonymous requests."""
     alphabet = string.ascii_lowercase + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
-def get_param(name, json_payload):
+def get_param(name: str, json_payload: Any) -> Optional[Any]:
+    """Read a request parameter from query/form values, then the JSON body."""
     value = request.values.get(name)
     if value is not None:
         return value
@@ -80,6 +98,13 @@ def get_param(name, json_payload):
 
 @app.route('/', methods=['GET', 'POST'])
 def turn_rest():
+    """Mint a time-limited TURN credential per the TURN REST API.
+
+    Returns:
+        JSON with ``username`` (`expiry:user`), the HMAC-SHA1 ``password``,
+        ``ttl``, and the ``uris`` list, or a plain-text error with a 4xx
+        status for a bad service or API key.
+    """
     json_payload = request.get_json(silent=True)
 
     service_input = str(get_param('service', json_payload) or 'turn').strip().lower()
@@ -106,13 +131,14 @@ def turn_rest():
         host = 'staticauth.openrelay.metered.ca'
     port = parse_port(turn_port, 3478)
 
-    # Sanitize user for credential compatibility
+    # The colon separates expiry from user in the credential, so a user-supplied
+    # colon would corrupt the format.
     user = username_input.replace(":", "-")
 
     exp = int(time.time()) + ttl
     username = "{}:{}".format(exp, user)
 
-    # Generate HMAC credential
+    # coturn's use-auth-secret scheme: password = b64(HMAC-SHA1(secret, username)).
     hashed = hmac.new(bytes(shared_secret, "utf-8"), bytes(username, "utf-8"), hashlib.sha1).digest()
     password = base64.b64encode(hashed).decode()
 

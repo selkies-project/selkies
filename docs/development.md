@@ -154,6 +154,12 @@ npm run dev          # http://localhost:3000
 
 `npm run build` writes the site to `website/out`, which is what the `Docs` workflow uploads, and `npm run check-links` fails on any link or anchor in that output that does not resolve.
 
+### Developer Reference
+
+The Developer Reference is generated from the Google-style docstrings and type hints in `src/selkies` by [fumadocs-python](https://www.fumadocs.dev/docs/integrations/python). The pages are build output, never committed: `docs/reference` is gitignored, and `npm run dev` and `npm run build` generate it fresh from the code, so the published site always matches the source that built it. The only extra requirement over the site itself is `python3` — the generator bootstraps a private venv in `website/.venv-docs` on first use (delete that directory to rebuild it, e.g. after upgrading the `fumadocs-python` npm package).
+
+While the dev server is running, re-run `npm run generate:api` from `website` to pick up docstring or signature changes; the extractor reads the source statically (griffe), so the package's native dependencies are never needed. The vendored `Xlib`, `webrtc`, and `ice` forks keep upstream documentation style and are excluded from the reference. Docstrings are rendered as MDX: keep anything shaped like `<name>` or containing braces inside backticks.
+
 ## Container Customization
 
 The reference container images (the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) and the LXQt desktop images built by CI) use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor, installed from the distribution's package registry (`s6` package): `s6-svscan /etc/service` starts one `s6-supervise` per service directory — the X11 display server (or the headless Wayland compositor), the desktop session, the audio stack (`pipewire`/`wireplumber`/`pipewire-pulse`), `dbus`, and `selkies`, restarting any that crash. Services are controlled with `s6-svc` and inspected with `s6-svstat`, the `supervisord`/`supervisorctl` equivalents, without any Python dependency (`s6-overlay` is deliberately NOT used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init or launcher).

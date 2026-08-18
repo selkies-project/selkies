@@ -15,10 +15,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 
-KEYS = {"node": str, "accelerated": bool, "gpu": bool, "renderer": str, "error": str}
+KEYS: dict[str, type] = {"node": str, "accelerated": bool, "gpu": bool, "renderer": str, "error": str}
 
 
-def main():
+def main() -> bool:
+    """Pin the probe_wayland_gpu report shape and its hardware-independent answers."""
     res = H.Results("gpu-probe")
     try:
         import pixelflux
