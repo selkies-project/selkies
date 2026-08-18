@@ -13,12 +13,18 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
 import * as yaml from "js-yaml";
 import { t } from "@/i18n";
+import { getLastServerSettings } from "@/utils";
+import {
+    INSTALLED_APPS_ROLLBACK_EVENT,
+    postAppCommand,
+    readInstalledApps,
+    writeInstalledApps,
+} from "../../../../selkies-web-core/lib/app-commands.js";
 
 const REPO_BASE_URL = 'https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/';
 const METADATA_URL = `${REPO_BASE_URL}metadata.yml`;
 const IMAGE_BASE_URL = `${REPO_BASE_URL}img/`;
 const METADATA_FETCH_TIMEOUT_MS = 10000;
-const INSTALLED_APPS_STORAGE_KEY = 'prootInstalledApps';
 
 interface App {
     name: string;
@@ -45,27 +51,42 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     const [fetchAttempt, setFetchAttempt] = useState(0);
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedApp, setSelectedApp] = useState<App | null>(null);
-    const [installedApps, setInstalledApps] = useState<string[]>(() => {
-        const savedApps = localStorage.getItem(INSTALLED_APPS_STORAGE_KEY);
-        if (savedApps) {
-            try {
-                const parsedApps = JSON.parse(savedApps);
-                if (Array.isArray(parsedApps) && parsedApps.every(item => typeof item === 'string')) {
-                    return parsedApps;
-                }
-                console.warn("Invalid data found in localStorage for installed apps. Resetting.");
-                localStorage.removeItem(INSTALLED_APPS_STORAGE_KEY);
-            } catch (e) {
-                console.error("Failed to parse installed apps from localStorage:", e);
-                localStorage.removeItem(INSTALLED_APPS_STORAGE_KEY);
-            }
-        }
-        return [];
-    });
+    const [installedApps, setInstalledApps] = useState<string[]>(readInstalledApps);
 
     useEffect(() => {
-        localStorage.setItem(INSTALLED_APPS_STORAGE_KEY, JSON.stringify(installedApps));
+        writeInstalledApps(installedApps);
     }, [installedApps]);
+
+    // A failed install/remove already rolled the stored list back; mirror it
+    // into this mounted list so the badge flips without a remount.
+    useEffect(() => {
+        const onRollback = (event: Event) => {
+            const { app, action } = (event as CustomEvent).detail || {};
+            if (action === 'install')
+                setInstalledApps(prev => prev.filter(name => name !== app));
+            else if (action === 'remove')
+                setInstalledApps(prev => prev.includes(app) ? prev : [...prev, app]);
+        };
+        window.addEventListener(INSTALLED_APPS_ROLLBACK_EVENT, onRollback);
+        return () => window.removeEventListener(INSTALLED_APPS_ROLLBACK_EVENT, onRollback);
+    }, []);
+
+    // Commands run server-side only when command_enabled is on; without it the
+    // core suppresses every 'cmd,' send, so the modal must say why instead of
+    // pretending the install happened (classic-dashboard parity).
+    const [serverSettings, setServerSettings] = useState<any>(() => getLastServerSettings());
+    useEffect(() => {
+        const handleWindowMessage = (event: MessageEvent) => {
+            if (event.origin !== window.location.origin) return;
+            const message = event.data;
+            if (typeof message !== 'object' || message === null) return;
+            if (message.type === 'serverSettings') setServerSettings(message.payload);
+        };
+        window.addEventListener('message', handleWindowMessage);
+        return () => window.removeEventListener('message', handleWindowMessage);
+    }, []);
+    const commandsKnown = serverSettings != null;
+    const commandsAvailable = serverSettings?.command_enabled?.value === true;
 
     // Sync with external isOpen prop
     useEffect(() => {
@@ -134,27 +155,28 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         setSelectedApp(null);
     };
 
-    // Unified apps command contract (both dashboards): the /selkies-proot wrapper.
+    // Unified apps command contract (both dashboards): app-commands.js posts
+    // the selkies-proot wrapper commands and tracks them for rollback.
     const handleInstall = (appName: string) => {
-        console.log(`Install app: ${appName}`);
-        window.postMessage({ type: 'command', value: `/selkies-proot install ${appName}` }, window.location.origin);
+        if (!commandsAvailable) return;
+        postAppCommand('install', appName);
         setInstalledApps(prev => prev.includes(appName) ? prev : [...prev, appName]);
     };
 
     const handleRemove = (appName: string) => {
-        console.log(`Remove app: ${appName}`);
-        window.postMessage({ type: 'command', value: `/selkies-proot remove ${appName}` }, window.location.origin);
+        if (!commandsAvailable) return;
+        postAppCommand('remove', appName);
         setInstalledApps(prev => prev.filter(name => name !== appName));
     };
 
     const handleUpdate = (appName: string) => {
-        console.log(`Update app: ${appName}`);
-        window.postMessage({ type: 'command', value: `/selkies-proot update ${appName}` }, window.location.origin);
+        if (!commandsAvailable) return;
+        postAppCommand('update', appName);
     };
 
     const handleLaunch = (appName: string) => {
-        console.log(`Launch app: ${appName}`);
-        window.postMessage({ type: 'command', value: `st ~/.local/bin/${appName}-pa` }, window.location.origin);
+        if (!commandsAvailable) return;
+        postAppCommand('launch', appName);
     };
 
     const filteredApps = appData?.include?.filter(app =>
@@ -202,6 +224,15 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                     </DialogHeader>
 
                     <ScrollArea className="h-[calc(98vh-8rem)]">
+                        {commandsKnown && !commandsAvailable && (
+                            <div className="p-6 pb-0">
+                                <Card className="border-destructive">
+                                    <CardContent className="p-4 text-sm text-muted-foreground">
+                                        {t('appsModal.commandsDisabled')}
+                                    </CardContent>
+                                </Card>
+                            </div>
+                        )}
                         {isLoading && (
                             <div className="flex justify-center items-center w-full h-full p-6">
                                 <div className="flex flex-col items-center gap-4">
@@ -258,32 +289,36 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                             <CardFooter className="flex gap-2 justify-end">
                                                 {isAppInstalled(selectedApp.name) ? (
                                                     <>
-                                                        <Button 
-                                                            variant="default" 
+                                                        <Button
+                                                            variant="default"
                                                             onClick={() => handleLaunch(selectedApp.name)}
+                                                            disabled={!commandsAvailable}
                                                             className="w-auto"
                                                         >
                                                             {t('apps.launchApp', { name: selectedApp.name })}
                                                         </Button>
-                                                        <Button 
-                                                            variant="outline" 
+                                                        <Button
+                                                            variant="outline"
                                                             onClick={() => handleUpdate(selectedApp.name)}
+                                                            disabled={!commandsAvailable}
                                                             className="w-auto"
                                                         >
                                                             {t('apps.updateApp', { name: selectedApp.name })}
                                                         </Button>
-                                                        <Button 
-                                                            variant="destructive" 
+                                                        <Button
+                                                            variant="destructive"
                                                             onClick={() => handleRemove(selectedApp.name)}
+                                                            disabled={!commandsAvailable}
                                                             className="w-auto"
                                                         >
                                                             {t('apps.removeApp', { name: selectedApp.name })}
                                                         </Button>
                                                     </>
                                                 ) : (
-                                                    <Button 
-                                                        variant="default" 
+                                                    <Button
+                                                        variant="default"
                                                         onClick={() => handleInstall(selectedApp.name)}
+                                                        disabled={!commandsAvailable}
                                                         className="w-auto"
                                                     >
                                                         {t('apps.installApp', { name: selectedApp.name })}

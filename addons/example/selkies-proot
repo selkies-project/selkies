@@ -1,0 +1,26 @@
+#!/bin/sh
+
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# Dashboard-facing wrapper around proot-apps (linuxserver.io): the apps panel
+# posts `selkies-proot install|remove|update <app>` through the server's
+# command channel. proot-apps runs its whole toolchain (proot, jq, ncat) from
+# ~/.local/bin by absolute path, so the per-user copy is seeded — or refreshed
+# after an image update — from the image's staging directory before
+# delegating; a fresh home directory needs no provisioning step.
+
+set -eu
+
+staging="/opt/proot-apps"
+bin="${HOME}/.local/bin"
+
+if [ -d "${staging}" ]; then
+    if [ ! -x "${bin}/proot-apps" ] || ! diff -q "${staging}/pversion" "${bin}/pversion" > /dev/null 2>&1; then
+        mkdir -p "${bin}"
+        cp "${staging}"/* "${bin}"/
+    fi
+fi
+
+exec "${bin}/proot-apps" "$@"

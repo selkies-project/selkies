@@ -149,7 +149,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # session-start keyframe instead of waiting for the next one.
         self._keyframe_bytes: Optional[int] = None
         self._keyframe_natural: bool = True
-        self.__loop = asyncio.get_event_loop()
+        self.__loop = asyncio.get_running_loop()
         self.__mid: Optional[str] = None
         self.__rtp_exited = asyncio.Event()
         self.__rtp_header_extensions_map = rtp.HeaderExtensionsMap()

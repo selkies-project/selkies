@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { toast } from "sonner";
 import { computeRenderableSettings, getLastServerSettings } from "@/utils";
 import { t } from "@/i18n";
+import { resolveFailedAppCommand } from "../../../../selkies-web-core/lib/app-commands.js";
 
 // Helper function to format bytes
 function formatBytes(bytes: number, decimals = 2): string {
@@ -51,7 +52,7 @@ export function Files({}: FilesProps = {}) {
             }
 
             if (message.type === 'fileUpload') {
-                const { status, fileName, progress, message: errMsg } = message.payload;
+                const { status, fileName, progress, message: errMsg, code } = message.payload;
 
                 if (status === 'start') {
                     toast.loading(t('uploads.uploadingFile', { fileName }), {
@@ -71,8 +72,23 @@ export function Files({}: FilesProps = {}) {
                         id: fileName,
                     });
                 } else if (status === 'warning') {
-                    // e.g. a second upload started while one is in flight.
-                    toast.warning(errMsg || t('notifications.unknownError'), {
+                    // A failed apps command settles its pending optimistic
+                    // update first; a stale launch match is lifecycle noise,
+                    // not a notice.
+                    if (code === 'commandFailed' && !resolveFailedAppCommand(errMsg)) return;
+                    // e.g. a second upload started while one is in flight, or a
+                    // clipboard-image skip from the core with a translation code.
+                    // The translator returns the key itself for an unknown code
+                    // (a future core may ship new ones), so the raw message is
+                    // the fallback, as in the classic dashboard.
+                    const codeKey = (typeof code === 'string' &&
+                        (code.startsWith('clipboardSkip') || code === 'commandFailed'))
+                        ? `notifications.${code}` : null;
+                    const codeMsg = codeKey ? t(codeKey, { detail: errMsg }) : null;
+                    const warnMsg = (codeMsg && codeMsg !== codeKey)
+                        ? codeMsg
+                        : (errMsg || t('notifications.unknownError'));
+                    toast.warning(warnMsg, {
                         id: fileName,
                     });
                 }

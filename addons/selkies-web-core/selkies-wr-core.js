@@ -34,14 +34,31 @@ import { createFileUploader } from "./lib/file-upload.js";
 // no separate hashed file to place next to whichever chunk references it.
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
+import { installAuthGuard } from './lib/auth-guard.js';
 import { storageKeyForServerKey } from './lib/conditional-settings.js';
+import { getRoutePrefix, getStorageAppName } from './lib/util.js';
+
+installAuthGuard();
 
 // Best-effort local keyboard layout, resolved once at script init so the value
 // is ready by the time signaling + ICE bring the data channel up (getLayoutMap
 // resolves in microtask time next to that). If it somehow loses the race the
 // hint simply rides the next SETTINGS send. null = unknown = omit.
 let detectedKeyboardLayout = null;
-detectKeyboardLayout().then((layout) => { detectedKeyboardLayout = layout; });
+let persistentSettingsSent = false;
+// The WebRTCClient lives inside the exported function's scope, so a module-scope
+// holder mirrors it for module-scope consumers (the late layout send below).
+let activeWebrtcClient = null;
+detectKeyboardLayout().then((layout) => {
+    detectedKeyboardLayout = layout;
+    // This core sends its settings once per session; a probe landing later
+    // would leave the hint out for the whole session, so it follows here.
+    if (layout && persistentSettingsSent && activeWebrtcClient) {
+        try {
+            activeWebrtcClient.sendDataChannelMessage(`SETTINGS,${JSON.stringify({ keyboardLayout: layout })}`);
+        } catch (e) { /* session may not be up yet */ }
+    }
+});
 
 // Per-transfer id so concurrent multipart clipboard sends are not interleaved.
 let __clipboardTransferCounter = 0;
@@ -346,11 +363,7 @@ export default function webrtc() {
 	// via the server's mk_access system action (websockets MK_ACCESS parity).
 	let collabInputGranted = false;
 
-	// Set storage key based on URL
-	// Origin + pathname only (NOT the full URL): a per-session ?token=... must not mint
-	// a new localStorage namespace each connect. Must match selkies-core.js / ws-core.
-	const urlForKey = window.location.origin + window.location.pathname;
-	const storageAppName = urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+	const storageAppName = getStorageAppName();
 	// Guarded write: a full or unavailable store degrades to a warning instead of
 	// throwing QuotaExceededError into the caller.
 	const safeSetItem = (key, value) => {
@@ -370,7 +383,7 @@ export default function webrtc() {
 		'video_streaming_mode', 'use_cpu',
 		'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
 		'is_manual_resolution_mode', 'manual_width', 'manual_height',
-		'encoder_rtc', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
+		'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
 		'video_bitrate', 'force_aligned_resolution'
 	];
 	const storageKeyFor = (key) => {
@@ -759,7 +772,7 @@ export default function webrtc() {
 		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
 
 		const knownSettings = [
-			'framerate', 'encoder_rtc', 'is_manual_resolution_mode',
+			'framerate', 'encoder', 'is_manual_resolution_mode',
 			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
 			'rate_control_mode', 'video_crf', 'use_cpu', 'force_aligned_resolution',
 			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality',
@@ -826,6 +839,7 @@ export default function webrtc() {
 		try {
 			const settingsJson = JSON.stringify(settingsToSend);
 			webrtc.sendDataChannelMessage(`SETTINGS,${settingsJson}`);
+			persistentSettingsSent = true;
 			console.log('Sent initial settings to server:', settingsToSend);
 		} catch (e) {
 			console.error('Error constructing or sending initial settings:', e);
@@ -986,6 +1000,12 @@ export default function webrtc() {
 			setTimeout(() => { resizeEnd() }, rdelta);
 		} else {
 			rtimeout = false;
+			// enable_resize=false pins the PRIMARY's resolution server-side:
+			// the resize it ignores must not be requested nor restyled onto.
+			// A secondary's resize stays allowed (server gate matches).
+			if (window.enable_resize === false && storageDisplayId !== 'display2') {
+				return;
+			}
 			windowResolution = input.getWindowResolution();
 			// Clamp the CSS-px size so the physical request stays within the
 			// 4080 cap and the element box matches what the server realizes
@@ -1049,7 +1069,11 @@ export default function webrtc() {
 			// If manual resolution is not set, reset to window resolution
 			const currentWindowRes = input.getWindowResolution();
 			resetToWindowResolution(...currentWindowRes);
-			sendResolutionToServer(currentWindowRes[0], currentWindowRes[1]);
+			// A pinned primary keeps the server's resolution: the initial
+			// element styling above still applies, the request does not.
+			if (window.enable_resize !== false || storageDisplayId === 'display2') {
+				sendResolutionToServer(currentWindowRes[0], currentWindowRes[1]);
+			}
 			enableAutoResize();
 		}
 	}
@@ -1117,9 +1141,14 @@ export default function webrtc() {
 				console.log("Resetting to window size");
 				// Clear the manual dimensions before re-deriving from the window.
 				manualHeight = manualWidth = 0;
-				let currentWindowRes = input.getWindowResolution();
-				resetToWindowResolution(...currentWindowRes);
-				sendResolutionToServer(...currentWindowRes);
+				// With the primary pinned (enable_resize=false) the stream is
+				// not moving: only return to auto mode, without a resend or
+				// restyle (resizeEnd gates later resizes itself).
+				if (window.enable_resize !== false || storageDisplayId === 'display2') {
+					let currentWindowRes = input.getWindowResolution();
+					resetToWindowResolution(...currentWindowRes);
+					sendResolutionToServer(...currentWindowRes);
+				}
 				enableAutoResize();
 				// snake_case keys: these are the ones read back at init.
 				setIntParam('manual_width', null);
@@ -1170,7 +1199,13 @@ export default function webrtc() {
 						if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
 							sendResolutionToServer(manualWidth, manualHeight);
 							applyManualStyle(manualWidth, manualHeight, scaleLocal);
-						} else if (!isSharedMode && input) {
+						} else if (!isSharedMode && input &&
+							(window.enable_resize !== false || storageDisplayId === 'display2')) {
+							// enable_resize=false pins the PRIMARY to the server's
+							// resolution: the resize it ignores must not be
+							// requested, and the layout must not restyle onto a
+							// size whose source never moves. Secondaries stay
+							// allowed (ws-core and server parity).
 							const currentWindowRes = input.getWindowResolution();
 							const autoWidth = alignResolution(currentWindowRes[0]);
 							const autoHeight = alignResolution(currentWindowRes[1]);
@@ -1263,25 +1298,35 @@ export default function webrtc() {
 				const newClipboardText = message.text;
 				sendClipboardData(newClipboardText);
 				break;
-			case 'clipboardImageUpdate':
+			case 'clipboardImageUpdate': {
 				// Dashboard image upload: hand the blob to the same binary path the
 				// focus/paste read uses. Only meaningful when binary clipboard is on
-				// (the server drops image writes otherwise).
+				// (the server drops image writes otherwise). Every skip surfaces a
+				// notification — a dead click with no feedback reads as a bug.
 				if (isSharedMode) {
 					console.log("Shared mode: Clipboard image write to server blocked.");
+					notifyClipboardImageSkip('viewers cannot set the clipboard', 'clipboardSkipReadonly');
 					break;
 				}
-				if (message.imageBlob && enable_binary_clipboard) {
-					(async () => {
-						try {
-							const buf = await message.imageBlob.arrayBuffer();
-							await sendClipboardData(buf, message.imageBlob.type || 'image/png');
-						} catch (e) {
-							console.warn('Failed to send uploaded clipboard image:', e);
-						}
-					})();
+				if (!message.imageBlob) {
+					notifyClipboardImageSkip('no image selected', 'clipboardSkipNoImage');
+					break;
 				}
+				if (!enable_binary_clipboard) {
+					notifyClipboardImageSkip('image clipboard is disabled on the server (enable_binary_clipboard)', 'clipboardSkipBinaryDisabled');
+					break;
+				}
+				(async () => {
+					try {
+						const buf = await message.imageBlob.arrayBuffer();
+						await sendClipboardData(buf, message.imageBlob.type || 'image/png', notifyClipboardImageSkip);
+					} catch (e) {
+						console.warn('Failed to send uploaded clipboard image:', e);
+						notifyClipboardImageSkip('send failed: ' + e.message, 'clipboardSkipSendFailed');
+					}
+				})();
 				break;
+			}
 			case 'audioDeviceSelected':
 				if (message.context === 'output' && message.deviceId) {
 					preferredOutputDeviceId = message.deviceId;
@@ -1408,7 +1453,7 @@ export default function webrtc() {
 		if (settings.force_aligned_resolution !== undefined) passthrough.force_aligned_resolution = !!settings.force_aligned_resolution;
 		if (settings.use_cpu !== undefined) passthrough.use_cpu = !!settings.use_cpu;
 		// Encoder switch (h264enc <-> openh264enc): the server restarts the pipeline on this.
-		if (settings.encoder_rtc !== undefined) passthrough.encoder_rtc = settings.encoder_rtc;
+		if (settings.encoder !== undefined) passthrough.encoder = settings.encoder;
 	// A secondary page's runtime move to another side of the primary (WS
 	// displayPosition parity): the server applies and re-lays out; unguarded
 	// for the primary, which ignores it server-side.
@@ -1431,11 +1476,11 @@ export default function webrtc() {
 			webrtc.sendDataChannelMessage(`ab,${audioBitRate}`);
 			storeInt('audio_bitrate', audioBitRate);
 		}
-		if (settings.encoder_rtc !== undefined) {
+		if (settings.encoder !== undefined) {
 			// The server restarts the pipeline with the new encoder (forwarded via the
 			// SETTINGS passthrough above); track it locally for the decode path.
-			encoder = settings.encoder_rtc;
-			storeString('encoder_rtc', encoder);
+			encoder = settings.encoder;
+			storeString('encoder', encoder);
 			console.log("Encoder switched to:", encoder);
 		}
 		if (settings.scaling_dpi !== undefined) {
@@ -1498,10 +1543,12 @@ export default function webrtc() {
 			force_aligned_resolution = !!settings.force_aligned_resolution;
 			storeBool('force_aligned_resolution', force_aligned_resolution);
 			// Re-assert the current resolution so the stream snaps to the new
-			// alignment without waiting for the next window resize.
+			// alignment without waiting for the next window resize. A pinned
+			// primary (enable_resize=false) keeps the server's resolution.
 			if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
 				sendResolutionToServer(manualWidth, manualHeight);
-			} else if (!isSharedMode && input) {
+			} else if (!isSharedMode && input &&
+				(window.enable_resize !== false || storageDisplayId === 'display2')) {
 				const currentWindowRes = input.getWindowResolution();
 				sendResolutionToServer(currentWindowRes[0], currentWindowRes[1]);
 			}
@@ -1630,6 +1677,7 @@ export default function webrtc() {
 	// WebSocket core; text re-sends are deduped here client-side.
 	const localClipboardSender = createLocalClipboardSender({
 		isChromium,
+		getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
 		isSharedMode: () => isSharedMode,
 		canSync: () => clipboardStatus === "enabled",
 		canRead: () => !!clipboard_in_enabled,
@@ -1697,10 +1745,32 @@ export default function webrtc() {
 		}
 	}
 
-	async function sendClipboardData(data, mimeType = 'text/plain') {
-		if (clipboardStatus !== "enabled" || !clipboard_in_enabled || data == null) return;
+	// A skipped clipboard-image upload tells the dashboard why, in its
+	// notification channel (the same {type:'fileUpload',status:'warning'} shape
+	// transfer warnings already use).
+	function notifyClipboardImageSkip(reason, code) {
+		console.warn('Clipboard image upload skipped: ' + reason);
+		window.postMessage({
+			type: 'fileUpload',
+			payload: { status: 'warning', fileName: 'clipboard-image', message: reason, code },
+		}, window.location.origin);
+	}
+
+	async function sendClipboardData(data, mimeType = 'text/plain', onSkip = null) {
+		const skip = (reason, code) => { if (onSkip) onSkip(reason, code); };
+		if (clipboardStatus !== "enabled" || !clipboard_in_enabled || data == null) {
+			skip('clipboard-in disabled', 'clipboardSkipInDisabled');
+			return;
+		}
+		if (!webrtc || !webrtc.dataChannelOpen()) {
+			skip('not connected', 'clipboardSkipNotConnected');
+			return;
+		}
 		// Change-only sync: skip content the session already carries in either direction.
-		if (!clipboardSync.shouldSend(data, mimeType)) return;
+		if (!clipboardSync.shouldSend(data, mimeType)) {
+			skip('already the current clipboard', 'clipboardSkipUnchanged');
+			return;
+		}
 
 		const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
 		let dataBytes;
@@ -1726,11 +1796,20 @@ export default function webrtc() {
 				chunkRawBytes: Math.max(1, Math.floor(dcMessageBudget() * 3 / 4)),
 				nextTid: () => ++__clipboardTransferCounter,
 			});
+			// sendDataChannelMessage drops quietly on a closed channel, so a
+			// mid-transfer death completes without a throw: keep the content
+			// re-sendable and say why nothing arrived.
+			if (!webrtc.dataChannelOpen()) {
+				skip('connection lost during send', 'clipboardSkipSendFailed');
+				return;
+			}
 			// Only a completed transfer marks the content synced; a throw above
 			// leaves it re-sendable on the next copy of the same content.
 			clipboardSync.markSynced(data, mimeType);
 		} catch (err) {
 			console.error("Error sending clipboard data:", err);
+			skip('send failed: ' + (err && err.message ? err.message : err),
+				'clipboardSkipSendFailed');
 		}
 	}
 
@@ -1808,13 +1887,6 @@ export default function webrtc() {
 		}
 	}
 
-	// Returns URL pathname against browser's URL even when running under
-	// iframe context where the pathname could be root directory `/` otherwise.
-	function getRoutePrefix() {
-		const pathname = window.location.pathname;
-		const dirPath = pathname.substring(0, pathname.lastIndexOf('/') + 1);
-		return dirPath.replace(/\/$/, '');
-	}
 
 	return {
 		initialize() {
@@ -1912,7 +1984,7 @@ export default function webrtc() {
 			isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
 			manualWidth = getIntParam('manual_width', null);
 			manualHeight = getIntParam('manual_height', null);
-			encoder = getStringParam('encoder_rtc', 'h264enc');
+			encoder = getStringParam('encoder', 'h264enc');
 			rateControlMode = getStringParam('rate_control_mode', 'cbr');
 			// hiDPI contract: CSS scaling on => DPR 1 everywhere (resolution + input);
 			// off => devicePixelRatio is applied by the resolution senders and input math.
@@ -1988,11 +2060,26 @@ export default function webrtc() {
 			};
 			// (constructor takes 3 args; strict-viewer gating lives in the send wrapper below)
 			webrtc = new WebRTCClient(signaling, videoElement, 1);
+			activeWebrtcClient = webrtc;
 			const send = (data) => {
 				if (isSharedMode && isStrictViewer && !collabInputGranted) return;
 				webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
+			if (!isSharedMode) {
+				// Actions to take whenever window changes focus
+				window.addEventListener('focus', handleWindowFocus);
+				window.addEventListener('blur', handleWindowBlur);
+				// Registered before input attaches (both capture on window,
+				// registration order decides), so the paste-ordering hold sees
+				// a Ctrl+V before Input forwards it.
+				clipboardGestures.wire();
+			}
+			// Page-lifetime input binding: the overlay must host IME composition
+			// before negotiation ends, reconnects reuse it, and sends into a
+			// closed channel drop quietly in sendDataChannelMessage.
+			// Strict-viewer sends stay gated in the send wrapper.
+			input.attach();
 			// CSS-pixel window size (websockets-core parity): the library default
 			// multiplies by devicePixelRatio, and every caller here applies dpr
 			// itself — without this override HiDPI sessions double-multiply (4x
@@ -2032,6 +2119,9 @@ export default function webrtc() {
 			signaling.ondisconnect = (reconnect) => {
 				videoElement.style.cursor = "auto";
 				releaseWakeLock();
+				// Same probe as the websockets close: an auth wall dropped this
+				// session and a fresh document is what re-presents the login.
+				if (window.__selkiesAuthProbe) window.__selkiesAuthProbe();
 				if (reconnect) {
 					status = 'connecting';
 					webrtc.reset();
@@ -2131,8 +2221,8 @@ export default function webrtc() {
 					}
 				}
 
-				// Bind input handlers. For shared mode, the listeners are limited
-				input.attach();
+				// Input is bound for the page lifetime at construction, so a
+				// reopened channel needs no rebind.
 
 				// Pull the current server clipboard once on connect (cache-only),
 				// mirroring the websockets core. Without this a WebRTC session (or
@@ -2168,10 +2258,6 @@ export default function webrtc() {
 				}, 5000)
 			}
 
-			webrtc.ondatachannelclose = () => {
-				input.detach();
-			}
-
 			// Unified dashboard hotkeys (parity with the websockets core): the core
 			// owns the chords; dashboards react to these messages. The legacy
 			// built-in drawer still toggles for bare-core sessions.
@@ -2185,13 +2271,6 @@ export default function webrtc() {
 
 			webrtc.onplaystreamrequired = () => {
 				showStart = true;
-			}
-
-			if (!isSharedMode) {
-				// Actions to take whenever window changes focus
-				window.addEventListener('focus', handleWindowFocus);
-				window.addEventListener('blur', handleWindowBlur);
-				clipboardGestures.wire();
 			}
 
 			webrtc.onclipboardcontent = async (msg) => {
@@ -2209,23 +2288,30 @@ export default function webrtc() {
 				// ordering on the data channel. Only the LOCAL clipboard write is
 				// gated — on enablement, direction policy, and the connect-time
 				// 'cr' reply being cache-only.
+				// The fetch flag is consumed before the async decode (ws-core
+				// parity): arrival order, not decode duration, decides which
+				// payload settles the init fetch.
+				const isInitClipboardFetch = consumeInitClipboardFetch();
 				const {isMultipart, mimeType, content} = await handleClipboardData(msg);
 				const isText = mimeType === "text/plain";
 				if (isMultipart || content === null) {
 					return;
 				}
-				const isInitClipboardFetch = consumeInitClipboardFetch();
 				const canWriteLocal = !isInitClipboardFetch &&
 					clipboardStatus === 'enabled' && clipboard_out_enabled;
 
 				if (isText) {
+					// Freshness is computed before resolveServer records the sig:
+					// a value the session already carries must not churn the
+					// local clipboard again.
+					const isFreshContent = clipboardSync.shouldSend(content, 'text/plain');
 					clipboardSync.resolveServer(content, null, 'text/plain');
 					// The dashboard UI gets the (bounded) preview regardless; the
 					// local write is retried on the next gesture when the browser
 					// demands activation.
 					window.postMessage(clipboardPreviewMessage(content),
 						window.location.origin);
-					if (canWriteLocal) {
+					if (canWriteLocal && isFreshContent) {
 						deferredClipboardWriter.write(
 							() => navigator.clipboard.writeText(content), {
 								onSuccess: () => console.log('Successfully wrote text from server to local clipboard.'),
@@ -2233,8 +2319,14 @@ export default function webrtc() {
 							});
 					}
 				} else if (enable_binary_clipboard) {
-					try { content.getType(mimeType).then(async (b) => clipboardSync.resolveServer(undefined, b, mimeType, new Uint8Array(await b.arrayBuffer()))).catch(() => {}); } catch (_) {}
-					if (canWriteLocal) {
+					let isFreshImage = true;
+					try {
+						const b = await content.getType(mimeType);
+						const bytes = new Uint8Array(await b.arrayBuffer());
+						isFreshImage = clipboardSync.shouldSend(bytes, mimeType);
+						clipboardSync.resolveServer(undefined, b, mimeType, bytes);
+					} catch (_) {}
+					if (canWriteLocal && isFreshImage) {
 						deferredClipboardWriter.write(
 							() => navigator.clipboard.write([content]), {
 								onSuccess: () => {
@@ -2291,6 +2383,19 @@ export default function webrtc() {
 							input.detach_context();
 						}
 					}
+				} else if (action.startsWith('command_error,') && !isSharedMode) {
+					// A client-requested command failed server-side (apps modal
+					// installs above all): surface it in the same warning channel
+					// clipboard skips use, or the optimistic UI reads as success.
+					window.postMessage({
+						type: 'fileUpload',
+						payload: {
+							status: 'warning',
+							fileName: 'command',
+							message: action.slice('command_error,'.length),
+							code: 'commandFailed',
+						},
+					}, window.location.origin);
 				} else if (action.startsWith('auth_success,') || action.startsWith('role_update,')) {
 					// Secure-mode role verdict (websockets AUTH_SUCCESS / ROLE_UPDATE
 					// parity). The server decides role and gamepad slot; the hash-derived
@@ -2371,6 +2476,11 @@ export default function webrtc() {
 				// (a persisted client pref); absent/malformed => true for older servers.
 				const ce = obj.settings && obj.settings.command_enabled;
 				serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
+				// Deployment policy the resize paths read (window.enable_resize):
+				// a pinned false means requesting or restyling toward a new size
+				// is pointless. Absent/malformed keeps the historic enabled default.
+				const er = obj.settings && obj.settings.enable_resize;
+				if (er && typeof er.value === 'boolean') window.enable_resize = er.value;
 				// Per-direction clipboard gates are policy, so the server value wins
 				// (module mirrors, not window[...], gate the actual handlers).
 				const cin = obj.settings && obj.settings.clipboard_in_enabled;
@@ -2567,6 +2677,7 @@ export default function webrtc() {
 			if (metricsLoopId !== null) { clearInterval(metricsLoopId); metricsLoopId = null; }
 			clearResumeWatchdog();
 			webrtc = null;
+			activeWebrtcClient = null;
 			input = null;
 			useCssScaling = false;
 			detectedSharedModeType = null;

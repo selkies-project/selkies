@@ -78,25 +78,43 @@ export function Clipboard() {
 
 	const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
 		const file = event.target.files?.[0];
-		if (file && file.type.startsWith('image/')) {
-			const reader = new FileReader();
-			reader.onload = (e) => {
-				const result = e.target?.result as string;
-				setClipboardImageUrl(result);
-
-				// Convert to blob and send to clipboard
-				fetch(result)
-					.then(res => res.blob())
-					.then(blob => {
-						window.postMessage({
-							type: 'clipboardImageUpdate',
-							imageBlob: blob
-						}, window.location.origin);
-					})
-					.catch(err => console.error('Error processing image:', err));
-			};
-			reader.readAsDataURL(file);
+		// Allow re-picking the same file: without clearing the value, a
+		// same-path selection fires no change event.
+		event.target.value = '';
+		if (!file) return;
+		if (!file.type.startsWith('image/')) {
+			// Same warning channel core-emitted clipboard skips use
+			// (classic-dashboard parity).
+			window.postMessage({
+				type: 'fileUpload',
+				payload: {
+					status: 'warning',
+					fileName: 'clipboard-image',
+					message: t('notifications.clipboardImageRejected', {
+						name: file.name,
+						mime: file.type || 'unknown',
+					}),
+				},
+			}, window.location.origin);
+			return;
 		}
+		const reader = new FileReader();
+		reader.onload = (e) => {
+			const result = e.target?.result as string;
+			setClipboardImageUrl(result);
+
+			// Convert to blob and send to clipboard
+			fetch(result)
+				.then(res => res.blob())
+				.then(blob => {
+					window.postMessage({
+						type: 'clipboardImageUpdate',
+						imageBlob: blob
+					}, window.location.origin);
+				})
+				.catch(err => console.error('Error processing image:', err));
+		};
+		reader.readAsDataURL(file);
 	};
 
 	const handleImageButtonClick = () => {

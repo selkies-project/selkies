@@ -29,6 +29,7 @@ export TURN_EXTERNAL_IP="${TURN_EXTERNAL_IP:-$(detect_external_ip)}"
 # Binding to the wrong IP(s) can result in connectivity issues that are difficult to trace.
 # Typically $(hostname -i) will return the primary IP to listen on.
 
+# shellcheck disable=SC2086  # TURN_EXTRA_ARGS carries whole flags, split on purpose
 turnserver \
     --verbose \
     --listening-ip="0.0.0.0" \
@@ -37,7 +38,7 @@ turnserver \
     --aux-server="0.0.0.0:${TURN_ALT_PORT:-8443}" \
     --aux-server="[::]:${TURN_ALT_PORT:-8443}" \
     --realm="${TURN_REALM:-example.com}" \
-    --external-ip="${TURN_EXTERNAL_IP:-$(dig -4 TXT +short @ns1.google.com o-o.myaddr.l.google.com 2>/dev/null | { read output; if [ -z "$output" ] || echo "$output" | grep -q '^;;'; then exit 1; else echo "$(echo $output | sed 's,\",,g')"; fi } || dig -6 TXT +short @ns1.google.com o-o.myaddr.l.google.com 2>/dev/null | { read output; if [ -z "$output" ] || echo "$output" | grep -q '^;;'; then exit 1; else echo "[$(echo $output | sed 's,\",,g')]"; fi } || hostname -I 2>/dev/null | awk '{print $1; exit}' || echo '127.0.0.1')}" \
+    --external-ip="${TURN_EXTERNAL_IP}" \
     --min-port="${TURN_MIN_PORT:-49152}" \
     --max-port="${TURN_MAX_PORT:-65535}" \
     --channel-lifetime="${TURN_CHANNEL_LIFETIME:--1}" \
@@ -50,4 +51,4 @@ turnserver \
     --log-file="stdout" \
     --allow-loopback-peers \
     --prometheus \
-    ${TURN_EXTRA_ARGS} $@
+    ${TURN_EXTRA_ARGS} "$@"

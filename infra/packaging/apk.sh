@@ -15,6 +15,7 @@ apk add --no-cache \
 # sonames it scans against whatever the builder has installed.
 # shellcheck disable=SC2046  # the depends list is deliberately word-split
 apk add --no-cache $(sed -n 's/^depends="\(.*\)"$/\1/p' /repo/infra/packaging/apk/APKBUILD)
+# shellcheck source=infra/packaging/version.sh
 . /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
@@ -32,7 +33,7 @@ abuild-keygen -a -n
 cp -f "${HOME}"/.abuild/*.rsa.pub /etc/apk/keys/
 # rootpkg is the target that assembles the .apk; `package` alone only stages
 # $pkgdir
-REPODEST=/build/apkrepo
+REPODEST="/build/apkrepo"
 export REPODEST
 cd /build/apk && abuild -F rootpkg
 # abuild's filename has no architecture in it, and both arch jobs land their

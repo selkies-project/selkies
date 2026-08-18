@@ -29,7 +29,7 @@
         },
         "wayland": {
             "type": "boolean",
-            "default": "false",
+            "default": false,
             "description": "Use the headless Wayland backend instead of X11 (default: false)."
         },
         "web_port": {

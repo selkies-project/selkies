@@ -45,7 +45,7 @@ Either method installs the `selkies`, `selkies-resize`, and `selkies-gpu-probe` 
 
 ```bash
 export DISPLAY="${DISPLAY:-:0}"
-export PIPEWIRE_LATENCY="128/48000"
+export PIPEWIRE_LATENCY="256/48000"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR:-/tmp}/pulse}"
@@ -58,7 +58,7 @@ export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DI
 selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
-In the default WebSocket mode, `--encoder=` accepts `h264enc` (default; hardware NVENC or VA-API when a supported GPU is available, otherwise software `x264`), `h264enc-striped`, `openh264enc` (software OpenH264), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc` and select the encoder with `--encoder-rtc=` (`h264enc`, the hardware-first default, or `openh264enc`).
+In the default WebSocket mode, `--encoder=` accepts `h264enc` (default; hardware NVENC or VA-API when a supported GPU is available, otherwise software `x264`), `h264enc-striped`, `openh264enc` (software OpenH264), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc`; the same `--encoder=` knob applies, filtered to what WebRTC can produce (`h264enc`, the hardware-first default, or `openh264enc`) — any other value falls back to the default with a logged warning.
 
 The default username (set with `--basic-auth-user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is the current user environment variable `$USER` (empty username if nonexistent). The password has no default: set it with `--basic-auth-password=`, `SELKIES_BASIC_AUTH_PASSWORD`, `PASSWORD`, or `PASSWD`, or pass `--enable-basic-auth=false` to serve without a login. Selkies refuses to start with basic authentication enabled and no password, so a login is never served that nobody chose a password for.
 
@@ -215,7 +215,7 @@ sudo chmod 777 /dev/input/js*
 # /usr/bin/pulseaudio --verbose --log-target=file:/tmp/pulseaudio_selkies.log --disallow-exit &
 
 # Initialize PipeWire
-# export PIPEWIRE_LATENCY="128/48000"
+# export PIPEWIRE_LATENCY="256/48000"
 # export DISABLE_RTKIT="y"
 # export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 # export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
@@ -233,7 +233,7 @@ sudo chmod 777 /dev/input/js*
 
 # Starts the remote desktop process
 # In the default WebSocket mode, change `--encoder=` to `h264enc-striped`, `openh264enc`, or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
-# For the WebRTC transport instead, add `--mode=webrtc` and set `--encoder-rtc=` to `h264enc` or `openh264enc`
+# For the WebRTC transport instead, add `--mode=webrtc` and set `--encoder=` to `h264enc` or `openh264enc`
 # DO NOT set `--enable-resize=true` if there is a physical display
 selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
 ```

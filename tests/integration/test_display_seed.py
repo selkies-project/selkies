@@ -87,7 +87,7 @@ def main() -> "H.Results":
                 res.check("D4: display2 seeded at client framerate",
                           "FPS: 33" in txt, txt[-300:])
 
-    asyncio.get_event_loop().run_until_complete(drive())
+    asyncio.run(drive())
     res.summary()
     return res
 

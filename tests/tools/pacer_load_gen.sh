@@ -5,8 +5,13 @@
 export DISPLAY="${E2E_DISPLAY:-:99}"
 WID=$(xdotool search --name "pacer-load" | head -1)
 if [ -z "$WID" ]; then
+  # shellcheck disable=SC2016  # the inner shell expands these, not this one
   xterm -geometry 220x45 -name pacer-load -e bash -c 'while true; do for i in $(seq 1 50); do echo "selkies-pacer-load-line-$i-0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ"; done; done' &
   XPID=$!
+  # The xterm outlives a stopped generator otherwise: the signal trap exits so
+  # the EXIT trap runs and takes it down.
+  trap 'kill "${XPID}" 2>/dev/null || true' EXIT
+  trap exit INT TERM
   sleep 1
   WID=$(xdotool search --name "pacer-load" | head -1)
 fi

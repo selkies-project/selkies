@@ -171,7 +171,7 @@ async def server_reflexive_candidate(
     Query STUN server to obtain a server-reflexive candidate.
     """
     # lookup address
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     stun_server = (
         await loop.run_in_executor(None, socket.gethostbyname, stun_server[0]),
         stun_server[1],
@@ -701,7 +701,7 @@ class Connection:
         assert self._event_waiter is None, "already awaiting event"
         if self._closed:
             return None
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._event_waiter = loop.create_future()
         return await asyncio.shield(self._event_waiter)
 
@@ -1022,7 +1022,7 @@ class Connection:
         self, component: int, addresses: list[str], timeout: int = 5
     ) -> list[Candidate]:
         candidates = []
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # gather host candidates
         host_protocols = []

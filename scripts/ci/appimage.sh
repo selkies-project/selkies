@@ -140,7 +140,7 @@ ENV_BIN="${HERE}/usr/conda/bin"
 export PATH="${ENV_BIN}:${PATH}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR}/pulse/native}"
-export PIPEWIRE_LATENCY="128/48000"
+export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-256/48000}"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 # Path to the bundled Joystick Interposer, for LD_PRELOADing into an application
 # that needs gamepads where /dev/uinput is unreachable. Deliberately not added to

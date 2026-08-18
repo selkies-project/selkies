@@ -184,7 +184,7 @@ async def create_mdns_protocol() -> MDnsProtocol:
     Using a single socket works fine on Linux, but on OS X we need to use
     separate sockets for sending and receiving.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # sender
 

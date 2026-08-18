@@ -20,6 +20,8 @@ import time
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
+sys.path.insert(0, TESTS)
+import helpers as H  # noqa: E402
 
 results = []
 
@@ -101,7 +103,7 @@ if not shutil.which("Xvfb") or not shutil.which("xrdb"):
     sys.exit(1 if failed else 77 if not failed else 0)
 
 DISP = ":98"
-xvfb = subprocess.Popen(
+xvfb = H.spawn(
     ["Xvfb", DISP, "-screen", "0", "640x480x24", "-extension", "GLX",
      "-nolisten", "tcp", "-ac", "-noreset"],
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

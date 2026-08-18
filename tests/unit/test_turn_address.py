@@ -20,7 +20,9 @@ import tempfile
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 ENTRYPOINT = os.path.join(REPO, "addons", "example", "container-entrypoint.sh")
-BEGIN, END = "public_address() {", "export SELKIES_ENABLE_INTERNAL_TURN=false"
+# The end marker stops before the assignment, so the value's quoting is
+# not part of what this suite pins.
+BEGIN, END = "public_address() {", "export SELKIES_ENABLE_INTERNAL_TURN"
 
 passed = failed = 0
 
@@ -35,12 +37,17 @@ def check(label: str, ok, detail="") -> None:
 
 
 def helpers():
-    """The address helpers as the entrypoint defines them, or None if the
-    expected markers are gone."""
+    """The address helpers as the entrypoint defines them.
+
+    Returns:
+        A (source, missing) pair: the slice between the markers and an empty
+        string, or None and the marker the entrypoint no longer carries.
+    """
     body = open(ENTRYPOINT).read()
-    if BEGIN not in body or END not in body:
-        return None
-    return body[body.index(BEGIN):body.index(END)]
+    for marker in (BEGIN, END):
+        if marker not in body:
+            return None, marker
+    return body[body.index(BEGIN):body.index(END)], ""
 
 
 def ask(call: str, dig: str = "exit 1", hostname: str = "exit 1",
@@ -77,9 +84,9 @@ if not shutil.which("bash"):
     # helpers.SKIP_EXIT, without importing the e2e helper module
     sys.exit(77)
 
-LIB = helpers()
+LIB, missing = helpers()
 if LIB is None:
-    print(f"FAIL  [turn-address] entrypoint defines the address helpers  missing: {BEGIN}")
+    print(f"FAIL  [turn-address] entrypoint defines the address helpers  missing: {missing}")
     sys.exit(1)
 
 V4 = 'case "$1" in -4) echo \'"203.0.113.7"\';; *) exit 1;; esac'

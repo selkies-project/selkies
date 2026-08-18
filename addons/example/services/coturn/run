@@ -5,7 +5,9 @@
 # Embedded coTURN TURN server; also useful when WebRTC mode is selected
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 until [ -d "${XDG_RUNTIME_DIR}" ]; do sleep 0.5; done
+# shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
 [ -f "${XDG_RUNTIME_DIR}/container-env" ] && . "${XDG_RUNTIME_DIR}/container-env"
+# shellcheck disable=SC2086  # TURN_EXTRA_ARGS carries whole flags, split on purpose
 exec turnserver \
     --verbose \
     --listening-ip="0.0.0.0" \

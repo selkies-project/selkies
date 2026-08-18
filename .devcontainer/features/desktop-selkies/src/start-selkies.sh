@@ -10,19 +10,20 @@ export DISPLAY="${DISPLAY:-:20}"
 if [ "${SELKIES_WAYLAND:-false}" != "true" ]; then
     unset WAYLAND_DISPLAY
 fi
-export XSERVER=${XSERVER:-XVFB}
+export XSERVER="${XSERVER:-XVFB}"
 
-SCRIPT_DIR=$(dirname $(readlink -f $0))
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
 function cleanup() {
-    kill -9 $(pidof turnserver) 1>/dev/null 2>&1 || true
+    pkill -9 -x turnserver 1>/dev/null 2>&1 || true
     pgrep -af '.*selkies.*' | cut -d' ' -f1 | xargs kill -9 1>/dev/null 2>&1 || true
     pgrep -afi '.*lxqt.*' | cut -d' ' -f1 | xargs kill -9 1>/dev/null 2>&1 || true
     sudo /usr/bin/pulseaudio -k 1>/dev/null 2>&1 || true
-    kill -9 $(pidof Xvfb) 1>/dev/null 2>&1 || true
+    pkill -9 -x Xvfb 1>/dev/null 2>&1 || true
     exit
 }
-trap cleanup SIGINT SIGKILL EXIT
+# SIGKILL cannot be trapped; SIGTERM is what a stopping container sends.
+trap cleanup SIGINT SIGTERM EXIT
 
 if [ "${SELKIES_WAYLAND:-false}" != "true" ]; then
     # Start Xvfb Xserver
@@ -36,7 +37,7 @@ if [ "${SELKIES_WAYLAND:-false}" != "true" ]; then
 fi
 
 # Start PulseAudio server
-export PULSE_SERVER=tcp:127.0.0.1:4713
+export PULSE_SERVER="tcp:127.0.0.1:4713"
 sudo /usr/bin/pulseaudio -k >/dev/null 2>&1 || true
 sudo /usr/bin/pulseaudio --system --verbose --log-target=file:/tmp/pulseaudio.log --realtime=true --disallow-exit -L 'module-native-protocol-tcp auth-ip-acl=127.0.0.0/8 port=4713 auth-anonymous=1' &
 
@@ -47,9 +48,10 @@ sudo chmod 777 /dev/input/js*
 
 # If installed, add the joystick interposer to LD_PRELOAD
 if [ -e "/usr/lib/x86_64-linux-gnu/selkies_joystick_interposer.so" ]; then
-    export SELKIES_INTERPOSER='/usr/$LIB/selkies_joystick_interposer.so'
+    # $LIB is a dynamic-loader token; the backslash keeps the shell off it.
+    export SELKIES_INTERPOSER="/usr/\$LIB/selkies_joystick_interposer.so"
     export LD_PRELOAD="${SELKIES_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
-    export SDL_JOYSTICK_DEVICE=/dev/input/js0
+    export SDL_JOYSTICK_DEVICE="/dev/input/js0"
 fi
 
 # Start the LXQt desktop session (X11 backend only)
@@ -67,7 +69,7 @@ if [ "${SELKIES_WAYLAND:-false}" != "true" ]; then
 fi
 
 # Start turnserver
-${SCRIPT_DIR}/start-turnserver.sh &
+"${SCRIPT_DIR}/start-turnserver.sh" &
 
 # Preset the resolution (X11 backend only)
 [ "${SELKIES_WAYLAND:-false}" != "true" ] && selkies-resize 1920x1080

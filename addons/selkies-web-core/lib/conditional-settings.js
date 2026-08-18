@@ -113,8 +113,14 @@ export const VIDEO_FULLCOLOR_SPEC = boolSpec("video_fullcolor", false,
     (value, _ctx, io) => io.postSetting({ video_fullcolor: value }));
 export const VIDEO_STREAMING_MODE_SPEC = boolSpec("video_streaming_mode", false,
     (value, _ctx, io) => io.postSetting({ video_streaming_mode: value }));
-export const USE_PAINT_OVER_QUALITY_SPEC = boolSpec("use_paint_over_quality", true,
-    (value, _ctx, io) => io.postSetting({ use_paint_over_quality: value }));
+// Paint-over spends encoder effort a bandwidth-targeted stream budgets for
+// motion, so it defaults off under CBR and back on under CRF until someone
+// chooses (same rule the server's resolve_paint_over_default applies).
+export const USE_PAINT_OVER_QUALITY_SPEC = {
+    ...boolSpec("use_paint_over_quality", true,
+        (value, _ctx, io) => io.postSetting({ use_paint_over_quality: value })),
+    conditional: (ctx) => (ctx.rateControlMode === "cbr" ? false : ctx.rateControlMode === "crf" ? true : undefined),
+};
 export const USE_CPU_SPEC = boolSpec("use_cpu", false,
     (value, _ctx, io) => io.postSetting({ use_cpu: value }));
 export const FORCE_ALIGNED_RESOLUTION_SPEC = boolSpec("force_aligned_resolution", false,

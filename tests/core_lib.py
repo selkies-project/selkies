@@ -16,6 +16,9 @@ BROWSER_ARGS: list = [
 # Playwright's bundled Chromium unless a system browser is named, which is how a
 # release Chrome build gets covered (its media stack differs from Chromium's)
 CHROME_PATH: Optional[str] = os.environ.get("E2E_CHROME") or None
+# System Firefox likewise: Playwright's bundled Firefox build lacks H264 (no
+# OpenH264), so H264 streams can never play there.
+FIREFOX_PATH: Optional[str] = os.environ.get("E2E_FIREFOX") or None
 
 
 def chromium_launch(pw: Any) -> Any:
@@ -26,8 +29,28 @@ def chromium_launch(pw: Any) -> Any:
     return pw.chromium.launch(**kwargs)
 
 
-def launch_chrome(pw: Any, url_hash: str = "", mode: Optional[str] = None) -> tuple:
-    """Launch an instrumented Chromium page on the test server.
+def launch_browser(pw: Any, engine: str = "chromium") -> Any:
+    """Launch a headless browser for ``engine``: chromium, firefox, or webkit."""
+    if engine == "firefox":
+        # The <video> carries the audio stream, so Firefox's default autoplay
+        # policy rejects the initial play() without a user gesture; the same
+        # allowance Chromium gets through --autoplay-policy (BROWSER_ARGS).
+        kwargs = {"headless": True, "firefox_user_prefs": {
+            "media.autoplay.default": 0,
+            "media.autoplay.blocking_policy": 0,
+            "media.autoplay.block-webaudio": False,
+        }}
+        if FIREFOX_PATH:
+            kwargs["executable_path"] = FIREFOX_PATH
+        return pw.firefox.launch(**kwargs)
+    if engine == "webkit":
+        return pw.webkit.launch(headless=True)
+    return chromium_launch(pw)
+
+
+def launch_chrome(pw: Any, url_hash: str = "", mode: Optional[str] = None,
+                  engine: str = "chromium") -> tuple:
+    """Launch an instrumented browser page on the test server.
 
     The init script counts WebSocket binary frames because headless rAF
     throttling makes the client's own fps counter read 0 even while the stream
@@ -39,19 +62,24 @@ def launch_chrome(pw: Any, url_hash: str = "", mode: Optional[str] = None) -> tu
         mode: Authoritative transport at load time; skips the
             localStorage-default mode-flip probe/reload (the hook dashboards
             use after /api/status).
+        engine: Browser engine to drive (chromium, firefox, or webkit).
 
     Returns:
         `(browser, page, console_errors, not_found)`; the two lists keep
         filling as the page runs.
     """
-    browser = chromium_launch(pw)
+    browser = launch_browser(pw, engine)
     ctx = browser.new_context(
         permissions=[],
         viewport={"width": 1280, "height": 720},
         device_scale_factor=1,
     )
     try:
-        ctx.grant_permissions(["clipboard-read", "clipboard-write"], origin=H.BASE_URL)
+        perms = {"chromium": ["clipboard-read", "clipboard-write"],
+                 "firefox": ["clipboard-read"],
+                 "webkit": []}[engine]
+        if perms:
+            ctx.grant_permissions(perms, origin=H.BASE_URL)
     except Exception:
         pass
     if mode:

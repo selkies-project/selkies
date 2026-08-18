@@ -2,11 +2,12 @@
 """The per-display setting lists stay in their intended relationship.
 
 Four copies exist: one per streaming core, and one per dashboard. They are not
-identical on purpose -- JPEG quality and the WebSocket encoder have no meaning
-over WebRTC, which carries its own encoder_rtc -- but each dashboard has to hold
-the union, because a dashboard drives both transports and a key missing from its
-list is written to the primary's storage key instead of the display's own. That
-is a silent failure: the control appears to work and changes the wrong display.
+identical on purpose -- JPEG quality has no meaning over WebRTC, and the WS
+core alone carries the jpeg-stock paint-over pair -- but each dashboard has to
+hold the union, because a dashboard drives both transports and a key missing
+from its list is written to the primary's storage key instead of the display's
+own. That is a silent failure: the control appears to work and changes the
+wrong display.
 """
 import os
 import re
@@ -22,9 +23,11 @@ SOURCES = {
     "wish": "selkies-dashboard-wish/src/utils.ts",
 }
 
-# Keys that belong to one transport only.
-WS_ONLY = {"encoder", "jpeg_quality", "paint_over_jpeg_quality"}
-WR_ONLY = {"encoder_rtc"}
+# Keys that belong to one transport only: the jpeg-stock controls ride the
+# websockets framing jpeg consumes. One encoder knob now drives both
+# transports, so neither core may drop it.
+WS_ONLY = {"jpeg_quality", "paint_over_jpeg_quality"}
+WR_ONLY = set()
 
 
 def read_list(rel):

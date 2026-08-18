@@ -43,7 +43,7 @@ def windows_after(capture, count: int, timeout: float = 20) -> list:
 
 def nested(socket: str, outputs: int) -> subprocess.Popen:
     """Start labwc nested on the capture socket with the given screen count."""
-    return subprocess.Popen(
+    return H.spawn(
         ["labwc"], env=dict(compositor_env(socket), WLR_WL_OUTPUTS=str(outputs)),
         stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 

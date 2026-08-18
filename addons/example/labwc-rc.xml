@@ -25,6 +25,11 @@
     <xwaylandPersistence>yes</xwaylandPersistence>
   </core>
   <theme>
+    <!-- breeze is installed in this image and is the icon set that ships the
+         window glyphs the titlebar layout's icon: item and menus resolve;
+         the slim Adwaita variant leaves them blank while the buttons still
+         receive clicks. labwc reads the icon theme from theme/icon. -->
+    <icon>breeze</icon>
     <titlebar>
       <layout>icon:iconify,max,close</layout>
     </titlebar>

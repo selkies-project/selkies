@@ -425,7 +425,7 @@ class RTCRtpReceiver:
                 target=decoder_worker,
                 name=self.__kind + "-decoder",
                 args=(
-                    asyncio.get_event_loop(),
+                    asyncio.get_running_loop(),
                     self.__decoder_queue,
                     self._track._queue,
                 ),

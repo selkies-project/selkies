@@ -26,6 +26,7 @@ import json
 import time
 import psutil
 import asyncio
+import inspect
 import aiohttp
 import aiofiles
 import logging
@@ -133,7 +134,7 @@ async def _dispatch_rtc_callback(callback: Callable[[List[str], List[str], bytes
     Sync callbacks run in a worker thread so a slow consumer cannot stall the
     event loop.
     """
-    if asyncio.iscoroutinefunction(callback):
+    if inspect.iscoroutinefunction(callback):
         await callback(stun_servers, turn_servers, rtc_config)
         return
     await asyncio.to_thread(callback, stun_servers, turn_servers, rtc_config)

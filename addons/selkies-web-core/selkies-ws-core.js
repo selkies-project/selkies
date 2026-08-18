@@ -25,14 +25,30 @@ import {
   createFileUploader
 } from './lib/file-upload.js';
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
+import { installAuthGuard } from './lib/auth-guard.js';
 import { storageKeyForServerKey } from './lib/conditional-settings.js';
+import { getRoutePrefix, getStorageAppName } from './lib/util.js';
+
+installAuthGuard();
 
 // Best-effort local keyboard layout, resolved once at script init so the value
 // is ready by the time the socket finishes connecting (getLayoutMap resolves in
 // microtask time next to a TCP+WS handshake). If it somehow loses that race the
 // hint simply rides the next full SETTINGS send instead. null = unknown = omit.
 let detectedKeyboardLayout = null;
-detectKeyboardLayout().then((layout) => { detectedKeyboardLayout = layout; });
+detectKeyboardLayout().then((layout) => {
+    detectedKeyboardLayout = layout;
+    // A probe landing after the initial payload ships would otherwise park the
+    // hint until the next settings milestone. The connection may not exist yet
+    // (module scope declares it later), so every part of the reach is guarded.
+    // Viewers never push settings, so shared mode skips the late send too.
+    try {
+        if (layout && !isSharedMode && typeof websocket !== 'undefined' && websocket &&
+            websocket.readyState === WebSocket.OPEN) {
+            websocket.send(`SETTINGS,${JSON.stringify({ keyboardLayout: layout })}`);
+        }
+    } catch (e) { /* pre-connect */ }
+});
 
 // Parse an audio frame body into the ordered Opus frames to decode, using RED redundancy
 // to recover frames the sender dropped under backpressure (pcmflux's delivery ring and the
@@ -379,11 +395,7 @@ window.onload = () => {
   'use strict';
 };
 
-// Set storage key based on URL
-// Origin + pathname only (NOT the full URL): a per-session ?token=... must not mint a
-// new localStorage namespace each connect. Must match selkies-core.js / selkies-wr-core.js.
-const urlForKey = window.location.origin + window.location.pathname;
-const storageAppName = urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+const storageAppName = getStorageAppName();
 // Guarded write: a full or unavailable store degrades to a warning instead of
 // throwing QuotaExceededError into the caller.
 const safeSetItem = (key, value) => {
@@ -2456,6 +2468,15 @@ const initializeInput = () => {
       console.log("handleResizeUI: Auto-resize skipped, manual resolution mode is active.");
       return;
     }
+    // enable_resize=false pins the PRIMARY's resolution server-side: the
+    // resize it ignores must not be requested, the canvas must not restyle
+    // onto a grid whose source never moves, and geometry-keyed stripe
+    // decoders must not churn. A secondary's resize is its layout bring-up
+    // and stays allowed (matching the server's gate).
+    if (window.enable_resize === false && displayId !== 'display2') {
+      console.log("handleResizeUI: Auto-resize skipped, dynamic resizing is disabled.");
+      return;
+    }
 
     console.log("handleResizeUI: Auto-resize triggered (e.g., by window resize event).");
     const windowResolution = inputInstance.getWindowResolution();
@@ -2728,11 +2749,17 @@ function receiveMessage(event) {
             sendResolutionToServer(manual_width, manual_height);
             applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
           } else if (!isSharedMode) {
-            const currentWindowRes = window.webrtcInput ? window.webrtcInput.getWindowResolution() : [window.innerWidth, window.innerHeight];
-            const autoWidth = alignResolution(currentWindowRes[0]);
-            const autoHeight = alignResolution(currentWindowRes[1]);
-            sendResolutionToServer(autoWidth, autoHeight);
-            resetCanvasStyle(autoWidth, autoHeight);
+            // enable_resize=false pins the PRIMARY to the server's resolution:
+            // the resize it ignores must not be requested, and the canvas must
+            // not restyle onto a grid whose source never moves. Secondaries
+            // stay allowed (server gate matches).
+            if (window.enable_resize !== false || displayId === 'display2') {
+              const currentWindowRes = window.webrtcInput ? window.webrtcInput.getWindowResolution() : [window.innerWidth, window.innerHeight];
+              const autoWidth = alignResolution(currentWindowRes[0]);
+              const autoHeight = alignResolution(currentWindowRes[1]);
+              sendResolutionToServer(autoWidth, autoHeight);
+              resetCanvasStyle(autoWidth, autoHeight);
+            }
           } else {
              if (manual_width && manual_height) {
                 applyManualCanvasStyle(manual_width, manual_height, true);
@@ -2807,15 +2834,20 @@ function receiveMessage(event) {
       setIntParam('manual_width', null);
       setIntParam('manual_height', null);
       setBoolParam('is_manual_resolution_mode', false);
-      const currentWindowRes = window.webrtcInput ? window.webrtcInput.getWindowResolution() : [window.innerWidth, window.innerHeight];
-      const autoWidth = alignResolution(currentWindowRes[0]);
-      const autoHeight = alignResolution(currentWindowRes[1]);
-      resetCanvasStyle(autoWidth, autoHeight);
-      if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc' || currentEncoderMode === 'h264enc-striped') {
-        console.log("Clearing VNC stripe decoders due to resolution reset to window.");
-        clearAllVncStripeDecoders();
-        if (canvasContext) canvasContext.setTransform(1, 0, 0, 1, 0, 0);
-        canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+      // With the primary pinned (enable_resize=false) the stream geometry is
+      // not changing: leave the canvas and stripe decoders alone and only
+      // return to auto mode (handleResizeUI gates the resend itself).
+      if (window.enable_resize !== false || displayId === 'display2') {
+        const currentWindowRes = window.webrtcInput ? window.webrtcInput.getWindowResolution() : [window.innerWidth, window.innerHeight];
+        const autoWidth = alignResolution(currentWindowRes[0]);
+        const autoHeight = alignResolution(currentWindowRes[1]);
+        resetCanvasStyle(autoWidth, autoHeight);
+        if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc' || currentEncoderMode === 'h264enc-striped') {
+          console.log("Clearing VNC stripe decoders due to resolution reset to window.");
+          clearAllVncStripeDecoders();
+          if (canvasContext) canvasContext.setTransform(1, 0, 0, 1, 0, 0);
+          canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+        }
       }
       enableAutoResize();
       break;
@@ -2836,25 +2868,35 @@ function receiveMessage(event) {
       const newClipboardText = message.text;
       sendClipboardData(newClipboardText);
       break;
-    case 'clipboardImageUpdate':
+    case 'clipboardImageUpdate': {
       // Dashboard image upload: hand the blob to the same binary path the
       // focus/paste read uses. Only meaningful when binary clipboard is on
-      // (the server drops image writes otherwise).
+      // (the server drops image writes otherwise). Every skip surfaces a
+      // notification — a dead click with no feedback reads as a bug.
       if (isSharedMode) {
         console.log("Shared mode: Clipboard image write to server blocked.");
+        notifyClipboardImageSkip('viewers cannot set the clipboard', 'clipboardSkipReadonly');
         break;
       }
-      if (message.imageBlob && enable_binary_clipboard) {
-        (async () => {
-          try {
-            const buf = await message.imageBlob.arrayBuffer();
-            await sendClipboardData(buf, message.imageBlob.type || 'image/png');
-          } catch (e) {
-            console.warn('Failed to send uploaded clipboard image:', e);
-          }
-        })();
+      if (!message.imageBlob) {
+        notifyClipboardImageSkip('no image selected', 'clipboardSkipNoImage');
+        break;
       }
+      if (!enable_binary_clipboard) {
+        notifyClipboardImageSkip('image clipboard is disabled on the server (enable_binary_clipboard)', 'clipboardSkipBinaryDisabled');
+        break;
+      }
+      (async () => {
+        try {
+          const buf = await message.imageBlob.arrayBuffer();
+          await sendClipboardData(buf, message.imageBlob.type || 'image/png', notifyClipboardImageSkip);
+        } catch (e) {
+          console.warn('Failed to send uploaded clipboard image:', e);
+          notifyClipboardImageSkip('send failed: ' + e.message, 'clipboardSkipSendFailed');
+        }
+      })();
       break;
+    }
     case 'pipelineStatusUpdate':
       console.log('Received pipelineStatusUpdate message:', message);
       let stateChangedFromStatus = false;
@@ -3071,14 +3113,33 @@ function receiveMessage(event) {
   }
 }
 
-async function sendClipboardData(data, mimeType = 'text/plain') {
-    if (!window.clipboard_enabled || !clipboard_in_enabled) return;
+// A skipped clipboard-image upload tells the dashboard why, in its
+// notification channel (the same {type:'fileUpload',status:'warning'} shape
+// transfer warnings already use).
+function notifyClipboardImageSkip(reason, code) {
+  console.warn('Clipboard image upload skipped: ' + reason);
+  window.postMessage({
+    type: 'fileUpload',
+    payload: { status: 'warning', fileName: 'clipboard-image', message: reason, code },
+  }, window.location.origin);
+}
+
+async function sendClipboardData(data, mimeType = 'text/plain', onSkip = null) {
+    const skip = (reason, code) => { if (onSkip) onSkip(reason, code); };
+    if (!window.clipboard_enabled || !clipboard_in_enabled) {
+        skip('clipboard-in disabled', 'clipboardSkipInDisabled');
+        return;
+    }
     if (!websocket || websocket.readyState !== WebSocket.OPEN) {
         console.warn('Cannot send clipboard data: WebSocket is not open.');
+        skip('not connected', 'clipboardSkipNotConnected');
         return;
     }
     // Change-only sync: skip content the session already carries in either direction.
-    if (!clipboardSync.shouldSend(data, mimeType)) return;
+    if (!clipboardSync.shouldSend(data, mimeType)) {
+        skip('already the current clipboard', 'clipboardSkipUnchanged');
+        return;
+    }
     const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
     let dataBytes;
     if (isBinary) {
@@ -3112,6 +3173,8 @@ async function sendClipboardData(data, mimeType = 'text/plain') {
     // throw above) leaves it re-sendable on the next copy of the same content.
     if (!transferAborted && websocket.readyState === WebSocket.OPEN) {
         clipboardSync.markSynced(data, mimeType);
+    } else {
+        skip('connection lost during send', 'clipboardSkipSendFailed');
     }
 }
 
@@ -3420,15 +3483,13 @@ function initWebsockets() {
   }
 
 
-  const pathname = window.location.pathname.substring(
-    0,
-    window.location.pathname.lastIndexOf('/') + 1
-  );
+  const pathname = getRoutePrefix() + '/';
 
   // Focus/gesture local->server sync (lib/clipboard-sync.js), identical in the
   // WebRTC core; text is sent per event here and deduped server-side.
   const localClipboardSender = createLocalClipboardSender({
     isChromium,
+    getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
     isSharedMode: () => isSharedMode,
     canSync: () => !!window.clipboard_enabled,
     canRead: () => !!clipboard_in_enabled,
@@ -5017,6 +5078,11 @@ function initWebsockets() {
               if (wsMax && typeof wsMax.value === 'number') applyWsMessageBudget(wsMax.value);
               const ce = obj.settings && obj.settings.command_enabled;
               serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
+              // Deployment policy the resize paths read (window.enable_resize):
+              // a pinned false means requesting or restyling toward a new size
+              // is pointless. Absent/malformed keeps the historic enabled default.
+              const er = obj.settings && obj.settings.enable_resize;
+              if (er && typeof er.value === 'boolean') window.enable_resize = er.value;
               // Clipboard direction/binary gates are deployment policy: the server
               // value wins over any persisted client preference.
               const cin = obj.settings && obj.settings.clipboard_in_enabled;
@@ -5224,12 +5290,16 @@ function initWebsockets() {
                     clipboardWorker.decode(fullBase64, mpMime).then(({ result }) => {
                         if (mpMime === 'text/plain') {
                             const text = result;
+                            // Cache-settle check happens before resolveServer
+                            // records the sig: a value the session already
+                            // carries must not be written back locally either.
+                            const isFreshContent = clipboardSync.shouldSend(text, 'text/plain');
                             // Cache + settle any pending Ctrl/Cmd+C copy promise.
                             clipboardSync.resolveServer(text, null, 'text/plain');
                             // Local write is gated per-direction (server->client = out)
                             // and retried on the next gesture when the browser
                             // demands activation.
-                            if (!isInitClipboardFetch && clipboard_out_enabled) {
+                            if (!isInitClipboardFetch && clipboard_out_enabled && isFreshContent) {
                                 deferredClipboardWriter.write(
                                     () => navigator.clipboard.writeText(text), {
                                         onFailure: (err) => console.error('Could not copy server clipboard text to local: ' + err),
@@ -5239,9 +5309,10 @@ function initWebsockets() {
                         } else if (clipboard_out_enabled) {
                             const bytes = result;
                             const blob = new Blob([bytes], { type: mpMime });
+                            const isFreshContent = clipboardSync.shouldSend(new Uint8Array(bytes), mpMime);
                             // Settle any pending Ctrl/Cmd+C copy promise with the image blob.
                             clipboardSync.resolveServer(undefined, blob, mpMime, bytes);
-                            if (!isInitClipboardFetch) {
+                            if (!isInitClipboardFetch && isFreshContent) {
                                 deferredClipboardWriter.write(
                                     () => writeImageToLocalClipboard(blob, mpMime), {
                                         onSuccess: () => {
@@ -5284,10 +5355,12 @@ function initWebsockets() {
                 clipboardWorker.decode(base64Data, mimeType).then(({ result }) => {
                     const bytes = result;
                     const blob = new Blob([bytes], { type: mimeType });
+                    const isFreshContent = clipboardSync.shouldSend(new Uint8Array(bytes), mimeType);
                     // Settle any pending Ctrl/Cmd+C copy promise with this fresh
                     // image blob (binary requests resolve to the Blob, text to its text()).
                     clipboardSync.resolveServer(undefined, blob, mimeType, bytes);
                     if (isInitClipboardFetch) return;
+                    if (!isFreshContent) return;
                     deferredClipboardWriter.write(
                         () => writeImageToLocalClipboard(blob, mimeType), {
                             onSuccess: () => {
@@ -5313,13 +5386,14 @@ function initWebsockets() {
             const writeLocal = !consumeInitClipboardFetch() && clipboard_out_enabled;
             clipboardWorker.decode(base64Payload, 'text/plain').then(({ result }) => {
                 const decodedText = result;
+                const isFreshContent = clipboardSync.shouldSend(decodedText, 'text/plain');
                 // Cache + settle any pending Ctrl/Cmd+C copy promise with this fresh
                 // text (resolves the ClipboardItem created in the keydown handler).
                 clipboardSync.resolveServer(decodedText, null, 'text/plain');
                 // Local write is gated per-direction (server->client = out) and
                 // retried on the next gesture when the browser demands activation.
                 // The connect-time 'cr' reply is cache-only — never written locally.
-                if (writeLocal) {
+                if (writeLocal && isFreshContent) {
                     deferredClipboardWriter.write(
                         () => navigator.clipboard.writeText(decodedText), {
                             onFailure: (err) => console.error('Could not copy server clipboard to local: ' + err),
@@ -5336,6 +5410,21 @@ function initWebsockets() {
           try {
             const systemMsg = JSON.parse(event.data.substring(7));
             if (systemMsg.action === 'reload') window.location.reload();
+            else if (typeof systemMsg.action === 'string' &&
+                systemMsg.action.startsWith('command_error,') && !isSharedMode) {
+              // A client-requested command failed server-side (apps modal
+              // installs above all): surface it in the same warning channel
+              // clipboard skips use, or the optimistic UI reads as success.
+              window.postMessage({
+                type: 'fileUpload',
+                payload: {
+                  status: 'warning',
+                  fileName: 'command',
+                  message: systemMsg.action.slice('command_error,'.length),
+                  code: 'commandFailed',
+                },
+              }, window.location.origin);
+            }
           } catch (e) {
             console.error('Error parsing system data:', e);
           }
@@ -5480,6 +5569,9 @@ function initWebsockets() {
 
   websocket.onclose = (event) => {
     console.log('[websockets] Connection closed', event);
+    // An auth wall dropped this socket (or the next one): the probe reloads
+    // the page when the origin now answers 401 (lib/auth-guard.js).
+    if (window.__selkiesAuthProbe) window.__selkiesAuthProbe();
     if (event.code === 4001) {
         console.error("Server rejected connection: Invalid token. Disabling reconnect.");
         if (reconnectIntervalId) clearInterval(reconnectIntervalId);
@@ -5565,7 +5657,7 @@ async function reloadPossiblyFlippingMode() {
       // Same path derivation as the data socket itself, so the probe hits the
       // exact route the connection would.
       const probeURL = new URL(window.location.href);
-      probeURL.pathname = window.location.pathname.substring(0, window.location.pathname.lastIndexOf('/') + 1) + 'api/websockets';
+      probeURL.pathname = getRoutePrefix() + '/api/websockets';
       const res = await fetch(probeURL.href, { cache: 'no-store' });
       if (res.status === 409) {
         try { sessionStorage.setItem('selkies_mode_flip', '1'); } catch (e) { /* ignore */ }

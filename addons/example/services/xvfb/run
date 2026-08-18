@@ -28,7 +28,7 @@ unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
 # libnvidia-egl-gbm, whose probing crashes this server outright. Pin the vendor
 # file to Mesa's: the framebuffer renders with the software stack here by design
 # (see the DRI3 note below), and the session's own EGL selection is untouched.
-MESA_EGL_VENDOR=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+MESA_EGL_VENDOR="/usr/share/glvnd/egl_vendor.d/50_mesa.json"
 if ls /dev/nvidia* >/dev/null 2>&1 && [ -f "${MESA_EGL_VENDOR}" ]; then
   export __EGL_VENDOR_LIBRARY_FILENAMES="${MESA_EGL_VENDOR}"
 fi
@@ -71,13 +71,13 @@ trap 'kill "${XVFB_PID}" 2>/dev/null' TERM INT
 # of failing, which reads downstream as "no screen found" and leaves the whole
 # container up but unusable. Prove the server completes a handshake, and hand a
 # stalled one back to the supervisor rather than supervising a dead display.
-READY=false
+READY="false"
 for _ in $(seq 1 30); do
     if ! kill -0 "${XVFB_PID}" 2>/dev/null; then
         break
     fi
     if timeout 2 xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1; then
-        READY=true
+        READY="true"
         break
     fi
     sleep 1

@@ -8,6 +8,11 @@ until [ -f "${XDG_RUNTIME_DIR}/container-env" ]; do sleep 0.5; done
 . "${XDG_RUNTIME_DIR}/container-env"
 shopt -s nullglob
 
+# Both backends: without the prefix, libfm-qt searches for a bare
+# applications.menu, finds none, and the launcher menu and runner model
+# stay empty ("Menu file not defined").
+export XDG_MENU_PREFIX="lxqt-"
+
 # Canonicalized by container-entrypoint.sh, so one spelling is enough here.
 if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
   # The session belongs to the nested compositor: it manages the windows and
@@ -39,22 +44,21 @@ if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
   export DISPLAY
   # Window management belongs to the nested compositor; LXQt starting one of its
   # own would find the selection taken and leave the session half-built
-  session_wm=/bin/true
+  session_wm="/bin/true"
   # The session draws natively on the nested compositor: its panel and desktop
   # are wlr-layer-shell surfaces (LXQt 2.1+), its window verbs are the ones
   # labwc performs itself, and the environment is what `startlxqtwayland` would
   # have exported — the compositor is already up, so only the environment is
   # wanted, not its exec.
-  export XDG_SESSION_TYPE=wayland
+  export XDG_SESSION_TYPE="wayland"
   export XDG_CURRENT_DESKTOP="LXQt:${SELKIES_WAYLAND_COMPOSITOR:-labwc}:wlroots"
-  export QT_QPA_PLATFORMTHEME=lxqt
-  export XDG_MENU_PREFIX=lxqt-
+  export QT_QPA_PLATFORMTHEME="lxqt"
   echo "[lxqt] session draws on ${WAYLAND_DISPLAY} natively"
 else
   export DISPLAY="${DISPLAY:-:20}"
   until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
   # The multi-monitor layout code drives Openbox, so the session runs it
-  session_wm=openbox
+  session_wm="openbox"
 fi
 # LXQt keeps its stock configuration — the panel's plugin list, the session and
 # window-manager defaults — under /usr/share/lxqt, which is a data directory rather
@@ -94,8 +98,15 @@ printf '[General]\nwindow_manager=%s\n' "${session_wm}" > "${HOME}/.config/lxqt/
 # actually present; the setting cascades per key, so everything else keeps its
 # packaged value.
 if grep -qs '#FancyMenu' /usr/share/lxqt/themes/light/lxqt-panel.qss; then
-  lxqt_icons=$(sed -n 's/^icon_theme=//p' /etc/xdg/lxqt/lxqt.conf /usr/share/lxqt/lxqt.conf 2>/dev/null | head -1)
-  if [ -n "${lxqt_icons}" ] && [ ! -d "/usr/share/icons/${lxqt_icons}" ]; then
+  lxqt_icons="$(sed -n 's/^icon_theme=//p' /etc/xdg/lxqt/lxqt.conf /usr/share/lxqt/lxqt.conf 2>/dev/null | head -1)"
+  # The slim Adwaita packaging ships only symbolic glyphs, which leaves panel
+  # plugins that ask for fullcolor assets (volume among them) blank; prefer
+  # breeze when it exists and the named theme lacks the check glyph.
+  check_glyph="/usr/share/icons/${lxqt_icons}/22x22/status/audio-volume-high.png"
+  if [ -n "${lxqt_icons}" ] && [ -d "/usr/share/icons/breeze" ] && [ ! -e "${check_glyph}" ] && [ "${lxqt_icons}" != "breeze" ]; then
+    printf '[General]\nicon_theme=breeze\n' > "${HOME}/.config/lxqt/lxqt.conf"
+    echo "[lxqt] icon theme ${lxqt_icons} lacks volume glyphs; the session uses breeze"
+  elif [ -n "${lxqt_icons}" ] && [ ! -d "/usr/share/icons/${lxqt_icons}" ]; then
     for icons in Adwaita breeze hicolor; do
       [ -d "/usr/share/icons/${icons}" ] || continue
       printf '[General]\nicon_theme=%s\n' "${icons}" > "${HOME}/.config/lxqt/lxqt.conf"

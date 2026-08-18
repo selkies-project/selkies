@@ -366,7 +366,7 @@ class Transaction:
 
         self.__protocol.send_stun(self.__request, self.__addr)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self.__timeout_handle = loop.call_later(self.__timeout_delay, self.__retry)
         self.__timeout_delay *= 2
         self.__tries += 1

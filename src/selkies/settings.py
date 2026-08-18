@@ -155,6 +155,19 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'Allowed file transfer directions (comma-separated: "upload,download"). Set to "" or "none" to disable.',
     },
     {
+        "name": "file_transfer_limit_mbps",
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "help": 'Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. Without it the congestion-control pacing still protects the video stream from downloads; uploads have no server-side congestion gauge and are paced by this cap alone.',
+    },
+    {
+        "name": "file_transfer_cc",
+        "type": "bool",
+        "default": True,
+        "help": 'Congestion-control pacing for file downloads: on a saturated uplink a greedy download otherwise queues ahead of the video stream (bufferbloat) and the session stalls. The pacer holds downloads inside a shared allowance that adapts from kernel queue depth (and RTT off-Linux) and needs no link estimate.',
+    },
+    {
         "name": "framerate",
         "type": "range",
         "default": "8-240",
@@ -570,7 +583,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "encoder",
         "type": "enum",
         "default": "h264enc",
-        "meta": {"allowed": ["h264enc", "h264enc-striped", "openh264enc", "jpeg"]},
+        "meta": {"allowed": ["h264enc", "openh264enc", "h264enc-striped", "jpeg"]},
         "help": "The default video encoder.",
     },
     {
@@ -840,18 +853,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "The Cloudflare TURN API token.",
     },
     {
-        "name": "encoder_rtc",
-        "type": "enum",
-        "default": "h264enc",
-        # Only encoders the pipeline can actually PRODUCE may be listed (pixelflux emits
-        # H.264 only; other codecs are a future addition — the vendored webrtc stack keeps
-        # its VP8/RTP code for that). h264enc is hardware-first (NVENC/VA-API when present,
-        # else software x264 — same behavior as the WS path); openh264enc stays a separate
-        # software choice.
-        "meta": {"allowed": ["h264enc", "openh264enc"]},
-        "help": "Video encoder to encode video media",
-    },
-    {
         "name": "app_wait_ready",
         "type": "bool",
         "default": False,
@@ -1001,6 +1002,13 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     if not text:
         return bool(default)
     return text.split("|")[0].strip().lower() in ("true", "1")
+
+
+# Encoders the WebRTC pipeline can produce (pixelflux emits H.264 only; the
+# jpeg/striped framing is a websockets-stream concept). The single `encoder`
+# knob is filtered to these in webrtc mode rather than carrying a second knob.
+WEBRTC_ENCODER_CHOICES = ("h264enc", "openh264enc")
+
 
 
 class AppSettings:
@@ -1166,7 +1174,7 @@ class AppSettings:
                             processed_value = []
                         else:
                             user_items = [item.strip() for item in raw_value_str.split(',') if item.strip()]
-                            if name in ("encoder", "encoder_rtc"):
+                            if name == "encoder":
                                 # Historical name from base images still shipping
                                 # SELKIES_ENCODER=x264enc in their env.
                                 user_items = [
@@ -1389,6 +1397,98 @@ class AppSettings:
             self.rate_control_mode = self.ENCODER_RC_DEFAULTS.get(
                 self.encoder, self.rate_control_mode
             )
+        self.resolve_paint_over_default()
+
+    def apply_webrtc_encoder_filter(self) -> None:
+        """Bring the `encoder` knob — the published menu and the value — in
+        line with the transport.
+
+        One encoder knob drives both transports: websockets framing is what
+        only websockets can carry, so in webrtc mode the menu and value are
+        brought into the WebRTC-producible subset of the operator's menu and
+        a choice that cannot stream falls back with a warning. The first call
+        (from _post_process_settings, after any operator narrowing of
+        `allowed`) snapshots that menu and value, so a live transport switch
+        filters against the operator's menu rather than the shipped one, and
+        a switch back to websockets restores both: neither a websockets-only
+        capability (jpeg, h264enc-striped) nor an operator narrowing or pin
+        is lost across a round trip.
+
+        A clamped value is stashed so the switch back can also restore a
+        client's websockets-only pick (clients write the session encoder
+        through to this knob): the stash applies only while the clamp
+        fallback is still in force and the client asserted nothing newer
+        during the webrtc leg — a fresh pick, flagged through
+        _encoder_client_set, always wins over the stash.
+        """
+        enc_definition = next(
+            (s for s in self._setting_definitions if s["name"] == "encoder"),
+            None,
+        )
+        if enc_definition is None:
+            return
+        if not hasattr(self, "_operator_encoder_allowed"):
+            self._operator_encoder_allowed = list(enc_definition["meta"]["allowed"])
+            self._operator_encoder_value = self.encoder
+        if self.mode != "webrtc":
+            enc_definition["meta"]["allowed"] = list(self._operator_encoder_allowed)
+            if self.encoder not in self._operator_encoder_allowed:
+                self.encoder = self._operator_encoder_value
+            stash = getattr(self, "_pre_webrtc_encoder", None)
+            if stash is not None:
+                if (
+                    not getattr(self, "_encoder_client_set", False)
+                    and self.encoder == getattr(self, "_webrtc_encoder_fallback", None)
+                    and stash in self._operator_encoder_allowed
+                ):
+                    self.encoder = stash
+                self._pre_webrtc_encoder = None
+                self._webrtc_encoder_fallback = None
+            return
+        allowed = [
+            item for item in self._operator_encoder_allowed
+            if item in WEBRTC_ENCODER_CHOICES
+        ]
+        if not allowed:
+            allowed = list(WEBRTC_ENCODER_CHOICES)
+        enc_definition["meta"]["allowed"] = allowed
+        if self.encoder not in allowed:
+            fallback = (
+                enc_definition["default"]
+                if enc_definition["default"] in allowed
+                else allowed[0]
+            )
+            if self.was_provided("encoder"):
+                logging.warning(
+                    "Encoder %r is not available for WebRTC (%s); using %r.",
+                    self.encoder,
+                    ", ".join(allowed),
+                    fallback,
+                )
+            self._pre_webrtc_encoder = self.encoder
+            self._webrtc_encoder_fallback = fallback
+            self._encoder_client_set = False
+            self.encoder = fallback
+        else:
+            self._pre_webrtc_encoder = None
+            self._webrtc_encoder_fallback = None
+
+    def resolve_paint_over_default(self) -> None:
+        """Default paint-over off on a bandwidth-targeted stream (CBR): the
+        static-scene repaint forces periodic bursts that a bitrate cap pays
+        for in motion quality, and no client has asked for the trade yet.
+
+        An explicit operator use_paint_over_quality choice wins via the
+        override check inside; client choices live in per-display state and
+        the dashboards' own precedence ladder, which this default never
+        outranks. Called from anywhere rate control resolves.
+        """
+        if self.was_provided("use_paint_over_quality"):
+            return
+        self.use_paint_over_quality = (
+            self.rate_control_mode != "cbr",
+            self.use_paint_over_quality[1],
+        )
 
     def _post_process_settings(self) -> None:
         """Normalize and cross-check settings whose meaning spans several
@@ -1404,6 +1504,8 @@ class AppSettings:
             logging.warning("Invalid mode value %r; using 'websockets'.", self.mode)
             mode = "websockets"
         self.mode = mode
+
+        self.apply_webrtc_encoder_filter()
 
         if not self.enable_rate_control[0]:
             # Rate control locked off means the engine runs constant quality on
@@ -1433,6 +1535,9 @@ class AppSettings:
                 rc_definition["meta"]["allowed"] = ["crf"]
         else:
             self.resolve_rate_control_default()
+        # The paint-over default keys off the resolved mode whether that mode
+        # came from the transport, the encoder, or an operator pin.
+        self.resolve_paint_over_default()
 
         audio_enabled = self.audio_enabled[0]
         if not audio_enabled and self.microphone_enabled[0]:

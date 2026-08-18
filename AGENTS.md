@@ -40,7 +40,9 @@ you are confident there will be no regressions (or able to validate regressions)
 Python and JavaScript, as well as thread usage in all languages, so that everything is performant and does not lead to
 hanging or lagging. Performance preservation or improvements such as zero-copy and latency-reducing measures are
 always important. Note that compatibility should be ensured for Python 3.9 to 3.14 or even higher, and CUDA/NVENC 11
-to 13 or higher. Update the translations as well (and write/update additional entries if necessary) as necessary.
+to 13 or higher. Gate on capabilities, never on interpreter versions: prefer the API that already encapsulates the
+difference (e.g. a library's own runner), else probe the feature itself (`hasattr`, a parameter's presence in
+`inspect.signature`, a try/except of the API) — never compare `sys.version_info`. Update the translations as well (and write/update additional entries if necessary) as necessary.
 Injection and clipboard mechanisms form fallback ladders that resolve the newest architecture first and degrade rung
 by rung: ext- before zwlr-data-control; on Wayland the seat keymap, then the in-process virtual-keyboard client, then
 the data-control clipboard paste; on X11 in-process XTEST before an xdotool fork. Cooldowns re-probe the top rung

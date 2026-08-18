@@ -72,12 +72,14 @@ const commonResolutionValues = [
 
 const encoderOptions = [
     "h264enc",
-    "h264enc-striped",
     "openh264enc",
+    "h264enc-striped",
     "jpeg",
 ];
 
-// WebRTC encoders (mirrors the server's encoder_rtc allowed list).
+// WebRTC encoders: the static pre-connect fallback; once the server payload
+// arrives, its `encoder` allowed list is already filtered to what the webrtc
+// pipeline produces.
 const encoderOptionsRTC = [
     "h264enc",
     "openh264enc",
@@ -134,6 +136,7 @@ const DEFAULT_STREAM_MODE = STREAM_MODE_WEBSOCKETS;
 const rateControlOptions = ["cbr", "crf"];
 const readHidpiStored = readExplicitStored(HIDPI_SPEC);
 const readRateControlStored = readExplicitStored(RATE_CONTROL_SPEC);
+const readPaintOverStored = readExplicitStored(USE_PAINT_OVER_QUALITY_SPEC);
 // Expressed in kbps
 const DEFAULT_VIDEO_BITRATE = 8000;
 
@@ -209,9 +212,6 @@ export function Settings() {
     const [encoder, setEncoder] = useState(() =>
         localStorage.getItem(getPrefixedKey("encoder")) || "h264enc"
     );
-    const [encoderRTC, setEncoderRTC] = useState(() =>
-        localStorage.getItem(getPrefixedKey("encoder_rtc")) || "h264enc"
-    );
     const [framerate, setFramerate] = useState(() =>
         parseInt(localStorage.getItem(getPrefixedKey("framerate")) ?? "", 10) || 60
     );
@@ -224,9 +224,9 @@ export function Settings() {
     const conditionalCtx = {
         manualActive: !!readStored("manual_width") || serverSettings?.is_manual_resolution_mode?.value === true,
         streamMode,
-        activeEncoder: (streamMode === STREAM_MODE_WEBRTC)
-            ? (readStored("encoder_rtc") || encoderRTC)
-            : (readStored("encoder") || encoder),
+        // One knob for both transports: an out-of-set stored value is ignored
+        // by the server's own fallback, and the serverSettings sync re-seats it.
+        activeEncoder: readStored("encoder") || encoder,
         allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
     };
     // Each conditional setting: one hook call over a shared spec. The hook owns
@@ -267,6 +267,22 @@ export function Settings() {
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [serverSettings]);
+    // HiDPI's stored value has the same stale-echo failure rate control has:
+    // the core persists every applied useCssScaling, so a derived pick
+    // outlives the resolution mode that produced it unless dropped when the
+    // ladder moves on.
+    useEffect(() => {
+        if (!serverSettings) return;
+        const key = HIDPI_SPEC.storageKey;
+        const resolved = resolveSpec(
+            HIDPI_SPEC, serverSettings, conditionalCtx, readHidpiStored);
+        if (!isExplicitChoice(HIDPI_SPEC)
+            && readStored(key) !== null
+            && readStored(key) !== HIDPI_SPEC.serialize(resolved)) {
+            localStorage.removeItem(getPrefixedKey(key));
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [serverSettings]);
     const [videoFullColor, setVideoFullColor] = useConditionalSetting(
         VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
@@ -283,8 +299,32 @@ export function Settings() {
     const [videoPaintoverBurstFrames, setVideoPaintoverBurstFrames] = useState(() =>
         parseInt(localStorage.getItem(getPrefixedKey("video_paintover_burst_frames")) ?? "", 10) || 5
     );
+    // Paint-over's default tracks rate control, so its resolution ctx carries
+    // the mode the rc hook just settled on.
+    const paintOverCtx = { ...conditionalCtx, rateControlMode };
     const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
-        USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+        USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings, rateControlMode], readPaintOverStored);
+    // Push the paint-over default the resolved rate control implies so the
+    // encoder agrees (same shape as the rate-control derivation above).
+    useEffect(() => {
+        if (!serverSettings) return;
+        const key = USE_PAINT_OVER_QUALITY_SPEC.storageKey;
+        const resolved = resolveSpec(
+            USE_PAINT_OVER_QUALITY_SPEC, serverSettings, { ...conditionalCtx, rateControlMode }, readPaintOverStored);
+        // Same stale-echo failure as rate control: the core persists every value
+        // it applies, so drop an unmarked echo once the ladder moves on.
+        if (!isExplicitChoice(USE_PAINT_OVER_QUALITY_SPEC)
+            && readStored(key) !== null
+            && readStored(key) !== String(resolved)) {
+            localStorage.removeItem(getPrefixedKey(key));
+        }
+        if (isSettingPinned(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, readPaintOverStored)) return;
+        const serverValue = serverSettings.use_paint_over_quality?.value;
+        if (resolved !== undefined && serverValue !== undefined && resolved !== serverValue) {
+            writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [serverSettings, rateControlMode]);
     const [useCpu, setUseCpu] = useConditionalSetting(
         USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
 
@@ -380,21 +420,14 @@ export function Settings() {
             return v === null ? fallback : v === 'true';
         };
 
-        // Update encoder options from the mode-appropriate server setting.
+        // One encoder knob on both transports; the server payload's allowed
+        // list is already filtered for the active transport.
         const s_encoder = serverSettings.encoder;
-        if (s_encoder && streamMode !== STREAM_MODE_WEBRTC) {
+        if (s_encoder) {
             const stored = localStorage.getItem(getPrefixedKey("encoder"));
             const final = s_encoder.allowed.includes(stored) ? stored : s_encoder.value;
             setEncoder(final);
             setDynamicEncoderOptions(s_encoder.allowed);
-        }
-
-        const s_encoder_rtc = serverSettings.encoder_rtc;
-        if (s_encoder_rtc && streamMode === STREAM_MODE_WEBRTC) {
-            const stored = localStorage.getItem(getPrefixedKey("encoder_rtc"));
-            const final = s_encoder_rtc.allowed.includes(stored) ? stored : s_encoder_rtc.value;
-            setEncoderRTC(final);
-            setDynamicEncoderOptions(s_encoder_rtc.allowed);
         }
 
         // HiDPI and rate control are conditional settings handled by their
@@ -644,16 +677,10 @@ export function Settings() {
 
     // Video Settings Handlers
     const handleEncoderChange = (selectedEncoder: string) => {
-        if (isWebrtc) {
-            setEncoderRTC(selectedEncoder);
-            localStorage.setItem(getPrefixedKey('encoder_rtc'), selectedEncoder);
-            // WebRTC uses encoder_rtc; the server switches the pipeline encoder on this.
-            debouncedPostSetting({ encoder_rtc: selectedEncoder });
-        } else {
-            setEncoder(selectedEncoder);
-            localStorage.setItem(getPrefixedKey('encoder'), selectedEncoder);
-            debouncedPostSetting({ encoder: selectedEncoder });
-        }
+        setEncoder(selectedEncoder);
+        localStorage.setItem(getPrefixedKey('encoder'), selectedEncoder);
+        // One knob for both transports; the server switches the pipeline encoder on this.
+        debouncedPostSetting({ encoder: selectedEncoder });
         // Rate control follows the encoder unless pinned (explicit client/server
         // choice). A derived change is not persisted, so it keeps following.
         if (rateControlEnabled
@@ -763,6 +790,23 @@ export function Settings() {
         writeConditional(HIDPI_SPEC, !manual, setHidpiEnabled, { persist: false });
     };
 
+    // Reset-to-window also restores HiDPI to its default: unlike the
+    // resolution-derived writes above (which respect a pinned choice), a reset
+    // means "back to defaults", so the client's own pin is dropped even under
+    // an operator-explicit value — use_css_scaling's overridden does not imply
+    // locked, and a kept pin would keep outranking the operator's value in the
+    // resolution ladder. The operator value (when explicit) or the derived
+    // default is then applied without storing; only a locked value leaves
+    // everything alone.
+    const resetHidpiToDerivedDefault = () => {
+        const s = serverSettings?.use_css_scaling;
+        if (s?.locked) return;
+        localStorage.removeItem(getPrefixedKey(HIDPI_SPEC.storageKey));
+        localStorage.removeItem(explicitChoiceKey(HIDPI_SPEC));
+        const uiValue = s?.overridden ? s.value !== true : true;
+        writeConditional(HIDPI_SPEC, uiValue, setHidpiEnabled, { persist: false });
+    };
+
     // Reset-to-window also returns UI scaling to its derived (devicePixelRatio-
     // based) default: the pinned client choice is dropped so the derived default
     // governs again, and the value propagates like a user change (state update +
@@ -806,7 +850,7 @@ export function Settings() {
         localStorage.removeItem(getPrefixedKey('manual_width'));
         localStorage.removeItem(getPrefixedKey('manual_height'));
         window.postMessage({ type: 'resetResolutionToWindow' }, window.location.origin);
-        deriveHidpiForResolution(false);
+        resetHidpiToDerivedDefault();
         resetDpiToDerivedDefault();
     };
 
@@ -871,7 +915,7 @@ export function Settings() {
     // syncs while scaling_dpi is overridden), leaves nothing the picker can change.
     const dpiScalingDisabled = !serverSettings || serverSettings.scaling_dpi?.allowed?.length <= 1
         || serverSettings.scaling_dpi?.overridden === true;
-    const activeEncoder = isWebrtc ? encoderRTC : encoder;
+    const activeEncoder = encoder;
     const isH264 = H264_ENCODERS.includes(activeEncoder);
     const showJpegOptions = !isWebrtc && activeEncoder === 'jpeg';
     const showRateControl = rateControlEnabled && isH264;
@@ -880,9 +924,7 @@ export function Settings() {
     const appliedRateControlMode = rateControlEnabled
         ? rateControlMode
         : (serverSettings?.rate_control_mode?.value ?? rateControlMode);
-    const encoderRenderable = isWebrtc
-        ? (renderableSettings.encoderRtc ?? true)
-        : (renderableSettings.encoder ?? true);
+    const encoderRenderable = renderableSettings.encoder ?? true;
 
     const showVideoTab = renderableSettings.videoSettings !== false;
     const showAudioTab = renderableSettings.audioSettings !== false;
@@ -944,11 +986,15 @@ export function Settings() {
                                 {(renderableSettings.hidpi ?? true) && (
                                     <div className="flex items-center justify-between">
                                         <div className="space-y-0.5">
-                                            <label className="text-sm font-medium">{t('sections.screen.hidpiLabel')}</label>
+                                            <label className="text-sm font-medium"
+                                                title={serverSettings?.enable_resize?.value === false
+                                                    ? t('sections.screen.hidpiDisabledNoResizeTitle')
+                                                    : undefined}>{t('sections.screen.hidpiLabel')}</label>
                                         </div>
                                         <Switch
                                             checked={hidpiEnabled}
                                             onCheckedChange={handleHidpiToggle}
+                                            disabled={serverSettings?.enable_resize?.value === false}
                                         />
                                     </div>
                                 )}

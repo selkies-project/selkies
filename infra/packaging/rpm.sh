@@ -19,6 +19,7 @@ if [ "$(uname -m)" = "x86_64" ]; then
     dnf install -y glibc-devel.i686 libgcc.i686
 fi
 gem install --no-document fpm
+# shellcheck source=infra/packaging/version.sh
 . /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root

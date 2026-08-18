@@ -547,6 +547,22 @@ class RTCApp:
         self.__send_data_channel_message(
             "system", {"action": "reload"})
 
+    def send_system_action(self, action: str, peer_id: Optional[str] = None) -> None:
+        """Send a system action (e.g. ``command_error,<text>``) to clients.
+
+        With a `peer_id` whose channel is still open, only that peer is
+        addressed (requester-scoped feedback); otherwise — including a
+        requester that reconnected under a new peer id — the action is
+        broadcast, and shared-mode viewers suppress it client-side.
+        """
+        if peer_id is not None:
+            peer_obj = self.peer_connections.get(peer_id)
+            channel = peer_obj.get("data_channel") if peer_obj else None
+            if channel is not None and channel.readyState == "open":
+                self.send_message_to_channel(channel, "system", {"action": action})
+                return
+        self.__send_data_channel_message("system", {"action": action})
+
     def send_framerate(self, framerate: int) -> None:
         """Broadcast the current framerate to all peers."""
         logger.info("sending framerate")

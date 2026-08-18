@@ -407,7 +407,7 @@ class MediaPlayer:
                 name="media-player",
                 target=player_worker_decode if self.__decode else player_worker_demux,
                 args=(
-                    asyncio.get_event_loop(),
+                    asyncio.get_running_loop(),
                     self.__container,
                     self.__streams,
                     self.__audio,

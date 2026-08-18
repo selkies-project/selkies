@@ -6,7 +6,7 @@
 # distro container). DISTRO_TAG keeps the Debian and Ubuntu flavors apart once
 # the release job collects every package into a single directory.
 set -eux
-export DEBIAN_FRONTEND=noninteractive
+export DEBIAN_FRONTEND="noninteractive"
 apt-get clean && apt-get update
 # python3-dev and build-essential: dependencies without a wheel for this
 # distribution's Python are compiled from their sdist. libxkbcommon0 is loaded
@@ -21,6 +21,7 @@ if [ "$(dpkg --print-architecture)" = "amd64" ]; then
     apt-get install --no-install-recommends -y gcc-multilib
 fi
 gem install --no-document fpm
+# shellcheck source=infra/packaging/version.sh
 . /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
