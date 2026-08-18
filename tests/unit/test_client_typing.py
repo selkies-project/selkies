@@ -23,7 +23,8 @@ if not node:
     # exiting 0 here would announce that every path types correctly without
     # having looked at one.
     print("SKIP node not found, so the client typing audit cannot run", flush=True)
-    sys.exit(77)  # helpers.SKIP_EXIT, without importing the e2e helper module
+    # helpers.SKIP_EXIT, without importing the e2e helper module
+    sys.exit(77)
 
 r = subprocess.run([node, AUDIT], capture_output=True, text=True, timeout=120)
 lines = [ln for ln in r.stdout.splitlines() if ln.startswith(("PASS", "FAIL"))]

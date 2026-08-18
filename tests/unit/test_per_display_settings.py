@@ -28,6 +28,7 @@ WR_ONLY = {"encoder_rtc"}
 
 
 def read_list(rel):
+    """The PER_DISPLAY_SETTINGS keys declared in `rel`, or None if absent."""
     path = os.path.join(ADDONS, rel)
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
@@ -37,10 +38,10 @@ def read_list(rel):
     return set(re.findall(r"'([^']+)'", match.group(1)))
 
 
-def main():
+def main() -> bool:
     failed = 0
 
-    def check(name, ok, detail=""):
+    def check(name: str, ok, detail="") -> None:
         nonlocal failed
         if not ok:
             failed += 1

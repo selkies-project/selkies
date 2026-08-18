@@ -19,6 +19,26 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
+"""WebRTC transport engine for Selkies.
+
+Owns the server side of every WebRTC session: peer-connection lifecycle
+(offer building, SDP/ICE plumbing, teardown), per-display media graphs (a
+`MediaRelay` fanning one encoded video/audio source out to every peer of that
+display), and the ordered "input" data channel that carries input, clipboard,
+cursor, stats, and control messages.
+
+Structural notes:
+
+- Everything runs on one asyncio loop. Capture threads never touch the loop
+  directly; encoded frames arrive via `loop.call_soon_threadsafe` into
+  `PipelineBridge` queues that the media tracks drain.
+- Data-channel dispatch is serialized per channel through a bounded queue with
+  a single consumer task so input events keep strict arrival order.
+- Behavior deliberately mirrors the websockets transport (broadcast semantics,
+  viewer/collaborator input gates, MK_ACCESS/AUTH_SUCCESS verdicts); parity
+  between the two transports is a project invariant.
+"""
+
 import logging
 import asyncio
 import gzip
@@ -54,7 +74,7 @@ from .webrtc.rtcicetransport import (
 from .webrtc.exceptions import InvalidStateError
 import av
 from fractions import Fraction
-from typing import List, Any, Dict, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 from .webrtc.contrib.media import MediaRelay
 from enum import Enum
 from .media_pipeline import MediaPipeline
@@ -73,13 +93,22 @@ logger = logging.getLogger("rtc")
 logger.setLevel(logging.INFO)
 
 class ConditionalExtraFormatter(logging.Formatter):
-    def __init__(self, fmt=None, datefmt=None, style='%', extra_fields=None):
-        super().__init__(fmt, datefmt, style)
-        self.extra_fields = extra_fields or ['client_peer_id', 'client_type']
+    """Log formatter that appends selected `extra` fields when present.
 
-    def format(self, record):
+    Records logged with `extra={'client_peer_id': ..., 'client_type': ...}`
+    get those fields appended as `key=value` pairs; records without them
+    format normally, so one formatter serves both peer-scoped and global
+    log lines.
+    """
+
+    def __init__(self, fmt: Optional[str] = None, datefmt: Optional[str] = None,
+                 style: str = '%', extra_fields: Optional[List[str]] = None) -> None:
+        super().__init__(fmt, datefmt, style)
+        self.extra_fields: List[str] = extra_fields or ['client_peer_id', 'client_type']
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format the record, appending any configured extra fields it carries."""
         result = super().format(record)
-        # Add extra fields only if they exist
         extra_parts = []
         for field in self.extra_fields:
             value = getattr(record, field, None)
@@ -115,13 +144,19 @@ DATA_CHANNEL_FALLBACK_CHUNK_SIZE = ((262144 - 512) * 3) // 4
 DATA_CHANNEL_BULK_HIGH_WATER = 1024 * 1024
 
 
-async def drain_data_channel(channel, high=DATA_CHANNEL_BULK_HIGH_WATER,
-                             timeout=15.0):
+async def drain_data_channel(channel: RTCDataChannel,
+                             high: int = DATA_CHANNEL_BULK_HIGH_WATER,
+                             timeout: float = 15.0) -> None:
     """Wait until `channel` has at most `high` queued bytes.
 
     Uses the channel's bufferedamountlow event with a temporarily lowered
     threshold; the timeout keeps a stalled/closing channel from wedging the
     sender (the send path already drops on closed channels).
+
+    Args:
+        channel: Data channel whose SCTP send queue is being paced.
+        high: Maximum queued bytes to allow before returning.
+        timeout: Seconds to wait before giving up on a stalled channel.
     """
     if channel.bufferedAmount <= high:
         return
@@ -129,7 +164,7 @@ async def drain_data_channel(channel, high=DATA_CHANNEL_BULK_HIGH_WATER,
     loop = asyncio.get_running_loop()
     low = loop.create_future()
 
-    def _on_low():
+    def _on_low() -> None:
         if not low.done():
             low.set_result(None)
 
@@ -153,8 +188,15 @@ def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
     base64 expansion; a 1 MiB message ceiling bounds per-message buffering. The
     result never exceeds a peer's negotiated limit, so a peer advertising a
     smaller size is honored rather than overrun.
+
+    Args:
+        peers: Mapping of peer id to peer entry (each may carry a
+            `data_channel`); None or empty falls back to the standard size.
+
+    Returns:
+        Raw byte count to read per chunk before base64 encoding.
     """
-    limit = None
+    limit: Optional[int] = None
     for peer in (peers or {}).values():
         channel = peer.get("data_channel")
         sctp = getattr(channel, "transport", None)
@@ -167,10 +209,13 @@ def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
     return (usable * 3) // 4
 
 class ClientType(str, Enum):
+    """Role a peer connected with: a controller drives a display's media
+    pipeline and full input; a viewer receives media with gated input."""
     CONTROLLER = "controller"
     VIEWER = "viewer"
 
 class RTCAppError(Exception):
+    """Raised for unrecoverable errors in the RTC signaling/pipeline layer."""
     pass
 
 class PipelineBridge:
@@ -180,57 +225,87 @@ class PipelineBridge:
     the freshest frame), a deeper bound acts as a short drop-oldest FIFO (audio
     wants continuity so a brief consumer stall doesn't silently drop samples).
     """
-    def __init__(self, maxsize: int = 1, on_drop=None):
-        self._queue = asyncio.Queue(maxsize=maxsize)
-        # Fired (on the loop thread) whenever a queued item is dropped. The video
-        # bridge uses it to force a recovery keyframe: a dropped ENCODED frame
-        # breaks the wire reference chain with no RTP gap, so the browser never
-        # requests a PLI and the smear would persist under infinite GOP.
+    def __init__(self, maxsize: int = 1,
+                 on_drop: Optional[Callable[[], None]] = None) -> None:
+        """Initializes the bridge.
+
+        Args:
+            maxsize: Queue depth; 1 means latest-wins, larger is drop-oldest.
+            on_drop: Fired (on the loop thread) whenever a queued item is
+                dropped. The video bridge uses it to force a recovery keyframe:
+                a dropped ENCODED frame breaks the wire reference chain with no
+                RTP gap, so the browser never requests a PLI and the smear
+                would persist under infinite GOP.
+        """
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
         self._on_drop = on_drop
 
-    def set_data(self, data: Any):
-        # Synchronous, no lock: the drop-oldest check and the put have no await, so
-        # the single-threaded loop runs them without interleaving (all access is on
-        # the loop thread). If the queue is full the consumer is lagging, so drop the
-        # oldest queued item to make space for the new one.
+    def set_data(self, data: Any) -> None:
+        """Enqueue an item, dropping the oldest one when the queue is full.
+
+        Synchronous, no lock: the drop-oldest check and the put have no await,
+        so the single-threaded loop runs them without interleaving (all access
+        is on the loop thread). A full queue means the consumer is lagging, so
+        the oldest queued item is dropped to make space for the new one.
+        """
         if self._queue.full():
             self._queue.get_nowait()
             if self._on_drop is not None:
                 self._on_drop()
         self._queue.put_nowait(data)
 
-    async def get_data(self):
-        # asynchronously wait until an item is available in the queue
+    async def get_data(self) -> Any:
+        """Wait until an item is available in the queue and return it."""
         return await self._queue.get()
 
 class AudioMedia(AudioStreamTrack):
-    def __init__(self, data_pipeline: PipelineBridge):
+    """Audio track that serves pre-encoded packets from a `PipelineBridge`."""
+
+    def __init__(self, data_pipeline: PipelineBridge) -> None:
         super().__init__()
         self.data_pipeline = data_pipeline
 
-    async def recv(self):
-        # Grab the next audio packet
+    async def recv(self) -> av.Packet:
+        """Return the next encoded audio packet from the bridge."""
         packet = await self.data_pipeline.get_data()
         return packet
 
 class VideoMedia(VideoStreamTrack):
-    def __init__(self, data_pipeline: PipelineBridge):
+    """Video track that serves pre-encoded packets from a `PipelineBridge`."""
+
+    def __init__(self, data_pipeline: PipelineBridge) -> None:
         super().__init__()
         self.data_pipeline = data_pipeline
 
-    async def recv(self):
-        # Grab the next video packet
+    async def recv(self) -> av.Packet:
+        """Return the next encoded video packet from the bridge."""
         packet = await self.data_pipeline.get_data()
         return packet
 
 class RTCApp:
+    """Server-side WebRTC engine: peers, per-display media graphs, channels.
+
+    The owning service late-binds most behavior (the `on_*` and `send_*`
+    hooks assigned in `__init__`), so this class stays transport-only: it
+    builds offers, routes data-channel traffic through the shared input
+    gates, and tears peers down symmetrically with the websockets engine.
+
+    Attributes:
+        peer_connections: Peer id to peer entry (`peer_conn`, `data_channel`,
+            `client_type`, `display_id`, `client_token`, ...). One entry per
+            connected browser page.
+        displays: Display id to media graph (`relay`, `video_bridge`,
+            `video_media`, and on the primary display `audio_bridge` /
+            `audio_media`).
+    """
+
     def __init__(
         self,
         async_event_loop: asyncio.AbstractEventLoop,
         encoder: str,
         stun_servers: Optional[List[str]] = None,
         turn_servers: Optional[List[str]] = None
-    ):
+    ) -> None:
         self.peer_connections: Dict[str, Any] = {}
         self.async_event_loop = async_event_loop
         self.stun_servers = stun_servers
@@ -294,8 +369,21 @@ class RTCApp:
         # recordable source (pre-parity behavior).
         self.provision_virtual_mic = None
 
-    async def set_sdp(self, sdp_type: str, sdp: str, client_peer_id: str):
-        """Sets remote SDP received by peer"""
+    async def set_sdp(self, sdp_type: str, sdp: str, client_peer_id: str) -> None:
+        """Apply the remote SDP answer received from a peer over signaling.
+
+        Answers for peers already in a closed/failed state are ignored rather
+        than raised: teardown routinely races late signaling messages.
+
+        Args:
+            sdp_type: Must be "answer"; the server always offers.
+            sdp: The remote session description text.
+            client_peer_id: Registered peer the answer belongs to.
+
+        Raises:
+            RTCAppError: On a non-answer type, missing sdp/peer id, or an
+                unknown peer.
+        """
         if sdp_type != 'answer':
             raise RTCAppError('ERROR: sdp type is not "answer"')
         if sdp is None:
@@ -318,8 +406,21 @@ class RTCApp:
         desc = RTCSessionDescription(sdp=sdp, type=sdp_type)
         await peer_conn.setRemoteDescription(desc)
 
-    async def set_ice(self, ice: Dict, client_peer_id: str):
-        """Adds ice candidate received from signaling server"""
+    async def set_ice(self, ice: Dict, client_peer_id: str) -> None:
+        """Add an ICE candidate received from the signaling server.
+
+        An empty candidate string is the end-of-candidates marker and is
+        forwarded as None.
+
+        Args:
+            ice: Candidate dict with `candidate` and `sdpMid` or
+                `sdpMLineIndex` keys, as sent by the browser.
+            client_peer_id: Registered peer the candidate belongs to.
+
+        Raises:
+            RTCAppError: On a missing peer id, an unknown peer, or a
+                candidate that fails to parse.
+        """
         if not client_peer_id:
             raise RTCAppError("ERROR: client_peer_id is required to set sdp")
 
@@ -339,7 +440,6 @@ class RTCApp:
             await peer_conn.addIceCandidate(None)
             return
 
-        # Generate RTCIceCandidate from ice
         obj = Candidate.from_sdp(ice.get('candidate'))
         icecandidate = candidate_from_aioice(obj)
 
@@ -355,20 +455,24 @@ class RTCApp:
             raise RTCAppError("ERROR: ice candidate is not an instance of RTCIceCandidate")
 
     async def send_clipboard_data(self, data: Union[str, bytes], mime_type: str = "text/plain",
-                                  reply_to: Optional[str] = None):
-        """Sends clipboard data over the data channel in chunks.
+                                  reply_to: Optional[str] = None) -> None:
+        """Send clipboard data over the data channel, chunked when large.
 
         Chunk sends are paced against each channel's SCTP queue (see
-        drain_data_channel) so a multi-MB clipboard neither buffers unboundedly
-        in memory nor starves input/cursor/stats behind it on the one ordered
-        stream, and the per-chunk gzip runs off the event loop.
+        `drain_data_channel`) so a multi-MB clipboard neither buffers
+        unboundedly in memory nor starves input/cursor/stats behind it on the
+        one ordered stream, and the per-chunk gzip runs off the event loop.
 
-        reply_to: set to the requesting verb (e.g. "cr") when this send answers
-        a client fetch rather than announcing a server-side clipboard change —
-        the websockets "clipboard_reply,<verb>" contract, carried here as an
-        extra field on the clipboard-msg / clipboard-msg-start payload so the
-        client can treat the payload cache-only without time heuristics (old
-        clients ignore the unknown field).
+        Args:
+            data: Clipboard payload; str is UTF-8 encoded before sending.
+            mime_type: Payload MIME type; "text/plain" marks it as text.
+            reply_to: Set to the requesting verb (e.g. "cr") when this send
+                answers a client fetch rather than announcing a server-side
+                clipboard change — the websockets `clipboard_reply,<verb>`
+                contract, carried here as an extra field on the clipboard-msg
+                / clipboard-msg-start payload so the client can treat the
+                payload cache-only without time heuristics (old clients ignore
+                the unknown field).
         """
         # An empty payload is only meaningful as a tagged reply (settling a
         # client fetch against an empty server clipboard).
@@ -422,13 +526,14 @@ class RTCApp:
 
         logger.info(f"Sent clipboard data of length {len(data_bytes)} with mime type {mime_type}")
 
-    def send_cursor_data(self, data: Any):
+    def send_cursor_data(self, data: Any) -> None:
+        """Broadcast a cursor update, remembering it for late-joining peers."""
         self.last_cursor_sent = data
         self.__send_data_channel_message(
             "cursor", data)
 
-    def send_gpu_stats(self, load: float, memory_total: int, memory_used: int):
-        """Sends GPU stats to the data channel"""
+    def send_gpu_stats(self, load: float, memory_total: int, memory_used: int) -> None:
+        """Broadcast GPU stats (load fraction, memory in MiB) to all peers."""
 
         self.__send_data_channel_message("gpu_stats", {
             "gpu_percent": load * 100,
@@ -436,48 +541,49 @@ class RTCApp:
             "mem_used": memory_used * 1024 * 1024,
         })
 
-    def send_reload_window(self):
-        """Sends reload window command to the data channel"""
+    def send_reload_window(self) -> None:
+        """Broadcast a window-reload command to all peers."""
         logger.info("sending window reload")
         self.__send_data_channel_message(
             "system", {"action": "reload"})
 
-    def send_framerate(self, framerate: int):
-        """Sends the current framerate to the data channel."""
+    def send_framerate(self, framerate: int) -> None:
+        """Broadcast the current framerate to all peers."""
         logger.info("sending framerate")
         self.__send_data_channel_message(
             "system", {"action": "videoFramerate," + str(framerate)})
 
-    def send_video_bitrate(self, bitrate: int):
-        """Sends the current video bitrate to the data channel"""
+    def send_video_bitrate(self, bitrate: int) -> None:
+        """Broadcast the current video bitrate to all peers."""
         logger.info("sending video bitrate")
         self.__send_data_channel_message(
             "system", {"action": "video_bitrate," + str(bitrate)})
 
-    def send_audio_bitrate(self, bitrate: int):
-        """Sends the current audio bitrate to the data channel"""
+    def send_audio_bitrate(self, bitrate: int) -> None:
+        """Broadcast the current audio bitrate to all peers."""
         logger.info("sending audio bitrate")
         self.__send_data_channel_message(
             "system", {"action": "audio_bitrate,%d" % bitrate})
 
-    def send_encoder(self, encoder: str):
-        """Sends the encoder name to the data channel"""
+    def send_encoder(self, encoder: str) -> None:
+        """Broadcast the active encoder name to all peers."""
         logger.info("sending encoder: " + encoder)
         self.__send_data_channel_message(
             "system", {"action": "encoder,%s" % encoder})
 
-    def send_resize_enabled(self, resize_enabled: bool):
-        """Sends the current resize enabled state
-        """
+    def send_resize_enabled(self, resize_enabled: bool) -> None:
+        """Broadcast the current resize-enabled state to all peers."""
         logger.info("sending resize enabled state")
         self.__send_data_channel_message(
             "system", {"action": "resize," + str(resize_enabled)})
 
-    def send_remote_resolution(self, res: str, display_id: str = "primary"):
-        """sends the realized remote resolution to the clients of `display_id`
-        (display-scoped: the websockets transport tags its stream_resolution
+    def send_remote_resolution(self, res: str, display_id: str = "primary") -> None:
+        """Send the realized remote resolution to the clients of `display_id`.
+
+        Display-scoped: the websockets transport tags its stream_resolution
         with the display id and addresses only that page, so a secondary's
-        realized size must never rescale the primary page)"""
+        realized size must never rescale the primary page.
+        """
         logger.info("sending remote resolution of: " + res)
         sent = False
         for peer_obj in self.peer_connections.values():
@@ -497,23 +603,26 @@ class RTCApp:
         if not sent:
             logger.info("skipping remote resolution because no data channel is ready")
 
-    def send_ping(self, t: float):
-        """Sends a ping request to the PRIMARY controller only: latency is measured
-        against one shared ping_start, and the websockets transport likewise derives
-        its reported latency from the primary client."""
+    def send_ping(self, t: float) -> None:
+        """Send a ping request to the PRIMARY controller only.
+
+        Latency is measured against one shared ping_start, and the websockets
+        transport likewise derives its reported latency from the primary
+        client.
+        """
         state, data_channel = self.get_data_channel()
         if not state:
             return
         self.send_message_to_channel(
             data_channel, "ping", {"start_time": float("%.3f" % t)})
 
-    def send_latency_time(self, latency: float):
-        """Sends measured latency response time in ms"""
+    def send_latency_time(self, latency: float) -> None:
+        """Broadcast the measured latency response time in milliseconds."""
         self.__send_data_channel_message(
             "latency_measurement", {"latency_ms": latency})
 
-    def send_system_stats(self, cpu_percent: float, mem_total: int, mem_used: int):
-        """Sends system stats"""
+    def send_system_stats(self, cpu_percent: float, mem_total: int, mem_used: int) -> None:
+        """Broadcast CPU and memory stats to all peers."""
         self.__send_data_channel_message(
             "system_stats", {
                 "cpu_percent": cpu_percent,
@@ -521,8 +630,14 @@ class RTCApp:
                 "mem_used": mem_used,
             })
 
-    def get_data_channel(self):
-        """Checks to see if the data channel is open"""
+    def get_data_channel(self) -> Tuple[bool, Optional[RTCDataChannel]]:
+        """Return the controller's data channel and whether it is usable.
+
+        Returns:
+            A `(ready, channel)` pair: ready is True only when the controller's
+            connection is connected and its channel open; channel is None when
+            no controller exists.
+        """
         state = False
         peer_obj = self.get_controller_instance()
         if not peer_obj:
@@ -532,9 +647,9 @@ class RTCApp:
         data_channel_state = peer_obj.get("data_channel").readyState
         return conn_state == "connected" and data_channel_state == "open", peer_obj.get("data_channel")
 
-    def _iter_open_data_channels(self):
-        """Every connected peer's open data channel — controllers and viewers,
-        all displays."""
+    def _iter_open_data_channels(self) -> Iterator[RTCDataChannel]:
+        """Yield every connected peer's open data channel — controllers and
+        viewers, all displays."""
         for peer_obj in self.peer_connections.values():
             peer_conn = peer_obj.get("peer_conn")
             channel = peer_obj.get("data_channel")
@@ -546,8 +661,9 @@ class RTCApp:
             ):
                 yield channel
 
-    def send_message_to_channel(self, channel, msg_type: str, data: Any):
-        """Sends one typed message to one specific peer's data channel."""
+    def send_message_to_channel(self, channel: RTCDataChannel, msg_type: str,
+                                data: Any) -> None:
+        """Send one typed message to one specific peer's data channel."""
         payload = json.dumps({"type": msg_type, "data": data})
         # Large payloads (cursor PNGs, settings, clipboard, stats) compress well;
         # small ones aren't worth the CPU or the risk to input latency. Only
@@ -557,8 +673,9 @@ class RTCApp:
             gz_payload = gzip.compress(payload.encode("utf-8"), 6)
         self._send_prepared_to_channel(channel, msg_type, payload, gz_payload)
 
-    def _send_prepared_to_channel(self, channel, msg_type: str, payload: str,
-                                  gz_payload: Optional[bytes]):
+    def _send_prepared_to_channel(self, channel: RTCDataChannel, msg_type: str,
+                                  payload: str,
+                                  gz_payload: Optional[bytes]) -> None:
         """Guarded raw send of an already-serialized (and possibly
         pre-compressed) message; bulk senders reuse one compression across
         channels instead of re-gzipping per peer."""
@@ -576,11 +693,13 @@ class RTCApp:
             # (close racing a sender): drop the message like any not-ready channel.
             logger.info("skipping message because data channel closed mid-send: %s" % msg_type)
 
-    def __send_data_channel_message(self, msg_type: str, data: Any):
-        """Broadcasts a typed message to every connected peer (all display
-        controllers and viewers) — the websockets transport broadcasts cursor,
-        stats, and clipboard to all of its clients, so the channel path must too.
-        Channels that are not open are skipped.
+    def __send_data_channel_message(self, msg_type: str, data: Any) -> None:
+        """Broadcast a typed message to every connected peer.
+
+        All display controllers and viewers receive it — the websockets
+        transport broadcasts cursor, stats, and clipboard to all of its
+        clients, so the channel path must too. Channels that are not open are
+        skipped.
         """
         if not self.peer_connections:
             return
@@ -591,13 +710,17 @@ class RTCApp:
         if not sent:
             logger.info("skipping message because no data channel is ready: %s" % msg_type)
 
-    def send_media_data_over_channel(self, msg_type, data):
+    def send_media_data_over_channel(self, msg_type: str, data: Any) -> None:
+        """Broadcast a media-related message to all peers."""
         self.__send_data_channel_message(msg_type, data)
 
-    async def close_display_peers(self, display_id: str):
-        """Close every peer attached to `display_id`. Each close is finished by
-        the connection-state handler (channel consumers, media graph, display
-        registration), which runs as its own task."""
+    async def close_display_peers(self, display_id: str) -> None:
+        """Close every peer attached to `display_id`.
+
+        Each close is finished by the connection-state handler (channel
+        consumers, media graph, display registration), which runs as its own
+        task.
+        """
         for peer_obj in [obj for obj in self.peer_connections.values()
                          if (obj.get("display_id") or "primary") == display_id]:
             peer_conn = peer_obj.get("peer_conn")
@@ -607,10 +730,13 @@ class RTCApp:
                 except Exception as e:
                     logger.warning(f"Error closing a '{display_id}' peer: {e}")
 
-    def get_controller_instance(self):
-        """Returns the peer connection object for the controller client, if it exists.
-        With multiple display controllers connected, the PRIMARY display's controller
-        is the authoritative one (latency pings and controller-directed replies)."""
+    def get_controller_instance(self) -> Optional[Dict[str, Any]]:
+        """Return the peer entry for the controller client, if one exists.
+
+        With multiple display controllers connected, the PRIMARY display's
+        controller is the authoritative one (latency pings and
+        controller-directed replies).
+        """
         controllers = [
             obj for obj in self.peer_connections.values()
             if obj.get("client_type") == ClientType.CONTROLLER
@@ -623,10 +749,25 @@ class RTCApp:
         )
 
     def munge_sdp(self, sdp: str, encoder: Optional[str] = None,
-                  fullcolor: Optional[bool] = None):
-        # Displays can run different encoders and chroma formats; the caller
-        # passes the ones this offer's display is using (defaults: the
-        # primary/global encoder and the configured full-colour setting).
+                  fullcolor: Optional[bool] = None) -> str:
+        """Rewrite the local offer SDP for optimal streaming behavior.
+
+        Injects rtx-time, keyframe parameter-set repetition, the 4:4:4 H.264
+        profile when full colour is active, the real Opus ptime, and generous
+        bandwidth ceilings. Displays can run different encoders and chroma
+        formats; the caller passes the ones this offer's display is using
+        (defaults: the primary/global encoder and the configured full-colour
+        setting).
+
+        Args:
+            sdp: The local offer SDP text.
+            encoder: Encoder the display is running; None means the global one.
+            fullcolor: Whether the display emits a 4:4:4 bitstream; None reads
+                the configured setting.
+
+        Returns:
+            The munged SDP text.
+        """
         encoder = encoder or self.encoder
         if fullcolor is None:
             fullcolor = bool(app_settings.video_fullcolor[0])
@@ -686,6 +827,12 @@ class RTCApp:
         return sdp_text
 
     def _munge_video_bandwidth(self, sdp_text: str) -> str:
+        """Raise the bandwidth ceiling of every video m-section in the SDP.
+
+        Inserts a `b=AS` line and per-codec x-google bitrate hints, both
+        scoped to the video section (see `munge_sdp` for why the ceiling is
+        generous).
+        """
         XGOOGLE = "x-google-max-bitrate=300000;x-google-min-bitrate=0"
         lines = sdp_text.split("\r\n")
         out: List[str] = []
@@ -705,10 +852,10 @@ class RTCApp:
                 section.append(lines[i])
                 i += 1
 
-            # Per-section b=AS: only insert when absent within THIS video block
-            # (the previous global guard skipped insertion if any b=AS existed
-            # anywhere in the offer). RFC4566 allows the media section to omit
-            # its own c= (inheriting the session-level c=); fall back to right
+            # Per-section b=AS: the presence check must be scoped to THIS video
+            # block — a b=AS elsewhere in the offer says nothing about this
+            # section's ceiling. RFC4566 allows the media section to omit its
+            # own c= (inheriting the session-level c=); fall back to right
             # after the m=video line when no per-media c= is present.
             if not any(s.startswith("b=AS:") for s in section):
                 c_idx = next(
@@ -755,9 +902,19 @@ class RTCApp:
 
         return "\r\n".join(out)
 
-    def consume_data(self, buf, pts, kind, display_id: str = "primary"):
-        # Synchronous: scheduled via loop.call_soon_threadsafe from the capture
-        # thread, since set_data does not await -- no per-frame Future/Task.
+    def consume_data(self, buf: Any, pts: Optional[int], kind: str,
+                     display_id: str = "primary") -> None:
+        """Feed one encoded frame from the capture side into a display's bridge.
+
+        Synchronous: scheduled via `loop.call_soon_threadsafe` from the capture
+        thread, since `set_data` does not await — no per-frame Future/Task.
+
+        Args:
+            buf: Buffer-protocol object holding the encoded sample.
+            pts: Presentation timestamp in the stream's clock, or None.
+            kind: "video" or "audio".
+            display_id: Display whose media graph receives the sample.
+        """
         graph = self.displays.get(display_id or "primary")
         if graph is None:
             return
@@ -791,8 +948,8 @@ class RTCApp:
                 except Exception as e:
                     logger.error(f"error processing audio sample: {e}")
 
-    def update_rtc_config(self, stun_servers: List[str], turn_servers: List[str]):
-        """Updates the STUN/TURN servers used for every NEW peer connection.
+    def update_rtc_config(self, stun_servers: List[str], turn_servers: List[str]) -> None:
+        """Update the STUN/TURN servers used for every NEW peer connection.
 
         get_rtc_config() reads these at peer-creation time, so a refresh (typically
         rotated TURN REST credentials) takes effect for every subsequent connection.
@@ -808,10 +965,16 @@ class RTCApp:
                 "(established sessions keep their current ICE)."
             )
 
-    def format_turn_servers(self, turn_servers: List[str]):
-        """
-        Restructure each TURN server string to the expected format
-        and return a list of formatted TURN server URLs.
+    def format_turn_servers(self, turn_servers: List[str]) -> List[Dict[str, Optional[str]]]:
+        """Parse turn:// or turns:// URL strings into ICE server dicts.
+
+        Non-TURN or unparsable entries are skipped; missing ports fall back to
+        the scheme default, bare IPv6 hosts are bracketed, and URL-encoded
+        credentials are decoded.
+
+        Returns:
+            One dict per valid server with `urls` and, when the URL carried
+            them, `username` / `credential` keys.
         """
         formatted_servers: List[Dict[str, Optional[str]]] = []
         for server in turn_servers or []:
@@ -849,15 +1012,15 @@ class RTCApp:
         return formatted_servers
 
     def format_stun_servers(self, stun_servers: List[str]) -> List[str]:
-        """Restructure each STUN server string to expected format"""
-        formatted_servers = []
+        """Strip the URL scheme separator from each STUN server string."""
+        formatted_servers: List[str] = []
         for stun in stun_servers:
             server = stun.split("//")
             formatted_servers.append("".join(server))
         return formatted_servers
 
-    def get_rtc_config(self):
-        # Format TURN servers
+    def get_rtc_config(self) -> RTCConfiguration:
+        """Build the RTCConfiguration for a new peer from the current servers."""
         formatted_turn_servers = self.format_turn_servers(self.turn_servers)
         formatted_stun_servers = self.format_stun_servers(self.stun_servers)
         logger.debug(f"stun servers: {formatted_stun_servers}")
@@ -888,15 +1051,25 @@ class RTCApp:
         )
         return config
 
-    def force_codec(self, pc: RTCPeerConnection, sender: RTCRtpSender, forced_codec_mime: str):
-        """
-        Forces a codec by MIME type and its associated RTX codec
+    def force_codec(self, pc: RTCPeerConnection, sender: RTCRtpSender,
+                    forced_codec_mime: str) -> None:
+        """Restrict a sender's codec preferences to one MIME type plus RTX.
+
+        Args:
+            pc: Peer connection owning the sender's transceiver.
+            sender: RTP sender whose transceiver is being restricted.
+            forced_codec_mime: MIME type (e.g. "video/H264") to force.
+
+        Raises:
+            ValueError: When the codec or its RTX companion is not in the
+                sender capabilities.
         """
         kind = sender.track.kind
         capabilities = RTCRtpSender.getCapabilities(kind)
         logger.debug(f"Current capabilities for {kind}: {capabilities}")
 
-        # Collect all codecs matching the given MIME type (e.g., all H264 codecs which may include different profiles)
+        # Collect every codec matching the MIME type: H.264 appears once per
+        # advertised profile and all of them must stay eligible.
         chosen_codec = []
         for codec in capabilities.codecs:
             if codec.mimeType == forced_codec_mime:
@@ -934,7 +1107,9 @@ class RTCApp:
         logger.debug(f"Forcing codec preferences to: {preferences}")
         transceiver.setCodecPreferences(preferences)
 
-    async def _drain_channel_queue(self, queue: asyncio.Queue, handler, label: str):
+    async def _drain_channel_queue(self, queue: asyncio.Queue,
+                                   handler: Callable[[Any], Any],
+                                   label: str) -> None:
         """Single consumer that dispatches queued messages strictly in order.
 
         Running one awaited handler at a time is what guarantees ordering: if
@@ -953,17 +1128,23 @@ class RTCApp:
             except Exception as e:
                 logger.error("Error handling message on channel %s: %s", label, e)
 
-    def _serialize_channel(self, channel: RTCDataChannel, handler, max_queue: int = 512):
+    def _serialize_channel(self, channel: RTCDataChannel,
+                           handler: Callable[[Any], Any],
+                           max_queue: int = 512) -> "asyncio.Task":
         """Wire a channel's messages through a bounded per-channel queue drained
         by a single consumer task, so dispatch stays in arrival order.
 
         The message handler only enqueues (drop+log on overflow); the consumer
         is cancelled when the channel closes. handler is called late-bound so
         reassigning the target callback still takes effect.
+
+        Returns:
+            The consumer task, so teardown paths can cancel it for channels
+            that never emit a close event.
         """
         queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue)
 
-        def _enqueue(msg):
+        def _enqueue(msg: Any) -> None:
             try:
                 queue.put_nowait(msg)
             except asyncio.QueueFull:
@@ -976,16 +1157,21 @@ class RTCApp:
         channel.on("close", lambda: consumer.cancel())
         return consumer
 
-    def _send_collab_state(self, channel, client_type, client_token):
-        """Send a peer its mk-token input verdict over the data channel as a
-        `system` action (the channel is JSON-typed): `mk_access,1` attaches the
-        client's input context, `mk_access,0` detaches it. Sent to controllers
-        as well as viewers (websockets MK_ACCESS parity) — an mk handoff strips
-        a controller's input authority too, and without the verdict its page
-        keeps a live input UI whose messages the server drops. No-op outside
-        secure mode. Gated on secure mode itself, NOT on an mk token existing —
-        a handoff that clears the token must still push the 0 that detaches the
-        previous holder."""
+    def _send_collab_state(self, channel: RTCDataChannel,
+                           client_type: ClientType,
+                           client_token: Optional[str]) -> None:
+        """Send a peer its mk-token input verdict over the data channel.
+
+        Delivered as a `system` action (the channel is JSON-typed):
+        `mk_access,1` attaches the client's input context, `mk_access,0`
+        detaches it. Sent to controllers as well as viewers (websockets
+        MK_ACCESS parity) — an mk handoff strips a controller's input
+        authority too, and without the verdict its page keeps a live input UI
+        whose messages the server drops. No-op outside secure mode. Gated on
+        secure mode itself, NOT on an mk token existing — a handoff that
+        clears the token must still push the 0 that detaches the previous
+        holder.
+        """
         if not app_settings.master_token:
             return
         granted = (
@@ -999,7 +1185,9 @@ class RTCApp:
         except Exception:
             logger.debug("collab-state send failed (channel closing)", exc_info=True)
 
-    def _send_auth_success(self, channel, client_type, client_token):
+    def _send_auth_success(self, channel: RTCDataChannel,
+                           client_type: ClientType,
+                           client_token: Optional[str]) -> None:
         """Tell the client its effective role/slot (websockets AUTH_SUCCESS
         parity): role coercion is decided server-side, so the page must learn
         the verdict to degrade its own UI instead of driving a controller UI
@@ -1017,10 +1205,11 @@ class RTCApp:
         except Exception:
             logger.debug("auth_success send failed (channel closing)", exc_info=True)
 
-    def _viewer_is_collaborator(self, client_token):
+    def _viewer_is_collaborator(self, client_token: Optional[str]) -> bool:
         """A viewer holding the active mk (mouse+keyboard) token is a read-write
         collaborator — mirrors the WS mk-token path — but only while enable_collab
-        is on. Fail-safe: any missing piece => not a collaborator (stays read-only)."""
+        is on. Fail-safe: any missing piece means not a collaborator (stays
+        read-only)."""
         if not client_token:
             return False
         if not bool(app_settings.enable_collab[0]):
@@ -1028,7 +1217,7 @@ class RTCApp:
         _, mk = current_session_tokens()
         return mk is not None and client_token == mk
 
-    def _mk_input_authorized(self, client_token):
+    def _mk_input_authorized(self, client_token: Optional[str]) -> bool:
         """Token-level input authority in secure mode: the active mk-token holder,
         or a controller-role token while no mk token is provisioned."""
         tokens, mk = current_session_tokens()
@@ -1037,7 +1226,7 @@ class RTCApp:
         perms = tokens.get(client_token) if client_token else None
         return bool(perms) and perms.get("role") == "controller"
 
-    def peer_holds_input_authority(self, peer):
+    def peer_holds_input_authority(self, peer: Optional[Dict[str, Any]]) -> bool:
         """Whether a peer entry may drive keyboard/mouse input, composing the two
         gates on_data_message applies: a viewer needs to be a read-write
         collaborator, and in secure mode every peer is additionally held to the
@@ -1053,12 +1242,16 @@ class RTCApp:
             return True
         return self._mk_input_authorized(client_token)
 
-    def _secure_input_denied(self, msg, client_token):
+    def _secure_input_denied(self, msg: str, client_token: Optional[str]) -> bool:
         """Secure-mode (master token configured) input authority, mirroring the WS
         gate: cmd and the keyboard/mouse/clipboard set are admitted only from the
         active mk-token holder, or from a controller-role token when no mk-token is
         provisioned. client_type is self-asserted over signaling, so a peer that
-        merely claims 'controller' is still held to the token here."""
+        merely claims 'controller' is still held to the token here.
+
+        Returns:
+            True when the message must be dropped.
+        """
         if not app_settings.master_token:
             return False
         # "co" is composed-text typing (co,end,<text>) — keyboard input like kd/ku.
@@ -1075,10 +1268,15 @@ class RTCApp:
             logger.warning("Dropping unauthorized secure-mode input: %s", msg[:32])
         return not authorized
 
-    def _secure_gamepad_denied(self, msg, client_token):
+    def _secure_gamepad_denied(self, msg: str, client_token: Optional[str]) -> bool:
         """Secure-mode gamepad authority, mirroring the WS gate: a client may only
-        drive its own assigned slot (js index == slot - 1), so a viewer or collaborator
-        can't spoof another player's controller. No slot on the token => no gamepad."""
+        drive its own assigned slot (js index == slot - 1), so a viewer or
+        collaborator can't spoof another player's controller. No slot on the
+        token means no gamepad.
+
+        Returns:
+            True when the gamepad message must be dropped.
+        """
         if not app_settings.master_token or not msg.startswith("js,"):
             return False
         tokens, _ = current_session_tokens()
@@ -1092,9 +1290,24 @@ class RTCApp:
             return True
         return int(slot) - 1 != index
 
-    def _on_input_channel_message(self, msg, channel=None, client_type=None, client_token=None, display_id="primary", peer_id=None):
-        """Decompress gzip'd payloads and intercept the compression handshake before
-        the input dispatcher (the late-bound on_data_message) sees the message."""
+    def _on_input_channel_message(self, msg: Any,
+                                  channel: Optional[RTCDataChannel] = None,
+                                  client_type: Optional[ClientType] = None,
+                                  client_token: Optional[str] = None,
+                                  display_id: str = "primary",
+                                  peer_id: Optional[str] = None) -> Any:
+        """Pre-filter one data-channel message before the input dispatcher.
+
+        Decompresses gzip'd payloads, intercepts the compression handshake,
+        applies the viewer/collaborator and secure-mode gates, and handles the
+        per-peer video pause verbs before the late-bound on_data_message sees
+        the message.
+
+        Returns:
+            Whatever the dispatched handler returns (possibly an awaitable,
+            which the channel's queue consumer awaits), or None when the
+            message was consumed or dropped here.
+        """
         if isinstance(msg, (bytes, bytearray)) and bytes(msg[:2]) == b"\x1f\x8b":
             try:
                 # Bounded inflate, mirroring the WebSocket 0x05 path: the channel's
@@ -1159,27 +1372,35 @@ class RTCApp:
         # (gamepad associations) can be traced to this peer.
         return self.on_data_message(msg, display_id or "primary", conn_id=peer_id)
 
-    async def on_peer_connection_established(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary"):
+    async def on_peer_connection_established(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary") -> None:
+        """Start the display's capture when its controller finishes connecting."""
         if client_type == ClientType.CONTROLLER:
             await self.start_display_media(display_id)
             logger.info(f"Media pipeline start requested for {client_peer_id} (display '{display_id}')")
 
-    async def on_peer_connection_lost(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary"):
-        """Called when peer connection is lost or closed."""
+    async def on_peer_connection_lost(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary") -> None:
+        """Stop the display's capture when its controller's connection ends."""
         if client_type == ClientType.CONTROLLER:
             await self.stop_display_media(display_id)
             logger.info(f"Media pipeline stop requested for {client_peer_id} (display '{display_id}')")
 
-    async def _default_start_display_media(self, display_id: str):
+    async def _default_start_display_media(self, display_id: str) -> None:
+        """Single-display default: only the primary pipeline is started."""
         if display_id == "primary" and self.media_pipeline:
             await self.media_pipeline.start_media_pipeline()
 
-    async def _default_stop_display_media(self, display_id: str):
+    async def _default_stop_display_media(self, display_id: str) -> None:
+        """Single-display default: only the primary pipeline is stopped."""
         if display_id == "primary" and self.media_pipeline:
             await self.media_pipeline.stop_media_pipeline()
 
-    async def on_connectionstatechange(self, client_peer_id: str):
-        """Handle connection state changes for a peer connection.
+    async def on_connectionstatechange(self, client_peer_id: str) -> None:
+        """React to a peer connection's state changes.
+
+        The "closed" branch is the peer's single teardown point for state
+        that a vanished client cannot release itself: consumer tasks, mic
+        playback, the display media graph (for controllers), and the
+        on_peer_gone input-state hook.
         """
         peer_conn = None
         peer_obj = None
@@ -1234,22 +1455,27 @@ class RTCApp:
         else:
             logger.debug(f"Unhandled peer connection state: {state}", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
 
-    def on_pli(self, client_peer_id: str, client_type: str):
+    def on_pli(self, client_peer_id: str, client_type: str) -> None:
+        """Translate a peer's RTP PLI into an IDR request for its display."""
         logger.debug("PLI occurred, triggering IDR frame request", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         peer_obj = self.peer_connections.get(client_peer_id) or {}
         display_id = peer_obj.get("display_id") or "primary"
         asyncio.run_coroutine_threadsafe(self.request_idr_frame(display_id), self.async_event_loop)
 
-    def _idr_on_video_drop(self, display_id: str, min_interval: float = 0.5):
-        """Drop hook for a display's video bridge. A dropped encoded frame leaves the
-        wire referencing a picture no client received; the drop is upstream of RTP so
-        no loss is signalled and the browser never asks for a keyframe, leaving a
-        persistent smear under infinite GOP. Force a recovery IDR, debounced so a
-        sustained consumer lag doesn't turn every dropped frame into a large keyframe
-        and deepen the congestion."""
-        state = {"last": None}
+    def _idr_on_video_drop(self, display_id: str,
+                           min_interval: float = 0.5) -> Callable[[], None]:
+        """Build the drop hook for a display's video bridge.
 
-        def on_drop():
+        A dropped encoded frame leaves the wire referencing a picture no
+        client received; the drop is upstream of RTP so no loss is signalled
+        and the browser never asks for a keyframe, leaving a persistent smear
+        under infinite GOP. The hook forces a recovery IDR, debounced so a
+        sustained consumer lag doesn't turn every dropped frame into a large
+        keyframe and deepen the congestion.
+        """
+        state: Dict[str, Optional[float]] = {"last": None}
+
+        def on_drop() -> None:
             loop = self.async_event_loop
             if loop is None:
                 return
@@ -1273,9 +1499,25 @@ class RTCApp:
         c_type: str,
         client_token: Optional[str] = None,
         display_id: str = "primary",
-    ):
-        """Starts the WebRTC pipeline and creates the peer connection."""
-        # Normalize client_type to ClientType enum
+    ) -> None:
+        """Create a peer connection and send its offer over signaling.
+
+        Builds the display's media graph when the peer is its controller,
+        attaches the media tracks, the mic receiver, and the serialized input
+        channel, and registers the peer entry only after the offer was sent —
+        a failure before registration tears the half-built connection down
+        here because no other teardown path could ever find it.
+
+        Args:
+            client_peer_id: Signaling id of the connecting peer.
+            c_type: Client role string, coerced to `ClientType`.
+            client_token: Session token the peer authenticated with, if any.
+            display_id: Display this peer attaches to.
+
+        Raises:
+            RTCAppError: When no media graph exists for the display (viewer
+                joining without a controller) or the encoder is unsupported.
+        """
         client_type = ClientType(c_type)
         display_id = display_id or "primary"
 
@@ -1303,7 +1545,6 @@ class RTCApp:
             )
         media_relay = graph["relay"]
 
-        # add audio and video encoded streams
         rtp_video_sender = peer_connection.addTrack(media_relay.subscribe(graph["video_media"]))
         rtp_video_sender.on("pli", lambda cid=client_peer_id, ct=client_type: self.on_pli(cid, ct))
         if graph.get("audio_media") is not None:
@@ -1414,12 +1655,21 @@ class RTCApp:
         # a stopped capture) — the owning service re-evaluates the consumer set.
         await self._notify_consumers_changed(display_id)
 
-    def _setup_mic_receiver(self, peer_connection, client_type=None, client_token=None):
-        """Add a recvonly mic transceiver in the bundled session and route its encoded
-        Opus straight into pcmflux -- no aiortc/Python Opus decode. RED (UDP loss
-        resilience) is gated by audio_redundancy: when on, the shared caps offer it and
-        pcmflux de-frames + loss-recovers each RED payload off the GIL before decoding;
-        when off, the m-line is restricted to plain Opus."""
+    def _setup_mic_receiver(self, peer_connection: RTCPeerConnection,
+                            client_type: Optional[ClientType] = None,
+                            client_token: Optional[str] = None) -> Dict[str, Any]:
+        """Add a recvonly mic transceiver and route its Opus into pcmflux.
+
+        The encoded payload goes straight into pcmflux — no aiortc/Python Opus
+        decode. RED (UDP loss resilience) is gated by audio_redundancy: when
+        on, the shared caps offer it and pcmflux de-frames + loss-recovers
+        each RED payload off the GIL before decoding; when off, the m-line is
+        restricted to plain Opus.
+
+        Returns:
+            The per-peer mic state dict (`pb`, `starting`, `closed`) that
+            `_stop_mic_playback_state` later tears down.
+        """
         mic_tx = peer_connection.addTransceiver("audio", direction="recvonly")
         if not bool(app_settings.audio_redundancy[0]):
             try:
@@ -1431,9 +1681,9 @@ class RTCApp:
                 logger.info(f"mic opus-only preference not applied: {e}")
 
         loop = self.async_event_loop
-        state = {"pb": None, "starting": False, "closed": False}
+        state: Dict[str, Any] = {"pb": None, "starting": False, "closed": False}
 
-        def sink(codec, frame):
+        def sink(codec: Any, frame: Any) -> None:
             if state["closed"]:
                 return
             # Only a controller or a live collab (m/k) holder speaks into the
@@ -1517,11 +1767,14 @@ class RTCApp:
         mic_tx.receiver._encoded_audio_sink = sink
         return state
 
-    async def _stop_mic_playback_state(self, state):
-        """Stop ONE peer's mic playback (per-peer ownership: a closing peer must
-        never silence the mic of the other primary peers). Marks the state closed
-        so an in-flight first-packet start cannot publish a live playback into a
-        torn-down peer (which nothing would ever stop)."""
+    async def _stop_mic_playback_state(self, state: Optional[Dict[str, Any]]) -> None:
+        """Stop ONE peer's mic playback.
+
+        Per-peer ownership: a closing peer must never silence the mic of the
+        other primary peers. Marks the state closed so an in-flight
+        first-packet start cannot publish a live playback into a torn-down
+        peer (which nothing would ever stop).
+        """
         if not state:
             return
         state["closed"] = True
@@ -1534,7 +1787,11 @@ class RTCApp:
                 pass
 
     def get_mime_by_encoder(self, encoder: str) -> Optional[str]:
-        """Returns respective mime type by encoder name"""
+        """Return the RTP MIME type for an encoder name.
+
+        Returns:
+            The MIME type; unmapped encoders fall back to "video/H264".
+        """
 
         # Every pipeline encoder emits H.264. Offering another MIME here would
         # negotiate a codec the stream cannot honor, so new entries may only be
@@ -1555,7 +1812,7 @@ class RTCApp:
             mime = "video/H264"
         return mime
 
-    async def _cancel_channel_consumers(self, peer_obj: Dict[str, Any]):
+    async def _cancel_channel_consumers(self, peer_obj: Dict[str, Any]) -> None:
         """Cancel and await a peer's data channel queue consumers.
 
         A channel that never reached SCTP-established never emits 'close', so
@@ -1568,8 +1825,16 @@ class RTCApp:
         if consumers:
             await asyncio.gather(*consumers, return_exceptions=True)
 
-    async def _stop_rtc_pipeline(self, client_peer_id: str):
-        """Stops the WebRTC pipeline and closes the peer connection."""
+    async def _stop_rtc_pipeline(self, client_peer_id: str) -> None:
+        """Close a peer connection and release everything the peer owned.
+
+        The explicit-stop counterpart of the "closed" state branch: it runs
+        the same teardown steps because it deletes the registration before the
+        state event could see it.
+
+        Raises:
+            RTCAppError: When teardown itself fails.
+        """
         try:
             if not self.peer_connections:
                 return
@@ -1605,10 +1870,13 @@ class RTCApp:
         except Exception as e:
             raise RTCAppError(f"Error stopping pipeline: {e}") from e
 
-    async def _notify_consumers_changed(self, display_id: str):
-        """A peer left this display's consumer set; the owning service re-checks
-        the all-paused capture stop so a departing unpaused peer cannot leave a
-        capture running for hidden-only consumers."""
+    async def _notify_consumers_changed(self, display_id: str) -> None:
+        """Tell the owning service this display's consumer set changed.
+
+        The service re-checks the all-paused capture stop so a departing
+        unpaused peer cannot leave a capture running for hidden-only
+        consumers, and a joining one can restart a stopped capture.
+        """
         cb = self.on_consumers_changed
         if cb is None:
             return
@@ -1619,12 +1887,13 @@ class RTCApp:
         except Exception as e:
             logger.debug(f"consumers-changed notification failed: {e}")
 
-    async def _teardown_display_graph(self, display_id: str):
+    async def _teardown_display_graph(self, display_id: str) -> None:
         """Drop one display's media graph, reaping its relay workers.
 
-        The relay's __run_track workers only exit when the SOURCE track errors,
-        so dropping the reference alone leaks them pending in recv() ("Task was
-        destroyed but it is pending!")."""
+        The relay's run-track workers only exit when the SOURCE track errors,
+        so dropping the reference alone leaks them pending in recv() ("Task
+        was destroyed but it is pending!").
+        """
         display_id = display_id or 'primary'
         graph = self.displays.pop(display_id, None)
         if not graph:
@@ -1642,7 +1911,8 @@ class RTCApp:
         # the drop and reload — reconnecting to the controller's fresh graph.
         await self._close_display_viewers(display_id)
 
-    async def _close_display_viewers(self, display_id: str):
+    async def _close_display_viewers(self, display_id: str) -> None:
+        """Close every non-controller peer of a display whose graph is gone."""
         victims = [
             (pid, obj) for pid, obj in list(self.peer_connections.items())
             if (obj.get('display_id') or 'primary') == display_id
@@ -1658,7 +1928,8 @@ class RTCApp:
             except Exception as e:
                 logger.debug(f"Error closing orphaned viewer '{pid}': {e}")
 
-    async def start_rtc_connection(self, client_peer_id: str, client_type: str, client_token: Optional[str] = None, display_id: str = "primary"):
+    async def start_rtc_connection(self, client_peer_id: str, client_type: str, client_token: Optional[str] = None, display_id: str = "primary") -> None:
+        """Start a peer connection, cleaning up the half-built state on failure."""
         try:
             logger.info("Starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._start_rtc_pipeline(client_peer_id, client_type, client_token, display_id)
@@ -1673,17 +1944,19 @@ class RTCApp:
         else:
             logger.info("RTC pipeline started successfully", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
 
-    async def _cleanup_failed_start(self, client_peer_id: str):
+    async def _cleanup_failed_start(self, client_peer_id: str) -> None:
         """Close the half-built peer connection of a failed pipeline start NOW.
-        Waiting for the signaling session-end (which may never come if the peer's
-        socket was already gone) leaves live ICE gatherers whose STUN retries
-        fire into torn-down transports."""
+
+        Waiting for the signaling session-end (which may never come if the
+        peer's socket was already gone) leaves live ICE gatherers whose STUN
+        retries fire into torn-down transports.
+        """
         try:
             await self._stop_rtc_pipeline(client_peer_id)
         except Exception as e:
             logger.debug(f"Failed-start cleanup for {client_peer_id}: {e}")
 
-    async def stop_rtc_connection(self, client_peer_id: str, client_type: str):
+    async def stop_rtc_connection(self, client_peer_id: str, client_type: str) -> None:
         """Stop a specific peer connection by ID."""
         try:
             logger.info("Stopping RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
@@ -1693,8 +1966,12 @@ class RTCApp:
         else:
             logger.info("RTC pipeline stopped successfully", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
 
-    async def stop_all_rtc_connections(self):
-        """Stop all active peer connections and cleanup media resources."""
+    async def stop_all_rtc_connections(self) -> None:
+        """Stop all active peer connections and clean up media resources.
+
+        Raises:
+            RTCAppError: When teardown fails.
+        """
         try:
             logger.info("Stopping all RTC connections")
             for client_peer_id in list(self.peer_connections.keys()):

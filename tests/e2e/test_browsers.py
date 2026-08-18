@@ -12,6 +12,8 @@ import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
 
+from typing import Optional
+
 DECODER_ERROR_PATTERNS = (
     "Failed to load resource", "Unexpected server response:", "ResizeObserver",
     "Error getting media devices", "AudioContext was not allowed",
@@ -20,12 +22,12 @@ DECODER_ERROR_PATTERNS = (
 
 
 # Persistent profile: Firefox only grants clipboard access to a profile that
-# carries the permission, which a fresh temporary profile never does
-FF_E2E_PROFILE = os.environ.get(
+# carries the permission, which a fresh temporary profile never does.
+FF_E2E_PROFILE: str = os.environ.get(
     "E2E_FIREFOX_PROFILE", os.path.join(H.WORKDIR, "firefox-profile"))
 
 
-def openh264_version():
+def openh264_version() -> Optional[str]:
     """Version of the OpenH264 GMP side-loaded by tests/tools/fetch-openh264.sh,
     or None. Without the plugin Firefox answers the offer with the video m-line
     rejected, so every video, input and clipboard check in the WebRTC block
@@ -39,9 +41,9 @@ def openh264_version():
     return None
 
 
-def openh264_prefs():
+def openh264_prefs() -> dict:
     """Prefs that point Firefox at the side-loaded plugin. Firefox only scans
-    gmp-gmpopenh264/<version> once a pref names that exact version, and the GMP
+    `gmp-gmpopenh264/<version>` once a pref names that exact version, and the GMP
     updater is turned off so it does not replace it mid-run."""
     version = openh264_version()
     if not version:
@@ -55,7 +57,7 @@ def openh264_prefs():
     }
 
 
-def engine_launch(p, engine):
+def engine_launch(p, engine: str):
     """Return (browser_or_none, ctx). Firefox needs a persistent profile that
     carries the OpenH264 GMP plugin (bundled profile ships without it, so the
     WebRTC answer rejects the video m-line) plus autoplay/clipboard prefs."""
@@ -79,7 +81,16 @@ def engine_launch(p, engine):
     return b, b.new_context(viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1})
 
 
-def engine_block(engine, mode="websockets"):
+def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
+    """Run the flow/input/clipboard/resize checklist on one browser engine.
+
+    Args:
+        engine: Playwright engine name: ``chromium``, ``firefox``, or ``webkit``.
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+
+    Returns:
+        The Results accumulator for this engine's checks.
+    """
     tag = f"{engine}-{mode}"
     res = H.Results(tag)
     H.server_start(mode=mode, wayland=False)
@@ -193,8 +204,9 @@ def engine_block(engine, mode="websockets"):
                     time.sleep(0.5)
                 res.check("clipboard: client text reached server", got_text == probe, repr(got_text))
 
-            # resize
-            if engine != "webkit":  # webkit proper checks skip resize (headless quirks)
+            # Resize; skipped on WebKit, whose headless viewport quirks make
+            # the realized root size unreliable.
+            if engine != "webkit":
                 req_w, req_h = 1242, 694
                 page.set_viewport_size({"width": req_w, "height": req_h})
                 deadline = time.time() + 12
@@ -223,7 +235,8 @@ def engine_block(engine, mode="websockets"):
     return res
 
 
-def main():
+def main() -> None:
+    """Run the engine blocks named on argv (default: all available)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
     try:

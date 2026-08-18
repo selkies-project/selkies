@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import threading
+from typing import Any, Dict, List, Optional, Set
 
 try:
     import pynvml
@@ -48,21 +49,41 @@ if GPUMonitorFactory is not None:
 # NVML availability is terminal per process: None = not yet attempted, True =
 # initialized, False = init failed. The library cannot appear after startup,
 # so a failure is never retried (and never re-logged) on later polls.
-_nvml_ready = None
+_nvml_ready: Optional[bool] = None
 
 # utilization.gpu is a percentage; memory.* are MiB (nounits strips the suffix);
 # pci.bus_id keys the stats to the render node the pipeline encodes on.
-_NVIDIA_SMI_QUERY = "utilization.gpu,memory.total,memory.used,pci.bus_id"
+_NVIDIA_SMI_QUERY: str = "utilization.gpu,memory.total,memory.used,pci.bus_id"
 
 # Overridable so tests can point at a fabricated tree.
-_SYSFS_DRM_ROOT = "/sys/class/drm"
+_SYSFS_DRM_ROOT: str = "/sys/class/drm"
 
-_DRIVER_VENDORS = {"nvidia": "nvidia", "amdgpu": "amd", "radeon": "amd", "i915": "intel", "xe": "intel"}
+_DRIVER_VENDORS: Dict[str, str] = {"nvidia": "nvidia", "amdgpu": "amd", "radeon": "amd", "i915": "intel", "xe": "intel"}
 
 class GPUStat:
+    """One GPU's live reading in the units the stats collectors serialize.
+
+    Attributes:
+        id: Position of this GPU in the merged detection list.
+        load: Utilization as a 0..1 fraction.
+        memoryTotal: Total device memory in MiB.
+        memoryUsed: Used device memory in MiB.
+        pci: Normalized PCI address (lowercase, 4-hex-digit domain), or None
+            when the source cannot name one.
+        vendor: Vendor keyword (`nvidia`/`amd`/`intel`/`apple`), or None.
+    """
+
     __slots__ = ("id", "load", "memoryTotal", "memoryUsed", "pci", "vendor")
 
-    def __init__(self, gpu_id, load, memory_total, memory_used, pci=None, vendor=None):
+    def __init__(
+        self,
+        gpu_id: int,
+        load: float,
+        memory_total: float,
+        memory_used: float,
+        pci: Optional[str] = None,
+        vendor: Optional[str] = None,
+    ) -> None:
         self.id = gpu_id
         self.load = load
         self.memoryTotal = memory_total
@@ -71,7 +92,7 @@ class GPUStat:
         self.vendor = vendor
 
 
-def _normalize_pci(bus_id):
+def _normalize_pci(bus_id: str) -> Optional[str]:
     """Lowercase PCI address with the 4-hex-digit domain sysfs uses
     (nvidia-smi prints an 8-digit domain)."""
     parts = str(bus_id).strip().lower().split(":")
@@ -81,7 +102,7 @@ def _normalize_pci(bus_id):
     return None
 
 
-def _pci_of_node(dri_node, root=None):
+def _pci_of_node(dri_node: Optional[str], root: Optional[str] = None) -> Optional[str]:
     """PCI address backing a /dev/dri/renderD* (or card*) node, via sysfs."""
     root = root or _SYSFS_DRM_ROOT
     name = os.path.basename(str(dri_node or "").strip())
@@ -91,7 +112,7 @@ def _pci_of_node(dri_node, root=None):
     return _normalize_pci(os.path.basename(dev))
 
 
-def _vendor_of_node(dri_node, root=None):
+def _vendor_of_node(dri_node: Optional[str], root: Optional[str] = None) -> Optional[str]:
     """Vendor keyword for the node's kernel driver, via sysfs."""
     root = root or _SYSFS_DRM_ROOT
     name = os.path.basename(str(dri_node or "").strip())
@@ -104,7 +125,7 @@ def _vendor_of_node(dri_node, root=None):
     return _DRIVER_VENDORS.get(driver)
 
 
-def _nvml_gpus():
+def _nvml_gpus() -> List[GPUStat]:
     """NVIDIA via NVML: no subprocess, exact per-device PCI identity."""
     global _nvml_ready
     if pynvml is None or _nvml_ready is False:
@@ -142,7 +163,8 @@ def _nvml_gpus():
     return gpus
 
 
-def _nvidia_gpus():
+def _nvidia_gpus() -> List[GPUStat]:
+    """NVIDIA via an nvidia-smi subprocess, when NVML is unavailable."""
     smi = shutil.which("nvidia-smi")
     if not smi:
         return []
@@ -181,7 +203,8 @@ def _nvidia_gpus():
     return gpus
 
 
-def _aitop_vendor(monitor):
+def _aitop_vendor(monitor: Any) -> str:
+    """Vendor keyword derived from an aitop monitor's class name."""
     return type(monitor).__name__.replace("GPUMonitor", "").replace("NPUMonitor", "").lower()
 
 
@@ -189,14 +212,15 @@ def _aitop_vendor(monitor):
 # can never produce data, and the NVIDIA/AMD ones log an ERROR every poll cycle
 # when a DRM-visible card has no userspace in the container (a bare /dev/dri
 # mount without the vendor toolkit); NPU/Apple monitors read other sources.
-_AITOP_MONITOR_TOOLS = {
+_AITOP_MONITOR_TOOLS: Dict[str, tuple] = {
     "NvidiaGPUMonitor": ("nvidia-smi",),
     "AMDGPUMonitor": ("rocm-smi", "amd-smi"),
     "IntelGPUMonitor": ("intel_gpu_top",),
 }
 
 
-def _aitop_monitor_usable(monitor):
+def _aitop_monitor_usable(monitor: Any) -> bool:
+    """Whether the monitor's backing CLI exists, logging the skip when not."""
     tools = _AITOP_MONITOR_TOOLS.get(type(monitor).__name__)
     if tools is None or any(shutil.which(tool) for tool in tools):
         return True
@@ -208,16 +232,18 @@ def _aitop_monitor_usable(monitor):
     return False
 
 
-_aitop_monitors_cache = None
+_aitop_monitors_cache: Optional[List[Any]] = None
 _aitop_monitors_lock = threading.Lock()
 
 
-def _aitop_monitors():
-    """aitop monitors, built once and reused. create_monitors() re-detects
-    vendors and appends to PATH on every call, so polling it per frame grows
-    PATH until subprocess spawns fail with E2BIG. A build failure is cached as
-    an empty list for the same reason — retrying each poll would keep growing
-    PATH; NVML/sysfs still cover the stats."""
+def _aitop_monitors() -> List[Any]:
+    """aitop monitors, built once and reused.
+
+    create_monitors() re-detects vendors and appends to PATH on every call, so
+    polling it per frame grows PATH until subprocess spawns fail with E2BIG. A
+    build failure is cached as an empty list for the same reason — retrying
+    each poll would keep growing PATH; NVML/sysfs still cover the stats.
+    """
     global _aitop_monitors_cache
     if _aitop_monitors_cache is None:
         with _aitop_monitors_lock:
@@ -234,8 +260,12 @@ def _aitop_monitors():
     return _aitop_monitors_cache
 
 
-def _aitop_gpus(vendors=None):
-    """Multi-vendor telemetry via aitop's monitors (utilization + memory in MiB)."""
+def _aitop_gpus(vendors: Optional[Set[str]] = None) -> List[GPUStat]:
+    """Multi-vendor telemetry via aitop's monitors (utilization + memory in MiB).
+
+    Args:
+        vendors: When given, only monitors for these vendor keywords are read.
+    """
     if GPUMonitorFactory is None:
         return []
     gpus = []
@@ -267,7 +297,8 @@ def _aitop_gpus(vendors=None):
     return gpus
 
 
-def _read_sysfs_number(path):
+def _read_sysfs_number(path: str) -> Optional[float]:
+    """Float value of a sysfs counter file, or None when unreadable."""
     try:
         with open(path, "r") as f:
             return float(f.read().strip())
@@ -275,7 +306,7 @@ def _read_sysfs_number(path):
         return None
 
 
-def _drm_sysfs_gpus(root=None):
+def _drm_sysfs_gpus(root: Optional[str] = None) -> List[GPUStat]:
     """AMD (and best-effort Intel) cards via /sys/class/drm/card*/device counters."""
     root = root or _SYSFS_DRM_ROOT
     gpus = []
@@ -311,13 +342,18 @@ def _drm_sysfs_gpus(root=None):
     return gpus
 
 
-def get_gpus(dri_node=None):
+def get_gpus(dri_node: Optional[str] = None) -> List[GPUStat]:
     """Return a list of GPUStat objects, one per detected GPU.
 
-    With `dri_node` (the render node the pipeline captures/encodes on, e.g.
-    /dev/dri/renderD128), the list holds ONLY that node's GPU so stats always
-    describe the same card the rest of the stack uses; an unresolvable node
-    falls back to the full list.
+    Args:
+        dri_node: The render node the pipeline captures/encodes on, e.g.
+            `/dev/dri/renderD128`. When given, the list holds ONLY that node's
+            GPU so stats always describe the same card the rest of the stack
+            uses; an unresolvable node falls back to the full list.
+
+    Returns:
+        GPUStat objects with sequential ids, merged best-source-first per
+        vendor and backfilled from sysfs.
     """
     gpus = _nvml_gpus()
     if gpus:

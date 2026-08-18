@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""NVML is probed once per process. On hosts without the NVIDIA library every
-GPU stats poll used to retry nvmlInit (a dlopen attempt plus a log line, a few
-times per second for the life of the server); a failed init must instead be
-terminal, and a successful one must not re-init. The stats path itself has to
-keep working either way through the non-NVML sources.
+"""NVML is probed once per process. A failed nvmlInit must be terminal and a
+successful one must not re-init: without that latch, a host lacking the NVIDIA
+library pays a dlopen attempt plus a log line on every GPU stats poll, a few
+times per second for the life of the server. The stats path itself has to keep
+working either way through the non-NVML sources.
 """
 import os
 import sys
@@ -17,7 +17,7 @@ import selkies.gpu_stats as gpu_stats  # noqa: E402
 passed = failed = 0
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     global passed, failed
     if ok:
         passed += 1

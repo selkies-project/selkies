@@ -24,7 +24,7 @@ DISPLAY = os.environ.get("RETYPE_DISPLAY", ":97")
 SAMPLE = "Big Chicken A"
 
 
-def start_server():
+def start_server() -> subprocess.Popen:
     """A bare X server, GLX off because it faults on some GPU hosts."""
     proc = subprocess.Popen(
         ["Xvfb", DISPLAY, "-screen", "0", "1280x720x24", "-extension", "GLX",
@@ -39,7 +39,7 @@ def start_server():
     raise RuntimeError("test X server did not start")
 
 
-def typed_text(display, keyboard, text):
+def typed_text(display, keyboard, text: str) -> str:
     """Inject text and read back what a client actually receives."""
     from selkies.Xlib import X
 
@@ -79,7 +79,7 @@ def typed_text(display, keyboard, text):
     return "".join(out)
 
 
-def main():
+def main() -> bool:
     res = H.Results("retype-case")
     server = start_server()
     try:

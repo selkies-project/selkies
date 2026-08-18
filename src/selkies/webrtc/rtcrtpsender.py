@@ -522,7 +522,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         last_video_timing = frame_time
                         delta_ms = min(0xFFFF, max(0, int((time.time() - frame_time) * 1000)))
                         packet.extensions.video_timing = (
-                            0x01,  # flags: triggered by timer
+                            # flags: triggered by timer
+                            0x01,
                             0, 0, delta_ms, delta_ms, 0, 0,
                         )
                     # send packet

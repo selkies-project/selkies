@@ -2,6 +2,15 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+"""Process entry point for the Selkies streaming server.
+
+Builds the centralized stream server, registers the WebRTC and WebSockets
+services, switches to the configured mode, and runs the asyncio loop until a
+signal or fatal error unwinds it. Signal handling routes SIGTERM/SIGHUP
+through main-task cancellation so a service-manager stop tears down the same
+way Ctrl-C does.
+"""
+
 import os
 import sys
 import signal
@@ -18,16 +27,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-async def wait_for_app_ready(ready_file, app_wait_ready=False):
-    """Wait for the streaming app's ready signal: returns immediately unless
-    app_wait_ready is set, else polls until a sidecar creates ready_file."""
+async def wait_for_app_ready(ready_file: str, app_wait_ready: bool = False) -> None:
+    """Wait for the streaming app's ready signal.
+
+    Returns immediately unless `app_wait_ready` is set, else polls until a
+    sidecar creates `ready_file`.
+    """
     if app_wait_ready:
         logger.info(f"Waiting for streaming app ready file: {ready_file}")
     while app_wait_ready and not os.path.exists(ready_file):
         await asyncio.sleep(0.2)
 
 
-def _install_shutdown_signal_handlers():
+def _install_shutdown_signal_handlers() -> None:
     """Make a service-manager stop (systemd, `docker stop`, `kill`) unwind the same
     way Ctrl-C does: cancelling the main task raises CancelledError through the
     server loop, so the streaming service is stopped, the unix socket is removed and
@@ -46,7 +58,7 @@ def _install_shutdown_signal_handlers():
         return
     shutting_down = False
 
-    def _request_shutdown(signal_name):
+    def _request_shutdown(signal_name: str) -> None:
         nonlocal shutting_down
         if shutting_down:
             logger.info("Ignoring %s: shutdown already in progress", signal_name)
@@ -65,10 +77,8 @@ def _install_shutdown_signal_handlers():
             logger.debug("Cannot install a %s handler on this platform", signal_name)
 
 
-async def run():
-    """
-    Main entry point for the Selkies streaming server.
-    """
+async def run() -> None:
+    """Build the stream server, register its services, and run until cancelled."""
     _install_shutdown_signal_handlers()
 
     # Publish the resolved gamepad-socket directory so the LD_PRELOAD interposer in
@@ -85,24 +95,19 @@ async def run():
 
     await wait_for_app_ready(settings.app_ready_file, settings.app_wait_ready[0])
 
-    # Create the centralised server with settings
     server = CentralizedStreamServer(settings)
 
-    # Register services
     server.register_service("webrtc", WebRTCService(server))
     server.register_service("websockets", DataStreamingServer(server))
 
-    # Switch to the configured mode
     logger.info(f"Initiating server with {settings.mode} mode")
     await server.switch_to_mode(settings.mode)
 
     await server.run()
 
 
-def main():
-    """
-    Entry point for command-line execution.
-    """
+def main() -> None:
+    """Entry point for command-line execution."""
     # uvloop makes the whole asyncio loop (timers, callbacks, socket I/O) markedly
     # faster, which directly lifts the pure-Python WebRTC SCTP data-channel
     # throughput and keeps large transfers from stalling input. Optional: fall

@@ -15,7 +15,8 @@ PRELOADED = "/usr/lib/x86_64-linux-gnu/selkies_joystick_interposer.so"
 fails = []
 
 
-def case(label, mode, env, expected):
+def case(label: str, mode: str, env: dict, expected: bool) -> None:
+    """Resolve the backend under `env` and record whether it matches."""
     saved_preload = os.environ.get("LD_PRELOAD", "")
     os.environ.pop("SELKIES_INTERPOSER", None)
     os.environ["LD_PRELOAD"] = env.get("LD_PRELOAD", "")
@@ -32,7 +33,7 @@ def case(label, mode, env, expected):
     print(f"{'PASS' if ok else 'FAIL'}  {label}  -> {got} (want {expected})")
 
 
-def run(has_uinput):
+def run(has_uinput: bool) -> None:
     """The device check is the one thing a test host cannot be asked to
     provide, so it is substituted; every other input is real."""
     real = ih.uinput_writable

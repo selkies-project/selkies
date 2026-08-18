@@ -30,7 +30,7 @@ SCRIPTS = sorted(
 passed = failed = 0
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     global passed, failed
     passed, failed = passed + int(ok), failed + int(not ok)
     print(f"{'PASS' if ok else 'FAIL'}  [example-shell] {label}  {detail}", flush=True)
@@ -50,9 +50,10 @@ for path in SCRIPTS:
     r = subprocess.run([bash, "-n", path], capture_output=True, text=True)
     check(f"parse {rel}", r.returncode == 0, r.stderr.strip()[:200])
 
-# A RUN's shell is what the build actually executes: Docker drops the comment
-# lines inside one and joins the continuations into a single command.
-def run_bodies(dockerfile):
+def run_bodies(dockerfile: str) -> list:
+    """The shell body of each RUN in `dockerfile`, as the build executes it:
+    Docker drops the comment lines inside one and joins the continuations
+    into a single command."""
     bodies, current = [], None
     for line in open(dockerfile).read().splitlines():
         if line.strip().startswith("#"):

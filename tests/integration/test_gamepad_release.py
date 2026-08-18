@@ -11,9 +11,18 @@ from playwright.sync_api import sync_playwright
 sys.path.insert(0, H.SRC)
 import selkies.input_handler as ih
 
-PAD = H.pad_init_js()
+PAD: str = H.pad_init_js()
 
-def decode(path):
+def decode(path: str) -> list[tuple[int, int, int]]:
+    """Decode a uinput-shim event stream into (type, code, value) tuples.
+
+    Args:
+        path: Path to the shim's binary event stream file.
+
+    Returns:
+        One `(ev_type, ev_code, ev_value)` tuple per 24-byte input_event
+        record, timestamps stripped.
+    """
     blob = open(path, "rb").read()
     return [struct.unpack("=qqHHi", blob[o:o + 24])[2:] for o in range(0, len(blob) - 23, 24)]
 
@@ -30,7 +39,8 @@ for mode in ("websockets", "webrtc"):
             page = ctx.new_page()
             page.goto(H.BASE_URL + "/", wait_until="load")
             (C.wait_wr_video if mode == "webrtc" else C.wait_ws_video)(page)
-            page.evaluate("window.__padPress(0, 1)")   # hold A
+            # Hold button A (index 0) without releasing it.
+            page.evaluate("window.__padPress(0, 1)")
             time.sleep(0.4)
             held = decode(STREAM)
             res.check(f"{mode}: button held", (ih.EV_KEY, ih.BTN_A, 1) in held)

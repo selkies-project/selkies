@@ -130,29 +130,34 @@ class HeaderExtensionsMap:
                 values.rtp_stream_id = x_value.decode("ascii")
             elif x_id == self.__ids.abs_send_time:
                 if len(x_value) < 3:
-                    continue  # malformed length; skip rather than raise struct.error
+                    # Malformed length: skip rather than raise struct.error.
+                    continue
                 values.abs_send_time = unpack("!L", b"\00" + x_value[:3])[0]
             elif x_id == self.__ids.transmission_offset:
                 if len(x_value) < 3:
-                    continue  # malformed length; skip rather than raise struct.error
+                    # Malformed length: skip rather than raise struct.error.
+                    continue
                 values.transmission_offset = unpack("!l", x_value[:3] + b"\00")[0] >> 8
             elif x_id == self.__ids.audio_level:
                 if len(x_value) < 1:
-                    continue  # malformed length; skip rather than raise struct.error
+                    # Malformed length: skip rather than raise struct.error.
+                    continue
                 vad_level = unpack("!B", x_value[:1])[0]
                 values.audio_level = (vad_level & 0x80 == 0x80, vad_level & 0x7F)
             elif x_id == self.__ids.transport_sequence_number:
                 values.transport_sequence_number = unpack("!H", x_value)[0]
             elif x_id == self.__ids.playout_delay:
                 if len(x_value) < 3:
-                    continue  # malformed length; skip rather than raise struct.error
+                    # Malformed length: skip rather than raise struct.error.
+                    continue
                 byte1, byte2, byte3 = struct.unpack('!BBB', x_value[:3])
                 min_value = (byte1 << 4 | byte2 >> 4)
                 max_value = ((byte2 & 0x0F) << 8 | byte3)
                 values.playout_delay = (min_value, max_value)
             elif x_id == self.__ids.video_timing:
                 if len(x_value) < 13:
-                    continue  # malformed length; skip rather than raise struct.error
+                    # Malformed length: skip rather than raise struct.error.
+                    continue
                 values.video_timing = unpack("!BHHHHHH", x_value[:13])
         return values
 
@@ -275,7 +280,8 @@ def unpack_remb_fci(data: bytes) -> tuple[int, list[int]]:
     if len(data) < 8 or data[0:4] != b"REMB":
         raise ValueError("Invalid REMB prefix")
     if len(data) < 8 + 4 * data[4]:
-        raise ValueError("Invalid REMB length")  # declared SSRC count exceeds buffer
+        # The declared SSRC count exceeds the buffer.
+        raise ValueError("Invalid REMB length")
 
     exponent = (data[5] & 0xFC) >> 2
     mantissa = ((data[5] & 0x03) << 16) | (data[6] << 8) | data[7]
@@ -898,8 +904,10 @@ def build_flexfec_03(
     payload_recovery = bytearray(longest)
     mask = 0
     for offset, media in enumerate(media_packets):
-        recovery[0] ^= media[0] & 0x3F  # P, X, CC (the version bits stay out)
-        recovery[1] ^= media[1]  # M, PT
+        # Byte 0 folds in P, X and CC (the version bits stay out); byte 1,
+        # M and PT.
+        recovery[0] ^= media[0] & 0x3F
+        recovery[1] ^= media[1]
         length_recovery ^= len(media) - 12
         ts_recovery ^= unpack("!L", media[4:8])[0]
         for i, b in enumerate(media[12:]):
@@ -907,18 +915,22 @@ def build_flexfec_03(
         mask |= 1 << (14 - offset)
 
     header = bytearray(12)
-    header[0] = 0x80  # V=2, P=0, X=0, CC=0
+    # V=2, P=0, X=0, CC=0.
+    header[0] = 0x80
     header[1] = payload_type & 0x7F
     header[2:4] = pack("!H", sequence_number)
     header[4:8] = pack("!L", timestamp)
     header[8:12] = pack("!L", ssrc)
 
     fec = bytearray()
-    fec += bytes([recovery[0] & 0x3F, recovery[1]])  # R=0, F=0
+    # Masking the top recovery bits sets R=0, F=0.
+    fec += bytes([recovery[0] & 0x3F, recovery[1]])
     fec += pack("!H", length_recovery)
     fec += pack("!L", ts_recovery)
-    fec += bytes([1, 0, 0, 0])  # SSRCCount=1 + reserved
+    # SSRCCount=1 plus three reserved bytes.
+    fec += bytes([1, 0, 0, 0])
     fec += pack("!L", protected_ssrc)
     fec += pack("!H", first_sequence_number)
-    fec += pack("!H", 0x8000 | mask)  # K=1: single mask block
+    # K=1: single mask block.
+    fec += pack("!H", 0x8000 | mask)
     return bytes(header) + bytes(fec) + bytes(payload_recovery)

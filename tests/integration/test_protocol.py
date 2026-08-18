@@ -13,7 +13,8 @@ import helpers as H
 import websockets
 
 
-def _settings_payload(**over):
+def _settings_payload(**over) -> dict:
+    """Build a primary-display SETTINGS payload with overrides applied on top."""
     base = {
         "displayId": "primary", "initialClientWidth": 1280, "initialClientHeight": 720,
         "is_manual_resolution_mode": False, "framerate": 60, "encoder": "h264enc",
@@ -28,11 +29,21 @@ async def _no_ack_task(*a, **k):
     return None
 
 
-def loglen():
+def loglen() -> int:
     return len(H.server_log())
 
 
-def wait_log_from(mark, substr, timeout=10):
+def wait_log_from(mark: int, substr: str, timeout: float = 10) -> bool:
+    """Poll the server log for a substring appearing at or after an offset.
+
+    Args:
+        mark: Byte offset into the log where the search starts.
+        substr: Substring to wait for.
+        timeout: Seconds to keep polling before giving up.
+
+    Returns:
+        True when the substring appeared, False on timeout.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         txt = H.server_log()
@@ -43,7 +54,8 @@ def wait_log_from(mark, substr, timeout=10):
     return False
 
 
-def run():
+def run() -> "H.Results":
+    """Drive the raw-WS opcode sequence and record each protocol check."""
     res = H.Results("protocol")
     H.server_start(mode="websockets", wayland=False)
 
@@ -107,7 +119,7 @@ def run():
             ok = wait_log_from(st, "Applied rate-control via '_rc'", 8) or \
                  wait_log_from(st, "Restarting its capture stream", 8)
             res.check("F5: '_rc,cbr' triggers structural restart", ok, "")
-            # and back
+            # Toggle back so the run ends in the transport's default CRF mode.
             st = loglen()
             await ws.send("_rc,crf")
             await asyncio.sleep(5)

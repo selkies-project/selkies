@@ -11,11 +11,14 @@ stays dependency-free so the WebSocket-only path can publish values without
 importing the WebRTC stack.
 """
 
+from typing import Optional
+
 # RED redundancy depth for RedOpusEncoder: None = the encoder's own default,
 # 0 = primary-only (plain Opus), N = carry N redundant blocks per packet.
-red_distance = None
+red_distance: Optional[int] = None
 
 
-def set_red_distance(distance):
+def set_red_distance(distance: int) -> None:
+    """Publish the RED redundancy depth, clamped to non-negative."""
     global red_distance
     red_distance = max(0, int(distance))

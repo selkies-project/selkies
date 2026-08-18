@@ -23,6 +23,7 @@ PASSWORD = "right"
 
 
 class _Settings:
+    """Minimal settings stub carrying only what the auth middleware reads."""
     enable_basic_auth = (True,)
     basic_auth_user = USER
     basic_auth_password = PASSWORD
@@ -31,7 +32,8 @@ class _Settings:
     subfolder = ""
 
 
-def _basic(user, password):
+def _basic(user: str, password: str) -> str:
+    """Build a Basic Authorization header value for the credentials."""
     return "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
 
 
@@ -45,7 +47,12 @@ CASES = [
 ]
 
 
-async def _run():
+async def _run() -> list[str]:
+    """Run every auth case against the real middleware on a stub server.
+
+    Returns:
+        Human-readable failure descriptions; empty when all cases pass.
+    """
     server = CentralizedStreamServer.__new__(CentralizedStreamServer)
     server.settings = _Settings()
 
@@ -77,7 +84,7 @@ async def _run():
     return failures
 
 
-def main():
+def main() -> int:
     failures = asyncio.run(_run())
     for failure in failures:
         print(f"FAIL  {failure}")

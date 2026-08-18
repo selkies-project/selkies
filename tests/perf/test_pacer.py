@@ -24,6 +24,8 @@ import time
 
 import aiohttp
 
+from typing import Optional
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 
@@ -43,27 +45,41 @@ os.makedirs(RUNNER_DIR, exist_ok=True)
 # ---------------------------------------------------------------- metrics -----
 
 class Recorder:
-    def __init__(self):
+    """Wire-level arrival metrics captured by the RTP receive tap.
+
+    Attributes:
+        audio_times: Monotonic arrival time per audio packet.
+        video_pkts: `(monotonic_time, rtp_timestamp)` per video packet.
+        ssrc_kind: SSRC to media-kind cache for tap classification.
+        twcc_arrivals: twcc_seq to `(recv_monotonic, wire_size)` for the
+            pending feedback window.
+        pings: `(recv_time, start_time)` per data-channel ping.
+        ow_video: One-way video latency samples in seconds (abs_send_time).
+        ow_audio: One-way audio latency samples in seconds (abs_send_time).
+    """
+
+    def __init__(self) -> None:
         self.reset()
-    def reset(self):
+    def reset(self) -> None:
         self.audio_times = []
-        self.video_pkts = []           # (time, rtp_ts)
+        self.video_pkts = []
         self.audio_bytes = 0
         self.video_bytes = 0
         self.n_audio = 0
         self.n_video = 0
         self.ssrc_kind = {}
-        self.twcc_arrivals = {}        # twcc_seq -> (recv_monotonic, wire_size)
+        self.twcc_arrivals = {}
         self.twcc_fb_count = 0
         self.twcc_emitted = 0
-        self.pings = []                # (recv_time, start_time) data-channel pings
-        self.ow_video = []             # one-way video latency s (abs_send_time)
-        self.ow_audio = []             # one-way audio latency s (abs_send_time)
+        self.pings = []
+        self.ow_video = []
+        self.ow_audio = []
 
 REC = Recorder()
 _orig_handle_rtp = rrx_mod.RTCRtpReceiver._handle_rtp_packet
 
 async def _wrapped_handle_rtp(self, packet, arrival_time_ms):
+    """Tap every received RTP packet into REC before normal handling."""
     kind = REC.ssrc_kind.get(packet.ssrc)
     if kind is None:
         kind = getattr(self, "_RTCRtpReceiver__kind", None)
@@ -83,7 +99,8 @@ async def _wrapped_handle_rtp(self, packet, arrival_time_ms):
     ast = getattr(packet.extensions, "abs_send_time", None)
     if ast:
         diff = (((current_ntp_time() >> 14) & 0xFFFFFF) - ast) & 0xFFFFFF
-        if diff < 0x800000:  # < 32 s; bigger diffs are wrap/artifacts
+        # Under 32 s is a plausible latency; bigger diffs are wrap artifacts.
+        if diff < 0x800000:
             ow = diff / 262144.0
             if kind == "audio":
                 REC.ow_audio.append(ow)
@@ -99,16 +116,25 @@ rrx_mod.RTCRtpReceiver._handle_rtp_packet = _wrapped_handle_rtp
 
 # ---- receiver-side TWCC feedback emission (what real browsers do) ------------
 
-def _build_twcc_fci(arrivals, fb_count):
-    """arrivals: {seq: (t_mono, size)} for the window; encode RLE chunks +
-    250us recv-deltas matching RFC transport-cc (smallest truthful encoding)."""
+def _build_twcc_fci(arrivals: dict, fb_count: int) -> Optional[bytes]:
+    """Encode a transport-cc FCI block from an arrival window.
+
+    Args:
+        arrivals: `{seq: (t_mono, size)}` for the feedback window.
+        fb_count: Running feedback packet counter (mod 256 on the wire).
+
+    Returns:
+        The FCI bytes as RLE chunks plus 250us receive deltas matching RFC
+        transport-cc (smallest truthful encoding), or None when the window is
+        empty or too wide to report.
+    """
     seqs = sorted(arrivals)
     if not seqs:
         return None
     base = seqs[0]
     statuses = []
     deltas = b""
-    # fill gaps as "not received" too so base..end contiguous
+    # Fill gaps as "not received" so base..end stays contiguous.
     end = seqs[-1]
     ref_t = arrivals[base][0]
     n = ((end - base) & 0xFFFF) + 1
@@ -120,7 +146,8 @@ def _build_twcc_fci(arrivals, fb_count):
             statuses.append(0)
             continue
         t = arrivals[s][0]
-        dt = t - prev_t                      # RFC: per-packet incremental delta
+        # The RFC encodes per-packet incremental deltas, not offsets from ref.
+        dt = t - prev_t
         prev_t = t
         if 0 <= dt < 0.06375:
             statuses.append(1)
@@ -128,7 +155,7 @@ def _build_twcc_fci(arrivals, fb_count):
         else:
             statuses.append(2)
             deltas += _st.pack("!h", max(-32768, min(32767, int(dt * 1_000_000 / 250))))
-    # cap window at 200 statuses to keep messages small
+    # Cap the window at 200 statuses to keep feedback messages small.
     if len(statuses) > 200:
         return None
     chunks = b""
@@ -156,22 +183,25 @@ TWCC_DEBUG = os.environ.get("TWCC_DEBUG", "0") == "1"
 
 # ---------------------------------------------------------------- shaping -----
 
-
-# ---------------------------------------------------------------- shaping -----
-
 class Shaper:
     """One-direction token-bucket+FIFO virtual clock, exact departure times,
     with a switch-fidelity tail-drop cap (no unbounded bufferbloat)."""
     CAP_BYTES = 250_000
 
-    def __init__(self, rate_bps=None, delay_s=0.0):
+    def __init__(self, rate_bps: Optional[float] = None, delay_s: float = 0.0) -> None:
         self.rate = rate_bps
         self.delay_s = delay_s
         self.free_at = time.monotonic()
         self.queued_bytes = 0
         self.dropped = 0
         self.shaped = 0
-    def push(self, data: bytes, emit):
+    def push(self, data: bytes, emit) -> None:
+        """Schedule `emit` at the datagram's shaped departure time.
+
+        Args:
+            data: The datagram, sized against the token bucket.
+            emit: Zero-argument callable that actually sends it.
+        """
         self.shaped += 1
         loop = asyncio.get_running_loop()
         if self.rate is None:
@@ -201,11 +231,11 @@ class UDPRelay:
     arriving there come from the near peer; after the up-shaper they go out on
     `far` toward the real destination. Replies arriving on `far` pass the
     down-shaper and are delivered to the recorded near address."""
-    def __init__(self, far_transport, shaper_up, shaper_down, name):
+    def __init__(self, far_transport, shaper_up: Shaper, shaper_down: Shaper, name: str) -> None:
         self.far_tr = far_transport
         self.up, self.down = shaper_up, shaper_down
         self.name = name
-        self.near_addr: tuple | None = None
+        self.near_addr: Optional[tuple] = None
         self.vis_tr = None
         self.n_up = self.n_down = 0
 
@@ -221,7 +251,8 @@ class UDPRelay:
             return
         self.down.push(data, lambda d=data, a=addr: self.vis_tr.sendto(d, a))
 
-async def make_relay(dest_addr, up: Shaper, down: Shaper, name):
+async def make_relay(dest_addr: tuple, up: Shaper, down: Shaper, name: str) -> tuple:
+    """Build a UDPRelay toward `dest_addr` and return (relay, advertised_addr)."""
     loop = asyncio.get_running_loop()
 
     class _Far(asyncio.DatagramProtocol):
@@ -255,7 +286,9 @@ async def rewrite_candidates(sdp_text: str, up: Shaper, down: Shaper, tag: str) 
             continue
         found, comp, proto, prio, host, port, typ, rest = m.groups()
         if typ != "host" or proto.upper() != "UDP":
-            continue  # drop srflx/relay entirely (we only trust relayed host)
+            # Drop srflx/relay candidates entirely: only the rewritten host
+            # candidates are allowed to carry media, or traffic escapes the shaper.
+            continue
         relay, addr = await make_relay((host, int(port)), up, down, tag)
         (rh, rp) = addr
         out_lines.append(
@@ -265,7 +298,20 @@ async def rewrite_candidates(sdp_text: str, up: Shaper, down: Shaper, tag: str) 
 
 # ---------------------------------------------------------------- client ------
 
-async def run_client(ws_url, measure_s, warmup_s, client_type="controller", client_slot=-1):
+async def run_client(ws_url: str, measure_s: float, warmup_s: float,
+                     client_type: str = "controller", client_slot: int = -1) -> dict:
+    """Run one headless WebRTC client session and measure a settled window.
+
+    Args:
+        ws_url: Signaling websocket URL of the server under test.
+        measure_s: Length of the measurement window after warmup.
+        warmup_s: Maximum time to wait for media before measuring.
+        client_type: Role announced in the HELLO message.
+        client_slot: Slot announced in the HELLO message.
+
+    Returns:
+        The measure_window() summary for the measurement window.
+    """
     recorder = REC
     recorder.reset()
 
@@ -374,7 +420,7 @@ async def run_client(ws_url, measure_s, warmup_s, client_type="controller", clie
     tw_task = asyncio.create_task(twcc_loop())
     window = {}
     try:
-        # warmup: wait for media, then soak
+        # Warmup: wait for media to start flowing, then let it settle.
         t0 = time.monotonic()
         while time.monotonic() - t0 < warmup_s:
             await asyncio.sleep(0.5)
@@ -402,7 +448,7 @@ async def run_client(ws_url, measure_s, warmup_s, client_type="controller", clie
             pass
         try:
             if state["server_puid"]:
-                # plain-text process exit notification; peer cleanup happens on ws close
+                # No explicit goodbye message: peer cleanup happens on ws close.
                 pass
         finally:
             try:
@@ -418,7 +464,8 @@ async def run_client(ws_url, measure_s, warmup_s, client_type="controller", clie
 
 # ------------------------------------------------------------- summarizing ----
 
-def measure_window(rec=None):
+def measure_window(rec: Optional[Recorder] = None) -> dict:
+    """Summarize a Recorder window into the metrics dict a cell reports."""
     rec = rec or REC
     gaps = [b - a for a, b in zip(rec.audio_times, rec.audio_times[1:])]
     gaps.sort()
@@ -432,11 +479,13 @@ def measure_window(rec=None):
             d[0] = min(d[0], t); d[1] = max(d[1], t); d[2] += 1
     spans = sorted(v[1] - v[0] for v in frames.values())
 
-    def pct(v, p):
+    def pct(v: list, p: float) -> Optional[float]:
+        """Percentile of an already-sorted list, reported in milliseconds."""
         if not v: return None
         return round(1000 * v[min(len(v) - 1, int(p / 100 * len(v)))], 2)
 
-    def pct_s(v, p):               # v already sorted? re-sort cheaply; seconds
+    def pct_s(v: list, p: float) -> Optional[float]:
+        """Percentile of an unsorted seconds list (sorts a copy), in milliseconds."""
         if not v: return None
         s = sorted(v)
         return round(1000 * s[min(len(s) - 1, int(p / 100 * len(s)))], 2)
@@ -467,13 +516,15 @@ def measure_window(rec=None):
 
 # ------------------------------------------------------------ server-side -----
 
-def server_log_delta(path, before_bytes):
+def server_log_delta(path: str, before_bytes: int) -> str:
+    """The server log's contents past the `before_bytes` offset."""
     size = os.path.getsize(path)
     with open(path, "rb") as f:
         f.seek(min(before_bytes, size))
         return f.read().decode(errors="replace")
 
-def server_cpu(pid):
+def server_cpu(pid: int) -> Optional[float]:
+    """Instantaneous CPU percent of the server process, or None if gone."""
     import psutil
     try:
         p = psutil.Process(pid)
@@ -486,12 +537,24 @@ def server_cpu(pid):
 LOAD_GEN = os.environ.get("PACER_E2E_LOAD", "1") != "0"
 CURRENT_SHAPER = {"up": None, "down": None}
 
-async def run_cell(pacer_on: bool, regime: str):
-    up = Shaper()  # pass-through
+async def run_cell(pacer_on: bool, regime: str) -> dict:
+    """Run one benchmark cell: a server boot plus one measured client session.
+
+    Args:
+        pacer_on: Whether the server runs with SELKIES_WEBRTC_PACER enabled.
+        regime: Link shape: ``flat`` (pass-through), ``shaped`` (constant
+            constrained), or ``osc`` (rate oscillates between two levels).
+
+    Returns:
+        The cell's metrics row, including server CPU and log-derived counts.
+    """
+    # Pass-through by default; the regimes below replace both legs.
+    up = Shaper()
     down = Shaper()
     if regime == "shaped":
-        up = Shaper(rate_bps=5.5e6, delay_s=0.015)   # client -> server (input etc)
-        down = Shaper(rate_bps=5.5e6, delay_s=0.015) # server -> client (media)
+        # Client -> server carries input; server -> client carries media.
+        up = Shaper(rate_bps=5.5e6, delay_s=0.015)
+        down = Shaper(rate_bps=5.5e6, delay_s=0.015)
     elif regime == "osc":
         up = Shaper(rate_bps=8e6, delay_s=0.015)
         down = Shaper(rate_bps=8e6, delay_s=0.015)
@@ -516,7 +579,7 @@ async def run_cell(pacer_on: bool, regime: str):
         "SELKIES_VIDEO_BITRATE": "8000",
         "SELKIES_DEBUG": "true",
     }
-    # Forward pacer tuning knobs from our own env to the server under test
+    # Forward pacer tuning knobs from our own env to the server under test.
     for k in os.environ:
         if k.startswith("SELKIES_WEBRTC_PACER_") or k in ("SELKIES_CONGESTION_CONTROL", "SELKIES_ENCODER"):
             env[k] = os.environ[k]
@@ -524,7 +587,8 @@ async def run_cell(pacer_on: bool, regime: str):
     proc = H.server_start(mode="webrtc", extra_env=env, log=log)
     from psutil import Process
     pr = Process(proc.pid)
-    pr.cpu_percent()                                  # prime the delta counter
+    # The first cpu_percent() call primes psutil's delta counter.
+    pr.cpu_percent()
     window = {}
     load_proc = None
     try:
@@ -543,7 +607,8 @@ async def run_cell(pacer_on: bool, regime: str):
             load_proc.terminate()
             subprocess.run(["pkill", "-9", "-f", "pacer-load"], capture_output=True)
         cell_log = server_log_delta(log, log_before)
-        cpu = pr.cpu_percent()                        # avg over the cell
+        # Second cpu_percent() reads the average since the priming call.
+        cpu = pr.cpu_percent()
         H.server_stop()
     return {
         "pacer": pacer_on, "regime": regime,
@@ -554,7 +619,8 @@ async def run_cell(pacer_on: bool, regime: str):
                              + cell_log.count("keyframe requested"),
     }
 
-async def main():
+async def main() -> bool:
+    """Run every pacer/regime cell and require media in each."""
     cells = [
         (False, "osc"), (True, "osc"),
         (False, "osc2"), (True, "osc2"),

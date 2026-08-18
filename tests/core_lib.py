@@ -4,27 +4,46 @@ import json
 import os
 import sys
 import time
+from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
-BROWSER_ARGS = [
+BROWSER_ARGS: list = [
     "--no-sandbox", "--use-gl=swiftshader", "--mute-audio",
     "--autoplay-policy=no-user-gesture-required",
 ]
 # Playwright's bundled Chromium unless a system browser is named, which is how a
 # release Chrome build gets covered (its media stack differs from Chromium's)
-CHROME_PATH = os.environ.get("E2E_CHROME") or None
+CHROME_PATH: Optional[str] = os.environ.get("E2E_CHROME") or None
 
 
-def chromium_launch(pw):
+def chromium_launch(pw: Any) -> Any:
+    """Launch headless Chromium (or the system Chrome named by E2E_CHROME)."""
     kwargs = {"headless": True, "args": BROWSER_ARGS}
     if CHROME_PATH:
         kwargs["executable_path"] = CHROME_PATH
     return pw.chromium.launch(**kwargs)
 
 
-def launch_chrome(pw, url_hash="", mode=None):
+def launch_chrome(pw: Any, url_hash: str = "", mode: Optional[str] = None) -> tuple:
+    """Launch an instrumented Chromium page on the test server.
+
+    The init script counts WebSocket binary frames because headless rAF
+    throttling makes the client's own fps counter read 0 even while the stream
+    flows, and records clipboard/display/role postMessages for the checks.
+
+    Args:
+        pw: The sync_playwright handle.
+        url_hash: Fragment appended to the base URL (e.g. `#display2`).
+        mode: Authoritative transport at load time; skips the
+            localStorage-default mode-flip probe/reload (the hook dashboards
+            use after /api/status).
+
+    Returns:
+        `(browser, page, console_errors, not_found)`; the two lists keep
+        filling as the page runs.
+    """
     browser = chromium_launch(pw)
     ctx = browser.new_context(
         permissions=[],
@@ -36,8 +55,6 @@ def launch_chrome(pw, url_hash="", mode=None):
     except Exception:
         pass
     if mode:
-        # Authoritative transport at load time: skips the localStorage-default
-        # mode-flip probe/reload (the hook dashboards use after /api/status).
         ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
     page = ctx.new_page()
     console_errors = []
@@ -79,7 +96,7 @@ def launch_chrome(pw, url_hash="", mode=None):
     return browser, page, console_errors, not_found
 
 
-def new_page(context, mode=None, url_hash=""):
+def new_page(context: Any, mode: Optional[str] = None, url_hash: str = "") -> Any:
     """A second/third window with the same init instrumentation (display2,
     shared/viewer roles)."""
     if mode:
@@ -89,9 +106,16 @@ def new_page(context, mode=None, url_hash=""):
     return pg
 
 
-def benign_console(console_errors, not_found):
-    # The 409 handshake error is the client's own mode-flip probe converging to
-    # the server's authoritative transport when localStorage runs stale.
+def benign_console(console_errors: list, not_found: list) -> tuple:
+    """Split observed console errors and 404s into real ones and known noise.
+
+    The 409 handshake error is the client's own mode-flip probe converging to
+    the server's authoritative transport when localStorage runs stale;
+    manifest/favicon 404s are the browser's own probing.
+
+    Returns:
+        `(real_errors, bad404)` — anything listed here fails the check.
+    """
     benign_pats = ("Failed to load resource", "Unexpected server response:")
     real_errors = [e for e in console_errors if not any(bp in e for bp in benign_pats)]
     benign = [u for u in not_found if u.endswith("/manifest.json") or "favicon" in u]
@@ -99,11 +123,17 @@ def benign_console(console_errors, not_found):
     return real_errors, bad404
 
 
-def wait_ws_video(page, timeout=15):
-    """A stream-sized canvas alone is not proof of video: the client sizes it
+def wait_ws_video(page: Any, timeout: float = 15) -> Optional[dict]:
+    """Wait for WebSocket video: a stream-sized canvas plus a received chunk.
+
+    A stream-sized canvas alone is not proof of video: the client sizes it
     from layout messages before any frame arrives, and a capture that failed to
-    start never sends one. Require a received video chunk as well, mirroring the
-    decoded-frame requirement wait_wr_video gets from videoWidth."""
+    start never sends one. Require a received video chunk as well, mirroring
+    the decoded-frame requirement wait_wr_video gets from videoWidth.
+
+    Returns:
+        The canvas dimensions as a dict, or None on timeout.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         info = page.evaluate("""(() => {
@@ -118,7 +148,9 @@ def wait_ws_video(page, timeout=15):
     return None
 
 
-def wait_wr_video(page, timeout=45):
+def wait_wr_video(page: Any, timeout: float = 45) -> Optional[dict]:
+    """Wait for a decoding WebRTC `<video>`; its dimensions and audio track
+    count as a dict, or None on timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         info = page.evaluate("""(() => {
@@ -135,7 +167,8 @@ def wait_wr_video(page, timeout=45):
     return None
 
 
-def page_fps(page, timeout=10):
+def page_fps(page: Any, timeout: float = 10) -> float:
+    """First non-zero client fps reading, or 0 after `timeout` seconds."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         fps = page.evaluate("window.fps")
@@ -145,13 +178,15 @@ def page_fps(page, timeout=10):
     return 0
 
 
-def server_clipboard_push_check(page, payload_text):
+def server_clipboard_push_check(page: Any, payload_text: str) -> bool:
+    """Whether the page received `payload_text` as a server clipboard push."""
     got = page.evaluate("window.__clipMsgs.map(m => m.text)")
     return payload_text in got
 
 
-def send_clipboard_from_client(page, text, engine="chromium"):
+def send_clipboard_from_client(page: Any, text: str, engine: str = "chromium") -> None:
     """Drive client->server clipboard truthfully per engine.
+
     Chromium reads the clipboard on window focus. Firefox/WebKit only forward
     through the 'paste' event — and Firefox *strips* clipboardData from
     synthetic ClipboardEvents, so there we write the clipboard for real and
@@ -166,12 +201,14 @@ def send_clipboard_from_client(page, text, engine="chromium"):
         page.bring_to_front()
         page.evaluate("window.dispatchEvent(new Event('focus'))")
     else:
+        # The honest path on WebKit; Firefox strips clipboardData, so there
+        # this dispatch is a no-op and the Ctrl+V chord below does the work.
         page.evaluate("""(text) => {
           const dt = new DataTransfer();
           dt.setData('text/plain', text);
           const ev = new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true});
           window.dispatchEvent(ev);
-        }""", text)  # honest path on WebKit; stripped to a no-op on Firefox
+        }""", text)
         if engine == "webkit":
             return
         # Firefox: the first Ctrl+V may be consumed by the paste-ordering hold
@@ -189,13 +226,15 @@ def send_clipboard_from_client(page, text, engine="chromium"):
     time.sleep(0.3)
 
 
-def settings_change(page, settings):
+def settings_change(page: Any, settings: dict) -> None:
+    """Post a settings update into the page as the dashboards do."""
     page.evaluate(
         "(s) => window.postMessage({type: 'settings', settings: s}, window.location.origin)",
         settings)
 
 
-def wait_log(substr, timeout=12, log=H.LOG):
+def wait_log(substr: str, timeout: float = 12, log: str = H.LOG) -> bool:
+    """Wait for `substr` to appear in the server log, biased to recent output."""
     deadline = time.time() + timeout
     last_len = len(H.server_log(log))
     while time.time() < deadline:
@@ -207,14 +246,17 @@ def wait_log(substr, timeout=12, log=H.LOG):
     return H.server_log(log).find(substr) >= 0
 
 
-def wait_log_absent(substr, timeout=6, log=H.LOG):
+def wait_log_absent(substr: str, timeout: float = 6, log: str = H.LOG) -> bool:
+    """True when `substr` still has not appeared after `timeout` seconds."""
     time.sleep(timeout)
     return substr not in H.server_log(log)
 
 
 # ---------------- X11-observable input checks ----------------
 
-def x11_keymap_pressed(keysym_char="x"):
+def x11_keymap_pressed(keysym_char: str = "x") -> Optional[bool]:
+    """Whether the X server currently reports the key for `keysym_char` as
+    held, straight from query_keymap; None if the keysym has no keycode."""
     from selkies.Xlib import XK
     code = None
     d = H.x_display()
@@ -233,7 +275,7 @@ def x11_keymap_pressed(keysym_char="x"):
         d.close()
 
 
-def x11_mouse_pos():
+def x11_mouse_pos() -> tuple:
     """Pointer position straight from the X server, so no xdotool is needed."""
     d = H.x_display()
     try:

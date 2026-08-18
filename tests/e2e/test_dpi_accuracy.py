@@ -19,13 +19,26 @@ STOPS = [96, 120, 144, 168, 192, 216, 240, 264, 288]
 DPRS = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
 
 
-def expected(dpr):
+def expected(dpr: float) -> int:
+    """Return the scaling stop nearest to a devicePixelRatio's implied DPI.
+
+    Args:
+        dpr: Browser devicePixelRatio.
+
+    Returns:
+        The closest entry in ``STOPS`` after quantizing the density to
+        quarter steps (96 DPI per 1.0x, 24 DPI per quarter).
+    """
     return min(STOPS, key=lambda stop: abs(stop - round(dpr * 4) * 24))
 
 
-def xft_dpi():
-    """Xft.dpi from the running resource database, or 96 when unset: X's own
-    default, which is what an application reads when nothing overrides it."""
+def xft_dpi() -> int:
+    """Read Xft.dpi from the running resource database.
+
+    Returns:
+        The Xft.dpi value, or 96 when unset: X's own default, which is what
+        an application reads when nothing overrides it.
+    """
     env = {**os.environ, "DISPLAY": H.TEST_DISPLAY}
     out = subprocess.run(["xrdb", "-query"], capture_output=True, text=True, env=env).stdout
     for line in out.splitlines():
@@ -34,7 +47,8 @@ def xft_dpi():
     return 96
 
 
-def run():
+def run() -> int:
+    """Drive each DPR through a fresh browser context and compare Xft.dpi."""
     res = H.Results("dpi-accuracy")
     H.server_start(mode="websockets", web_root=H.CLASSIC_DIST)
     subprocess.run(["xrdb", "-remove"], capture_output=True,

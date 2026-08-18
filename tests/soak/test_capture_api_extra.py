@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Second-pass pixelflux + pcmflux capability soak: surfaces NOT covered by
-cap_soak.py. Standalone (no selkies).
+test_capture_api.py. Standalone (no selkies).
 
 Phase A:  X11 Computer Use full action matrix (right/middle/double/triple click,
           drag, mouse down/up, key specs/combos, hold_key, type, scroll dirs +
@@ -36,12 +36,20 @@ from helpers import Results
 import pixelflux
 import pcmflux
 
+from typing import Optional
+
 TEST_DISPLAY = ":98"
 CU_PORT = 9600
 CU_BASE = f"http://127.0.0.1:{CU_PORT}"
 
 
-def curl(url, body=None, timeout=30):
+def curl(url: str, body=None, timeout: float = 30) -> tuple:
+    """GET (or POST when a body is given) a URL.
+
+    Returns:
+        Tuple of (status_code, response_bytes); HTTP errors are returned, not
+        raised, so error-status assertions can read the body.
+    """
     data = body.encode() if isinstance(body, str) else body
     req = urllib.request.Request(url, data=data,
                                  method="POST" if body is not None else "GET")
@@ -52,20 +60,23 @@ def curl(url, body=None, timeout=30):
         return e.code, e.read()
 
 
-def dget(d, *path):
+def dget(d: dict, *path):
+    """Nested dict lookup following the given key path."""
     for k in path:
         d = d[k]
     return d
 
 
-def png_size(b):
+def png_size(b: bytes) -> Optional[tuple]:
+    """(width, height) from a PNG header, or None for non-PNG bytes."""
     if b[:8] != b"\x89PNG\r\n\x1a\n":
         return None
     w, h = struct.unpack(">II", b[16:24])
     return w, h
 
 
-def make_settings(encoder="h264enc", w=1024, h=640, **kw):
+def make_settings(encoder: str = "h264enc", w: int = 1024, h: int = 640, **kw):
+    """Build an H.264 CaptureSettings baseline with overrides applied last."""
     cs = pixelflux.CaptureSettings()
     cs.capture_width = w
     cs.capture_height = h
@@ -87,12 +98,15 @@ def make_settings(encoder="h264enc", w=1024, h=640, **kw):
 
 
 class FrameCounter:
-    def __init__(self):
+    """Thread-safe frame-callback sink that counts stripes and IDR NALs."""
+
+    def __init__(self) -> None:
         self.n = 0
         self.idr_nals = 0
         self.lock = threading.Lock()
 
-    def __call__(self, frame):
+    def __call__(self, frame) -> None:
+        """Count one stripe, detecting IDR NALs in H.264 payloads."""
         try:
             b = bytes(frame)
         except Exception:
@@ -113,12 +127,14 @@ class FrameCounter:
                         break
                     i += 1
 
-    def snap(self):
+    def snap(self) -> dict:
+        """A consistent snapshot of the counters."""
         with self.lock:
             return dict(n=self.n, idr_nals=self.idr_nals)
 
 
-def x_root_size():
+def x_root_size() -> tuple[int, int]:
+    """(width, height) of the test X server's root window."""
     from selkies.Xlib import display as xdisp
     d = xdisp.Display(TEST_DISPLAY)
     s = d.screen()
@@ -127,7 +143,8 @@ def x_root_size():
     return w, h
 
 
-def ffprobe(path):
+def ffprobe(path: str) -> Optional[dict]:
+    """ffprobe stream/format info as a dict, or None when the probe fails."""
     env = dict(os.environ)
     r = subprocess.run(["ffprobe", "-v", "error",
                         "-show_streams", "-show_format", "-of", "json", path],
@@ -138,14 +155,24 @@ def ffprobe(path):
 
 
 def FF_RUN(fn):
-    """Run a probe that must not take the whole block down (transient X/rio blips)."""
+    """Pass through an already-computed probe result.
+
+    Intended to guard a probe that must not take the whole block down, but the
+    argument is evaluated before this call, so exceptions still propagate at
+    the call site; the try/except here can never fire.
+    """
     try:
         return fn
     except Exception:
         return None
 
 
-def cu_json(payload):
+def cu_json(payload: dict) -> tuple:
+    """POST an action to the computer-use endpoint.
+
+    Returns:
+        Tuple of (status_code, decoded_json_or_empty_dict).
+    """
     status, body = curl(f"{CU_BASE}/computer-use", json.dumps(payload))
     out = {}
     try:
@@ -155,7 +182,8 @@ def cu_json(payload):
     return status, out
 
 
-def main():
+def main() -> Results:
+    """Run phases A-E against a live X11 and Wayland capture environment."""
     res = Results("cap-soak2")
     os.environ["DISPLAY"] = TEST_DISPLAY
     subprocess.run(["xsetroot", "-solid", "#2244aa"],
@@ -167,7 +195,8 @@ def main():
     pixelflux.start_computer_use(f"127.0.0.1:{CU_PORT}")
     time.sleep(1.0)
 
-    def cu(name, payload, pred, detail=""):
+    def cu(name: str, payload: dict, pred, detail: str = "") -> None:
+        """Post one computer-use action and check its response with `pred`."""
         try:
             st, out = cu_json(payload)
             res.check(name, pred(st, out), f"{st} {out}" if not detail else f"{st} {detail}")
@@ -376,7 +405,8 @@ def main():
 
     try:
         j = make_settings(w=320, h=200)
-        j.output_mode = 0  # JPEG
+        # output_mode 0 selects JPEG, which the recorder must reject.
+        j.output_mode = 0
         j.video_fullframe = False
         try:
             pixelflux.start_recording(os.path.join(H.WORKDIR, "cap2-rec-jpg.mp4"), j)
@@ -433,7 +463,7 @@ def main():
         cs.paint_over_jpeg_quality = 70
         cap.set_cursor_callback(lambda mt, data, hx, hy: None)
         cap.start_capture(fc, cs)
-        # force damage so paint-over triggers repeatedly
+        # Force damage so paint-over triggers repeatedly.
         subprocess.run(["xsetroot", "-solid", "#55aa33"],
                        env={"DISPLAY": TEST_DISPLAY, "PATH": os.environ.get("PATH", "")},
                        capture_output=True)
@@ -710,7 +740,8 @@ def main():
     return res
 
 
-def selfpt(fd_ms):
+def selfpt(fd_ms: float) -> float:
+    """Poll deadline in seconds, scaled to the opus frame duration."""
     return max(1.5, fd_ms / 1000.0 * 12)
 
 

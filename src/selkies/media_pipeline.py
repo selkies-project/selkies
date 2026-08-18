@@ -19,13 +19,35 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
+"""WebRTC-side media pipeline over pixelflux (video) and pcmflux (audio).
+
+Owns one display's capture: pixelflux encodes H.264 on its own capture
+thread, pcmflux encodes Opus on its own audio thread, and both hand
+zero-copy buffers back into the asyncio loop via `call_soon_threadsafe` for
+the transport's `produce_data` to packetize as RTP. Because RTP senders are
+live across capture restarts, the pipeline keeps its own monotonic pts
+clocks (video: 90 kHz wall-clock anchor; audio: an epoch offset over
+pcmflux's re-zeroing sample clock) so pts never jumps backward.
+
+Tunables split two ways, mirroring the WebSockets path: rate/quality knobs
+(bitrate, CRF, framerate, streaming mode, paint-over) apply live through
+pixelflux's non-blocking update calls, while structural changes (encoder,
+CPU/GPU, full color, rate-control mode) restart the capture on the live
+module. Every setter stores its value first so changes made while capture is
+paused shape the next start.
+
+The pixelflux/pcmflux imports are guarded: plain WebSocket mode and module
+import must survive their absence, so capture starts raise a clear error
+instead of the import failing.
+"""
+
 import asyncio
 import logging
 import re
 import time
 from enum import Enum
 from abc import ABCMeta, abstractmethod
-from typing import Callable
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from .settings import settings as app_settings
 from .display_utils import apply_common_capture_settings, format_pixelflux_cursor
@@ -48,21 +70,25 @@ logger.setLevel(logging.INFO)
 
 
 class RateControlMode(str, Enum):
+    """Video rate-control mode: constant bitrate or constant quality (CRF)."""
     CBR = "cbr"
     CRF = "crf"
 
 
 class MediaPipelineError(Exception):
+    """Raised when a capture pipeline cannot start or is unavailable."""
     pass
 
 
 class MediaPipeline(metaclass=ABCMeta):
+    """Interface a transport drives to run and tune a media pipeline."""
+
     @abstractmethod
-    async def start_media_pipeline(self):
+    async def start_media_pipeline(self) -> None:
         pass
 
     @abstractmethod
-    async def stop_media_pipeline(self):
+    async def stop_media_pipeline(self) -> None:
         pass
 
     @abstractmethod
@@ -70,35 +96,44 @@ class MediaPipeline(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def set_pointer_visible(self, visible: bool):
+    async def set_pointer_visible(self, visible: bool) -> None:
         pass
 
     @abstractmethod
-    async def set_framerate(self, framerate: int):
+    async def set_framerate(self, framerate: int) -> None:
         pass
 
     @abstractmethod
-    async def set_video_bitrate(self, bitrate: int):
+    async def set_video_bitrate(self, bitrate: int) -> None:
         pass
 
     @abstractmethod
-    async def set_audio_bitrate(self, bitrate: int):
+    async def set_audio_bitrate(self, bitrate: int) -> None:
         pass
 
     @abstractmethod
-    async def dynamic_idr_frame(self):
+    async def dynamic_idr_frame(self) -> None:
         pass
 
     @abstractmethod
-    async def update_rate_control_mode(self, mode: RateControlMode):
+    async def update_rate_control_mode(self, mode: RateControlMode) -> None:
         pass
 
     @abstractmethod
-    async def set_crf(self, crf: int):
+    async def set_crf(self, crf: int) -> None:
         pass
 
 
 class MediaPipelinePixel(MediaPipeline):
+    """pixelflux/pcmflux implementation of MediaPipeline for one display.
+
+    Capture threads deliver encoded frames to `_screen_capture_callback` /
+    the audio callback, which hop onto the asyncio loop and hand zero-copy
+    memoryviews to `produce_data`. The transport wires `produce_data`,
+    `on_pipeline_started`, `on_cursor_data`, and `get_cursor_size_cap`
+    before starting the pipeline.
+    """
+
     def __init__(
         self,
         async_event_loop: asyncio.AbstractEventLoop,
@@ -110,7 +145,7 @@ class MediaPipelinePixel(MediaPipeline):
         height: int = 1080,
         audio_channels: int = 2,
         audio_enabled: bool = True,
-        audio_device_name="output.monitor",
+        audio_device_name: str = "output.monitor",
         crf: int = 23,
         rc_mode: RateControlMode = RateControlMode.CBR,
         video_fullcolor: bool = False,
@@ -120,15 +155,15 @@ class MediaPipelinePixel(MediaPipeline):
         video_paintover_crf: int = 18,
         video_paintover_burst_frames: int = 5,
         display_id: str = "primary",
-        capture_region=None,
-    ):
+        capture_region: Optional[Tuple[int, int]] = None,
+    ) -> None:
         self.async_event_loop = async_event_loop
         # Which display this pipeline feeds and, for a secondary display, the
         # region of the extended framebuffer it captures ((x, y) origin; the
         # dimensions ride self.width/self.height). None captures from (0, 0)
         # with auto size — the single-display behavior.
         self.display_id = display_id or "primary"
-        self.capture_region = capture_region
+        self.capture_region: Optional[Tuple[int, int]] = capture_region
         self.audio_channels = audio_channels
         self.encoder_rtc = encoder_rtc
         self.framerate = framerate
@@ -170,15 +205,17 @@ class MediaPipelinePixel(MediaPipeline):
         # <= 0 falls back to the capture-settings default.
         self.get_cursor_size_cap: Callable[[], int] = lambda: 0
 
-        self.capture_module = None
-        self.pcmflux_module = None
+        # pixelflux ScreenCapture / pcmflux AudioCapture instances; typed Any
+        # because both imports are optional.
+        self.capture_module: Any = None
+        self.pcmflux_module: Any = None
         self._is_screen_capturing = False
         self._is_pcmflux_capturing = False
         self._running = False
         self.async_lock = asyncio.Lock()
         # Video pts clock; pipeline-scoped (not capture-scoped) so capture
         # restarts and fps changes can never rewind pts on a live RTP sender.
-        self._video_pts_anchor = None
+        self._video_pts_anchor: Optional[float] = None
         self._last_video_pts = -1
         # Audio pts continuity: pcmflux's sample clock re-zeros on every capture
         # restart, which is a backward RTP jump on a live sender. Anchor each new
@@ -189,12 +226,13 @@ class MediaPipelinePixel(MediaPipeline):
         self._audio_pts_offset = 0
         self._audio_last_pts = -1
         self._audio_frame_samples = 480
-        self._audio_routing_task = None
+        self._audio_routing_task: Optional[asyncio.Task] = None
 
-    async def set_pointer_visible(self, visible: bool):
-        """To enable capturing the cursor from pixeflux.
+    async def set_pointer_visible(self, visible: bool) -> None:
+        """Toggle pixelflux cursor capture.
 
-        :visible: set True to enable
+        Args:
+            visible: True to capture (and deliver) the pointer cursor.
         """
         if self.capture_cursor == visible:
             return
@@ -212,10 +250,12 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.error(f"Error setting pointer visibility: {e}", exc_info=True)
 
-    async def update_rate_control_mode(self, mode: RateControlMode):
-        """Set rate control mode for video encoder.
+    async def update_rate_control_mode(self, mode: RateControlMode) -> None:
+        """Set rate control mode for the video encoder.
 
-        :mode: Rate control mode, either "cbr" or "crf"
+        Args:
+            mode: Either RateControlMode.CBR or RateControlMode.CRF. A mode
+                switch is structural, so it restarts the capture.
         """
         if mode not in [RateControlMode.CBR, RateControlMode.CRF]:
             logger.error(f"Invalid rate control mode: {mode}")
@@ -236,10 +276,11 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.info(f"Error updating rate control mode {e}", exc_info=True)
 
-    async def set_crf(self, crf: int):
-        """Set video encoder target CRF.
+    async def set_crf(self, crf: int) -> None:
+        """Set the video encoder's target CRF (applied live in CRF mode).
 
-        :crf: CRF value
+        Args:
+            crf: Constant-rate-factor value; lower is higher quality.
         """
         if self.video_crf == crf:
             return
@@ -263,7 +304,7 @@ class MediaPipelinePixel(MediaPipeline):
             self.video_crf = old_crf
             logger.info(f"Error updating CRF {e}", exc_info=True)
 
-    async def set_use_cpu(self, use_cpu: bool):
+    async def set_use_cpu(self, use_cpu: bool) -> None:
         """Switch h264enc between software x264 and hardware encoding.
 
         Unlike CRF/bitrate this is structural (a different encoder instance), so
@@ -278,7 +319,7 @@ class MediaPipelinePixel(MediaPipeline):
         logger.info(f"use_cpu -> {use_cpu}; restarting screen capture")
         await self.restart_screen_capture()
 
-    async def _apply_tunables_live(self, what: str):
+    async def _apply_tunables_live(self, what: str) -> None:
         """Push current capture settings to the running module with no restart."""
         if not self._is_screen_capturing or self.capture_module is None:
             return
@@ -288,7 +329,7 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.info(f"Error updating {what}: {e}", exc_info=True)
 
-    async def set_video_fullcolor(self, fullcolor: bool):
+    async def set_video_fullcolor(self, fullcolor: bool) -> None:
         """Toggle 4:4:4 color. Structural (pixel format), so restart capture (WS parity)."""
         if self.video_fullcolor == fullcolor:
             return
@@ -298,8 +339,8 @@ class MediaPipelinePixel(MediaPipeline):
         logger.info(f"video_fullcolor -> {fullcolor}; restarting screen capture")
         await self.restart_screen_capture()
 
-    async def set_encoder_rtc(self, encoder_rtc: str):
-        """Switch the WebRTC video encoder (h264enc <-> openh264enc). Structural (a
+    async def set_encoder_rtc(self, encoder_rtc: str) -> None:
+        """Switch the WebRTC video encoder (h264enc or openh264enc). Structural (a
         different encoder instance), so restart capture — same as use_cpu (WS parity)."""
         if self.encoder_rtc == encoder_rtc:
             return
@@ -309,35 +350,36 @@ class MediaPipelinePixel(MediaPipeline):
         logger.info(f"encoder_rtc -> {encoder_rtc}; restarting screen capture")
         await self.restart_screen_capture()
 
-    async def set_video_streaming_mode(self, enabled: bool):
+    async def set_video_streaming_mode(self, enabled: bool) -> None:
         """Toggle Turbo (stream every frame vs damage-gated). Live tunable."""
         if self.video_streaming_mode == enabled:
             return
         self.video_streaming_mode = enabled
         await self._apply_tunables_live(f"streaming mode -> {enabled}")
 
-    async def set_use_paint_over_quality(self, enabled: bool):
+    async def set_use_paint_over_quality(self, enabled: bool) -> None:
         if self.use_paint_over_quality == enabled:
             return
         self.use_paint_over_quality = enabled
         await self._apply_tunables_live(f"paint-over -> {enabled}")
 
-    async def set_video_paintover_crf(self, crf: int):
+    async def set_video_paintover_crf(self, crf: int) -> None:
         if self.video_paintover_crf == crf:
             return
         self.video_paintover_crf = crf
         await self._apply_tunables_live(f"paint-over CRF -> {crf}")
 
-    async def set_video_paintover_burst_frames(self, frames: int):
+    async def set_video_paintover_burst_frames(self, frames: int) -> None:
         if self.video_paintover_burst_frames == frames:
             return
         self.video_paintover_burst_frames = frames
         await self._apply_tunables_live(f"paint-over burst -> {frames}")
 
-    async def set_video_bitrate(self, bitrate: int):
-        """Set video encoder target bitrate.
+    async def set_video_bitrate(self, bitrate: int) -> None:
+        """Set the video encoder's target bitrate (applied live in CBR mode).
 
-        :bitrate: bitrate in kbps
+        Args:
+            bitrate: Target bitrate in kbps.
         """
         if bitrate <= 0 or self.video_bitrate == bitrate:
             return
@@ -364,10 +406,11 @@ class MediaPipelinePixel(MediaPipeline):
             self.video_bitrate = old_bitrate
             logger.info(f"Error updating video bitrate {e}", exc_info=True)
 
-    async def set_audio_bitrate(self, bitrate: int):
-        """Set audio encoder target bitrate.
+    async def set_audio_bitrate(self, bitrate: int) -> None:
+        """Set the Opus encoder's target bitrate.
 
-        :bitrate: bitrate in bps
+        Args:
+            bitrate: Target bitrate in bps.
         """
         if bitrate <= 0 or self.audio_bitrate == bitrate:
             return
@@ -393,10 +436,11 @@ class MediaPipelinePixel(MediaPipeline):
             await self._stop_audio_pipeline()
             await self._start_audio_pipeline()
 
-    async def set_framerate(self, framerate: int):
-        """Set pixelflux capture rate in fps .
+    async def set_framerate(self, framerate: int) -> None:
+        """Set the pixelflux capture rate (applied live).
 
-        :framerate: framerate in frames per second, for example, 15, 30, 60.
+        Args:
+            framerate: Frames per second, for example 15, 30, 60.
         """
         async with self.async_lock:
             if framerate <= 0 or self.framerate == framerate:
@@ -410,8 +454,8 @@ class MediaPipelinePixel(MediaPipeline):
             self.capture_module.update_framerate(float(self.framerate))
             logger.info(f"Updated framerate to: {self.framerate}")
 
-    async def dynamic_idr_frame(self):
-        """Requests an IDR frame from pixelflux"""
+    async def dynamic_idr_frame(self) -> None:
+        """Request an IDR frame from pixelflux."""
         if not self._is_screen_capturing or self.capture_module is None:
             return
         try:
@@ -421,8 +465,13 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.error(f"Error requesting IDR frame: {e}", exc_info=True)
 
-    def generate_capture_settings(self):
-        """Generates configuration for pixelflux screen capturing"""
+    def generate_capture_settings(self) -> Any:
+        """Build the pixelflux CaptureSettings snapshot for the current state.
+
+        Returns:
+            A populated `pixelflux.CaptureSettings` (annotated as Any because
+            the import is optional).
+        """
         cs = CaptureSettings()
         cs.capture_width = self.width
         cs.capture_height = self.height
@@ -463,7 +512,8 @@ class MediaPipelinePixel(MediaPipeline):
         )
         return cs
 
-    def _screen_capture_callback(self, frame):
+    def _screen_capture_callback(self, frame: Any) -> None:
+        """Deliver one encoded video frame; runs on the pixelflux capture thread."""
         try:
             hdr = 0 if self._omit_stripe_headers else 10
             if len(frame) > hdr:
@@ -496,10 +546,12 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.error(f"Error in capture callback: {e}", exc_info=False)
 
-    def _pixelflux_cursor_handler(self, msg_type, data_bytes, hot_x, hot_y):
-        """pixelflux cursor events (either backend) -> client cursor messages
-        (websockets parity). Runs on the capture-side thread; delivery hops to
-        the asyncio loop."""
+    def _pixelflux_cursor_handler(
+        self, msg_type: str, data_bytes: Optional[bytes], hot_x: int, hot_y: int
+    ) -> None:
+        """Translate pixelflux cursor events (either backend) into client cursor
+        messages (websockets parity). Runs on the capture-side thread; delivery
+        hops to the asyncio loop."""
         try:
             size = int(getattr(app_settings, "cursor_size", -1) or -1)
             if size <= 0:
@@ -511,7 +563,14 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.error(f"Error handling pixelflux cursor: {e}")
 
-    async def start_screen_capture(self):
+    async def start_screen_capture(self) -> None:
+        """Start pixelflux screen capture at the current settings snapshot.
+
+        Raises:
+            MediaPipelineError: When pixelflux is unavailable or the capture
+                fails to start, so the caller never reports a live stream
+                while nothing is captured.
+        """
         if self._is_screen_capturing:
             return
 
@@ -547,7 +606,7 @@ class MediaPipelinePixel(MediaPipeline):
             # stream to the transport while nothing is captured.
             raise MediaPipelineError(f"screen capture failed to start: {e}") from e
 
-    async def update_capture_region(self, x: int, y: int, w: int, h: int):
+    async def update_capture_region(self, x: int, y: int, w: int, h: int) -> None:
         """Re-target the live capture to a new region of the extended framebuffer
         (no restart); falls back to a restart when no live capture exists."""
         self.capture_region = (int(x), int(y))
@@ -565,7 +624,8 @@ class MediaPipelinePixel(MediaPipeline):
                 logger.warning(f"Live capture re-target failed ({e}); restarting capture.")
         await self.restart_screen_capture()
 
-    async def stop_screen_capture(self):
+    async def stop_screen_capture(self) -> None:
+        """Stop the pixelflux capture, dropping the module even on error."""
         if not self._is_screen_capturing or self.capture_module is None:
             return
         try:
@@ -581,8 +641,11 @@ class MediaPipelinePixel(MediaPipeline):
     async def pause_screen_capture(self) -> bool:
         """Consumer-aware pause: stop only the screen capture (audio and the
         pipeline's running state survive) once every consumer of this display
-        is hidden; resume_screen_capture restarts it. Returns whether a live
-        capture was actually stopped."""
+        is hidden; resume_screen_capture restarts it.
+
+        Returns:
+            Whether a live capture was actually stopped.
+        """
         async with self.async_lock:
             if not self._running or not self._is_screen_capturing:
                 return False
@@ -591,15 +654,19 @@ class MediaPipelinePixel(MediaPipeline):
 
     async def resume_screen_capture(self) -> bool:
         """Restart a capture stopped by pause_screen_capture, at the CURRENT
-        settings (a resize/scale received while paused applies here). Returns
-        whether a stopped capture was actually started."""
+        settings (a resize/scale received while paused applies here).
+
+        Returns:
+            Whether a stopped capture was actually started.
+        """
         async with self.async_lock:
             if not self._running or self._is_screen_capturing:
                 return False
             await self.start_screen_capture()
             return True
 
-    async def restart_screen_capture(self):
+    async def restart_screen_capture(self) -> None:
+        """Reapply the current settings snapshot to the live capture module."""
         async with self.async_lock:
             # Checked under the lock: a concurrent stop_media_pipeline may have
             # stopped capture while we waited, and a restart must not resurrect it.
@@ -620,7 +687,8 @@ class MediaPipelinePixel(MediaPipeline):
             except Exception as e:
                 logger.error(f"Error restarting screen capture: {e}")
 
-    async def _start_audio_pipeline(self):
+    async def _start_audio_pipeline(self) -> None:
+        """Start pcmflux Opus capture; best-effort (video survives its absence)."""
         if self._is_pcmflux_capturing:
             return
 
@@ -671,7 +739,8 @@ class MediaPipelinePixel(MediaPipeline):
                 f"bitrate={capture_settings.opus_bitrate}, channels={capture_settings.channels}"
             )
 
-            def audio_capture_callback(frame):
+            def audio_capture_callback(frame: Any) -> None:
+                """Deliver one Opus frame; runs on the pcmflux capture thread."""
                 try:
                     if len(frame) > 0:
                         # zero-copy view; consume_data wraps it in av.Packet(buf) (zero-copy)
@@ -722,11 +791,14 @@ class MediaPipelinePixel(MediaPipeline):
             await self._stop_audio_pipeline()
             return
 
-    async def _pactl(self, *args):
-        """Run pactl and return its stdout ('' on failure). The PA control plane is
-        driven via subprocess on this path: the in-process asyncio PA bindings can
-        run a native event callback against freed state under load (observed
-        SIGSEGV in the loop during peer churn), and these are rare one-shot ops."""
+    async def _pactl(self, *args: str) -> str:
+        """Run pactl and return its stdout (empty string on failure).
+
+        The PA control plane is driven via subprocess on this path: the
+        in-process asyncio PA bindings can run a native event callback against
+        freed state under load (observed SIGSEGV in the loop during peer
+        churn), and these are rare one-shot ops.
+        """
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -756,8 +828,8 @@ class MediaPipelinePixel(MediaPipeline):
             logger.warning(f"pactl {' '.join(args)} failed: {e}")
             return ""
 
-    async def _list_sources(self):
-        """{name: index} of current sources via `pactl list short sources`."""
+    async def _list_sources(self) -> Dict[str, str]:
+        """`{name: index}` of current sources via `pactl list short sources`."""
         sources = {}
         for line in (await self._pactl("list", "short", "sources")).splitlines():
             parts = line.split("\t")
@@ -765,13 +837,14 @@ class MediaPipelinePixel(MediaPipeline):
                 sources[parts[1]] = parts[0]
         return sources
 
-    async def _enforce_audio_routing(self):
+    async def _enforce_audio_routing(self) -> None:
+        """Move the pcmflux stream onto the configured source if PipeWire strayed.
+
+        PipeWire often ignores the requested audio device and connects
+        recording apps to the default source, particularly when switching
+        between streaming modes.
         """
-        PipeWire often ignores requested audio device and connects recording apps
-        to the default source. This could happen when switching between
-        streaming modes. So route the pcmflux stream to correct source.
-        """
-        # Give pcmflux a fraction of a second to initialize its PA stream
+        # Give pcmflux a fraction of a second to initialize its PA stream.
         await asyncio.sleep(0.5)
         try:
             sources = await self._list_sources()
@@ -808,11 +881,9 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.error(f"Error enforcing WebRTC audio routing: {e}")
 
-    async def _ensure_audio_device(self):
-        """
-        Verify the configured audio_device_name is a valid source.
-        If not, attempt to fallback to the default sink's monitor
-        """
+    async def _ensure_audio_device(self) -> None:
+        """Verify audio_device_name is a valid source, else fall back to the
+        default sink's monitor (or PipeWire's `auto_null.monitor`)."""
         try:
             default_sink_name = (await self._pactl("get-default-sink")).strip()
             default_monitor_name = None
@@ -849,7 +920,6 @@ class MediaPipelinePixel(MediaPipeline):
                     logger.info(
                         "Default sink monitor not available; falling back to 'auto_null.monitor'"
                     )
-                    # Pipewiere's default sink monitor
                     self.audio_device_name = "auto_null.monitor"
                 else:
                     logger.error(
@@ -859,10 +929,13 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.error(f"Error validating the audio device: {e}")
 
-    async def _stop_audio_pipeline(self):
-        # Routing enforcement belongs to the capture session that armed it: a stop
-        # inside its start-up delay must not pactl-move a stream that is gone, and
-        # a pending subprocess must not outlive the loop.
+    async def _stop_audio_pipeline(self) -> None:
+        """Cancel routing enforcement and stop the pcmflux capture.
+
+        Routing enforcement belongs to the capture session that armed it: a
+        stop inside its start-up delay must not pactl-move a stream that is
+        gone, and a pending subprocess must not outlive the loop.
+        """
         task = self._audio_routing_task
         self._audio_routing_task = None
         if task is not None:
@@ -886,7 +959,9 @@ class MediaPipelinePixel(MediaPipeline):
             logger.info("pcmflux audio pipeline stopped.")
         return
 
-    async def start_media_pipeline(self):
+    async def start_media_pipeline(self) -> None:
+        """Start video (and, when enabled, audio) capture and mark the pipeline
+        running; a start failure tears both back down and stays stopped."""
         async with self.async_lock:
             if self._running:
                 return
@@ -923,7 +998,8 @@ class MediaPipelinePixel(MediaPipeline):
                     logger.error("Error during start-failure cleanup", exc_info=True)
                 self._running = False
 
-    async def stop_media_pipeline(self):
+    async def stop_media_pipeline(self) -> None:
+        """Stop both captures and mark the pipeline stopped."""
         async with self.async_lock:
             if not self._running:
                 return
@@ -938,5 +1014,5 @@ class MediaPipelinePixel(MediaPipeline):
             except Exception as e:
                 logger.error(f"Error stopping media pipelines: {e}", exc_info=True)
 
-    def is_media_pipeline_running(self):
+    def is_media_pipeline_running(self) -> bool:
         return self._running

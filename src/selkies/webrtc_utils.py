@@ -2,6 +2,26 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+"""WebRTC support utilities: ICE configuration, metrics, and resource monitors.
+
+Three groups of helpers live here:
+
+- RTC ICE configuration: builders and parsers for RTCPeerConnection-style ICE
+  server JSON, the prioritized `get_rtc_configuration` resolver, and refresh
+  monitors (HMAC shared-secret, TURN REST, Cloudflare, and a config-file
+  watcher) that push updated credentials through an `on_rtc_config` callback.
+- Metrics: Prometheus gauges/histograms plus an optional per-connection CSV
+  dump of client-reported WebRTC statistics. CSV writes run on a dedicated
+  single-worker thread pool so they preserve row order, never block the event
+  loop, and can be drained deterministically at teardown.
+- System/GPU monitors: asyncio polling loops that off-load blocking psutil and
+  GPU queries to worker threads and report through async callbacks.
+
+All periodic loops share the same shutdown idiom: an `asyncio.Event` waited on
+with a timeout, so `stop()` interrupts the sleep immediately instead of waiting
+out the period.
+"""
+
 import json
 import time
 import psutil
@@ -14,7 +34,7 @@ import hashlib
 import hmac
 import base64
 from watchdog.observers import Observer
-from typing import Tuple, List, Dict, Any, Optional, Union
+from typing import Awaitable, Callable, Tuple, List, Dict, Any, Optional, Union
 from watchdog.events import FileClosedEvent, FileSystemEventHandler
 
 import os
@@ -55,12 +75,25 @@ DEFAULT_STUN_SERVERS = [
 
 
 def _format_ice_host(host: str) -> str:
+    """Brackets bare IPv6 literals so they are valid in `host:port` URLs."""
     if host and ":" in host and not (host.startswith("[") and host.endswith("]")):
         return f"[{host}]"
     return host
 
 
 def _extract_host_port(url: str, scheme: str, default_port: int) -> Tuple[Optional[str], int]:
+    """Parses the host and port out of an ICE URL such as `stun:host:port`.
+
+    Args:
+        url: The full ICE URL, beginning with `scheme` and a colon.
+        scheme: The URL scheme (`stun`, `turn`, or `turns`), used to strip
+            the prefix before parsing.
+        default_port: Port to use when the URL omits one or carries an
+            unparsable one.
+
+    Returns:
+        A `(host, port)` tuple; `host` is None when the URL has no host.
+    """
     parsed = urllib.parse.urlparse("//" + url[len(scheme) + 1:])
     host = parsed.hostname
     if not host:
@@ -73,6 +106,12 @@ def _extract_host_port(url: str, scheme: str, default_port: int) -> Tuple[Option
 
 
 def _append_stun_url(stun_list: List[str], seen_stun: set, host: Optional[str], port: Any) -> None:
+    """Appends a deduplicated `stun:host:port` URL to `stun_list`.
+
+    Deduplication is case-insensitive on host and keyed on the parsed port
+    (unparsable ports fall back to 3478), tracked via the caller-owned
+    `seen_stun` set so multiple sources can share one dedup scope.
+    """
     if not host:
         return
     try:
@@ -88,7 +127,12 @@ def _append_stun_url(stun_list: List[str], seen_stun: set, host: Optional[str], 
     stun_list.append(f"stun:{_format_ice_host(host)}:{port_num}")
 
 
-async def _dispatch_rtc_callback(callback, stun_servers: List[str], turn_servers: List[str], rtc_config: bytes) -> None:
+async def _dispatch_rtc_callback(callback: Callable[[List[str], List[str], bytes], Any], stun_servers: List[str], turn_servers: List[str], rtc_config: bytes) -> None:
+    """Invokes an `on_rtc_config` callback, async or sync.
+
+    Sync callbacks run in a worker thread so a slow consumer cannot stall the
+    event loop.
+    """
     if asyncio.iscoroutinefunction(callback):
         await callback(stun_servers, turn_servers, rtc_config)
         return
@@ -96,6 +140,7 @@ async def _dispatch_rtc_callback(callback, stun_servers: List[str], turn_servers
 
 
 def _log_asyncio_task_error(task: asyncio.Task) -> None:
+    """Surfaces exceptions from fire-and-forget callback tasks in the log."""
     try:
         task.result()
     except asyncio.CancelledError:
@@ -105,33 +150,60 @@ def _log_asyncio_task_error(task: asyncio.Task) -> None:
         logger_rtcice.warning(f"Error in on_rtc_config callback task: {e}")
 
 
-def _schedule_rtc_callback(loop: asyncio.AbstractEventLoop, callback, stun_servers: List[str], turn_servers: List[str], rtc_config: bytes) -> None:
+def _schedule_rtc_callback(loop: asyncio.AbstractEventLoop, callback: Callable[[List[str], List[str], bytes], Any], stun_servers: List[str], turn_servers: List[str], rtc_config: bytes) -> None:
+    """Schedules an `on_rtc_config` dispatch on the loop from any thread."""
     task = loop.create_task(_dispatch_rtc_callback(callback, stun_servers, turn_servers, rtc_config))
     task.add_done_callback(_log_asyncio_task_error)
 
 
-def generate_rtc_config(turn_host, turn_port, shared_secret, user, protocol='udp', turn_tls=False, stun_host=None, stun_port=None):
-    # Use shared secret to generate HMAC credential
+def generate_rtc_config(
+    turn_host: str,
+    turn_port: Union[int, str],
+    shared_secret: str,
+    user: Optional[str],
+    protocol: str = 'udp',
+    turn_tls: bool = False,
+    stun_host: Optional[str] = None,
+    stun_port: Optional[Union[int, str]] = None
+) -> str:
+    """Builds an RTC config JSON string with coturn-style HMAC TURN credentials.
 
+    Derives a short-term credential from the shared secret: the username is
+    `expiry:user` (expiry 24 hours out) and the password is the base64 HMAC-SHA1
+    of that username, matching coturn's `use-auth-secret` scheme. STUN servers
+    are the optional explicit host, the TURN host itself, and the built-in
+    defaults, deduplicated in that order.
+
+    Args:
+        turn_host: TURN server hostname or IP.
+        turn_port: TURN server port.
+        shared_secret: The secret shared with the TURN server for HMAC auth.
+        user: Base username for the credential; colons are replaced and an
+            empty/None value falls back to a generic default.
+        protocol: TURN transport, `udp` or `tcp`.
+        turn_tls: Emit a `turns:` URL instead of `turn:`.
+        stun_host: Optional additional STUN host to list first.
+        stun_port: Port for `stun_host`.
+
+    Returns:
+        Pretty-printed RTC config JSON.
+    """
     # A generic default keeps the credential username non-empty
-    # ('<expiry>:selkies' rather than a bare '<expiry>:') when none is supplied.
+    # ('<expiry>:selkies' rather than a bare '<expiry>:') when none is
+    # supplied; colons are stripped because they delimit the expiry field.
     user = (user or "").strip() or "selkies"
-    # Sanitize user for credential compatibility
     user = user.replace(":", "-")
 
-    # Credential expires in 24 hours
     expiry_hour = 24
 
     exp = int(time.time()) + expiry_hour * 3600
     username = "{}:{}".format(exp, user)
 
-    # Generate HMAC credential
     hashed = hmac.new(bytes(shared_secret, "utf-8"), bytes(username, "utf-8"), hashlib.sha1).digest()
     password = base64.b64encode(hashed).decode()
 
-    # Configure STUN servers
-    stun_list = []
-    seen_stun = set()
+    stun_list: List[str] = []
+    seen_stun: set = set()
     if stun_host is not None and stun_port is not None:
         _append_stun_url(stun_list, seen_stun, str(stun_host), stun_port)
     _append_stun_url(stun_list, seen_stun, str(turn_host), turn_port)
@@ -157,6 +229,13 @@ def generate_rtc_config(turn_host, turn_port, shared_secret, user, protocol='udp
     return json.dumps(rtc_config, indent=2)
 
 class HMACRTCMonitor:
+    """Periodically regenerates HMAC TURN credentials before they expire.
+
+    Rebuilds the config every `period` seconds on the running event loop and
+    delivers it through the `on_rtc_config` callback, which the consumer must
+    assign before `start()`.
+    """
+
     def __init__(
         self,
         turn_host: str,
@@ -182,16 +261,23 @@ class HMACRTCMonitor:
         self.enabled = enabled
         self.stop_event = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
-        self.on_rtc_config = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
+        self.on_rtc_config: Callable[[List[str], List[str], bytes], Any] = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
 
-    def start(self):
+    def start(self) -> None:
+        """Starts the periodic refresh task; no-op when disabled."""
         if not self.enabled:
             return
         self.stop_event.clear()
         self._task = asyncio.create_task(self._monitor_loop())
         logger_rtcice.info("HMAC RTC monitor started")
 
-    async def _monitor_loop(self):
+    async def _monitor_loop(self) -> None:
+        """Regenerates and dispatches credentials until stopped.
+
+        The HMAC generation and config parsing run in worker threads so the
+        loop stays responsive; per-iteration failures are logged and retried
+        on the next period rather than killing the monitor.
+        """
         try:
             while not self.stop_event.is_set():
                 try:
@@ -221,12 +307,21 @@ class HMACRTCMonitor:
         finally:
             logger_rtcice.info("HMAC RTC monitor stopped")
 
-    async def stop(self):
+    async def stop(self) -> None:
+        """Signals the loop to exit and waits for the task to finish."""
         self.stop_event.set()
         if self._task:
             await self._task
 
 class RESTRTCMonitor:
+    """Periodically re-fetches TURN credentials from a TURN REST API.
+
+    Fetches every `period` seconds and delivers the parsed config through the
+    `on_rtc_config` callback, which the consumer must assign before `start()`.
+    Request parameters (protocol, TLS, username) travel in configurable HTTP
+    headers so custom REST endpoints can be matched without code changes.
+    """
+
     def __init__(
         self,
         turn_rest_uri: str,
@@ -252,16 +347,22 @@ class RESTRTCMonitor:
         self.turn_tls = turn_tls
         self.turn_rest_tls_header = turn_rest_tls_header
         self.turn_api_key = turn_api_key if turn_api_key else None
-        self.on_rtc_config = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
+        self.on_rtc_config: Callable[[List[str], List[str], bytes], Any] = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
 
-    def start(self):
+    def start(self) -> None:
+        """Starts the periodic refresh task; no-op when disabled."""
         if not self.enabled:
             return
         self.stop_event.clear()
         self._task = asyncio.create_task(self._monitor_loop())
         logger_rtcice.info("TURN REST RTC monitor started")
 
-    async def _monitor_loop(self):
+    async def _monitor_loop(self) -> None:
+        """Fetches and dispatches REST configs until stopped.
+
+        Per-iteration failures are logged and retried on the next period
+        rather than killing the monitor.
+        """
         try:
             while not self.stop_event.is_set():
                 try:
@@ -290,13 +391,19 @@ class RESTRTCMonitor:
         finally:
             logger_rtcice.info("TURN REST RTC monitor stopped")
 
-    async def stop(self):
+    async def stop(self) -> None:
+        """Signals the loop to exit and waits for the task to finish."""
         self.stop_event.set()
         if self._task:
             await self._task
 
 class CloudflareRTCMonitor:
-    """Refreshes Cloudflare TURN credentials before their TTL (default 24h) expires."""
+    """Refreshes Cloudflare TURN credentials before their TTL (default 24h) expires.
+
+    Delivers each refreshed config through the `on_rtc_config` callback, which
+    the consumer must assign before `start()`.
+    """
+
     def __init__(
         self,
         turn_token_id: str,
@@ -313,16 +420,18 @@ class CloudflareRTCMonitor:
         self.enabled = enabled
         self.stop_event = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
-        self.on_rtc_config = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
+        self.on_rtc_config: Callable[[List[str], List[str], bytes], Any] = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
 
-    def start(self):
+    def start(self) -> None:
+        """Starts the periodic refresh task; no-op when disabled."""
         if not self.enabled:
             return
         self.stop_event.clear()
         self._task = asyncio.create_task(self._monitor_loop())
         logger_rtcice.info("Cloudflare TURN RTC monitor started")
 
-    async def _monitor_loop(self):
+    async def _monitor_loop(self) -> None:
+        """Refreshes and dispatches Cloudflare credentials until stopped."""
         try:
             while not self.stop_event.is_set():
                 # Wait first: the initial fetch already happened at startup.
@@ -346,44 +455,61 @@ class CloudflareRTCMonitor:
         finally:
             logger_rtcice.info("Cloudflare TURN RTC monitor stopped")
 
-    async def stop(self):
+    async def stop(self) -> None:
+        """Signals the loop to exit and waits for the task to finish."""
         self.stop_event.set()
         if self._task:
             await self._task
 
 class RTCConfigFileMonitor(FileSystemEventHandler):
+    """Watches an RTC config JSON file and dispatches it on every change.
+
+    Runs a watchdog observer thread on the file's directory; parsed configs
+    are marshalled back onto the event loop captured at construction time and
+    delivered through the `on_rtc_config` callback. Must therefore be
+    constructed on a running event loop.
+    """
+
     def __init__(self, rtc_file: str, enabled: bool = True):
         self.enabled = enabled
         self.rtc_file = os.path.abspath(rtc_file)
         self.watch_dir = os.path.dirname(self.rtc_file) or "."
         self._loop = asyncio.get_running_loop()
-        self.on_rtc_config = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
+        self.on_rtc_config: Callable[[List[str], List[str], bytes], Any] = lambda stun_servers, turn_servers, rtc_config: logger_rtcice.warning("unhandled on_rtc_config")
 
         self.observer = Observer()
         self.observer.schedule(self, self.watch_dir, recursive=False)
 
-    async def start(self):
+    async def start(self) -> None:
+        """Starts the watchdog observer thread; no-op when disabled."""
         if not self.enabled:
             return
 
         await asyncio.to_thread(self.observer.start)
         logger_rtcice.info(f"RTC config file monitor started for: {self.rtc_file}")
 
-    def _shutdown_observer(self):
+    def _shutdown_observer(self) -> None:
+        """Stops the observer and joins its thread; runs off the event loop."""
         if self.observer.is_alive():
             self.observer.stop()
-            # Wait for the watchdog thread to terminate.
             self.observer.join()
 
-    async def stop(self):
+    async def stop(self) -> None:
+        """Stops the watchdog observer; no-op when disabled."""
         if not self.enabled:
             return
 
         await asyncio.to_thread(self._shutdown_observer)
         logger_rtcice.info("RTC config file monitor stopped")
 
-    def _reload_config(self, src_path: str):
-        """Read, parse, and dispatch the updated RTC config. Runs on the watchdog thread."""
+    def _reload_config(self, src_path: str) -> None:
+        """Reads, parses, and dispatches the updated RTC config.
+
+        Runs on the watchdog thread; the callback dispatch is handed to the
+        event loop via `call_soon_threadsafe`. The file is re-checked for
+        trusted ownership/permissions on every reload because it can be
+        replaced between events.
+        """
         try:
             logger_rtcice.info(f"Detected RTC JSON file change: {src_path}")
             if not _is_trusted_config_file(self.rtc_file):
@@ -408,19 +534,19 @@ class RTCConfigFileMonitor(FileSystemEventHandler):
 
     # FileSystemEventHandler overrides: catch in-place writes (on_closed) and the
     # write-temp-then-rename pattern (surfaces as move/create, not close).
-    def on_closed(self, event):
+    def on_closed(self, event: Any) -> None:
         if not isinstance(event, FileClosedEvent):
             return
         if os.path.abspath(event.src_path) != self.rtc_file:
             return
         self._reload_config(event.src_path)
 
-    def on_moved(self, event):
+    def on_moved(self, event: Any) -> None:
         dest = getattr(event, "dest_path", None)
         if dest and os.path.abspath(dest) == self.rtc_file:
             self._reload_config(dest)
 
-    def on_created(self, event):
+    def on_created(self, event: Any) -> None:
         if os.path.abspath(event.src_path) == self.rtc_file:
             self._reload_config(event.src_path)
 
@@ -434,7 +560,15 @@ def make_turn_rtc_config_json_legacy(
     stun_host: Optional[str] = None,
     stun_port: Optional[int] = None
 ) -> str:
-    """COnverts given rtc details to json format for legacy components"""
+    """Builds an RTC config JSON string from long-term TURN credentials.
+
+    Unlike `generate_rtc_config`, the username/password pair is used verbatim
+    (no HMAC derivation), matching TURN servers configured with static
+    long-term credentials.
+
+    Returns:
+        Pretty-printed RTC config JSON.
+    """
     stun_list: List[str] = []
     seen_stun: set = set()
     if stun_host is not None and stun_port is not None:
@@ -461,6 +595,29 @@ def make_turn_rtc_config_json_legacy(
     return json.dumps(rtc_config, indent=2)
 
 def parse_rtc_config(data: Union[str, bytes]) -> Tuple[List[str], List[str], bytes]:
+    """Parses an RTC config JSON document into STUN/TURN URI lists.
+
+    Accepts the RTCPeerConnection `iceServers` shape as well as several
+    variants seen in the wild — a lowercase `iceservers` key, TURN REST
+    responses that use a top-level `uris` list with `username`/`password`,
+    per-server `uris`/`password` keys, and string-valued `urls` — and
+    normalizes them all to the spec shape. Entries and URLs of invalid type
+    are dropped with a warning rather than failing the whole config, since
+    the input may come from an external REST service or a user-edited file.
+
+    Args:
+        data: RTC config JSON as text or bytes.
+
+    Returns:
+        A tuple of `(stun_uris, turn_uris, config_bytes)`: deduplicated
+        `stun://host:port` URIs, deduplicated `turn(s)://` URIs with embedded
+        percent-encoded credentials when available, and the config as UTF-8
+        JSON bytes (re-serialized only when normalization changed it).
+
+    Raises:
+        TypeError: If the root or `iceServers` value has the wrong type.
+        KeyError: If no ice-server data can be located at all.
+    """
     rtc_config = json.loads(data)
     if not isinstance(rtc_config, dict):
         raise TypeError(f"Invalid RTC config root type: {type(rtc_config)}")
@@ -648,9 +805,29 @@ async def fetch_turn_rest(
     header_tls: str = 'x-turn-tls',
     turn_api_key: Optional[str] = None
 ) -> Tuple[List[str], List[str], bytes]:
-    """
-    Asynchronously fetches TURN config from a REST API
-    Returns a tuple containing STUN URIs, TURN URIs, and the raw/normalized RTC config JSON bytes.
+    """Fetches TURN configuration from a TURN REST API endpoint.
+
+    The username, transport protocol, and TLS flag are sent both as HTTP
+    headers (names configurable per deployment) and, for the username/API key,
+    as query parameters, to cover the header- and query-style REST dialects.
+
+    Args:
+        uri: The REST endpoint URL.
+        user: Username to request credentials for.
+        auth_header_username: Header name carrying the username.
+        protocol: TURN transport, `udp` or `tcp`.
+        header_protocol: Header name carrying the transport.
+        turn_tls: Request `turns:` URLs.
+        header_tls: Header name carrying the TLS flag.
+        turn_api_key: Optional API key, sent as both `key` and `api` query
+            parameters to satisfy either dialect.
+
+    Returns:
+        The `parse_rtc_config` tuple of STUN URIs, TURN URIs, and config bytes.
+
+    Raises:
+        Exception: On HTTP errors, empty responses, timeouts, or network
+            failures (original errors are chained).
     """
     auth_headers: Dict[str, str] = {}
     if auth_header_username:
@@ -685,8 +862,20 @@ async def fetch_turn_rest(
             raise Exception(f"Network error while fetching REST API config: {e}") from e
 
 async def fetch_cloudflare_turn(turn_token_id: str, api_token: str, ttl: int = 86400) -> Dict[str, Any]:
-    """
-    Asynchronously obtains TURN credentials from the Cloudflare Calls API using aiohttp.
+    """Obtains TURN credentials from the Cloudflare Calls API.
+
+    Args:
+        turn_token_id: Cloudflare TURN key ID.
+        api_token: Cloudflare API bearer token.
+        ttl: Requested credential lifetime in seconds.
+
+    Returns:
+        The decoded JSON response, whose `iceServers` member holds the
+        credentialed server entry.
+
+    Raises:
+        Exception: On HTTP errors, timeouts, or network failures (original
+            errors are chained).
     """
     auth_headers = {
         "authorization": f"Bearer {api_token}",
@@ -710,7 +899,13 @@ async def fetch_cloudflare_turn(turn_token_id: str, api_token: str, ttl: int = 8
             raise Exception(f"Network error while fetching Cloudflare credentials: {e}") from e
 
 async def try_cloudflare(args: Any) -> Optional[Tuple[List[str], List[str], bytes]]:
-    """Attempts to configure RTC using Cloudflare TURN."""
+    """Attempts to configure RTC using Cloudflare TURN.
+
+    Returns:
+        The parsed config tuple, or None when Cloudflare TURN is disabled,
+        misconfigured, or the fetch fails (so the caller can fall through to
+        the next configuration method).
+    """
     if not args.enable_cloudflare_turn:
         return None
 
@@ -729,8 +924,12 @@ async def try_cloudflare(args: Any) -> Optional[Tuple[List[str], List[str], byte
         return None
 
 def _is_trusted_config_file(path: str) -> bool:
-    """True if safe to trust as an RTC config source (overrides all STUN/TURN; default
-    lives in world-writable /tmp): must be owned by root/current user, not group/other-writable.
+    """Returns True if the file is safe to trust as an RTC config source.
+
+    The config file overrides all other STUN/TURN settings and its default
+    location is world-writable /tmp, so it must not be a symlink, must be
+    owned by root or the current user, and must not be group- or
+    world-writable.
     """
     try:
         st = os.lstat(path)
@@ -754,7 +953,12 @@ def _is_trusted_config_file(path: str) -> bool:
 
 
 async def try_json_file(args: Any) -> Optional[Tuple[List[str], List[str], bytes]]:
-    """Attempts to configure RTC from a local JSON file."""
+    """Attempts to configure RTC from a local JSON file.
+
+    Returns:
+        The parsed config tuple, or None when the file is absent, untrusted
+        (see `_is_trusted_config_file`), or unparsable.
+    """
     if not os.path.exists(args.rtc_config_json):
         return None
 
@@ -774,7 +978,12 @@ async def try_json_file(args: Any) -> Optional[Tuple[List[str], List[str], bytes
         return None
 
 async def try_rest_api(args: Any, username: str, protocol: str, use_tls: bool) -> Optional[Tuple[List[str], List[str], bytes]]:
-    """Attempts to configure RTC from a custom TURN REST API."""
+    """Attempts to configure RTC from a custom TURN REST API.
+
+    Returns:
+        The parsed config tuple, or None when no REST URI is configured or
+        the fetch fails.
+    """
     if not args.turn_rest_uri:
         return None
 
@@ -791,7 +1000,12 @@ async def try_rest_api(args: Any, username: str, protocol: str, use_tls: bool) -
         return None
 
 def try_legacy_turn(args: Any, protocol: str, use_tls: bool) -> Optional[Tuple[List[str], List[str], bytes]]:
-    """Attempts to configure RTC using long-term TURN credentials."""
+    """Attempts to configure RTC using long-term TURN credentials.
+
+    Returns:
+        The parsed config tuple, or None when any of host, port, username, or
+        password is missing.
+    """
     if not (args.turn_username and args.turn_password and args.turn_host and args.turn_port):
         return None
 
@@ -803,7 +1017,12 @@ def try_legacy_turn(args: Any, protocol: str, use_tls: bool) -> Optional[Tuple[L
     return parse_rtc_config(config_json)
 
 def try_hmac_turn(args: Any, username: str, protocol: str, use_tls: bool) -> Optional[Tuple[List[str], List[str], bytes]]:
-    """Attempts to configure RTC using short-term HMAC credentials."""
+    """Attempts to configure RTC using short-term HMAC credentials.
+
+    Returns:
+        The parsed config tuple, or None when the shared secret, host, or
+        port is missing.
+    """
     if not (args.turn_shared_secret and args.turn_host and args.turn_port):
         return None
 
@@ -815,16 +1034,20 @@ def try_hmac_turn(args: Any, username: str, protocol: str, use_tls: bool) -> Opt
     return parse_rtc_config(hmac_data)
 
 async def get_rtc_configuration(args: Any) -> Tuple[List[str], List[str], bytes, Dict[str, bool]]:
-    """
-    Determines and fetches the RTC configuration based on a prioritized sequence of methods.
+    """Resolves the RTC configuration from a prioritized sequence of sources.
 
-    Priority Order:
-    1. Cloudflare TURN API
-    2. Local RTC Config JSON file
-    3. Custom TURN REST API
-    4. Long-term TURN credentials (username/password)
-    5. Short-term TURN credentials (shared secret HMAC)
-    6. Default built-in configuration
+    Tries, in order: the Cloudflare TURN API, a local RTC config JSON file, a
+    custom TURN REST API, long-term TURN credentials (username/password),
+    short-term HMAC credentials (shared secret), and finally the built-in
+    STUN-only default. The first source that yields a config wins.
+
+    Args:
+        args: Parsed CLI/settings namespace carrying the TURN/STUN options.
+
+    Returns:
+        A tuple of `(stun_uris, turn_uris, config_bytes, sources_used)`, where
+        `sources_used` flags which refreshable source produced the config so
+        the caller can start the matching periodic monitor.
     """
 
     turn_rest_username = args.turn_rest_username.replace(":", "-")
@@ -838,7 +1061,6 @@ async def get_rtc_configuration(args: Any) -> Tuple[List[str], List[str], bytes,
         "using_cloudflare_turn": False
     }
 
-    # Try each method in order of priority, returning on the first success
     if config := await try_cloudflare(args):
         monitoring_utilities_used["using_cloudflare_turn"] = True
         return *config, monitoring_utilities_used
@@ -858,7 +1080,6 @@ async def get_rtc_configuration(args: Any) -> Tuple[List[str], List[str], bytes,
         monitoring_utilities_used["using_hmac_turn"] = True
         return *config, monitoring_utilities_used
 
-    # Fallback to default if all other methods fail
     logger_rtcice.warning("No valid TURN server information found, using default RTC config.")
     return *parse_rtc_config(DEFAULT_RTC_CONFIG), monitoring_utilities_used
 
@@ -876,6 +1097,16 @@ WEBRTC_CSV_MAX_HEADERS = 2048
 WEBRTC_CSV_MAX_RETAINED_ROWS = 100000
 
 class Metrics:
+    """Prometheus metrics plus optional CSV capture of client WebRTC stats.
+
+    Registers gauges/histograms in the global Prometheus registry at
+    construction; `unregister()` must release every one of them or the next
+    `Metrics()` raises DuplicateTimeseries. When `using_webrtc_csv` is set,
+    client-reported stat dictionaries are also appended to per-connection CSV
+    files whose column schema follows the (untrusted) client's field set with
+    bounded width and row count.
+    """
+
     def __init__(self, using_webrtc_csv: bool = False):
         self.using_webrtc_csv = using_webrtc_csv
 
@@ -916,7 +1147,8 @@ class Metrics:
         # collected before completion (and their exceptions stay observed).
         self._csv_tasks: set = set()
 
-    def set_fps(self, fps):
+    def set_fps(self, fps: float) -> None:
+        """Records the client-observed FPS in both the gauge and histogram."""
         self.fps.set(fps)
         self.fps_hist.observe(fps)
 
@@ -933,14 +1165,14 @@ class Metrics:
                       "idr_resurrects", "timeout_resurrects", "stale_resets"):
             self.webrtc_pacer_events.labels(display, event).set(snap.get(event, 0))
 
-    def set_gpu_utilization(self, utilization):
+    def set_gpu_utilization(self, utilization: float) -> None:
         self.gpu_utilization.set(utilization)
 
-    def set_latency(self, latency_ms):
+    def set_latency(self, latency_ms: float) -> None:
         self.latency.set(latency_ms)
-    
-    def unregister(self):
-        """Unregister all metrics from the global registry."""
+
+    def unregister(self) -> None:
+        """Unregisters all metrics from the global registry and drains CSV writers."""
         # Drain CSV writers deterministically. The writes run on a dedicated
         # single-worker executor (self._csv_executor); cancel any not-yet-started
         # futures, then shut the executor down with wait=True so no writer thread
@@ -966,6 +1198,15 @@ class Metrics:
                 pass
 
     async def set_webrtc_stats(self, webrtc_stat_type: str, webrtc_stats: str) -> None:
+        """Publishes a client stats report to Prometheus and, optionally, CSV.
+
+        Args:
+            webrtc_stat_type: `_stats_audio` for the audio stream; anything
+                else is treated as video.
+            webrtc_stats: Raw JSON list of RTCStats-shaped objects from the
+                client. Parsing/sanitizing runs in a worker thread to keep
+                large reports off the event loop.
+        """
         sanitized_stats = await asyncio.to_thread(self._parse_and_sanitize_stats, webrtc_stats)
         if self.using_webrtc_csv:
             is_audio = webrtc_stat_type == "_stats_audio"
@@ -987,17 +1228,22 @@ class Metrics:
         return self.sanitize_json_stats(json.loads(webrtc_stats))
 
     def sanitize_json_stats(self, obj_list: List[Dict[str, Any]]) -> OrderedDict:
-        """A helper function to process data to a structure
-           For example: reportName.fieldName:value
+        """Flattens a list of RTCStats objects into `reportName.fieldName` keys.
+
+        The first entry of each stat type gets the bare type as its report
+        name; later same-type entries get a stable dedup suffix. All values
+        are stringified. Entries that are not dicts are skipped and a
+        missing/non-string `type` defaults to `unknown`, since the list comes
+        from the untrusted browser client.
         """
         obj_type = set()
         sanitized_stats = OrderedDict()
-        # Per-type occurrence counter for a content-stable dedup suffix. Keying
-        # the suffix on the global enumerate() index made every column name
-        # shift whenever the stats list reordered/inserted, which churned the
-        # CSV schema (full rewrites) and grew the union header unbounded. A
-        # per-type counter (and the entry 'id' when present) keeps a given
-        # logical stat mapped to the same column across messages.
+        # Per-type occurrence counter for a content-stable dedup suffix. A
+        # suffix keyed on a global list index would shift every column name
+        # whenever the stats list reordered/inserted, churning the CSV schema
+        # (full rewrites) and growing the union header unbounded. A per-type
+        # counter (and the entry 'id' when present) keeps a given logical
+        # stat mapped to the same column across messages.
         type_counts: Dict[str, int] = {}
 
         def _identity(entry: Any) -> Tuple[str, str]:
@@ -1018,8 +1264,6 @@ class Metrics:
         # sorted() is stable, so entries sharing a (type, id) keep their relative
         # input order; entries that are not dicts are skipped in the loop below.
         for entry in sorted(obj_list, key=_identity) if isinstance(obj_list, list) else obj_list:
-            # Stats come from the (untrusted) browser client; skip entries that
-            # are not dicts and default a missing/non-string 'type'.
             if not isinstance(entry, dict):
                 continue
             base_key = entry.get('type')
@@ -1031,8 +1275,8 @@ class Metrics:
             curr_key = base_key
             if curr_key in obj_type:
                 # Prefer the entry's stable 'id'; fall back to the per-type
-                # occurrence index. Both are stable across reorders/inserts,
-                # unlike the prior global loop index.
+                # occurrence index. Both stay stable across reorders/inserts,
+                # unlike a global loop index would.
                 entry_id = entry.get('id')
                 if isinstance(entry_id, str) and entry_id:
                     suffix = entry_id
@@ -1056,10 +1300,11 @@ class Metrics:
         return sanitized_stats
 
     def _bump_and_cap_rows(self, file_path: str, is_audio: bool) -> None:
-        """Records one appended data row and, only once the tracked count exceeds
-        WEBRTC_CSV_MAX_RETAINED_ROWS, trims the oldest rows off disk. Tracking the
-        count avoids re-reading the file on every write; the O(N) trim runs only
-        on overflow. Caller must hold self._csv_lock.
+        """Counts one appended data row, trimming the file once over the cap.
+
+        Tracking the count avoids re-reading the file on every write; the
+        O(N) trim runs only when the count exceeds
+        WEBRTC_CSV_MAX_RETAINED_ROWS. Caller must hold `self._csv_lock`.
         """
         if is_audio:
             self.stats_audio_row_count += 1
@@ -1071,11 +1316,15 @@ class Metrics:
                 self.stats_video_row_count = self._trim_csv_to_cap(file_path)
 
     def _trim_csv_to_cap(self, file_path: str) -> int:
-        """Drops the oldest data rows so the file keeps at most
-        WEBRTC_CSV_MAX_RETAINED_ROWS rows (plus the header), bounding on-disk
-        growth on the steady-state append path. Rewrites via a temp file +
-        atomic replace so an interrupted trim can't corrupt the stats. Returns
-        the resulting on-disk data-row count. Caller must hold self._csv_lock.
+        """Drops the oldest data rows so the file stays within the row cap.
+
+        Keeps at most WEBRTC_CSV_MAX_RETAINED_ROWS rows plus the header,
+        bounding on-disk growth on the steady-state append path. Rewrites via
+        a temp file and atomic replace so an interrupted trim cannot corrupt
+        the stats. Caller must hold `self._csv_lock`.
+
+        Returns:
+            The resulting on-disk data-row count.
         """
         with open(file_path, 'r', newline='') as stats_file:
             rows = list(csv.reader(stats_file, delimiter=','))
@@ -1094,12 +1343,20 @@ class Metrics:
         return len(data)
 
     def write_webrtc_stats_csv(self, obj: dict, file_path: str, is_audio: bool = False) -> None:
-        """Writes the WebRTC statistics to a CSV file.
+        """Appends one sanitized stats report to the CSV file.
 
-        Arguments:
-            obj_list {[list of object]} -- list of Python objects/dictionary
-            is_audio {bool} -- whether this is the audio stream (passed by the
-                caller rather than re-derived from the file path).
+        Runs on the dedicated CSV executor thread. Handles three schema cases:
+        the same field set in a different order (single-row remap, no
+        rewrite), a changed field set (full union-schema rewrite via
+        `update_webrtc_stats_csv`), and a fresh file (header plus first row).
+
+        Args:
+            obj: Flattened `reportName.fieldName` stats mapping from
+                `sanitize_json_stats`.
+            file_path: Destination CSV path.
+            is_audio: Whether this is the audio stream, passed by the caller
+                rather than re-derived from the file path; selects which
+                header/row-count state to use.
         """
 
         dt = datetime.now()
@@ -1107,11 +1364,11 @@ class Metrics:
         # Writes run in worker threads; serialize them.
         with self._csv_lock:
             try:
-                # Prepare the data
                 headers = ["timestamp"]
                 headers += obj.keys()
 
-                # Upon reconnections the client could send a redundant objs just discard them
+                # Reconnecting clients can send redundant near-empty reports;
+                # discard rows with too few fields to be a real stats sample.
                 if len(headers) < 15:
                     return
 
@@ -1169,12 +1426,17 @@ class Metrics:
             except Exception as e:
                 logger_metrics.error("writing WebRTC Statistics to CSV file: " + str(e))
 
-    def update_webrtc_stats_csv(self, file_path: str, headers: List[str], values: List[Any], is_audio: bool = False):
-        """Rewrites the CSV when the set of stat fields changes, aligning the
-           previously-stored rows onto the new (union) header layout by field
-           name. Missing fields are filled with "NaN". Returns a tuple of the
-           new header length, the new header-name tuple, and the resulting
-           on-disk data-row count, or the previous values on failure.
+    def update_webrtc_stats_csv(self, file_path: str, headers: List[str], values: List[Any], is_audio: bool = False) -> Tuple[Optional[int], Optional[Tuple[str, ...]], int]:
+        """Rewrites the CSV when the set of stat fields changes.
+
+        Aligns the previously stored rows onto the new (union) header layout
+        by field name, filling missing fields with "NaN". Caller must hold
+        `self._csv_lock`.
+
+        Returns:
+            A tuple of the new header length, the new header-name tuple, and
+            the resulting on-disk data-row count — or the previous values on
+            failure so the caller's state stays consistent with the file.
         """
         prev_len = self.prev_stats_audio_header_len if is_audio else self.prev_stats_video_header_len
         prev_names = self.prev_stats_audio_header_names if is_audio else self.prev_stats_video_header_names
@@ -1225,7 +1487,7 @@ class Metrics:
             prev_index = {name: pos for pos, name in enumerate(prev_headers)}
             new_index = {name: pos for pos, name in enumerate(headers)}
 
-            def remap(row_values, src_index):
+            def remap(row_values: List[Any], src_index: Dict[str, int]) -> List[Any]:
                 out = []
                 for name in merged_headers:
                     pos = src_index.get(name)
@@ -1255,9 +1517,8 @@ class Metrics:
             logger_metrics.error("writing WebRTC Statistics to CSV file: " + str(e))
             return prev_len, prev_names, prev_rows
 
-    async def initialize_webrtc_csv_file(self, webrtc_stats_dir: str ='/tmp'):
-        """Initializes the WebRTC Statistics file upon every new WebRTC connection
-        """
+    async def initialize_webrtc_csv_file(self, webrtc_stats_dir: str = '/tmp') -> None:
+        """Points CSV capture at fresh timestamped files for a new connection."""
         dt = datetime.now()
         timestamp = dt.strftime("%Y-%m-%d:%H:%M:%S")
         self.stats_video_file_path = '{}/selkies-stats-video-{}.csv'.format(webrtc_stats_dir, timestamp)
@@ -1268,7 +1529,7 @@ class Metrics:
         # (len, names) pair and wrongly rewrite.
         await asyncio.to_thread(self._reset_csv_header_state)
 
-    def _reset_csv_header_state(self):
+    def _reset_csv_header_state(self) -> None:
         with self._csv_lock:
             self.prev_stats_video_header_len = None
             self.prev_stats_audio_header_len = None
@@ -1287,30 +1548,40 @@ logger_gpu = logging.getLogger("gpu_monitor")
 logger_gpu.setLevel(logging.INFO)
 
 class SystemMonitor:
+    """Periodically samples CPU and memory usage via psutil.
+
+    The latest sample is exposed on `cpu_percent`, `mem_total`, and
+    `mem_used`; the optional async `on_timer` callback fires once per period
+    with the current timestamp. psutil calls run in a worker thread so
+    sampling never blocks the event loop.
+    """
+
     def __init__(self, period: int = 1, enabled: bool = True):
         self.period = max(1, int(period))
         self.enabled = enabled
         self.stop_event = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
-        self.cpu_percent = 0
-        self.mem_total = 0
-        self.mem_used = 0
+        self.cpu_percent: float = 0
+        self.mem_total: int = 0
+        self.mem_used: int = 0
 
-        self.on_timer = None
+        self.on_timer: Optional[Callable[[float], Awaitable[None]]] = None
 
-    def start(self):
+    def start(self) -> None:
+        """Starts the sampling task; no-op when disabled."""
         if not self.enabled:
             return
         self.stop_event.clear()
         self.task = asyncio.create_task(self._monitor_loop())
         logger_system.info("System monitor started")
 
-    def _get_system_metrics(self):
+    def _get_system_metrics(self) -> Tuple[float, int, int]:
+        """Returns `(cpu_percent, mem_total_bytes, mem_used_bytes)`; blocking."""
         cpu = psutil.cpu_percent()
         mem = psutil.virtual_memory()
         return cpu, mem.total, mem.used
 
-    async def _monitor_loop(self):
+    async def _monitor_loop(self) -> None:
         try:
             while not self.stop_event.is_set():
                 self.cpu_percent, self.mem_total, self.mem_used = await asyncio.to_thread(
@@ -1330,13 +1601,22 @@ class SystemMonitor:
         finally:
             logger_system.debug("System monitor loop exited")
 
-    async def stop(self):
+    async def stop(self) -> None:
+        """Signals the loop to exit and waits for the task to finish."""
         self.stop_event.set()
         if self.task:
             await self.task
         logger_system.info("System monitor stopped")
 
 class GPUMonitor:
+    """Periodically samples GPU load and memory for the pipeline's card.
+
+    Each sample is delivered through the optional async `on_stats` callback
+    as `(load, mem_total, mem_used)`. GPU queries run in a worker thread so
+    sampling never blocks the event loop. When no GPU is found on the first
+    probe, the loop exits instead of polling forever.
+    """
+
     def __init__(self, gpu_id: int = 0, period: int = 1, enabled: bool = True, dri_node: str = ""):
         self.period = max(1, int(period))
         self.enabled = enabled
@@ -1346,9 +1626,10 @@ class GPUMonitor:
         self.dri_node = dri_node
         self.stop_event = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
-        self.on_stats = None
+        self.on_stats: Optional[Callable[..., Awaitable[None]]] = None
 
     def start(self) -> None:
+        """Starts the sampling task; no-op when disabled."""
         if not self.enabled:
             return
         self.stop_event.clear()
@@ -1356,6 +1637,11 @@ class GPUMonitor:
         logger_gpu.info("GPU monitor started")
 
     def _get_gpu_stats(self) -> Optional[Tuple]:
+        """Returns `(load, mem_total, mem_used)` for the target GPU; blocking.
+
+        Returns:
+            The stats tuple, or None when the GPU cannot be found or queried.
+        """
         try:
             gpus = gpu_stats.get_gpus(self.dri_node)
             # A dri_node match returns exactly the pipeline's GPU; the index only
@@ -1369,7 +1655,7 @@ class GPUMonitor:
             logger_gpu.warning(f"Error while fetching GPU stats: {e}")
             return None
 
-    async def _monitor_loop(self):
+    async def _monitor_loop(self) -> None:
         # No GPU present: report nothing and stop, mirroring the WebSocket GPU monitor.
         # CPU load and system memory are surfaced separately by SystemMonitor; the GPU
         # gauge contract (fractional load, MB memory) cannot carry CPU stats without
@@ -1397,7 +1683,8 @@ class GPUMonitor:
         finally:
             logger_gpu.debug("GPU monitor loop exited")
 
-    async def stop(self):
+    async def stop(self) -> None:
+        """Signals the loop to exit and waits for the task to finish."""
         self.stop_event.set()
         if self.task:
             await self.task

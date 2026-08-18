@@ -13,7 +13,8 @@ import helpers as H
 import websockets
 
 
-def _settings_payload(display_id, framerate, bitrate):
+def _settings_payload(display_id: str, framerate: int, bitrate: int) -> dict:
+    """Build a SETTINGS payload for a display at the given rate and bitrate."""
     return {
         "displayId": display_id, "initialClientWidth": 1280, "initialClientHeight": 720,
         "is_manual_resolution_mode": False, "framerate": framerate, "encoder": "h264enc",
@@ -22,11 +23,21 @@ def _settings_payload(display_id, framerate, bitrate):
     }
 
 
-def loglen():
+def loglen() -> int:
     return len(H.server_log())
 
 
-def wait_log_from(mark, substr, timeout=8):
+def wait_log_from(mark: int, substr: str, timeout: float = 8) -> bool:
+    """Poll the server log for a substring appearing at or after an offset.
+
+    Args:
+        mark: Byte offset into the log where the search starts.
+        substr: Substring to wait for.
+        timeout: Seconds to keep polling before giving up.
+
+    Returns:
+        True when the substring appeared, False on timeout.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         txt = H.server_log()
@@ -36,11 +47,13 @@ def wait_log_from(mark, substr, timeout=8):
     return False
 
 
-async def connect_and_set(ws, display_id, framerate, bitrate):
+async def connect_and_set(ws, display_id: str, framerate: int, bitrate: int) -> None:
+    """Send a SETTINGS message for the display over an open websocket."""
     await ws.send("SETTINGS," + json.dumps(_settings_payload(display_id, framerate, bitrate)))
 
 
-async def read_nonstop(ws, seconds):
+async def read_nonstop(ws, seconds: float) -> None:
+    """Drain incoming websocket messages for up to the given duration."""
     end = time.time() + seconds
     while time.time() < end:
         try:
@@ -51,7 +64,8 @@ async def read_nonstop(ws, seconds):
             return
 
 
-def main():
+def main() -> "H.Results":
+    """Set the primary to 33fps, then check a fresh display2 seeds from it."""
     H.server_start(mode="websockets", wayland=False)
     res = H.Results("D4-probe")
 
@@ -72,7 +86,6 @@ def main():
                 txt = H.server_log()[st:]
                 res.check("D4: display2 seeded at client framerate",
                           "FPS: 33" in txt, txt[-300:])
-            # cleanup
 
     asyncio.get_event_loop().run_until_complete(drive())
     res.summary()

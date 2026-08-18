@@ -22,8 +22,10 @@ import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
 
+from typing import Optional
 
-def desktop_window():
+
+def desktop_window() -> Optional[tuple]:
     """(x, y, w, h) of the session's desktop window, or None when it has none.
 
     A session drawing natively on Wayland has no X11 desktop window at all, which
@@ -39,7 +41,7 @@ def desktop_window():
     return None
 
 
-def wait_secondary_ready(mode, secondary_id="display2", timeout=45):
+def wait_secondary_ready(mode: str, secondary_id: str = "display2", timeout: float = 45) -> bool:
     """Block until the server has started the secondary capture.
 
     The transports announce it differently: websockets logs the per-display
@@ -51,8 +53,8 @@ def wait_secondary_ready(mode, secondary_id="display2", timeout=45):
     return C.wait_log("SUCCESS: Capture started for '{}'".format(secondary_id), timeout=timeout)
 
 
-def server_layout(mode, primary_wh):
-    """The layout the server applied, as {display_id: rect}."""
+def server_layout(mode: str, primary_wh: tuple) -> Optional[dict]:
+    """The layout the server applied, as `{display_id: rect}`."""
     if mode == "webrtc":
         out = subprocess.run(["grep", "-a", "pipeline started at", H.LOG],
                              capture_output=True, text=True).stdout.strip().splitlines()
@@ -69,7 +71,8 @@ def server_layout(mode, primary_wh):
     return ast.literal_eval(tail[1]) if len(tail) > 1 else None
 
 
-def wait_root_width(width, timeout=30):
+def wait_root_width(width: int, timeout: float = 30) -> Optional[tuple]:
+    """Block until the X root has grown to at least the union width."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         got = H.x_root_size()
@@ -79,7 +82,8 @@ def wait_root_width(width, timeout=30):
     return None
 
 
-def run(mode, wayland):
+def run(mode: str, wayland: bool) -> bool:
+    """Assert the applied two-display geometry for one transport/backend pair."""
     tag = "two-display-{}-{}".format(mode, "wl" if wayland else "x11")
     res = H.Results(tag)
     H.server_start(mode=mode, wayland=wayland)

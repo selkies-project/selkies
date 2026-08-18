@@ -2,29 +2,41 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+"""Centralized configuration schema and resolution for the Selkies server.
+
+Every setting lives in one declarative list (`SETTING_DEFINITIONS`); the
+`AppSettings` singleton resolves each entry with precedence CLI flag >
+`SELKIES_<NAME>` env > fallback `env_var`(s) > built-in default. CLI and env
+names derive from `name`: `my_setting` becomes `--my-setting` /
+`SELKIES_MY_SETTING`. This module also owns everything both transports must
+agree on about settings: the client-facing settings payload
+(`build_client_settings_payload`), the shared per-setting sanitizer for
+client-proposed values (`sanitize_client_setting`), and the WebSocket message
+size ceiling with its bounded gzip inflater.
+
+Override value syntax, by setting type:
+
+- List/enum (e.g. `SELKIES_ENCODER="jpeg,h264enc"`): first item is the
+  default, the full list is the allowed options; a single value locks the
+  choice. Invalid items are dropped; an entirely-invalid override keeps the
+  full built-in menu and default.
+- Bool (case-insensitive): `"true"`/`"1"` is on, anything else off; a
+  `"|locked"` suffix (e.g. `"true|locked"`) forbids the client changing it.
+- Range: `"8-240"` restricts the allowed span (initial value = built-in
+  default, clamped in); a bare value `"60"` keeps the built-in span and makes
+  it the initial value, widening the span if it falls outside (so legacy
+  fixed-value configs still resolve); `"60,8-240"` sets initial and span in
+  one value; a degenerate span `"60-60"` locks the setting.
+- An override set to `""` means "use the built-in default"; list types keep
+  their explicit `""`/`"none"` = disable semantics.
+"""
+
 import argparse
 import os
 import logging
 import re
 import zlib
-from typing import Any, Dict, List
-
-# Settings precedence: CLI flag > SELKIES_<NAME> env > fallback env_var(s) > 'default'.
-# Names derive from 'name': my_setting -> --my-setting / SELKIES_MY_SETTING.
-# Special syntax:
-#   - List/enum (e.g. SELKIES_ENCODER="jpeg,h264enc"): first item is default,
-#     full list is the allowed options; a single value locks the choice. Invalid
-#     items are dropped; an entirely-invalid override keeps the full built-in
-#     menu and default.
-#   - Bool (case-insensitive): "true"/"1" = on, anything else = off; a
-#     "|locked" suffix (e.g. "true|locked") forbids the client changing it.
-#   - Range: "8-240" restricts the allowed span (initial value = built-in
-#     default, clamped in); a bare value "60" keeps the built-in span and makes
-#     it the initial value, widening the span if it falls outside (so legacy
-#     fixed-value configs still resolve); "60,8-240" sets initial + span in one
-#     value; a degenerate span "60-60" locks the setting.
-#   - An override set to "" means "use the built-in default"; list types keep
-#     their explicit ""/"none" = disable semantics.
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # One WebSocket message ceiling for BOTH directions: enforced on receive
 # (aiohttp max_msg_size) and advertised to clients so multipart chunk sizing
@@ -38,7 +50,7 @@ WS_MESSAGE_SIZE_HARD_CAP = 32 * 1024 * 1024
 WS_MAX_MESSAGE_BYTES = min(8 * 1024 * 1024, WS_MESSAGE_SIZE_HARD_CAP)
 
 
-def inflate_gz_bounded(payload):
+def inflate_gz_bounded(payload: bytes) -> str:
     """Inflate a client gzip payload, bounded by the shared message ceiling.
 
     The inflated bytes stand in for a raw TEXT message, which could never
@@ -46,8 +58,16 @@ def inflate_gz_bounded(payload):
     WebSockets, the negotiated max-message-size on the data channel), so the
     same budget applies here — an unbounded gzip.decompress would let a single
     small frame balloon ~1000x into process memory.
-    Raises ValueError for a payload that inflates past the cap, is truncated,
-    or does not decode as UTF-8.
+
+    Args:
+        payload: Raw gzip-container bytes from a client 0x05 frame.
+
+    Returns:
+        The inflated payload decoded as UTF-8 text.
+
+    Raises:
+        ValueError: If the payload inflates past the cap or is truncated.
+        UnicodeDecodeError: If the inflated bytes do not decode as UTF-8.
     """
     # wbits=31 selects the gzip container.
     d = zlib.decompressobj(wbits=31)
@@ -958,16 +978,16 @@ for _setting_def in SETTING_DEFINITIONS:
         _setting_def["sensitive"] = True
 
 
-def _range_number(text):
-    """A range-setting number: int when integral, float otherwise, so a
+def _range_number(text: str) -> Union[int, float]:
+    """Parse a range-setting number: int when integral, float otherwise, so a
     fractional span bound stays representable."""
     value = float(text)
     return int(value) if value.is_integer() else value
 
 
-def parse_bool(value, default=False):
-    """A configured value's truth: "true" or "1", case-insensitively, ahead of any
-    "|locked" suffix. Everything else is false.
+def parse_bool(value: Any, default: bool = False) -> bool:
+    """Resolve a configured value's truth: "true" or "1", case-insensitively,
+    ahead of any "|locked" suffix. Everything else is false.
 
     Environment variables carry whatever case the operator typed, so every reader
     of one -- here, the container entrypoint, and the tools it calls -- has to agree
@@ -984,9 +1004,15 @@ def parse_bool(value, default=False):
 
 
 class AppSettings:
-    """
-    Parses and stores application settings from command-line arguments and
-    environment variables, based on a centralized definition list.
+    """Parses and stores application settings from CLI arguments and
+    environment variables, based on the centralized definition list.
+
+    Each setting becomes an instance attribute named after its definition:
+    bool settings resolve to a `(value, locked)` tuple, range settings to a
+    `(min, max)` tuple (with the initial value kept in the definition's
+    `meta["default_value"]`), and other types to their parsed scalar/list
+    value. `was_provided` reports whether an operator set a value explicitly,
+    which drives conditional defaults and operator locks downstream.
     """
 
     # Typing for settings that static tools access as attributes (everything
@@ -1011,7 +1037,7 @@ class AppSettings:
     subfolder: str
     video_bitrate: tuple[float, float]
 
-    def __init__(self, setting):
+    def __init__(self, setting: List[Dict[str, Any]]) -> None:
         parser = argparse.ArgumentParser(
             description="Selkies WebSocket Streaming Server"
         )
@@ -1031,9 +1057,9 @@ class AppSettings:
         self._post_process_settings()
 
     @staticmethod
-    def _fallback_env_vars(setting):
-        """A setting's fallback env aliases as a tuple: `env_var` may be one
-        name or an ordered list of names (earlier entries win)."""
+    def _fallback_env_vars(setting: Dict[str, Any]) -> Tuple[str, ...]:
+        """Return a setting's fallback env aliases as a tuple: `env_var` may be
+        one name or an ordered list of names (earlier entries win)."""
         fallback = setting.get("env_var")
         if not fallback:
             return ()
@@ -1041,8 +1067,13 @@ class AppSettings:
             return (fallback,)
         return tuple(fallback)
 
-    def _add_arguments(self, parser):
-        """Programmatically add arguments to the parser from definitions."""
+    def _add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Add one string-typed CLI argument per setting definition.
+
+        Every flag parses as a raw string (type conversion happens later in
+        `_process_and_set_attributes`) so CLI and environment values flow
+        through the identical parsing path.
+        """
         for setting in self._setting_definitions:
             name = setting["name"]
             # Dashes are the documented spelling, but the setting's own name is the
@@ -1065,8 +1096,14 @@ class AppSettings:
                 help=f"{setting['help']} ({env_help_text})",
             )
 
-    def _process_and_set_attributes(self, args):
-        """Process parsed arguments and set them as class attributes."""
+    def _process_and_set_attributes(self, args: argparse.Namespace) -> None:
+        """Resolve every setting's raw value, parse it by type, and set it as
+        an instance attribute.
+
+        Also records which settings were explicitly overridden (CLI or env) in
+        `self._overridden`, and derives manual-resolution mode from positive
+        manual width/height overrides.
+        """
         processed = {}
         overrides = {}
         for setting in self._setting_definitions:
@@ -1337,7 +1374,7 @@ class AppSettings:
         "jpeg": "crf",
     }
 
-    def resolve_rate_control_default(self):
+    def resolve_rate_control_default(self) -> None:
         """Apply the transport's rate-control default for the current mode.
 
         A no-op when the operator pinned rate_control_mode or disabled rate
@@ -1353,8 +1390,11 @@ class AppSettings:
                 self.encoder, self.rate_control_mode
             )
 
-    def _post_process_settings(self):
-        """Additional processing of config data after initial parsing."""
+    def _post_process_settings(self) -> None:
+        """Normalize and cross-check settings whose meaning spans several
+        entries: transport mode spelling, rate-control resolution, the
+        audio/microphone dependency, the clipboard policy string, and the TURN
+        REST username default."""
         # One spelling of the transport for every consumer, normalized before
         # anything branches on it. The service registry is keyed on this value,
         # so a differently-cased one would otherwise abort the server at startup
@@ -1419,9 +1459,6 @@ class AppSettings:
 
 settings = AppSettings(SETTING_DEFINITIONS)
 
-# Settings never broadcast to clients: server-local paths and lifecycle hooks.
-# Server-local listener, filesystem and hook settings: a browser has no use for
-# them and they disclose host layout.
 # Non-bool settings the server stops accepting client updates for once an
 # operator sets them explicitly. They are published as locked so a dashboard
 # renders them read-only instead of offering a control the server ignores.
@@ -1432,20 +1469,29 @@ OPERATOR_LOCKED_WHEN_OVERRIDDEN = ("scaling_dpi",)
 CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped", "openh264enc")
 
 
-def effective_use_cpu(encoder, requested, default):
-    """Software-encode flag for an encoder choice.
+def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) -> bool:
+    """Derive the software-encode flag for an encoder choice.
 
     A CPU-only encoder implies software encoding, but that is a property of the
     encoder rather than a decision the client made: any other encoder honours the
     client's own request, falling back to the server default when it never made
     one. Deriving it this way is what lets a display return to hardware encoding
     after a spell on JPEG.
+
+    Args:
+        encoder: The encoder name the display is switching to.
+        requested: The client's own use_cpu request, or None when it never
+            made one.
+        default: The server's configured use_cpu default.
     """
     if encoder in CPU_ONLY_ENCODERS:
         return True
     return bool(default) if requested is None else bool(requested)
 
 
+# Settings never broadcast to clients: server-local listener, filesystem and
+# lifecycle-hook settings. A browser has no use for them and they disclose
+# host layout.
 CLIENT_PAYLOAD_EXCLUDED = [
     'port', 'addr', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',
     'audio_device_name', 'watermark_path', 'recording_socket',
@@ -1456,9 +1502,9 @@ CLIENT_PAYLOAD_EXCLUDED = [
 ]
 
 
-def _published_enum_allowed(setting_def, value):
-    """The `allowed` list a client is told about for an enum, with the server's
-    resolved value merged in when it sits off the curated stops.
+def _published_enum_allowed(setting_def: Dict[str, Any], value: Any) -> List[str]:
+    """Build the `allowed` list a client is told about for an enum, with the
+    server's resolved value merged in when it sits off the curated stops.
 
     A numeric enum declaring meta.value_range accepts admin values the UI menu
     does not list (SELKIES_AUDIO_BITRATE=6000 against stops starting at 32000).
@@ -1485,9 +1531,9 @@ def _published_enum_allowed(setting_def, value):
     return [item for _, item in sorted(zip(numbers, merged), key=lambda pair: pair[0])]
 
 
-def build_client_settings_payload():
-    """Client-facing settings snapshot shared by both transports: skips
-    server-local/sensitive entries, carries locked/overridden flags plus
+def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
+    """Build the client-facing settings snapshot shared by both transports:
+    skips server-local/sensitive entries, carries locked/overridden flags plus
     enum/range metadata, and derives the clipboard gate booleans."""
     out = {}
     for setting_def in SETTING_DEFINITIONS:
@@ -1535,15 +1581,13 @@ INT_SETTING_DEFAULT_MAX = 1_000_000
 INT_SETTING_DEFAULT_MIN = -1_000_000
 
 
-def sanitize_client_setting(name, client_value, source, log):
-    """Clamp/validate ONE client-provided setting against the server's limits —
-    the sanitizer shared by both transports (websockets SETTINGS payloads and
-    the WebRTC settings channel), so a value is accepted or clamped identically
-    whichever path delivered it.
+def sanitize_client_setting(name: str, client_value: Any, source: Any,
+                            log: logging.Logger) -> Any:
+    """Clamp/validate ONE client-provided setting against the server's limits.
 
-    `source` exposes the server's resolved values by attribute (the parsed
-    settings namespace); `log` is the calling transport's logger. Returns the
-    sanitized value, or None when the setting is unknown.
+    This is the sanitizer shared by both transports (websockets SETTINGS
+    payloads and the WebRTC settings channel), so a value is accepted or
+    clamped identically whichever path delivered it.
 
     Rules: ranges clamp into the server min/max (fractional values are legal,
     integral values stay ints); enums fall back to the server default when not
@@ -1551,6 +1595,17 @@ def sanitize_client_setting(name, client_value, source, log):
     (top-level min/max win over meta so declared bounds aren't loosened by the
     sentinel-safe negative fallback); locked bools keep the server value. A
     None client value resolves to the server value/default for the type.
+
+    Args:
+        name: The setting name as defined in SETTING_DEFINITIONS.
+        client_value: The client-proposed value, or None to request the
+            server's resolved value/default.
+        source: Namespace exposing the server's resolved values by attribute
+            (the parsed AppSettings instance).
+        log: The calling transport's logger.
+
+    Returns:
+        The sanitized value, or None when the setting is unknown.
     """
     setting_def = next((s for s in SETTING_DEFINITIONS if s['name'] == name), None)
     if not setting_def:

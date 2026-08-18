@@ -21,7 +21,8 @@ SOCKET = sys.argv[1] if len(sys.argv) > 1 else "wayland-1"
 DURATION = float(os.environ.get("WLOBS_DURATION", "25"))
 
 
-def emit(kind, **kv):
+def emit(kind: str, **kv) -> None:
+    """Print one JSONL event line for the test driver to parse."""
     print(json.dumps({"kind": kind, **kv}), flush=True)
 
 
@@ -107,7 +108,8 @@ def ptr_axis(ptr, time_ms, axis, value):
     emit("ptr_axis", axis=axis, value=value)
 
 
-def offer_mimes(offer):
+def offer_mimes(offer) -> dict:
+    """Attach dispatchers that accumulate the offer's advertised mime types."""
     out = {"mimes": []}
     def _on_offer(of, mime):
         out["mimes"].append(mime)

@@ -23,7 +23,15 @@ DISPLAY = os.environ.get("LEAK_DISPLAY", ":96")
 ATTEMPTS = 40
 
 
-def start_server():
+def start_server() -> subprocess.Popen:
+    """Start a throwaway Xvfb on DISPLAY and wait until it answers queries.
+
+    Returns:
+        The Xvfb process handle.
+
+    Raises:
+        RuntimeError: If the server does not come up within the poll window.
+    """
     proc = subprocess.Popen(
         ["Xvfb", DISPLAY, "-screen", "0", "640x480x24", "-extension", "GLX",
          "-nolisten", "tcp", "-ac", "-noreset"],
@@ -37,12 +45,13 @@ def start_server():
     raise RuntimeError("test X server did not start")
 
 
-def open_fd_count():
+def open_fd_count() -> int:
     """Descriptors this process holds; one leaked connection is one socket."""
     return len(os.listdir("/proc/self/fd"))
 
 
-def main():
+def main() -> bool:
+    """Fail every monitor build repeatedly and count the descriptors left behind."""
     res = H.Results("x-connection-leak")
     server = start_server()
     try:

@@ -16,8 +16,9 @@ selects tiers from it. Tiers describe what a suite needs:
     perf         a long constrained-link benchmark, run on request
     soak         the full pixelflux/pcmflux API surface, run on request
 """
+from typing import Iterator, Optional, Sequence
 
-SUITES = [
+SUITES: list = [
     # --- unit -------------------------------------------------------------
     {"path": "unit/test_uinput_abi.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_uinput_policy.py", "tier": "unit", "timeout": 120},
@@ -85,11 +86,16 @@ SUITES = [
     {"path": "soak/test_capture_api_extra.py", "tier": "soak", "timeout": 2400},
 ]
 
-TIERS = ("unit", "integration", "e2e", "perf", "soak")
+TIERS: tuple = ("unit", "integration", "e2e", "perf", "soak")
 
 
-def cases(tiers=None):
-    """(path, selector, tier, timeout) for every runnable case."""
+def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:
+    """Yield `(path, selector, tier, timeout)` for every runnable case.
+
+    Args:
+        tiers: Restrict to these tiers; None yields every suite. A suite with
+            no selectors yields one case whose selector is None.
+    """
     for suite in SUITES:
         if tiers and suite["tier"] not in tiers:
             continue

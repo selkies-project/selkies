@@ -22,20 +22,23 @@ CAPTURE = "wayland-1"
 results = []
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     results.append((label, bool(ok)))
     print(f"{'PASS' if ok else 'FAIL'}  {label}  {detail}", flush=True)
 
 
 class FakeWaylandInput:
-    def __init__(self):
-        self.targets = []
+    """Records which socket the handler retargets injection at."""
 
-    def set_app_wayland_display(self, name):
+    def __init__(self) -> None:
+        self.targets: list = []
+
+    def set_app_wayland_display(self, name: str) -> None:
         self.targets.append(name)
 
 
-def make_handler(app_wayland_display=""):
+def make_handler(app_wayland_display: str = "") -> WebRTCInput:
+    """A WebRTCInput with only the app-socket resolution state initialized."""
     h = WebRTCInput.__new__(WebRTCInput)
     h.wayland_input = FakeWaylandInput()
     h.app_wayland_display = app_wayland_display
@@ -48,8 +51,12 @@ def make_handler(app_wayland_display=""):
     return h
 
 
-def resolve(runtime, names, app_wayland_display=""):
-    """Lay out `names` as live sockets and resolve against them."""
+def resolve(runtime: str, names, app_wayland_display: str = "") -> tuple:
+    """Lay out `names` as live sockets and resolve against them.
+
+    Returns:
+        `(resolved_name, handler)` for inspecting the resolution state.
+    """
     for entry in os.listdir(runtime):
         os.unlink(os.path.join(runtime, entry))
     keep = []
@@ -68,7 +75,7 @@ def resolve(runtime, names, app_wayland_display=""):
             server.close()
 
 
-def main():
+def main() -> int:
     runtime = tempfile.mkdtemp(prefix="selkies-appsock-")
     os.environ["XDG_RUNTIME_DIR"] = runtime
 

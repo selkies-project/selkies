@@ -2,7 +2,22 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-X11_KEYSYM_MAP = {
+"""Static X11 keysym lookup table for server-side keyboard injection.
+
+`X11_KEYSYM_MAP` maps X11 keysym codes (the numeric `XK_*` values from X11's
+`keysymdef.h`, including the `0x1000000`-offset Unicode plane entries) to the
+character the keysym produces (`char`, None for non-printing keys such as
+modifiers) and its canonical X key name (`xkey_name`, the spelling `xdotool
+key` and XTEST keymap lookups accept). The X11 input path in `input_handler`
+consults it to resolve client keysyms — chiefly non-printable and
+non-Latin ones — into injectable key names without a live keymap query. The
+table is generated from `keysymdef.h` data; edit upstream coverage there
+rather than hand-tuning individual rows.
+"""
+
+from typing import Dict, Optional
+
+X11_KEYSYM_MAP: Dict[int, Dict[str, Optional[str]]] = {
     0xffe1: {'char': None, 'xkey_name': 'Shift_L'},
     0xffe2: {'char': None, 'xkey_name': 'Shift_R'},
     0xffe3: {'char': None, 'xkey_name': 'Control_L'},

@@ -20,7 +20,7 @@ AUDIT = os.path.join(TESTS, "tools", "i18n_audit.mjs")
 passed = failed = 0
 
 
-def check(label, ok, detail=""):
+def check(label: str, ok, detail="") -> None:
     global passed, failed
     if ok:
         passed += 1
@@ -36,7 +36,8 @@ if not node:
     # looked at one.
     print("SKIP node not found, so the dashboard translation audit cannot run",
           flush=True)
-    sys.exit(77)  # helpers.SKIP_EXIT, without importing the e2e helper module
+    # helpers.SKIP_EXIT, without importing the e2e helper module
+    sys.exit(77)
 
 r = subprocess.run([node, AUDIT, ADDONS], capture_output=True, text=True, timeout=120)
 if r.returncode != 0:

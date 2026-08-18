@@ -14,7 +14,8 @@ import helpers as H
 import websockets
 
 
-def _settings_payload(**over):
+def _settings_payload(**over) -> dict:
+    """Build a primary-display SETTINGS payload with overrides applied on top."""
     base = {
         "displayId": "primary", "initialClientWidth": 1280, "initialClientHeight": 720,
         "is_manual_resolution_mode": False, "framerate": 60, "encoder": "h264enc",
@@ -25,11 +26,21 @@ def _settings_payload(**over):
     return base
 
 
-def loglen():
+def loglen() -> int:
     return len(H.server_log())
 
 
-def wait_log_from(mark, substr, timeout=10):
+def wait_log_from(mark: int, substr: str, timeout: float = 10) -> bool:
+    """Poll the server log for a substring appearing at or after an offset.
+
+    Args:
+        mark: Byte offset into the log where the search starts.
+        substr: Substring to wait for.
+        timeout: Seconds to keep polling before giving up.
+
+    Returns:
+        True when the substring appeared, False on timeout.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         txt = H.server_log()
@@ -39,7 +50,8 @@ def wait_log_from(mark, substr, timeout=10):
     return False
 
 
-async def read_ws(ws, seconds):
+async def read_ws(ws, seconds: float) -> None:
+    """Drain incoming websocket messages for up to the given duration."""
     end = time.time() + seconds
     while time.time() < end:
         try:
@@ -50,7 +62,8 @@ async def read_ws(ws, seconds):
             return
 
 
-async def drive():
+async def drive() -> "H.Results":
+    """Run the stop/start, encoder-toggle, and reconnect phases in sequence."""
     uri = f"ws://localhost:{H.PORT}/api/websockets"
     res = H.Results("stress")
     async with websockets.connect(uri, max_size=None) as ws:
@@ -59,7 +72,7 @@ async def drive():
         await asyncio.sleep(3.0)
         await read_ws(ws, 2)
 
-        # Ten stop/start cycles
+        # Phase 1: repeated stop/start cycles must each restart the capture.
         for i in range(10):
             st = loglen()
             await ws.send("STOP_VIDEO")
@@ -73,7 +86,7 @@ async def drive():
         else:
             res.check("10 stop/start cycles all restart", True, "")
 
-        # toggle encoder between h264enc and jpeg repeatedly
+        # Phase 2: encoder toggles must each bring the capture back up.
         for enc in ("jpeg", "h264enc", "openh264enc", "h264enc"):
             st = loglen()
             await ws.send("SETTINGS," + json.dumps(_settings_payload(encoder=enc)))
@@ -82,7 +95,8 @@ async def drive():
             res.check(f"encoder switch to {enc}", ok, H.server_log()[st:][-160:])
             await read_ws(ws, 1)
 
-        # reconnect within grace window: send SETTINGS then quickly disconnect+reconnect
+        # Phase 3: disconnect and reconnect within the grace window; the fresh
+        # client's SETTINGS must still bring the capture up cleanly.
         st = loglen()
         await ws.send("STOP_VIDEO")
         await asyncio.sleep(0.8)
@@ -94,7 +108,7 @@ async def drive():
             await asyncio.sleep(4.0)
             ok = wait_log_from(st, "SUCCESS: Capture started", 10)
             res.check("reconnect captures cleanly", ok, "")
-            # toggling binary clipboard value
+            # A binary-clipboard toggle must be accepted without complaint.
             st = loglen()
             await ws2.send("SETTINGS," + json.dumps(_settings_payload(enable_binary_clipboard=False)))
             await asyncio.sleep(1.5)
@@ -103,7 +117,7 @@ async def drive():
     return res
 
 
-def main():
+def main() -> None:
     H.server_start(mode="websockets", wayland=False)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

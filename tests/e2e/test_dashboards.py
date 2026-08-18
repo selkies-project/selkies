@@ -12,13 +12,19 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 
-def wait_canvas(page, timeout=15):
+def wait_canvas(page, timeout: float = 15):
     return C.wait_ws_video(page, timeout)
 
 
-def classic_open_video(page):
-    # Dashboard sidebar starts closed: open it via the edge toggle-handle first,
-    # then the video section header (sections start closed too).
+def classic_open_video(page) -> bool:
+    """Open the classic dashboard's Video section.
+
+    The sidebar starts closed: open it via the edge toggle-handle first, then
+    the video section header (sections start closed too).
+
+    Returns:
+        True when the Video section header was found and clicked.
+    """
     try:
         page.locator('.toggle-handle').first.click()
         time.sleep(0.8)
@@ -36,7 +42,7 @@ def classic_open_video(page):
     return False
 
 
-def set_range_slider(page, idx, value):
+def set_range_slider(page, idx: int, value) -> None:
     """Set an HTML range input slider by index via native setters + events."""
     page.evaluate("""([idx, value]) => {
       const els = [...document.querySelectorAll('input[type="range"]')];
@@ -50,10 +56,19 @@ def set_range_slider(page, idx, value):
     }""", [idx, value])
 
 
-def dash_block(dashboard, dist):
+def dash_block(dashboard: str, dist: str) -> "H.Results":
+    """Exercise one dashboard's settings loop and mode-switch round trip.
+
+    Args:
+        dashboard: ``classic`` or ``wish``.
+        dist: Path to that dashboard's built web root.
+
+    Returns:
+        The Results accumulator for this dashboard's checks.
+    """
     res = H.Results(f"dash-{dashboard}")
     H.server_start(mode="websockets", wayland=False, web_root=dist)
-    # gates: fixed width so the sidebar content is deterministic
+    # Fixed viewport width keeps the sidebar content deterministic.
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
         ctx = browser.new_context(viewport={"width": 1440, "height": 900},
@@ -70,7 +85,7 @@ def dash_block(dashboard, dist):
         page.goto(H.BASE_URL, wait_until="load")
         time.sleep(9.0)
 
-        # core UI chrome visible (sidebar dashed line)
+        # Core UI chrome must be visible before anything else is driven.
         chrome = page.evaluate("""(() => ({
             body: document.body.innerText.length,
             sidebar: !!document.querySelector('.sidebar, [role="menubar"], .top-menu, .sidebar-container'),
@@ -80,7 +95,7 @@ def dash_block(dashboard, dist):
         info = wait_canvas(page)
         res.check("video streams", info is not None, info)
 
-        # UI-driven framerate change applies server-side
+        # A UI-driven framerate change must apply server-side.
         st = len(H.server_log())
         changed = False
         if dashboard == "classic":
@@ -101,8 +116,9 @@ def dash_block(dashboard, dist):
             except Exception as e:
                 print("classic slider err:", e)
         else:
-            # wish: Settings panel opens via the Settings2 icon in the control strip;
-            # Radix sliders are driven by click-to-focus + arrow keys.
+            # Wish: the Settings panel opens via the Settings2 icon in the
+            # control strip; Radix sliders are driven by click-to-focus plus
+            # arrow keys.
             try:
                 opened = False
                 trig = page.locator('button:has(svg.lucide-settings-2)').first
@@ -111,7 +127,7 @@ def dash_block(dashboard, dist):
                     time.sleep(1.2)
                     opened = page.locator('[role="slider"]').count() > 0
                 if not opened:
-                    # fallback via aria tooltip text
+                    # Fall back to locating the button by its aria tooltip text.
                     page.get_by_role("button", name=lambda n: "settings" in (n or "").lower()).first.click(force=True, timeout=2500)
                     time.sleep(1.2)
                     opened = page.locator('[role="slider"]').count() > 0
@@ -133,7 +149,8 @@ def dash_block(dashboard, dist):
                    or "framerate" in newlog.lower())
         res.check("UI framerate change applied server-side", changed and applied, newlog[-160:])
 
-        # mode switch via dashboard dropdown: websockets <-> webrtc, exact parity loop
+        # Mode switch via the dashboard's own dropdown, then the parity loop
+        # back: websockets to webrtc and back to websockets.
         if dashboard == "classic":
             sel = page.locator('select').first
             if sel.count():
@@ -158,7 +175,7 @@ def dash_block(dashboard, dist):
             s, body = H.curl("/api/switch", method="POST", data={"mode": "webrtc"})
             res.check("mode switch api", s == 200, body[:60])
         time.sleep(6.0)
-        # reconnect page (flip semantics) in webrtc mode and expect video
+        # A fresh page pinned to webrtc must stream after the flip.
         ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'webrtc';")
         page2 = ctx.new_page()
         page2.goto(H.BASE_URL, wait_until="load")
@@ -166,7 +183,7 @@ def dash_block(dashboard, dist):
         res.check("video flows in webrtc after dashboard switch", info2 is not None, info2)
         page2.close()
 
-        # switch back to websockets; page loads and video again
+        # Switch back to websockets; a fresh page must stream again.
         s, body = H.curl("/api/switch", method="POST", data={"mode": "websockets"})
         res.check("mode switch back to websocket api", s == 200, body[:60])
         time.sleep(4.0)
@@ -187,7 +204,7 @@ def dash_block(dashboard, dist):
     return res
 
 
-def gates_block(dashboard, dist):
+def gates_block(dashboard: str, dist: str) -> "H.Results":
     """ui_sidebar_show_shortcuts=false must hide the shortcuts UI on BOTH dashboards."""
     res = H.Results(f"gates-{dashboard}")
     H.server_start(mode="websockets", wayland=False, web_root=dist,
@@ -202,10 +219,10 @@ def gates_block(dashboard, dist):
         page = ctx.new_page()
         page.goto(H.BASE_URL, wait_until="load")
         time.sleep(8.0)
-        # ui_show_sidebar=false: chrome hidden entirely
+        # ui_show_sidebar=false must hide the chrome entirely.
         chrome = page.evaluate("""(() => !!document.querySelector('.sidebar, [role="menubar"], .top-menu, .sidebar-container'))()""")
         res.check("ui_show_sidebar=false hides chrome", not chrome, chrome)
-        # shortcuts hidden when sidebar enabled (run a second boot for this one)
+        # The shortcuts gate needs the sidebar enabled, so it gets its own boot.
         browser.close()
     H.server_start(mode="websockets", wayland=False, web_root=dist,
                    extra_env={"SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false"})
@@ -217,17 +234,19 @@ def gates_block(dashboard, dist):
         page.goto(H.BASE_URL, wait_until="load")
         time.sleep(8.0)
         body = page.evaluate("document.body.innerText")
-        # 'Shortcuts' is a section/menu label in both dashboards.
+        # 'Shortcuts' is a section/menu label in both dashboards, and the label
+        # text shows up in innerText even when the section exists only as a DOM
+        # label, so this catches a section that was merely collapsed.
         has_shortcuts = "Shortcuts" in body
         res.check("ui_sidebar_show_shortcuts=false hides Shortcuts section",
                   not has_shortcuts, has_shortcuts)
-        # shortcuts strings appear even when the section exists only in DOM labels
         browser.close()
     res.summary()
     return res
 
 
-def main():
+def main() -> None:
+    """Run the dashboard blocks named on argv (default: all)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
     if which in ("all", "classic"):

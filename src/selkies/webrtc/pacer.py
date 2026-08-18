@@ -47,43 +47,57 @@ logger = logging.getLogger("selkies_webrtc_pacer")
 # tiny absolute rates and must never queue behind anything else.
 CLASS_RTCP = 0
 CLASS_AUDIO = 0
-CLASS_DC = 1        # data-channel traffic (input, status, clipboard)
-CLASS_VIDEO = 2     # video RTP, RTX and FEC
+# CLASS_DC carries data-channel traffic (input, status, clipboard);
+# CLASS_VIDEO carries video RTP, RTX and FEC.
+CLASS_DC = 1
+CLASS_VIDEO = 2
 # Classes that own a queue: class 0 bypasses the bucket and is never enqueued.
 _QUEUED_CLASSES = (CLASS_DC, CLASS_VIDEO)
 
-PACE_FACTOR = 2.5          # pace above encoder target when the link allows
-BYPASS_RESERVE_BPS = 500_000  # wire share reserved for bypass classes (audio
-                           # + RTCP + DC) when braking from an estimate
-OVERFLOW_RECOVERY_PER_S = 0.25  # AIMD: multiplicative pace recovery (+25%/s)
-                           # in the absence of internal overflow events
-AIMD_FLOOR_FACTOR = 0.35   # brake depth floor (x encoder target): chained
-                           # overflow brakes must never crater the stream into
-                           # a starvation valley that +25%/s takes seconds to
-                           # climb out of
-DEBT_WINDOW_S = 0.005      # burst credit window: how much wire time the bucket
-                           # may hoard. Wider windows let video bursts land
-                           # in front of audio.
-BURST_FLOOR_BYTES = 2048   # floor under the burst budget. Credit saturates at
-                           # the budget, so a budget below one packet leaves
-                           # that packet unaffordable forever; DTLS records here
-                           # are MTU-sized and this keeps headroom above them.
-CAP_MIN_MS = 120           # video queue budget floor, time-denominated
-IDR_FLOOR_FACTOR = 2.2     # IDR-size floor for the video queue budget
-IDR_WINDOW = 4             # rolling window of recent IDR sizes for the floor
+# Pace above the encoder target when the link allows.
+PACE_FACTOR = 2.5
+# Wire share reserved for bypass classes (audio + RTCP + DC) when braking
+# from an estimate.
+BYPASS_RESERVE_BPS = 500_000
+# AIMD: multiplicative pace recovery (+25%/s) in the absence of internal
+# overflow events.
+OVERFLOW_RECOVERY_PER_S = 0.25
+# Brake depth floor (x encoder target): chained overflow brakes must never
+# crater the stream into a starvation valley that +25%/s takes seconds to
+# climb out of.
+AIMD_FLOOR_FACTOR = 0.35
+# Burst credit window: how much wire time the bucket may hoard. Wider windows
+# let video bursts land in front of audio.
+DEBT_WINDOW_S = 0.005
+# Floor under the burst budget. Credit saturates at the budget, so a budget
+# below one packet leaves that packet unaffordable forever; DTLS records here
+# are MTU-sized and this keeps headroom above them.
+BURST_FLOOR_BYTES = 2048
+# Video queue budget floor, time-denominated.
+CAP_MIN_MS = 120
+# IDR-size floor for the video queue budget, over a rolling window of recent
+# IDR sizes.
+IDR_FLOOR_FACTOR = 2.2
+IDR_WINDOW = 4
 KEYREQ_MIN_INTERVAL_S = 0.5
-MIN_PACE_BPS = 100_000     # sanity floor: a 0-goodput feedback window must
-                           # never stall (or divide-by-zero) the scheduler
-DRAIN_MAX_SLEEP_S = 0.05   # defensive cap on drain sleeps; pokes handle the rest
-GOODPUT_WARMUP_S = 5.0     # post-enable grace: ignore goodput braking so the
-                           # first (audio-only/startup) feedback windows cannot
-                           # slam the pace before video even ramps
-RESURRECT_TIMEOUT_S = 1.0  # if no keyframe resurrects a dead GOP within this
-                           # of the last keyreq, resurrect on queue-drain anyway
-DC_HIGH_WATER_BYTES = 2_000_000  # backlog at which data-channel senders block
-DC_LOW_WATER_BYTES = 1_000_000   # backlog at which they are released again
-DC_BLOCK_TIMEOUT_S = 1.0   # cap on one backpressure wait: a wedged wire must
-                           # slow senders, never park them forever
+# Sanity floor: a 0-goodput feedback window must never stall (or
+# divide-by-zero) the scheduler.
+MIN_PACE_BPS = 100_000
+# Defensive cap on drain sleeps; pokes handle the rest.
+DRAIN_MAX_SLEEP_S = 0.05
+# Post-enable grace: ignore goodput braking so the first (audio-only/startup)
+# feedback windows cannot slam the pace before video even ramps.
+GOODPUT_WARMUP_S = 5.0
+# If no keyframe resurrects a dead GOP within this of the last keyreq,
+# resurrect on queue-drain anyway.
+RESURRECT_TIMEOUT_S = 1.0
+# Data-channel backpressure: senders block once the backlog passes the high
+# water mark and are released again below the low water mark.
+DC_HIGH_WATER_BYTES = 2_000_000
+DC_LOW_WATER_BYTES = 1_000_000
+# Cap on one backpressure wait: a wedged wire must slow senders, never park
+# them forever.
+DC_BLOCK_TIMEOUT_S = 1.0
 
 
 def _stale_deadline_s() -> float:
@@ -103,7 +117,8 @@ def _stale_deadline_s() -> float:
 # resulting gap, which costs more delivered-video latency than the freshness it
 # buys on most links. Set SELKIES_WEBRTC_PACER_STALE_MS to enable.
 VIDEO_STALE_S = _stale_deadline_s()
-MIN_GOODPUT_SAMPLE_BYTES = 2048  # near-empty windows carry no rate signal
+# Near-empty windows carry no rate signal.
+MIN_GOODPUT_SAMPLE_BYTES = 2048
 
 SendNow = Callable[[bytes], Awaitable[None]]
 

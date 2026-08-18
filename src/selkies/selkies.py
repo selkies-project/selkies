@@ -1,6 +1,28 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
+"""WebSockets-mode streaming server: the main Selkies application module.
+
+Owns the data WebSocket plane for the websockets transport: per-client
+connection handling (auth/roles, input dispatch, settings), the per-display
+pixelflux video captures with their bounded per-client relays, the shared
+pcmflux Opus audio fan-out (with the all-clients Opus+RED gate), microphone
+forwarding, clipboard/cursor delivery, stats collection, and the display
+layout/reconfiguration engine shared conceptually with the WebRTC transport
+(parity between the two transports, and between X11 and Wayland, is a design
+requirement).
+
+Threading model: one asyncio event loop runs everything control-plane.
+pixelflux/pcmflux deliver frames from their own native threads; those
+callbacks never touch asyncio state directly — they hand zero-copy items to
+the loop via ``call_soon_threadsafe``. Per-client video delivery is bounded
+by ``_VideoRelay`` (drop-and-resync past a byte budget) and audio by a fixed
+queue, so one slow client can never back pressure the shared pipeline.
+Blocking native calls (capture start/stop, geometry reads) run on executor
+threads. The Wayland path is subprocess-free by design: compositor output
+management, DPI-as-output-scale, and cursor sizing all go through the
+in-process pixelflux handle, never through forked tools.
+"""
 import asyncio
 import base64
 import contextlib
@@ -15,6 +37,7 @@ from datetime import datetime
 from enum import Enum
 from shutil import which
 from types import SimpleNamespace
+from typing import Any, Awaitable, Callable, Iterable, Optional, Union
 
 import psutil
 from aiohttp import web, WSMsgType
@@ -141,14 +164,21 @@ IS_WAYLAND = bool(settings.wayland[0])
 # cursor_size setting (SELKIES_CURSOR_SIZE / XCURSOR_SIZE) when explicit;
 # None means "auto" (platform default), which disables every cursor-size
 # override so a later DPI sync never stomps the compositor/DE choice.
-CURSOR_SIZE = settings.cursor_size if settings.cursor_size > 0 else None
+CURSOR_SIZE: Optional[int] = settings.cursor_size if settings.cursor_size > 0 else None
 
 
-def _scaling_dpi_bounds():
-    """Numeric span of the declared scaling_dpi stops. The 's,' DPI verb accepts
-    any value in between (a client's device-pixel ratio need not land on a stop),
-    but never outside it: the DPI is applied to the desktop and, when an explicit
-    cursor size is configured, scales the cursor request with it."""
+def _scaling_dpi_bounds() -> tuple[int, int]:
+    """Numeric span of the declared scaling_dpi stops.
+
+    The 's,' DPI verb accepts any value in between (a client's device-pixel
+    ratio need not land on a stop), but never outside it: the DPI is applied to
+    the desktop and, when an explicit cursor size is configured, scales the
+    cursor request with it.
+
+    Returns:
+        The `(min, max)` DPI bounds, falling back to `(96, 288)` when no stops
+        are declared.
+    """
     definition = next((s for s in SETTING_DEFINITIONS if s['name'] == 'scaling_dpi'), None)
     stops = [float(v) for v in (definition or {}).get('meta', {}).get('allowed', [])]
     return (int(min(stops)), int(max(stops))) if stops else (96, 288)
@@ -201,8 +231,9 @@ except (ImportError, RuntimeError) as e:
         f"pixelflux library unavailable ({e}). Striped encoding modes unavailable."
     )
 
-upload_path = str(getattr(settings, 'file_manager_path', '') or '~/Desktop')
-upload_dir_path = os.path.expanduser(upload_path)
+upload_path: str = str(getattr(settings, 'file_manager_path', '') or '~/Desktop')
+# None when the directory could not be created (uploads disabled).
+upload_dir_path: Optional[str] = os.path.expanduser(upload_path)
 
 try:
     os.makedirs(upload_dir_path, exist_ok=True)
@@ -211,22 +242,33 @@ except OSError as e:
     logger.error(f"Could not create upload directory {upload_dir_path}: {e}")
     upload_dir_path = None
 
-user_tokens = {}
-client_permissions = {}
-active_mk_token = None
+user_tokens: dict[str, dict] = {}
+client_permissions: dict[Any, dict] = {}
+active_mk_token: Optional[str] = None
 
 
-def current_session_tokens():
-    """Live control-plane token view — (user_tokens mapping, active mk-token) — as
-    provisioned via /api/tokens. Both transports authorize input against this."""
+def current_session_tokens() -> tuple[dict[str, dict], Optional[str]]:
+    """Live control-plane token view, as provisioned via /api/tokens.
+
+    Returns:
+        The `(user_tokens mapping, active mk-token)` pair. Both transports
+        authorize input against this.
+    """
     return user_tokens, active_mk_token
 
 
-def _perms_hold_input_authority(perms, token=None):
-    """The single input-authority rule: while an mk token is active only its
-    holder may drive keyboard/mouse (and the commands and clipboard that ride the
-    same gate), otherwise any controller-role client may. `token` covers callers
-    holding a user_tokens entry, which carries no token field of its own."""
+def _perms_hold_input_authority(perms: Optional[dict], token: Optional[str] = None) -> bool:
+    """Apply the single input-authority rule shared by both transports.
+
+    While an mk token is active only its holder may drive keyboard/mouse (and
+    the commands and clipboard that ride the same gate); otherwise any
+    controller-role client may.
+
+    Args:
+        perms: The client's permission entry (may be None or empty).
+        token: Covers callers holding a user_tokens entry, which carries no
+            token field of its own.
+    """
     perms = perms or {}
     if active_mk_token is not None:
         return (perms.get("token") if token is None else token) == active_mk_token
@@ -236,12 +278,29 @@ def _perms_hold_input_authority(perms, token=None):
 # Set by the WebRTC service at init so a token update also reconciles LIVE
 # WebRTC peers (revocation closes them; mk handoffs push over the data
 # channel). reconcile_clients() itself only walks websockets sockets.
-webrtc_reconcile_hook = None
+webrtc_reconcile_hook: Optional[Callable[[], Awaitable[None]]] = None
 
 
-async def _poll_pa_object(list_coro, valid_names, poll_interval=0.1, timeout=2.0):
-    """Poll a PulseAudio list coroutine (sink_list/source_list) until an object
-    with one of valid_names appears (PipeWire creates them asynchronously)."""
+async def _poll_pa_object(
+    list_coro: Callable[[], Awaitable[Iterable[Any]]],
+    valid_names: Iterable[str],
+    poll_interval: float = 0.1,
+    timeout: float = 2.0,
+) -> Optional[Any]:
+    """Poll a PulseAudio list coroutine until a named object appears.
+
+    PipeWire creates sinks/sources asynchronously, so a freshly loaded module's
+    object may not be listed immediately.
+
+    Args:
+        list_coro: A pulsectl list coroutine (sink_list/source_list).
+        valid_names: Object names that count as a match.
+        poll_interval: Seconds between polls.
+        timeout: Total seconds to keep polling.
+
+    Returns:
+        The matching PulseAudio object, or None if it never appeared.
+    """
     for _ in range(int(timeout / poll_interval)):
         for obj in await list_coro():
             if obj.name in valid_names:
@@ -250,7 +309,7 @@ async def _poll_pa_object(list_coro, valid_names, poll_interval=0.1, timeout=2.0
     return None
 
 
-async def ensure_capture_sink(audio_device_name):
+async def ensure_capture_sink(audio_device_name: Optional[str]) -> bool:
     """Make sure the sink whose monitor the server captures exists.
 
     A container's PipeWire or PulseAudio comes up with no sink at all when the
@@ -259,9 +318,14 @@ async def ensure_capture_sink(audio_device_name):
     control plane creates the same sink, but only once a client sends mic data,
     which server-to-client audio must not wait for.
 
-    Best effort: returns True when the sink is present afterwards. A False only
-    means the capture will fail for the usual reasons, so callers proceed and
-    let pcmflux report.
+    Args:
+        audio_device_name: The configured capture device (a `.monitor` suffix
+            is stripped to derive the sink name); falls back to "output".
+
+    Returns:
+        True when the sink is present afterwards. Best effort: a False only
+        means the capture will fail for the usual reasons, so callers proceed
+        and let pcmflux report.
     """
     sink_name = (audio_device_name or "output").strip().split(".monitor")[0]
     if not PULSEAUDIO_AVAILABLE or not sink_name:
@@ -288,21 +352,35 @@ async def ensure_capture_sink(audio_device_name):
             pulse.close()
 
 
-async def provision_virtual_microphone(pulse, audio_device_name, is_pcmflux_capturing):
+async def provision_virtual_microphone(
+    pulse: Any,
+    audio_device_name: Optional[str],
+    is_pcmflux_capturing: bool,
+) -> tuple[Optional[int], bool]:
     """Provision the SelkiesVirtualMic control plane shared by both transports.
 
-    Creates the 'input'/'output' null sinks, loads module-virtual-source bridging
-    input.monitor -> a recordable source, and forces the system default sink/source
-    so an app recording the default source hears the client's forwarded mic. The
-    PCM data plane (pcmflux AudioPlayback into the 'input' sink) belongs to the
-    caller; this is the control plane only.
+    Creates the 'input'/'output' null sinks, loads module-virtual-source
+    bridging input.monitor to a recordable source, and forces the system
+    default sink/source so an app recording the default source hears the
+    client's forwarded mic. The PCM data plane (pcmflux AudioPlayback into the
+    'input' sink) belongs to the caller; this is the control plane only.
 
     Idempotent: an existing SelkiesVirtualMic is reused, so the websockets 0x02
-    mic path and the WebRTC 'input' playback never double-load the module when both
-    are live. Returns (module_index, owns_module); owns_module is True only when
-    THIS call loaded the module, so a caller that merely reused an existing source
-    never unloads it out from under the other transport on teardown. Returns
-    (None, False) when the module load could not be verified.
+    mic path and the WebRTC 'input' playback never double-load the module when
+    both are live.
+
+    Args:
+        pulse: A connected pulsectl_asyncio.PulseAsync client.
+        audio_device_name: The capture device name whose sink half becomes the
+            default output sink.
+        is_pcmflux_capturing: When True, verify pcmflux's source-output is
+            attached to a valid capture target and move it if not.
+
+    Returns:
+        `(module_index, owns_module)`. owns_module is True only when THIS call
+        loaded the module, so a caller that merely reused an existing source
+        never unloads it out from under the other transport on teardown.
+        `(None, False)` when the module load could not be verified.
     """
     virtual_source_name = "SelkiesVirtualMic"
     master_monitor = "input.monitor"
@@ -446,7 +524,7 @@ WS_GZIP_MIN_BYTES = 512
 WS_GZIP_OFFLOAD_BYTES = 512 * 1024
 
 
-def _path_is_within(directory, target):
+def _path_is_within(directory: str, target: str) -> bool:
     """Return True if `target` is `directory` itself or strictly inside it.
 
     Compares on path-segment boundaries via os.path.commonpath rather than a
@@ -461,10 +539,10 @@ def _path_is_within(directory, target):
         return False
 
 
-_background_tasks = set()
+_background_tasks: set[asyncio.Task] = set()
 
 
-def _spawn_background_task(coro, name=None):
+def _spawn_background_task(coro, name: Optional[str] = None) -> asyncio.Task:
     """Run a fire-and-forget coroutine with a strong reference held until it
     finishes: the event loop keeps only weak references, so an unreferenced task
     can be garbage-collected mid-flight."""
@@ -474,7 +552,7 @@ def _spawn_background_task(coro, name=None):
     return task
 
 
-def _close_abandoned_ws(client):
+def _close_abandoned_ws(client: web.WebSocketResponse) -> None:
     """Close a dropped socket in the background: close() can itself block
     draining the same paused transport that stalled the send, so it must
     never run inline on a broadcast path."""
@@ -486,18 +564,32 @@ def _close_abandoned_ws(client):
     _spawn_background_task(_close())
 
 
-async def _broadcast_to_clients(clients, message, per_client_timeout=None):
-    """Broadcast concurrently to all clients - only remove on clear connection errors.
+async def _broadcast_to_clients(
+    clients: set,
+    message: Union[str, bytes, bytearray, memoryview],
+    per_client_timeout: Optional[float] = None,
+) -> set:
+    """Broadcast concurrently to all clients, removing only on clear connection errors.
 
-    When per_client_timeout is set, a client whose send stalls past the bound is
-    treated as dead: the send is cancelled and the socket is dropped and closed. A
-    cancelled send_str may have left a half-written frame on the wire, so that socket
-    must never be reused for later sends.
+    When per_client_timeout is set, a client whose send stalls past the bound
+    is treated as dead: the send is cancelled and the socket is dropped and
+    closed. A cancelled send_str may have left a half-written frame on the
+    wire, so that socket must never be reused for later sends.
 
-    Returns the set of clients dropped by this call. Removal mutates the PASSED
-    collection, so callers that fan out over a computed temporary set (the media
-    senders) must subtract the returned set from their authoritative registry
-    themselves — otherwise the dead socket re-enters the very next per-frame set."""
+    Args:
+        clients: The socket set to fan out over; dead sockets are removed from
+            it in place.
+        message: Text control message, or raw bytes for binary frames.
+        per_client_timeout: Per-send liveness bound in seconds; None sends
+            unbounded.
+
+    Returns:
+        The set of clients dropped by this call. Removal mutates the PASSED
+        collection, so callers that fan out over a computed temporary set (the
+        media senders) must subtract the returned set from their authoritative
+        registry themselves — otherwise the dead socket re-enters the very next
+        per-frame set.
+    """
     if not clients:
         return set()
 
@@ -658,26 +750,27 @@ class _VideoRelay:
                  'backlog_bytes', 'live_rows', 'stopped', '_wake', '_task',
                  '_next_sync_req')
 
-    def __init__(self, server, display_id, ws, budget):
+    def __init__(self, server: "DataStreamingServer", display_id: str,
+                 ws: web.WebSocketResponse, budget: int) -> None:
         self.server = server
         self.display_id = display_id
         self.ws = ws
         self.budget = budget
-        self.backlog = deque()
+        self.backlog: deque = deque()
         self.backlog_bytes = 0
         # Rows whose IDR was accepted into the current (uncleared) backlog:
         # only their delta chunks are chain-continuous for this client.
-        self.live_rows = set()
+        self.live_rows: set[int] = set()
         self.stopped = False
         self._wake = asyncio.Event()
-        self._task = None
+        self._task: Optional[asyncio.Task] = None
         self._next_sync_req = 0.0
 
-    def start(self):
+    def start(self) -> None:
         self._task = asyncio.create_task(
             self._run(), name=f"VideoRelay:{self.display_id}")
 
-    def stop(self):
+    def stop(self) -> None:
         """Graceful: an in-flight send completes — cancelling mid-frame would
         tear the websocket framing on a socket that stays open for control."""
         self.stopped = True
@@ -685,7 +778,7 @@ class _VideoRelay:
         self.backlog_bytes = 0
         self._wake.set()
 
-    def flush_for_gate(self):
+    def flush_for_gate(self) -> None:
         """ACK backpressure engaged: drop the undrained backlog and gate every
         row, so the client resumes only at the IDR that
         _set_backpressure_enabled requests when the gate lifts."""
@@ -694,17 +787,27 @@ class _VideoRelay:
             self.backlog_bytes = 0
             self.live_rows.clear()
 
-    def _want_sync(self):
+    def _want_sync(self) -> bool:
+        """Rate-limit this relay's keyframe (re)requests to the sync floor."""
         now = time.monotonic()
         if now >= self._next_sync_req:
             self._next_sync_req = now + VIDEO_RELAY_SYNC_FLOOR_SECONDS
             return True
         return False
 
-    def offer(self, item):
-        """Accept, drop, or gate one encoded chunk. Runs on the event loop and
-        never awaits. Returns True when the caller should request a keyframe
-        (data was dropped that only a sync point recovers)."""
+    def offer(self, item: dict) -> bool:
+        """Accept, drop, or gate one encoded chunk.
+
+        Runs on the event loop and never awaits.
+
+        Args:
+            item: The fan-out item (`data` memoryview, `owner` frame,
+                `frame_id`).
+
+        Returns:
+            True when the caller should request a keyframe (data was dropped
+            that only a sync point recovers).
+        """
         data = item['data']
         size = len(data)
         is_h264 = size >= 10 and data[0] == 0x04
@@ -730,7 +833,8 @@ class _VideoRelay:
             self._wake.set()
         return dropped and self._want_sync()
 
-    async def _run(self):
+    async def _run(self) -> None:
+        """Drain the backlog onto the socket until stopped or the socket dies."""
         try:
             while True:
                 if self.stopped:
@@ -777,21 +881,31 @@ class _VideoRelay:
 
 
 class SelkiesAppError(Exception):
-    pass
+    """Application-level error raised for unrecoverable streaming conditions."""
 
 class RateControlMode(str, Enum):
+    """H.264 rate-control mode: constant bitrate or constant quality (CRF)."""
     CBR = "cbr"
     CRF = "crf"
 
 class SelkiesStreamingApp:
+    """Session-level streaming state shared across transports.
+
+    Holds the display geometry, encoder/framerate/bitrate defaults, and the
+    clipboard/cursor delivery helpers that broadcast over the data websocket.
+    The heavy lifting (captures, relays, reconfiguration) lives in
+    DataStreamingServer; this object is the small shared surface that the
+    input handler and both transports address.
+    """
+
     def __init__(
         self,
-        async_event_loop,
-        framerate,
-        encoder,
-        data_streaming_server=None,
-        mode="websockets",
-    ):
+        async_event_loop: asyncio.AbstractEventLoop,
+        framerate: int,
+        encoder: str,
+        data_streaming_server: Optional["DataStreamingServer"] = None,
+        mode: str = "websockets",
+    ) -> None:
         self.server_enable_resize = ENABLE_RESIZE
         self.mode = mode
         # Fallback geometry for capture paths that run before any client has
@@ -819,16 +933,25 @@ class SelkiesStreamingApp:
         self.last_cursor_sent = None
         self.data_streaming_server = data_streaming_server
 
-    async def send_ws_clipboard_data(self, data, mime_type="text/plain", reply_to=None):
-        """
-        Asynchronously sends clipboard data to all clients, handling multipart for large data.
+    async def send_ws_clipboard_data(
+        self,
+        data: Union[str, bytes],
+        mime_type: str = "text/plain",
+        reply_to: Optional[str] = None,
+    ) -> None:
+        """Send clipboard data to all clients, multipart for large payloads.
 
-        reply_to: set to the requesting verb (e.g. "cr") when this send answers a
-        client fetch rather than announcing a server-side clipboard change. A
-        "clipboard_reply,<verb>" frame then precedes the payload frames on the
-        same ordered socket, so clients can treat the payload cache-only without
-        time heuristics. Legacy clients route the unknown verb to their input
-        module, which ignores it.
+        Args:
+            data: Clipboard text (str) or binary payload (bytes).
+            mime_type: The payload's MIME type; anything but "text/plain" is
+                treated as binary and gated on enable_binary_clipboard.
+            reply_to: Set to the requesting verb (e.g. "cr") when this send
+                answers a client fetch rather than announcing a server-side
+                clipboard change. A `clipboard_reply,<verb>` frame then
+                precedes the payload frames on the same ordered socket, so
+                clients can treat the payload cache-only without time
+                heuristics. Legacy clients route the unknown verb to their
+                input module, which ignores it.
         """
         if not (self.data_streaming_server and self.data_streaming_server.clients):
             data_logger.warning("Cannot send clipboard: no clients or server not ready.")
@@ -872,7 +995,14 @@ class SelkiesStreamingApp:
         except Exception as e:
             data_logger.error(f"Failed to send clipboard data: {e}", exc_info=True)
 
-    def send_ws_cursor_data(self, data):
+    def send_ws_cursor_data(self, data: dict) -> None:
+        """Broadcast a cursor-change payload to all clients.
+
+        Thread-safe: called from pixelflux's cursor thread, so the broadcast is
+        scheduled onto the event loop via run_coroutine_threadsafe rather than
+        awaited. The payload is also cached as last_cursor_sent so late-joining
+        clients receive the current cursor at connect.
+        """
         self.last_cursor_sent = data
         if (
             self.data_streaming_server
@@ -898,7 +1028,8 @@ class SelkiesStreamingApp:
         else:
             data_logger.warning("Cannot broadcast cursor data: no clients connected or server not ready.")
 
-    async def stop_pipeline(self):
+    async def stop_pipeline(self) -> None:
+        """Stop all pipelines by reconciling displays against current state."""
         logger_app.info("Stopping pipelines (generic call)...")
         if self.data_streaming_server:
             await self.data_streaming_server.reconfigure_displays()
@@ -907,7 +1038,8 @@ class SelkiesStreamingApp:
 
     stop_ws_pipeline = stop_pipeline
 
-    def set_framerate(self, framerate):
+    def set_framerate(self, framerate: Union[int, float]) -> None:
+        """Store the session default framerate; applies at the next pipeline (re)start."""
         self.framerate = int(framerate)
         logger_app.info(
             f"Framerate for {self.encoder} set to {self.framerate}. Restart pipeline if active."
@@ -915,14 +1047,28 @@ class SelkiesStreamingApp:
 
 
 class DataStreamingServer(BaseStreamingService):
-    """Handles the data WebSocket connection for input, stats, and control messages."""
+    """The websockets-transport streaming service.
 
-    def __init__(self, supervisor = None):
+    Owns the data WebSocket plane end to end: connection auth and roles,
+    input/settings/control dispatch, per-display pixelflux captures with their
+    per-client `_VideoRelay` fan-out, ACK-driven backpressure, the shared
+    pcmflux audio broadcast (with its all-clients Opus+RED gate), microphone
+    forwarding, stats collectors, and the display layout/reconfiguration
+    engine (X11 xrandr monitors or Wayland compositor outputs).
+
+    Concurrency contracts: `_reconfigure_lock` serializes reconfiguration and
+    audio pipeline start/stop (with `_reconfigure_pending` coalescing requests
+    that arrive during a hold); `_video_capture_lock` serializes per-display
+    capture start/stop underneath it. Native capture objects are persistent
+    per display so restarts keep the encoder backend warm.
+    """
+
+    def __init__(self, supervisor: Optional[Any] = None) -> None:
         super().__init__("websockets")
-        self.data_ws = (
+        self.data_ws: Optional[web.WebSocketResponse] = (
             None
         )
-        self.clients = set()
+        self.clients: set[web.WebSocketResponse] = set()
         self.app = None
         self.cli_args = settings
         self.is_secure_mode = False
@@ -948,8 +1094,8 @@ class DataStreamingServer(BaseStreamingService):
         self._shutdown_called = False
         self.supervisor = supervisor
         
-        def get_initial_value(setting_name):
-            """Helper to get the correct initial integer/bool from a processed setting."""
+        def get_initial_value(setting_name: str):
+            """Get the correct initial integer/bool from a processed setting."""
             processed_value = getattr(self.cli_args, setting_name)
             setting_def = next((s for s in SETTING_DEFINITIONS if s['name'] == setting_name), None)
             if not setting_def: return None
@@ -1090,10 +1236,13 @@ class DataStreamingServer(BaseStreamingService):
         self._is_wm_swapped = False
         self._wm_swap_is_supported = None
 
-    def initialize(self):
-        """
-        Initialize the DataStreamingServer components including SelkiesStreamingApp and InputHandler.
-        This should be called before run().
+    def initialize(self) -> None:
+        """Create the SelkiesStreamingApp and InputHandler and wire their callbacks.
+
+        Must be called before run(). Also resolves secure vs legacy mode (a set
+        master token locks the encoder to h264enc and closes the config gate
+        until tokens are provisioned) and installs the WebRTC-dialect live
+        verbs so both transports honor the same per-key tunables.
         """
         self.is_secure_mode = bool(self.cli_args.master_token)
         if self.is_secure_mode:
@@ -1202,11 +1351,13 @@ class DataStreamingServer(BaseStreamingService):
             )
         logger.info("DataStreamingServer initialization complete.")
 
-    async def set_native_cursor_rendering(self, enabled: bool):
-        """Compose the X cursor into the captured video (vs the client-drawn
-        overlay); applies to every display's capture. Reached both from the
+    async def set_native_cursor_rendering(self, enabled: bool) -> None:
+        """Compose the cursor into the captured video (vs the client-drawn overlay).
+
+        Applies to every display's capture. Reached both from the
         SET_NATIVE_CURSOR_RENDERING message and the shared input protocol's
-        pointer-visibility toggle ("p,N"), which map to the same tunable."""
+        pointer-visibility toggle ("p,N"), which map to the same tunable.
+        """
         if self.capture_cursor == enabled:
             data_logger.info(f"Native cursor rendering: value {enabled} is already set.")
             return
@@ -1215,19 +1366,23 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.info("Cursor rendering changed, triggering display reconfiguration.")
             await self.reconfigure_displays()
 
-    def _opcode_display_module(self, display_id):
+    def _opcode_display_module(self, display_id: str) -> Optional[Any]:
+        """The display's live ScreenCapture module, or None if not capturing."""
         inst = self.capture_instances.get(display_id)
         return inst.get('module') if inst else None
 
-    def _track_capture_settings(self, display_id, fresh=None, **live_fields):
-        """Record what the display's running capture is actually configured with:
-        pass `fresh` after rebuilding the whole settings object, or individual
+    def _track_capture_settings(self, display_id: str, fresh: Optional[Any] = None,
+                                **live_fields: Any) -> None:
+        """Record what the display's running capture is actually configured with.
+
+        Pass `fresh` after rebuilding the whole settings object, or individual
         fields after a targeted rate update.
 
         The tracked object is what _video_relay_budget sizes new relays from and
         what a layout-following reconfigure re-pushes to the module, so a live
         change that skipped it would be applied to the encoder and then silently
-        reverted."""
+        reverted.
+        """
         inst = self.capture_instances.get(display_id)
         if inst is None:
             return
@@ -1240,7 +1395,7 @@ class DataStreamingServer(BaseStreamingService):
         for name, value in live_fields.items():
             setattr(cs, name, value)
 
-    async def _handle_opcode_fps(self, fps, display_id='primary'):
+    async def _handle_opcode_fps(self, fps: Any, display_id: str = 'primary') -> None:
         """Live framerate for the shared '_arg_fps' verb (WebRTC-mode parity):
         sanitize against the server range, store, and live-update the display's
         capture; a stopped display applies the new rate at its next START_VIDEO."""
@@ -1264,7 +1419,7 @@ class DataStreamingServer(BaseStreamingService):
             except Exception as e:
                 data_logger.warning(f"Live framerate update failed for '{display_id}' ({e}).")
 
-    async def _handle_opcode_video_bitrate(self, bitrate, display_id="primary"):
+    async def _handle_opcode_video_bitrate(self, bitrate: Any, display_id: str = "primary") -> None:
         """Live video bitrate (kbps) for the 'vb' verb, sanitized exactly like
         the SETTINGS path so locked server ranges cannot be bypassed."""
         sanitized = sanitize_client_setting("video_bitrate", bitrate, self.cli_args, data_logger)
@@ -1287,7 +1442,7 @@ class DataStreamingServer(BaseStreamingService):
             except Exception as e:
                 data_logger.warning(f"Live bitrate update failed for '{display_id}' ({e}).")
 
-    async def _handle_opcode_audio_bitrate(self, bitrate):
+    async def _handle_opcode_audio_bitrate(self, bitrate: Any) -> None:
         """Live Opus bitrate (bps) for the 'ab' verb; same live-retarget with
         restart fallback as the SETTINGS path."""
         sanitized = sanitize_client_setting("audio_bitrate", bitrate, self.cli_args, data_logger)
@@ -1312,7 +1467,7 @@ class DataStreamingServer(BaseStreamingService):
                         await self._stop_pcmflux_pipeline()
                         await self._start_pcmflux_pipeline()
 
-    async def _handle_opcode_rate_control(self, mode, display_id='primary'):
+    async def _handle_opcode_rate_control(self, mode: Any, display_id: str = 'primary') -> None:
         """Rate-control switch for the '_rc' verb: structural like the SETTINGS
         path (the encoder session must be rebuilt), honoring the server's
         enable_rate_control lock and a stopped display's start gating."""
@@ -1361,7 +1516,7 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.warning(f"Rate-control restart failed for '{display_id}'; falling back to full reconfiguration.")
             await self.reconfigure_displays()
 
-    async def _handle_opcode_crf(self, crf, display_id='primary'):
+    async def _handle_opcode_crf(self, crf: Any, display_id: str = 'primary') -> None:
         """Live CRF for the '_crf' verb; rides the tunables path like SETTINGS."""
         sanitized = sanitize_client_setting("video_crf", crf, self.cli_args, data_logger)
         if sanitized is None:
@@ -1382,8 +1537,8 @@ class DataStreamingServer(BaseStreamingService):
             except Exception as e:
                 data_logger.warning(f"Live CRF update failed for '{display_id}' ({e}).")
 
-    async def broadcast_display_config(self):
-        """Broadcasts the current display configuration to all clients."""
+    async def broadcast_display_config(self) -> None:
+        """Broadcast the current display roster to all clients."""
         if not self.clients:
             return
         
@@ -1398,7 +1553,8 @@ class DataStreamingServer(BaseStreamingService):
         # Bounded: callers hold _reconfigure_lock.
         await _broadcast_to_clients(self.clients, message_str, per_client_timeout=2.0)
 
-    def refresh_cursor_cache(self):
+    def refresh_cursor_cache(self) -> Optional[dict]:
+        """Refresh and return the cached cursor payload for late-joining clients."""
         if not self.app:
             return None
 
@@ -1411,7 +1567,8 @@ class DataStreamingServer(BaseStreamingService):
 
         return self.app.last_cursor_sent
 
-    async def send_current_cursor(self, websocket, raddr):
+    async def send_current_cursor(self, websocket: web.WebSocketResponse, raddr: Any) -> None:
+        """Send the current cursor image to one client (used at connect/resume)."""
         cursor_data = self.refresh_cursor_cache()
         if not cursor_data:
             return
@@ -1423,9 +1580,13 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e:
             data_logger.warning(f"Failed to send current cursor to client {raddr}: {e}")
 
-    def _pcmflux_audio_callback(self, frame):
-        """
-        Callback passed to pcmflux, called from its capture thread with an AudioFrame.
+    def _pcmflux_audio_callback(self, frame: Any) -> None:
+        """Queue one encoded audio frame for broadcast.
+
+        Called from pcmflux's capture thread with an AudioFrame, so it never
+        touches asyncio state directly: the enqueue is scheduled onto the loop
+        with call_soon_threadsafe, and loop/queue references are snapshotted
+        because teardown can null them concurrently.
         """
         if self.is_pcmflux_capturing and frame is not None and self.pcmflux_audio_queue is not None:
             if len(frame) > 0:
@@ -1452,9 +1613,12 @@ class DataStreamingServer(BaseStreamingService):
                     # Loop closed mid-teardown: drop the chunk.
                     pass
     
-    async def _pcmflux_send_audio_chunks(self):
-        """
-        Async task to broadcast Opus audio chunks from the queue to WebSocket clients.
+    async def _pcmflux_send_audio_chunks(self) -> None:
+        """Broadcast queued Opus audio chunks to the primary-viewer sockets.
+
+        Runs as a long-lived task. Secondary-display sockets are excluded (they
+        render video only; audio rides the primary connection), and sends are
+        bounded so one stalled socket cannot freeze the shared stream.
         """
         data_logger.info("pcmflux audio chunk broadcasting task started.")
         try:
@@ -1494,14 +1658,21 @@ class DataStreamingServer(BaseStreamingService):
         finally:
             data_logger.info("pcmflux audio chunk broadcasting task finished.")
 
-    def _compute_audio_red_distance(self):
-        """RED distance for the shared audio broadcast. WS is TCP, but the sender still
-        drops frames under backpressure (pcmflux delivery ring drop-oldest, and this
-        server's audio queue drops on overflow), and RED lets the client recover those
-        within the redundancy distance. Enabled only when the server allows it AND there
-        is at least one client AND every connected client advertised audioRedundancy; a
-        single non-capable (or legacy, field-absent) client falls the whole stream back
-        to plain frames (0), which decodes everywhere."""
+    def _compute_audio_red_distance(self) -> int:
+        """RED distance for the shared audio broadcast.
+
+        WS is TCP, but the sender still drops frames under backpressure
+        (pcmflux delivery ring drop-oldest, and this server's audio queue drops
+        on overflow), and RED lets the client recover those within the
+        redundancy distance.
+
+        Returns:
+            The configured distance only when the server allows it AND there is
+            at least one client AND every connected client advertised
+            audioRedundancy; otherwise 0 (plain frames, which decode
+            everywhere) — a single non-capable or legacy (field-absent) client
+            falls the whole stream back.
+        """
         if not self.audio_redundancy_enabled:
             return 0
         if not self.clients:
@@ -1511,7 +1682,7 @@ class DataStreamingServer(BaseStreamingService):
                 return 0
         return getattr(settings, "audio_redundancy_distance", AUDIO_RED_DISTANCE)
 
-    async def _regate_audio_redundancy(self):
+    async def _regate_audio_redundancy(self) -> None:
         """Recompute the RED gate for the shared audio stream and, if it flipped
         while capturing, restart the pipeline so the new red_distance takes
         effect. Callers hold the reconfigure guard (pipeline start/stop must be
@@ -1534,7 +1705,18 @@ class DataStreamingServer(BaseStreamingService):
         await self._stop_pcmflux_pipeline()
         await self._start_pcmflux_pipeline()
 
-    async def _start_pcmflux_pipeline(self):
+    async def _start_pcmflux_pipeline(self) -> bool:
+        """Start the pcmflux audio capture and the shared broadcast task.
+
+        Resolves the RED distance for the current client set at start, so a
+        gate change while running requires a restart (see
+        _regate_audio_redundancy). Callers serialize via the reconfigure guard.
+
+        Returns:
+            True when capturing afterwards (already-running counts); False when
+            audio is disabled, pcmflux is unavailable, or the start failed (a
+            partial start is cleaned up).
+        """
         if not settings.audio_enabled[0]:
             data_logger.info("Audio is disabled by server settings. Not starting pipeline.")
             return False
@@ -1604,7 +1786,12 @@ class DataStreamingServer(BaseStreamingService):
             await self._stop_pcmflux_pipeline()
             return False
 
-    async def _stop_pcmflux_pipeline(self):
+    async def _stop_pcmflux_pipeline(self) -> bool:
+        """Stop the audio capture and broadcast task; idempotent.
+
+        The capturing flag is cleared first so the capture-thread callback
+        stops queueing chunks before the queue is dropped.
+        """
         if not self.is_pcmflux_capturing and not self.pcmflux_module:
             return True
         
@@ -1636,19 +1823,17 @@ class DataStreamingServer(BaseStreamingService):
         data_logger.info("pcmflux audio pipeline stopped.")
         return True
 
-    async def shutdown_pipelines(self):
-        """
-        A unified, deadlock-proof method to stop all capture pipelines.
-        This should be the ONLY way pipelines are programmatically stopped.
+    async def shutdown_pipelines(self) -> None:
+        """Stop all capture pipelines; the ONLY way pipelines are stopped programmatically.
+
+        Deadlock-proof by construction: reconfigure_displays() self-acquires
+        the reconfigure lock, so it runs first and outside the guard; the
+        audio/backpressure teardown then runs under the guard (a
+        disconnect/connect race could otherwise tear down audio a new client
+        just started), and none of the awaited teardowns re-acquire the lock.
         """
         logger.info("Initiating unified pipeline shutdown...")
         await self.reconfigure_displays()
-        # Serialize the audio/backpressure teardown against reconfigure: a
-        # disconnect/connect race could otherwise let this tear down audio a new
-        # client just started. The guard is NOT held at this call site, and none
-        # of the awaited teardowns re-acquire the reconfigure lock, so this is
-        # deadlock-free. reconfigure_displays() above self-acquires the lock, so
-        # it must stay outside this block.
         async with self._reconfigure_guard():
             await self._stop_pcmflux_pipeline()
             if self.display_clients:
@@ -1665,11 +1850,19 @@ class DataStreamingServer(BaseStreamingService):
                     pass
         logger.info("Unified pipeline shutdown complete.")
 
-    async def _ensure_backpressure_task_is_stopped(self, display_id: str, notify: bool = True):
-        """Safely cancels and cleans up the backpressure task for a specific display.
-        Returns whether the pipeline-reset notification was sent, so callers that
-        must guarantee a reset (capture stop) can send it exactly once themselves
-        when no task was running."""
+    async def _ensure_backpressure_task_is_stopped(self, display_id: str, notify: bool = True) -> bool:
+        """Cancel and clean up the backpressure task for a specific display.
+
+        Args:
+            display_id: The display whose task to stop.
+            notify: When True and a task was actually running, reset the frame
+                ids and notify the client(s).
+
+        Returns:
+            Whether the pipeline-reset notification was sent, so callers that
+            must guarantee a reset (capture stop) can send it exactly once
+            themselves when no task was running.
+        """
         display_state = self.display_clients.get(display_id)
         if not display_state:
             return False
@@ -1697,10 +1890,15 @@ class DataStreamingServer(BaseStreamingService):
             return True
         return False
 
-    async def _reset_frame_ids_and_notify(self, display_id: str):
-        """
-        Resets frame IDs for a display. If it's the primary display,
-        it broadcasts the reset to ALL clients.
+    async def _reset_frame_ids_and_notify(self, display_id: str) -> None:
+        """Reset a display's frame-id state and send PIPELINE_RESETTING.
+
+        For the primary display the reset is broadcast to ALL clients (shared
+        viewers decode the same stream); a secondary notifies only its own
+        socket. Every id-keyed artifact (send stamps, RTT samples, the fps
+        estimator's baseline) resets with the numbering, since a stale stamp
+        matched by a NEW id of the same value manufactures a giant RTT sample
+        that poisons the smoothed estimate.
         """
         display_state = self.display_clients.get(display_id)
         if not display_state:
@@ -1710,10 +1908,8 @@ class DataStreamingServer(BaseStreamingService):
         display_state['last_sent_frame_id'] = 0
         display_state['has_sent_any_frame'] = False
         display_state['acknowledged_frame_id'] = -1
-        # Frame numbering restarts at 0, so every artifact keyed by id must go
-        # with it: a stale send stamp matched by a NEW id of the same value
-        # manufactures a giant RTT "sample" that poisons the smoothed estimate
-        # (and with it the backpressure forgiveness and the dashboard latency).
+        # Id-keyed artifacts go with the numbering (see the docstring): a stale
+        # stamp would otherwise skew backpressure forgiveness and the dashboard.
         sent_ts = display_state.get('sent_timestamps')
         if sent_ts is not None:
             sent_ts.clear()
@@ -1753,8 +1949,8 @@ class DataStreamingServer(BaseStreamingService):
         display_state['backpressure_enabled'] = True
         display_state['last_ack_update_time'] = time.monotonic()
 
-    async def _start_backpressure_task_if_needed(self, display_id: str):
-        """Starts the backpressure task for a specific display if not already running.
+    async def _start_backpressure_task_if_needed(self, display_id: str) -> None:
+        """Start the backpressure task for a specific display if not already running.
         Backend-agnostic: frame ids, ACKs, and RTT flow identically on Wayland."""
         display_state = self.display_clients.get(display_id)
         if not display_state:
@@ -1774,12 +1970,17 @@ class DataStreamingServer(BaseStreamingService):
         else:
             data_logger.warning(f"Backpressure task for '{display_id}' was already running. Not starting a new one.")
 
-    def _active_primary_consumers(self, exclude=None):
-        """Sockets still consuming the primary broadcast: every client except the
-        secondary displays' owners, minus the paused ones. A paused viewer with a
-        deferred rejoin pending counts as active — it keeps the capture alive under
-        a waking viewer, while genuinely hidden ones let an all-tabs-hidden session
-        stop encoding. `exclude` drops the socket whose STOP_VIDEO is in flight."""
+    def _active_primary_consumers(self, exclude: Optional[web.WebSocketResponse] = None) -> set:
+        """Sockets still consuming the primary broadcast.
+
+        Every client except the secondary displays' owners, minus the paused
+        ones. A paused viewer with a deferred rejoin pending counts as active —
+        it keeps the capture alive under a waking viewer, while genuinely
+        hidden ones let an all-tabs-hidden session stop encoding.
+
+        Args:
+            exclude: Drops the socket whose STOP_VIDEO is in flight.
+        """
         secondary_ws = {
             info.get('ws')
             for did, info in self.display_clients.items()
@@ -1791,14 +1992,14 @@ class DataStreamingServer(BaseStreamingService):
             consumers.discard(exclude)
         return consumers
 
-    def _primary_reconnect_pending(self):
+    def _primary_reconnect_pending(self) -> bool:
         """Whether the primary display entry is being held for a socket that is
         already gone: the reconnect grace keeps the capture warm so a reloading
         page resumes on it instead of paying a full pipeline rebuild."""
         entry = self.display_clients.get('primary')
         return entry is not None and entry.get('ws') not in self.clients
 
-    async def _stop_primary_if_unconsumed(self, reason: str):
+    async def _stop_primary_if_unconsumed(self, reason: str) -> None:
         """Stop the primary capture once nothing decodes it — the last unpaused
         consumer hid its tab or disconnected. Hiding and disconnecting take the
         same verdict here; only a pending reconnect grace keeps the capture warm.
@@ -1814,7 +2015,7 @@ class DataStreamingServer(BaseStreamingService):
             primary_entry['video_active'] = False
         await self._stop_capture_for_display('primary')
 
-    def _cancel_deferred_rejoin(self, websocket):
+    def _cancel_deferred_rejoin(self, websocket: web.WebSocketResponse) -> None:
         """Drop a pending deferred rejoin for this socket. A STOP_VIDEO (or a
         disconnect) arriving after a throttled resume supersedes it: the rejoin
         would otherwise un-pause a tab that is hidden again, and the socket would
@@ -1823,7 +2024,7 @@ class DataStreamingServer(BaseStreamingService):
         if rejoin_task is not None:
             rejoin_task.cancel()
 
-    def _schedule_deferred_viewer_rejoin(self, websocket, delay: float):
+    def _schedule_deferred_viewer_rejoin(self, websocket: web.WebSocketResponse, delay: float) -> None:
         """Rejoin a rapid-resume-throttled viewer once the resume floor passes.
         The client already believes it resumed, so a silent discard would leave
         the socket paused until its stall watchdog; at most one deferred rejoin
@@ -1855,13 +2056,19 @@ class DataStreamingServer(BaseStreamingService):
         self._deferred_viewer_rejoins[websocket] = asyncio.create_task(_rejoin())
 
     def _video_relay_budget(self, display_id: str, fallback: int) -> int:
-        """Skip-ahead byte budget for one client's video relay:
+        """Skip-ahead byte budget for one client's video relay.
+
         VIDEO_RELAY_BUDGET_SECONDS of stream at the display's CURRENT
         configured bitrate (1 kbps = 125 B/s), floored so low-bitrate streams
         keep absorbing transport jitter. Read from the live capture settings
         at relay creation so in-place restarts (settings changes that reuse
-        the capture callback) are honored; `fallback` covers the start window
-        before capture_instances is registered."""
+        the capture callback) are honored.
+
+        Args:
+            display_id: The display whose configured bitrate sizes the budget.
+            fallback: Covers the start window before capture_instances is
+                registered.
+        """
         inst = self.capture_instances.get(display_id)
         cs = inst.get('settings') if inst else None
         if cs is None:
@@ -1870,7 +2077,7 @@ class DataStreamingServer(BaseStreamingService):
         return max(VIDEO_RELAY_BUDGET_MIN_BYTES,
                    int(kbps * 125 * VIDEO_RELAY_BUDGET_SECONDS))
 
-    def _close_video_relays(self, display_id: str):
+    def _close_video_relays(self, display_id: str) -> None:
         """Stop every per-client video relay for this display. Graceful: each
         relay finishes its in-flight send and its task removes itself."""
         group = self.video_relay_groups.pop(display_id, None)
@@ -1878,7 +2085,7 @@ class DataStreamingServer(BaseStreamingService):
             for relay in list(group.values()):
                 relay.stop()
 
-    def _schedule_idr_for_display(self, display_id: str):
+    def _schedule_idr_for_display(self, display_id: str) -> None:
         """Ask the encoder for a fresh keyframe on this display, off the event loop."""
         instance = self.capture_instances.get(display_id)
         module = instance.get('module') if instance else None
@@ -1890,12 +2097,17 @@ class DataStreamingServer(BaseStreamingService):
             except Exception:
                 pass
 
-    def _second_screen_availability(self):
-        """Whether this session can actually attach a second display, and the
-        reason when it cannot. The admin flag gates first; past it, X11 and the
-        self-composited Wayland backend mint another output on demand, while
-        host capture is bounded by the host compositor's real output count
-        (unknown until the first capture start establishes the host session)."""
+    def _second_screen_availability(self) -> tuple[bool, str]:
+        """Whether this session can actually attach a second display.
+
+        The admin flag gates first; past it, X11 and the self-composited
+        Wayland backend mint another output on demand, while host capture is
+        bounded by the host compositor's real output count (unknown until the
+        first capture start establishes the host session).
+
+        Returns:
+            `(available, reason)`; the reason is empty when available.
+        """
         enabled, _ = self.cli_args.second_screen
         if not enabled:
             return False, "Second screens are disabled on this server."
@@ -1908,10 +2120,13 @@ class DataStreamingServer(BaseStreamingService):
             return False, "The host compositor has a single output, so a second display has nothing to capture."
         return True, ""
 
-    async def _refresh_second_screen_capacity(self):
+    async def _refresh_second_screen_capacity(self) -> bool:
         """Host-capture mode only: re-read how many outputs the host exposes.
-        True when the answer changed, i.e. the second-screen availability that
-        clients were told may have flipped."""
+
+        Returns:
+            True when the answer changed, i.e. the second-screen availability
+            that clients were told may have flipped.
+        """
         if not IS_WAYLAND or not (self.cli_args.wayland_host_display or '').strip():
             return False
         module = self._wayland_control_module()
@@ -1952,7 +2167,7 @@ class DataStreamingServer(BaseStreamingService):
             payload['second_screen'] = dict(entry, value=False)
         return payload
 
-    async def _broadcast_live_server_settings(self, display_id: str):
+    async def _broadcast_live_server_settings(self, display_id: str) -> None:
         """Re-announce server settings after the given display changed its live encoder.
 
         The handshake payload holds boot config only, so every connected client —
@@ -2001,7 +2216,7 @@ class DataStreamingServer(BaseStreamingService):
             for ws in dropped:
                 self.clients.discard(ws)
 
-    def _set_backpressure_enabled(self, display_id: str, display_state: dict, enabled: bool):
+    def _set_backpressure_enabled(self, display_id: str, display_state: dict, enabled: bool) -> None:
         """Update the backpressure flag, requesting an IDR when it lifts.
 
         While backpressure was active, delta frames were dropped, so on the
@@ -2013,8 +2228,16 @@ class DataStreamingServer(BaseStreamingService):
         if enabled and not prev_enabled:
             self._schedule_idr_for_display(display_id)
 
-    async def _run_frame_backpressure_logic(self, display_id: str):
-        """The core backpressure and latency calculation loop for a single display."""
+    async def _run_frame_backpressure_logic(self, display_id: str) -> None:
+        """The core backpressure and latency calculation loop for a single display.
+
+        Every BACKPRESSURE_CHECK_INTERVAL_S it compares the last sent and last
+        acked frame ids (uint16 circular distance), sized by the client's
+        measured consumption rate and forgiving capped propagation delay, and
+        flips the display's backpressure flag: a stalled or lagging client
+        stops receiving delta frames, and the lift requests an IDR resync.
+        Also feeds the Prometheus fps/latency gauges for the primary display.
+        """
         data_logger.info(f"Frame-based backpressure logic task started for display '{display_id}'.")
         display_state = None
         try:
@@ -2113,8 +2336,9 @@ class DataStreamingServer(BaseStreamingService):
                 display_state['backpressure_enabled'] = True
             data_logger.info(f"Backpressure logic task for '{display_id}' finished.")
 
-    def _estimate_client_fps(self, display_state, acked_id, configured_fps, now):
-        """Measured client FPS from acked-frame cadence, clamped to [1.0, configured_fps].
+    def _estimate_client_fps(self, display_state: dict, acked_id: int,
+                             configured_fps: Union[int, float], now: float) -> float:
+        """Measured client FPS from acked-frame cadence, clamped to `[1.0, configured_fps]`.
 
         Updates the running estimate only from healthy (unthrottled) intervals with
         forward progress; otherwise holds the last value. `now` is passed in so the
@@ -2142,7 +2366,7 @@ class DataStreamingServer(BaseStreamingService):
         display_state['_measured_client_fps'] = est
         return est
 
-    async def broadcast_stream_resolution(self):
+    async def broadcast_stream_resolution(self) -> None:
         """Send each display's realized resolution to the socket rendering that
         display, and the primary's to every remaining socket (shared viewers
         render the primary stream). The payload names its display: applying the
@@ -2180,16 +2404,22 @@ class DataStreamingServer(BaseStreamingService):
             for ws in dropped:
                 self.clients.discard(ws)
 
-    async def _sync_wayland_realized_geometry(self, display_id, broadcast=True):
-        """Read back what the pixelflux compositor actually realized on this
+    async def _sync_wayland_realized_geometry(self, display_id: str, broadcast: bool = True) -> None:
+        """Reconcile a display's state with the compositor's realized geometry.
+
+        Reads back what the pixelflux compositor actually realized on this
         display's output (it may even-mask dimensions or keep the old mode on a
-        GBM allocation failure), fold it into display state/layouts and
-        broadcast stream_resolution so the client reconciles its canvas and
+        GBM allocation failure), folds it into display state/layouts and
+        broadcasts stream_resolution so the client reconciles its canvas and
         input mapping — the Wayland counterpart of the X11 reconfigure path's
         realized clamp + broadcast. The read also acts as a barrier: the
         compositor answers it only after any queued capture (re)start finished.
-        `broadcast=False` defers the fan-out to a caller that broadcasts once
-        for every display (the reconfigure pass)."""
+
+        Args:
+            display_id: The display to reconcile.
+            broadcast: False defers the fan-out to a caller that broadcasts
+                once for every display (the reconfigure pass).
+        """
         if not IS_WAYLAND:
             return
         inst = self.capture_instances.get(display_id)
@@ -2220,7 +2450,7 @@ class DataStreamingServer(BaseStreamingService):
         if broadcast:
             await self.broadcast_stream_resolution()
 
-    async def _apply_wayland_cursor_size(self, dpi):
+    async def _apply_wayland_cursor_size(self, dpi: Union[int, float]) -> None:
         """Wayland counterpart of the X11 per-DPI cursor resize: the compositor
         reloads its theme cursor (composited overlay and named-cursor delivery
         both re-render) at the DPI-scaled size, live, no capture restart."""
@@ -2240,7 +2470,7 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e:
             data_logger.warning(f"Wayland cursor resize failed: {e}")
 
-    def _update_wayland_cursor_cap(self, dpi):
+    def _update_wayland_cursor_cap(self, dpi: Union[int, float]) -> None:
         """Wayland parity with X11's per-DPI cursor re-derive: track the DPI on
         the input handler and scale the remote-cursor delivery cap with it, so
         the next capture (re)start threads the raised cap through
@@ -2257,8 +2487,13 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.debug(f"cursor cap update skipped: {e}")
 
     def _parse_settings_payload(self, payload_str: str) -> dict:
+        """Parse a SETTINGS JSON payload into typed values (absent keys become None).
+
+        Raises:
+            json.JSONDecodeError: When the payload is not valid JSON.
+        """
         settings_data = json.loads(payload_str)
-        parsed = {}
+        parsed: dict[str, Any] = {}
 
         def get_int(k):
             v = settings_data.get(k)
@@ -2327,9 +2562,32 @@ class DataStreamingServer(BaseStreamingService):
         return parsed
 
     async def _apply_client_settings(
-        self, websocket_obj, settings: dict, is_initial_settings: bool, client_role: str = "controller"
-    ):
+        self,
+        websocket_obj: web.WebSocketResponse,
+        settings: dict,
+        is_initial_settings: bool,
+        client_role: str = "controller",
+    ) -> None:
+        """Sanitize and apply one client's SETTINGS payload to its display.
 
+        Controller-only (a viewer's payload is ignored). Under
+        _reconfigure_lock it resolves the target geometry (server-forced
+        manual, client manual, or initial client size), stores sanitized
+        per-display tunables (primary updates also become session seeds for
+        later displays), applies DPI/cursor/keyboard-layout side effects, and
+        applies video changes live where possible — only structural switches
+        (encoder, use_cpu, fullcolor, rate-control, Wayland capture scale)
+        restart the display's capture. Dimensional or initial changes trigger a
+        full reconfigure AFTER the lock is released (reconfigure_displays
+        self-acquires it).
+
+        Args:
+            websocket_obj: The sending socket (used only for logging identity).
+            settings: The parsed payload from _parse_settings_payload.
+            is_initial_settings: True for the connection's first SETTINGS,
+                which sizes the display and always reconfigures.
+            client_role: "controller" or "viewer".
+        """
         if client_role == "viewer":
             _viewer_raddr = client_permissions.get(websocket_obj, {}).get("remote_address", "unknown")
             data_logger.info(f"Ignoring SETTINGS payload from viewer {_viewer_raddr}.")
@@ -2639,18 +2897,45 @@ class DataStreamingServer(BaseStreamingService):
         if is_initial_settings and self.client_settings_received and not self.client_settings_received.is_set():
             self.client_settings_received.set()
 
-    def _report_client_presence(self):
+    def _report_client_presence(self) -> None:
+        """Tell the supervisor whether any client is connected (idle shutdown gate)."""
         if self.supervisor:
             self.supervisor.set_clients_present(bool(self.clients))
 
-    def _holds_input_authority(self, websocket, perms=None):
+    def _holds_input_authority(self, websocket: web.WebSocketResponse,
+                               perms: Optional[dict] = None) -> bool:
         """Whether this socket may drive keyboard/mouse input. `perms` supplies the
         entry for a socket already removed from client_permissions."""
         if perms is None:
             perms = client_permissions.get(websocket)
         return _perms_hold_input_authority(perms)
 
-    async def ws_handler(self, websocket: web.WebSocketResponse, remote_address, token = "", query_role = "", query_slot = None):
+    async def ws_handler(
+        self,
+        websocket: web.WebSocketResponse,
+        remote_address: tuple,
+        token: str = "",
+        query_role: str = "",
+        query_slot: Optional[str] = None,
+    ) -> None:
+        """Run one data-WebSocket connection from handshake to cleanup.
+
+        The connection's whole lifecycle lives here: auth (token in secure
+        mode, query role/slot in legacy mode), reconnect rate-limiting, the
+        handshake pushes (MODE, display roster, cursor, server settings), the
+        message dispatch loop (SETTINGS, ACKs, video/audio start/stop, resize,
+        DPI, mic PCM, and the shared input protocol), and the finally-block
+        teardown: input-state release gated on departing input authority, RED
+        re-gate, deferred display teardown behind the reconnect grace, and
+        last-client pipeline/collector shutdown.
+
+        Args:
+            websocket: The prepared WebSocket.
+            remote_address: `(ip, port)` of the peer.
+            token: Auth token (secure mode only).
+            query_role: Legacy-mode role request ("viewer" caps the role).
+            query_slot: Legacy-mode gamepad slot request ("2".."4").
+        """
         if self.is_secure_mode:
             await self.config_gate.wait()
             if not token or token not in user_tokens:
@@ -4052,8 +4337,8 @@ class DataStreamingServer(BaseStreamingService):
 
             data_logger.info(f"Data WS handler for {raddr} finished all cleanup.")
 
-    async def _run_detached_command(self, cmd_list: list, description: str):
-        """Runs a command detached from the server process: its own session
+    async def _run_detached_command(self, cmd_list: list[str], description: str) -> None:
+        """Run a command detached from the server process: its own session
         (start_new_session) survives our exit and our signals, with no shell in
         between."""
         data_logger.info(f"Running detached command ({description}): {' '.join(cmd_list)}")
@@ -4067,10 +4352,19 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e:
             data_logger.error(f"Failed to run detached command ({description}): {e}")
 
-    async def _run_command(self, cmd, description, best_effort=False):
-        """Helper to run a shell command and log its output/errors. best_effort=True
-        logs a non-zero exit at DEBUG instead of ERROR — for delete-if-exists cleanups
-        that fail only because the target is already gone."""
+    async def _run_command(self, cmd: list[str], description: str, best_effort: bool = False) -> bool:
+        """Run an external command (10s bound) and log its output/errors.
+
+        Args:
+            cmd: The argv list (no shell).
+            description: Label used in log lines.
+            best_effort: Logs a non-zero exit at DEBUG instead of ERROR — for
+                delete-if-exists cleanups that fail only because the target is
+                already gone.
+
+        Returns:
+            True on a zero exit within the timeout.
+        """
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -4101,7 +4395,7 @@ class DataStreamingServer(BaseStreamingService):
             log(f"Exception during '{description}': {e}", exc_info=not best_effort)
             return False
 
-    def _wayland_control_module(self):
+    def _wayland_control_module(self) -> Optional[Any]:
         """A pixelflux handle for compositor output management (any ScreenCapture
         reaches the shared Wayland backend); prefers the primary's persistent
         module so no extra instance exists in the common case."""
@@ -4114,7 +4408,7 @@ class DataStreamingServer(BaseStreamingService):
             self._wayland_ctl_module = ScreenCapture()
         return self._wayland_ctl_module
 
-    async def _drop_wayland_secondary(self, display_id: str, reason: str):
+    async def _drop_wayland_secondary(self, display_id: str, reason: str) -> None:
         """Refuse a secondary display that cannot stream: destroy its compositor
         output (Wayland; no-op on X11 where the control module is absent), stop
         its capture, unregister it, and kill its client with the reason."""
@@ -4141,7 +4435,7 @@ class DataStreamingServer(BaseStreamingService):
             except (ConnectionResetError, OSError, RuntimeError):
                 pass
 
-    async def _reanchor_wayland_primary(self, layouts, keep_ids):
+    async def _reanchor_wayland_primary(self, layouts: dict, keep_ids: set[str]) -> None:
         """Collapse an unrealizable Wayland arrangement: primary back at the
         origin (layout + capture rebuild) — the Wayland mirror of the X11
         re-anchor when the extension does not fit the realized root."""
@@ -4152,18 +4446,24 @@ class DataStreamingServer(BaseStreamingService):
             keep_ids.discard('primary')
             await self._stop_capture_for_display('primary')
 
-    async def _apply_wayland_output_layout(self, layouts, keep_ids):
-        """Realize the computed union layout as compositor outputs — the Wayland
-        counterpart of the X11 monitor/framebuffer apply. The primary (output 0)
-        is sized by its capture start and MOVED here to its layout offset
-        ('left'/'up' place it off-origin; teardown re-anchors it at 0,0); each
-        secondary gets a real output at its layout rectangle, created here
-        BEFORE the capture start loop binds a capture to it. Ordering keeps the
-        output rectangles disjoint: moved/stale secondaries are destroyed
-        first, then the primary repositions, then secondaries are created.
-        Mutates `layouts`/`keep_ids` when a display has to be dropped (output
-        creation or the primary move refused), killing its client like the X11
-        path."""
+    async def _apply_wayland_output_layout(self, layouts: dict, keep_ids: set[str]) -> None:
+        """Realize the computed union layout as compositor outputs.
+
+        The Wayland counterpart of the X11 monitor/framebuffer apply. The
+        primary (output 0) is sized by its capture start and MOVED here to its
+        layout offset ('left'/'up' place it off-origin; teardown re-anchors it
+        at 0,0); each secondary gets a real output at its layout rectangle,
+        created here BEFORE the capture start loop binds a capture to it.
+        Ordering keeps the output rectangles disjoint: moved/stale secondaries
+        are destroyed first, then the primary repositions, then secondaries are
+        created.
+
+        Args:
+            layouts: display_id to layout rect; mutated when a display has to
+                be dropped (output creation or the primary move refused),
+                killing its client like the X11 path.
+            keep_ids: The keep-alive capture set; mutated alongside `layouts`.
+        """
         module = self._wayland_control_module()
         if module is None:
             return
@@ -4235,13 +4535,20 @@ class DataStreamingServer(BaseStreamingService):
                     await wayland_reposition_primary(module, 0, 0)
                     await self._reanchor_wayland_primary(layouts, keep_ids)
 
-    async def _stop_capture_for_display(self, display_id: str):
-        # Serialize against any concurrent start/stop for any display.
+    async def _stop_capture_for_display(self, display_id: str) -> None:
+        """Stop one display's capture, serialized against any concurrent start/stop."""
         async with self._video_capture_lock:
             await self._stop_capture_for_display_impl(display_id)
 
-    async def _stop_capture_for_display_impl(self, display_id: str):
-        """Stops the capture, relays, and backpressure tasks for a single, specific display."""
+    async def _stop_capture_for_display_impl(self, display_id: str) -> None:
+        """Stop the capture, relays, and backpressure task for one display.
+
+        Callers hold _video_capture_lock. Guarantees exactly one
+        PIPELINE_RESETTING per real capture stop: clients rebuild their video
+        sinks/decoders only on that message, including when no backpressure
+        task ran (viewer-only captures, stops before the task armed) — without
+        it a resumed stream plays into the stale sink and freezes silently.
+        """
         data_logger.info(f"Stopping all streams for display '{display_id}'...")
         reset_sent = await self._ensure_backpressure_task_is_stopped(display_id)
         capture_info = self.capture_instances.pop(display_id, None)
@@ -4251,11 +4558,8 @@ class DataStreamingServer(BaseStreamingService):
                 await asyncio.to_thread(capture_module.stop_capture)
         self._close_video_relays(display_id)
         if capture_info and not reset_sent:
-            # Clients rebuild their video sinks/decoders only on PIPELINE_RESETTING;
-            # every real capture stop must send exactly one, including when no
-            # backpressure task ran (viewer-only captures, stops before the task
-            # armed) — without it a resumed stream plays into the stale sink and
-            # freezes silently.
+            # The backpressure teardown did not notify; send the one guaranteed
+            # PIPELINE_RESETTING for this stop (see the docstring).
             await self._reset_frame_ids_and_notify(display_id)
 
         data_logger.info(f"Successfully stopped all streams for display '{display_id}'.")
@@ -4276,11 +4580,14 @@ class DataStreamingServer(BaseStreamingService):
             if self._reconfigure_pending:
                 await self.reconfigure_displays()
 
-    async def reconfigure_displays(self):
-        """
-        Central logic to create a virtual desktop for ALL connected clients.
-        It then starts capture pipelines ONLY for clients with 'video_active' = True.
-        This is called on connect, disconnect, or settings change.
+    async def reconfigure_displays(self) -> None:
+        """Rebuild the virtual desktop layout for ALL connected clients.
+
+        Called on connect, disconnect, or settings change. Starts capture
+        pipelines only for clients with video_active True. Self-serializing:
+        a call while a pass is running coalesces (last-write-wins) into one
+        follow-up pass instead of queueing, so state converges on the latest
+        request without a reconfigure storm.
         """
         if self._reconfigure_lock.locked():
             # A pass is already running; flag it to run again with the latest
@@ -4306,7 +4613,7 @@ class DataStreamingServer(BaseStreamingService):
             if not self._reconfigure_pending:
                 break
 
-    async def _signal_all_displays_stopped(self):
+    async def _signal_all_displays_stopped(self) -> None:
         """Send VIDEO_STOPPED to clients on a reconfiguration abort WITHOUT clearing
         video_active: a transient abort (zero size / no screen_name / failed newmode)
         must not permanently stop healthy displays, so the next successful reconfigure
@@ -4335,9 +4642,19 @@ class DataStreamingServer(BaseStreamingService):
                 except (ConnectionResetError, OSError, RuntimeError):
                     pass
 
-    async def _reconfigure_displays_locked(self):
+    async def _reconfigure_displays_locked(self) -> None:
         """One reconfiguration pass. Must only be called by reconfigure_displays()
-        with _reconfigure_lock held; early returns here abort just this pass."""
+        with _reconfigure_lock held; early returns here abort just this pass.
+
+        The pass: optionally swap in a multi-monitor-capable WM (X11), compute
+        the union layout from all display clients, decide per running capture
+        whether it can follow the new layout live (structurally identical
+        sessions retune in place; the rest are stopped and rebuilt), realize
+        the layout (xrandr monitors + framebuffer on X11, compositor outputs on
+        Wayland), clamp everything to what the server actually realized —
+        dropping displays that cannot exist — then (re)start the active
+        captures and broadcast the resulting resolutions and roster.
+        """
         current_display_count = len(self.display_clients)
         if not IS_WAYLAND and self._wm_swap_is_supported is None:
             if which("xfce4-session") or which("startplasma-x11"):
@@ -4726,13 +5043,17 @@ class DataStreamingServer(BaseStreamingService):
         data_logger.info("Display reconfiguration finished successfully.")
 
 
-    async def _ensure_viewer_capture(self):
+    async def _ensure_viewer_capture(self) -> bool:
         """Start the primary capture for a shared/player viewer when no display-
         owning client is connected (fresh server, or the controller left): the
         desktop exists regardless, so a lone viewer must not wait on a controller
         ("Waiting for stream..." forever). Captures the CURRENT desktop geometry —
         viewers never resize anything; the next controller's settings re-layout
-        as usual."""
+        as usual.
+
+        Returns:
+            True when the primary capture is running afterwards.
+        """
         if 'primary' in self.capture_instances:
             return True
         layout = getattr(self, 'display_layouts', {}).get('primary')
@@ -4774,22 +5095,41 @@ class DataStreamingServer(BaseStreamingService):
                     data_logger.error(f"Viewer-driven audio start failed: {e}", exc_info=True)
         return started
 
-    async def _start_capture_for_display(self, display_id: str, width: int, height: int, x_offset: int, y_offset: int):
-        # Serialize against any concurrent start/stop so the capture_instances
-        # guard+insert can't race a still-finishing op.
+    async def _start_capture_for_display(self, display_id: str, width: int, height: int,
+                                         x_offset: int, y_offset: int) -> bool:
+        """Start (or confirm) one display's capture, serialized under _video_capture_lock.
+
+        Also refreshes second-screen capacity afterwards: a capture start is
+        what establishes the host session in host-capture mode, so the host's
+        output count can first become known — or change — here.
+
+        Returns:
+            True when a live capture exists for the display afterwards.
+        """
         async with self._video_capture_lock:
             started = await self._start_capture_for_display_impl(display_id, width, height, x_offset, y_offset)
-        # A capture start is what establishes the host session in host-capture
-        # mode, so the host's output count (and with it second-screen
-        # availability) can first become known — or change — here.
         if started and await self._refresh_second_screen_capacity():
             await self._broadcast_live_server_settings(display_id)
         return started
 
-    async def _start_capture_for_display_impl(self, display_id: str, width: int, height: int, x_offset: int, y_offset: int):
-        """
-        Starts a capture instance by creating the required CaptureSettings
-        object and providing a callback with the correct signature.
+    async def _start_capture_for_display_impl(self, display_id: str, width: int, height: int,
+                                              x_offset: int, y_offset: int) -> bool:
+        """Start a capture instance for one display region.
+
+        Callers hold _video_capture_lock. Builds the CaptureSettings, installs
+        the zero-copy frame callback (which fans chunks out to the per-client
+        relays via call_soon_threadsafe) and the pixelflux cursor handler, and
+        starts the persistent ScreenCapture module (reused across restarts so
+        the encoder backend stays warm). A genuinely capturing existing
+        instance is left alone (an IDR is nudged for rejoining clients); a
+        stale one is rebuilt.
+
+        Returns:
+            True on success; False when the start failed (reported so callers
+            do not ack a false VIDEO_STARTED).
+
+        Raises:
+            SelkiesAppError: When the pixelflux library is unavailable.
         """
         # Guard before anything touches the pixelflux classes: with the library
         # missing, _get_capture_settings would otherwise die on CaptureSettings()
@@ -4998,8 +5338,21 @@ class DataStreamingServer(BaseStreamingService):
             # Failure is reported so callers do not ack a false VIDEO_STARTED.
             return False
 
-    def _get_capture_settings(self, display_id, width, height, x, y):
-        """Helper to create CaptureSettings for a specific display region."""
+    def _get_capture_settings(self, display_id: str, width: int, height: int,
+                              x: int, y: int) -> Any:
+        """Build a pixelflux CaptureSettings for a specific display region.
+
+        Per-display stored tunables win; each falls back to its session
+        default, which is what a viewer-driven primary capture (no
+        display-owning client) runs on entirely.
+
+        Returns:
+            A populated pixelflux CaptureSettings (typed Any because pixelflux
+            is an optional import).
+
+        Raises:
+            SelkiesAppError: For an unknown non-primary display_id.
+        """
         display_state = self.display_clients.get(display_id)
         if not display_state:
             if display_id == 'primary':
@@ -5048,9 +5401,12 @@ class DataStreamingServer(BaseStreamingService):
         )
         return cs
     
-    async def run(self):
-        """
-        Start the DataStreamingServer and all its components.
+    async def run(self) -> None:
+        """Start the server's components and block until shutdown is signaled.
+
+        Spawns the input handler's connect/clipboard/cursor tasks, applies the
+        configured startup DPI and cursor size, then waits on shutdown_event;
+        cleanup always runs via shutdown() on the way out.
         """
         self._shutdown_called = False
         self.initialize()
@@ -5101,10 +5457,14 @@ class DataStreamingServer(BaseStreamingService):
             logger.info("Main loop ending or interrupted. Performing cleanup...")
             await self.shutdown()
 
-    async def shutdown(self):
-        """
-        Shutdown all DataStreamingServer components and clean up resources.
-        This should be called to properly stop the server.
+    async def shutdown(self) -> None:
+        """Shut down all components and release resources; idempotent.
+
+        Closes every client socket first (with code 4000, no KILL verb — see
+        the inline rationale), then stops pipelines while display state still
+        exists to address their tasks, cancels auxiliary tasks, stops the input
+        handler, drops the persistent capture modules, and unregisters the
+        Prometheus gauges so a later mode switch can re-register them.
         """
         if self._shutdown_called:
             logger.info("Shutdown already called, skipping")
@@ -5193,27 +5553,35 @@ class DataStreamingServer(BaseStreamingService):
         self.input_handler = None
         logger.info("DataStreamingServer shutdown complete.")
 
-    async def start(self):
+    async def start(self) -> None:
         self.shutdown_event.clear()
         await self.run()
 
-    async def stop(self):
+    async def stop(self) -> None:
         self.shutdown_event.set()
 
-    def register_routes(self, api_prefix: str, main_router: web.UrlDispatcher):
-        # Data-plane WebSocket under /api so ONE nginx `location /api` (with the
-        # WebSocket upgrade) fronts every dynamic path — control endpoints, this
-        # data socket, and the WebRTC signaling socket alike. Nothing the browser
-        # needs is proxied outside /api anymore.
+    def register_routes(self, api_prefix: str, main_router: web.UrlDispatcher) -> None:
+        """Register the data WebSocket and token endpoints on the shared router.
+
+        Both live under /api so ONE nginx `location /api` (with the WebSocket
+        upgrade) fronts every dynamic path — control endpoints, this data
+        socket, and the WebRTC signaling socket alike; everything the browser
+        needs is proxied through /api.
+        """
         main_router.add_get(f'{api_prefix}/api/websockets{{slash:/?}}', self.data_ws_handler)
         main_router.add_post(f'{api_prefix}/api/tokens', self.handle_tokens)
 
-    async def handle_tokens(self, request: web.Request):
-        # Provisioning is transport-independent: user_tokens/active_mk_token govern
-        # authority for both the websockets and WebRTC gates, so tokens are accepted
-        # in any active mode (unlike the data WS endpoint below, which is mode-gated).
-        # Read master_token from settings, not self.is_secure_mode, which is only set
-        # once the websockets service's initialize() runs (never in WebRTC mode).
+    async def handle_tokens(self, request: web.Request) -> web.StreamResponse:
+        """Accept a full replacement of the session's token/permission table.
+
+        Provisioning is transport-independent: user_tokens/active_mk_token
+        govern authority for both the websockets and WebRTC gates, so tokens
+        are accepted in any active mode (unlike the data WS endpoint, which is
+        mode-gated). Secure mode is read from settings.master_token, not
+        self.is_secure_mode, which is only set once the websockets service's
+        initialize() runs (never in WebRTC mode). Opens the config gate on
+        first provision and reconciles live clients against the new table.
+        """
         if not settings.master_token:
             return web.json_response({"error": "Server not in secure mode"}, status=404)
 
@@ -5242,7 +5610,14 @@ class DataStreamingServer(BaseStreamingService):
         _spawn_background_task(reconcile_clients())
         return web.Response(status=200, text="OK")
 
-    async def data_ws_handler(self, request: web.Request):
+    async def data_ws_handler(self, request: web.Request) -> web.StreamResponse:
+        """aiohttp entry point: upgrade to a WebSocket and hand off to ws_handler.
+
+        Refuses when the websockets transport is not the active mode. A
+        view-only basic-auth credential caps the role at viewer no matter what
+        the query string asks for (legacy, non-secure mode); secure mode leaves
+        the ceiling unset and lets the token govern.
+        """
         if self.supervisor.current_mode != self.mode:
             return web.Response(status=409, text="WebSocket mode is inactive")
 
@@ -5262,12 +5637,8 @@ class DataStreamingServer(BaseStreamingService):
 
         peername = request.transport.get_extra_info('peername')
         remote_address = peername[:2] if peername else (request.remote, 0)
-        # Extract legacy role/slot from query params
         query_role = request.query.get('role', '')
         query_slot = request.query.get('slot')
-        # A view-only basic-auth credential caps the role at viewer no matter what
-        # the query string asks for (legacy, non-secure mode); secure mode leaves
-        # the ceiling unset and lets the token govern.
         if request.get("auth_role_ceiling") == "viewer":
             query_role = "viewer"
             query_slot = None
@@ -5279,7 +5650,12 @@ class DataStreamingServer(BaseStreamingService):
         return ws
 
 
-async def _collect_system_stats_ws(shared_data, interval_seconds=1):
+async def _collect_system_stats_ws(shared_data: dict, interval_seconds: float = 1) -> None:
+    """Singleton collector: poll CPU/memory into the shared stats dict.
+
+    One instance serves every connection's stats sender (per-connection
+    collectors would mean N psutil polls per second).
+    """
     data_logger.debug(
         f"System monitor loop (WS mode) started, interval: {interval_seconds}s"
     )
@@ -5301,7 +5677,24 @@ async def _collect_system_stats_ws(shared_data, interval_seconds=1):
         data_logger.error(f"System monitor (WS) error: {e}", exc_info=True)
 
 
-async def _collect_gpu_stats_ws(shared_data, gpu_id=0, interval_seconds=1, dri_node="", metrics=None):
+async def _collect_gpu_stats_ws(
+    shared_data: dict,
+    gpu_id: int = 0,
+    interval_seconds: float = 1,
+    dri_node: str = "",
+    metrics: Optional[Metrics] = None,
+) -> None:
+    """Singleton collector: poll the pipeline's GPU into the shared stats dict.
+
+    Args:
+        shared_data: The instance-wide stats dict the per-connection senders read.
+        gpu_id: Index into the unfiltered GPU list.
+        interval_seconds: Poll interval.
+        dri_node: When set and it filters to exactly one GPU, that GPU wins
+            over the index — stats must describe the GPU the pipeline
+            captures/encodes on.
+        metrics: Optional Prometheus gauges fed alongside the dict.
+    """
     data_logger.debug(
         f"GPU monitor loop (WS mode) for GPU {gpu_id} (node {dri_node or 'any'}), "
         f"interval: {interval_seconds}s"
@@ -5356,8 +5749,13 @@ async def _collect_gpu_stats_ws(shared_data, gpu_id=0, interval_seconds=1, dri_n
     except Exception as e:
         data_logger.error(f"GPU monitor (WS) error: {e}", exc_info=True)
 
-async def _collect_network_stats_ws(shared_data, server_instance, interval_seconds=2):
-    """Periodically calculates bandwidth and collects latency."""
+async def _collect_network_stats_ws(shared_data: dict, server_instance: DataStreamingServer,
+                                    interval_seconds: float = 2) -> None:
+    """Singleton collector: derive sent-bandwidth and smoothed latency.
+
+    Must be the single instance-wide task: it consumes and resets the server's
+    _bytes_sent_in_interval counter, so per-connection copies would race it.
+    """
     data_logger.debug(
         f"Network monitor loop (WS mode) started, interval: {interval_seconds}s"
     )
@@ -5387,7 +5785,17 @@ async def _collect_network_stats_ws(shared_data, server_instance, interval_secon
     except Exception as e:
         data_logger.error(f"Network monitor (WS) error: {e}", exc_info=True)
 
-async def _send_stats_periodically_ws(websocket, shared_data, server_instance, interval_seconds=5):
+async def _send_stats_periodically_ws(
+    websocket: web.WebSocketResponse,
+    shared_data: dict,
+    server_instance: DataStreamingServer,
+    interval_seconds: float = 5,
+) -> None:
+    """Per-connection sender: push the singleton collectors' stats to one socket.
+
+    Reads (never pops) the shared dicts, since many per-connection senders
+    share the same collectors; ends itself when the socket dies.
+    """
     try:
         while True:
             await asyncio.sleep(interval_seconds)
@@ -5417,15 +5825,32 @@ async def _send_stats_periodically_ws(websocket, shared_data, server_instance, i
     except Exception as e:
         data_logger.error(f"Stats sender (WS) error: {e}", exc_info=True)
 
-async def on_resize_handler(res_str, current_app_instance, data_server_instance=None, display_id='primary'):
-    """
-    Handles client resize request. Updates the state for a specific display and triggers a full reconfiguration.
+async def on_resize_handler(
+    res_str: str,
+    current_app_instance: SelkiesStreamingApp,
+    data_server_instance: Optional[DataStreamingServer] = None,
+    display_id: str = 'primary',
+) -> None:
+    """Handle a client resize request for one display.
+
+    Honors the enable_resize gate (primary only — a secondary's resize is its
+    layout bring-up and must stay allowed, WebRTC parity) and the server's
+    manual-resolution override, applies 16-pixel alignment when the display
+    asked for it, then either updates a lone Wayland display's capture in place
+    (with a realized-geometry read-back) or triggers a full layout
+    reconfiguration.
+
+    Args:
+        res_str: The requested `{width}x{height}` string.
+        current_app_instance: The shared app whose primary geometry mirrors the
+            display state.
+        data_server_instance: The owning server; without it only the gate
+            checks run.
+        display_id: The display being resized.
     """
     logger_app_resize.info(f"on_resize_handler for display '{display_id}' with resolution: {res_str}")
     if (display_id == 'primary'
             and not getattr(current_app_instance, 'server_enable_resize', True)):
-        # enable_resize gates only the PRIMARY's dynamic resolution; a secondary's resize
-        # is its layout bring-up and must stay allowed (WebRTC parity).
         logger_app_resize.warning(f"Primary resize to {res_str} ignored: dynamic resizing disabled.")
         return
     if data_server_instance:
@@ -5512,8 +5937,15 @@ async def on_resize_handler(res_str, current_app_instance, data_server_instance=
     except Exception as e:
         logger_app_resize.error(f"Error during resize handling for '{res_str}': {e}", exc_info=True)
 
-async def reconcile_clients():
-    """Iterate through connected clients and disconnect those with invalid/changed permissions."""
+async def reconcile_clients() -> None:
+    """Reconcile live connections against the current token table.
+
+    Disconnects clients whose token was revoked or whose role changed, pushes
+    ROLE_UPDATE for slot-only changes, and re-announces MK_ACCESS to every
+    surviving tokened client (with a cursor resend for the new holder). Ends by
+    invoking the WebRTC reconcile hook so live WebRTC peers get the same
+    treatment — this function itself only walks websockets sockets.
+    """
     global user_tokens, client_permissions
     connected_websockets = list(client_permissions.keys())
     current_tokens = user_tokens.copy()
