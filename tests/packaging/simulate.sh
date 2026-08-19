@@ -54,6 +54,7 @@ elif [ -n "${MULTILIB_SYSROOT:-}" ]; then
   for d in "${MULTILIB_SYSROOT}"/usr/lib/gcc/*/*/32; do
     [ -d "${d}" ] && MULTILIB_FLAGS="${MULTILIB_FLAGS} -B${d}"
   done
+  # shellcheck disable=SC2086  # MULTILIB_FLAGS carries whole flags, split on purpose
   if ! echo 'int main(void){return 0;}' | gcc -m32 ${MULTILIB_FLAGS} -x c - -o /dev/null 2>/dev/null; then
     echo "note: MULTILIB_SYSROOT does not yield a working 32-bit compiler" >&2
     MULTILIB_FLAGS=""
@@ -122,7 +123,7 @@ for name in deb rpm apk arch; do
   printf '%-10s exit=%-3s repo-writes=%-5s version=%-13s commands=%-9s shebang=%-58s out=%s\n' \
     "$name" "$rc" "$([ -z "$leaked" ] && echo none || echo LEAK)" \
     "${got:-<none>}" "$([ -z "$unlinked" ] && echo linked || echo UNLINKED)" \
-    "${shebang:-<none>}" "$(ls "$SB/out" 2>/dev/null | tr '\n' ' ')"
+    "${shebang:-<none>}" "$(find "$SB/out" -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null)"
   [ -z "$badver" ] || echo "       | version ${got:-<none>}, ${badver}" >&2
   [ -z "$unlinked" ] || echo "       | not on PATH: ${unlinked}" >&2
   if [ "$rc" -ne 0 ] || [ -n "$leaked" ] || [ -n "$badver" ] || [ -n "$unlinked" ]; then

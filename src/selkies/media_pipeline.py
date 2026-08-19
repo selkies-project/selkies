@@ -137,7 +137,7 @@ class MediaPipelinePixel(MediaPipeline):
     def __init__(
         self,
         async_event_loop: asyncio.AbstractEventLoop,
-        encoder_rtc: str,
+        encoder: str,
         framerate: int = 30,
         video_bitrate: int = 8000,
         audio_bitrate: int = 128000,
@@ -165,7 +165,7 @@ class MediaPipelinePixel(MediaPipeline):
         self.display_id = display_id or "primary"
         self.capture_region: Optional[Tuple[int, int]] = capture_region
         self.audio_channels = audio_channels
-        self.encoder_rtc = encoder_rtc
+        self.encoder = encoder
         self.framerate = framerate
         self.video_bitrate = video_bitrate
         self.rc_mode = rc_mode
@@ -339,15 +339,15 @@ class MediaPipelinePixel(MediaPipeline):
         logger.info(f"video_fullcolor -> {fullcolor}; restarting screen capture")
         await self.restart_screen_capture()
 
-    async def set_encoder_rtc(self, encoder_rtc: str) -> None:
+    async def set_encoder(self, encoder: str) -> None:
         """Switch the WebRTC video encoder (h264enc or openh264enc). Structural (a
         different encoder instance), so restart capture — same as use_cpu (WS parity)."""
-        if self.encoder_rtc == encoder_rtc:
+        if self.encoder == encoder:
             return
-        self.encoder_rtc = encoder_rtc
+        self.encoder = encoder
         if not self._is_screen_capturing or self.capture_module is None:
             return
-        logger.info(f"encoder_rtc -> {encoder_rtc}; restarting screen capture")
+        logger.info(f"encoder -> {encoder}; restarting screen capture")
         await self.restart_screen_capture()
 
     async def set_video_streaming_mode(self, enabled: bool) -> None:
@@ -497,7 +497,7 @@ class MediaPipelinePixel(MediaPipeline):
             display_name=self.display_id,
             scale=self.scale,
             framerate=self.framerate,
-            encoder=self.encoder_rtc,
+            encoder=self.encoder,
             use_cpu=self.use_cpu,
             cbr=self.rc_mode == RateControlMode.CBR,
             bitrate_kbps=self.video_bitrate,

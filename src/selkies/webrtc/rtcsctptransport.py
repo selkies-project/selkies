@@ -743,7 +743,7 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         self.__state = "new"
         self.__transport = transport
 
-        self._loop = asyncio.get_event_loop()
+        self._loop = asyncio.get_running_loop()
         self._hmac_key = os.urandom(16)
 
         self._local_partial_reliability = True

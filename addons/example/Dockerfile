@@ -120,8 +120,14 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     echo "ubuntu ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers && \
     echo "ubuntu:${PASSWD}" | chpasswd && \
     chown -R -f -h --no-preserve-root ubuntu:ubuntu / || echo 'Failed to set filesystem ownership in some paths to ubuntu user' && \
-    # Preserve setuid/setgid removed by chown
-    chmod -f 4755 /usr/lib/dbus-1.0/dbus-daemon-launch-helper /usr/bin/chfn /usr/bin/chsh /usr/bin/mount /usr/bin/gpasswd /usr/bin/passwd /usr/bin/newgrp /usr/bin/umount /usr/bin/su /usr/bin/sudo-root /usr/bin/fusermount || echo 'Failed to set chmod setuid for some paths' && \
+    # Preserve setuid/setgid removed by chown; a setuid bit on a file not owned
+    # by root is rejected, so the ownership has to be restored as well.
+    # sudo.ws is the classic sudo binary under the name sudo-rs packaging
+    # gives it; sudo-root is sudo-rs's setuid helper. /usr/bin/su ships only
+    # under its real name from util-linux.
+    chown root:root /usr/lib/dbus-1.0/dbus-daemon-launch-helper /usr/bin/chfn /usr/bin/chsh /usr/bin/mount /usr/bin/gpasswd /usr/bin/passwd /usr/bin/newgrp /usr/bin/umount /usr/bin/su /usr/bin/sudo.ws /usr/bin/sudo-root /usr/bin/fusermount 2>/dev/null; \
+    chmod -f 4755 /usr/lib/dbus-1.0/dbus-daemon-launch-helper /usr/bin/chfn /usr/bin/chsh /usr/bin/mount /usr/bin/gpasswd /usr/bin/passwd /usr/bin/newgrp /usr/bin/umount /usr/bin/su /usr/bin/sudo.ws /usr/bin/sudo-root /usr/bin/fusermount || echo 'Failed to set chmod setuid for some paths' && \
+    chown root:shadow /usr/sbin/unix_chkpwd /usr/sbin/pam_extrausers_chkpwd /usr/bin/expiry /usr/bin/chage 2>/dev/null; \
     chmod -f 2755 /var/local /var/mail /usr/sbin/unix_chkpwd /usr/sbin/pam_extrausers_chkpwd /usr/bin/expiry /usr/bin/chage || echo 'Failed to set chmod setgid for some paths'
 
 # Set locales
@@ -129,7 +135,14 @@ ENV LANG="en_US.UTF-8"
 ENV LANGUAGE="en_US:en"
 ENV LC_ALL="en_US.UTF-8"
 
-USER 0
+# Rootless build from here on: layers run as the session user through
+# fakeroot, so the package database and apt cache stay owned by that user and
+# in-session package management behaves like `/usr/bin/sudo` (the fakeroot
+# alias) does at runtime. Real-root operations in the live session use
+# /usr/bin/sudo-root.
+USER 1000
+# Use BUILDAH_FORMAT=docker in buildah
+SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
 
 # Install and configure below this line
 ###
@@ -164,6 +177,15 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         libxfixes3 \
         libxtst6 \
         libxext6 \
+        # x264 for pixelflux's striped software H.264 encoder (optional GPL
+        # feature of prebuilt wheels; the package pulls the matching runtime)
+        x264 \
+        # ffmpeg sidecars pixelflux links (hardware VA-API and PPM sinks); the
+        # metapackage resolves the ABI-versioned libavutil/libavfilter/libavcodec
+        # per release, whose suffixes move every LTS. opus-tools covers pcmflux's
+        # audio encoder
+        ffmpeg \
+        opus-tools \
         # Wayland backend: pixelflux opens libwayland-server for the capture
         # compositor, and XWayland serves the X11-only applications running
         # under the nested session compositor installed below
@@ -177,18 +199,23 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         pipewire-audio-client-libraries \
         pipewire-pulse \
         wireplumber \
-        # Minimal LXQt desktop (Openbox window manager)
+        # Minimal LXQt desktop (Openbox window manager); breeze is the LXQt 2
+        # icon set and actually ships the glyph groups the slim Adwaita build lacks
         lxqt-session \
         lxqt-panel \
         lxqt-runner \
+        breeze-icon-theme \
         lxqt-about \
         openbox \
         obconf-qt \
         qterminal \
         pcmanfm-qt \
         # qterminal is the session's terminal; xterm backs the callers that spawn
-        # a terminal by hardcoded name (libfm-qt, GLib's Terminal=true handling)
+        # a terminal by hardcoded name (libfm-qt, GLib's Terminal=true handling),
+        # and stterm provides the `st` the dashboards' apps panel launches
+        # proot-apps entries in
         xterm \
+        stterm \
         # Recommends of the packages above, named here because the image installs
         # none of them by default and each is load-bearing rather than optional:
         # lxqt-qtplugin is the platform theme QT_QPA_PLATFORMTHEME=lxqt loads, so
@@ -359,6 +386,20 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
     sed -i '/^Exec=/ s/$/ --password-store=basic/' /usr/share/applications/google-chrome.desktop && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
+# proot-apps (https://github.com/linuxserver/proot-apps) backs the dashboards'
+# apps panel: portable per-user applications in a proot, installed and removed
+# through the selkies-proot wrapper without touching the image. The release
+# tarball is staged into the image; the wrapper seeds each user's ~/.local/bin
+# from it on first use, because proot-apps runs its tools from there by
+# absolute path.
+RUN mkdir -pm755 /opt/proot-apps && \
+    PAPPS_RELEASE="$(curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 -o /dev/null -w '%{url_effective}' "https://github.com/linuxserver/proot-apps/releases/latest" | sed 's|.*/||')" && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://github.com/linuxserver/proot-apps/releases/download/${PAPPS_RELEASE}/proot-apps-$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/aarch64/').tar.gz" \
+        | tar -xzf - -C /opt/proot-apps/ && \
+    printf '%s\n' "${PAPPS_RELEASE}" > /opt/proot-apps/pversion
+COPY --chown=1000:1000 addons/example/selkies-proot /usr/local/bin/selkies-proot
+RUN chmod -f 755 /usr/local/bin/selkies-proot
+
 # Titlebar buttons for applications that draw their own client-side decoration.
 # The session runs no GNOME settings layer, so the compiled-in default applies
 # and it hides minimize and maximize: GNOME's button-layout default is
@@ -376,18 +417,21 @@ RUN set -eu; \
         > /usr/share/glib-2.0/schemas/selkies-decoration.gschema.override && \
     glib-compile-schemas /usr/share/glib-2.0/schemas/ && \
     if [ -f /etc/gtk-3.0/settings.ini ] && grep -q '^\[Settings\]' /etc/gtk-3.0/settings.ini; then \
-        sed -i '/^\[Settings\]/a gtk-decoration-layout=minimize,maximize,close' /etc/gtk-3.0/settings.ini; \
+        sed -i '/^\[Settings\]/a gtk-decoration-layout=:minimize,maximize,close' /etc/gtk-3.0/settings.ini; \
     else \
         mkdir -pm755 /etc/gtk-3.0 && \
-        printf '[Settings]\ngtk-decoration-layout=minimize,maximize,close\n' > /etc/gtk-3.0/settings.ini; \
+        printf '[Settings]\ngtk-decoration-layout=:minimize,maximize,close\n' > /etc/gtk-3.0/settings.ini; \
     fi
+# Package state is already owned by the session user: every build-time apt ran
+# as uid 1000 under fakeroot. Keep the log dir present for in-session apt runs.
+RUN install -d /var/log/apt
 
 # Install Selkies with pip: from the wheels dropped into `wheels/`, or the
 # latest PyPI release when `wheels/` is empty. When fresh pixelflux/pcmflux
 # wheels (built from the main HEAD of selkies-project/pixelflux and
 # selkies-project/pcmflux) ride along, pip selects the ones matching this image's
 # Python and platform; everything else still resolves from PyPI
-COPY addons/example/wheels/ /tmp/wheels/
+COPY --chown=1000:1000 addons/example/wheels/ /tmp/wheels/
 RUN set -e; \
     SELKIES_WHL="$(ls /tmp/wheels/selkies-*.whl 2>/dev/null || true)"; \
     if [ -z "${SELKIES_WHL}" ]; then \
@@ -402,11 +446,13 @@ RUN set -e; \
     PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --force-reinstall ${PKGS}; \
     rm -rf /tmp/wheels /tmp/picked
 
-# The DRI3-capable server replaces the distribution's /usr/bin/Xvfb
-COPY --from=xvfb / /
+# The DRI3-capable server replaces the distribution's /usr/bin/Xvfb; chowned
+# to the session user like the rest of the image so fakeroot-sudo apt can
+# still write under /usr after the copy
+COPY --from=xvfb --chown=1000:1000 / /
 
 # Install the joystick interposer and fake-udev libraries (container-only)
-COPY --from=add-ons /opt/add-ons/lib/ /usr/lib/
+COPY --from=add-ons --chown=1000:1000 /opt/add-ons/lib/ /usr/lib/
 
 # Makes the session look like the Openbox one: floating windows with their usual
 # titlebar buttons, no bar of the compositor's own, and XWayland for the X11-only
@@ -425,15 +471,35 @@ RUN echo "[ ! -z \"\$TERM\" -a -r /etc/motd ] && echo \"\$(grep '^PRETTY_NAME=' 
     printf "==============================================\n=         Selkies Example Container          =\n==============================================\n" > /etc/motd
 
 USER 0
-# Enable sudo through sudo-root with uid 0
+# The restores below need the real chmod/chown syscalls: under the fakeroot
+# SHELL even a uid-0 process gets the LD_PRELOAD wrappers, and while chown
+# passes through to the filesystem, a setuid chmod lands only in fakeroot's
+# fake database — the committed layer keeps 0755 and Chrome aborts at launch
+# demanding a root-owned 4755 chrome-sandbox.
+SHELL ["/bin/sh", "-c"]
+# Enable sudo through sudo-root with uid 0.
+# The uid-1000 fakeroot layers above install packages whose setuid helpers
+# (Chrome's chrome-sandbox, polkit's agent helper and pkexec) then really
+# belong to uid 1000 — chmod went through, chown was faked — leaving them
+# setuid-to-ubuntu. Without a root-owned chrome-sandbox, Chrome aborts at
+# launch wherever unprivileged user namespaces are unavailable (the default
+# Docker seccomp profile), so their root ownership is restored here.
 RUN if [ -d "/usr/libexec/sudo" ]; then SUDO_LIB="/usr/libexec/sudo"; else SUDO_LIB="/usr/lib/sudo"; fi && \
     chown -R -f -h --no-preserve-root root:root /usr/bin/sudo-root /etc/sudo.conf /etc/sudoers /etc/sudoers.d /etc/sudo_logsrvd.conf "${SUDO_LIB}" || echo 'Failed to provide root permissions in some paths relevant to sudo' && \
-    chmod -f 4755 /usr/bin/sudo-root || echo 'Failed to set chmod setuid for root'
+    chmod -f 4755 /usr/bin/sudo-root || echo 'Failed to set chmod setuid for root' && \
+    for helper in /opt/google/chrome/chrome-sandbox /usr/lib/polkit-1/polkit-agent-helper-1 /usr/libexec/polkit-agent-helper-1 /usr/bin/pkexec; do \
+        if [ -e "$helper" ]; then chown -f root:root "$helper" && chmod -f 4755 "$helper" || echo "Failed to restore setuid for $helper"; fi; \
+    done
 
 USER 1000
 
 # Default runtime environment (overridable with -e)
-ENV PIPEWIRE_LATENCY="128/48000"
+ENV PIPEWIRE_LATENCY="256/48000"
+# The dashboards' apps panel drives proot-apps through the command channel;
+# without this it shows its commands-disabled notice. Commands run as the
+# session user, whom the streamed desktop already hands a terminal, so the
+# example enables the channel; disable with -e SELKIES_COMMAND_ENABLED=false.
+ENV SELKIES_COMMAND_ENABLED=true
 ENV XDG_RUNTIME_DIR=/tmp/runtime-ubuntu
 ENV PIPEWIRE_RUNTIME_DIR="${XDG_RUNTIME_DIR}"
 ENV PULSE_RUNTIME_PATH="${XDG_RUNTIME_DIR}/pulse"

@@ -478,13 +478,31 @@ export class WebRTCClient {
 		if (event.data instanceof ArrayBuffer) {
 			const head = new Uint8Array(event.data, 0, Math.min(2, event.data.byteLength));
 			if (head[0] === 0x1f && head[1] === 0x8b) {
-				// Gzip'd payload: decompress asynchronously; the queue keeps later
-				// plain messages from overtaking it.
-				this._recvQueue = this._recvQueue.then(async () => {
+				// Gzip'd payload: decompress concurrently, then route by kind.
+				// A slot in the ordered queue reserves this message's arrival
+				// position in case it inflates into an order-sensitive kind; a
+				// kind that doesn't need ordering routes as soon as it inflates
+				// instead of waiting behind the queue.
+				const routed = (async () => {
 					const text = await new Response(new Blob([event.data]).stream()
 						.pipeThrough(new DecompressionStream('gzip'))).text();
-					this._dispatchDataChannelMessage(text);
-				}).catch((e) => this._setError("failed to decompress data channel message: " + e));
+					const msg = this._parseDataChannelMessage(text);
+					if (msg === null || this._requiresOrderedDelivery(msg)) {
+						return msg;
+					}
+					this._routeDataChannelMessage(msg);
+					return null;
+				})().catch((e) => {
+					this._setError("failed to decompress data channel message: " + e);
+					return null;
+				});
+				this._recvQueue = this._recvQueue.then(async () => {
+					const msg = await routed;
+					// Returned so the queue also awaits an async clipboard
+					// handler on gzipped traffic (the fat payloads are exactly
+					// what gets compressed).
+					if (msg !== null) return this._routeDataChannelMessage(msg);
+				}).catch((e) => this._setError("failed to handle data channel message: " + e));
 				return;
 			}
 			this._setError("unexpected binary data channel message");
@@ -494,11 +512,39 @@ export class WebRTCClient {
 			this._gzTx = true;
 			return;
 		}
-		this._recvQueue = this._recvQueue.then(() => this._dispatchDataChannelMessage(event.data));
+		const msg = this._parseDataChannelMessage(event.data);
+		if (msg === null) {
+			return;
+		}
+		if (!this._requiresOrderedDelivery(msg)) {
+			try {
+				this._routeDataChannelMessage(msg);
+			} catch (e) {
+				this._setError("failed to handle data channel message: " + e);
+			}
+			return;
+		}
+		// Caught per link: one throwing handler (or a rejected async clipboard
+		// handler) must fail alone, not leave the queue chain rejected and
+		// every later message dropped.
+		this._recvQueue = this._recvQueue.then(() => this._routeDataChannelMessage(msg))
+			.catch((e) => this._setError("failed to handle data channel message: " + e));
 	}
 
-	_dispatchDataChannelMessage(data) {
-		// Attempt to parse message as JSON
+	/**
+	 * Only kinds where cross-message order matters ride the ordered queue:
+	 * multipart clipboard sequences must reassemble in sequence, and
+	 * server_settings snapshots are last-wins, so a slow-inflating one must
+	 * not be overtaken by a newer plain one. Everything else (cursor, ping,
+	 * stats, system actions) routes on arrival so a long clipboard decode
+	 * cannot delay it.
+	 */
+	_requiresOrderedDelivery(msg) {
+		return typeof msg.type === 'string' &&
+			(msg.type.startsWith('clipboard-msg') || msg.type === 'server_settings');
+	}
+
+	_parseDataChannelMessage(data) {
 		var msg;
 		try {
 			msg = JSON.parse(data);
@@ -508,11 +554,13 @@ export class WebRTCClient {
 			} else {
 				this._setError("failed to parse data channel message: " + data);
 			}
-			return;
+			return null;
 		}
-
 		this._setDebug("data channel message: " + data);
+		return msg;
+	}
 
+	_routeDataChannelMessage(msg) {
 		if (msg.type === 'pipeline') {
 			this._setStatus(msg.data.status);
 		} else if (msg.type === 'gpu_stats') {
@@ -521,7 +569,9 @@ export class WebRTCClient {
 			}
 		} else if (typeof msg.type === 'string' && msg.type.startsWith('clipboard-msg')) {
 			if (typeof this.onclipboardcontent === 'function') {
-				this.onclipboardcontent(msg);
+				// Returned so the receive queue awaits the async handler:
+				// clipboard messages complete in arrival order.
+				return this.onclipboardcontent(msg);
 			}
 		} else if (msg.type === 'cursor') {
 			if (this.oncursorchange !== null && msg.data !== null) {
@@ -613,6 +663,15 @@ export class WebRTCClient {
 	dataChannelBufferedAmount() {
 		return (this._send_channel && this._send_channel.readyState === 'open')
 			? this._send_channel.bufferedAmount : 0;
+	}
+
+	/**
+	 * Whether the data channel can carry a send right now. Bulk senders check
+	 * this to report "not connected" instead of silently dropping into
+	 * sendDataChannelMessage's quiet no-op.
+	 */
+	dataChannelOpen() {
+		return this._send_channel !== null && this._send_channel.readyState === 'open';
 	}
 
 	/**

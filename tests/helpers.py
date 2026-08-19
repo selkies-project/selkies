@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared helpers for the selkies test suites: server lifecycle, HTTP probes,
 and the X11 and Wayland observation used to prove that input arrived."""
+import ctypes
 import json
 import os
 import shutil
@@ -122,6 +123,27 @@ def pulse_setup() -> None:
             capture_output=True, timeout=10)
 
 
+PR_SET_PDEATHSIG = 1
+_LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+def _die_with_parent() -> None:
+    """preexec for spawned children: the kernel SIGKILLs the child the moment
+    the test process dies, so an externally killed run (timeout or SIGKILL
+    skips every ``finally``) cannot orphan servers or damage feeds into the
+    shared display and port fixtures. The reparent check closes the
+    fork-to-prctl race."""
+    _LIBC.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+    if os.getppid() == 1:
+        os._exit(1)
+
+
+def spawn(cmd: Iterable, **kwargs: Any) -> subprocess.Popen:
+    """subprocess.Popen for a test child that must not outlive the suite."""
+    kwargs.setdefault("preexec_fn", _die_with_parent)
+    return subprocess.Popen(cmd, **kwargs)
+
+
 def server_start(mode: str = "websockets", wayland: bool = False,
                  web_root: str = CORE_DIST,
                  extra_env: Optional[dict] = None,
@@ -163,13 +185,17 @@ def server_start(mode: str = "websockets", wayland: bool = False,
     # endpoint is only wired in when one is offered.
     if os.environ.get("E2E_TURN_REST_URI"):
         env["SELKIES_TURN_REST_URI"] = os.environ["E2E_TURN_REST_URI"]
+    # Warnings config crosses into the server so a deprecation sweep can see
+    # server-side hits; everything else stays hermetic.
+    if os.environ.get("PYTHONWARNINGS"):
+        env["PYTHONWARNINGS"] = os.environ["PYTHONWARNINGS"]
     if not wayland:
         env["DISPLAY"] = TEST_DISPLAY
     if extra_env:
         env.update(extra_env)
     with open(log, "w") as lf:
         lf.write("")
-    proc = subprocess.Popen(
+    proc = spawn(
         [PYTHON, "-m", "selkies"],
         env=env, cwd=WORKDIR,
         stdout=open(log, "a"), stderr=subprocess.STDOUT,
@@ -177,10 +203,13 @@ def server_start(mode: str = "websockets", wayland: bool = False,
     open(PIDFILE, "w").write(str(proc.pid))
     deadline = time.time() + 75
     import urllib.request
+    # A subfolder deployment moves every route, this probe included.
+    prefix = env.get("SELKIES_SUBFOLDER", "").strip("/")
+    status_url = f"{BASE_URL}/{prefix}/api/status" if prefix else f"{BASE_URL}/api/status"
     try:
         while time.time() < deadline:
             try:
-                with urllib.request.urlopen(f"{BASE_URL}/api/status", timeout=2) as r:
+                with urllib.request.urlopen(status_url, timeout=2) as r:
                     if r.status == 200:
                         return proc
             except Exception:
@@ -570,7 +599,7 @@ class WlObs:
     compositor and collect its JSONL event lines from a reader thread."""
 
     def __init__(self, socket_name: str) -> None:
-        self.proc = subprocess.Popen(
+        self.proc = spawn(
             [PYTHON, os.path.join(TOOLS, "wlobs.py"), socket_name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             env={**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", WORKDIR),

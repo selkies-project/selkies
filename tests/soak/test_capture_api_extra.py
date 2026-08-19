@@ -304,8 +304,8 @@ def main() -> Results:
     # real keyboard landing via xev
     try:
         xev_log = os.path.join(H.WORKDIR, "cap2-xev.log")
-        xev = subprocess.Popen(["xev", "-event", "keyboard"], stdout=open(xev_log, "w"),
-                               stderr=subprocess.STDOUT)
+        xev = H.spawn(["xev", "-event", "keyboard"], stdout=open(xev_log, "w"),
+                      stderr=subprocess.STDOUT)
         time.sleep(1.2)
         wid = None
         for _ in range(10):
@@ -619,7 +619,7 @@ def main() -> Results:
         ac.stop_capture()
         subprocess.run(["pactl", "set-default-sink", "cs2out"], capture_output=True,
                        env=dict(os.environ))
-        tone = subprocess.Popen(
+        tone = H.spawn(
             ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
              "-f", "lavfi", "-i", "sine=frequency=440:duration=30", "-af", "volume=0.7"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

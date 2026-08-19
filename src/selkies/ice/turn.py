@@ -298,7 +298,7 @@ class TurnClientMixin:
         """
         # if a channel is being bound for the peer, wait
         if addr in self.peer_connect_waiters:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             waiter = loop.create_future()
             self.peer_connect_waiters[addr].append(waiter)
             await waiter
@@ -437,7 +437,7 @@ async def create_turn_endpoint(
     """
     Create datagram connection relayed over TURN.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     inner_protocol: TurnClientProtocol
     inner_transport: asyncio.BaseTransport
     if transport == "tcp":

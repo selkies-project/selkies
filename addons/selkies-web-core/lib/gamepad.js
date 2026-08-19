@@ -36,10 +36,14 @@ const JSDB_PLATFORM = (() => {
 })();
 
 export class GamepadManager {
-    constructor(gamepad, onButton, onAxis) {
+    constructor(gamepad, onButton, onAxis, onHeld) {
         this.gamepad = gamepad;
         this.onButton = onButton;
         this.onAxis = onAxis;
+        // Called ~10x/s while any control is away from rest, so the server can
+        // neutralize a held pad whose client died without any transport close.
+        this.onHeld = onHeld || null;
+        this._lastHeldBeat = 0;
         this.state = {};
         this._active = true;
         this.interval = setInterval(() => {
@@ -234,6 +238,29 @@ export class GamepadManager {
                 delete this.state[i];
             }
         }
+
+        if (this.onHeld && this._anyHeld()) {
+            const now = Date.now();
+            if (now - this._lastHeldBeat >= 100) {
+                this._lastHeldBeat = now;
+                this.onHeld();
+            }
+        }
+    }
+
+    /**
+     * True while any tracked pad has a button pressed or an axis away from
+     * rest. Axes that idle off-zero (some trigger conventions) read as held;
+     * that only sustains the heartbeat, which is harmless.
+     */
+    _anyHeld() {
+        for (const i in this.state) {
+            const s = this.state[i];
+            if (s.buttons.some((v) => v !== 0) || s.axes.some((v) => v !== 0)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     destroy() {

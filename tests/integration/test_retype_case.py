@@ -26,7 +26,7 @@ SAMPLE = "Big Chicken A"
 
 def start_server() -> subprocess.Popen:
     """A bare X server, GLX off because it faults on some GPU hosts."""
-    proc = subprocess.Popen(
+    proc = H.spawn(
         ["Xvfb", DISPLAY, "-screen", "0", "1280x720x24", "-extension", "GLX",
          "-nolisten", "tcp", "-ac", "-noreset"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)

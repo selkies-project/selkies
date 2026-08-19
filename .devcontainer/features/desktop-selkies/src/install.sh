@@ -12,7 +12,7 @@ echo "The provided xserver is: ${XSERVER:-missing env}"
 echo "The provided desktop is: ${DESKTOP:-missing env}"
 echo "Use Wayland backend: ${WAYLAND:-false}"
 
-export DEBIAN_FRONTEND=noninteractive
+export DEBIAN_FRONTEND="noninteractive"
 
 # Install base dependencies (X11 capture/input for pixelflux, PulseAudio for
 # pcmflux, Mesa/VA-API for GPU acceleration, and the display stack)

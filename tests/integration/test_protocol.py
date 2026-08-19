@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Protocol-level e2e: raw WS client drives SETTINGS / STOP_VIDEO / opcodes to
 verify A1 (settings while stopped must not restart capture) and F4/F5 (the
-WebRTC-dialect opcodes apply live on the websockets transport, sanitized)."""
+WebRTC-dialect opcodes apply live on the websockets transport, sanitized).
+
+Also covers the `cmd` opcode the dashboards' apps panel posts on: the command
+names it builds are bare, so the server has to resolve them on its own PATH,
+and a launch that fails has to come back as command_error or the optimistic
+install/remove in the UI never rolls back."""
 import asyncio
 import json
 import os
@@ -54,10 +59,30 @@ def wait_log_from(mark: int, substr: str, timeout: float = 10) -> bool:
     return False
 
 
+def command_stub(path: str, sentinel: str) -> None:
+    """Write an executable standing in for the image's selkies-proot wrapper.
+
+    Args:
+        path: File to create; its directory goes on the server's PATH.
+        sentinel: File the stub writes its arguments to when it runs.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write('#!/bin/sh\necho "$@" > "{}"\n'.format(sentinel))
+    os.chmod(path, 0o755)
+
+
 def run() -> "H.Results":
     """Drive the raw-WS opcode sequence and record each protocol check."""
     res = H.Results("protocol")
-    H.server_start(mode="websockets", wayland=False)
+    stub_dir = os.path.join(H.WORKDIR, "cmd-stub-bin")
+    sentinel = os.path.join(H.WORKDIR, "cmd-stub.args")
+    command_stub(os.path.join(stub_dir, "selkies-proot"), sentinel)
+    if os.path.exists(sentinel):
+        os.unlink(sentinel)
+    H.server_start(mode="websockets", wayland=False,
+                   extra_env={"SELKIES_COMMAND_ENABLED": "true",
+                              "PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")})
 
     async def drive():
         uri = f"ws://localhost:{H.PORT}/api/websockets"
@@ -126,10 +151,42 @@ def run() -> "H.Results":
             res.check("F5: '_rc,crf' toggles back to CRF",
                       wait_log_from(st, "Applied rate-control via '_rc': crf", 8), "")
 
+            # The apps panel posts the wrapper by name, so PATH resolution in
+            # the server's shell is what makes the panel work at all.
+            await ws.send("cmd,selkies-proot install demo-app")
+            deadline = time.time() + 10
+            while time.time() < deadline and not os.path.exists(sentinel):
+                await asyncio.sleep(0.25)
+            got = ""
+            if os.path.exists(sentinel):
+                with open(sentinel) as fh:
+                    got = fh.read().strip()
+            res.check("cmd: a bare command name resolves on the server's PATH",
+                      got == "install demo-app", got)
+
+            # A command that is not installed must reach the client as
+            # command_error carrying the echoed command, which is what the
+            # dashboards match their pending action against.
+            await ws.send("cmd,selkies-proot-absent install demo-app")
+            err = ""
+            deadline = time.time() + 10
+            while time.time() < deadline and not err:
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    continue
+                if isinstance(msg, str) and msg.startswith("system,"):
+                    action = json.loads(msg[len("system,"):]).get("action", "")
+                    if action.startswith("command_error,"):
+                        err = action
+            res.check("cmd: a missing command reports command_error to the client",
+                      err.endswith(": selkies-proot-absent install demo-app")
+                      and "127" in err, err)
+
             await ws.send("STOP_VIDEO")
             await asyncio.sleep(1.0)
 
-    asyncio.get_event_loop().run_until_complete(drive())
+    asyncio.run(drive())
     res.summary()
     return res
 

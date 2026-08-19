@@ -70,7 +70,7 @@ import msgpack
 from PIL import Image
 import urllib.parse
 import urllib.request
-from typing import Any, Container, Iterable, Optional, Union
+from typing import Any, Callable, Container, Iterable, Optional, Union
 from .display_utils import (
     pixelflux_x11_cursor,
     unpremultiply_rgba,
@@ -2738,6 +2738,66 @@ class SelkiesGamepad:
         logger_selkies_gamepad.info("Gamepad services fully closed.")
 
 
+# Watch tasks for client-requested commands; referenced so they cannot be
+# garbage-collected mid-watch.
+_command_watch_tasks: set = set()
+
+
+async def run_client_command(command_to_run: str, logger: logging.Logger,
+                             notify: Optional[Callable[[str], Any]] = None) -> None:
+    """Launch a client-requested command and watch it to completion.
+
+    Output stays discarded (a long-running app must never block on a full
+    pipe), but a launch failure or any nonzero exit — above all 127, the
+    command-not-installed case — is reported through ``notify`` (async, one
+    text argument) with the runtime and the echoed command, because the
+    dashboards' apps UI marks the action done optimistically and needs a
+    counter-signal to roll back. A clean exit stays unreported, and the
+    dashboards decide relevance by age: a long-lived app quitting nonzero
+    hours later is application lifecycle, not a launch failure.
+    """
+    try:
+        process = await subprocess.create_subprocess_shell(
+            command_to_run,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=os.path.expanduser("~"),
+        )
+    except Exception as e:
+        logger.error(f"Failed to launch command '{command_to_run}': {e}")
+        if notify:
+            try:
+                await notify(f"failed to launch: {command_to_run}")
+            except Exception:
+                pass
+        return
+    logger.info(f"Launched command '{command_to_run}' with PID {process.pid}")
+
+    started = time.monotonic()
+
+    async def _watch():
+        try:
+            code = await process.wait()
+        except Exception:
+            return
+        if not code:
+            return
+        runtime = time.monotonic() - started
+        hint = " (command not found)" if code in (126, 127) else ""
+        logger.warning(
+            f"Command '{command_to_run}' exited with status {code}{hint} after {runtime:.1f}s")
+        if notify:
+            try:
+                await notify(
+                    f"exited with status {code}{hint} after {runtime:.1f}s: {command_to_run}")
+            except Exception:
+                pass
+
+    task = asyncio.create_task(_watch())
+    _command_watch_tasks.add(task)
+    task.add_done_callback(_command_watch_tasks.discard)
+
+
 class WebRTCInputError(Exception):
     """Raised for input-handler failures surfaced to the transport layer."""
 
@@ -2840,6 +2900,10 @@ class WebRTCInput:
         self.num_gamepads = 4
         self.gamepad_instances = {}
         self.client_gamepad_associations = {}
+        # Slot -> last held-state heartbeat ('js,h'). Only slots that have sent
+        # one are swept: a client that never heartbeats (an older web client)
+        # keeps the transport-close release path alone.
+        self.gamepad_heartbeats = {}
         # Resolved once: the decision (and the reason for it) is logged at startup
         # rather than per gamepad slot.
         self.uinput_gamepads = uinput_gamepads_enabled(uinput_gamepad)
@@ -2995,6 +3059,21 @@ class WebRTCInput:
                     raise RuntimeError("pixelflux is not installed")
                 self.wayland_input = ScreenCapture()
                 logger_webrtc_input.info("Wayland input injection initialized.")
+                missing = [m for m in (
+                    "clipboard_write_app", "clipboard_unwatch_app",
+                    "list_outputs", "create_output", "set_keymap_overlay",
+                    "hold_spare_app_screens", "set_app_output_scale",
+                    "set_app_wayland_display", "type_text_wayland",
+                    "get_keyboard_state",
+                ) if not hasattr(self.wayland_input, m)]
+                if missing:
+                    logger_webrtc_input.warning(
+                        "Installed pixelflux is missing APIs this build "
+                        "expects; Wayland features that depend on them "
+                        "degrade or stay off. Update pixelflux to a "
+                        "matching build.")
+                    logger_webrtc_input.debug(
+                        f"pixelflux methods absent: {', '.join(missing)}")
             except Exception as e:
                 logger_webrtc_input.error(f"Failed to initialize Wayland input: {e}")
 
@@ -3013,6 +3092,21 @@ class WebRTCInput:
     def send_cursor_data(self, data: dict) -> None:
         if self.rtc_app.mode == "websockets": self.rtc_app.send_ws_cursor_data(data)
         else: self.rtc_app.send_cursor_data(data)
+    def send_command_error(self, text: str, conn_id: Optional[str] = None) -> None:
+        """Route a command failure notice to the transport (see send_cursor_data).
+
+        Each transport carries the system action on its own wire format. Over
+        WebRTC ``conn_id`` is the requesting peer's id, so the notice targets
+        that peer's channel; the websockets transport notifies its requesting
+        socket in its own cmd branch and only broadcasts here.
+        """
+        try:
+            if self.rtc_app.mode == "websockets":
+                self.rtc_app.send_system_action(f"command_error,{text}")
+            else:
+                self.rtc_app.send_system_action(f"command_error,{text}", peer_id=conn_id)
+        except Exception:
+            logger_webrtc_input.debug("command_error notify failed", exc_info=True)
 
     def __keyboard_connect(self) -> None: self.keyboard = _XTestKeyboard(self.xdisplay) if self.xdisplay else None
 
@@ -3241,6 +3335,10 @@ class WebRTCInput:
             "conn_id": conn_id,
         }
 
+        # A fresh association starts with no heartbeat: the previous client's
+        # last beat must not date-stamp the new one into an immediate sweep.
+        self.gamepad_heartbeats.pop(gamepad_idx, None)
+
         # Kernel device up front, so applications see a plug event before the
         # first input rather than a controller that appears mid-press.
         self.gamepad_instances[gamepad_idx].ensure_uinput()
@@ -3269,6 +3367,7 @@ class WebRTCInput:
             indices_to_disassociate = [gamepad_idx]
 
         for idx in indices_to_disassociate:
+            self.gamepad_heartbeats.pop(idx, None)
             if idx in self.client_gamepad_associations:
                 associated_info = self.client_gamepad_associations.pop(idx)
                 # Release anything still held on the persistent pad: an ungraceful
@@ -3408,6 +3507,7 @@ class WebRTCInput:
         logger_webrtc_input.info("Releasing gamepad associations (persistent instances stay up).")
         await self.__gamepad_disconnect()
         self.gamepad_instances = {}
+        self.gamepad_heartbeats.clear()
         # Before the pointer backends go away: a button still held here would
         # otherwise stay pressed in the desktop with nothing left to release it.
         await self.release_mouse_buttons()
@@ -3443,12 +3543,13 @@ class WebRTCInput:
         self._reset_multipart_clipboard()
 
     async def _key_stale_sweep(self) -> None:
-        """Auto-release keys whose heartbeats stopped (lost key-up), so a key is
-        never stuck held when the network drops packets."""
+        """Auto-release keys and neutralize gamepads whose heartbeats stopped,
+        so no input stays stuck held when a key-up is lost to congestion or the
+        client vanishes without a transport close."""
         try:
             while True:
                 await asyncio.sleep(self.key_sweep_interval)
-                if not self.pressed_keys:
+                if not self.pressed_keys and not self.gamepad_heartbeats:
                     continue
                 now = time.monotonic()
                 stale = [k for k, seen in self.pressed_keys.items() if now - seen > self.key_stale_window]
@@ -3499,6 +3600,15 @@ class WebRTCInput:
                             self.atomically_typed_keys.discard(keysym)
                     except Exception as e:
                         logger_webrtc_input.warning(f"Failed to auto-release key {keysym}: {e}")
+                for idx, seen in list(self.gamepad_heartbeats.items()):
+                    if now - seen <= self.key_stale_window:
+                        continue
+                    self.gamepad_heartbeats.pop(idx, None)
+                    gamepad = self.gamepad_instances.get(idx)
+                    if gamepad is not None and gamepad._held_controls:
+                        logger_webrtc_input.warning(
+                            f"Neutralizing gamepad slot {idx} (heartbeat lost).")
+                        gamepad.reset_state()
         except asyncio.CancelledError:
             pass
 
@@ -5987,12 +6097,16 @@ class WebRTCInput:
                 # Send event to the persistent target_gamepad_instance
                 target_gamepad_instance.send_event(button_num, button_val, is_button_event=True)
 
-            elif cmd == "a": 
+            elif cmd == "a":
                 axis_num = int(toks[3])
                 axis_val = float(toks[4])
                 # Send event to the persistent target_gamepad_instance
                 target_gamepad_instance.send_event(axis_num, axis_val, is_button_event=False)
-            
+
+            elif cmd == "h":
+                # Held-state heartbeat: refresh only (no injection), like 'kh'.
+                self.gamepad_heartbeats[gamepad_idx] = time.monotonic()
+
             else: logger_webrtc_input.warning(f"Unhandled joystick command for slot {gamepad_idx}: js {cmd}")
         elif msg_type == "cws":
             if self.enable_clipboard in ["true", "in"]:
@@ -6219,19 +6333,12 @@ class WebRTCInput:
             if len(toks) > 1:
                 command_to_run = ",".join(toks[1:])
                 logger_webrtc_input.info(f"Attempting to execute command: '{command_to_run}'")
-                home_directory = os.path.expanduser("~")
-                try:
-                    # Use asyncio subprocess for fire-and-forget execution
-                    # stdout and stderr are redirected to DEVNULL to ignore output.
-                    process = await subprocess.create_subprocess_shell(
-                        command_to_run,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        cwd=home_directory
-                    )
-                    logger_webrtc_input.info(f"Successfully launched command: '{command_to_run}'")
-                except Exception as e:
-                    logger_webrtc_input.error(f"Failed to launch command '{command_to_run}': {e}")
+
+                async def _notify_cmd_error(text, conn_id=conn_id):
+                    self.send_command_error(text, conn_id)
+
+                await run_client_command(
+                    command_to_run, logger_webrtc_input, notify=_notify_cmd_error)
             else:
                 logger_webrtc_input.warning("Received 'cmd' message without a command string.")
         elif msg_type == "_arg_fps":

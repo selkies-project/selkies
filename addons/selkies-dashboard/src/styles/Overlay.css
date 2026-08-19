@@ -1297,6 +1297,19 @@ a.cite-link:active {
     margin-top: 12px;
 }
 
+/* Inline notice when the server cannot act on app commands at all. */
+.apps-modal-notice {
+    color: var(--notification-warn-color);
+    border: 1px solid var(--notification-warn-color);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    text-align: center;
+}
+.apps-modal-notice p {
+    margin: 0;
+}
+
 /* Search bar within the apps modal. */
 .apps-search-bar {
     width: 100%;
@@ -1488,6 +1501,11 @@ a.cite-link:active {
 }
 .app-action-button.remove:hover {
     background-color: rgba(239, 68, 68, 0.12);
+}
+
+.app-action-button:disabled {
+    opacity: 0.45;
+    cursor: default;
 }
 
 /* --- Spinner Icon Color Fix --- */

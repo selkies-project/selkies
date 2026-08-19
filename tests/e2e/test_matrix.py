@@ -11,13 +11,15 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 
-def run_block(mode: str, wayland: bool, block: str = "") -> "H.Results":
+def run_block(mode: str, wayland: bool, block: str = "",
+              engine: str = "chromium") -> "H.Results":
     """Drive one transport/backend pair through the full e2e checklist.
 
     Args:
         mode: Transport mode, ``websockets`` or ``webrtc``.
         wayland: True to run against the Wayland backend, False for X11.
         block: Label for this block's Results; derived from mode when empty.
+        engine: Browser engine to drive (chromium, firefox, or webkit).
 
     Returns:
         The Results accumulator for this block's checks.
@@ -25,6 +27,19 @@ def run_block(mode: str, wayland: bool, block: str = "") -> "H.Results":
     tag = block or f"{mode}-{'wl' if wayland else 'x11'}"
     res = H.Results(tag)
     wl_socket = "wayland-1"
+
+    if wayland:
+        try:
+            from pixelflux import ScreenCapture
+            missing = [m for m in ("clipboard_write_app", "list_outputs",
+                                   "create_output", "set_keymap_overlay")
+                       if not hasattr(ScreenCapture, m)]
+        except ImportError:
+            missing = ["the module entirely"]
+        if missing:
+            print(f"[{tag}] PREFLIGHT: installed pixelflux is missing APIs "
+                  "this tree expects; wayland checks will fail against it",
+                  flush=True)
 
     H.server_start(mode=mode, wayland=wayland)
     res.check("server up", True, H.curl("/api/status")[0])
@@ -34,7 +49,7 @@ def run_block(mode: str, wayland: bool, block: str = "") -> "H.Results":
     res.check("api/health", ok == 200, ok)
 
     with sync_playwright() as p:
-        browser, page, console_errors, not_found = C.launch_chrome(p, mode=mode)
+        browser, page, console_errors, not_found = C.launch_chrome(p, mode=mode, engine=engine)
         wl_obs = None
         try:
             if mode == "websockets":
@@ -107,7 +122,7 @@ def run_block(mode: str, wayland: bool, block: str = "") -> "H.Results":
 
             # --- clipboard: client -> server -------------------------------
             probe = f"e2e-{tag}-c2s-{int(time.time())}"
-            C.send_clipboard_from_client(page, probe, "chromium")
+            C.send_clipboard_from_client(page, probe, engine)
             deadline = time.time() + 8
             got = None
             while time.time() < deadline:
@@ -231,15 +246,16 @@ def run_block(mode: str, wayland: bool, block: str = "") -> "H.Results":
 def main() -> None:
     """Run the matrix blocks named on argv (default: all four)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    engine = os.environ.get("E2E_ENGINE", "chromium")
     blocks = []
     if which in ("all", "ws-x11"):
-        blocks.append(run_block("websockets", False))
+        blocks.append(run_block("websockets", False, engine=engine))
     if which in ("all", "wr-x11"):
-        blocks.append(run_block("webrtc", False))
+        blocks.append(run_block("webrtc", False, engine=engine))
     if which in ("all", "ws-wl"):
-        blocks.append(run_block("websockets", True))
+        blocks.append(run_block("websockets", True, engine=engine))
     if which in ("all", "wr-wl"):
-        blocks.append(run_block("webrtc", True))
+        blocks.append(run_block("webrtc", True, engine=engine))
     failed = sum(len(b.failed()) for b in blocks)
     total = sum(len(b.items) for b in blocks)
     print(f"\n=== MATRIX: {total - failed}/{total} passed ===")

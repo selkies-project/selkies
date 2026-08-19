@@ -108,7 +108,7 @@ class CopyAndPasteSignaling(BaseSignaling):
         self._write_pipe = sys.stdout
 
     async def connect(self) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._reader = asyncio.StreamReader(loop=loop)
         self._read_transport, _ = await loop.connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(self._reader), self._read_pipe

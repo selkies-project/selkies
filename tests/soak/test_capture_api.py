@@ -400,10 +400,10 @@ def main() -> "H.Results":
 
     # ---- pcmflux capture: stereo, VBR, header prefix, silence gate, latency ----
     H.pulse_setup()
-    tone = subprocess.Popen(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
-                             "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
-                             "-af", "volume=0.5"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    tone = H.spawn(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
+                    "-af", "volume=0.5"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
     try:
         H.pulse_setup()

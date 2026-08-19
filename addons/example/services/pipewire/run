@@ -4,6 +4,6 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 export DISABLE_RTKIT="y"
-export PIPEWIRE_LATENCY="128/48000"
+export PIPEWIRE_LATENCY="256/48000"
 until [ -d "${XDG_RUNTIME_DIR}" ]; do sleep 0.5; done
 exec dbus-run-session -- /usr/bin/pipewire

@@ -111,14 +111,16 @@ def main() -> None:
     # uvloop makes the whole asyncio loop (timers, callbacks, socket I/O) markedly
     # faster, which directly lifts the pure-Python WebRTC SCTP data-channel
     # throughput and keeps large transfers from stalling input. Optional: fall
-    # back to the stock loop if it isn't installed.
+    # back to the stock loop if it isn't installed. uvloop.run owns how its
+    # loop is installed per interpreter, so no event-loop policy API (removed
+    # in Python 3.16) is touched here.
     try:
         import uvloop
-        uvloop.install()
+        runner = uvloop.run
     except ImportError:
-        pass
+        runner = asyncio.run
     try:
-        asyncio.run(run())
+        runner(run())
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except asyncio.CancelledError:

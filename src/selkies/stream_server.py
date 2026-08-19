@@ -31,10 +31,19 @@ import shutil
 import base64
 import pathlib
 import asyncio
+import array
+import math
+import mimetypes
+import struct
 import logging
 import socket
 import urllib.parse
 import tempfile
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 from aiohttp import web
 from datetime import datetime
 from prometheus_client import generate_latest
@@ -61,6 +70,178 @@ UPLOAD_PART_TTL_SECONDS: int = 3600
 # Uploads are written to a hidden staging sibling of their destination and
 # renamed onto it, so a destination is only ever replaced by a complete file.
 UPLOAD_STAGING_PREFIX: str = ".selkies-upload-"
+
+
+def _sock_unsent_bytes(sock: Any) -> Optional[int]:
+    """Bytes queued in the socket's send buffer that TCP has not yet
+    transmitted, or None.
+
+    On a saturated link this is where the queue actually lives — the classic
+    bufferbloat gauge (RTT) stays flat when the delay piles up below the
+    sender, which is exactly what a metered first hop produces. The ioctl is
+    SIOCOUTQNSD (not-sent data only): SIOCOUTQ would also count in-flight
+    unacked bytes, which scale with the path's bandwidth-delay product, so a
+    healthy long-RTT link would read as permanently congested.
+    """
+    try:
+        buf = array.array("i", [0])
+        fcntl.ioctl(sock.fileno(), 0x894B, buf, True)
+        return buf[0]
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+
+
+def _sock_rtt_us(sock: Any) -> Optional[int]:
+    """Smoothed RTT of a TCP socket in microseconds, or None when unavailable."""
+    try:
+        info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104)
+    except Exception:
+        return None
+    if len(info) < 72:
+        return None
+    # struct tcp_info: 8 u8 fields then 15 u32s precede tcpi_rtt, a u32 at
+    # byte offset 68 (offset 24 holds tcpi_unacked).
+    r68 = struct.unpack_from("I", info, 68)[0]
+    return r68 or None
+
+
+class TransferPacer:
+    """File-transfer pacing shared across all transfers of one server.
+
+    Two modes. A static cap (rate_bps) exists for links whose rate the operator
+    already knows. Without one, the pacer instead holds every download inside a
+    shared allowance that adapts to the bottleneck: the download socket's
+    unsent-queue depth is the gauge (RTT inflation where the queue ioctl is
+    unavailable), so a rate that builds a queue (bufferbloat = the video
+    stream stalls) is walked back, and one that drains cleanly earns headroom.
+    No link estimate is needed. A connection offering neither gauge gives the
+    adaptive mode nothing to react to, so it is left unpaced rather than
+    throttled blindly; the static cap still applies.
+
+    Transfers share ONE rate across concurrent downloads and uploads on
+    purpose: the link sees one source regardless of how many sockets a
+    browser opens. Upload reads have no usable gauge at all — the client's
+    uplink queue stands in the client's kernel, invisible to this side — so
+    they ride only the static-cap leg, ungauged (see connection_state).
+    """
+
+    _CHUNK = 256 * 1024
+    _RATE_FLOOR = 48 * 1024
+
+    def __init__(self, static_bps: int = 0, adaptive: bool = False) -> None:
+        self.static_bps = static_bps
+        self.adaptive = adaptive
+        self.rate_bps = static_bps or 256 * 1024
+        self._tokens = self.rate_bps * 0.5
+        self._ts = time.monotonic()
+        self._congested = False
+        self._probe_ceiling = None
+        self._slow_start = True
+        self._hold_until = 0.0
+
+    @property
+    def active(self) -> bool:
+        return self.adaptive or self.static_bps > 0
+
+    @property
+    def _ceiling(self) -> int:
+        # Effectively unbounded when purely adaptive.
+        return self.static_bps or 64 * 1024 * 1024 * 1024
+
+    def connection_state(self, gauged: bool = True) -> Dict[str, Any]:
+        """Per-transfer gauge state. The RTT floor is a property of one
+        connection's path: sharing it would let a nearby client's short base
+        RTT make a distant client's read as permanent congestion. Upload
+        reads pass gauged=False: with no honest congestion signal they pace
+        against the static cap alone and pass untouched in adaptive-only
+        mode, like any other gaugeless connection."""
+        return {"rtt_floor_us": None, "gauged": gauged}
+
+    async def pace(self, sock: Any, nbytes: int, conn: Dict[str, Any]) -> None:
+        if not self.active:
+            return
+        if self.adaptive and conn["gauged"]:
+            outq = _sock_unsent_bytes(sock) if sock is not None else None
+            if outq is not None:
+                self._gauge_backoff(
+                    congested=outq > 192 * 1024, clear=outq < 96 * 1024, cut=0.6)
+            else:
+                rtt = _sock_rtt_us(sock) if sock is not None else None
+                if rtt:
+                    floor = conn["rtt_floor_us"] = (
+                        rtt if conn["rtt_floor_us"] is None
+                        else min(conn["rtt_floor_us"], rtt)
+                    )
+                    self._gauge_backoff(
+                        congested=rtt > floor + 8000, clear=True, cut=0.5)
+                else:
+                    conn["gauged"] = False
+        if self.adaptive and not conn["gauged"] and not self.static_bps:
+            return
+        now = time.monotonic()
+        # A long gap since the last paced write means the remembered rate is
+        # stale: re-enter the multiplicative ramp so a link that got faster
+        # meanwhile is rediscovered in chunks, not minutes (TCP's restart
+        # after idle); one that got slower is cut by the first gauge sample.
+        if self.adaptive and now - self._ts > 10:
+            self._slow_start = True
+        limit = min(self.rate_bps, self._ceiling)
+        self._tokens = min(limit * 0.5, self._tokens + (now - self._ts) * limit)
+        self._ts = now
+        self._tokens -= nbytes
+        if self._tokens < 0:
+            # The deficit is slept off here and paid back by the next call's
+            # elapsed-time refill; zeroing the balance after the sleep would
+            # credit the slept interval twice and double the delivered rate.
+            await asyncio.sleep(-self._tokens / limit)
+
+    def _gauge_backoff(self, congested: bool, clear: bool, cut: float) -> None:
+        """One congestion-control step on the shared allowance: a congested
+        sample multiplies the rate down; a clear one probes upward —
+        multiplicatively while no congestion has ever been seen (the initial
+        ramp toward an unknown link rate), additively after (fine-grained
+        probing near the working point, TCP's post-ssthresh split).
+
+        The recovery ceiling arms ONCE per congestion epoch, from the rate at
+        the epoch's first congested sample (ssthresh semantics): arming it per
+        chunk lets a sustained spike ratchet the ceiling toward the floor, and
+        computing it from the post-backoff rate pins recovery below the rate
+        itself. Reaching the ceiling releases it so clear stretches keep
+        probing past the last congested rate; that sawtooth is what keeps a
+        link that gets faster later reachable.
+
+        The epoch closes only on a clear sample past the drain window: a
+        clear inside the hold still reflects the pre-cut queue draining, and
+        ending the epoch there would let an oscillating gauge re-arm the
+        ceiling from each freshly cut rate — the same ratchet, one flap at a
+        time."""
+        if congested:
+            self._slow_start = False
+            if not self._congested:
+                self._congested = True
+                self._probe_ceiling = max(self.rate_bps, 2 * self._RATE_FLOOR)
+            self.rate_bps = max(self.rate_bps * cut, self._RATE_FLOOR)
+            # Growth pauses for a drain window: resuming on the first clear
+            # sample keeps the bottleneck queue standing, and the cut then
+            # never actually relieves the stream sharing the link.
+            self._hold_until = time.monotonic() + 1.5
+            return
+        if not clear:
+            return
+        if time.monotonic() < self._hold_until:
+            return
+        self._congested = False
+        ceiling = self._probe_ceiling
+        if ceiling is not None and self.rate_bps >= ceiling:
+            self._probe_ceiling = ceiling = None
+        bound = min(
+            ceiling if ceiling is not None else self.rate_bps * 4,
+            self._ceiling,
+        )
+        if self._slow_start:
+            self.rate_bps = min(self.rate_bps * 2, bound)
+        else:
+            self.rate_bps = min(self.rate_bps + 8 * 1024, bound)
 
 
 def _upload_staging_path(dest: str, token: str) -> str:
@@ -504,6 +685,20 @@ class CentralizedStreamServer:
         self.cert_watcher: Optional[asyncio.Task] = None
         self.ssl_context: Optional[ssl.SSLContext] = None
         self.static_fs_path: str = ""
+        # Download pacing: congestion-controlled by default; a static cap only
+        # when the operator knows the link rate. A zero limit with adaptive off
+        # means downloads take the unthrottled FileResponse path.
+        limit_mbps = float(self.settings.file_transfer_limit_mbps or 0.0)
+        if not math.isfinite(limit_mbps) or limit_mbps < 0:
+            logger.warning(
+                f"Ignoring file_transfer_limit_mbps={limit_mbps!r}: not a usable rate."
+            )
+            limit_mbps = 0.0
+        cc = self.settings.file_transfer_cc
+        self.transfer_pacer = TransferPacer(
+            static_bps=int(limit_mbps * 125000),
+            adaptive=bool(cc[0] if isinstance(cc, (list, tuple)) else cc),
+        )
         self.upload_dir = pathlib.Path(
             os.path.expanduser(self.settings.file_manager_path)
         ).resolve()
@@ -982,9 +1177,15 @@ class CentralizedStreamServer:
 
             await self._stop_service()
             logger.info(f"Starting service: {mode_name}")
-            # The service reads the settings at start, so an unpinned
-            # rate_control_mode follows the transport it is about to stream on.
+            # The service reads the settings at start. The encoder knob is
+            # brought in line with the transport first — a websockets-only
+            # encoder (jpeg, h264enc-striped) cannot ride the WebRTC pipeline,
+            # and a switch back restores the operator's menu and value — and
+            # only then does an unpinned rate_control_mode resolve, since its
+            # websockets default depends on the resolved encoder (same order
+            # as _post_process_settings).
             self.settings.mode = mode_name
+            self.settings.apply_webrtc_encoder_filter()
             self.settings.resolve_rate_control_default()
             service = self.services[mode_name]
             task = asyncio.create_task(service.start())
@@ -1103,6 +1304,12 @@ class CentralizedStreamServer:
         """
         declared = request.content_length
         loop = asyncio.get_running_loop()
+        # Reads pace against the shared transfer allowance: a paused read
+        # fills aiohttp's flow-control buffer, the TCP window closes, and the
+        # client's uplink is freed for the input/feedback traffic the stream
+        # depends on. Ungauged — only a static cap actually paces here.
+        pacer = self.transfer_pacer
+        pace_conn = pacer.connection_state(gauged=False) if pacer.active else None
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_TRUNC)
         fd = os.open(path, flags, 0o644)
         fh = os.fdopen(fd, "wb")
@@ -1111,6 +1318,8 @@ class CentralizedStreamServer:
             async for chunk in request.content.iter_chunked(1 << 20):
                 if declared is not None and written + len(chunk) > declared:
                     raise ValueError("body exceeds declared Content-Length")
+                if pace_conn is not None:
+                    await pacer.pace(None, len(chunk), pace_conn)
                 await loop.run_in_executor(None, fh.write, chunk)
                 written += len(chunk)
             await loop.run_in_executor(None, fh.close)
@@ -1441,6 +1650,60 @@ class CentralizedStreamServer:
             # would otherwise render inside the modal instead of downloading.
             filename = full_path.name.encode("ascii", "replace").decode().replace('"', "_")
             quoted = urllib.parse.quote(full_path.name)
+            # Pacing applies to plain GETs only: HEAD must answer instantly
+            # (StreamResponse.write is not empty-body-aware, so it would read
+            # and pace the whole file), a Range request is a resume or a seek
+            # — pacing a partial stream buys nothing while FileResponse
+            # negotiates the 206 properly — and a conditional request exists
+            # to be answered with 304/412 from the validators only
+            # FileResponse computes. All of those fall through to
+            # FileResponse's sendfile path.
+            conditional = any(
+                name in request.headers
+                for name in ("If-Modified-Since", "If-None-Match",
+                             "If-Range", "If-Unmodified-Since")
+            )
+            if (self.transfer_pacer.active and request.method == "GET"
+                    and "Range" not in request.headers and not conditional):
+                # Paced write loop: on a bottleneck link this is what keeps a
+                # large download from queueing ahead of the video stream.
+                sock = request.transport.get_extra_info("socket") if request.transport else None
+                conn = self.transfer_pacer.connection_state()
+                logger.info(
+                    f"Download '{full_path.name}': pacing active "
+                    f"(limit={self.transfer_pacer.rate_bps/125000:.1f} Mbit/s, "
+                    f"adaptive={self.transfer_pacer.adaptive})")
+                # Filesystem calls run off the event loop: a cold cache or
+                # slow mount must not stall the video pipeline this pacing
+                # exists to protect.
+                size = (await asyncio.to_thread(full_path.stat)).st_size
+                content_type = (
+                    mimetypes.guess_type(full_path.name)[0]
+                    or "application/octet-stream"
+                )
+                response = web.StreamResponse(
+                    status=200,
+                    headers={
+                        "Content-Type": content_type,
+                        "Content-Length": str(size),
+                        "Accept-Ranges": "bytes",
+                        "Content-Disposition":
+                            f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quoted}',
+                    },
+                )
+                await response.prepare(request)
+                fh = await asyncio.to_thread(open, full_path, "rb")
+                try:
+                    while True:
+                        chunk = await asyncio.to_thread(fh.read, TransferPacer._CHUNK)
+                        if not chunk:
+                            break
+                        await self.transfer_pacer.pace(sock, len(chunk), conn)
+                        await response.write(chunk)
+                finally:
+                    await asyncio.to_thread(fh.close)
+                await response.write_eof()
+                return response
             return web.FileResponse(
                 full_path,
                 headers={

@@ -5,6 +5,7 @@
 
 set -e
 
+# shellcheck disable=SC2086  # TURN_EXTRA_ARGS carries whole flags, split on purpose
 exec turnserver \
     --verbose \
     --listening-ip="0.0.0.0" \
@@ -21,4 +22,4 @@ exec turnserver \
     --pidfile="/tmp/turnserver.pid" \
     --log-file="stdout" \
     --prometheus \
-    ${TURN_EXTRA_ARGS} $@
+    ${TURN_EXTRA_ARGS} "$@"

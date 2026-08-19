@@ -7,31 +7,25 @@
 // Selkies-specific utilities shared by the dashboard components.
 // Kept separate from src/lib/utils.ts which is managed by shadcn.
 
-// --- Route Prefix ---
+// The route prefix and the storage namespace are the same derivations the
+// streaming cores use, so both dashboards and both cores agree on them.
+import { getRoutePrefix, getStorageAppName } from "../../selkies-web-core/lib/util.js";
 
-// Directory the SPA is served from, without a trailing slash ('' at the
-// server root). Lets fetches like `${getRoutePrefix()}/api/status` work when
-// the server runs under a subfolder prefix.
-export function getRoutePrefix(): string {
-  const pathname = window.location.pathname;
-  const dirPath = pathname.substring(0, pathname.lastIndexOf('/') + 1);
-  return dirPath.replace(/\/$/, '');
-}
+export { getRoutePrefix, getStorageAppName };
 
 // --- Storage Key Prefixing ---
 
 // Union of both streaming cores' PER_DISPLAY_SETTINGS lists so the dashboard
 // and whichever core is running agree on which keys get the _display2 suffix.
-// The websockets core owns 'encoder'/'jpeg_quality'/'paint_over_jpeg_quality'
-// and the WebRTC core owns 'encoder_rtc'; a key the running core ignores is
-// inert, while a missing one would make the secondary display write the
-// primary's key.
+// The websockets core alone owns 'jpeg_quality'/'paint_over_jpeg_quality'
+// (jpeg is websockets framing); a key the running core ignores is inert, while
+// a missing one would make the secondary display write the primary's key.
 const PER_DISPLAY_SETTINGS = [
   'framerate', 'video_crf', 'video_fullcolor',
   'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
   'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
   'is_manual_resolution_mode', 'manual_width', 'manual_height',
-  'encoder', 'encoder_rtc', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
+  'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
   'video_bitrate', 'force_aligned_resolution',
 ];
 
@@ -44,16 +38,6 @@ export const isSecondaryDisplay = displayId === 'display2';
 /// controls it cannot use in the gap before `clientRoleUpdate` arrives.
 export const isViewerUrlMode =
   urlHash.toLowerCase().startsWith('#shared') || /^#player[234]$/.test(urlHash.toLowerCase());
-
-export function getStorageAppName(): string {
-  if (typeof window === 'undefined') return '';
-  // Origin + pathname only (NOT the full URL): a per-session ?token=... must not mint
-  // a new localStorage namespace each connect. Must match the cores' derivation.
-  const urlForKey = window.location.origin + window.location.pathname;
-  // Must match the streaming cores' prefix sanitizer ([._-] literal class, not
-  // a [.-_] range) so dashboard and cores share one storage prefix.
-  return urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
-}
 
 const storageAppName = getStorageAppName();
 
@@ -123,7 +107,6 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
 
   // Per-control renderability derived from the settings' own constraints.
   newRenderable.encoder = isSettingRenderable(s.encoder);
-  newRenderable.encoderRtc = isSettingRenderable(s.encoder_rtc);
   newRenderable.framerate = isSettingRenderable(s.framerate);
   newRenderable.jpegQuality = isSettingRenderable(s.jpeg_quality);
   newRenderable.paintOverJpegQuality = isSettingRenderable(s.paint_over_jpeg_quality);

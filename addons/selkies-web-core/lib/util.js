@@ -71,3 +71,31 @@ export const DISPLAY_LABELS = {
 
 /** @param {string} value @returns {string} */
 export const displayLabel = (value) => DISPLAY_LABELS[value] ?? value;
+
+/**
+ * Directory this document is served from, without a trailing slash ('' at the
+ * server root). Every request the client builds hangs off it, so a deployment
+ * reverse-proxied under a subfolder reaches its own routes, and an iframed
+ * client reads its own path instead of the frame's.
+ *
+ * @returns {string} The path prefix, e.g. `/desk`.
+ */
+export function getRoutePrefix() {
+    const pathname = window.location.pathname;
+    const dirPath = pathname.substring(0, pathname.lastIndexOf('/') + 1);
+    return dirPath.replace(/\/$/, '');
+}
+
+/**
+ * The localStorage namespace every stored key is prefixed with. Origin and
+ * pathname only (NOT the full URL): a per-session `?token=` must not mint a
+ * new namespace on each connect. Cores and dashboards share one prefix, so
+ * this derivation is the single one they all call.
+ *
+ * @returns {string} Sanitized namespace, empty outside a browser.
+ */
+export function getStorageAppName() {
+    if (typeof window === 'undefined') return '';
+    const urlForKey = window.location.origin + window.location.pathname;
+    return urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+}

@@ -1262,6 +1262,9 @@ export class Input {
         // the text/composition echo suppression — can still see the chord.
         this._momentaryChordMods = new Set();
         this._momentaryChordModsTimer = null;
+        // Last text typed by a textInput commit, so a compositionend carrying
+        // the same text right after stays clear-only (Blink chains both).
+        this._lastTextInputCommit = null;
         this.keyboardInputAssist = document.getElementById('keyboard-input-assist');
 
         this._activeTouches = new Map();
@@ -1547,6 +1550,23 @@ export class Input {
     }
 
     _handleKeyDown(event) {
+        // Dashboard hotkeys pierce the allow-native-input veil on the
+        // dashboard tree: that class exempts plain typing, not the chords.
+        // Resolve them before the target-class labeling below so a focused
+        // dashboard control never swallows them.
+        if (event.ctrlKey && event.shiftKey) {
+            let hotkey = null;
+            if (event.code === 'KeyM' && document.fullscreenElement === null) hotkey = this.onmenuhotkey;
+            else if (event.code === 'KeyF' && document.fullscreenElement === null) hotkey = this.onfullscreenhotkey;
+            else if (event.code === 'KeyG') hotkey = this.ongamepadhotkey;
+            if (hotkey !== null && this._guac_markEvent(event)) {
+                // Receiver-bound: a bare hotkey() would lose `this` for a
+                // method-style handler (the default is this.enterFullscreen).
+                hotkey.call(this);
+                _stopEvent(event);
+                return;
+            }
+        }
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
         this._releaseDesyncedModifiers(event);
@@ -1659,28 +1679,6 @@ export class Input {
                         this._sendKeyEvent(keysym, code, false);
                     }
                 }
-            }
-        }
-
-        if (event.code === 'KeyM' && event.ctrlKey && event.shiftKey) {
-            if (document.fullscreenElement === null && this.onmenuhotkey !== null) {
-                this.onmenuhotkey();
-                _stopEvent(event);
-                return;
-            }
-        }
-        if (event.code === 'KeyF' && event.ctrlKey && event.shiftKey) {
-            if (document.fullscreenElement === null && this.onfullscreenhotkey !== null) {
-                this.onfullscreenhotkey();
-                _stopEvent(event);
-                return;
-            }
-        }
-        if (event.code === 'KeyG' && event.ctrlKey && event.shiftKey) {
-            if (this.ongamepadhotkey != null) {
-                this.ongamepadhotkey();
-                _stopEvent(event);
-                return;
             }
         }
 
@@ -1923,6 +1921,10 @@ export class Input {
         if (!this._guac_markEvent(event)) return;
         this.isComposing = true;
         this.compositionString = "";
+        // A fresh composition invalidates the textInput echo stamp: a commit
+        // of this composition that matches a recent stamp is real typing, not
+        // an echo, and must not be dropped by _compositionEnd's echo check.
+        this._lastTextInputCommit = null;
         // Composition continued instead of committing: the held chord (if any)
         // was consumed by the IME itself, so it must not fire remotely.
         this._pendingChord = null;
@@ -1967,7 +1969,14 @@ export class Input {
         if (this._pendingChord !== null) {
             setTimeout(() => this._flushPendingChord(), 0);
         }
-        if (browser.isLinux()) {
+        // Empty-data end means the commit rides the following textInput: clear
+        // the preedit without typing. A non-empty end is the commit, except the
+        // one Blink chains after its own textInput — then the text already
+        // typed and the end only clears the preedit.
+        const echo = this._lastTextInputCommit;
+        const echoMatches = echo !== null && echo.data === event.data &&
+            (performance.now() - echo.at) < 400;
+        if (browser.isLinux() || !event.data || echoMatches) {
             this._updateCompositionText("");
             this.isComposing = false;
             this.compositionString = "";
@@ -2018,6 +2027,9 @@ export class Input {
         // text echo of it must not ALSO type the letter.
         if (this._chordModifierHeld()) return;
         this._typeText(event.data);
+        // A commit that Blink chains compositionend(data) after: the end sees
+        // this stamp and only clears the preedit instead of typing again.
+        this._lastTextInputCommit = { data: event.data, at: performance.now() };
         this._clearCompositionHostSoon();
     }
 
@@ -3105,7 +3117,7 @@ export class Input {
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
         if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
         if (!this.gamepadManager) {
-            this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this));
+            this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this), this._gamepadHeartbeat.bind(this));
         }
         // Counts are advisory: the server presents a fixed Xbox pad regardless, and
         // Firefox's non-standard axis layout is normalized in _gamepadButton/_gamepadAxis.
@@ -3128,6 +3140,12 @@ export class Input {
         if (this._isSidebarOpen) {
             window.postMessage({ type: 'gamepadButtonUpdate', gamepadIndex: server_gp_index, buttonIndex: btn_num, value: val }, window.location.origin);
         }
+    }
+
+    _gamepadHeartbeat() {
+        const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
+        if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
+        this.send("js,h," + server_gp_index);
     }
 
     _gamepadAxis(gp_num, axis_num, val) {
@@ -3315,9 +3333,11 @@ export class Input {
         this.listeners_context.push(addListener(compositionTarget, 'compositionstart', this._compositionStart, this));
         this.listeners_context.push(addListener(compositionTarget, 'compositionupdate', this._compositionUpdate, this));
         this.listeners_context.push(addListener(compositionTarget, 'compositionend', this._compositionEnd, this));
-        if (browser.isLinux()) {
-            this.listeners_context.push(addListener(this.element, 'textInput', this._handleTextInput, this));
-        }
+        // Blink on every platform can deliver an IME commit as textInput with
+        // an empty compositionend (IBus/GTK and some TSF paths). Plain typing
+        // never reaches this listener: plain keydowns are stopEvent'ed before
+        // the browser action.
+        this.listeners_context.push(addListener(this.element, 'textInput', this._handleTextInput, this));
         this.listeners_context.push(addListener(this.element, 'pointerdown', this._handlePointerDown, this));
         this.listeners_context.push(addListener(this.element, 'pointermove', this._handlePointerMove, this));
         this.listeners_context.push(addListener(this.element, 'pointerup', this._handlePointerUp, this));

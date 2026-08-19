@@ -6,14 +6,20 @@
 
 // src/components/Sidebar.jsx
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
-import { displayLabel } from "../../../selkies-web-core/lib/util.js";
+import { displayLabel, getRoutePrefix, getStorageAppName } from "../../../selkies-web-core/lib/util.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import { getTranslator } from "../translations";
+import {
+  INSTALLED_APPS_ROLLBACK_EVENT,
+  postAppCommand,
+  readInstalledApps,
+  resolveFailedAppCommand,
+  writeInstalledApps,
+} from "../../../selkies-web-core/lib/app-commands.js";
 import * as yaml from "js-yaml";
-import { getRoutePrefix } from "../utils.js";
 
 // --- Constants ---
 const urlHash = window.location.hash;
@@ -21,27 +27,28 @@ const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
 
 // Union of both streaming cores' PER_DISPLAY_SETTINGS lists so the dashboard and
 // whichever core is running agree on which keys get the _display2 suffix. The
-// websockets core owns 'encoder'/'jpeg_quality'/'paint_over_jpeg_quality' and the
-// WebRTC core owns 'encoder_rtc'; a key the running core ignores is inert, while a
-// missing one would make the secondary display write the primary's key.
+// websockets core alone owns 'jpeg_quality'/'paint_over_jpeg_quality' (jpeg is
+// websockets framing); a key the running core ignores is inert, while a missing
+// one would make the secondary display write the primary's key.
 const PER_DISPLAY_SETTINGS = [
     'framerate', 'video_crf', 'video_fullcolor',
     'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
     'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
     'is_manual_resolution_mode', 'manual_width', 'manual_height', 'encoder',
-    'encoder_rtc', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
+    'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
     'video_bitrate', 'force_aligned_resolution'
 ];
 
 const encoderOptions = [
   "h264enc",
-  "h264enc-striped",
   "openh264enc",
+  "h264enc-striped",
   "jpeg",
 ];
 
-// WebRTC encoders — must match the server's encoder_rtc allowed list (pixelflux emits
-// H.264 only; hardware-first h264enc + software openh264enc).
+// WebRTC encoders — the static pre-connect fallback only; once the server
+// payload arrives its `encoder` allowed list is already filtered to what the
+// webrtc pipeline produces (pixelflux emits H.264 only).
 const encoderOptionsWR = [
   "h264enc",
   "openh264enc",
@@ -133,7 +140,6 @@ const STREAM_MODE_WEBRTC = "webrtc";
 const STREAM_MODE_WEBSOCKETS = "websockets";
 const STREAMING_MODES= [STREAM_MODE_WEBSOCKETS, STREAM_MODE_WEBRTC]
 const DEFAULT_STREAM_MODE = STREAM_MODE_WEBSOCKETS;
-const DEFAULT_WEBRTC_ENCODER = "h264enc";
 // Global default in bps, matching the server and the wish dashboard.
 const DEFAULT_AUDIO_BITRATE = 128000;
 // Opus target bitrate stops mirroring the server's audio_bitrate allowed enum
@@ -343,8 +349,6 @@ const SelkiesLogo = ({ width = 30, height = 30, className, t, ...props }) => {
   );
 };
 
-const INSTALLED_APPS_STORAGE_KEY = "prootInstalledApps";
-
 // Session cache of the fetched proot-apps catalog: AppsModal is conditionally
 // mounted, so each open is a fresh mount; a hit here skips the network.
 let cachedAppData = null;
@@ -382,42 +386,35 @@ function readStreamAudioLevel(meterRef) {
   return Math.sqrt(sum / m.data.length);
 }
 
-function AppsModal({ isOpen, onClose, t }) {
+function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown }) {
   const [appData, setAppData] = useState(cachedAppData);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [fetchAttempt, setFetchAttempt] = useState(0);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedApp, setSelectedApp] = useState(null);
-  const [installedApps, setInstalledApps] = useState(() => {
-    const savedApps = localStorage.getItem(INSTALLED_APPS_STORAGE_KEY);
-    if (savedApps) {
-      try {
-        const parsedApps = JSON.parse(savedApps);
-        if (
-          Array.isArray(parsedApps) &&
-          parsedApps.every((item) => typeof item === "string")
-        ) {
-          return parsedApps;
-        }
-        console.warn(
-          "Invalid data found in localStorage for installed apps. Resetting."
-        );
-        localStorage.removeItem(INSTALLED_APPS_STORAGE_KEY);
-      } catch (e) {
-        console.error("Failed to parse installed apps from localStorage:", e);
-        localStorage.removeItem(INSTALLED_APPS_STORAGE_KEY);
-      }
-    }
-    return [];
-  });
+  const [installedApps, setInstalledApps] = useState(readInstalledApps);
 
   useEffect(() => {
-    localStorage.setItem(
-      INSTALLED_APPS_STORAGE_KEY,
-      JSON.stringify(installedApps)
-    );
+    writeInstalledApps(installedApps);
   }, [installedApps]);
+
+  // A failed install/remove already rolled the stored list back; mirror it
+  // into this mounted list so the badge flips without a remount.
+  useEffect(() => {
+    const onRollback = (event) => {
+      const { app, action } = event.detail || {};
+      if (action === "install")
+        setInstalledApps((prev) => prev.filter((name) => name !== app));
+      else if (action === "remove")
+        setInstalledApps((prev) =>
+          prev.includes(app) ? prev : [...prev, app]
+        );
+    };
+    window.addEventListener(INSTALLED_APPS_ROLLBACK_EVENT, onRollback);
+    return () =>
+      window.removeEventListener(INSTALLED_APPS_ROLLBACK_EVENT, onRollback);
+  }, []);
 
   // Catalog fetch: one attempt per modal open (plus explicit Retry bumps of
   // fetchAttempt) — a failure settles into the error view rather than
@@ -475,50 +472,27 @@ function AppsModal({ isOpen, onClose, t }) {
   const handleAppClick = (app) => setSelectedApp(app);
   const handleBackToGrid = () => setSelectedApp(null);
 
-  // Unified apps command contract (both dashboards): the /selkies-proot wrapper.
+  // Unified apps command contract (both dashboards): app-commands.js posts
+  // the selkies-proot wrapper commands and tracks them for rollback.
   const handleInstall = (appName) => {
-    console.log(`Install app: ${appName}`);
-    window.postMessage(
-      {
-        type: "command",
-        value: `/selkies-proot install ${appName}`,
-      },
-      window.location.origin
-    );
+    if (!commandsAvailable) return;
+    postAppCommand("install", appName);
     setInstalledApps((prev) =>
       prev.includes(appName) ? prev : [...prev, appName]
     );
   };
   const handleRemove = (appName) => {
-    console.log(`Remove app: ${appName}`);
-    window.postMessage(
-      {
-        type: "command",
-        value: `/selkies-proot remove ${appName}`,
-      },
-      window.location.origin
-    );
+    if (!commandsAvailable) return;
+    postAppCommand("remove", appName);
     setInstalledApps((prev) => prev.filter((name) => name !== appName));
   };
   const handleUpdate = (appName) => {
-    console.log(`Update app: ${appName}`);
-    window.postMessage(
-      {
-        type: "command",
-        value: `/selkies-proot update ${appName}`,
-      },
-      window.location.origin
-    );
+    if (!commandsAvailable) return;
+    postAppCommand("update", appName);
   };
   const handleLaunch = (appName) => {
-    console.log(`Launch app: ${appName}`);
-    window.postMessage(
-      {
-        type: "command",
-        value: `st ~/.local/bin/${appName}-pa`,
-      },
-      window.location.origin
-    );
+    if (!commandsAvailable) return;
+    postAppCommand("launch", appName);
   };
 
   const filteredApps =
@@ -543,6 +517,16 @@ function AppsModal({ isOpen, onClose, t }) {
         &times;
       </button>
       <div className="apps-modal-content">
+        {commandsKnown && !commandsAvailable && (
+          <div className="apps-modal-notice">
+            <p>
+              {t(
+                "appsModal.commandsDisabled",
+                "App installation is unavailable: this session has remote commands disabled (the server's SELKIES_COMMAND_ENABLED setting)."
+              )}
+            </p>
+          </div>
+        )}
         {isLoading && (
           <div className="apps-modal-loading">
             <SpinnerIcon />
@@ -587,6 +571,7 @@ function AppsModal({ isOpen, onClose, t }) {
                     <>
                       <button
                         onClick={() => handleLaunch(selectedApp.name)}
+                        disabled={!commandsAvailable}
                         className="app-action-button install"
                       >
                         {t("appsModal.launchButton", "Launch")}{" "}
@@ -594,6 +579,7 @@ function AppsModal({ isOpen, onClose, t }) {
                       </button>
                       <button
                         onClick={() => handleUpdate(selectedApp.name)}
+                        disabled={!commandsAvailable}
                         className="app-action-button update"
                       >
                         {t("appsModal.updateButton", "Update")}{" "}
@@ -601,6 +587,7 @@ function AppsModal({ isOpen, onClose, t }) {
                       </button>
                       <button
                         onClick={() => handleRemove(selectedApp.name)}
+                        disabled={!commandsAvailable}
                         className="app-action-button remove"
                       >
                         {t("appsModal.removeButton", "Remove")}{" "}
@@ -610,6 +597,7 @@ function AppsModal({ isOpen, onClose, t }) {
                   ) : (
                     <button
                       onClick={() => handleInstall(selectedApp.name)}
+                      disabled={!commandsAvailable}
                       className="app-action-button install"
                     >
                       {t("appsModal.installButton", "Install")}{" "}
@@ -673,15 +661,6 @@ function AppsModal({ isOpen, onClose, t }) {
   );
 }
 
-const getStorageAppName = () => {
-  if (typeof window === 'undefined') return '';
-  // Origin + pathname only (NOT the full URL): a per-session ?token=... must not mint
-  // a new localStorage namespace each connect. Must match the cores' derivation.
-  const urlForKey = window.location.origin + window.location.pathname;
-  // Must match the streaming cores' prefix sanitizer ([._-] literal class, not
-  // the buggy [.-_] range) so dashboard and cores share one storage prefix.
-  return urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
-};
 const storageAppName = getStorageAppName();
 const getPrefixedKey = (key) => {
   const prefixedKey = `${storageAppName}_${key}`;
@@ -706,6 +685,7 @@ const isExplicitChoice = (spec) => localStorage.getItem(explicitChoiceKey(spec))
 const readExplicitStored = (spec) => (key) => (isExplicitChoice(spec) ? readStored(key) : null);
 const readHidpiStored = readExplicitStored(HIDPI_SPEC);
 const readRateControlStored = readExplicitStored(RATE_CONTROL_SPEC);
+const readPaintOverStored = readExplicitStored(USE_PAINT_OVER_QUALITY_SPEC);
 
 // Drives a conditional setting: lazy init + re-resolve whenever the server
 // settings or any dependency in `deps` changes (server-sync AND encoder/manual-
@@ -844,7 +824,6 @@ function Sidebar() {
     newRenderable.coreButtons = s.ui_show_core_buttons?.value ?? true;
 
     newRenderable.encoder = isRenderable('encoder');
-    newRenderable.encoder_rtc = isRenderable('encoder_rtc');
     newRenderable.framerate = isRenderable('framerate');
     newRenderable.jpeg_quality = isRenderable('jpeg_quality');
     newRenderable.paint_over_jpeg_quality = isRenderable('paint_over_jpeg_quality');
@@ -1033,9 +1012,6 @@ function Sidebar() {
       (typeof window !== "undefined" && window.__SELKIES_STREAMING_MODE__) ||
       DEFAULT_STREAM_MODE
   );
-  const [encoderRTC, setEncoderRTC] = useState(
-    localStorage.getItem(getPrefixedKey("encoder_rtc")) || DEFAULT_WEBRTC_ENCODER
-  );
   const [audioBitrate, setAudioBitrate] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("audio_bitrate")), 10) || DEFAULT_AUDIO_BITRATE
   );
@@ -1085,9 +1061,9 @@ function Sidebar() {
   const conditionalCtx = {
     manualActive: !!readStored("manual_width") || serverSettings?.is_manual_resolution_mode?.value === true,
     streamMode,
-    activeEncoder: (streamMode === STREAM_MODE_WEBRTC)
-      ? (readStored("encoder_rtc") || encoderRTC)
-      : (readStored("encoder") || encoder),
+    // One knob for both transports: an out-of-set stored value is ignored by
+    // the server's own fallback, and the serverSettings sync below re-seats it.
+    activeEncoder: readStored("encoder") || encoder,
     allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
   };
   // Each conditional setting: one hook call over a shared spec. The hook owns
@@ -1098,8 +1074,11 @@ function Sidebar() {
     HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
   const [rateControlMode, setRateControlMode] = useConditionalSetting(
     RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings, streamMode], readRateControlStored);
+  // Paint-over's default tracks rate control, so its resolution ctx carries
+  // the mode the rc hook just settled on.
+  const paintOverCtx = { ...conditionalCtx, rateControlMode };
   const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
-    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings, rateControlMode], readPaintOverStored);
   const [videoFullColor, setVideoFullColor] = useConditionalSetting(
     VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [use_cpu, setUseCpu] = useConditionalSetting(
@@ -1263,16 +1242,6 @@ function Sidebar() {
       setEncoder(final);
       setDynamicEncoderOptions(s_encoder.allowed);
     }
-    const s_encoder_rtc = serverSettings.encoder_rtc;
-    if (s_encoder_rtc) {
-      // The server payload carries boot config, while the core re-asserts the
-      // stored encoder on connect and the server applies it live — so a stored
-      // allowed pick is what the stream actually runs.
-      const stored = localStorage.getItem(getPrefixedKey("encoder_rtc"));
-      const final = s_encoder_rtc.allowed.includes(stored) ? stored : s_encoder_rtc.value;
-      setEncoderRTC(final);
-      setDynamicEncoderOptions(s_encoder_rtc.allowed);
-    }
     const s_framerate = serverSettings.framerate;
     if (s_framerate) {
       const stored = getStoredInt("framerate");
@@ -1411,6 +1380,45 @@ function Sidebar() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverSettings]);
+
+  // HiDPI's stored value has the same stale-echo failure rate control has: the
+  // core persists every applied useCssScaling, so a derived pick outlives the
+  // resolution mode that produced it unless dropped when the ladder moves on.
+  useEffect(() => {
+    if (!serverSettings) return;
+    const key = HIDPI_SPEC.storageKey;
+    const resolved = resolveSpec(
+      HIDPI_SPEC, serverSettings, conditionalCtx, readHidpiStored);
+    if (!isExplicitChoice(HIDPI_SPEC)
+      && readStored(key) !== null
+      && readStored(key) !== HIDPI_SPEC.serialize(resolved)) {
+      localStorage.removeItem(getPrefixedKey(key));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverSettings]);
+
+  // Push the paint-over default the resolved rate control implies so the
+  // encoder agrees (same shape as the rate-control derivation above).
+  useEffect(() => {
+    if (!serverSettings) return;
+    const key = USE_PAINT_OVER_QUALITY_SPEC.storageKey;
+    const resolved = resolveSpec(
+      USE_PAINT_OVER_QUALITY_SPEC, serverSettings, { ...conditionalCtx, rateControlMode }, readPaintOverStored);
+    // Same stale-echo failure as rate control: the core persists every value
+    // it applies, so a derived pick outlives the transport/encoder flip that
+    // produced it. Drop the unmarked echo once the ladder moves on.
+    if (!isExplicitChoice(USE_PAINT_OVER_QUALITY_SPEC)
+      && readStored(key) !== null
+      && readStored(key) !== String(resolved)) {
+      localStorage.removeItem(getPrefixedKey(key));
+    }
+    if (isSettingPinned(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, readPaintOverStored)) return;
+    const serverValue = serverSettings.use_paint_over_quality?.value;
+    if (resolved !== undefined && serverValue !== undefined && resolved !== serverValue) {
+      writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverSettings, rateControlMode]);
 
   const handleDpiScalingChange = (event) => {
     const newDpi = parseInt(event.target.value, 10);
@@ -1707,16 +1715,10 @@ function Sidebar() {
     // Persist the choice immediately so conditionalCtx.activeEncoder (read from
     // localStorage) doesn't lag behind during the post debounce and let a
     // serverSettings sync re-derive rate control off the stale encoder.
-    if (streamMode === STREAM_MODE_WEBRTC) {
-      setEncoderRTC(selectedEncoder);
-      localStorage.setItem(getPrefixedKey("encoder_rtc"), selectedEncoder);
-      // WebRTC uses encoder_rtc; the server switches the pipeline encoder on this.
-      debouncedPostSetting({ encoder_rtc: selectedEncoder });
-    } else {
-      setEncoder(selectedEncoder);
-      localStorage.setItem(getPrefixedKey("encoder"), selectedEncoder);
-      debouncedPostSetting({ encoder: selectedEncoder });
-    }
+    setEncoder(selectedEncoder);
+    localStorage.setItem(getPrefixedKey("encoder"), selectedEncoder);
+    // One knob for both transports; the server switches the pipeline encoder on this.
+    debouncedPostSetting({ encoder: selectedEncoder });
     // Rate control follows the encoder unless pinned (explicit client/server
     // choice). A derived change is not persisted, so it keeps following.
     if (rateControlEnabled
@@ -1878,6 +1880,21 @@ function Sidebar() {
     setSelectedDpi(derived);
     debouncedPostSetting({ scaling_dpi: derived });
   };
+  // Reset-to-window also restores HiDPI to its default: unlike the resolution-
+  // derived writes above (which respect a pinned choice), a reset means "back
+  // to defaults", so the client's own pin is dropped even under an operator-
+  // explicit value — use_css_scaling's overridden does not imply locked, and a
+  // kept pin would keep outranking the operator's value in the resolution
+  // ladder. The operator value (when explicit) or the derived default is then
+  // applied without storing; only a locked value leaves everything alone.
+  const resetHidpiToDerivedDefault = () => {
+    const s = serverSettings?.use_css_scaling;
+    if (s?.locked) return;
+    localStorage.removeItem(getPrefixedKey(HIDPI_SPEC.storageKey));
+    localStorage.removeItem(explicitChoiceKey(HIDPI_SPEC));
+    const uiValue = s?.overridden ? s.value !== true : true;
+    writeConditional(HIDPI_SPEC, uiValue, setHidpiEnabled, { persist: false });
+  };
   const handleForceAlignedResolutionToggle = () => {
     writeConditional(FORCE_ALIGNED_RESOLUTION_SPEC, !forceAlignedResolution, setForceAlignedResolution, { persist: true });
   };
@@ -1932,7 +1949,7 @@ function Sidebar() {
       { type: "resetResolutionToWindow" },
       window.location.origin
     );
-    deriveHidpiForResolution(false);
+    resetHidpiToDerivedDefault();
     resetDpiToDerivedDefault();
   };
   const handleVideoToggle = () =>
@@ -2005,6 +2022,21 @@ function Sidebar() {
     if (file && file.type.startsWith("image/")) {
       window.postMessage(
         { type: "clipboardImageUpdate", imageBlob: file },
+        window.location.origin
+      );
+    } else if (file) {
+      window.postMessage(
+        {
+          type: "fileUpload",
+          payload: {
+            status: "warning",
+            fileName: "clipboard-image",
+            message: t("notifications.clipboardImageRejected", {
+              name: file.name,
+              mime: file.type || "unknown",
+            }),
+          },
+        },
         window.location.origin
       );
     }
@@ -2344,7 +2376,20 @@ function Sidebar() {
             progress,
             fileSize,
             message: errMsg,
+            code,
           } = message.payload;
+          // A failed apps command settles its pending optimistic update
+          // first; a stale launch match is lifecycle noise, not a notice.
+          if (code === "commandFailed" && !resolveFailedAppCommand(errMsg))
+            return;
+          // Core-emitted skip reasons carry a translation code; unknown/absent
+          // codes fall back to the raw message for third-party consumers.
+          const localizedMsg =
+            typeof code === "string" && code.startsWith("clipboardSkip")
+              ? t(`notifications.${code}`, errMsg)
+              : code === "commandFailed"
+                ? t("notifications.commandFailed", { detail: errMsg })
+                : errMsg;
           const id = fileName;
           setNotifications((prev) => {
             const exIdx = prev.findIndex((n) => n.id === id);
@@ -2371,7 +2416,7 @@ function Sidebar() {
                     id,
                     fileName: t("notifications.warningPrefix"),
                     status: "warn",
-                    message: errMsg,
+                    message: localizedMsg,
                     timestamp: Date.now(),
                     fadingOut: false,
                   }
@@ -2421,7 +2466,7 @@ function Sidebar() {
                     ...cn,
                     fileName: t("notifications.warningPrefix"),
                     status: "warn",
-                    message: errMsg,
+                    message: localizedMsg,
                     timestamp: Date.now(),
                     fadingOut: false,
                   };
@@ -2431,7 +2476,7 @@ function Sidebar() {
             } else return prev;
           });
         } else if (message.type === "serverSettings") {
-            const encoders = message.payload?.encoder?.allowed || message.payload?.encoder_rtc?.allowed
+            const encoders = message.payload?.encoder?.allowed
             if (encoders && Array.isArray(encoders)) {
               const newEncoderOptions =
                 Array.isArray(encoders) && encoders.length > 0
@@ -2533,7 +2578,7 @@ function Sidebar() {
   );
 
   // The encoder relevant to the active transport; CBR/CRF applies to every H.264 encoder on both.
-  const activeEncoder = isWebrtc ? encoderRTC : encoder;
+  const activeEncoder = encoder;
   const H264_ENCODERS = ["h264enc", "h264enc-striped", "openh264enc", "nvh264enc"];
   const showFPS = [
     "jpeg",
@@ -2866,7 +2911,7 @@ function Sidebar() {
                       </select>{" "}
                     </div>
                   )}
-                {!isWebrtc && (renderableSettings.encoder ?? true) && (
+                {(renderableSettings.encoder ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="encoderSelect">
                       {t("sections.video.encoderLabel")}
@@ -2878,25 +2923,6 @@ function Sidebar() {
                       disabled={!serverSettings || serverSettings.encoder?.allowed?.length <= 1}
                     >
                       {(serverSettings?.encoder?.allowed || dynamicEncoderOptions).map((enc) => (
-                        <option key={enc} value={enc}>
-                          {displayLabel(enc)}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-                {isWebrtc && (renderableSettings.encoder_rtc ?? true) && (
-                  <div className="dev-setting-item">
-                    <label htmlFor="encoderRTCSelect">
-                      {t("sections.video.encoderLabel")}
-                    </label>
-                    <select
-                      id="encoderRTCSelect"
-                      value={encoderRTC}
-                      onChange={handleEncoderChange}
-                      disabled={!serverSettings || serverSettings.encoder_rtc?.allowed?.length <= 1}
-                    >
-                      {(serverSettings?.encoder_rtc?.allowed || dynamicEncoderOptions).map((enc) => (
                         <option key={enc} value={enc}>
                           {displayLabel(enc)}
                         </option>
@@ -3185,8 +3211,11 @@ function Sidebar() {
                           className={`toggle-button-sidebar ${hidpiEnabled ? "active" : ""}`}
                           onClick={handleHidpiToggle}
                           aria-pressed={hidpiEnabled}
-                          title={t(hidpiEnabled ? "sections.screen.hidpiDisableTitle" : "sections.screen.hidpiEnableTitle",
-                                  hidpiEnabled ? "Disable HiDPI (Use CSS Scaling)" : "Enable HiDPI (Pixel Perfect)")}
+                          disabled={serverSettings?.enable_resize?.value === false}
+                          title={serverSettings?.enable_resize?.value === false
+                            ? t("sections.screen.hidpiDisabledNoResizeTitle", "Resolution changes are disabled by the server (enable_resize)")
+                            : t(hidpiEnabled ? "sections.screen.hidpiDisableTitle" : "sections.screen.hidpiEnableTitle",
+                                hidpiEnabled ? "Disable HiDPI (Use CSS Scaling)" : "Enable HiDPI (Pixel Perfect)")}
                         >
                           <span className="toggle-button-sidebar-knob"></span>
                         </button>
@@ -3348,7 +3377,7 @@ function Sidebar() {
                       : "sections.screen.scaleLocallyTitleEnable"
                   )}
                 >
-                  {t("sections.screen.scaleLocallyLabel")}
+                  {t("sections.screen.scaleLocallyLabel")}{" "}
                   {t(
                     scaleLocally
                       ? "sections.screen.scaleLocallyOn"
@@ -4377,7 +4406,9 @@ function Sidebar() {
         </div>
       )}
       {isAppsModalOpen && (
-        <AppsModal isOpen={isAppsModalOpen} onClose={toggleAppsModal} t={t} />
+        <AppsModal isOpen={isAppsModalOpen} onClose={toggleAppsModal} t={t}
+          commandsAvailable={serverSettings?.command_enabled?.value === true}
+          commandsKnown={serverSettings != null} />
       )}
 
       {(isMobile || hasDetectedTouch) && isKeyboardButtonVisible && (renderableSettings.keyboardButton ?? true) && (

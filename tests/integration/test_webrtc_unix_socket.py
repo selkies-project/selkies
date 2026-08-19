@@ -31,16 +31,16 @@ env = {"PATH": os.environ.get("PATH", ""),
        "SELKIES_MODE": "webrtc", "SELKIES_ENABLE_BASIC_AUTH": "false",
        "SELKIES_WEB_ROOT": H.CORE_DIST,
        "SELKIES_TURN_REST_URI": ""}
-server = subprocess.Popen(
+server = H.spawn(
     [H.PYTHON, "-m", "selkies", "--port", str(PORT), "--unix-socket", SOCK],
     env=env, cwd=H.WORKDIR,
     stdout=open(os.path.join(H.WORKDIR, "selkies-webrtc.log"), "w"),
     stderr=subprocess.STDOUT, start_new_session=True)
-proxy = subprocess.Popen([H.PYTHON, os.path.join(H.TOOLS, "tcp2unix.py"),
-                          "127.0.0.1", str(PORT), SOCK],
-                         env=dict(os.environ), cwd=H.WORKDIR,
-                         stdout=open(os.path.join(H.WORKDIR, "proxy.log"), "w"),
-                         stderr=subprocess.STDOUT, start_new_session=True)
+proxy = H.spawn([H.PYTHON, os.path.join(H.TOOLS, "tcp2unix.py"),
+                 "127.0.0.1", str(PORT), SOCK],
+                env=dict(os.environ), cwd=H.WORKDIR,
+                stdout=open(os.path.join(H.WORKDIR, "proxy.log"), "w"),
+                stderr=subprocess.STDOUT, start_new_session=True)
 time.sleep(9)
 
 res = H.Results("webrtc-unix")

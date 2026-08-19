@@ -209,6 +209,7 @@ export function createLocalClipboardSender({
     binaryEnabled,
     sendClipboardData,
     dedupeText = false,
+    getDeferredWriteInFlight = null,
 }) {
     let sendInFlight = null;
     let lastText = null;
@@ -219,6 +220,19 @@ export function createLocalClipboardSender({
         // instead of throwing per focus event.
         if (!window.isSecureContext || !navigator.clipboard) return;
         if (isSharedMode() || !canSync() || !canRead()) return;
+
+        // A server push that only just landed locally (or is still settling
+        // through the deferred writer) must be on the page before this read:
+        // reading around the flush returns the PRE-push content, which then
+        // reads as a change and bounces the stale value back to the server.
+        if (getDeferredWriteInFlight) {
+            for (let i = 0; i < 2; i++) {
+                const w = getDeferredWriteInFlight();
+                if (!w) break;
+                try { await w; } catch (_) { /* write-side errors surface there */ }
+                if (!getDeferredWriteInFlight()) break;
+            }
+        }
 
         const work = (async () => {
             try {
@@ -365,8 +379,20 @@ export function createClipboardSync({ sendRequest }) {
     let lastText = '';
     let lastBlob = null;
     let lastMime = 'text/plain';
+    // Latest value synced in EITHER direction, plus the browser's re-encoded
+    // form of the latest INBOUND image (writing a pushed image recompresses
+    // it, so the focus read-back would otherwise read as new and echo once).
+    // Exactly one value is "current" at a time: remembering older sigs would
+    // suppress legitimately re-copying content copied before an intervening
+    // value. The re-encode form follows lastSyncedSig's lifetime — a new
+    // synced value invalidates it.
     let lastSyncedSig = null;
+    let lastReencodeSig = null;
     let pending = [];
+    function noteSynced(s) {
+        lastSyncedSig = s;
+        lastReencodeSig = null;
+    }
 
     function hashBytes(h, u8) {
         for (let i = 0; i < u8.length; i++) h = ((h << 5) + h + u8[i]) | 0;
@@ -411,12 +437,13 @@ export function createClipboardSync({ sendRequest }) {
         const { full, legacy } = sigOf(data, mime);
         // The legacy compare suppresses echoes of content whose receive-side
         // signature was stored without bytes (size-only form).
-        return !(full === lastSyncedSig || (legacy !== null && legacy === lastSyncedSig));
+        if (full === lastSyncedSig || full === lastReencodeSig) return false;
+        return !(legacy !== null && (legacy === lastSyncedSig || legacy === lastReencodeSig));
     }
 
     /** Record content as synced (call on transfer success). */
     function markSynced(data, mime) {
-        lastSyncedSig = sig(data, mime);
+        noteSynced(sig(data, mime));
     }
 
     /**
@@ -425,8 +452,8 @@ export function createClipboardSync({ sendRequest }) {
      * content-hashed so it matches what shouldSend computes for the same data.
      */
     function resolveServer(text, blob, mime, bytes) {
-        if (typeof text === 'string') { lastText = text; lastSyncedSig = sig(text); }
-        if (blob) { lastBlob = blob; lastSyncedSig = sig(bytes != null ? bytes : blob, mime || blob.type); }
+        if (typeof text === 'string') { lastText = text; noteSynced(sig(text)); }
+        if (blob) { lastBlob = blob; noteSynced(sig(bytes != null ? bytes : blob, mime || blob.type)); }
         if (mime) { lastMime = mime; }
         if (pending.length === 0) return;
         const reqs = pending;
@@ -453,13 +480,24 @@ export function createClipboardSync({ sendRequest }) {
      * worst case is one redundant round-trip, never a loop.
      */
     async function captureLocalImageSig() {
+        // Anchor: the re-encode belongs to the value lastSyncedSig holds NOW;
+        // if another sync (either direction) landed mid-read, this capture is
+        // stale and would suppress a legitimate later copy.
+        const anchor = lastSyncedSig;
         try {
             const items = await navigator.clipboard.read();
             for (const it of items) {
                 const m = it.types.find((t) => t !== 'text/plain');
                 if (!m) continue;
                 const b = await it.getType(m);
-                lastSyncedSig = sig(new Uint8Array(await b.arrayBuffer()), m);
+                // Kept alongside the push's own sig (still lastSyncedSig): the
+                // re-encoded form is what a focus read-back sees. Hash first,
+                // re-check the anchor after the last await — a sync landing
+                // during arrayBuffer() must void this capture too.
+                const reencoded = sig(new Uint8Array(await b.arrayBuffer()), m);
+                if (lastSyncedSig === anchor) {
+                    lastReencodeSig = reencoded;
+                }
                 return;
             }
         } catch (_) { /* unfocused or permission denied */ }

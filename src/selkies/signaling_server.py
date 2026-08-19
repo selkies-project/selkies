@@ -601,13 +601,13 @@ class WebRTCPeerManagement:
         mid-handshake). Rejecting the newest claimant breaks the loop and keeps
         the current holder stable; a lone refresh (one takeover per reload)
         never trips this."""
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         times = [t for t in self._eviction_times.get(key, ()) if now - t < self._EVICTION_STORM_WINDOW_S]
         self._eviction_times[key] = times
         return len(times) >= self._EVICTION_STORM_LIMIT
 
     def _record_eviction(self, key: Any) -> None:
-        self._eviction_times.setdefault(key, []).append(asyncio.get_event_loop().time())
+        self._eviction_times.setdefault(key, []).append(asyncio.get_running_loop().time())
 
     def _secure_token_rejected(self, client_token: Any) -> bool:
         """Secure mode (master token configured) binds streaming access to a

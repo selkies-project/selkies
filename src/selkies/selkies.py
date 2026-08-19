@@ -24,6 +24,7 @@ management, DPI-as-output-scale, and cursor sizing all go through the
 in-process pixelflux handle, never through forked tools.
 """
 import asyncio
+import inspect
 import base64
 import contextlib
 import gzip
@@ -31,7 +32,6 @@ import json
 import logging
 import os
 import time
-from asyncio import subprocess
 from collections import OrderedDict, deque
 from datetime import datetime
 from enum import Enum
@@ -74,6 +74,7 @@ from .input_handler import (
     VIEWER_ALLOWED_PREFIXES,
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
+    run_client_command,
 )
 from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, effective_use_cpu, inflate_gz_bounded, sanitize_client_setting
 from .settings import settings as app_settings
@@ -1028,6 +1029,24 @@ class SelkiesStreamingApp:
         else:
             data_logger.warning("Cannot broadcast cursor data: no clients connected or server not ready.")
 
+    def send_system_action(self, action: str) -> None:
+        """Broadcast a system action (e.g. ``command_error,<text>``) to clients."""
+        if (
+            self.data_streaming_server
+            and getattr(self.data_streaming_server, "clients", None)
+            and self.async_event_loop
+            and self.async_event_loop.is_running()
+        ):
+            msg = "system," + json.dumps({"action": action})
+            clients_ref = self.data_streaming_server.clients
+
+            async def _broadcast_system_helper():
+                await _broadcast_to_clients(clients_ref, msg, per_client_timeout=2.0)
+
+            asyncio.run_coroutine_threadsafe(
+                _broadcast_system_helper(), self.async_event_loop
+            )
+
     async def stop_pipeline(self) -> None:
         """Stop all pipelines by reconciling displays against current state."""
         logger_app.info("Stopping pipelines (generic call)...")
@@ -1247,12 +1266,6 @@ class DataStreamingServer(BaseStreamingService):
         self.is_secure_mode = bool(self.cli_args.master_token)
         if self.is_secure_mode:
             logger.info("Secure Mode ENABLED (SELKIES_MASTER_TOKEN is set).")
-            settings.encoder = "h264enc"
-            for s_def in SETTING_DEFINITIONS:
-                if s_def['name'] == 'encoder':
-                    s_def['meta']['allowed'] = ['h264enc']
-                    s_def['default'] = 'h264enc'
-                    break
         else:
             logger.info("Legacy Mode ENABLED (SELKIES_MASTER_TOKEN is not set).")
             self.config_gate.set()
@@ -2737,6 +2750,12 @@ class DataStreamingServer(BaseStreamingService):
                                 self.app.set_framerate(int(value))
                             elif attr == 'app_encoder':
                                 self.app.encoder = value
+                                # Written through to the settings singleton:
+                                # transport services re-seed from it on a mode
+                                # switch, so the session's encoder must live
+                                # there for a client pick to survive the trip.
+                                app_settings.encoder = value
+                                app_settings._encoder_client_set = True
                             else:
                                 setattr(self, attr, value)
                         data_logger.info(f"Session default {key} updated to {value} for new displays.")
@@ -4033,17 +4052,17 @@ class DataStreamingServer(BaseStreamingService):
                         if len(toks) > 1:
                             command_to_run = ",".join(toks[1:])
                             data_logger.info(f"Attempting to execute command: '{command_to_run}'")
-                            home_directory = os.path.expanduser("~")
-                            try:
-                                process = await subprocess.create_subprocess_shell(
-                                    command_to_run,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                    cwd=home_directory
-                                )
-                                data_logger.info(f"Successfully launched command: '{command_to_run}' with PID {process.pid}")
-                            except Exception as e:
-                                data_logger.error(f"Failed to launch command '{command_to_run}': {e}")
+
+                            async def _notify_cmd_error(text, ws=websocket):
+                                try:
+                                    await ws.send_str(
+                                        "system,"
+                                        + json.dumps({"action": f"command_error,{text}"}))
+                                except Exception:
+                                    pass
+
+                            await run_client_command(
+                                command_to_run, data_logger, notify=_notify_cmd_error)
                         else:
                             data_logger.warning("Received 'cmd' message without a command string.")
 
@@ -4798,14 +4817,35 @@ class DataStreamingServer(BaseStreamingService):
             if keep_ids:
                 # Re-target live captures while the framebuffer covers BOTH the old and
                 # new regions (grow first, shrink after): a region outside the root
-                # would fail the grab and kill the capture thread.
+                # would fail the grab and kill the capture thread. The grow must run
+                # whenever the union exceeds the CURRENT root, including a pure grow
+                # (union == target): otherwise the re-target is clamped against the
+                # old root and the capture stays stuck at those dimensions — the
+                # pinned region produces no grab failure, so pixelflux's geometry
+                # gate never re-clamps it once the root finally enlarges.
                 try:
                     cur_w, cur_h = (int(v) for v in curr_res.lower().replace(" ", "").split("x"))
                 except (ValueError, AttributeError):
                     cur_w, cur_h = total_width, total_height
                 union_w, union_h = max(cur_w, total_width), max(cur_h, total_height)
-                if (union_w, union_h) != (total_width, total_height):
-                    await grow_framebuffer(union_w, union_h)
+                grew = True
+                if (union_w, union_h) != (cur_w, cur_h):
+                    grew = await grow_framebuffer(union_w, union_h)
+                if not grew:
+                    # The framebuffer is at its bound: any new layout reaching
+                    # past the current root would pin clamped at re-target and
+                    # never recover (its grab still fits the old root, so the
+                    # geometry gate never polls). Restart those captures after
+                    # the mode-set instead of re-targeting them here.
+                    for did in sorted(list(keep_ids)):
+                        layout = layouts[did]
+                        if (layout['x'] + layout['w'] > cur_w
+                                or layout['y'] + layout['h'] > cur_h):
+                            data_logger.warning(
+                                f"Framebuffer grow refused (still {cur_w}x{cur_h}); "
+                                f"capture '{did}' restarts after the mode-set.")
+                            keep_ids.discard(did)
+                            await self._stop_capture_for_display(did)
                 for did in sorted(keep_ids):
                     layout = layouts[did]
                     module = self.capture_instances[did]['module']
@@ -5530,7 +5570,7 @@ class DataStreamingServer(BaseStreamingService):
                 self.input_handler.stop_clipboard()
             if hasattr(self.input_handler, "stop_cursor_monitor"):
                 self.input_handler.stop_cursor_monitor()
-            if hasattr(self.input_handler, "disconnect") and asyncio.iscoroutinefunction(
+            if hasattr(self.input_handler, "disconnect") and inspect.iscoroutinefunction(
                 self.input_handler.disconnect
             ):
                 await self.input_handler.disconnect()

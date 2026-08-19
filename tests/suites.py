@@ -34,6 +34,7 @@ SUITES: list = [
     {"path": "unit/test_example_session_scripts.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_encoder_cpu_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rate_control_defaults.py", "tier": "unit", "timeout": 180},
+    {"path": "unit/test_transfer_pacer.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_nvml_failfast.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_release_version.py", "tier": "unit", "timeout": 120},
@@ -60,6 +61,7 @@ SUITES: list = [
     {"path": "integration/test_basic_auth_challenge.py", "tier": "integration", "timeout": 120},
 
     # --- e2e --------------------------------------------------------------
+    {"path": "e2e/test_ime_composition.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_matrix.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/test_scroll.py", "tier": "e2e", "timeout": 900,
@@ -67,7 +69,7 @@ SUITES: list = [
     {"path": "e2e/test_browsers.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["chromium-ws", "firefox-ws", "webkit-ws", "chromium-wr", "firefox-wr"]},
     {"path": "e2e/test_dashboards.py", "tier": "e2e", "timeout": 1200,
-     "selectors": ["classic", "wish"]},
+     "selectors": ["classic", "wish", "gates"]},
     {"path": "e2e/test_clipboard_large.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_cross_transition.py", "tier": "e2e", "timeout": 900},
@@ -77,11 +79,14 @@ SUITES: list = [
     {"path": "e2e/test_dpi_accuracy.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_regressions.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["matrix", "switch", "clipboard", "pacer"]},
+    {"path": "e2e/test_auth_refresh.py", "tier": "e2e", "timeout": 300},
+    {"path": "e2e/test_subfolder.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_software_decode.py", "tier": "e2e", "timeout": 900,
      "selectors": ["retry", "persisted", "ladder", "healthy", "striped"]},
 
     # --- on request -------------------------------------------------------
     {"path": "perf/test_pacer.py", "tier": "perf", "timeout": 3600},
+    {"path": "perf/test_transfer_saturation.py", "tier": "perf", "timeout": 1800},
     {"path": "soak/test_capture_api.py", "tier": "soak", "timeout": 2400},
     {"path": "soak/test_capture_api_extra.py", "tier": "soak", "timeout": 2400},
 ]

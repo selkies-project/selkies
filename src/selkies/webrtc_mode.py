@@ -295,6 +295,13 @@ class WebRTCService(BaseStreamingService):
         pipeline, the RTC app, the input handler, and the monitors, then wire
         the peer manager with the fetched RTC configuration."""
 
+        # Re-snapshot settings: this service is constructed once at boot, but a
+        # live transport switch lands here with the settings singleton already
+        # re-resolved for webrtc (encoder filter, rate-control default), and
+        # the pipeline below must be built from those values, not the boot-time
+        # copy.
+        self._init_default_settings()
+
         # Metrics backs BOTH the Prometheus endpoint and the WebRTC CSV statistics,
         # so build it when either flag is on: CSV-only configs must not leave
         # self.metrics as None (session start dereferences it for the CSV file).
@@ -312,7 +319,7 @@ class WebRTCService(BaseStreamingService):
 
         self.media_pipeline = MediaPipelinePixel(
             async_event_loop=asyncio.get_running_loop(),
-            encoder_rtc=self.args.encoder_rtc,
+            encoder=self.args.encoder,
             framerate=int(self.args.framerate),
             # kbps, as consumed by pixelflux.
             video_bitrate=int(self.args.video_bitrate),
@@ -358,7 +365,7 @@ class WebRTCService(BaseStreamingService):
         ) = await get_rtc_configuration(self.args)
         self.rtc_app = RTCApp(
             async_event_loop=asyncio.get_running_loop(),
-            encoder=self.args.encoder_rtc,
+            encoder=self.args.encoder,
             stun_servers=stun_servers,
             turn_servers=turn_servers,
         )
@@ -937,6 +944,19 @@ class WebRTCService(BaseStreamingService):
                     )
                 else:
                     logger.info(f"resize_display('{target_w}x{target_h}') reported success")
+                # Pull the capture onto the new root NOW: the auto-adjust poll
+                # trails ~30 frames behind, during which a grown desktop's new
+                # bands (panel, window bottoms) stay out of frame. A zero-size
+                # region update re-reads the live root synchronously and keeps
+                # root-follow (websockets keep-path parity).
+                capture_module = getattr(self.media_pipeline, "capture_module", None)
+                if capture_module is not None:
+                    try:
+                        await asyncio.to_thread(
+                            capture_module.update_capture_region, 0, 0, 0, 0
+                        )
+                    except Exception as e:
+                        logger.warning(f"Capture re-follow after resize failed: {e}")
                 self.media_pipeline.width = realized_w
                 self.media_pipeline.height = realized_h
                 self.media_pipeline.last_resize_success = True
@@ -1640,7 +1660,7 @@ class WebRTCService(BaseStreamingService):
                 setting = lambda key: self._display_setting(did, key)
                 pipeline = MediaPipelinePixel(
                     async_event_loop=asyncio.get_running_loop(),
-                    encoder_rtc=str(setting("encoder_rtc")),
+                    encoder=str(setting("encoder")),
                     framerate=int(setting("framerate")),
                     video_bitrate=int(setting("video_bitrate")),
                     audio_enabled=False,
@@ -1838,7 +1858,7 @@ class WebRTCService(BaseStreamingService):
         "video_bitrate": lambda p, v: p.set_video_bitrate(v),
         "framerate": lambda p, v: p.set_framerate(v),
         "use_cpu": lambda p, v: p.set_use_cpu(bool(v)),
-        "encoder_rtc": lambda p, v: p.set_encoder_rtc(str(v)),
+        "encoder": lambda p, v: p.set_encoder(str(v)),
         "video_fullcolor": lambda p, v: p.set_video_fullcolor(bool(v)),
         "video_streaming_mode": lambda p, v: p.set_video_streaming_mode(bool(v)),
         "use_paint_over_quality": lambda p, v: p.set_use_paint_over_quality(bool(v)),
@@ -1893,15 +1913,23 @@ class WebRTCService(BaseStreamingService):
         pipeline = self.display_pipelines.get(display_id)
         if pipeline is not None:
             await applier(pipeline, value)
-        if key == "encoder_rtc" and display_id == "primary" and self.rtc_app:
-            # Keep the RTCApp's global encoder current: it is the default for
-            # munge_sdp/codec choice on CONNECTIONS CREATED LATER, and the
-            # startup snapshot would go stale after a switch. Secondary displays
-            # resolve per display through get_encoder_for_display.
-            self.rtc_app.encoder = str(value)
+        if key == "encoder" and display_id == "primary":
+            # Written through to the settings singleton: transport services
+            # re-seed from it on a mode switch, so the session's encoder must
+            # live there for a client pick to survive the trip. The flag marks
+            # a fresh pick during the webrtc leg, which outranks any stashed
+            # pre-clamp value on the switch back.
+            self.settings.encoder = str(value)
+            self.settings._encoder_client_set = True
+            if self.rtc_app:
+                # Keep the RTCApp's global encoder current: it is the default
+                # for munge_sdp/codec choice on CONNECTIONS CREATED LATER, and
+                # the startup snapshot would go stale after a switch. Secondary
+                # displays resolve per display through get_encoder_for_display.
+                self.rtc_app.encoder = str(value)
 
     def _encoder_for_display(self, display_id: str) -> str:
-        return str(self._display_setting(display_id, "encoder_rtc") or self.args.encoder_rtc)
+        return str(self._display_setting(display_id, "encoder") or self.args.encoder)
 
     def _fullcolor_for_display(self, display_id: str) -> bool:
         return bool(self._display_setting(display_id, "video_fullcolor"))
@@ -1931,7 +1959,7 @@ class WebRTCService(BaseStreamingService):
             "manual_height",
             # Enforced on the resize paths (the client also aligns before sending).
             "force_aligned_resolution",
-            "encoder_rtc",
+            "encoder",
             "video_fullcolor",
             "video_streaming_mode",
             "use_paint_over_quality",

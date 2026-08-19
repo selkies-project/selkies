@@ -34,7 +34,7 @@ done
 export WAYLAND_DISPLAY
 echo "${WAYLAND_DISPLAY}" > "${XDG_RUNTIME_DIR}/selkies-capture-display"
 
-export WLR_BACKENDS=wayland
+export WLR_BACKENDS="wayland"
 # Screens the session opens. It cannot gain or lose one while it runs, so it
 # opens the two Selkies can show and Selkies holds the second small until a
 # client connects for it: a screen held at full size would stretch the desktop

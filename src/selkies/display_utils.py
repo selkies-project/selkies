@@ -348,8 +348,13 @@ def _resize_on_display(
     ci = randr.get_crtc_info(d, crtc, res.config_timestamp)
     outputs = list(ci.outputs) or [out_id]
     geom = root.get_geometry()
-    mm_w = max(1, round(mode_w * 25.4 / 96.0))
-    mm_h = max(1, round(mode_h * 25.4 / 96.0))
+    # mm follows the session DPI the last set_dpi stamped (96 when the pane
+    # was never retargeted), not a hardcoded assumption: xdpyinfo and the
+    # toolkit paths reading RandR's physical size otherwise un-scale after
+    # every resize.
+    dpi_hint = _APPLIED_DPI if _APPLIED_DPI is not None else 96
+    mm_w = max(1, round(mode_w * 25.4 / dpi_hint))
+    mm_h = max(1, round(mode_h * 25.4 / dpi_hint))
     rotation = ci.rotation or randr.Rotate_0
     # The screen may not shrink under an active CRTC, so a CRTC that would
     # poke out of the new screen is disabled first (as xrandr does).
@@ -599,18 +604,21 @@ def _monitor_info(
 
     ``take_output`` attaches the (single) connected physical output; an
     output can belong to only one logical monitor, so exactly one monitor per
-    layout takes it.
+    layout takes it. The primary monitor carries the RandR primary flag: the
+    WM tiles panels against it, and the same-set no-op in
+    `_sync_replace_selkies_monitors` reads it back to prove the live set
+    already matches.
     """
     return {
         "name": d.intern_atom(name),
-        "primary": False,
+        "primary": name == "selkies-primary",
         "automatic": False,
         "x": int(x),
         "y": int(y),
         "width_in_pixels": int(w),
         "height_in_pixels": int(h),
-        "width_in_millimeters": max(1, round(w * 25.4 / 96.0)),
-        "height_in_millimeters": max(1, round(h * 25.4 / 96.0)),
+        "width_in_millimeters": max(1, round(w * 25.4 / (_APPLIED_DPI if _APPLIED_DPI is not None else 96.0))),
+        "height_in_millimeters": max(1, round(h * 25.4 / (_APPLIED_DPI if _APPLIED_DPI is not None else 96.0))),
         "crtcs": [out_id] if take_output else [],
     }
 
@@ -702,9 +710,10 @@ def _sync_grow_screen(w: int, h: int) -> None:
             geom = root.get_geometry()
             if geom.width >= w and geom.height >= h:
                 return
+            dpi_hint = _APPLIED_DPI if _APPLIED_DPI is not None else 96.0
             randr.set_screen_size(
                 root, w, h,
-                max(1, round(w * 25.4 / 96.0)), max(1, round(h * 25.4 / 96.0)),
+                max(1, round(w * 25.4 / dpi_hint)), max(1, round(h * 25.4 / dpi_hint)),
             )
             d.sync()
             geom = root.get_geometry()
@@ -740,6 +749,8 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
             root, _, out_id, _, _ = _connected_output_state(d)
             reply = randr.get_monitors(root, is_active=False)
             stale = []
+            live = {}
+            primary_name = None
             for m in reply.monitors:
                 try:
                     name = d.get_atom_name(m.name)
@@ -747,6 +758,20 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
                     continue
                 if name.startswith("selkies-"):
                     stale.append(name)
+                    live[name] = (m.x, m.y, m.width_in_pixels, m.height_in_pixels)
+                    if m.primary:
+                        primary_name = name
+            # A same-set swap still costs a delete+create (RRSetMonitor cannot
+            # replace in place) and hands the WM a ConfigureNotify to re-tile
+            # against, so decline the dance when nothing would change.
+            desired = {
+                f"selkies-{did}": (int(l["x"]), int(l["y"]), int(l["w"]), int(l["h"]))
+                for did, l in layouts.items()
+            }
+            if live == desired and (
+                primary_name == "selkies-primary" or "selkies-primary" not in desired
+            ):
+                return
             ordered = sorted(layouts.items(), key=lambda kv: kv[0] != "primary")
             d.grab_server()
             try:
@@ -1673,6 +1698,41 @@ def _is_wayland() -> bool:
         return False
 
 
+# The DPI the last set_dpi actually applied (so resizes keep sizing the pane
+# in mm on the same density instead of flipping it back to 96).
+_APPLIED_DPI: Optional[int] = None
+
+
+def _sync_stamp_root_dpi(dpi_value: int) -> None:
+    """Resize the root pane's reported physical size to match ``dpi_value``.
+
+    Keeps the DPI the X server itself reports (xdpyinfo/RandR consumers) in
+    step with the DPI the desktops were told to render at. Idempotent: a
+    matching mm size posts no RRSetScreenSize at all, so the idleness of
+    repeated SETTINGS payloads stays ConfigureNotify-free.
+    """
+    global _APPLIED_DPI
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root = d.screen().root
+            geom = root.get_geometry()
+            mm_w = max(1, round(geom.width * 25.4 / dpi_value))
+            mm_h = max(1, round(geom.height * 25.4 / dpi_value))
+            info = randr.get_screen_info(root)
+            cur = info.sizes[info.size_id] if info.sizes else None
+            if cur and (cur.width_in_millimeters, cur.height_in_millimeters) == (mm_w, mm_h):
+                _APPLIED_DPI = dpi_value
+                return
+            randr.set_screen_size(root, geom.width, geom.height, mm_w, mm_h)
+            d.sync()
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            raise
+    _APPLIED_DPI = dpi_value
+
+
 async def set_dpi(dpi_setting: Union[int, str]) -> bool:
     """Set the X11 display DPI using DE-specific methods.
 
@@ -1704,6 +1764,11 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
         logger_app_resize.debug(
             "Wayland backend: DPI realizes as a compositor output scale.")
         return False
+
+    global _APPLIED_DPI
+    if _APPLIED_DPI == dpi_value:
+        logger_app_resize.debug(f"DPI {dpi_value} already applied; skipping the re-ladder.")
+        return True
 
     any_method_succeeded = False
     # Names which DE path was taken, for the logs below.
@@ -1749,6 +1814,14 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
 
     if not any_method_succeeded:
         logger_app_resize.warning(f"No DPI setting method succeeded for DPI {dpi_value} (Attempted for: {de_name_for_log}).")
+    else:
+        # xdpyinfo/RandR consumers (Qt's fallback included) read the pane's
+        # physical size, which nothing above touched: stamp it with the same
+        # density or those apps render unscaled against the rest of the DE.
+        try:
+            await asyncio.to_thread(_sync_stamp_root_dpi, dpi_value)
+        except Exception as e:
+            logger_app_resize.warning(f"Root mm-size retarget to {dpi_value} DPI failed: {e}")
 
     return any_method_succeeded
 

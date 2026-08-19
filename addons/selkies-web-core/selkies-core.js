@@ -4,18 +4,19 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+import { getStorageAppName } from "./lib/util.js";
 import webrtc from "./selkies-wr-core";
 import websockets from "./selkies-ws-core";
 
 const STREAM_MODE_WEBRTC = "webrtc";
 const STREAM_MODE_WEBSOCKETS = "websockets";
 
-// Storage key namespace: origin + pathname only, NOT the full URL — a per-session
-// ?token=... in the query string must not mint a new localStorage namespace on every
+// The shared namespace (lib/util.js) is origin + pathname only, NOT the full URL:
+// a per-session ?token=... must not mint a new localStorage namespace on every
 // connect (that leak eventually exhausts the origin quota and blanks the iframe).
-// Must match selkies-ws-core.js / selkies-wr-core.js / the dashboard Sidebar.
+// The raw URL stays here because the legacy-prefix migration below walks it.
 const urlForKey = window.location.origin + window.location.pathname;
-const storageAppName = urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+const storageAppName = getStorageAppName();
 const getPrefixedKey = (key) => {return `${storageAppName}_${key}`}
 // Guarded write: a full or unavailable store degrades to a warning instead of
 // throwing QuotaExceededError into startup.

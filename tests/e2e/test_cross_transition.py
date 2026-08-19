@@ -65,6 +65,31 @@ def main() -> "H.Results":
             p3 = ctx3.new_page()
             p3.goto(H.BASE_URL, wait_until="load")
             verify(p3, "webrtc", res, "after flip back to webrtc")
+            # A client whose stored transport is the one the server is not
+            # running gets 409 from its websocket probe and moves itself onto
+            # the live transport, so a stale tab heals instead of retrying
+            # forever. The probe URL is built from the document's own path.
+            ctx4 = browser.new_context(viewport={"width": 1280, "height": 720})
+            ctx4.add_init_script(
+                "try { const app = (location.origin + location.pathname)"
+                ".replace(/[^a-zA-Z0-9._-]/g, '_');"
+                " if (!localStorage.getItem(app + '_stream_mode'))"
+                " localStorage.setItem(app + '_stream_mode', 'websockets'); }"
+                " catch (e) {}")
+            p4 = ctx4.new_page()
+            p4.goto(H.BASE_URL, wait_until="load")
+            # The flip reloads the page, which destroys the evaluation context
+            # the wait is polling, so the wait itself is retried across it.
+            info, deadline = None, time.time() + 90
+            while info is None and time.time() < deadline:
+                try:
+                    info = C.wait_wr_video(p4, timeout=15)
+                except Exception:
+                    p4.wait_for_timeout(1000)
+            res.check("a client stored on the inactive transport flips itself over",
+                      info is not None, info)
+            p4.close(); ctx4.close()
+
             time.sleep(2)
             # Multiple flips must not accumulate signaling/capture instances.
             txt = H.server_log()

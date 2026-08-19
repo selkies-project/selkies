@@ -10,7 +10,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
 import PlayerGamepadButton from './components/PlayerGamepadButton.jsx';
 import './index.css';
-import { getRoutePrefix } from './utils.js';
+import { getRoutePrefix } from '../../selkies-web-core/lib/util.js';
 // Bundled straight from the addon it lives in, so a fresh checkout builds
 // without a vendored copy in src/.
 import "../../universal-touch-gamepad/universalTouchGamepad.js";

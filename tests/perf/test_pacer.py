@@ -593,7 +593,7 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
     load_proc = None
     try:
         if LOAD_GEN:
-            load_proc = subprocess.Popen(
+            load_proc = H.spawn(
                 [os.path.join(H.TOOLS, "pacer_load_gen.sh")],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log_before = os.path.getsize(log)

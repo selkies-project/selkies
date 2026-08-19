@@ -119,9 +119,7 @@ async def drive() -> "H.Results":
 
 def main() -> None:
     H.server_start(mode="websockets", wayland=False)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    r = loop.run_until_complete(drive())
+    r = asyncio.run(drive())
     sys.exit(0 if not r.failed() else 1)
 
 
