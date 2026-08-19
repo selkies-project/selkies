@@ -2,6 +2,7 @@
   "name": "selkies-web-core",
   "version": "1.0.0",
   "description": "Selkies HTML5 web client core",
+  "type": "module",
   "main": "index.html",
   "directories": {
     "lib": "lib"

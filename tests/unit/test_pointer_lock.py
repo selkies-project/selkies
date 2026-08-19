@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """How the client asks for pointer lock, and what it does when the engine says no.
 
-Locked motion is relayed as relative motion and injected as relative motion, so
-the OS acceleration curve the engine applies to movementX/Y lands on top of the
-one the remote desktop applies. The client asks for the raw deltas instead, and
-every engine on Linux and Android refuses that with NotSupportedError -- which
+Locked motion is relayed as relative motion and injected verbatim, so the OS
+acceleration curve the engine applies to movementX/Y is the whole difference
+between how far a hand moved and how far the remote pointer went. The client
+asks for the raw deltas instead, and every engine on Linux and Android refuses
+that with NotSupportedError -- which
 must still end in a lock, must not be mistaken for a real failure, and must not
 slip past the guards the fullscreen caller checked before it asked. The checks
 live in tests/tools/pointer_lock_audit.mjs, because the path under test is

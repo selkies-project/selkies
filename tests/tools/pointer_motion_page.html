@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>pointer motion probe</title>
+<style>
+html, body { margin: 0; height: 100%; background: #101820; }
+#videoCanvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="videoCanvas"></canvas>
+<script type="module">
+// Feeds real pointer-lock movement through the client's own relative-motion
+// path and reports what it would have put on the wire, so the numbers come
+// from the engine rather than from a model of it.
+import { Input } from '/addons/selkies-web-core/lib/input.js';
+
+const element = document.getElementById('videoCanvas');
+const input = Object.create(Input.prototype);
+Object.assign(input, {
+    element, isSharedMode: false, useCssScaling: false, buttonMask: 0,
+    x: 0, y: 0, m: null, _relCarryX: 0, _relCarryY: 0,
+    _pendingMove: null, _moveFlushScheduled: false,
+});
+
+const T = { lockPath: 'none', locked: false, err: '', dpr: window.devicePixelRatio,
+            moves: 0, sumMX: 0, travelX: 0, travelY: 0, sends: 0 };
+
+input.send = (msg) => {
+    const parts = msg.split(',');
+    if (parts[0] !== 'm2') return;
+    T.sends++;
+    T.travelX += Number(parts[1]);
+    T.travelY += Number(parts[2]);
+};
+
+document.addEventListener('mousemove', (event) => {
+    if (!document.pointerLockElement) return;
+    T.moves++;
+    T.sumMX += (event.movementX || 0);
+    input._queueCoalescedMouseMove('m2', event.movementX || 0, event.movementY || 0, 0);
+}, true);
+
+document.addEventListener('pointerlockchange', () => {
+    T.locked = document.pointerLockElement === element;
+    if (T.locked) {
+        T.moves = T.sumMX = T.travelX = T.travelY = T.sends = 0;
+        input._relCarryX = input._relCarryY = 0;
+        input._pendingMove = null;
+    }
+});
+document.addEventListener('pointerlockerror', () => { T.err = T.err || 'pointerlockerror'; });
+
+element.addEventListener('mousedown', () => {
+    const lock = element.requestPointerLock({ unadjustedMovement: true });
+    if (!lock || !lock.catch) { T.lockPath = 'no-promise'; return; }
+    lock.then(() => { T.lockPath = 'unadjusted'; }).catch((err) => {
+        T.err = (err && err.name) || String(err);
+        if (err && err.name === 'NotSupportedError') {
+            T.lockPath = 'plain';
+            const plain = element.requestPointerLock();
+            if (plain && plain.catch) plain.catch((e) => { T.err += '/' + (e && e.name); });
+        }
+    });
+});
+
+setInterval(() => {
+    fetch('/report', { method: 'POST', body: JSON.stringify(T) });
+}, 200);
+</script>
+</body>
+</html>

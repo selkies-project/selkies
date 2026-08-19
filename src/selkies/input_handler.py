@@ -4435,6 +4435,19 @@ class WebRTCInput:
         if relative:
             final_x = self.last_x + x
             final_y = self.last_y + y
+            # The pointer the deltas drive is clamped to the layout edge by the
+            # X server or the compositor, so the tracked position clamps with
+            # it: an unclamped accumulator has to unwind its overshoot before
+            # absolute positions compare against the real pointer again, and
+            # the absolute fallback below would inject the fiction as-is.
+            if self.data_server_instance and hasattr(self.data_server_instance, 'display_layouts'):
+                layouts = self.data_server_instance.display_layouts
+                if layouts:
+                    edge_x = max(l.get('x', 0) + l.get('w', 0) for l in layouts.values())
+                    edge_y = max(l.get('y', 0) + l.get('h', 0) for l in layouts.values())
+                    if edge_x > 0 and edge_y > 0:
+                        final_x = max(0, min(final_x, edge_x - 1))
+                        final_y = max(0, min(final_y, edge_y - 1))
         else:
             offset_x = 0
             offset_y = 0

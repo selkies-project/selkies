@@ -28,6 +28,7 @@ SUITES: list = [
     {"path": "unit/test_clipboard_ladder.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_app_compositor_socket.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_lock.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_relative_motion.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_gpu_fallback.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_turn_address.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_env_case.py", "tier": "unit", "timeout": 180},
@@ -44,6 +45,7 @@ SUITES: list = [
     {"path": "integration/test_gamepad_release.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_gamepad_switch.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_protocol.py", "tier": "integration", "timeout": 900},
+    {"path": "integration/test_relative_injection.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_wayland_session_dpi.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_parity_checks.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_display_seed.py", "tier": "integration", "timeout": 600},
@@ -81,6 +83,7 @@ SUITES: list = [
      "selectors": ["matrix", "switch", "clipboard", "pacer"]},
     {"path": "e2e/test_auth_refresh.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_subfolder.py", "tier": "e2e", "timeout": 900},
+    {"path": "e2e/test_pointer_motion.py", "tier": "e2e", "timeout": 1800},
     {"path": "e2e/test_software_decode.py", "tier": "e2e", "timeout": 900,
      "selectors": ["retry", "persisted", "ladder", "healthy", "striped"]},
 
