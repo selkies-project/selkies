@@ -1192,12 +1192,13 @@ export class Input {
         this._latestMouseX = 0;
         this._latestMouseY = 0;
         this.useCssScaling = useCssScaling;
-        this.mouseRelative = false;
         this.m = null;
         this.buttonMask = 0;
         this.gamepadManager = null;
         this.x = 0;
         this.y = 0;
+        this._relCarryX = 0;
+        this._relCarryY = 0;
         this.onmenuhotkey = null;
         this.onfullscreenhotkey = this.enterFullscreen;
         this.ongamepadhotkey = null;
@@ -2125,8 +2126,7 @@ export class Input {
         this._latestMouseX = visualClientX;
         this._latestMouseY = visualClientY;
         if (this._trackpadMode) return;
-        const client_dpr = window.devicePixelRatio || 1;
-        const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || window.isManualResolutionMode || this.isSharedMode) ? 1 : client_dpr;
+        const dpr_for_input_coords = this._inputDpr();
         const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
         if (down) {
             this._releaseDesyncedModifiers(event);
@@ -2163,12 +2163,12 @@ export class Input {
             !(canvas !== null && document.pointerLockElement === canvas)) {
             this._armPointerLock();
         }
-        if ((this.element != null && document.pointerLockElement === this.element) || (canvas !== null && document.pointerLockElement === canvas)) {
+        if (this._isStreamLocked()) {
             mtype = "m2";
-            let movementX_logical = event.movementX || 0;
-            let movementY_logical = event.movementY || 0;
-            this.x = Math.round(movementX_logical * dpr_for_input_coords);
-            this.y = Math.round(movementY_logical * dpr_for_input_coords);
+            // CSS pixels, scaled and quantized where the motion is sent so that
+            // a frame's worth of it is rounded once.
+            this.x = event.movementX || 0;
+            this.y = event.movementY || 0;
 
         } else if (event.type === 'mousemove' || event.type === 'pointermove' ||
                    event.type === 'pointerdown' || event.type === 'pointerup') {
@@ -2221,13 +2221,18 @@ export class Input {
             // Button / non-move event: flush pending motion first so ordering
             // (move-then-click, accumulated relative deltas) is preserved.
             this._flushCoalescedMouseMove();
+            if (mtype === "m2") {
+                const moved = this._relativeToServer(this.x, this.y);
+                this.x = moved[0];
+                this.y = moved[1];
+            }
             this.send([ mtype, this.x, this.y, this.buttonMask, 0 ].join(","));
         }
     }
 
     _queueCoalescedMouseMove(mtype, x, y, buttonMask) {
         if (mtype === "m2") {
-            // Relative mode: deltas must be summed, never dropped.
+            // Relative mode: CSS-pixel deltas must be summed, never dropped.
             if (this._pendingMove && this._pendingMove.mtype === "m2") {
                 this._pendingMove.x += x;
                 this._pendingMove.y += y;
@@ -2259,8 +2264,14 @@ export class Input {
         const m = this._pendingMove;
         if (!m) return;
         this._pendingMove = null;
-        // An accumulated relative move of (0,0) carries no information.
-        if (m.mtype === "m2" && m.x === 0 && m.y === 0) return;
+        if (m.mtype === "m2") {
+            const moved = this._relativeToServer(m.x, m.y);
+            // An accumulated relative move of (0,0) carries no information; the
+            // sub-pixel remainder stays behind for the next frame.
+            if (moved[0] === 0 && moved[1] === 0) return;
+            this.send([ m.mtype, moved[0], moved[1], m.buttonMask, 0 ].join(","));
+            return;
+        }
         this.send([ m.mtype, m.x, m.y, m.buttonMask, 0 ].join(","));
     }
 
@@ -2292,7 +2303,6 @@ export class Input {
         event.stopPropagation();
 
         const now = Date.now();
-        const dpr = this.useCssScaling ? 1 : (window.devicePixelRatio || 1);
         const TAP_AND_HOLD_THRESHOLD = 300;
 
         const type = event.type;
@@ -2362,10 +2372,11 @@ export class Input {
                 if (touchData) {
                     const changedTouch = Array.from(changedTouches).find(t => t.identifier === touchData.id);
                     if (changedTouch) {
-                        const deltaX = (changedTouch.clientX - touchData.lastX) * dpr;
-                        const deltaY = (changedTouch.clientY - touchData.lastY) * dpr;
-                        if (Math.abs(deltaX) >= 0.5 || Math.abs(deltaY) >= 0.5) {
-                            this.send(`m2,${Math.round(deltaX)},${Math.round(deltaY)},${this.buttonMask},0`);
+                        const moved = this._relativeToServer(
+                            changedTouch.clientX - touchData.lastX,
+                            changedTouch.clientY - touchData.lastY);
+                        if (moved[0] !== 0 || moved[1] !== 0) {
+                            this.send(`m2,${moved[0]},${moved[1]},${this.buttonMask},0`);
                         }
                         touchData.lastX = changedTouch.clientX;
                         touchData.lastY = changedTouch.clientY;
@@ -2424,23 +2435,26 @@ export class Input {
         }
     }
 
-    // Map a client-space point to sink-buffer absolute coordinates when a fixed-size sink
-    // is active: the ws-core canvas (manual resolution / shared mode) or the wr-core
-    // <video> (manual resolution; each core has its own flag). One shared implementation:
-    // backing-store size over the CSS rect, clamped. Returns false when no sink applies
-    // (auto resolution) so callers run their DPR-scaled window math instead.
-    _applySinkCoordinates(clientX, clientY, canvas, videoEle) {
-        // streamResolutionDiverged: the server realized a different resolution
-        // than the window-derived request (mode snapping / rejected mode-set),
-        // so the window-math contract (CSS × dpr == server px) is broken and
-        // coordinates must be mapped through the stream box like manual mode —
-        // the canvas buffer on the websockets core, the <video> intrinsic size
-        // on the WebRTC core.
+    /**
+     * The box a fixed-size sink presents the stream in, in CSS pixels, or null
+     * when no sink applies (auto resolution) or the box cannot be measured, so
+     * callers run their DPR-scaled window math instead. The sink is the ws-core
+     * canvas (manual resolution / shared mode) or the wr-core <video> (manual
+     * resolution; each core has its own flag).
+     *
+     * streamResolutionDiverged: the server realized a different resolution
+     * than the window-derived request (mode snapping / rejected mode-set),
+     * so the window-math contract (CSS × dpr == server px) is broken and
+     * coordinates must be mapped through the stream box like manual mode —
+     * the canvas buffer on the websockets core, the <video> intrinsic size
+     * on the WebRTC core.
+     */
+    _sinkBox(canvas, videoEle) {
         const sink = ((window.is_manual_resolution_mode || this.isSharedMode || window.streamResolutionDiverged) && canvas)
             ? canvas
             : ((window.isManualResolutionMode || window.streamResolutionDiverged) && videoEle) ? videoEle : null;
         if (!sink) {
-            return false;
+            return null;
         }
         // ws-core hides #videoCanvas (display: none) whenever frames are being
         // presented on the <video>/worker sink, mirroring the canvas box onto
@@ -2490,25 +2504,90 @@ export class Input {
                 boxLeft += (rect.width - boxW) / 2;
                 boxTop += (rect.height - boxH) / 2;
             }
-            // Stream px per CSS px.
-            const scaleX = sinkW / boxW;
-            const scaleY = sinkH / boxH;
-            this.x = Math.max(0, Math.min(sinkW, Math.round((clientX - boxLeft) * scaleX)));
-            this.y = Math.max(0, Math.min(sinkH, Math.round((clientY - boxTop) * scaleY)));
-            return true;
+            return { boxLeft, boxTop, boxW, boxH, sinkW, sinkH };
         }
         // Never measured: fall back to the windowMath path instead of
         // claiming success with (0, 0).
-        return false;
+        return null;
+    }
+
+    _applySinkCoordinates(clientX, clientY, canvas, videoEle) {
+        const box = this._sinkBox(canvas, videoEle);
+        if (!box) {
+            return false;
+        }
+        const scaleX = box.sinkW / box.boxW;
+        const scaleY = box.sinkH / box.boxH;
+        this.x = Math.max(0, Math.min(box.sinkW, Math.round((clientX - box.boxLeft) * scaleX)));
+        this.y = Math.max(0, Math.min(box.sinkH, Math.round((clientY - box.boxTop) * scaleY)));
+        return true;
+    }
+
+    /**
+     * Device pixel ratio to map client coordinates by, or 1 wherever the stream
+     * is already realized in CSS pixels and the sink box carries the scale.
+     */
+    _inputDpr() {
+        if (this.useCssScaling || window.is_manual_resolution_mode ||
+            window.isManualResolutionMode || this.isSharedMode) {
+            return 1;
+        }
+        return window.devicePixelRatio || 1;
+    }
+
+    /**
+     * Server pixels per CSS pixel, by whichever mapping absolute coordinates use.
+     *
+     * A relative delta covers the same ground as the absolute coordinates it
+     * stands in for, so it carries the same scale. Scaling it by the device
+     * pixel ratio alone leaves a pointer-locked flick short (or long) by the
+     * stream box ratio in every mode that maps through the box.
+     */
+    _pointerScale() {
+        const box = this._sinkBox(document.getElementById('videoCanvas'),
+                                  document.getElementById('stream'));
+        if (box) {
+            return { x: box.sinkW / box.boxW, y: box.sinkH / box.boxH };
+        }
+        const dpr = this._inputDpr();
+        if (!this.m) {
+            this._windowMath();
+        }
+        return this.m
+            ? { x: this.m.mouseMultiX * dpr, y: this.m.mouseMultiY * dpr }
+            : { x: dpr, y: dpr };
+    }
+
+    /**
+     * Quantize a relative motion to whole server pixels, carrying the remainder.
+     *
+     * Rounding each event on its own discards a fraction of a pixel every time,
+     * and a stream of sub-pixel deltas -- what any client whose scale is not a
+     * whole number produces -- turns that into a systematic sensitivity error
+     * whose size depends on how fast the pointer is moving, and into drift on
+     * motion that should cancel out.
+     */
+    _quantizeRelative(x, y) {
+        this._relCarryX += x;
+        this._relCarryY += y;
+        const outX = Math.round(this._relCarryX);
+        const outY = Math.round(this._relCarryY);
+        this._relCarryX -= outX;
+        this._relCarryY -= outY;
+        return [outX, outY];
+    }
+
+    /** Scale a CSS-pixel relative motion onto the wire's server pixels. */
+    _relativeToServer(cssX, cssY) {
+        const scale = this._pointerScale();
+        return this._quantizeRelative(cssX * scale.x, cssY * scale.y);
     }
 
     _calculateTouchCoordinates(touchPoint) {
         this._updateCursorPosition(touchPoint.clientX, touchPoint.clientY);
         this._latestMouseX = touchPoint.clientX;
         this._latestMouseY = touchPoint.clientY;
-        // Actual client DPR.
-        const client_dpr = window.devicePixelRatio || 1;
-        const dpr_for_input_coords = (this.useCssScaling || window.is_manual_resolution_mode || window.isManualResolutionMode || this.isSharedMode) ? 1 : client_dpr;
+        const dpr_for_input_coords = this._inputDpr();
         let canvas = document.getElementById('videoCanvas');
         let videoEle = document.getElementById('stream');
 
@@ -2533,9 +2612,13 @@ export class Input {
         // Touch/trackpad paths call this for button changes: flush pending motion
         // first so ordering is preserved.
         this._flushCoalescedMouseMove();
-        const mtype = (document.pointerLockElement === this.element || this.mouseRelative) ? "m2" : "m";
-        const toks = [ mtype, this.x, this.y, this.buttonMask, 0 ];
-        this.send(toks.join(","));
+        if (this._isStreamLocked()) {
+            // A button change carries no motion of its own, and under lock
+            // this.x/this.y hold movement deltas, not a position.
+            this.send([ "m2", 0, 0, this.buttonMask, 0 ].join(","));
+            return;
+        }
+        this.send([ "m", this.x, this.y, this.buttonMask, 0 ].join(","));
     }
 
     setTrackpadMode(enabled) {
@@ -3044,12 +3127,20 @@ export class Input {
         }
     }
 
-    _pointerLock() {
-        // The lock can land on the ws-core canvas (Ctrl-Shift-Click on it)
-        // instead of the overlay element; both count as "stream locked".
+    /**
+     * Whether pointer lock is held on the stream: on the overlay element, or on
+     * the ws-core canvas a Ctrl-Shift-Click can land it on instead.
+     */
+    _isStreamLocked() {
         const canvas = document.getElementById('videoCanvas');
-        if (document.pointerLockElement === this.element ||
-            (canvas !== null && document.pointerLockElement === canvas)) {
+        return (this.element != null && document.pointerLockElement === this.element) ||
+            (canvas !== null && document.pointerLockElement === canvas);
+    }
+
+    _pointerLock() {
+        this._relCarryX = 0;
+        this._relCarryY = 0;
+        if (this._isStreamLocked()) {
             this.send("p,1");
             this.send("SET_NATIVE_CURSOR_RENDERING,1");
         } else {
@@ -3078,20 +3169,20 @@ export class Input {
         };
     }
 
+    /** Frame-space X for a client X, unrounded so the device scale rounds once. */
     _clientToServerX(clientX) {
         if (!this.m) return 0;
         const elementRelativeX = clientX - this.m.elementClientX;
         const viewportRelativeX = elementRelativeX - this.m.mouseOffsetX;
-        let serverX = viewportRelativeX * this.m.mouseMultiX;
-        return Math.round(serverX);
+        return viewportRelativeX * this.m.mouseMultiX;
     }
 
+    /** Frame-space Y for a client Y, unrounded so the device scale rounds once. */
     _clientToServerY(clientY) {
         if (!this.m) return 0;
         const elementRelativeY = clientY - this.m.elementClientY;
         const viewportRelativeY = elementRelativeY - this.m.mouseOffsetY;
-        let serverY = viewportRelativeY * this.m.mouseMultiY;
-        return Math.round(serverY);
+        return viewportRelativeY * this.m.mouseMultiY;
     }
 
     /**
@@ -3182,11 +3273,13 @@ export class Input {
     /**
      * Take pointer lock on an element, asking for raw movement deltas.
      *
-     * Locked motion is relayed as relative motion, which the remote desktop
-     * accelerates again on injection, so the OS curve the engine applies to
-     * movementX/Y compounds with it and a flick travels much further remotely
-     * than it did locally. unadjustedMovement asks for the deltas before that
-     * curve. Engines that cannot deliver them (every engine on Linux, and
+     * Locked motion is relayed as relative motion and injected verbatim -- both
+     * XTEST and the Wayland backend pass deltas through unaccelerated -- so the
+     * OS curve the engine applies to movementX/Y is the whole difference between
+     * how far a hand moved and how far the remote pointer went, and it grows
+     * with speed. unadjustedMovement asks for the deltas before that curve,
+     * which is what the games and 3D applications pointer lock exists for
+     * expect. Engines that cannot deliver them (every engine on Linux, and
      * Android) reject the option with NotSupportedError, and the first refusal
      * turns it off for the page; `again` re-runs the request the way its caller
      * would, so guarded callers re-check their guards. Engines older than the
@@ -3356,7 +3449,7 @@ export class Input {
         if (this._isStreamFullscreen()) {
              this._armPointerLock();
              this.requestKeyboardLock();
-        } else if (document.pointerLockElement === this.element) {
+        } else if (this._isStreamLocked()) {
              this._pointerLock();
         }
         this._windowMath();
@@ -3411,6 +3504,8 @@ export class Input {
         // queued move cannot fire send() after this instance is detached. The
         // already-scheduled RAF then no-ops (the flush early-returns on null).
         this._pendingMove = null;
+        this._relCarryX = 0;
+        this._relCarryY = 0;
         if ((this.buttonMask & 1) === 1) {
              this.buttonMask &= ~1;
              this._sendMouseState();
@@ -3419,15 +3514,10 @@ export class Input {
         this._exitPointerLock();
     }
 
-    /**
-     * Sends WebRTC app command to hide the remote pointer when exiting pointer lock.
-     */
+    /** Release a stream-held pointer lock, hiding the server-drawn pointer. */
     _exitPointerLock() {
-        const canvas = document.getElementById('videoCanvas');
-        if (document.pointerLockElement === this.element ||
-            (canvas !== null && document.pointerLockElement === canvas)) {
+        if (this._isStreamLocked()) {
             document.exitPointerLock();
-            // hide the pointer.
             this.send("p,0");
             console.log("remote pointer visibility to: False");
         }

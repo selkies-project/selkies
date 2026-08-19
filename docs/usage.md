@@ -17,7 +17,7 @@ Fullscreen mode is available with the shortcut `Control + Shift + F`, or by pres
 
 The cursor can be locked into the web interface using `Control + Shift + Left Click` in web browsers supporting the Pointer Lock API. Press `Escape` to exit this remote cursor mode. This remote cursor capability is useful for most games or graphics applications where the cursor must be confined to the remote screen.
 
-While locked, the client asks the browser for raw mouse movement, so your local pointer acceleration is not applied on top of the remote desktop's own. Browsers offer this on Windows and macOS; on Linux and Android they refuse it, and locked movement carries the local acceleration curve as well.
+Locked movement is relayed to the remote desktop as-is, so the only acceleration applied to it is your own machine's. The client asks the browser for raw mouse movement to leave that curve out, which is what games and 3D applications expect; browsers offer it on Windows and macOS, and refuse it on Linux and Android, where locked movement keeps the local acceleration curve.
 
 The configuration menu is available by clicking the small button on the right side of the interface with the fullscreen turned off, or by using the shortcut `Control + Shift + M`.
 
