@@ -291,7 +291,11 @@ static int is_our_device_path(const char *pathname) {
     return pathname && strcmp(pathname, g_device_path) == 0;
 }
 
-__attribute__((constructor)) void init_interposer(void) {
+/* Static (local symbol) and uniquely named on purpose: the sibling joystick
+ * interposer also has a constructor, and a shared global constructor name makes
+ * the dynamic linker resolve one library's INIT_ARRAY entry to the other's
+ * constructor, so this one would never run when both are preloaded together. */
+__attribute__((constructor)) static void swc_init_interposer(void) {
     swc_logging_init();
 
     const char *dev_index = getenv("SELKIES_WEBCAM_DEVICE");
