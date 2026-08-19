@@ -45,7 +45,7 @@ export LD_PRELOAD="${SELKIES_WEBCAM_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
 #   SELKIES_WEBCAM_DEVICE=0                     -> /dev/video0
 #   SELKIES_WEBCAM_SOCKET_PATH=/tmp             -> /tmp/selkies_webcam0.sock
 #   WEBCAM_LOG=1                                -> stderr diagnostics
-chromium --use-fake-ui-for-media-stream
+chromium
 ```
 
 Do **not** preload this into the Selkies backend process itself; the capture
