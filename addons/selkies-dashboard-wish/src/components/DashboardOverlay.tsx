@@ -28,6 +28,7 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
   const [isVideoActive, setIsVideoActive] = useState<boolean>(true);
   const [isAudioActive, setIsAudioActive] = useState<boolean>(true);
   const [isMicrophoneActive, setIsMicrophoneActive] = useState<boolean>(false);
+  const [isWebcamActive, setIsWebcamActive] = useState<boolean>(false);
   // Seeded from the URL so a shared/player viewer never sees control UI in the
   // gap before the server's clientRoleUpdate lands.
   const [isViewer, setIsViewer] = useState<boolean>(isViewerUrlMode);
@@ -51,6 +52,7 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
           if (message.video !== undefined) setIsVideoActive(message.video);
           if (message.audio !== undefined) setIsAudioActive(message.audio);
           if (message.microphone !== undefined) setIsMicrophoneActive(message.microphone);
+          if (message.webcam !== undefined) setIsWebcamActive(message.webcam);
         } else if (message.type === 'clientRoleUpdate') {
           // Read-only viewers get no control UI.
           setIsViewer(message.role === 'viewer');
@@ -58,6 +60,7 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
           if (message.video !== undefined) setIsVideoActive(message.video);
           if (message.audio !== undefined) setIsAudioActive(message.audio);
           if (message.microphone !== undefined) setIsMicrophoneActive(message.microphone);
+          if (message.webcam !== undefined) setIsWebcamActive(message.webcam);
           if (message.gamepad !== undefined) setIsGamepadEnabled(message.gamepad);
         } else if (message.type === 'serverSettings') {
           setShowSidebar(message.payload?.ui_show_sidebar?.value !== false);
@@ -84,6 +87,10 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
 
   const handleMicrophoneToggle = () => {
     window.postMessage({ type: 'pipelineControl', pipeline: 'microphone', enabled: !isMicrophoneActive }, window.location.origin);
+  };
+
+  const handleWebcamToggle = () => {
+    window.postMessage({ type: 'pipelineControl', pipeline: 'webcam', enabled: !isWebcamActive }, window.location.origin);
   };
 
   const handleGamepadToggle = () => {
@@ -145,10 +152,12 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
             isVideoActive={isVideoActive}
             isAudioActive={isAudioActive}
             isMicrophoneActive={isMicrophoneActive}
+            isWebcamActive={isWebcamActive}
             isGamepadEnabled={isGamepadEnabled}
             onVideoToggle={handleVideoToggle}
             onAudioToggle={handleAudioToggle}
             onMicrophoneToggle={handleMicrophoneToggle}
+            onWebcamToggle={handleWebcamToggle}
             onGamepadToggle={handleGamepadToggle}
             isTouchGamepadActive={isTouchGamepadActive}
             onToggleTouchGamepad={handleToggleTouchGamepad}

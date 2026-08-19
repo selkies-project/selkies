@@ -27,6 +27,7 @@ import {
   Monitor,
   Maximize,
   Mic,
+  Webcam,
   Settings2,
   Gauge,
   Share2,
@@ -56,11 +57,13 @@ interface TopMenuProps {
   isVideoActive: boolean;
   isAudioActive: boolean;
   isMicrophoneActive: boolean;
+  isWebcamActive: boolean;
   isGamepadEnabled: boolean;
   isTouchGamepadActive: boolean;
   onVideoToggle: () => void;
   onAudioToggle: () => void;
   onMicrophoneToggle: () => void;
+  onWebcamToggle: () => void;
   onGamepadToggle: () => void;
   onToggleTouchGamepad: () => void;
   toggleStats: () => void;
@@ -70,11 +73,13 @@ export function TopMenu({
   isVideoActive,
   isAudioActive,
   isMicrophoneActive,
+  isWebcamActive,
   isGamepadEnabled,
   isTouchGamepadActive,
   onVideoToggle,
   onAudioToggle,
   onMicrophoneToggle,
+  onWebcamToggle,
   onGamepadToggle,
   onToggleTouchGamepad }: TopMenuProps) {
 
@@ -672,6 +677,22 @@ export function TopMenu({
                         <span className="flex-1">{t('topMenu.microphone')}</span>
                         <span className="text-xs text-muted-foreground ml-auto">
                           {isMicrophoneActive ? t('common.on') : t('common.off')}
+                        </span>
+                      </MenubarItem>
+                    )}
+
+                    {(renderableSettings.webcamToggle ?? true) && (
+                      <MenubarItem
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          onWebcamToggle();
+                        }}
+                      >
+                        <Webcam className="h-4 w-4 mr-2" />
+                        <span className="flex-1">{t('topMenu.webcam')}</span>
+                        <span className="text-xs text-muted-foreground ml-auto">
+                          {isWebcamActive ? t('common.on') : t('common.off')}
                         </span>
                       </MenubarItem>
                     )}

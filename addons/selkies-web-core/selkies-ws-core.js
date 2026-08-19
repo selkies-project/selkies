@@ -28,6 +28,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { storageKeyForServerKey } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName } from './lib/util.js';
+import { WebcamCapture } from './lib/webcam-capture.js';
 
 installAuthGuard();
 
@@ -187,6 +188,7 @@ let triggerInitializeDecoder = () => {
 let isVideoPipelineActive = true;
 let isAudioPipelineActive = true;
 let isMicrophoneActive = false;
+let isWebcamActive = false;
 let isGamepadEnabled;
 let lastReceivedVideoFrameId = -1;
 let mainDecoderHasKeyframe = false;
@@ -199,6 +201,9 @@ let sharedDeltasDroppedWhileConfiguring = 0;
 let initializationComplete = false;
 let audioEnabled = true;
 let microphoneEnabled = true;
+let webcamEnabled = true;
+let webcamCapture = null;
+let preferredWebcamDeviceId = null;
 // Display related resources
 let displayId = 'primary';
 let displayPosition = 'right';
@@ -2639,6 +2644,7 @@ function postSidebarButtonUpdate() {
     video: isVideoPipelineActive,
     audio: isAudioPipelineActive,
     microphone: isMicrophoneActive,
+    webcam: isWebcamActive,
     gamepad: isGamepadEnabled
   };
   console.log('Posting sidebarButtonStatusUpdate:', updatePayload);
@@ -2990,6 +2996,20 @@ function receiveMessage(event) {
           startMicrophoneCapture();
         } else {
           stopMicrophoneCapture();
+        }
+      } else if (pipeline === 'webcam') {
+        if (isSharedMode) {
+          console.log("Shared mode: Webcam control blocked.");
+          break;
+        }
+        if (!webcamEnabled) {
+          console.log("Webcam is disabled. Webcam pipeline control blocked.");
+          break;
+        }
+        if (desiredState) {
+          startWebcamCapture();
+        } else {
+          stopWebcamCapture();
         }
       } else {
         console.warn(`Received pipelineControl message for unknown pipeline: ${pipeline}`);
@@ -3373,6 +3393,7 @@ function sendStatsMessage() {
     isVideoPipelineActive: isVideoPipelineActive,
     isAudioPipelineActive: isAudioPipelineActive,
     isMicrophoneActive: isMicrophoneActive,
+    isWebcamActive: isWebcamActive,
   };
   stats.encoderName = currentEncoderMode;
   stats.video_fullcolor = video_fullcolor;
@@ -4926,6 +4947,7 @@ function initWebsockets() {
 
         if (!isSharedMode) {
             stopMicrophoneCapture();
+            stopWebcamCapture();
             if (!isTokenAuthMode) {
                 initializeInput();
             }
@@ -5506,6 +5528,11 @@ function initWebsockets() {
           microphoneEnabled = false;
           stopMicrophoneCapture();
           window.postMessage({ type: 'pipelineStatusUpdate', microphone: false }, window.location.origin);
+        } else if (event.data === 'WEBCAM_DISABLED' && !isSharedMode) {
+          console.log("Server reports webcam is disabled. Stopping webcam capture.");
+          webcamEnabled = false;
+          stopWebcamCapture();
+          window.postMessage({ type: 'pipelineStatusUpdate', webcam: false }, window.location.origin);
         } else {
           if (window.webrtcInput && window.webrtcInput.on_message && !isSharedMode) {
             window.webrtcInput.on_message(event.data);
@@ -5616,7 +5643,7 @@ function initWebsockets() {
       });
       audioDecoderWorker = null;
     }
-    if (!isSharedMode) stopMicrophoneCapture();
+    if (!isSharedMode) { stopMicrophoneCapture(); stopWebcamCapture(); }
     isVideoPipelineActive = false;
     isAudioPipelineActive = false;
     isMicrophoneActive = false;
@@ -6034,6 +6061,54 @@ function stopMicrophoneCapture() {
   }
 }
 
+// Webcam uplink: JPEG frames from the local camera are sent as binary opcode
+// 0x06 messages; the server stages them for the virtual V4L2 device. Binary
+// frames bypass the gzip wrapper by design (see the patched websocket.send).
+function startWebcamCapture() {
+  if (isSharedMode || webcamCapture) {
+    return;
+  }
+  webcamCapture = new WebcamCapture({
+    sendFrame: (jpeg) => {
+      if (!(websocket && websocket.readyState === WebSocket.OPEN && isWebcamActive)) {
+        return;
+      }
+      const messageBuffer = new ArrayBuffer(1 + jpeg.byteLength);
+      const bytes = new Uint8Array(messageBuffer);
+      bytes[0] = 0x06;
+      bytes.set(jpeg, 1);
+      try {
+        websocket.send(messageBuffer);
+      } catch (e) {
+        console.error("Error sending webcam frame:", e);
+      }
+    },
+    // Drop frames rather than build latency when the socket is backed up.
+    canSend: () => !websocket || websocket.bufferedAmount < 4 * 1024 * 1024,
+    onStateChange: (active) => {
+      isWebcamActive = active;
+      postSidebarButtonUpdate();
+    },
+    onError: (error) => {
+      console.error('Webcam capture error:', error);
+      alert(`Webcam error: ${error.name || 'Error'} - ${error.message || error}`);
+      stopWebcamCapture();
+    },
+  });
+  webcamCapture.start(preferredWebcamDeviceId);
+}
+
+function stopWebcamCapture() {
+  if (webcamCapture) {
+    webcamCapture.stop();
+    webcamCapture = null;
+  }
+  if (isWebcamActive) {
+    isWebcamActive = false;
+    postSidebarButtonUpdate();
+  }
+}
+
 function cleanup() {
   if (metricsIntervalId) {
     clearInterval(metricsIntervalId);
@@ -6048,7 +6123,7 @@ function cleanup() {
   if (window.isCleaningUp) return;
   window.isCleaningUp = true;
   console.log("Cleanup: Starting cleanup process...");
-  if (!isSharedMode) stopMicrophoneCapture();
+  if (!isSharedMode) { stopMicrophoneCapture(); stopWebcamCapture(); }
 
   if (websocket) {
     websocket.onopen = null;

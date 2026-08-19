@@ -23,6 +23,7 @@ gem install --no-document fpm
 . /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
+/repo/infra/packaging/v4l2-interposer.sh /pkg-root
 RPM_ARCH="$(uname -m)"
 mkdir -p /out
 cd /out

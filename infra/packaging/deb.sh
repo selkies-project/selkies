@@ -25,6 +25,7 @@ gem install --no-document fpm
 . /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
+/repo/infra/packaging/v4l2-interposer.sh /pkg-root
 # dpkg knows the Debian name for whatever this is running on, so a new
 # architecture needs no translation table here
 DEB_ARCH="$(dpkg --print-architecture)"

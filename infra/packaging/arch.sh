@@ -10,6 +10,7 @@ set -eux
 pacman -Syu --noconfirm --needed python python-pip base-devel libxkbcommon sudo
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
+/repo/infra/packaging/v4l2-interposer.sh /pkg-root
 # makepkg writes src/ and pkg/ next to the PKGBUILD, and /repo is read-only
 rm -rf /build
 mkdir -p /build /out
