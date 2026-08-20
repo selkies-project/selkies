@@ -8,6 +8,11 @@
 // lacks MediaStreamTrackProcessor, so a <video>+canvas fallback keeps it working.
 // JPEG encoding always goes through OffscreenCanvas.convertToBlob — the only
 // still-image encoder the browser exposes.
+//
+// Capture follows tab visibility: a hidden tab halts the frame pump (the
+// camera track itself stays open so no permission re-prompt is needed) and a
+// visible tab rebuilds it from the live track, so nothing queued while the
+// tab was away is ever sent and the first frame after resume is current.
 
 export class WebcamCapture {
   // opts:
@@ -34,7 +39,18 @@ export class WebcamCapture {
     this._ctx = null;
     this._encoding = false;
     this._active = false;
+    this._pumping = false;
     this._lastSendMs = 0;
+    this._onVisibilityChange = () => {
+      if (!this._active) {
+        return;
+      }
+      if (document.hidden) {
+        this._haltPump();
+      } else {
+        this._pump();
+      }
+    };
   }
 
   get active() {
@@ -79,7 +95,20 @@ export class WebcamCapture {
 
     this._active = true;
     this._onStateChange(true);
+    document.addEventListener("visibilitychange", this._onVisibilityChange);
+    if (!document.hidden) {
+      await this._pump();
+    }
+  }
 
+  // Starts the frame source for the live track; idempotent while pumping.
+  async _pump() {
+    if (this._pumping || !this._active || !this._stream) {
+      return;
+    }
+    this._pumping = true;
+    this._lastSendMs = 0;
+    const track = this._stream.getVideoTracks()[0];
     if (typeof MediaStreamTrackProcessor !== "undefined" && track) {
       this._pumpProcessor(track);
     } else {
@@ -88,11 +117,34 @@ export class WebcamCapture {
     }
   }
 
+  // Stops the frame source without touching the camera track. An encode
+  // already in flight is discarded by the pumping check in _encodeFrom's
+  // completion, so no frame captured before the halt is sent after it.
+  _haltPump() {
+    this._pumping = false;
+    if (this._reader) {
+      try {
+        this._reader.cancel();
+      } catch (e) {
+        /* ignore */
+      }
+      this._reader = null;
+    }
+    if (this._timer) {
+      clearInterval(this._timer);
+      this._timer = null;
+    }
+    if (this._video) {
+      this._video.srcObject = null;
+      this._video = null;
+    }
+  }
+
   // Draws one VideoFrame to the canvas and kicks off a non-blocking JPEG encode.
   // The frame is drawn and encoding flagged synchronously so the caller can
   // close the frame immediately; only one encode runs at a time.
   _encodeFrom(source, w, h) {
-    if (this._encoding || !this._canSend()) {
+    if (this._encoding || !this._pumping || !this._canSend()) {
       return;
     }
     const now = performance.now();
@@ -114,7 +166,7 @@ export class WebcamCapture {
       .convertToBlob({ type: "image/jpeg", quality: this.quality })
       .then((blob) => blob.arrayBuffer())
       .then((buf) => {
-        if (this._active) {
+        if (this._active && this._pumping) {
           this._sendFrame(new Uint8Array(buf));
         }
       })
@@ -126,19 +178,23 @@ export class WebcamCapture {
 
   async _pumpProcessor(track) {
     let processor;
+    let reader;
     try {
       processor = new MediaStreamTrackProcessor({ track });
-      this._reader = processor.readable.getReader();
+      reader = processor.readable.getReader();
+      this._reader = reader;
     } catch (error) {
       // Fall back if construction fails despite the API being present.
       this._reader = null;
       await this._startVideoFallback();
       return;
     }
-    while (this._active) {
+    // The loop is keyed on its own reader so a halt-then-resume, which
+    // installs a new reader, ends this loop instead of racing two of them.
+    while (this._active && this._reader === reader) {
       let result;
       try {
-        result = await this._reader.read();
+        result = await reader.read();
       } catch (error) {
         break;
       }
@@ -157,35 +213,40 @@ export class WebcamCapture {
   }
 
   async _startVideoFallback() {
-    this._video = document.createElement("video");
-    this._video.muted = true;
-    this._video.playsInline = true;
-    this._video.srcObject = this._stream;
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = this._stream;
+    this._video = video;
     try {
-      await this._video.play();
+      await video.play();
     } catch (error) {
       // A muted local stream should autoplay; if not, the loop tolerates a
       // not-yet-ready video by skipping frames.
     }
+    if (this._video !== video) {
+      // Halted while play() was pending.
+      return;
+    }
     const tick = () => {
-      if (!this._active) {
+      if (!this._active || this._video !== video) {
         return;
       }
-      if (this._video && this._video.readyState >= 2) {
+      if (video.readyState >= 2) {
         this._encodeFrom(
-          this._video,
-          this._video.videoWidth || this.width,
-          this._video.videoHeight || this.height,
+          video,
+          video.videoWidth || this.width,
+          video.videoHeight || this.height,
         );
       }
     };
-    if (this._video.requestVideoFrameCallback) {
+    if (video.requestVideoFrameCallback) {
       const onFrame = () => {
-        if (!this._active) return;
+        if (!this._active || this._video !== video) return;
         tick();
-        this._video.requestVideoFrameCallback(onFrame);
+        video.requestVideoFrameCallback(onFrame);
       };
-      this._video.requestVideoFrameCallback(onFrame);
+      video.requestVideoFrameCallback(onFrame);
     } else {
       this._timer = setInterval(tick, 1000 / this.fps);
     }
@@ -196,18 +257,8 @@ export class WebcamCapture {
       return;
     }
     this._active = false;
-    if (this._reader) {
-      try {
-        this._reader.cancel();
-      } catch (e) {
-        /* ignore */
-      }
-      this._reader = null;
-    }
-    if (this._timer) {
-      clearInterval(this._timer);
-      this._timer = null;
-    }
+    document.removeEventListener("visibilitychange", this._onVisibilityChange);
+    this._haltPump();
     if (this._stream) {
       this._stream.getTracks().forEach((t) => {
         try {
@@ -217,10 +268,6 @@ export class WebcamCapture {
         }
       });
       this._stream = null;
-    }
-    if (this._video) {
-      this._video.srcObject = null;
-      this._video = null;
     }
     this._canvas = null;
     this._ctx = null;
