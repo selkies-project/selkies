@@ -35,8 +35,10 @@ attr() { printf '%s' "${ENTRY}" | sed -n "s/.*[[:space:]]$1=\"\([^\"]*\)\".*/\1/
 URL="$(attr URL)"
 VERSION="$(attr version)"
 WANT="$(attr hashValue)"
-[ -n "${URL}" ] && [ -n "${VERSION}" ] && [ -n "${WANT}" ] || {
-    echo "openh264: update service returned no usable entry" >&2; exit 1; }
+if [ -z "${URL}" ] || [ -z "${VERSION}" ] || [ -z "${WANT}" ]; then
+    echo "openh264: update service returned no usable entry" >&2
+    exit 1
+fi
 
 DEST="${PROFILE}/gmp-gmpopenh264/${VERSION}"
 if [ -f "${DEST}/libgmpopenh264.so" ]; then

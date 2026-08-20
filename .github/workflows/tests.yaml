@@ -45,6 +45,11 @@ env:
   E2E_DISPLAY: ":99"
   # Drive the release Chrome build rather than Playwright's bundled Chromium
   E2E_CHROME: /usr/bin/google-chrome
+  # The shell suite gates on shellcheck's lowest severity, and which findings
+  # that reports differs by release, so the runner image's own shellcheck would
+  # turn the tree red on an image bump alone.
+  SHELLCHECK_VERSION: "0.11.0"
+  SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
 
 jobs:
   unit:
@@ -72,7 +77,15 @@ jobs:
       # lint half reports itself skipped inside a suite that exits zero, so
       # nothing else notices it never ran.
       - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+        run: |
+          scripts/ci/fetch.sh \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            "${RUNNER_TEMP}/shellcheck.tar.xz"
+          echo "${SHELLCHECK_SHA256}  ${RUNNER_TEMP}/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}"
+          sudo install -m 0755 \
+            "${RUNNER_TEMP}/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
       - name: Run the unit tier
         run: |
           # The suites reach into selkies.input_handler and
