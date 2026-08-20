@@ -11,9 +11,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     (/dev/videoN) backed by a Unix domain socket to the Selkies backend. It
     emulates the observable half of a fixed-function MJPEG webcam: the
     VIDIOC_* ioctl surface, MMAP streaming buffers, and poll readiness, so
-    that unmodified consumers (Chromium, Firefox, ffmpeg, GStreamer) capture
-    frames pushed from the browser without any kernel module or elevated
-    privilege in the container.
+    that unmodified consumers capture frames pushed from the browser without
+    any kernel module or elevated privilege in the container.
 
     Design mirrors the sibling joystick interposer: the application-facing fd
     is the connected socket itself, so poll/select/epoll/dup/fork work with no
@@ -23,10 +22,21 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     passes to each client once via SCM_RIGHTS. mmap() of the device fd is
     redirected onto a per-handle buffer memfd, so the application maps real
     shared memory and DQBUF copies one frame into it.
+
+    Two additional surfaces cover consumers that bypass the plain libc calls.
+    The libv4l2 wrapper library reaches the kernel through the libc syscall()
+    entry point instead of open()/ioctl() to keep out of the way of libv4l's
+    own LD_PRELOAD shims, so syscall() is interposed and routes only
+    device-path opens and interposer-owned fds into the emulation. Camera
+    discovery works by listing a directory rather than probing the device
+    path, so scans of exactly /dev and /sys/class/video4linux get the device
+    entry injected into their readdir() stream; every other directory stream
+    passes through untouched.
 */
 
 #define _GNU_SOURCE
 #define _LARGEFILE64_SOURCE 1
+#include <dirent.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -116,11 +126,17 @@ static int (*real_close)(int fd) = NULL;
 static ssize_t (*real_read)(int fd, void *buf, size_t count) = NULL;
 static ssize_t (*real_write)(int fd, const void *buf, size_t count) = NULL;
 static int (*real_access)(const char *pathname, int mode) = NULL;
+static long (*real_syscall)(long number, ...) = NULL;
+static DIR *(*real_opendir)(const char *name) = NULL;
+static struct dirent *(*real_readdir)(DIR *dirp) = NULL;
+static int (*real_closedir)(DIR *dirp) = NULL;
+static void (*real_rewinddir)(DIR *dirp) = NULL;
 static int (*real_fstat)(int fd, struct stat *buf) = NULL;
 static int (*real_stat)(const char *pathname, struct stat *buf) = NULL;
 static int (*real_lstat)(const char *pathname, struct stat *buf) = NULL;
 static void *(*real_mmap)(void *addr, size_t length, int prot, int flags, int fd, off_t offset) = NULL;
 #ifdef SWC_LFS64
+static struct dirent64 *(*real_readdir64)(DIR *dirp) = NULL;
 static int (*real_stat64)(const char *pathname, struct stat64 *buf) = NULL;
 static int (*real_lstat64)(const char *pathname, struct stat64 *buf) = NULL;
 static int (*real_fstat64)(int fd, struct stat64 *buf) = NULL;
@@ -291,6 +307,11 @@ static int is_our_device_path(const char *pathname) {
     return pathname && strcmp(pathname, g_device_path) == 0;
 }
 
+static const char *device_basename(void) {
+    const char *slash = strrchr(g_device_path, '/');
+    return slash ? slash + 1 : g_device_path;
+}
+
 /* Static (local symbol) and uniquely named on purpose: the sibling joystick
  * interposer also has a constructor, and a shared global constructor name makes
  * the dynamic linker resolve one library's INIT_ARRAY entry to the other's
@@ -331,6 +352,11 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
     load_real_func((void *)&real_open64, "open64");
     load_real_func((void *)&real_openat, "openat");
     load_real_func((void *)&real_openat64, "openat64");
+    load_real_func((void *)&real_syscall, "syscall");
+    load_real_func((void *)&real_opendir, "opendir");
+    load_real_func((void *)&real_readdir, "readdir");
+    load_real_func((void *)&real_closedir, "closedir");
+    load_real_func((void *)&real_rewinddir, "rewinddir");
 #ifdef __GLIBC__
     load_real_func((void *)&real___open_2, "__open_2");
     load_real_func((void *)&real___open64_2, "__open64_2");
@@ -338,6 +364,7 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
     load_real_func((void *)&real___openat64_2, "__openat64_2");
 #endif
 #ifdef SWC_LFS64
+    load_real_func((void *)&real_readdir64, "readdir64");
     load_real_func((void *)&real_mmap64, "mmap64");
     load_real_func((void *)&real_stat64, "stat64");
     load_real_func((void *)&real_lstat64, "lstat64");
@@ -463,6 +490,268 @@ int __fxstat64(int ver, int fd, struct stat64 *buf) {
     return real___fxstat64(ver, fd, buf);
 }
 #endif
+
+/* --- Device enumeration: directory listing injection --- */
+/* Consumers discover cameras by listing a directory, not by probing the
+ * device path: some scan /dev for videoN nodes, others scan
+ * /sys/class/video4linux for class entries. Streams opened on exactly those
+ * two directories are tracked, and the device entry is
+ * appended once at end-of-listing unless a real entry of the same name already
+ * appeared (e.g. a placeholder node or a real camera). When the sysfs class
+ * directory does not exist at all, the stream is backed by an existing
+ * directory purely to obtain a valid DIR handle and only synthetic entries are
+ * emitted. Every other directory stream passes through untouched, gated by a
+ * tracked-stream counter so the common path stays lock-free. */
+#define WC_MAX_TRACKED_DIRS 8
+
+typedef struct {
+    DIR *dir;
+    int fake_only;          /* placeholder-backed: emit synthetic entries only */
+    unsigned char d_type;   /* DT_CHR for /dev, DT_LNK for sysfs */
+    int synth_state;
+    int injected;
+    int suppress;           /* real listing already carries the device name */
+    struct dirent ent;
+#ifdef SWC_LFS64
+    struct dirent64 ent64;
+#endif
+} wc_dir_t;
+
+static wc_dir_t tracked_dirs[WC_MAX_TRACKED_DIRS];
+static int tracked_dir_count = 0;
+static pthread_mutex_t dirs_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int dir_path_wants_device(const char *name, unsigned char *d_type) {
+    if (name == NULL) {
+        return 0;
+    }
+    size_t len = strlen(name);
+    while (len > 1 && name[len - 1] == '/') {
+        len--;
+    }
+    if (len == 4 && strncmp(name, "/dev", 4) == 0) {
+        *d_type = DT_CHR;
+        return 1;
+    }
+    if (len == 22 && strncmp(name, "/sys/class/video4linux", 22) == 0) {
+        *d_type = DT_LNK;
+        return 1;
+    }
+    return 0;
+}
+
+static wc_dir_t *find_tracked_dir_locked(DIR *dirp) {
+    for (int i = 0; i < WC_MAX_TRACKED_DIRS; i++) {
+        if (tracked_dirs[i].dir == dirp) {
+            return &tracked_dirs[i];
+        }
+    }
+    return NULL;
+}
+
+DIR *opendir(const char *name) {
+    if (!real_opendir && load_real_func((void *)&real_opendir, "opendir") < 0) {
+        errno = ENOENT;
+        return NULL;
+    }
+    unsigned char d_type = 0;
+    if (!dir_path_wants_device(name, &d_type)) {
+        return real_opendir(name);
+    }
+    DIR *dir = real_opendir(name);
+    int fake_only = 0;
+    if (dir == NULL) {
+        /* /dev always exists; only the sysfs class dir is worth fabricating. */
+        if (d_type != DT_LNK) {
+            return NULL;
+        }
+        int saved_errno = errno;
+        static const char *placeholders[] = { "/sys/class", "/sys", "/" };
+        for (size_t i = 0; i < sizeof(placeholders) / sizeof(placeholders[0]) && dir == NULL; i++) {
+            dir = real_opendir(placeholders[i]);
+        }
+        if (dir == NULL) {
+            errno = saved_errno;
+            return NULL;
+        }
+        fake_only = 1;
+    }
+    pthread_mutex_lock(&dirs_mutex);
+    wc_dir_t *slot = NULL;
+    for (int i = 0; i < WC_MAX_TRACKED_DIRS; i++) {
+        if (tracked_dirs[i].dir == NULL) {
+            slot = &tracked_dirs[i];
+            break;
+        }
+    }
+    if (slot == NULL) {
+        pthread_mutex_unlock(&dirs_mutex);
+        if (fake_only) {
+            if (real_closedir || load_real_func((void *)&real_closedir, "closedir") == 0) {
+                real_closedir(dir);
+            }
+            errno = ENOENT;
+            return NULL;
+        }
+        return dir;
+    }
+    memset(slot, 0, sizeof(*slot));
+    slot->dir = dir;
+    slot->fake_only = fake_only;
+    slot->d_type = d_type;
+    __atomic_add_fetch(&tracked_dir_count, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&dirs_mutex);
+    return dir;
+}
+
+/* The synthetic listing is ".", "..", then the device; the wrapped listing is
+ * the real entries with the device appended once at end-of-stream. The entry
+ * struct lives in the tracked slot, matching readdir()'s per-stream lifetime. */
+#define WC_FILL_DIR_ENTRY(entp, nm, tp, ino) do {                       \
+    memset((entp), 0, sizeof(*(entp)));                                 \
+    snprintf((entp)->d_name, sizeof((entp)->d_name), "%s", (nm));       \
+    (entp)->d_type = (tp);                                              \
+    (entp)->d_ino = (ino);                                              \
+    (entp)->d_reclen = (unsigned short)sizeof(*(entp));                 \
+} while (0)
+
+struct dirent *readdir(DIR *dirp) {
+    if (!real_readdir && load_real_func((void *)&real_readdir, "readdir") < 0) {
+        errno = EBADF;
+        return NULL;
+    }
+    if (__atomic_load_n(&tracked_dir_count, __ATOMIC_ACQUIRE) == 0) {
+        return real_readdir(dirp);
+    }
+    pthread_mutex_lock(&dirs_mutex);
+    wc_dir_t *t = find_tracked_dir_locked(dirp);
+    if (t == NULL) {
+        pthread_mutex_unlock(&dirs_mutex);
+        return real_readdir(dirp);
+    }
+    if (t->fake_only) {
+        struct dirent *ret = NULL;
+        if (t->synth_state < 3) {
+            const char *nm = (t->synth_state == 0) ? "." :
+                             (t->synth_state == 1) ? ".." : device_basename();
+            unsigned char tp = (t->synth_state < 2) ? DT_DIR : t->d_type;
+            WC_FILL_DIR_ENTRY(&t->ent, nm, tp, (ino_t)(1 + t->synth_state));
+            t->synth_state++;
+            ret = &t->ent;
+        }
+        pthread_mutex_unlock(&dirs_mutex);
+        return ret;
+    }
+    pthread_mutex_unlock(&dirs_mutex);
+    struct dirent *e = real_readdir(dirp);
+    pthread_mutex_lock(&dirs_mutex);
+    t = find_tracked_dir_locked(dirp);
+    if (t == NULL) {
+        pthread_mutex_unlock(&dirs_mutex);
+        return e;
+    }
+    struct dirent *ret = e;
+    if (e != NULL) {
+        if (strcmp(e->d_name, device_basename()) == 0) {
+            t->suppress = 1;
+        }
+    } else if (!t->suppress && !t->injected) {
+        t->injected = 1;
+        WC_FILL_DIR_ENTRY(&t->ent, device_basename(), t->d_type, (ino_t)1);
+        ret = &t->ent;
+    }
+    pthread_mutex_unlock(&dirs_mutex);
+    return ret;
+}
+
+#ifdef SWC_LFS64
+struct dirent64 *readdir64(DIR *dirp) {
+    if (!real_readdir64 && load_real_func((void *)&real_readdir64, "readdir64") < 0) {
+        errno = EBADF;
+        return NULL;
+    }
+    if (__atomic_load_n(&tracked_dir_count, __ATOMIC_ACQUIRE) == 0) {
+        return real_readdir64(dirp);
+    }
+    pthread_mutex_lock(&dirs_mutex);
+    wc_dir_t *t = find_tracked_dir_locked(dirp);
+    if (t == NULL) {
+        pthread_mutex_unlock(&dirs_mutex);
+        return real_readdir64(dirp);
+    }
+    if (t->fake_only) {
+        struct dirent64 *ret = NULL;
+        if (t->synth_state < 3) {
+            const char *nm = (t->synth_state == 0) ? "." :
+                             (t->synth_state == 1) ? ".." : device_basename();
+            unsigned char tp = (t->synth_state < 2) ? DT_DIR : t->d_type;
+            WC_FILL_DIR_ENTRY(&t->ent64, nm, tp, (ino64_t)(1 + t->synth_state));
+            t->synth_state++;
+            ret = &t->ent64;
+        }
+        pthread_mutex_unlock(&dirs_mutex);
+        return ret;
+    }
+    pthread_mutex_unlock(&dirs_mutex);
+    struct dirent64 *e = real_readdir64(dirp);
+    pthread_mutex_lock(&dirs_mutex);
+    t = find_tracked_dir_locked(dirp);
+    if (t == NULL) {
+        pthread_mutex_unlock(&dirs_mutex);
+        return e;
+    }
+    struct dirent64 *ret = e;
+    if (e != NULL) {
+        if (strcmp(e->d_name, device_basename()) == 0) {
+            t->suppress = 1;
+        }
+    } else if (!t->suppress && !t->injected) {
+        t->injected = 1;
+        WC_FILL_DIR_ENTRY(&t->ent64, device_basename(), t->d_type, (ino64_t)1);
+        ret = &t->ent64;
+    }
+    pthread_mutex_unlock(&dirs_mutex);
+    return ret;
+}
+#endif
+
+void rewinddir(DIR *dirp) {
+    if (!real_rewinddir && load_real_func((void *)&real_rewinddir, "rewinddir") < 0) {
+        return;
+    }
+    if (__atomic_load_n(&tracked_dir_count, __ATOMIC_ACQUIRE) != 0) {
+        pthread_mutex_lock(&dirs_mutex);
+        wc_dir_t *t = find_tracked_dir_locked(dirp);
+        if (t != NULL) {
+            t->synth_state = 0;
+            t->injected = 0;
+            t->suppress = 0;
+            if (t->fake_only) {
+                pthread_mutex_unlock(&dirs_mutex);
+                return;
+            }
+        }
+        pthread_mutex_unlock(&dirs_mutex);
+    }
+    real_rewinddir(dirp);
+}
+
+int closedir(DIR *dirp) {
+    if (!real_closedir && load_real_func((void *)&real_closedir, "closedir") < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if (__atomic_load_n(&tracked_dir_count, __ATOMIC_ACQUIRE) != 0) {
+        pthread_mutex_lock(&dirs_mutex);
+        wc_dir_t *t = find_tracked_dir_locked(dirp);
+        if (t != NULL) {
+            t->dir = NULL;
+            __atomic_sub_fetch(&tracked_dir_count, 1, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&dirs_mutex);
+    }
+    return real_closedir(dirp);
+}
 
 /* --- Socket connection and config handshake --- */
 
@@ -1084,25 +1373,19 @@ static int intercept_ioctl_locked(wc_handle_t *h, ioctl_request_t request, void 
     }
 }
 
-int ioctl(int fd, ioctl_request_t request, ...) {
-    va_list args;
-    va_start(args, request);
-    void *arg = va_arg(args, void *);
-    va_end(args);
-
-    if (!real_ioctl && load_real_func((void *)&real_ioctl, "ioctl") < 0) {
-        errno = EFAULT;
-        return -1;
-    }
-
+/* Shared by the libc ioctl() wrapper and the syscall() route. Sets *handled
+ * when fd is an interposer handle; otherwise the caller forwards to its own
+ * real entry point. DQBUF may block waiting for a frame; it manages the lock
+ * itself so the wait never stalls a concurrent STREAMOFF/close. */
+static int wc_ioctl_common(int fd, ioctl_request_t request, void *arg, int *handled) {
     pthread_mutex_lock(&handles_mutex);
     wc_handle_t *h = find_handle_for_fd_locked(fd);
     if (h == NULL) {
         pthread_mutex_unlock(&handles_mutex);
-        return real_ioctl(fd, request, arg);
+        *handled = 0;
+        return -1;
     }
-    /* DQBUF may block waiting for a frame; it manages the lock itself so the
-     * wait never stalls a concurrent STREAMOFF/close on the same device. */
+    *handled = 1;
     if (_IOC_TYPE(request) == 'V' && _IOC_NR(request) == _IOC_NR(VIDIOC_DQBUF)) {
         pthread_mutex_unlock(&handles_mutex);
         return handle_dqbuf(fd, arg);
@@ -1115,17 +1398,37 @@ int ioctl(int fd, ioctl_request_t request, ...) {
     return ret;
 }
 
+int ioctl(int fd, ioctl_request_t request, ...) {
+    va_list args;
+    va_start(args, request);
+    void *arg = va_arg(args, void *);
+    va_end(args);
+
+    if (!real_ioctl && load_real_func((void *)&real_ioctl, "ioctl") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    int handled = 0;
+    int ret = wc_ioctl_common(fd, request, arg, &handled);
+    return handled ? ret : real_ioctl(fd, request, arg);
+}
+
 /* mmap of the device fd is redirected onto that handle's buffer memfd, so the
  * application maps the real shared buffer at the QUERYBUF offset. */
+static int wc_buf_fd_for_fd(int fd) {
+    pthread_mutex_lock(&handles_mutex);
+    wc_handle_t *h = find_handle_for_fd_locked(fd);
+    int buf_fd = (h != NULL && h->buf_fd >= 0) ? h->buf_fd : -1;
+    pthread_mutex_unlock(&handles_mutex);
+    return buf_fd;
+}
+
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
     if (!real_mmap && load_real_func((void *)&real_mmap, "mmap") < 0) {
         errno = ENOMEM;
         return MAP_FAILED;
     }
-    pthread_mutex_lock(&handles_mutex);
-    wc_handle_t *h = find_handle_for_fd_locked(fd);
-    int buf_fd = (h && h->buf_fd >= 0) ? h->buf_fd : -1;
-    pthread_mutex_unlock(&handles_mutex);
+    int buf_fd = wc_buf_fd_for_fd(fd);
     if (buf_fd >= 0) {
         return real_mmap(addr, length, prot, flags, buf_fd, offset);
     }
@@ -1138,10 +1441,7 @@ void *mmap64(void *addr, size_t length, int prot, int flags, int fd, off64_t off
         errno = ENOMEM;
         return MAP_FAILED;
     }
-    pthread_mutex_lock(&handles_mutex);
-    wc_handle_t *h = find_handle_for_fd_locked(fd);
-    int buf_fd = (h && h->buf_fd >= 0) ? h->buf_fd : -1;
-    pthread_mutex_unlock(&handles_mutex);
+    int buf_fd = wc_buf_fd_for_fd(fd);
     if (buf_fd >= 0) {
         return real_mmap64(addr, length, prot, flags, buf_fd, offset);
     }
@@ -1150,18 +1450,18 @@ void *mmap64(void *addr, size_t length, int prot, int flags, int fd, off64_t off
 #endif
 
 /* read() I/O mode: deliver one JPEG frame per call (implicit streaming), for
- * consumers that skip MMAP. A handle used in MMAP mode never calls read(). */
-ssize_t read(int fd, void *buf, size_t count) {
-    if (!real_read && load_real_func((void *)&real_read, "read") < 0) {
-        errno = EFAULT;
-        return -1;
-    }
+ * consumers that skip MMAP. A handle used in MMAP mode never calls read().
+ * Shared by the libc read() wrapper and the syscall() route; sets *handled
+ * when fd is an interposer handle. */
+static ssize_t wc_read_common(int fd, void *buf, size_t count, int *handled) {
     pthread_mutex_lock(&handles_mutex);
     wc_handle_t *h = find_handle_for_fd_locked(fd);
     if (h == NULL) {
         pthread_mutex_unlock(&handles_mutex);
-        return real_read(fd, buf, count);
+        *handled = 0;
+        return -1;
     }
+    *handled = 1;
     if (!h->streaming) {
         volatile wc_shm_header_t *hdr = (volatile wc_shm_header_t *)h->staging_map;
         h->last_frame_seq = __atomic_load_n(&hdr->latest_frame_seq, __ATOMIC_ACQUIRE);
@@ -1203,11 +1503,20 @@ ssize_t read(int fd, void *buf, size_t count) {
     }
 }
 
-int close(int fd) {
-    if (!real_close) {
+ssize_t read(int fd, void *buf, size_t count) {
+    if (!real_read && load_real_func((void *)&real_read, "read") < 0) {
         errno = EFAULT;
         return -1;
     }
+    int handled = 0;
+    ssize_t ret = wc_read_common(fd, buf, count, &handled);
+    return handled ? ret : real_read(fd, buf, count);
+}
+
+/* Releases the handle's resources and retires the entry before the caller
+ * issues its own real close, so a reused fd number can't alias a stale
+ * handle. Returns 1 when fd was an interposer handle. */
+static int wc_close_untrack(int fd) {
     pthread_mutex_lock(&handles_mutex);
     int found = -1;
     for (int i = 0; i < handle_count; i++) {
@@ -1222,11 +1531,118 @@ int close(int fd) {
         if (h->staging_map) {
             munmap(h->staging_map, h->staging_size);
         }
-        /* Retire the entry before the real close so a reused fd number can't
-         * alias a stale handle. */
         handles[found] = handles[handle_count - 1];
         handle_count--;
     }
     pthread_mutex_unlock(&handles_mutex);
+    return found >= 0;
+}
+
+int close(int fd) {
+    if (!real_close) {
+        errno = EFAULT;
+        return -1;
+    }
+    wc_close_untrack(fd);
     return real_close(fd);
+}
+
+/* The libv4l2 wrapper library reaches the kernel through the libc syscall()
+ * entry point rather than open()/ioctl(), so that libv4l's own
+ * v4l1compat/v4l2convert LD_PRELOAD shims never recurse into it; that same
+ * design detail routes it straight past every wrapper above. Interposing
+ * syscall() catches exactly the device-path opens and operations on
+ * interposer-owned fds; everything else is forwarded to the real syscall()
+ * with the full six-argument window, which is safe for any Linux syscall.
+ * SYS_mmap is only claimed where SYS_mmap2 is absent (64-bit ABIs): on 32-bit
+ * ABIs SYS_mmap is the legacy one-struct-argument form and must pass through. */
+long syscall(long number, ...) {
+    long a[6];
+    va_list ap;
+    va_start(ap, number);
+    for (int i = 0; i < 6; i++) {
+        a[i] = va_arg(ap, long);
+    }
+    va_end(ap);
+
+    if (!real_syscall && load_real_func((void *)&real_syscall, "syscall") < 0) {
+        errno = ENOSYS;
+        return -1;
+    }
+
+    switch (number) {
+#ifdef SYS_open
+    case SYS_open:
+        if (is_our_device_path((const char *)a[0])) {
+            int fd = common_open_logic((const char *)a[0], (int)a[1]);
+            if (fd != -2) {
+                return fd;
+            }
+        }
+        break;
+#endif
+#ifdef SYS_openat
+    case SYS_openat: {
+        char full[4096];
+        const char *check = resolve_at((int)a[0], (const char *)a[1], full, sizeof(full));
+        if (is_our_device_path(check)) {
+            int fd = common_open_logic(check, (int)a[2]);
+            if (fd != -2) {
+                return fd;
+            }
+        }
+        break;
+    }
+#endif
+    case SYS_ioctl: {
+        int handled = 0;
+        int ret = wc_ioctl_common((int)a[0], (ioctl_request_t)a[1], (void *)a[2], &handled);
+        if (handled) {
+            return ret;
+        }
+        break;
+    }
+    case SYS_read: {
+        int handled = 0;
+        ssize_t ret = wc_read_common((int)a[0], (void *)a[1], (size_t)a[2], &handled);
+        if (handled) {
+            return (long)ret;
+        }
+        break;
+    }
+    case SYS_close:
+        wc_close_untrack((int)a[0]);
+        break;
+#if defined(SYS_mmap) && !defined(SYS_mmap2)
+    case SYS_mmap: {
+        int buf_fd = wc_buf_fd_for_fd((int)a[4]);
+        if (buf_fd >= 0) {
+            if (!real_mmap && load_real_func((void *)&real_mmap, "mmap") < 0) {
+                errno = ENOMEM;
+                return -1;
+            }
+            void *map = real_mmap((void *)a[0], (size_t)a[1], (int)a[2], (int)a[3], buf_fd, (off_t)a[5]);
+            return map == MAP_FAILED ? -1 : (long)map;
+        }
+        break;
+    }
+#endif
+#ifdef SYS_mmap2
+    case SYS_mmap2: {
+        int buf_fd = wc_buf_fd_for_fd((int)a[4]);
+        if (buf_fd >= 0) {
+            if (!real_mmap && load_real_func((void *)&real_mmap, "mmap") < 0) {
+                errno = ENOMEM;
+                return -1;
+            }
+            void *map = real_mmap((void *)a[0], (size_t)a[1], (int)a[2], (int)a[3], buf_fd, (off_t)a[5] * 4096);
+            return map == MAP_FAILED ? -1 : (long)map;
+        }
+        break;
+    }
+#endif
+    default:
+        break;
+    }
+    return real_syscall(number, a[0], a[1], a[2], a[3], a[4], a[5]);
 }
