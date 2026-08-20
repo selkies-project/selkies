@@ -32,6 +32,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     path, so scans of exactly /dev and /sys/class/video4linux get the device
     entry injected into their readdir() stream; every other directory stream
     passes through untouched.
+
+    Duplicated fds (dup/dup2/dup3, fcntl F_DUPFD) are tracked as aliases of
+    the originating handle so ioctls on any duplicate resolve to the same
+    emulated device, and fcntl(F_SETFL) keeps the handle's O_NONBLOCK
+    semantics in sync after open.
 */
 
 #define _GNU_SOURCE
@@ -126,6 +131,10 @@ static int (*real_close)(int fd) = NULL;
 static ssize_t (*real_read)(int fd, void *buf, size_t count) = NULL;
 static ssize_t (*real_write)(int fd, const void *buf, size_t count) = NULL;
 static int (*real_access)(const char *pathname, int mode) = NULL;
+static int (*real_dup)(int oldfd) = NULL;
+static int (*real_dup2)(int oldfd, int newfd) = NULL;
+static int (*real_dup3)(int oldfd, int newfd, int flags) = NULL;
+static int (*real_fcntl)(int fd, int cmd, ...) = NULL;
 static long (*real_syscall)(long number, ...) = NULL;
 static DIR *(*real_opendir)(const char *name) = NULL;
 static struct dirent *(*real_readdir)(DIR *dirp) = NULL;
@@ -146,6 +155,7 @@ static void *(*real_mmap64)(void *addr, size_t length, int prot, int flags, int 
 /* Fortified open entry points: binaries built with _FORTIFY_SOURCE (the default
  * on Ubuntu and other hardened distros) lower a two-argument open() to these,
  * bypassing the open()/openat() wrappers above. They never carry a mode. */
+static int (*real_fcntl64)(int fd, int cmd, ...) = NULL;
 static int (*real___open_2)(const char *file, int oflag) = NULL;
 static int (*real___open64_2)(const char *file, int oflag) = NULL;
 static int (*real___openat_2)(int dirfd, const char *file, int oflag) = NULL;
@@ -261,6 +271,7 @@ typedef enum {
 typedef struct {
     int fd;                 /* connected socket, returned to the application */
     int open_flags;
+    uint32_t priority;      /* VIDIOC_G/S_PRIORITY state */
     webcam_config_t cfg;
 
     void *staging_map;      /* read-only mapping of the staging memfd */
@@ -286,6 +297,16 @@ static int handle_count = 0;
 static char g_device_path[256] = WC_DEFAULT_DEVICE_PATH;
 static char g_socket_path[256] = WC_DEFAULT_SOCKET_PATH;
 
+/* Duplicated fds referring to a handle's file description. Guarded by
+ * handles_mutex like the handle table itself. */
+#define WC_MAX_ALIASES 64
+typedef struct {
+    int fd;
+    int primary_fd;
+} wc_fd_alias_t;
+static wc_fd_alias_t fd_aliases[WC_MAX_ALIASES];
+static int alias_count = 0;
+
 /* Guards the handles[] table lookups and state transitions. Never held across
  * the blocking connect/config-read on the open path nor the blocking doorbell
  * wait in DQBUF; those run on a private fd or after the entry is published. */
@@ -298,6 +319,16 @@ static wc_handle_t *find_handle_for_fd_locked(int fd) {
     for (int i = 0; i < handle_count; i++) {
         if (handles[i].fd == fd) {
             return &handles[i];
+        }
+    }
+    for (int i = 0; i < alias_count; i++) {
+        if (fd_aliases[i].fd == fd) {
+            for (int j = 0; j < handle_count; j++) {
+                if (handles[j].fd == fd_aliases[i].primary_fd) {
+                    return &handles[j];
+                }
+            }
+            return NULL;
         }
     }
     return NULL;
@@ -352,6 +383,13 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
     load_real_func((void *)&real_open64, "open64");
     load_real_func((void *)&real_openat, "openat");
     load_real_func((void *)&real_openat64, "openat64");
+    load_real_func((void *)&real_dup, "dup");
+    load_real_func((void *)&real_dup2, "dup2");
+    load_real_func((void *)&real_dup3, "dup3");
+    load_real_func((void *)&real_fcntl, "fcntl");
+#ifdef __GLIBC__
+    load_real_func((void *)&real_fcntl64, "fcntl64");
+#endif
     load_real_func((void *)&real_syscall, "syscall");
     load_real_func((void *)&real_opendir, "opendir");
     load_real_func((void *)&real_readdir, "readdir");
@@ -802,9 +840,12 @@ static int recv_config_and_fd(int sockfd, webcam_config_t *cfg) {
 
 /* Connect, receive config + staging fd, map the staging memfd read-only, and
  * emit the one-byte arch specifier (sizeof(long)) as a handshake ack. On
- * success returns the socket fd and fills *out; the staging fd is consumed. */
-static int connect_and_configure(wc_handle_t *out) {
-    int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+ * success returns the socket fd and fills *out; the staging fd is consumed.
+ * O_CLOEXEC from the application's open() carries onto the socket so exec'd
+ * children can't hold a dead connection open and keep the backend feeding. */
+static int connect_and_configure(wc_handle_t *out, int open_flags) {
+    int sock_type = SOCK_STREAM | ((open_flags & O_CLOEXEC) ? SOCK_CLOEXEC : 0);
+    int sockfd = socket(AF_UNIX, sock_type, 0);
     if (sockfd == -1) {
         swc_log_error("socket() failed: %s", strerror(errno));
         return -1;
@@ -856,6 +897,7 @@ static int connect_and_configure(wc_handle_t *out) {
     out->staging_size = staging_size;
     out->buf_fd = -1;
     out->buf_map = NULL;
+    out->priority = V4L2_PRIORITY_DEFAULT;
     swc_log_info("configured %ux%u @ %u/%u fps, %u slots x %u bytes",
                  cfg.width, cfg.height, cfg.fps_num, cfg.fps_den, cfg.n_slots, cfg.slot_size);
     return sockfd;
@@ -868,7 +910,7 @@ static int common_open_logic(const char *pathname, int flags) {
         return -2;
     }
     wc_handle_t pending;
-    int new_fd = connect_and_configure(&pending);
+    int new_fd = connect_and_configure(&pending, flags);
     if (new_fd == -1) {
         errno = EIO;
         return -1;
@@ -1271,13 +1313,16 @@ static int intercept_ioctl_locked(wc_handle_t *h, ioctl_request_t request, void 
         if (rb->count == 0) {
             release_buffers_locked(h);
             rb->count = 0;
-            return 0;
+        } else {
+            uint32_t count = rb->count;
+            if (count < WC_MIN_BUFFERS) count = WC_MIN_BUFFERS;
+            if (count > WC_MAX_BUFFERS) count = WC_MAX_BUFFERS;
+            if (allocate_buffers_locked(h, count) != 0) { errno = ENOMEM; return -1; }
+            rb->count = count;
         }
-        uint32_t count = rb->count;
-        if (count < WC_MIN_BUFFERS) count = WC_MIN_BUFFERS;
-        if (count > WC_MAX_BUFFERS) count = WC_MAX_BUFFERS;
-        if (allocate_buffers_locked(h, count) != 0) { errno = ENOMEM; return -1; }
-        rb->count = count;
+#ifdef V4L2_BUF_CAP_SUPPORTS_MMAP
+        rb->capabilities = V4L2_BUF_CAP_SUPPORTS_MMAP;
+#endif
         return 0;
     }
     case _IOC_NR(VIDIOC_QUERYBUF): {
@@ -1365,9 +1410,39 @@ static int intercept_ioctl_locked(wc_handle_t *h, ioctl_request_t request, void 
         if (*i != 0) { errno = EINVAL; return -1; }
         return 0;
     }
+    case _IOC_NR(VIDIOC_G_PRIORITY): {
+        uint32_t *p = arg;
+        if (!p) { errno = EFAULT; return -1; }
+        *p = h->priority;
+        return 0;
+    }
+    case _IOC_NR(VIDIOC_S_PRIORITY): {
+        uint32_t *p = arg;
+        if (!p) { errno = EFAULT; return -1; }
+        if (*p > V4L2_PRIORITY_RECORD) { errno = EINVAL; return -1; }
+        h->priority = *p;
+        return 0;
+    }
+    /* The kernel implements the control ioctls for every video device and
+     * reports each unsupported control id as EINVAL, never ENOTTY; control
+     * enumeration loops (V4L2_CTRL_FLAG_NEXT_CTRL) terminate on EINVAL. */
+    case _IOC_NR(VIDIOC_QUERYCTRL):
+    case _IOC_NR(VIDIOC_QUERYMENU):
+    case _IOC_NR(VIDIOC_G_CTRL):
+    case _IOC_NR(VIDIOC_S_CTRL):
+#ifdef VIDIOC_QUERY_EXT_CTRL
+    case _IOC_NR(VIDIOC_QUERY_EXT_CTRL):
+#endif
+#ifdef VIDIOC_G_EXT_CTRLS
+    case _IOC_NR(VIDIOC_G_EXT_CTRLS):
+    case _IOC_NR(VIDIOC_S_EXT_CTRLS):
+    case _IOC_NR(VIDIOC_TRY_EXT_CTRLS):
+#endif
+        errno = EINVAL;
+        return -1;
     default:
-        /* Controls, events, cropping, output: a fixed camera advertises none.
-         * ENOTTY/EINVAL here matches minimal real webcams and passes callers. */
+        /* Events, cropping, output, standards: a fixed camera advertises
+         * none, and ENOTTY here matches minimal real webcams. */
         errno = ENOTTY;
         return -1;
     }
@@ -1513,11 +1588,22 @@ ssize_t read(int fd, void *buf, size_t count) {
     return handled ? ret : real_read(fd, buf, count);
 }
 
-/* Releases the handle's resources and retires the entry before the caller
- * issues its own real close, so a reused fd number can't alias a stale
- * handle. Returns 1 when fd was an interposer handle. */
+/* Retires the fd's tracking before the caller issues its own real close, so
+ * a reused fd number can't alias a stale handle. A dup alias only drops its
+ * entry; a primary fd with surviving duplicates promotes one of them, since
+ * the file description (and the emulated device state) is still open. The
+ * handle's resources are released only with the last referencing fd.
+ * Returns 1 when fd was tracked. */
 static int wc_close_untrack(int fd) {
     pthread_mutex_lock(&handles_mutex);
+    for (int i = 0; i < alias_count; i++) {
+        if (fd_aliases[i].fd == fd) {
+            fd_aliases[i] = fd_aliases[alias_count - 1];
+            alias_count--;
+            pthread_mutex_unlock(&handles_mutex);
+            return 1;
+        }
+    }
     int found = -1;
     for (int i = 0; i < handle_count; i++) {
         if (handles[i].fd == fd) {
@@ -1526,13 +1612,31 @@ static int wc_close_untrack(int fd) {
         }
     }
     if (found >= 0) {
-        wc_handle_t *h = &handles[found];
-        release_buffers_locked(h);
-        if (h->staging_map) {
-            munmap(h->staging_map, h->staging_size);
+        int promoted = 0;
+        for (int i = 0; i < alias_count; i++) {
+            if (fd_aliases[i].primary_fd == fd) {
+                int new_primary = fd_aliases[i].fd;
+                handles[found].fd = new_primary;
+                fd_aliases[i] = fd_aliases[alias_count - 1];
+                alias_count--;
+                for (int j = 0; j < alias_count; j++) {
+                    if (fd_aliases[j].primary_fd == fd) {
+                        fd_aliases[j].primary_fd = new_primary;
+                    }
+                }
+                promoted = 1;
+                break;
+            }
         }
-        handles[found] = handles[handle_count - 1];
-        handle_count--;
+        if (!promoted) {
+            wc_handle_t *h = &handles[found];
+            release_buffers_locked(h);
+            if (h->staging_map) {
+                munmap(h->staging_map, h->staging_size);
+            }
+            handles[found] = handles[handle_count - 1];
+            handle_count--;
+        }
     }
     pthread_mutex_unlock(&handles_mutex);
     return found >= 0;
@@ -1546,6 +1650,120 @@ int close(int fd) {
     wc_close_untrack(fd);
     return real_close(fd);
 }
+
+/* Registers newfd as an alias of oldfd's handle after a successful
+ * duplication. A full alias table only degrades the duplicate to poll-only
+ * (same socket description), so the drop is logged rather than failed. */
+static void wc_register_dup(int oldfd, int newfd) {
+    if (handle_count == 0) {
+        return;
+    }
+    pthread_mutex_lock(&handles_mutex);
+    wc_handle_t *h = find_handle_for_fd_locked(oldfd);
+    if (h != NULL) {
+        if (alias_count < WC_MAX_ALIASES) {
+            fd_aliases[alias_count].fd = newfd;
+            fd_aliases[alias_count].primary_fd = h->fd;
+            alias_count++;
+            swc_log_info("dup fd %d -> %d aliases handle fd %d", oldfd, newfd, h->fd);
+        } else {
+            swc_log_warn("alias table full; fd %d not tracked", newfd);
+        }
+    }
+    pthread_mutex_unlock(&handles_mutex);
+}
+
+int dup(int oldfd) {
+    if (!real_dup && load_real_func((void *)&real_dup, "dup") < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    int newfd = real_dup(oldfd);
+    if (newfd >= 0) {
+        wc_register_dup(oldfd, newfd);
+    }
+    return newfd;
+}
+
+int dup2(int oldfd, int newfd) {
+    if (!real_dup2 && load_real_func((void *)&real_dup2, "dup2") < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    int ret = real_dup2(oldfd, newfd);
+    if (ret >= 0 && oldfd != newfd) {
+        wc_close_untrack(newfd);
+        wc_register_dup(oldfd, newfd);
+    }
+    return ret;
+}
+
+int dup3(int oldfd, int newfd, int flags) {
+    if (!real_dup3 && load_real_func((void *)&real_dup3, "dup3") < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    int ret = real_dup3(oldfd, newfd, flags);
+    if (ret >= 0) {
+        wc_close_untrack(newfd);
+        wc_register_dup(oldfd, newfd);
+    }
+    return ret;
+}
+
+/* Bookkeeping on top of the real call: F_DUPFD variants create an alias like
+ * dup(), and F_SETFL refreshes the stored open flags so a later toggle of
+ * O_NONBLOCK changes DQBUF/read blocking behavior like it would on a real
+ * device. The argument is a single machine word for every fcntl command, so
+ * forwarding one long is exact. */
+static int wc_fcntl_bookkeep(int fd, int cmd, long arg, int ret) {
+    if (ret >= 0) {
+        if (cmd == F_DUPFD
+#ifdef F_DUPFD_CLOEXEC
+            || cmd == F_DUPFD_CLOEXEC
+#endif
+        ) {
+            wc_register_dup(fd, ret);
+        } else if (cmd == F_SETFL && handle_count > 0) {
+            pthread_mutex_lock(&handles_mutex);
+            wc_handle_t *h = find_handle_for_fd_locked(fd);
+            if (h != NULL) {
+                h->open_flags = (int)arg;
+            }
+            pthread_mutex_unlock(&handles_mutex);
+        }
+    }
+    return ret;
+}
+
+int fcntl(int fd, int cmd, ...) {
+    va_list ap;
+    va_start(ap, cmd);
+    long arg = va_arg(ap, long);
+    va_end(ap);
+    if (!real_fcntl && load_real_func((void *)&real_fcntl, "fcntl") < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    return wc_fcntl_bookkeep(fd, cmd, arg, real_fcntl(fd, cmd, arg));
+}
+
+#ifdef __GLIBC__
+int fcntl64(int fd, int cmd, ...) {
+    va_list ap;
+    va_start(ap, cmd);
+    long arg = va_arg(ap, long);
+    va_end(ap);
+    if (!real_fcntl64 && load_real_func((void *)&real_fcntl64, "fcntl64") < 0) {
+        if (!real_fcntl && load_real_func((void *)&real_fcntl, "fcntl") < 0) {
+            errno = EBADF;
+            return -1;
+        }
+        return wc_fcntl_bookkeep(fd, cmd, arg, real_fcntl(fd, cmd, arg));
+    }
+    return wc_fcntl_bookkeep(fd, cmd, arg, real_fcntl64(fd, cmd, arg));
+}
+#endif
 
 /* The libv4l2 wrapper library reaches the kernel through the libc syscall()
  * entry point rather than open()/ioctl(), so that libv4l's own

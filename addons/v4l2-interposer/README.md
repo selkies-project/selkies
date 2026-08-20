@@ -22,8 +22,21 @@ This library emulates the observable half of a fixed-function MJPEG webcam: the
   is redirected onto a per-handle buffer memfd, so the application maps real
   shared memory and `DQBUF` copies one frame into it.
 - Only a fixed format is advertised: MJPEG at the resolution and frame rate the
-  backend configures. Controls, events, cropping and output ioctls return
-  `ENOTTY`, exactly as a minimal real webcam does.
+  backend configures. Control ioctls return `EINVAL` per control (terminating
+  enumeration loops the way the kernel does for a camera without controls);
+  events, cropping and output ioctls return `ENOTTY`, exactly as a minimal
+  real webcam does.
+- The libc `syscall()` entry point is interposed as well, covering consumers
+  built on the libv4l2 wrapper library, which reaches the kernel through raw
+  syscalls rather than `open()`/`ioctl()`.
+- Directory scans of exactly `/dev` and `/sys/class/video4linux` get the
+  device entry injected into their `readdir()` stream (suppressed when a real
+  entry of the same name exists), so applications that enumerate cameras by
+  listing find the device with no placeholder node.
+- `dup`/`dup2`/`dup3` and `fcntl(F_DUPFD*)` results are tracked as aliases of
+  the originating handle, and `fcntl(F_SETFL)` updates the handle's
+  `O_NONBLOCK` behavior, matching real device-fd semantics.
+
 
 ## Compiling
 
