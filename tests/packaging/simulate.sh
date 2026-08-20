@@ -26,7 +26,7 @@ rm -rf "$SB"; mkdir -p "$SB"/{repo,dist,out,stubs,log,home} "$SB/etc/apk/keys"
 cp -r "$REPO/infra" "$SB/repo/"
 # only what the packaging scripts read: addons/ also holds node_modules
 mkdir -p "$SB/repo/addons"
-cp -r "$REPO/addons/js-interposer" "$SB/repo/addons/"
+cp -r "$REPO/addons/js-interposer" "$REPO/addons/v4l2-interposer" "$SB/repo/addons/"
 cp "$WHEEL_SRC"/selkies-*.whl "$SB/dist/"
 
 # Rebase the container-absolute paths onto the sandbox, using a sentinel so an
@@ -42,7 +42,7 @@ done
 # This is the read-only bind mount the workflow gives the container.
 chmod -R a-w "$SB/repo"
 
-# interposer.sh builds a 32-bit variant wherever gcc can. Hosts without a
+# The interposer scripts build a 32-bit variant wherever gcc can. Hosts without a
 # multilib toolchain can point MULTILIB_SYSROOT at an unpacked one (see
 # tests/README.md) and the gcc stub below hands the real compiler the flags that
 # reach it, so the 32-bit branch is exercised rather than skipped.
@@ -62,7 +62,7 @@ elif [ -n "${MULTILIB_SYSROOT:-}" ]; then
     echo "note: 32-bit toolchain through MULTILIB_SYSROOT=${MULTILIB_SYSROOT}"
   fi
 else
-  echo "note: no 32-bit toolchain, interposer.sh will skip its 32-bit variant"
+  echo "note: no 32-bit toolchain, the interposer scripts will skip their 32-bit variant"
 fi
 if [ -n "${MULTILIB_FLAGS}" ]; then
   cat > "$SB/stubs/gcc" <<EOF
