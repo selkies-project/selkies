@@ -842,8 +842,8 @@ function Sidebar() {
     newRenderable.audio_bitrate = isRenderable('audio_bitrate');
 
     // The server setting behind the HiDPI toggle is use_css_scaling (HiDPI on
-    // = CSS scaling off); a lock on it must hide the toggle.
-    newRenderable.hidpi = s.use_css_scaling?.locked !== true;
+    // = CSS scaling off).
+    newRenderable.hidpi = isRenderable('use_css_scaling');
     newRenderable.forceAlignedResolution = isRenderable('force_aligned_resolution');
 
     newRenderable.enableSharing = s.enable_sharing?.value ?? true;

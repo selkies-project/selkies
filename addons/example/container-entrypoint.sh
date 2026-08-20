@@ -34,7 +34,13 @@ is_true() {
 
 # Wait for XDG_RUNTIME_DIR to exist (created by the image ENV or the caller)
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
-mkdir -pm700 "${XDG_RUNTIME_DIR}"
+# The mode is set separately: mkdir applies -m only to a directory it creates,
+# and a runtime directory left over from a previous run would keep whatever it
+# had. The spec requires 0700 and dbus and PipeWire refuse anything wider.
+mkdir -p "${XDG_RUNTIME_DIR}"
+# Not fatal: a runtime directory bind-mounted from elsewhere may not be ours
+# to re-mode, and that is no reason to refuse to start the container.
+chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 
 # Configure joystick interposer and fake-udev (container-only gamepad plumbing)
 # $LIB is a dynamic-loader token; the backslash keeps the shell off it.
@@ -45,7 +51,12 @@ export LIBUDEV_PKG_VERSION="${LIBUDEV_PKG_VERSION:-1.0.0}"
 export FAKE_UDEV_LIB="${LIB_PREFIX}/${LIBUDEV_PACKAGE}.so.${LIBUDEV_PKG_VERSION}-fake"
 export LD_PRELOAD="${SELKIES_INTERPOSER}:${FAKE_UDEV_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
 export SDL_JOYSTICK_DEVICE="/dev/input/js0"
-mkdir -pm1777 /dev/input || sudo-root mkdir -pm1777 /dev/input || echo 'Failed to create joystick interposer device directory'
+# Only when the container has no /dev/input of its own: a real one passed in
+# from the host keeps its own ownership and mode.
+if [ ! -d /dev/input ]; then
+  # shellcheck disable=SC2174  # /dev always exists, so -m applies to the leaf
+  mkdir -pm1777 /dev/input || sudo-root mkdir -pm1777 /dev/input || echo 'Failed to create joystick interposer device directory'
+fi
 
 # The interposer's device nodes, made directly where this container runs privileged
 # enough and through the image's setuid helper where it does not. Best effort: a
@@ -186,7 +197,13 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
 else
   export DISPLAY="${DISPLAY:-:20}"
 fi
-# PipeWire-Pulse server socket path
+# Every menu-reading application, not only the session's own: without the
+# prefix libfm-qt searches for a bare applications.menu, finds none, and shows
+# an empty application menu. Applications the dashboard launches are children
+# of the selkies service rather than of the session, so it belongs here, where
+# the shared environment is computed, and not in the session's script.
+export XDG_MENU_PREFIX="${XDG_MENU_PREFIX:-lxqt-}"
+# PipeWire audio latency and the PipeWire-Pulse server socket path
 export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-256/48000}"
 export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR}}"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"

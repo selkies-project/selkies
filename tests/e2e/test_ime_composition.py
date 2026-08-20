@@ -239,6 +239,15 @@ try:
         run_branch(pw, "webkit-textinput-after", None, None,
                    [("ibus anatomy", IBUS_GROUPS, IBUS_EXPECT, IBUS_PROBES)],
                    engine="webkit")
+        # Gecko is the engine the report contrasts against, and the one whose
+        # older builds dispatch no textInput at all: the handler decides which
+        # event carries the commit by asking the engine, so both anatomies have
+        # to land the same text here as everywhere else.
+        run_branch(pw, "firefox-ibus", None, None,
+                   [("ibus anatomy", IBUS_GROUPS, IBUS_EXPECT, IBUS_PROBES)],
+                   engine="firefox")
+        run_branch(pw, "firefox-cdp", None, None,
+                   [("cdp anatomy", CDP_GROUPS, CDP_EXPECT)], engine="firefox")
 finally:
     httpd.shutdown()
 

@@ -150,6 +150,10 @@ if env is None:
     sys.exit(1)
 check("a Wayland verdict keeps Wayland", env.get("SELKIES_WAYLAND") == "true",
       f"{env.get('SELKIES_WAYLAND')} (exit {proc.returncode})")
+# The two display numbers here are the container's published defaults, asserted
+# as a contract: XWayland owns :0 under the Wayland backend, and the X11 backend
+# runs on :20. They are not the harness's own display, which is named by
+# E2E_DISPLAY and never hardcoded.
 check("Wayland takes the compositor's display", env.get("DISPLAY") == ":0",
       env.get("DISPLAY"))
 check("an accelerated Wayland session keeps hardware GL",

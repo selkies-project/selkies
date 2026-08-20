@@ -3,8 +3,8 @@
 
 Setup:
   selkies --mode webrtc --unix-socket /tmp/...sock   (NO TCP listener)
-  tcp2unix TCP:18080 -> unix socket                  (reverse-proxy shim, HTTP only)
-  Chrome connects to http://localhost:18080, does WebRTC (signaling via the shim,
+  tcp2unix TCP:$E2E_PORT -> unix socket              (reverse-proxy shim, HTTP only)
+  Chrome connects to that port, does WebRTC (signaling via the shim,
   media over the server's own UDP ICE sockets).
 """
 import os
@@ -26,7 +26,7 @@ time.sleep(1.0)
 os.path.exists(SOCK) and os.unlink(SOCK)
 
 env = {"PATH": os.environ.get("PATH", ""),
-       "HOME": os.path.expanduser("~"), "DISPLAY": H.TEST_DISPLAY,
+       "HOME": os.path.expanduser("~"), "DISPLAY": H.require_display(),
        "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", H.WORKDIR),
        "SELKIES_MODE": "webrtc", "SELKIES_ENABLE_BASIC_AUTH": "false",
        "SELKIES_WEB_ROOT": H.CORE_DIST,

@@ -66,7 +66,8 @@ function makeInput(element) {
 /** A fresh page: the engine has not been asked for raw movement yet. */
 function reset(element) {
     Input._unadjustedMovement = true;
-    globalThis.document = { pointerLockElement: null, fullscreenElement: element };
+    globalThis.document = { pointerLockElement: null, fullscreenElement: element,
+                            getElementById: () => null };
 }
 
 // --- the request itself ---------------------------------------------------

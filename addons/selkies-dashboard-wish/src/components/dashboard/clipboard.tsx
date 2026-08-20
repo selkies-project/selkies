@@ -98,23 +98,17 @@ export function Clipboard() {
 			}, window.location.origin);
 			return;
 		}
-		const reader = new FileReader();
-		reader.onload = (e) => {
-			const result = e.target?.result as string;
-			setClipboardImageUrl(result);
-
-			// Convert to blob and send to clipboard
-			fetch(result)
-				.then(res => res.blob())
-				.then(blob => {
-					window.postMessage({
-						type: 'clipboardImageUpdate',
-						imageBlob: blob
-					}, window.location.origin);
-				})
-				.catch(err => console.error('Error processing image:', err));
-		};
-		reader.readAsDataURL(file);
+		// The picked file is already the blob the core wants, and an object URL
+		// previews it without reading a multi-megabyte image through base64 on
+		// the main thread.
+		setClipboardImageUrl(previous => {
+			if (previous) URL.revokeObjectURL(previous);
+			return URL.createObjectURL(file);
+		});
+		window.postMessage({
+			type: 'clipboardImageUpdate',
+			imageBlob: file,
+		}, window.location.origin);
 	};
 
 	const handleImageButtonClick = () => {
@@ -122,7 +116,10 @@ export function Clipboard() {
 	};
 
 	const handleClearImage = () => {
-		setClipboardImageUrl(null);
+		setClipboardImageUrl(previous => {
+			if (previous) URL.revokeObjectURL(previous);
+			return null;
+		});
 		if (fileInputRef.current) {
 			fileInputRef.current.value = '';
 		}

@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Download-pacing contracts. The token bucket must deliver the configured
+"""Transfer-pacing contracts. The token bucket must deliver the configured
 rate (not a multiple of it), the congestion step must arm its recovery
 ceiling once per epoch and probe multiplicatively only before the first
 congestion, a connection with no usable gauge must not be throttled blindly,
 and the file_transfer_limit_mbps setting must neutralize unusable values.
+
+Uploads have their own allowance, which nothing on this side can gauge: it
+measures what the client sends when nothing holds it back and then holds the
+transfer below that, so the first hop's queue drains and the session's own
+traffic is not stuck behind the file.
 """
 import asyncio
 import os
@@ -17,7 +22,7 @@ REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 
 from selkies import stream_server  # noqa: E402
-from selkies.stream_server import TransferPacer  # noqa: E402
+from selkies.stream_server import TransferPacer, UplinkAllowance  # noqa: E402
 
 passed = failed = 0
 
@@ -50,8 +55,8 @@ async def timed_pace(pacer: TransferPacer, total_bytes: int,
 
 
 # A static cap must deliver the configured rate: the initial burst is half a
-# second of budget, and everything past it drains at rate_bps. The pre-fix
-# bucket forgave every slept-off deficit and delivered double the cap.
+# second of budget, and everything past it drains at rate_bps. A bucket that
+# forgives a slept-off deficit instead delivers twice the cap.
 rate = 2 * 1024 * 1024
 pacer = TransferPacer(static_bps=rate, adaptive=False)
 sent = 3 * 1024 * 1024
@@ -177,6 +182,52 @@ check("negative limit clamps to 0 (pacing off)", probe_limit("-5") == "0.0",
       probe_limit("-5"))
 check("nan limit clamps to 0 (pacing off)", probe_limit("nan") == "0.0",
       probe_limit("nan"))
+
+# --- the upload allowance ------------------------------------------------
+async def drive_uplink(rate_bps: float, seconds: float,
+                       chunk: int = 64 * 1024) -> tuple:
+    """Feed an allowance from a client whose link delivers `rate_bps`.
+
+    Bytes become available at that rate and bank up while the allowance reads
+    more slowly, so a read waits only once the allowance has asked for more
+    than the link can carry — which is the signal the allowance settles on.
+    """
+    up = UplinkAllowance()
+    state = up.transfer()
+    start = time.monotonic()
+    ready_at = start
+    delivered = 0
+    while time.monotonic() - start < seconds:
+        before = time.monotonic()
+        if ready_at > before:
+            await asyncio.sleep(ready_at - before)
+        waited = time.monotonic() - before
+        ready_at += chunk / rate_bps
+        await up.pace(chunk, state, waited)
+        delivered += chunk
+    return state, delivered
+
+
+LINK_BPS = 3 * 1024 * 1024
+state, delivered = asyncio.run(drive_uplink(LINK_BPS, 9.0))
+check("the ramp finds the rate the client's link carries",
+      state["phase"] == "steady"
+      and abs(state["capacity_bps"] - LINK_BPS) / LINK_BPS < 0.25,
+      f"{state['capacity_bps']/125000:.2f} Mbit/s of {LINK_BPS/125000:.2f}"
+      f" (phase={state['phase']})")
+want = state["capacity_bps"] * UplinkAllowance.SHARE
+check("and settles at its share of that once the queue has drained",
+      abs(state["rate_bps"] - want) < want * 0.05,
+      f"{state['rate_bps']/125000:.2f} Mbit/s")
+check("which leaves the client's link room for the session",
+      state["rate_bps"] < LINK_BPS * 0.75,
+      f"{state['rate_bps']:.0f} of {LINK_BPS}")
+
+# A client slower than the floor must not be paced below it into a stall.
+slow, _ = asyncio.run(drive_uplink(32 * 1024, 6.0, chunk=4096))
+check("a client slower than the floor is not paced below it",
+      slow["rate_bps"] >= UplinkAllowance.FLOOR_BPS,
+      f"{slow['rate_bps']:.0f}")
 
 print(f"[pacer] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

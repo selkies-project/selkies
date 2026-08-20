@@ -158,5 +158,17 @@ out = subprocess.run(
              SELKIES_ENCODER="X264enc")).stdout.strip()
 check("the x264enc alias resolves however it is cased", out == "h264enc", out)
 
+# Every route is built as prefix + "/api/...", so the prefix an operator types
+# has to reach the routes as the one spelling that composes. "/" is the root:
+# read literally it would make every route start with two slashes.
+for value, want in (("/", ""), ("desk", "/desk"), ("/desk", "/desk"),
+                    ("/desk/", "/desk"), ("", "")):
+    out = subprocess.run(
+        [sys.executable, "-c", "import selkies.settings as s; print(repr(s.settings.subfolder))"],
+        capture_output=True, text=True, timeout=120,
+        env=dict(os.environ, PYTHONPATH=os.path.join(REPO, "src"),
+                 SELKIES_SUBFOLDER=value)).stdout.strip()
+    check(f"a subfolder of {value!r} is served under {want!r}", out == repr(want), out)
+
 print(f"[env-case] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

@@ -22,15 +22,18 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
+from core_lib import CHROME_PATH, FIREFOX_PATH
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 PAGE = "/tests/tools/pointer_motion_page.html"
 PORT = int(os.environ.get("E2E_MOTION_PORT", "18099"))
 LATEST: dict = {}
+WARMED: set = set()
 
 # (label, motions, pixels each, seconds between): a slow careful aim, a normal
 # drag, and a flick, all at one device pixel of travel per motion or more.
@@ -47,11 +50,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        # Swapped in whole: emptying it around the read would show the checks a
+        # report that has no numbers in it yet.
         try:
-            LATEST.clear()
-            LATEST.update(json.loads(self.rfile.read(length)))
+            report = json.loads(body)
         except ValueError:
-            pass
+            report = None
+        if report is not None:
+            LATEST.clear()
+            LATEST.update(report)
         self.send_response(204)
         self.end_headers()
 
@@ -60,9 +68,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def serve() -> None:
-    """Start the page server on a daemon thread."""
-    socketserver.TCPServer.allow_reuse_address = True
-    httpd = socketserver.TCPServer(("127.0.0.1", PORT), Handler)
+    """Start the page server on a daemon thread.
+
+    Threaded: the same server hands out the client's modules and takes the
+    page's reports, and a browser fetching one must not hold up the other.
+    """
+    class Threaded(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    httpd = Threaded(("127.0.0.1", PORT), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
 
@@ -75,6 +90,18 @@ def wait_for(pred, timeout: float) -> bool:
     return False
 
 
+def binary(browser: str) -> Optional[str]:
+    """The installed browser to drive, or None when it is not on this machine.
+
+    The suite-wide overrides name a browser that is not on PATH, and the rest
+    of the e2e tier resolves them the same way.
+    """
+    named = CHROME_PATH if browser == "chrome" else FIREFOX_PATH
+    if named:
+        return named
+    return shutil.which("google-chrome" if browser == "chrome" else "firefox")
+
+
 def launch(browser: str, profile: str, dpr: float) -> subprocess.Popen:
     """Start an installed browser on the test display at a device pixel ratio."""
     url = f"http://localhost:{PORT}{PAGE}"
@@ -82,14 +109,20 @@ def launch(browser: str, profile: str, dpr: float) -> subprocess.Popen:
         with open(os.path.join(profile, "user.js"), "w") as fh:
             fh.write(f'user_pref("layout.css.devPixelsPerPx", "{dpr}");\n')
             fh.write('user_pref("browser.shell.checkDefaultBrowser", false);\n')
-        cmd = ["firefox", "--no-remote", "--profile", profile,
+            # Nothing may open in front of the probe page: pointer lock needs a
+            # click on it, and a welcome tab would take that click instead.
+            fh.write('user_pref("browser.aboutwelcome.enabled", false);\n')
+            fh.write('user_pref("browser.startup.firstrunSkipsHomepage", true);\n')
+            fh.write('user_pref("browser.startup.homepage_override.mstone", "ignore");\n')
+            fh.write('user_pref("datareporting.policy.firstRunURL", "");\n')
+        cmd = [binary("firefox"), "--no-remote", "--profile", profile,
                "--width", "1600", "--height", "900", url]
     else:
-        cmd = ["google-chrome", "--no-first-run", "--no-default-browser-check",
+        cmd = [binary("chrome"), "--no-first-run", "--no-default-browser-check",
                "--disable-gpu", "--user-data-dir=" + profile,
                f"--force-device-scale-factor={dpr}",
                "--window-position=0,0", "--window-size=1600,900", url]
-    env = dict(os.environ, DISPLAY=H.TEST_DISPLAY)
+    env = dict(os.environ, DISPLAY=H.require_display())
     return H.spawn(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -99,33 +132,43 @@ def measure(res, browser: str, dpr: float) -> None:
     from selkies.Xlib.ext import xtest
 
     profile = os.path.join(H.WORKDIR, f"motion-profile-{browser}")
-    shutil.rmtree(profile, ignore_errors=True)
-    os.makedirs(profile, exist_ok=True)
-    if browser == "firefox":
+    if browser == "firefox" and browser not in WARMED:
         # A first run writes the profile and shows onboarding; get both out of
-        # the way before the window that has to hold pointer lock opens.
-        subprocess.run(["firefox", "--headless", "--profile", profile,
+        # the way before the window that has to hold pointer lock opens. The
+        # profile is then reused, since user.js is rewritten per launch.
+        shutil.rmtree(profile, ignore_errors=True)
+        os.makedirs(profile, exist_ok=True)
+        subprocess.run([binary("firefox"), "--headless", "--profile", profile,
                         "--screenshot", os.devnull, "about:blank"],
                        capture_output=True, timeout=180)
+        WARMED.add(browser)
+    elif browser != "firefox":
+        shutil.rmtree(profile, ignore_errors=True)
+    os.makedirs(profile, exist_ok=True)
     LATEST.clear()
-    proc = launch(browser, profile, dpr)
     label = f"{browser} at dpr {dpr}"
     d = H.x_display()
+    proc = launch(browser, profile, dpr)
     try:
         if not wait_for(lambda: bool(LATEST), 90):
             res.check(f"{label}: the probe page loads", False, "no report")
             return
-        time.sleep(3)
         root = d.screen().root
-        root.warp_pointer(700, 450)
-        d.sync()
-        time.sleep(0.5)
-        xtest.fake_input(d, X.ButtonPress, 1)
-        d.flush()
-        time.sleep(0.05)
-        xtest.fake_input(d, X.ButtonRelease, 1)
-        d.flush()
-        if not wait_for(lambda: LATEST.get("locked"), 20):
+        # The lock needs a click that lands on the page. A browser still
+        # opening its window swallows the first one, so keep asking: a machine
+        # under load is not a product regression.
+        for _ in range(15):
+            root.warp_pointer(700, 450)
+            d.sync()
+            time.sleep(0.5)
+            xtest.fake_input(d, X.ButtonPress, 1)
+            d.flush()
+            time.sleep(0.05)
+            xtest.fake_input(d, X.ButtonRelease, 1)
+            d.flush()
+            if wait_for(lambda: LATEST.get("locked"), 3):
+                break
+        if not LATEST.get("locked"):
             res.check(f"{label}: the pointer locks", False, LATEST.get("err", ""))
             return
         # Raw movement is refused by every engine on Linux, so the fallback to a
@@ -146,11 +189,12 @@ def measure(res, browser: str, dpr: float) -> None:
             time.sleep(1.2)
             injected = count * delta
             travelled = LATEST.get("travelX", 0) - mark.get("travelX", 0)
-            # A pixel of slack for a swallowed event around the warp, widening
-            # to one percent on the fast patterns, where the engine's own
-            # sub-pixel carry can be caught mid-flight.
+            # One event's worth of travel for an event swallowed around the
+            # warp, or one percent for the engine's own sub-pixel carry caught
+            # mid-flight, whichever is the larger. A scale error survives both:
+            # the reported miss was tens of percent.
             res.check(f"{label}: a {name} move of {injected} px travels {injected} px",
-                      abs(travelled - injected) <= max(1, injected // 100),
+                      abs(travelled - injected) <= max(delta, injected // 100),
                       f"{travelled}")
     finally:
         proc.terminate()
@@ -163,8 +207,7 @@ def measure(res, browser: str, dpr: float) -> None:
 
 def run() -> "H.Results":
     res = H.Results("pointer-motion")
-    browsers = [b for b in ("chrome", "firefox")
-                if shutil.which("google-chrome" if b == "chrome" else b)]
+    browsers = [b for b in ("chrome", "firefox") if binary(b)]
     if not browsers:
         H.skip_suite("neither Chrome nor Firefox is installed")
     serve()

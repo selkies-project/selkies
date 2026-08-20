@@ -31,7 +31,7 @@ def desktop_window() -> Optional[tuple]:
     A session drawing natively on Wayland has no X11 desktop window at all, which
     is not the same as one that is misplaced.
     """
-    env = {**os.environ, "DISPLAY": H.TEST_DISPLAY}
+    env = {**os.environ, "DISPLAY": H.require_display()}
     listing = subprocess.run(["wmctrl", "-l", "-G", "-x"], capture_output=True,
                              text=True, env=env).stdout
     for line in listing.splitlines():

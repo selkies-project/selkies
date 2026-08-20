@@ -598,7 +598,12 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log_before = os.path.getsize(log)
         url = f"ws://127.0.0.1:{H.PORT}/api/ws"
-        ms = 32.0 if regime == "osc" else 25.0
+        # The oscillating regime needs to be watched across many periods:
+        # the pacer brakes multiplicatively from a wide-open start and
+        # recovers between troughs, so a window covering only a few of them
+        # reports whichever side of that it happened to be on.
+        default_ms = 32.0 if regime == "osc" else 25.0
+        ms = float(os.environ.get("PACER_WINDOW_S", default_ms))
         window = await run_client(url, measure_s=ms, warmup_s=8.0)
     finally:
         if osc_task is not None:
@@ -620,7 +625,16 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
     }
 
 async def main() -> bool:
-    """Run every pacer/regime cell and require media in each."""
+    """Run every pacer/regime cell and require media in each.
+
+    The oscillating cells are run more than once. Under an oscillating link the
+    pacer settles into one of two behaviours from run to run on identical code
+    -- passing video through with few GOP resets and letting audio gap, or
+    purging hard and protecting audio at the cost of later video -- and a single
+    sample of that reads as a solid number while being neither. Repeats make the
+    spread visible instead; PACER_REPEATS overrides how many.
+    """
+    repeats = max(1, int(os.environ.get("PACER_REPEATS", "3")))
     cells = [
         (False, "osc"), (True, "osc"),
         (False, "osc2"), (True, "osc2"),
@@ -630,20 +644,42 @@ async def main() -> bool:
     rows = []
     for pacer_on, reg in cells:
         regime = "osc" if reg.startswith("osc") else ("shaped" if reg.startswith("shaped") else "flat")
-        LOG.info("=== cell pacer=%s regime=%s", pacer_on, reg)
-        row = await run_cell(pacer_on, regime)
-        row["cell"] = reg
-        rows.append(row)
-        print(json.dumps(row), flush=True)
+        # Only the bistable regime needs the repeats; the steady ones reproduce.
+        for run in range(repeats if regime == "osc" else 1):
+            LOG.info("=== cell pacer=%s regime=%s run=%d", pacer_on, reg, run + 1)
+            row = await run_cell(pacer_on, regime)
+            row["cell"] = reg
+            row["run"] = run + 1
+            rows.append(row)
+            print(json.dumps(row), flush=True)
     with open(os.path.join(RUNNER_DIR, "pacer_e2e_results.json"), "w") as f:
         json.dump(rows, f, indent=1)
     print("DONE ->", os.path.join(RUNNER_DIR, "pacer_e2e_results.json"))
     # The numbers are the point of this benchmark and are left to the reader;
     # what it asserts is that every cell completed with media actually flowing,
-    # which is what breaks when the pacer or the ICE path regresses.
+    # which is what breaks when the pacer or the ICE path regresses. It is
+    # deliberately not asserted that the pacer improves any of them: on the
+    # oscillating regime the same code lands either side of the trade from run
+    # to run, so any single-sample comparison is a coin flip dressed as a gate.
     empty = [f"pacer={r['pacer']} {r['cell']}" for r in rows
              if not r.get("video_pkts") or not r.get("audio_pkts")]
     print("RESULT", "all cells carried media" if not empty else f"FAILED: {empty}")
+
+    for cell in sorted({r["cell"] for r in rows}):
+        for pacer_on in (False, True):
+            runs = [r for r in rows if r["cell"] == cell and r["pacer"] == pacer_on]
+            if not runs:
+                continue
+            lat = sorted(r["ow_video_ms"]["p50"] or 0 for r in runs)
+            gaps = sorted(r["audio_gaps_over_60ms"] for r in runs)
+            resets = sorted(r["server_resets"] for r in runs)
+            # Which side of the trade each run landed on, so a spread that comes
+            # from the pacer switching behaviour is not read as measurement noise.
+            purging = sum(1 for r in runs if r["server_resets"] > 60)
+            print(f"RESULT {cell} pacer={pacer_on}: n={len(runs)} "
+                  f"one-way video p50 {lat[0]:.0f}-{lat[-1]:.0f} ms, "
+                  f"audio gaps {gaps[0]}-{gaps[-1]}, GOP resets {resets[0]}-{resets[-1]}, "
+                  f"purging in {purging}/{len(runs)}")
     return not empty
 
 if __name__ == "__main__":

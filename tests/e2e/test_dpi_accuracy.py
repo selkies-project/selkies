@@ -39,7 +39,7 @@ def xft_dpi() -> int:
         The Xft.dpi value, or 96 when unset: X's own default, which is what
         an application reads when nothing overrides it.
     """
-    env = {**os.environ, "DISPLAY": H.TEST_DISPLAY}
+    env = {**os.environ, "DISPLAY": H.require_display()}
     out = subprocess.run(["xrdb", "-query"], capture_output=True, text=True, env=env).stdout
     for line in out.splitlines():
         if line.startswith("Xft.dpi"):
@@ -52,7 +52,7 @@ def run() -> int:
     res = H.Results("dpi-accuracy")
     H.server_start(mode="websockets", web_root=H.CLASSIC_DIST)
     subprocess.run(["xrdb", "-remove"], capture_output=True,
-                   env={**os.environ, "DISPLAY": H.TEST_DISPLAY})
+                   env={**os.environ, "DISPLAY": H.require_display()})
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
         try:

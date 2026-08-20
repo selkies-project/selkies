@@ -20,23 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 
-DISPLAY = os.environ.get("RETYPE_DISPLAY", ":97")
 SAMPLE = "Big Chicken A"
-
-
-def start_server() -> subprocess.Popen:
-    """A bare X server, GLX off because it faults on some GPU hosts."""
-    proc = H.spawn(
-        ["Xvfb", DISPLAY, "-screen", "0", "1280x720x24", "-extension", "GLX",
-         "-nolisten", "tcp", "-ac", "-noreset"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    for _ in range(30):
-        if subprocess.run(["xdpyinfo", "-display", DISPLAY],
-                          capture_output=True).returncode == 0:
-            return proc
-        time.sleep(0.5)
-    proc.kill()
-    raise RuntimeError("test X server did not start")
 
 
 def typed_text(display, keyboard, text: str) -> str:
@@ -81,12 +65,12 @@ def typed_text(display, keyboard, text: str) -> str:
 
 def main() -> bool:
     res = H.Results("retype-case")
-    server = start_server()
+    server, display_name = H.private_x_server(1280, 720)
     try:
         from selkies.Xlib import display as xdisplay
         from selkies.input_handler import _XTestKeyboard
 
-        d = xdisplay.Display(DISPLAY)
+        d = xdisplay.Display(display_name)
         try:
             res.check("shift starts bound",
                       any(kc for kc in d.get_modifier_mapping()[0]), "")
@@ -98,7 +82,7 @@ def main() -> bool:
 
             # Strip Shift from the modifier map: the keysym stays, the modifier
             # goes, which is what a keymap-less deployment looks like.
-            subprocess.run(["xmodmap", "-display", DISPLAY, "-e", "clear shift"],
+            subprocess.run(["xmodmap", "-display", display_name, "-e", "clear shift"],
                            capture_output=True, timeout=10)
             d.sync()
             res.check("shift is now unbound",
@@ -122,8 +106,7 @@ def main() -> bool:
         finally:
             d.close()
     finally:
-        server.kill()
-        server.wait(timeout=10)
+        H.stop_x_server(server, display_name)
     return res.summary()
 
 

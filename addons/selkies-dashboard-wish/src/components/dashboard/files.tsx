@@ -8,10 +8,8 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { X } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { toast } from "sonner";
 import { computeRenderableSettings, getLastServerSettings } from "@/utils";
 import { t } from "@/i18n";
-import { resolveFailedAppCommand } from "../../../../selkies-web-core/lib/app-commands.js";
 
 // Helper function to format bytes
 function formatBytes(bytes: number, decimals = 2): string {
@@ -39,7 +37,8 @@ export function Files({}: FilesProps = {}) {
         setIsFilesModalOpen(!isFilesModalOpen);
     };
 
-    // Listen for file upload events and server settings
+    // The upload and command notices are raised by UploadNotifications, which
+    // stays mounted while this panel is closed.
     useEffect(() => {
         const handleWindowMessage = (event: MessageEvent) => {
             if (event.origin !== window.location.origin) return;
@@ -49,49 +48,6 @@ export function Files({}: FilesProps = {}) {
 
             if (message.type === 'serverSettings') {
                 setRenderableSettings(computeRenderableSettings(message.payload));
-            }
-
-            if (message.type === 'fileUpload') {
-                const { status, fileName, progress, message: errMsg, code } = message.payload;
-
-                if (status === 'start') {
-                    toast.loading(t('uploads.uploadingFile', { fileName }), {
-                        id: fileName,
-                    });
-                } else if (status === 'progress') {
-                    toast.loading(t('uploads.uploadingFileProgress', { fileName, progress }), {
-                        id: fileName,
-                    });
-                } else if (status === 'end') {
-                    toast.success(t('uploads.uploadSuccessFile', { fileName }), {
-                        id: fileName,
-                    });
-                } else if (status === 'error') {
-                    const errorMessage = errMsg ? `${t('notifications.errorPrefix')} ${errMsg}` : t('notifications.unknownError');
-                    toast.error(t('uploads.uploadFailedFile', { fileName, errorMessage }), {
-                        id: fileName,
-                    });
-                } else if (status === 'warning') {
-                    // A failed apps command settles its pending optimistic
-                    // update first; a stale launch match is lifecycle noise,
-                    // not a notice.
-                    if (code === 'commandFailed' && !resolveFailedAppCommand(errMsg)) return;
-                    // e.g. a second upload started while one is in flight, or a
-                    // clipboard-image skip from the core with a translation code.
-                    // The translator returns the key itself for an unknown code
-                    // (a future core may ship new ones), so the raw message is
-                    // the fallback, as in the classic dashboard.
-                    const codeKey = (typeof code === 'string' &&
-                        (code.startsWith('clipboardSkip') || code === 'commandFailed'))
-                        ? `notifications.${code}` : null;
-                    const codeMsg = codeKey ? t(codeKey, { detail: errMsg }) : null;
-                    const warnMsg = (codeMsg && codeMsg !== codeKey)
-                        ? codeMsg
-                        : (errMsg || t('notifications.unknownError'));
-                    toast.warning(warnMsg, {
-                        id: fileName,
-                    });
-                }
             }
         };
 

@@ -948,6 +948,10 @@ const browser = {
     isIOS: function() { return /iPod|iPhone|iPad/.test(navigator.platform); },
     isWindows: function() { return /Win/.test(navigator.platform); },
     isLinux: function() { return /Linux/.test(navigator.platform); },
+    // Engines that implement the textInput event deliver an IME commit there.
+    // Where the event does not exist, compositionend is the only thing carrying
+    // the committed text and skipping it drops every composed character.
+    hasTextInput: function() { return typeof window.TextEvent === 'function'; },
     isChrome: function() {
         const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
         if (brands.some((b) => /Chromium|Google Chrome/.test(b.brand))) return true;
@@ -1199,6 +1203,9 @@ export class Input {
         this.y = 0;
         this._relCarryX = 0;
         this._relCarryY = 0;
+        this._pointerScaleFrame = null;
+        this._pendingMove = null;
+        this._moveFlushScheduled = false;
         this.onmenuhotkey = null;
         this.onfullscreenhotkey = this.enterFullscreen;
         this.ongamepadhotkey = null;
@@ -1281,7 +1288,7 @@ export class Input {
         this._trackpadMode = false;
         this._trackpadTouches = new Map();
         this._trackpadLastTapTime = 0;
-        this._trackpadIsDragging = false;
+        this._trackpadGestureMode = null;
         this._trackpadTapTimeout = null;
         this._trackpadLastScrollCentroid = null;
         this._touchScrollLastCentroid = null;
@@ -1823,11 +1830,6 @@ export class Input {
         this._sendKeyEvent(keysym, code, true);
     }
 
-    _handleKeyPress(event) {
-        if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
-        if (!this._guac_markEvent(event)) return;
-    }
-
     _handleKeyUp(event) {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
@@ -1973,11 +1975,13 @@ export class Input {
         // Empty-data end means the commit rides the following textInput: clear
         // the preedit without typing. A non-empty end is the commit, except the
         // one Blink chains after its own textInput — then the text already
-        // typed and the end only clears the preedit.
+        // typed and the end only clears the preedit. On Linux the input methods
+        // deliver the syllable on the textInput after the end, so the end is
+        // clear-only there wherever the engine has that event to deliver it on.
         const echo = this._lastTextInputCommit;
         const echoMatches = echo !== null && echo.data === event.data &&
             (performance.now() - echo.at) < 400;
-        if (browser.isLinux() || !event.data || echoMatches) {
+        if ((browser.isLinux() && browser.hasTextInput()) || !event.data || echoMatches) {
             this._updateCompositionText("");
             this.isComposing = false;
             this.compositionString = "";
@@ -2135,6 +2139,8 @@ export class Input {
             this._focusCompositionHost();
         }
         var mtype = "m";
+        let relX = 0;
+        let relY = 0;
         let canvas = document.getElementById('videoCanvas');
         let videoEle = document.getElementById("stream");
         if (event.type === 'mousedown' || event.type === 'mouseup' || event.type === 'pointerdown' || event.type === 'pointerup' || event.type === 'pointercancel') {
@@ -2159,22 +2165,22 @@ export class Input {
         // Fullscreen must hold pointer lock: re-arm it when a click lands on
         // the stream after an in-fullscreen Escape unlock. The click itself
         // still goes to the server.
-        if (down && event.button === 0 &&
-            !(canvas !== null && document.pointerLockElement === canvas)) {
+        if (down && event.button === 0) {
             this._armPointerLock();
         }
         if (this._isStreamLocked()) {
             mtype = "m2";
             // CSS pixels, scaled and quantized where the motion is sent so that
             // a frame's worth of it is rounded once.
-            this.x = event.movementX || 0;
-            this.y = event.movementY || 0;
-
+            relX = event.movementX || 0;
+            relY = event.movementY || 0;
         } else if (event.type === 'mousemove' || event.type === 'pointermove' ||
+                   event.type === 'mousedown' || event.type === 'mouseup' ||
                    event.type === 'pointerdown' || event.type === 'pointerup') {
-            // Pen taps must map coordinates here too: a non-hovering stylus emits
-            // no pointermove before contact, so the press would otherwise go out
-            // at the previous pointer's stale x/y.
+            // A button event maps its own coordinates rather than trusting the
+            // last motion's: a non-hovering stylus emits no pointermove before
+            // contact, and a press that lands right after a pointer lock ends
+            // has only ever seen movement deltas.
             if (this._applySinkCoordinates(event.clientX, event.clientY, canvas, videoEle)) {
                 // Absolute coords mapped against the active sink (ws-core canvas or
                 // wr-core <video>); this.x/this.y were set by the helper.
@@ -2211,22 +2217,26 @@ export class Input {
             // button (tip 0, barrel 2, eraser 5) or the mask stays stuck down.
             this.buttonMask &= ~((1 << 0) | (1 << 2) | (1 << 5));
         }
+        // Under lock the payload is a movement delta, everywhere else the mapped
+        // position.
+        const outX = (mtype === "m2") ? relX : this.x;
+        const outY = (mtype === "m2") ? relY : this.y;
         if (event.type === 'mousemove' || event.type === 'pointermove') {
             // Coalesce high-frequency motion: a 1000 Hz mouse would otherwise emit
             // ~1000 tiny WS messages/s, congesting the uplink and the server's input
             // loop. At most one motion send per animation frame; the local cursor
             // still tracks every event.
-            this._queueCoalescedMouseMove(mtype, this.x, this.y, this.buttonMask);
+            this._queueCoalescedMouseMove(mtype, outX, outY, this.buttonMask);
         } else {
             // Button / non-move event: flush pending motion first so ordering
             // (move-then-click, accumulated relative deltas) is preserved.
             this._flushCoalescedMouseMove();
             if (mtype === "m2") {
-                const moved = this._relativeToServer(this.x, this.y);
-                this.x = moved[0];
-                this.y = moved[1];
+                const moved = this._relativeToServer(outX, outY);
+                this.send([ "m2", moved[0], moved[1], this.buttonMask, 0 ].join(","));
+            } else {
+                this.send([ "m", outX, outY, this.buttonMask, 0 ].join(","));
             }
-            this.send([ mtype, this.x, this.y, this.buttonMask, 0 ].join(","));
         }
     }
 
@@ -2542,34 +2552,54 @@ export class Input {
      * stands in for, so it carries the same scale. Scaling it by the device
      * pixel ratio alone leaves a pointer-locked flick short (or long) by the
      * stream box ratio in every mode that maps through the box.
+     *
+     * Measuring the box reads layout, so the answer is held for the rest of the
+     * frame: the trackpad path is not coalesced, and every touch event of a
+     * drag would otherwise force its own reflow.
      */
     _pointerScale() {
+        if (this._pointerScaleFrame) {
+            return this._pointerScaleFrame;
+        }
         const box = this._sinkBox(document.getElementById('videoCanvas'),
                                   document.getElementById('stream'));
+        let scale;
         if (box) {
-            return { x: box.sinkW / box.boxW, y: box.sinkH / box.boxH };
+            scale = { x: box.sinkW / box.boxW, y: box.sinkH / box.boxH };
+        } else {
+            const dpr = this._inputDpr();
+            if (!this.m) {
+                this._windowMath();
+            }
+            scale = this.m
+                ? { x: this.m.mouseMultiX * dpr, y: this.m.mouseMultiY * dpr }
+                : { x: dpr, y: dpr };
         }
-        const dpr = this._inputDpr();
-        if (!this.m) {
-            this._windowMath();
+        if (typeof window.requestAnimationFrame === 'function') {
+            this._pointerScaleFrame = scale;
+            window.requestAnimationFrame(() => { this._pointerScaleFrame = null; });
         }
-        return this.m
-            ? { x: this.m.mouseMultiX * dpr, y: this.m.mouseMultiY * dpr }
-            : { x: dpr, y: dpr };
+        return scale;
     }
 
     /**
      * Quantize a relative motion to whole server pixels, carrying the remainder.
      *
      * Rounding each event on its own discards a fraction of a pixel every time,
-     * and a stream of sub-pixel deltas -- what any client whose scale is not a
-     * whole number produces -- turns that into a systematic sensitivity error
+     * and a stream of sub-pixel deltas — what any client whose scale is not a
+     * whole number produces — turns that into a systematic sensitivity error
      * whose size depends on how fast the pointer is moving, and into drift on
-     * motion that should cancel out.
+     * motion that should cancel out. A carry that ever went non-finite would
+     * stay that way and put `NaN` on the wire, so it restarts from zero.
      */
     _quantizeRelative(x, y) {
         this._relCarryX += x;
         this._relCarryY += y;
+        if (!Number.isFinite(this._relCarryX) || !Number.isFinite(this._relCarryY)) {
+            this._relCarryX = 0;
+            this._relCarryY = 0;
+            return [0, 0];
+        }
         const outX = Math.round(this._relCarryX);
         const outY = Math.round(this._relCarryY);
         this._relCarryX -= outX;
@@ -3152,6 +3182,7 @@ export class Input {
     }
 
     _windowMath() {
+        this._pointerScaleFrame = null;
         const elementRect = this.element.getBoundingClientRect();
         const windowW = elementRect.width; const windowH = elementRect.height;
         const frameW = this.element.offsetWidth; const frameH = this.element.offsetHeight;
@@ -3273,17 +3304,17 @@ export class Input {
     /**
      * Take pointer lock on an element, asking for raw movement deltas.
      *
-     * Locked motion is relayed as relative motion and injected verbatim -- both
-     * XTEST and the Wayland backend pass deltas through unaccelerated -- so the
-     * OS curve the engine applies to movementX/Y is the whole difference between
-     * how far a hand moved and how far the remote pointer went, and it grows
-     * with speed. unadjustedMovement asks for the deltas before that curve,
-     * which is what the games and 3D applications pointer lock exists for
-     * expect. Engines that cannot deliver them (every engine on Linux, and
-     * Android) reject the option with NotSupportedError, and the first refusal
-     * turns it off for the page; `again` re-runs the request the way its caller
-     * would, so guarded callers re-check their guards. Engines older than the
-     * promise-returning API report failures through pointerlockerror instead.
+     * Locked motion is relayed as relative motion and injected verbatim — both
+     * XTEST and the Wayland backend pass deltas through unaccelerated — so the
+     * OS curve the engine applies to movementX/Y is what separates how far a
+     * hand moved from how far the remote pointer went, and it grows with speed.
+     * unadjustedMovement asks for the deltas before that curve, which is what
+     * games and 3D applications expect from pointer lock. Platforms that cannot
+     * deliver them — Linux and Android, on every engine — reject the option
+     * with NotSupportedError, and the first refusal turns it off for the page;
+     * `again` re-runs the request the way its caller would, so guarded callers
+     * re-check their guards. Engines older than the promise-returning API
+     * report failures through pointerlockerror instead.
      */
     _requestPointerLock(element, again, onFailure) {
         const lockPromise = Input._unadjustedMovement
@@ -3307,7 +3338,7 @@ export class Input {
      */
     _armPointerLock(attempt = 0) {
         if (this.isSharedMode || !this._isStreamFullscreen()) return;
-        if (document.pointerLockElement === this.element) return;
+        if (this._isStreamLocked()) return;
         this._requestPointerLock(this.element, () => this._armPointerLock(attempt), (err) => {
             if (attempt < 5) {
                 setTimeout(() => this._armPointerLock(attempt + 1), 60);
@@ -3323,7 +3354,7 @@ export class Input {
                 this._armPointerLock();
                 this.requestKeyboardLock();
             }
-        } else if (document.pointerLockElement === this.element) {
+        } else if (this._isStreamLocked()) {
             document.exitPointerLock();
         }
         // A fullscreen transition can eat keyups (held Escape on exit, the

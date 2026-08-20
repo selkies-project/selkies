@@ -39,6 +39,8 @@ apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
     libva2 \
     libva-drm2 \
     libgbm1 \
+    libpixman-1-0 \
+    libxcb-render0 \
     mesa-utils \
     wayland-protocols \
     libwayland-egl1 \
@@ -74,7 +76,7 @@ else
     PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir "selkies==${RELEASE#v}"
 fi
 
-mkdir -pm755 /etc/OpenCL/vendors && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
+mkdir -p /etc/OpenCL/vendors && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
 
 # Copy turnserver script
 cp start-turnserver.sh /usr/local/bin/start-turnserver.sh

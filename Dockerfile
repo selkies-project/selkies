@@ -9,8 +9,8 @@
 # 1) Build the web client (core + dashboard + keyboard-layout DB + touch gamepad)
 FROM docker.io/library/node:26-alpine AS web-build
 
-ARG SELKIES_MODE=webrtc
-ARG SELKIES_UPLOAD_DIR=/home/ubuntu/Desktop
+ARG SELKIES_MODE="webrtc"
+ARG SELKIES_UPLOAD_DIR="~/Desktop"
 
 WORKDIR /build
 
@@ -45,8 +45,8 @@ FROM docker.io/library/python:3-slim AS py-build
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
 
-ARG PYPI_PACKAGE=selkies
-ARG PACKAGE_VERSION=0.0.0.dev0
+ARG PYPI_PACKAGE="selkies"
+ARG PACKAGE_VERSION="0.0.0.dev0"
 
 RUN python3 -m pip install --no-cache-dir --upgrade build
 

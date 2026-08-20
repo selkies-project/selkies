@@ -66,6 +66,32 @@ Copy (`Ctrl/Cmd + C`) and paste (`Ctrl/Cmd + V`) work on Chromium, Firefox, and 
 
 </details>
 
+## The audio log repeats `spa.audioconvert ... out of buffers on port 0`.
+
+<details>
+  <summary>Open Answer</summary>
+
+PipeWire prints this when its converter has no free buffer to hand the next
+period to, which happens when the graph's quantum is short relative to what the
+session's clients ask of it. It is a warning about scheduling headroom, not an
+error: audio that plays cleanly through it is being delivered correctly, and
+PipeWire suppresses repeats.
+
+The lever is the quantum, which Selkies sets through `PIPEWIRE_LATENCY` (the
+container and the AppImage both default it to `256/48000`, about 5.3 ms).
+Raising it, for example to `512/48000`, gives the converter more room at the
+cost of a little more audio latency:
+
+```bash
+export PIPEWIRE_LATENCY="512/48000"
+```
+
+The container's audio services take the value from the environment, so setting
+it on `docker run` reaches PipeWire, PipeWire-Pulse and WirePlumber as well as
+the Selkies process.
+
+</details>
+
 ## The gamepad shows as connected in Selkies, but Steam or a browser inside the remote desktop does not see it.
 
 <details>

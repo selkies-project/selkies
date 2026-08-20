@@ -75,6 +75,7 @@ from .display_utils import (
     pixelflux_x11_cursor,
     unpremultiply_rgba,
     cursor_content_handle,
+    layout_extent,
 )
 from .media_pipeline import RateControlMode
 from .settings import settings, WS_MAX_MESSAGE_BYTES
@@ -2936,6 +2937,7 @@ class WebRTCInput:
         self.button_mask = 0
         self.last_x = -1
         self.last_y = -1
+        self.tracked_position_stale = False
         self.ping_start = None
 
         self.upload_dir = upload_dir
@@ -3082,13 +3084,19 @@ class WebRTCInput:
         await self.send_clipboard_data(data, mime_type)
     def _on_cursor_change(self, data: dict) -> None: self.send_cursor_data(data)
     async def send_clipboard_data(self, data: Union[str, bytes],
-                                  mime_type: str = "text/plain") -> None:
+                                  mime_type: str = "text/plain",
+                                  reply_to: Optional[str] = None,
+                                  conn_id: Any = None) -> None:
         # Mode router only: each transport owns its one chunked sender
-        # (SelkiesStreamingApp.send_ws_clipboard_data / RTCApp.send_clipboard_data).
+        # (SelkiesStreamingApp.send_ws_clipboard_data / RTCApp.send_clipboard_data),
+        # and each addresses one requester by the identity its own connections
+        # carry.
         if self.rtc_app.mode == "websockets":
-            await self.rtc_app.send_ws_clipboard_data(data, mime_type)
+            await self.rtc_app.send_ws_clipboard_data(data, mime_type, reply_to=reply_to,
+                                                      conn_id=conn_id)
         else:
-            await self.rtc_app.send_clipboard_data(data, mime_type)
+            await self.rtc_app.send_clipboard_data(data, mime_type, reply_to=reply_to,
+                                                   peer_id=conn_id)
     def send_cursor_data(self, data: dict) -> None:
         if self.rtc_app.mode == "websockets": self.rtc_app.send_ws_cursor_data(data)
         else: self.rtc_app.send_cursor_data(data)
@@ -4410,6 +4418,16 @@ class WebRTCInput:
         against the held state bit by bit, emitting press/release, scroll
         clicks, or the Alt+Arrow back/forward chords.
 
+        A delta is injected as a delta; the tracked position follows it only so
+        that an absolute message has something to compare against, and it is
+        bounded by the laid-out screen because the X server and the compositor
+        bound the pointer the same way. The tracking stays an estimate even so
+        — an application can move the pointer, and the framebuffer can be a few
+        pixels wider than the layout — so the first absolute position after any
+        delta warps unconditionally rather than trusting that comparison. Where
+        no relative injection exists (a capture backend without it), the bound
+        matters directly: the estimate is what gets injected.
+
         Args:
             x: Absolute X, or the X delta when relative.
             y: Absolute Y, or the Y delta when relative.
@@ -4432,22 +4450,23 @@ class WebRTCInput:
         # keeps press/release balanced if the tip bit is set at the same time.
         if button_mask & MOUSE_MASK_BIT_ERASER:
             button_mask = (button_mask | MOUSE_MASK_BIT_PRIMARY) & ~MOUSE_MASK_BIT_ERASER
+        was_stale = self.tracked_position_stale
         if relative:
+            # XTEST carries the delta in an Int16; saturating keeps a client's
+            # overlarge value from failing the request and taking the button
+            # transitions riding on the same message down with it.
+            x = max(-32768, min(32767, x))
+            y = max(-32768, min(32767, y))
             final_x = self.last_x + x
             final_y = self.last_y + y
-            # The pointer the deltas drive is clamped to the layout edge by the
-            # X server or the compositor, so the tracked position clamps with
-            # it: an unclamped accumulator has to unwind its overshoot before
-            # absolute positions compare against the real pointer again, and
-            # the absolute fallback below would inject the fiction as-is.
+            edge_x, edge_y = 0, 0
             if self.data_server_instance and hasattr(self.data_server_instance, 'display_layouts'):
-                layouts = self.data_server_instance.display_layouts
-                if layouts:
-                    edge_x = max(l.get('x', 0) + l.get('w', 0) for l in layouts.values())
-                    edge_y = max(l.get('y', 0) + l.get('h', 0) for l in layouts.values())
-                    if edge_x > 0 and edge_y > 0:
-                        final_x = max(0, min(final_x, edge_x - 1))
-                        final_y = max(0, min(final_y, edge_y - 1))
+                edge_x, edge_y = layout_extent(self.data_server_instance.display_layouts)
+            if edge_x > 0:
+                final_x = max(0, min(final_x, edge_x - 1))
+            if edge_y > 0:
+                final_y = max(0, min(final_y, edge_y - 1))
+            self.tracked_position_stale = True
         else:
             offset_x = 0
             offset_y = 0
@@ -4469,14 +4488,15 @@ class WebRTCInput:
                     return
             final_x = x + offset_x
             final_y = y + offset_y
+            self.tracked_position_stale = False
 
-        position_changed = (final_x != self.last_x or final_y != self.last_y)
+        position_changed = (was_stale or final_x != self.last_x or final_y != self.last_y)
         self.last_x = final_x
         self.last_y = final_y
+        # A button-only relative message carries no motion of its own.
+        is_static_relative = relative and x == 0 and y == 0
 
         if self.wayland_input:
-            is_static_relative = relative and (x == 0 and y == 0)
-            
             if not is_static_relative:
                 if relative:
                     if hasattr(self.wayland_input, 'inject_relative_mouse_move'):
@@ -4542,14 +4562,13 @@ class WebRTCInput:
             self.button_mask = button_mask
             return
         if relative:
-            self.send_mouse(MOUSE_MOVE, (x, y))
+            if not is_static_relative:
+                self.send_mouse(MOUSE_MOVE, (x, y))
         elif position_changed or button_mask != self.button_mask:
             # Button transitions warp unconditionally: the X pointer may have
             # been moved by an application/tool since the last event, and a
             # press must land where the client aims, not where the pointer sits.
             self.send_mouse(MOUSE_POSITION, (final_x, final_y))
-        self.last_x = final_x
-        self.last_y = final_y
         if button_mask != self.button_mask:
             for bit_index in range(8):
                 current_button_bit_value = (1 << bit_index)
@@ -4819,6 +4838,17 @@ class WebRTCInput:
     # Small enough to leave the desktop's centre on the screen that is shown,
     # large enough for a compositor to lay out on.
     SPARE_SCREEN_SIZE = (320, 240)
+
+    def resync_session_screens(self) -> None:
+        """Re-hold the session's spare screens after the output set changed.
+
+        The nested session opens the screens it was started with, and which of
+        them a capture drives changes as displays come and go, so the hold is
+        recomputed whenever a layout pass creates or destroys an output.
+        """
+        if self.wayland_input is None:
+            return
+        self._schedule_spare_screen_hold()
 
     def _schedule_spare_screen_hold(self) -> None:
         """A nested session opens the screens it was started with, whether or
@@ -6049,8 +6079,11 @@ class WebRTCInput:
                     self.pressed_keys[keysym] = now
         elif msg_type in ["m", "m2"]:
             relative = msg_type == "m2"
+            # Dropped rather than defaulted: a mouse message nobody can parse
+            # says nothing about where the pointer is, and defaulting it warps
+            # to the origin of the display.
             try: x, y, button_mask, scroll_magnitude = [int(i) for i in toks[1:]]
-            except (ValueError, IndexError): x,y,button_mask,scroll_magnitude = 0,0,self.button_mask,0; relative=False
+            except (ValueError, IndexError): return
             try: await self.send_x11_mouse(x, y, button_mask, scroll_magnitude, relative, display_id=display_id)
             except Exception as e: logger_webrtc_input.warning(f"Failed to set mouse cursor: {e}")
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
@@ -6220,32 +6253,22 @@ class WebRTCInput:
             if self.enable_clipboard in ["true", "out"]:
                 data, mime_type = await self.read_clipboard(use_binary=self.enable_binary_clipboard in ["true", "out"])
                 if data:
-                    if getattr(self.rtc_app, "mode", None) == "websockets":
-                        # Tag the reply as a client-requested fetch: the payload
-                        # frames are preceded by "clipboard_reply,cr" so clients
-                        # can treat it cache-only without the connect-time 5s
-                        # heuristic (old clients route the unknown verb to the
-                        # input no-op path and keep the heuristic).
-                        await self.rtc_app.send_ws_clipboard_data(
-                            data, mime_type, reply_to="cr")
-                    else:
-                        # Same contract over WebRTC: the clipboard-msg carries a
-                        # reply_to field (old clients ignore the extra field and
-                        # keep their heuristic).
-                        await self.rtc_app.send_clipboard_data(
-                            data, mime_type, reply_to="cr")
+                    # Tag the reply as a client-requested fetch: the payload
+                    # frames are preceded by "clipboard_reply,cr" (a reply_to
+                    # field on the WebRTC clipboard-msg) so the client treats it
+                    # cache-only without the connect-time 5s heuristic, and it
+                    # goes to that client alone — one arriving unasked-for is
+                    # what makes another client cache content it never pastes.
+                    await self.send_clipboard_data(
+                        data, mime_type, reply_to="cr", conn_id=conn_id)
                 else:
                     # Reply even when empty: the tag settles the client's
                     # connect-time fetch AND switches it to tagged replies, so a
                     # real clipboard change seconds after connect is never
                     # mistaken for the init snapshot and dropped.
                     logger_webrtc_input.debug("No clipboard content; sending empty tagged reply")
-                    if getattr(self.rtc_app, "mode", None) == "websockets":
-                        await self.rtc_app.send_ws_clipboard_data(
-                            "", "text/plain", reply_to="cr")
-                    else:
-                        await self.rtc_app.send_clipboard_data(
-                            "", "text/plain", reply_to="cr")
+                    await self.send_clipboard_data(
+                        "", "text/plain", reply_to="cr", conn_id=conn_id)
             else: logger_webrtc_input.warning("Rejecting clipboard read: outbound clipboard disabled.")
         elif msg_type == "REQUEST_CLIPBOARD":
             # Client sends REQUEST_CLIPBOARD on Ctrl/Cmd+C and awaits the next
@@ -6289,7 +6312,8 @@ class WebRTCInput:
                                     await asyncio.sleep(0.15)
                                 data, mime_type = await self.read_clipboard(use_binary=use_binary)
                             if data:
-                                await self.on_clipboard_read(data, mime_type)
+                                await self.send_clipboard_data(data, mime_type,
+                                                               conn_id=conn_id)
                             else:
                                 logger_webrtc_input.debug("No clipboard content to send on REQUEST_CLIPBOARD.")
                         except Exception as e:

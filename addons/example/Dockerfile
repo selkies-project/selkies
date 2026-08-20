@@ -29,21 +29,21 @@
 # wlr-layer-shell: the Wayland session then runs natively, with none of the
 # XWayland detour older releases need.
 
-ARG DISTRIB_IMAGE=ubuntu
-ARG DISTRIB_RELEASE=26.04
-ARG PYPI_PACKAGE=selkies
+ARG DISTRIB_IMAGE="ubuntu"
+ARG DISTRIB_RELEASE="26.04"
+ARG PYPI_PACKAGE="selkies"
 # Xvfb with DRI3 (https://github.com/linuxserver/docker-xvfb): the distribution
 # server has none, so GL clients render in software even with a GPU present.
 # Built against an older glibc than either base carries, which they both
 # satisfy; override to match a different base or to opt out.
-ARG XVFB_IMAGE=lscr.io/linuxserver/xvfb:debianbookworm
+ARG XVFB_IMAGE="lscr.io/linuxserver/xvfb:debianbookworm"
 
 FROM ${XVFB_IMAGE} AS xvfb
 
 # Build the joystick interposer and fake-udev inside this repository (they are
 # dedicated to containerized environments and are not desktop components)
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS add-ons
-ARG DEBIAN_FRONTEND=noninteractive
+ARG DEBIAN_FRONTEND="noninteractive"
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
         build-essential \
         ca-certificates && \
@@ -93,10 +93,10 @@ RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https:
         sed -i 's/^Components: .*/& contrib/' /etc/apt/sources.list.d/debian.sources; \
     fi
 
-ARG DEBIAN_FRONTEND=noninteractive
+ARG DEBIAN_FRONTEND="noninteractive"
 # Configure rootless user environment for constrained conditions without escalated root privileges inside containers
-ARG TZ=UTC
-ENV PASSWD=mypasswd
+ARG TZ="UTC"
+ENV PASSWD="mypasswd"
 RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get install --no-install-recommends -y \
         apt-utils \
         dbus-user-session \
@@ -123,12 +123,17 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     # Preserve setuid/setgid removed by chown; a setuid bit on a file not owned
     # by root is rejected, so the ownership has to be restored as well.
     # sudo.ws is the classic sudo binary under the name sudo-rs packaging
-    # gives it; sudo-root is sudo-rs's setuid helper. /usr/bin/su ships only
-    # under its real name from util-linux.
+    # gives it; sudo-root is the real sudo, renamed above so that plain `sudo`
+    # reaches fakeroot. /usr/bin/su ships only under its real name from
+    # util-linux. wall and write are setgid tty rather than setuid, and the
+    # two spool directories are setgid to the group that owns their contents.
     chown root:root /usr/lib/dbus-1.0/dbus-daemon-launch-helper /usr/bin/chfn /usr/bin/chsh /usr/bin/mount /usr/bin/gpasswd /usr/bin/passwd /usr/bin/newgrp /usr/bin/umount /usr/bin/su /usr/bin/sudo.ws /usr/bin/sudo-root /usr/bin/fusermount 2>/dev/null; \
     chmod -f 4755 /usr/lib/dbus-1.0/dbus-daemon-launch-helper /usr/bin/chfn /usr/bin/chsh /usr/bin/mount /usr/bin/gpasswd /usr/bin/passwd /usr/bin/newgrp /usr/bin/umount /usr/bin/su /usr/bin/sudo.ws /usr/bin/sudo-root /usr/bin/fusermount || echo 'Failed to set chmod setuid for some paths' && \
     chown root:shadow /usr/sbin/unix_chkpwd /usr/sbin/pam_extrausers_chkpwd /usr/bin/expiry /usr/bin/chage 2>/dev/null; \
-    chmod -f 2755 /var/local /var/mail /usr/sbin/unix_chkpwd /usr/sbin/pam_extrausers_chkpwd /usr/bin/expiry /usr/bin/chage || echo 'Failed to set chmod setgid for some paths'
+    chown root:tty /usr/bin/wall /usr/bin/write 2>/dev/null; \
+    chown root:staff /var/local 2>/dev/null; \
+    chown root:mail /var/mail 2>/dev/null; \
+    chmod -f 2755 /var/local /var/mail /usr/bin/wall /usr/bin/write /usr/sbin/unix_chkpwd /usr/sbin/pam_extrausers_chkpwd /usr/bin/expiry /usr/bin/chage || echo 'Failed to set chmod setgid for some paths'
 
 # Set locales
 ENV LANG="en_US.UTF-8"
@@ -196,7 +201,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # Audio (PipeWire with the PulseAudio interface for pcmflux)
         libpulse0 \
         pipewire \
-        pipewire-audio-client-libraries \
+        pipewire-audio \
         pipewire-pulse \
         wireplumber \
         # Minimal LXQt desktop (Openbox window manager); breeze is the LXQt 2
@@ -319,9 +324,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 # panel that runs and maps a window but is invisible against the desktop. The
 # icon theme goes with it, since LXQt otherwise falls back to Oxygen, which is
 # not installed here. This is the system scope, so a user's own
-# ~/.config/lxqt/lxqt.conf still overrides it. The names are checked against
-# what the packages above actually installed, so a package change fails the
-# build here rather than reaching a user as a desktop that will not paint.
+# ~/.config/lxqt/lxqt.conf still overrides it. The names are taken from what is
+# installed rather than asserted, so a renamed or dropped theme still leaves a
+# session that paints; only an image with none of them at all fails here.
 #
 # pcmanfm-qt gets its desktop background the same way, for the same reason: its
 # own default is #000000 with no wallpaper, which reads as a broken session
@@ -366,9 +371,9 @@ RUN printf '/usr/local/nvidia/lib\n/usr/local/nvidia/lib64\n' > /etc/ld.so.conf.
     printf '{\n  "file_format_version": "1.0.0",\n  "ICD": {\n    "library_path": "libEGL_nvidia.so.0"\n  }\n}\n' > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
 ENV PATH="/usr/local/nvidia/bin${PATH:+:${PATH}}"
 ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
-ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=all
-ENV __GL_SYNC_TO_VBLANK=0
+ENV NVIDIA_VISIBLE_DEVICES="all"
+ENV NVIDIA_DRIVER_CAPABILITIES="all"
+ENV __GL_SYNC_TO_VBLANK="0"
 
 # The browsers, in one apt operation: Firefox from Mozilla's own APT repository,
 # which serves real .deb builds on both bases and is pinned over the
@@ -422,8 +427,9 @@ RUN set -eu; \
         mkdir -pm755 /etc/gtk-3.0 && \
         printf '[Settings]\ngtk-decoration-layout=:minimize,maximize,close\n' > /etc/gtk-3.0/settings.ini; \
     fi
-# Package state is already owned by the session user: every build-time apt ran
-# as uid 1000 under fakeroot. Keep the log dir present for in-session apt runs.
+# Package state is already owned by the session user: the recursive chown above
+# handed it over, and the apt runs after it went through fakeroot as uid 1000.
+# Keep the log dir present for in-session apt runs.
 RUN install -d /var/log/apt
 
 # Install Selkies with pip: from the wheels dropped into `wheels/`, or the
@@ -471,24 +477,27 @@ RUN echo "[ ! -z \"\$TERM\" -a -r /etc/motd ] && echo \"\$(grep '^PRETTY_NAME=' 
     printf "==============================================\n=         Selkies Example Container          =\n==============================================\n" > /etc/motd
 
 USER 0
-# The restores below need the real chmod/chown syscalls: under the fakeroot
-# SHELL even a uid-0 process gets the LD_PRELOAD wrappers, and while chown
-# passes through to the filesystem, a setuid chmod lands only in fakeroot's
-# fake database — the committed layer keeps 0755 and Chrome aborts at launch
-# demanding a root-owned 4755 chrome-sandbox.
+# The restores below need the real chown syscall: under the fakeroot SHELL even
+# a uid-0 process gets the LD_PRELOAD wrappers, and an ownership change lands
+# only in fakeroot's database while the chmod goes through to the filesystem —
+# so the committed layer keeps the setuid bit on a file owned by uid 1000,
+# which the kernel refuses to honour.
 SHELL ["/bin/sh", "-c"]
 # Enable sudo through sudo-root with uid 0.
-# The uid-1000 fakeroot layers above install packages whose setuid helpers
-# (Chrome's chrome-sandbox, polkit's agent helper and pkexec) then really
-# belong to uid 1000 — chmod went through, chown was faked — leaving them
-# setuid-to-ubuntu. Without a root-owned chrome-sandbox, Chrome aborts at
-# launch wherever unprivileged user namespaces are unavailable (the default
-# Docker seccomp profile), so their root ownership is restored here.
+# The uid-1000 fakeroot layers above install packages whose setuid and setgid
+# helpers (Chrome's chrome-sandbox, polkit's agent helper and pkexec, xterm's
+# utempter) then really belong to uid 1000. Without a root-owned
+# chrome-sandbox, Chrome aborts at launch wherever unprivileged user
+# namespaces are unavailable (the default Docker seccomp profile), so their
+# ownership is restored here.
 RUN if [ -d "/usr/libexec/sudo" ]; then SUDO_LIB="/usr/libexec/sudo"; else SUDO_LIB="/usr/lib/sudo"; fi && \
     chown -R -f -h --no-preserve-root root:root /usr/bin/sudo-root /etc/sudo.conf /etc/sudoers /etc/sudoers.d /etc/sudo_logsrvd.conf "${SUDO_LIB}" || echo 'Failed to provide root permissions in some paths relevant to sudo' && \
     chmod -f 4755 /usr/bin/sudo-root || echo 'Failed to set chmod setuid for root' && \
     for helper in /opt/google/chrome/chrome-sandbox /usr/lib/polkit-1/polkit-agent-helper-1 /usr/libexec/polkit-agent-helper-1 /usr/bin/pkexec; do \
         if [ -e "$helper" ]; then chown -f root:root "$helper" && chmod -f 4755 "$helper" || echo "Failed to restore setuid for $helper"; fi; \
+    done && \
+    for helper in /usr/lib/*/utempter/utempter /usr/libexec/utempter/utempter; do \
+        if [ -e "$helper" ]; then chown -f root:utmp "$helper" && chmod -f 2755 "$helper" || echo "Failed to restore setgid for $helper"; fi; \
     done
 
 USER 1000
@@ -499,8 +508,8 @@ ENV PIPEWIRE_LATENCY="256/48000"
 # without this it shows its commands-disabled notice. Commands run as the
 # session user, whom the streamed desktop already hands a terminal, so the
 # example enables the channel; disable with -e SELKIES_COMMAND_ENABLED=false.
-ENV SELKIES_COMMAND_ENABLED=true
-ENV XDG_RUNTIME_DIR=/tmp/runtime-ubuntu
+ENV SELKIES_COMMAND_ENABLED="true"
+ENV XDG_RUNTIME_DIR="/tmp/runtime-ubuntu"
 ENV PIPEWIRE_RUNTIME_DIR="${XDG_RUNTIME_DIR}"
 ENV PULSE_RUNTIME_PATH="${XDG_RUNTIME_DIR}/pulse"
 ENV PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/pulse/native"
@@ -523,15 +532,15 @@ ENV SELKIES_WAYLAND_OUTPUTS=""
 # it, so the session keeps hardware acceleration. Without a GPU both backends
 # render in software and Wayland stays; set false to keep Wayland either way,
 # which renders the whole session in software
-ENV SELKIES_WAYLAND_X11_FALLBACK=true
+ENV SELKIES_WAYLAND_X11_FALLBACK="true"
 # Start the LXQt session (set to false to run only the display server)
-ENV START_LXQT=true
+ENV START_LXQT="true"
 # Web interface port
-ENV SELKIES_PORT=8080
+ENV SELKIES_PORT="8080"
 
-ENV SHELL=/bin/bash
-ENV USER=ubuntu
-ENV HOME=/home/ubuntu
+ENV SHELL="/bin/bash"
+ENV USER="ubuntu"
+ENV HOME="/home/ubuntu"
 WORKDIR /home/ubuntu
 
 EXPOSE 8080

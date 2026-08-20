@@ -183,6 +183,29 @@ def run() -> "H.Results":
                       err.endswith(": selkies-proot-absent install demo-app")
                       and "127" in err, err)
 
+            # A clipboard fetch belongs to the client that asked for it. A
+            # second client that receives the tagged reply reads it as its own
+            # fetch and caches the content without ever writing it locally, so
+            # the next real change of that content is suppressed too. The
+            # bystander joins as a viewer: a second controller on one display
+            # takes the display over and disconnects the first.
+            async with websockets.connect(uri + "?role=viewer", max_size=None) as other:
+                await asyncio.wait_for(other.recv(), timeout=10)
+                await ws.send("cr")
+                # Read for a fixed window rather than to a gap: a viewer is
+                # being streamed to, so there is always another frame coming.
+                stray = []
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    try:
+                        seen = await asyncio.wait_for(other.recv(), timeout=0.3)
+                    except asyncio.TimeoutError:
+                        continue
+                    if isinstance(seen, str) and seen.startswith("clipboard"):
+                        stray.append(seen)
+                res.check("clipboard: a fetch is answered to its requester alone",
+                          not stray, f"{stray[:2]}")
+
             await ws.send("STOP_VIDEO")
             await asyncio.sleep(1.0)
 

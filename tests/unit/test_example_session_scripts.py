@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""The example container's shell stays parseable and lint-clean.
+"""The shell the repository ships stays parseable and lint-clean.
 
 These scripts run only inside the container against a live compositor and X
 server, so CI cannot exercise their behaviour. It can still guard the failure
 that reaches a user as a session that will not paint — or, for the Dockerfile,
 as a build that dies minutes in: a quoting or syntax slip. Every service script
 is parsed with `bash -n`, so is the shell inside each Dockerfile `RUN`, and —
-where shellcheck is installed — the scripts are checked for shellcheck errors
-(its warning level is style, and these predate a clean pass at that level, so
-gating on it here would fail on debt this suite did not introduce).
+where shellcheck is installed — every shell script the repository ships is
+linted at shellcheck's lowest severity, which the tree passes.
 """
 import glob
+import re
 import os
 import shutil
 import subprocess
@@ -71,13 +71,30 @@ def run_bodies(dockerfile: str) -> list:
     return bodies
 
 
-for dockerfile in (os.path.join(EXAMPLE, "Dockerfile"), os.path.join(REPO, "Dockerfile")):
+def unquoted_settings(dockerfile: str) -> list:
+    """`ARG`/`ENV` lines whose value is not double-quoted.
+
+    Docker strips the quotes, so they change no value, but an unquoted one
+    silently truncates at the first space and reads as a shell expansion where
+    it is not one. Keeping every definition quoted makes both impossible to
+    introduce by copy.
+    """
+    setting = re.compile(r'^\s*(?:ARG|ENV)\s+[A-Za-z_][A-Za-z0-9_]*=(.*)$')
+    return [line for line in open(dockerfile).read().splitlines()
+            if (m := setting.match(line)) and not m.group(1).startswith('"')]
+
+
+DOCKERFILES = sorted(glob.glob(os.path.join(REPO, "**", "Dockerfile"), recursive=True))
+DOCKERFILES = [p for p in DOCKERFILES if "node_modules" not in p]
+check("Dockerfiles found", bool(DOCKERFILES), str(len(DOCKERFILES)))
+for dockerfile in DOCKERFILES:
     rel = os.path.relpath(dockerfile, REPO)
     bodies = run_bodies(dockerfile)
-    check(f"{rel} has RUN blocks", bool(bodies), str(len(bodies)))
     for i, body in enumerate(bodies, 1):
         r = subprocess.run([bash, "-n"], input=body, capture_output=True, text=True)
         check(f"parse {rel} RUN #{i}", r.returncode == 0, r.stderr.strip()[:200])
+    loose = unquoted_settings(dockerfile)
+    check(f"{rel} quotes every ARG/ENV value", not loose, "; ".join(loose)[:200])
 
 PY_HELPERS = sorted(glob.glob(os.path.join(EXAMPLE, "services", "*", "*.py")))
 for path in PY_HELPERS:
@@ -86,11 +103,42 @@ for path in PY_HELPERS:
                        capture_output=True, text=True)
     check(f"compile {rel}", r.returncode == 0, r.stderr.strip()[:200])
 
+# Two values whose absence is invisible until a desktop is in front of someone:
+# a session with no menu prefix shows an empty application menu, and a latency
+# an operator raised has to reach the daemons that honour it, not just the
+# server process.
+entrypoint = open(os.path.join(EXAMPLE, "container-entrypoint.sh")).read()
+check("the shared environment carries the menu prefix",
+      "XDG_MENU_PREFIX" in entrypoint,
+      "container-entrypoint.sh")
+for service in ("pipewire", "pipewire-pulse", "wireplumber"):
+    path = os.path.join(EXAMPLE, "services", service, "run")
+    body = open(path).read()
+    check(f"{service} takes the audio latency an operator set",
+          "${PIPEWIRE_LATENCY:-" in body, os.path.relpath(path, REPO))
+
+# Every shell script the repository ships, not just the example container's:
+# the packaging, CI and tooling scripts run unattended, where a quoting slip is
+# the same class of failure and nobody is watching the output.
+ALL_SHELL = sorted(
+    p for p in (
+        glob.glob(os.path.join(REPO, "**", "*.sh"), recursive=True)
+        + glob.glob(os.path.join(REPO, "**", "services", "*", "run"), recursive=True)
+        + glob.glob(os.path.join(REPO, "**", "services", "*", "finish"), recursive=True))
+    if "node_modules" not in p)
+
 shellcheck = shutil.which("shellcheck")
 if shellcheck:
-    for path in SCRIPTS:
+    check("shell scripts found to lint", len(ALL_SHELL) >= len(SCRIPTS), str(len(ALL_SHELL)))
+    for path in ALL_SHELL:
         rel = os.path.relpath(path, REPO)
-        r = subprocess.run([shellcheck, "-x", "--severity=error", path],
+        # Gated at the lowest severity: the tree passes it, so anything new is
+        # something this run introduced rather than debt it inherited. The
+        # source path is named because the scripts' own `shellcheck source=`
+        # directives are repo-relative, and shellcheck would otherwise resolve
+        # them against whatever directory the suite happened to be run from.
+        r = subprocess.run([shellcheck, "-x", f"--source-path={REPO}",
+                            "--severity=style", path],
                            capture_output=True, text=True)
         check(f"lint {rel}", r.returncode == 0, r.stdout.strip()[:400])
 else:

@@ -10,4 +10,5 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 collect_ignore_glob = ["unit/*.py", "integration/*.py", "e2e/*.py",
-                       "perf/*.py", "soak/*.py", "tools/*.py", "tools/*/*.py"]
+                       "perf/*.py", "soak/*.py", "packaging/*.py",
+                       "tools/*.py", "tools/*/*.py"]

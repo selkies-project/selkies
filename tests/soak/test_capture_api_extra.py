@@ -38,7 +38,9 @@ import pcmflux
 
 from typing import Optional
 
-TEST_DISPLAY = ":98"
+# Filled in by __main__ with a throwaway X server of this suite's own:
+# the capture checks paint the root and resize it.
+TEST_DISPLAY = ""
 CU_PORT = 9600
 CU_BASE = f"http://127.0.0.1:{CU_PORT}"
 
@@ -598,10 +600,7 @@ def main() -> Results:
     # ============================= Phase E: pcmflux extras ===============
     print("\n=== Phase E: pcmflux extras ===", flush=True)
     H.pulse_setup()
-    subprocess.run(["pactl", "load-module", "module-null-sink", "sink_name=cs2out",
-                    "rate=48000", "channels=2"],
-                   capture_output=True,
-                   env=dict(os.environ))
+    cs2out = H.pulse_null_sink("cs2out", rate=48000, channels=2)
 
     # silence gate: silent monitor -> few frames; tone -> frames
     tone = None
@@ -670,17 +669,26 @@ def main() -> Results:
         except Exception as e:
             res.check(f"pcm: {label}", False, repr(e)[:130])
 
+    # A source that does not exist is reported and retried rather than raised:
+    # the open happens inside the capture loop, so a sink that appears late
+    # recovers instead of taking the session down. What must not happen is
+    # capturing something else in its place, which is silent and undetectable
+    # from the stream.
     try:
         bad = pcmflux.AudioCaptureSettings()
         bad.device_name = "definitely-not-a-sink.monitor"
         bad.sample_rate = 48000
         bad.channels = 2
+        frames = []
         ac = pcmflux.AudioCapture()
-        ac.start_capture(bad, lambda f: None)
-        res.check("pcm: bad capture device raises", False, "")
+        ac.start_capture(bad, lambda f: frames.append(1))
+        time.sleep(2.0)
         ac.stop_capture()
+        res.check("pcm: a missing capture device yields no audio",
+                  not frames, f"{len(frames)} frames")
     except Exception as e:
-        res.check("pcm: bad capture device raises", True, str(e)[:70])
+        res.check("pcm: a missing capture device yields no audio", True,
+                  f"raised instead: {str(e)[:60]}")
 
     # RED round trip + playback small buffer + debug
     try:
@@ -736,6 +744,9 @@ def main() -> Results:
     except Exception as e:
         res.check("pcm: playback error contract", False, repr(e)[:80])
 
+    # The sink this phase created goes with it; left loaded it outlives the run
+    # and the next one finds a second copy under the same name.
+    H.pulse_unload(cs2out)
     res.summary()
     return res
 
@@ -746,5 +757,10 @@ def selfpt(fd_ms: float) -> float:
 
 
 if __name__ == "__main__":
-    os.environ["E2E_DISPLAY"] = TEST_DISPLAY
-    sys.exit(0 if main().summary() else 1)
+    xvfb, TEST_DISPLAY = H.private_x_server(1920, 1080)
+    os.environ["E2E_DISPLAY"] = H.TEST_DISPLAY = TEST_DISPLAY
+    try:
+        ok = main().summary()
+    finally:
+        H.stop_x_server(xvfb, TEST_DISPLAY)
+    sys.exit(0 if ok else 1)

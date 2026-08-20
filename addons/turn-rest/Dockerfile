@@ -4,7 +4,7 @@
 
 FROM python:3-alpine
 
-ARG PIP_BREAK_SYSTEM_PACKAGES=1
+ARG PIP_BREAK_SYSTEM_PACKAGES="1"
 RUN pip3 install --no-cache-dir --force-reinstall flask gunicorn
 
 COPY app.py /etc
@@ -12,15 +12,15 @@ COPY app.py /etc
 WORKDIR /etc
 
 # Gunicorn environment variables, number of workers
-ENV WEB_CONCURRENCY=3
+ENV WEB_CONCURRENCY="3"
 # Replace environment with customized TURN server
-ENV TURN_SHARED_SECRET=openrelayprojectsecret
-ENV TURN_HOST=staticauth.openrelay.metered.ca
-ENV TURN_PORT=443
-ENV TURN_PROTOCOL=udp
-ENV TURN_TLS=false
-ENV STUN_HOST=stun.l.google.com
-ENV STUN_PORT=19302
+ENV TURN_SHARED_SECRET="openrelayprojectsecret"
+ENV TURN_HOST="staticauth.openrelay.metered.ca"
+ENV TURN_PORT="443"
+ENV TURN_PROTOCOL="udp"
+ENV TURN_TLS="false"
+ENV STUN_HOST="stun.l.google.com"
+ENV STUN_PORT="19302"
 
 EXPOSE 8008
 

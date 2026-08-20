@@ -29,7 +29,7 @@ firefox webkit`.
 | Tier | Needs |
 | --- | --- |
 | `unit` | The source tree and `gcc` for `tests/tools`. The audits of the web client (translations, typing, pointer lock, relative motion) also want `node`, and report themselves skipped without it. The example session scripts are parsed with `bash -n` (their Python helpers byte-compiled) and, where installed, checked for `shellcheck` errors. The transport-dependent rate-control defaults, the one-shot NVML probe, the clipboard-paste typing route (for compositors without `zwp_virtual_keyboard`, such as KWin), and the clipboard ladder's back-off around a dead X display are covered here too. |
-| `integration` | An X display (`E2E_DISPLAY`, default `:99`) or the Wayland backend, PulseAudio, and `selkies` importable with `pixelflux`/`pcmflux`. The Wayland session-DPI suite starts its own throwaway `Xvfb` and skips without one. |
+| `integration` | An X display named by `E2E_DISPLAY` or the Wayland backend, PulseAudio, and `selkies` importable with `pixelflux`/`pcmflux`. Suites needing a server of their own (the keymap, connection-leak and session-DPI checks) start a throwaway `Xvfb` on a free display number instead, and need nothing set. The packaging simulation needs neither, only the source tree and a `python3` that can build a virtualenv. |
 | `e2e` | The above plus Playwright browsers, the built web client (`scripts/ci/build-web.sh`), `wl-clipboard` for the Wayland clipboard checks, `wmctrl` for the two-display desktop-window check (skipped with a notice when absent), and `tests/tools/fetch-openh264.sh` for the Firefox WebRTC block. The pointer-motion suite drives the *installed* Chrome and Firefox on the test display with XTEST, and skips when neither is on `PATH`. |
 | `perf` | A long constrained-link pacer benchmark, plus `xterm` and `xdotool` for the screen-damage load generator. Run on request. |
 | `soak` | The whole `pixelflux`/`pcmflux` API surface, including recording and Wayland. Run on request. |
@@ -38,8 +38,8 @@ firefox webkit`.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `E2E_DISPLAY` | `:99` | X display the server streams from. Never point this at a real session: the suites inject input and resize the root window. |
-| `E2E_PORT` | `18080` | Server port. Everything the server exposes, `/api/metrics` included, is on it. |
+| `E2E_DISPLAY` | none; required | X display the server streams from. Deliberately not defaulted and never inherited from `DISPLAY`: the suites inject input and resize the root window, so pointing them at a real session damages it. Provision a throwaway server (`Xvfb :N -screen 0 8192x4096x24 -noreset`) and name it here. |
+| `E2E_PORT` | a free port | Server port; everything the server exposes, `/api/metrics` included, is on it. Left unset each suite process takes its own, so runs do not have to be serialised. Set it when something in front of the server needs a fixed one. |
 | `E2E_WORKDIR` | `$TMPDIR/selkies-tests` | Server log, shim recordings and other scratch. |
 | `SELKIES_TEST_PYTHON` | the interpreter running the tests | Interpreter the server under test runs on. |
 | `E2E_CHROME` | unset | System Chrome/Chromium binary. Unset uses Playwright's bundled Chromium. |
@@ -71,13 +71,20 @@ Unix-socket suite puts in front of a server with no TCP listener.
 
 `tests/packaging/simulate.sh` runs `infra/packaging/*.sh` against a genuinely
 read-only `/repo` with the root-only tools stubbed, on any host, with no
-container runtime. It takes seconds and catches the staging, read-only-mount and
-package-version mistakes that otherwise only surface in the release job:
+container runtime. It catches the staging, read-only-mount and package-version
+mistakes that otherwise only surface in the release job:
 
 ```bash
 python3 -m build            # or drop a wheel in dist/
 tests/packaging/simulate.sh
 ```
+
+`packaging/test_packaging.py` is that script as a suite, in the `integration`
+tier. It reports one check per packager and needs nothing prepared: it packages
+a wheel from `WHEEL_DIR` or `dist/` when one is there and builds one into
+`$E2E_WORKDIR/packaging-wheel` when not, reusing it afterwards. The packaging
+scripts build a virtualenv, so it hands them the interpreter running the tests
+rather than a distro `python3` that may lack `ensurepip`.
 
 Those scripts also compile the Joystick Interposer into each package, including
 a 32-bit variant wherever the compiler can produce one. A host without a
@@ -86,7 +93,10 @@ simulation covers that branch instead of skipping it:
 
 ```bash
 mkdir -p /tmp/multilib && cd /tmp/multilib
-apt-get download libc6-dev-i386 libc6-i386 lib32gcc-13-dev lib32gcc-s1
+# The gcc runtime package is named for the distribution's compiler generation,
+# so it is resolved rather than spelled out.
+apt-get download libc6-dev-i386 libc6-i386 lib32gcc-s1 \
+  "$(apt-cache search --names-only '^lib32gcc-[0-9]+-dev$' | sort -V | tail -1 | cut -d' ' -f1)"
 for d in *.deb; do dpkg-deb -x "$d" root/; done
 mkdir -p root/lib32 root/lib
 ln -sf ../usr/lib32/libc.so.6 root/lib32/libc.so.6

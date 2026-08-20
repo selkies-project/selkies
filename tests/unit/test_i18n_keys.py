@@ -58,5 +58,12 @@ for name, res in report.items():
     ) or f"{res['enKeys']} keys x {res['locales']} locales"
     check(f"{name}: no locale is missing a key English has", not gaps, detail)
 
+    punctuation = res["punctuation"]
+    detail = ", ".join(
+        f"{k} ({', '.join(lc[:4])})" for k, lc in list(punctuation.items())[:4]
+    ) or f"{res['enKeys']} keys x {res['locales']} locales"
+    check(f"{name}: a label ends in a colon in every locale or in none",
+          not punctuation, detail)
+
 print(f"[i18n] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

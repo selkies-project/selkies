@@ -24,30 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 
-DISPLAY = os.environ.get("LEAK_DISPLAY", ":96")
 ATTEMPTS = 40
-
-
-def start_server() -> subprocess.Popen:
-    """Start a throwaway Xvfb on DISPLAY and wait until it answers queries.
-
-    Returns:
-        The Xvfb process handle.
-
-    Raises:
-        RuntimeError: If the server does not come up within the poll window.
-    """
-    proc = H.spawn(
-        ["Xvfb", DISPLAY, "-screen", "0", "640x480x24", "-extension", "GLX",
-         "-nolisten", "tcp", "-ac", "-noreset"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    for _ in range(30):
-        if subprocess.run(["xdpyinfo", "-display", DISPLAY],
-                          capture_output=True).returncode == 0:
-            return proc
-        time.sleep(0.5)
-    proc.kill()
-    raise RuntimeError("test X server did not start")
 
 
 def open_fd_count() -> int:
@@ -58,7 +35,7 @@ def open_fd_count() -> int:
 def main() -> bool:
     """Fail every monitor build repeatedly and count the descriptors left behind."""
     res = H.Results("x-connection-leak")
-    server = start_server()
+    server, display_name = H.private_x_server(640, 480)
     try:
         from selkies import input_handler as IH
 
@@ -75,7 +52,7 @@ def main() -> bool:
             failures = 0
             for _ in range(ATTEMPTS):
                 try:
-                    IH._X11ClipboardMonitor(DISPLAY)
+                    IH._X11ClipboardMonitor(display_name)
                 except RuntimeError:
                     failures += 1
             res.check("every build failed as arranged", failures == ATTEMPTS, failures)
@@ -90,7 +67,7 @@ def main() -> bool:
             IH._X11ClipboardMonitor._build = original
 
         # And a successful monitor still closes cleanly, fds included.
-        mon = IH._X11ClipboardMonitor(DISPLAY)
+        mon = IH._X11ClipboardMonitor(display_name)
         cmd_fds = (mon._cmd_r, mon._cmd_w)
         mon.close()
         closed = []
@@ -124,8 +101,7 @@ def main() -> bool:
         res.check("a SIGKILLed run takes its spawned children with it",
                   not os.path.exists(f"/proc/{child_pid}"), f"child {child_pid}")
     finally:
-        server.kill()
-        server.wait(timeout=10)
+        H.stop_x_server(server, display_name)
     return res.summary()
 
 

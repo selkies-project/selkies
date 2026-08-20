@@ -5306,7 +5306,7 @@ function initWebsockets() {
                                     });
                             }
                             window.postMessage(clipboardPreviewMessage(text), window.location.origin);
-                        } else if (clipboard_out_enabled) {
+                        } else if (clipboard_out_enabled && enable_binary_clipboard) {
                             const bytes = result;
                             const blob = new Blob([bytes], { type: mpMime });
                             const isFreshContent = clipboardSync.shouldSend(new Uint8Array(bytes), mpMime);

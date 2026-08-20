@@ -35,7 +35,6 @@ import time
 from collections import OrderedDict, deque
 from datetime import datetime
 from enum import Enum
-from shutil import which
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Iterable, Optional, Union
 
@@ -54,8 +53,9 @@ from .display_utils import (
     resize_display,
     clear_selkies_monitors,
     replace_selkies_monitors,
-    current_wm_name,
-    wait_for_wm,
+    reconcile_realized_layout,
+    read_realized_root,
+    MultiMonitorWindowManager,
     wayland_output_id,
     session_screen_index,
     wayland_reposition_primary,
@@ -569,6 +569,7 @@ async def _broadcast_to_clients(
     clients: set,
     message: Union[str, bytes, bytearray, memoryview],
     per_client_timeout: Optional[float] = None,
+    only: Optional[int] = None,
 ) -> set:
     """Broadcast concurrently to all clients, removing only on clear connection errors.
 
@@ -583,6 +584,9 @@ async def _broadcast_to_clients(
         message: Text control message, or raw bytes for binary frames.
         per_client_timeout: Per-send liveness bound in seconds; None sends
             unbounded.
+        only: Connection identity (`id(socket)`) to address alone, for an
+            answer that belongs to one client rather than to the session. A
+            requester that has since disconnected receives nothing.
 
     Returns:
         The set of clients dropped by this call. Removal mutates the PASSED
@@ -592,6 +596,9 @@ async def _broadcast_to_clients(
         per-frame set.
     """
     if not clients:
+        return set()
+    recipients = clients if only is None else {c for c in clients if id(c) == only}
+    if not recipients:
         return set()
 
     # Hard per-frame ceiling, both text and binary. Nothing legitimate reaches
@@ -649,8 +656,8 @@ async def _broadcast_to_clients(
 
     # Single-viewer fast path (the common case): skip the pair-list/gather/zip machinery,
     # using the same connection-error removal semantics as the multi-client path below.
-    if len(clients) == 1:
-        client = next(iter(clients))
+    if len(recipients) == 1:
+        client = next(iter(recipients))
         if client.closed:
             clients.discard(client)
             return {client}
@@ -678,7 +685,7 @@ async def _broadcast_to_clients(
     closed_clients = set()
     timed_out_clients = set()
 
-    for client in clients:
+    for client in recipients:
         if client.closed:
             closed_clients.add(client)
             continue
@@ -939,8 +946,9 @@ class SelkiesStreamingApp:
         data: Union[str, bytes],
         mime_type: str = "text/plain",
         reply_to: Optional[str] = None,
+        conn_id: Optional[int] = None,
     ) -> None:
-        """Send clipboard data to all clients, multipart for large payloads.
+        """Send clipboard data to the session's clients, multipart when large.
 
         Args:
             data: Clipboard text (str) or binary payload (bytes).
@@ -953,6 +961,11 @@ class SelkiesStreamingApp:
                 clients can treat the payload cache-only without time
                 heuristics. Legacy clients route the unknown verb to their
                 input module, which ignores it.
+            conn_id: Connection that asked for this payload. An answer goes to
+                that client alone: every other one already holds the content or
+                is about to be told of a change, and a tagged reply they did
+                not ask for is read as their own fetch and cached without ever
+                reaching their clipboard.
         """
         if not (self.data_streaming_server and self.data_streaming_server.clients):
             data_logger.warning("Cannot send clipboard: no clients or server not ready.")
@@ -967,7 +980,8 @@ class SelkiesStreamingApp:
             if reply_to:
                 await _broadcast_to_clients(
                     self.data_streaming_server.clients,
-                    f"clipboard_reply,{reply_to}", per_client_timeout=2.0)
+                    f"clipboard_reply,{reply_to}", per_client_timeout=2.0,
+                    only=conn_id)
             data_bytes = data.encode('utf-8') if not is_binary and isinstance(data, str) else data
             total_size = len(data_bytes)
             if total_size < CLIPBOARD_CHUNK_SIZE:
@@ -978,20 +992,24 @@ class SelkiesStreamingApp:
                     message = f"clipboard,{encoded_data}"
                 # Bounded: the clipboard monitor task calls this, and one
                 # stalled client must not wedge clipboard delivery for all.
-                await _broadcast_to_clients(self.data_streaming_server.clients, message, per_client_timeout=2.0)
+                await _broadcast_to_clients(self.data_streaming_server.clients, message,
+                                            per_client_timeout=2.0, only=conn_id)
             else:
                 data_logger.info(f"Sending large clipboard data ({mime_type}, {total_size} bytes) via multipart.")
                 start_message = f"clipboard_start,{mime_type},{total_size}"
-                await _broadcast_to_clients(self.data_streaming_server.clients, start_message, per_client_timeout=2.0)
+                await _broadcast_to_clients(self.data_streaming_server.clients, start_message,
+                                            per_client_timeout=2.0, only=conn_id)
                 offset = 0
                 while offset < total_size:
                     chunk = data_bytes[offset:offset + CLIPBOARD_CHUNK_SIZE]
                     encoded_chunk = base64.b64encode(chunk).decode('ascii')
                     data_message = f"clipboard_data,{encoded_chunk}"
-                    await _broadcast_to_clients(self.data_streaming_server.clients, data_message, per_client_timeout=2.0)
+                    await _broadcast_to_clients(self.data_streaming_server.clients, data_message,
+                                                per_client_timeout=2.0, only=conn_id)
                     offset += len(chunk)
                     await asyncio.sleep(0)
-                await _broadcast_to_clients(self.data_streaming_server.clients, "clipboard_finish", per_client_timeout=2.0)
+                await _broadcast_to_clients(self.data_streaming_server.clients, "clipboard_finish",
+                                            per_client_timeout=2.0, only=conn_id)
                 data_logger.info("Finished sending multi-part clipboard data.")
         except Exception as e:
             data_logger.error(f"Failed to send clipboard data: {e}", exc_info=True)
@@ -1252,15 +1270,14 @@ class DataStreamingServer(BaseStreamingService):
 
         # State for window manager swapping
         self._last_display_count = 0
-        self._is_wm_swapped = False
-        self._wm_swap_is_supported = None
+        self._wm_swap = MultiMonitorWindowManager()
 
     def initialize(self) -> None:
         """Create the SelkiesStreamingApp and InputHandler and wire their callbacks.
 
         Must be called before run(). Also resolves secure vs legacy mode (a set
-        master token locks the encoder to h264enc and closes the config gate
-        until tokens are provisioned) and installs the WebRTC-dialect live
+        master token closes the config gate until tokens are provisioned, and
+        governs who holds input authority) and installs the WebRTC-dialect live
         verbs so both transports honor the same per-key tunables.
         """
         self.is_secure_mode = bool(self.cli_args.master_token)
@@ -1358,10 +1375,10 @@ class DataStreamingServer(BaseStreamingService):
                 res_str, self.app, self, display_id
             )
         else:
+            # Only the resolution is frozen: a DPI sync scales what the desktop
+            # draws inside it, and this transport applies that in its own
+            # message loop rather than through an input-handler callback.
             self.input_handler.on_resize = lambda res_str, display_id='primary': logger.warning("Resize disabled.")
-            self.input_handler.on_scaling_ratio = lambda scale_val: logger.warning(
-                "Scaling disabled."
-            )
         logger.info("DataStreamingServer initialization complete.")
 
     async def set_native_cursor_rendering(self, enabled: bool) -> None:
@@ -4018,6 +4035,15 @@ class DataStreamingServer(BaseStreamingService):
                                         # reconciles from stream_resolution like X11.
                                         await self._sync_wayland_realized_geometry(client_display_id)
 
+                            # Record it where SETTINGS records its own: the
+                            # display's stored DPI is what a later partial
+                            # SETTINGS keeps, and what the change check compares
+                            # against, so leaving it behind re-applies a DPI the
+                            # desktop has already moved off.
+                            dpi_state = self.display_clients.get(client_display_id)
+                            if dpi_state is not None:
+                                dpi_state["scaling_dpi"] = dpi_value
+
                             if CURSOR_SIZE is not None:
                                 if IS_WAYLAND:
                                     await self._apply_wayland_cursor_size(dpi_value)
@@ -4553,6 +4579,9 @@ class DataStreamingServer(BaseStreamingService):
                     # put the primary back at the origin.
                     await wayland_reposition_primary(module, 0, 0)
                     await self._reanchor_wayland_primary(layouts, keep_ids)
+        # Which of the session's own screens a capture drives has just changed.
+        if self.input_handler:
+            self.input_handler.resync_session_screens()
 
     async def _stop_capture_for_display(self, display_id: str) -> None:
         """Stop one display's capture, serialized against any concurrent start/stop."""
@@ -4675,29 +4704,7 @@ class DataStreamingServer(BaseStreamingService):
         captures and broadcast the resulting resolutions and roster.
         """
         current_display_count = len(self.display_clients)
-        if not IS_WAYLAND and self._wm_swap_is_supported is None:
-            if which("xfce4-session") or which("startplasma-x11"):
-                self._wm_swap_is_supported = True
-            else:
-                self._wm_swap_is_supported = False
-        if (not IS_WAYLAND and current_display_count > 1 and self._wm_swap_is_supported and not self._is_wm_swapped):
-            if "openbox" in (await current_wm_name()).lower():
-                data_logger.info("Multi-monitor setup: Openbox already manages the session; no WM swap.")
-            else:
-                data_logger.info("Multi-monitor setup: switching to Openbox.")
-                # Openbox resolves its stock config chain (user/system rc.xml):
-                # a hand-written minimal config would strip the stock <mouse>
-                # bindings (titlebar double-click maximize, middle-click,
-                # menus) that the compiled-in defaults do not cover, leaving
-                # presses on decorations dead.
-                await self._run_detached_command(["openbox", "--replace"], "switch to openbox")
-                # The takeover must finish BEFORE the layout applies: the
-                # incoming WM snapshots the monitor set it starts against, and
-                # a snapshot taken mid-swap re-tiles maximized windows across
-                # the whole framebuffer.
-                if not await wait_for_wm("openbox"):
-                    data_logger.warning("Openbox takeover not confirmed; applying layout anyway.")
-            self._is_wm_swapped = True
+        await self._wm_swap.ensure_for(current_display_count, IS_WAYLAND)
         if not self.display_clients:
             # Nothing to lay out: stop everything that is still running.
             for display_id in list(self.capture_instances.keys()):
@@ -4892,102 +4899,73 @@ class DataStreamingServer(BaseStreamingService):
             # clamp the layouts — and the per-display state the resolution
             # broadcast reports — to what was actually realized, so clients
             # render the stream that really exists.
-            realized_res, _, _, _, _ = await get_new_res("1x1")
-            try:
-                realized_w, realized_h = (
-                    int(v) for v in (realized_res or "").lower().replace(" ", "").split("x")
-                )
-            except (ValueError, AttributeError):
-                realized_w, realized_h = total_width, total_height
-            if (realized_w > 0 and realized_h > 0
-                    and (realized_w, realized_h) != (total_width, total_height)):
+            realized_w, realized_h = await read_realized_root((total_width, total_height))
+            if (realized_w, realized_h) != (total_width, total_height):
                 data_logger.warning(
                     f"Realized screen size {realized_w}x{realized_h} differs from target "
                     f"{total_width}x{total_height}; clamping display layouts to it."
                 )
-                # A primary that no longer fits at its offset (secondary placed
-                # left/up on a server that refused the grow — fully outside OR
-                # truncated to a sliver) must stay usable above all else:
-                # re-anchor it at the origin. The arrangement is void then, so
-                # every secondary is dropped below.
-                primary_layout = layouts.get('primary')
-                extension_unrealizable = bool(primary_layout) and (
-                    (primary_layout['x'] > 0 and primary_layout['x'] + primary_layout['w'] > realized_w)
-                    or (primary_layout['y'] > 0 and primary_layout['y'] + primary_layout['h'] > realized_h)
-                )
-                if extension_unrealizable:
+                offsets = {d: (l['x'], l['y']) for d, l in layouts.items()}
+                fit = reconcile_realized_layout(layouts, realized_w, realized_h)
+                if fit.reanchored:
                     data_logger.error(
-                        f"Primary at +{primary_layout['x']}+{primary_layout['y']} does not fit the "
-                        f"realized {realized_w}x{realized_h} root; re-anchoring it at the origin."
+                        f"Primary at +{offsets['primary'][0]}+{offsets['primary'][1]} does not fit "
+                        f"the realized {realized_w}x{realized_h} root; re-anchored at the origin."
                     )
-                    primary_layout['x'], primary_layout['y'] = 0, 0
                     if 'primary' in keep_ids:
                         # The kept capture was re-targeted to the void offset;
                         # rebuild it at the re-anchored region instead.
                         keep_ids.discard('primary')
                         await self._stop_capture_for_display('primary')
-                for did, layout in list(layouts.items()):
-                    if did != 'primary' and (extension_unrealizable
-                                             or layout['x'] >= realized_w
-                                             or layout['y'] >= realized_h):
-                        # The region lies entirely outside the realized root (or
-                        # the arrangement collapsed): no capture can grab it and
-                        # no pointer warp can reach it (clicks would clamp to
-                        # the primary's edge). Refuse the display instead of
-                        # leaving a broken sliver laid out.
-                        data_logger.error(
-                            f"Display '{did}' at +{layout['x']}+{layout['y']} does not fit the "
-                            f"realized {realized_w}x{realized_h} root; dropping it. The X server "
-                            "must allow a framebuffer covering all displays (e.g. a larger Xvfb "
-                            "-screen) for extended layouts."
-                        )
-                        del layouts[did]
-                        keep_ids.discard(did)
-                        await self._stop_capture_for_display(did)
-                        dropped_client = self.display_clients.get(did)
-                        dropped_ws = dropped_client.get('ws') if dropped_client else None
-                        if dropped_ws is not None:
-                            try:
-                                await asyncio.wait_for(
-                                    dropped_ws.send_str(
-                                        "KILL The X server cannot extend the desktop to fit this display."
-                                    ),
-                                    timeout=2.0,
-                                )
-                                await asyncio.wait_for(
-                                    dropped_ws.close(code=1008, message=b"Extended layout unrealizable"),
-                                    timeout=2.0,
-                                )
-                            except asyncio.TimeoutError:
-                                _close_abandoned_ws(dropped_ws)
-                            except (ConnectionResetError, OSError, RuntimeError):
-                                pass
-                        continue
-                    clamped_w = max(2, min(layout['w'], realized_w - layout['x']) & ~1)
-                    clamped_h = max(2, min(layout['h'], realized_h - layout['y']) & ~1)
-                    if (clamped_w, clamped_h) == (layout['w'], layout['h']):
-                        continue
-                    data_logger.warning(
-                        f"Display '{did}': layout {layout['w']}x{layout['h']} clamped to "
-                        f"{clamped_w}x{clamped_h} inside the realized root."
+                for did in fit.dropped:
+                    data_logger.error(
+                        f"Display '{did}' at +{offsets[did][0]}+{offsets[did][1]} does not fit the "
+                        f"realized {realized_w}x{realized_h} root; dropping it. The X server "
+                        "must allow a framebuffer covering all displays (e.g. a larger Xvfb "
+                        "-screen) for extended layouts."
                     )
-                    layout['w'], layout['h'] = clamped_w, clamped_h
+                    keep_ids.discard(did)
+                    await self._stop_capture_for_display(did)
+                    dropped_client = self.display_clients.get(did)
+                    dropped_ws = dropped_client.get('ws') if dropped_client else None
+                    if dropped_ws is not None:
+                        try:
+                            await asyncio.wait_for(
+                                dropped_ws.send_str(
+                                    "KILL The X server cannot extend the desktop to fit this display."
+                                ),
+                                timeout=2.0,
+                            )
+                            await asyncio.wait_for(
+                                dropped_ws.close(code=1008, message=b"Extended layout unrealizable"),
+                                timeout=2.0,
+                            )
+                        except asyncio.TimeoutError:
+                            _close_abandoned_ws(dropped_ws)
+                        except (ConnectionResetError, OSError, RuntimeError):
+                            pass
+                for did in fit.clamped:
+                    layout = layouts[did]
+                    data_logger.warning(
+                        f"Display '{did}': layout clamped to {layout['w']}x{layout['h']} "
+                        "inside the realized root."
+                    )
                     client_data = self.display_clients.get(did)
                     if client_data:
-                        client_data['width'], client_data['height'] = clamped_w, clamped_h
+                        client_data['width'], client_data['height'] = layout['w'], layout['h']
                     if did == 'primary':
-                        self.app.display_width = clamped_w
-                        self.app.display_height = clamped_h
+                        self.app.display_width = layout['w']
+                        self.app.display_height = layout['h']
                     # A capture kept alive across this pass was re-targeted to the
                     # pre-clamp region; move it inside the realized root or rebuild it.
                     inst = self.capture_instances.get(did)
                     if did in keep_ids and inst and inst.get('module'):
                         try:
                             inst['module'].update_capture_region(
-                                layout['x'], layout['y'], clamped_w, clamped_h
+                                layout['x'], layout['y'], layout['w'], layout['h']
                             )
                             inst['settings'] = self._get_capture_settings(
-                                did, clamped_w, clamped_h, layout['x'], layout['y']
+                                did, layout['w'], layout['h'], layout['x'], layout['y']
                             )
                         except Exception as e:
                             data_logger.warning(
@@ -4995,10 +4973,13 @@ class DataStreamingServer(BaseStreamingService):
                             )
                             keep_ids.discard(did)
                             await self._stop_capture_for_display(did)
-                # One atomic re-swap to the clamped layouts (dropped displays'
+                # One atomic re-swap to the fitted layouts (dropped displays'
                 # monitors disappear with it) — RRSetMonitor cannot redefine an
-                # existing name in place.
-                await replace_selkies_monitors(layouts, screen_name=screen_name)
+                # existing name in place. A root that merely came back larger
+                # than asked for needs none: every swap makes window managers
+                # re-tile.
+                if fit.dropped or fit.reanchored or fit.clamped:
+                    await replace_selkies_monitors(layouts, screen_name=screen_name)
         else:
             # Wayland: realize the layout as compositor outputs before the start
             # loop binds a capture to each of them.

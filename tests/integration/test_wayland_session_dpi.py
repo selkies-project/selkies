@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
@@ -102,18 +101,8 @@ if not shutil.which("Xvfb") or not shutil.which("xrdb"):
     print(f"\n{len(results) - len(failed)}/{len(results)} passed", flush=True)
     sys.exit(1 if failed else 77 if not failed else 0)
 
-DISP = ":98"
-xvfb = H.spawn(
-    ["Xvfb", DISP, "-screen", "0", "640x480x24", "-extension", "GLX",
-     "-nolisten", "tcp", "-ac", "-noreset"],
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+xvfb, DISP = H.private_x_server(640, 480)
 try:
-    for _ in range(50):
-        if subprocess.run(["xrdb", "-query", "-display", DISP],
-                          capture_output=True).returncode == 0:
-            break
-        time.sleep(0.2)
-
     def query() -> dict[str, str]:
         """Read the private X server's resource database as a dict."""
         out = subprocess.run(["xrdb", "-query", "-display", DISP],
@@ -133,8 +122,7 @@ try:
     check("xsettingsd config follows the merge",
           "Xft/DPI 147456" in open(os.path.join(home, ".xsettingsd")).read())
 finally:
-    xvfb.terminate()
-    xvfb.wait()
+    H.stop_x_server(xvfb, DISP)
     shutil.rmtree(home, ignore_errors=True)
 
 failed = [r for r in results if not r[1]]

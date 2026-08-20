@@ -3,6 +3,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
-mkdir -pm700 "${XDG_RUNTIME_DIR}"
+mkdir -p "${XDG_RUNTIME_DIR}"
+chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 chown -f "$(id -nu):$(id -ng)" "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 exec dbus-daemon --system --nofork --nosyslog --nopidfile --address="${DBUS_SYSTEM_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/dbus-system-bus}"

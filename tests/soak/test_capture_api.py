@@ -10,6 +10,7 @@ multichannel/RED/playback, ...).
 import base64
 import json
 import os
+import shutil
 import socket as pysocket
 import subprocess
 import sys
@@ -20,7 +21,9 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
-TEST_DISPLAY = ":98"
+# Filled in by __main__ with a throwaway X server of this suite's own:
+# the capture checks paint the root and resize it.
+TEST_DISPLAY = ""
 CU_PORT = 9599
 REC_SOCK = os.path.join(H.WORKDIR, "pixelflux-rec.sock")
 
@@ -267,9 +270,13 @@ def main() -> "H.Results":
             res.check("wayland output mgmt", False, repr(e)[:140])
         # input injection (virtual-keyboard + pointer)
         try:
-            wc.set_keymap_string("us")
-            wc.get_xkb_keymap_string()
-            wc.bind_keysyms([ord("x")])
+            # A real round trip: the API takes an XKB keymap, not a layout
+            # name, and a name simply fails to compile and leaves the current
+            # keymap in place — which no check here would notice.
+            wc.set_keymap_string(wc.get_xkb_keymap_string())
+            # The caller owns keysym-to-keycode assignment; bind the one this
+            # check goes on to press.
+            wc.set_keymap_overlay([(45, ord("x"))])
             wc.inject_key(45, 1)
             time.sleep(0.2)
             ks = wc.get_keyboard_state()
@@ -400,11 +407,24 @@ def main() -> "H.Results":
 
     # ---- pcmflux capture: stereo, VBR, header prefix, silence gate, latency ----
     H.pulse_setup()
-    tone = H.spawn(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
-                    "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
-                    "-af", "volume=0.5"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.5)
+    # Every audio check below listens for this tone, so its absence is reported
+    # once here rather than left to raise out of the suite: spawning a missing
+    # binary outside a check's own try block takes the whole run down and
+    # reports nothing at all.
+    tone = None
+    if shutil.which("ffplay"):
+        tone = H.spawn(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
+                        # Long enough to outlast every audio check that listens
+                        # for it; the process is terminated explicitly below, so
+                        # the duration only has to be an upper bound. At 30 s the
+                        # later checks in this section were reading silence.
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=600",
+                        "-af", "volume=0.5"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.5)
+    else:
+        res.check("a tone generator for the audio checks", False,
+                  "ffplay not found; the pcmflux checks below have nothing to hear")
     try:
         H.pulse_setup()
         ps = pcmflux.AudioCaptureSettings()
@@ -435,11 +455,9 @@ def main() -> "H.Results":
         res.check("pcmflux capture", False, repr(e)[:200])
 
     # ---- pcmflux multichannel (6 ch) capture ----
+    surround = None
     try:
-        subprocess.run(["pactl", "load-module", "module-null-sink",
-                        "sink_name=surround51", "rate=48000"],
-                       capture_output=True,
-                       env=dict(os.environ))
+        surround = H.pulse_null_sink("surround51", rate=48000)
         ps = pcmflux.AudioCaptureSettings()
         ps.device_name = "surround51.monitor"
         ps.sample_rate = 48000
@@ -457,6 +475,8 @@ def main() -> "H.Results":
         ac.stop_capture()
     except Exception as e:
         res.check("pcmflux multichannel", False, repr(e)[:200])
+    finally:
+        H.pulse_unload(surround)
 
     # ---- pcmflux RED redundancy + raw opus (omit header) ----
     try:
@@ -520,6 +540,10 @@ def main() -> "H.Results":
 
 
 if __name__ == "__main__":
-    os.environ["E2E_DISPLAY"] = TEST_DISPLAY
-    r = main()
+    xvfb, TEST_DISPLAY = H.private_x_server(1920, 1080)
+    os.environ["E2E_DISPLAY"] = H.TEST_DISPLAY = TEST_DISPLAY
+    try:
+        r = main()
+    finally:
+        H.stop_x_server(xvfb, TEST_DISPLAY)
     sys.exit(0 if not r.failed() else 1)

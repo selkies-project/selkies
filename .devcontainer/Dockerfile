@@ -1,7 +1,7 @@
-ARG IMAGE_TAG=ubuntu-24.04
+ARG IMAGE_TAG="ubuntu-24.04"
 FROM mcr.microsoft.com/devcontainers/base:${IMAGE_TAG}
 
-ARG DEBIAN_FRONTEND=noninteractive
+ARG DEBIAN_FRONTEND="noninteractive"
 
 # Install base Selkies dependencies (X11 capture/input, PulseAudio, Mesa/VA-API, Wayland plumbing)
 RUN sudo apt-get update && sudo apt-get install --no-install-recommends -y \
@@ -28,6 +28,8 @@ RUN sudo apt-get update && sudo apt-get install --no-install-recommends -y \
         libva2 \
         libva-drm2 \
         libgbm1 \
+        libpixman-1-0 \
+        libxcb-render0 \
         mesa-utils \
         wayland-protocols \
         libwayland-egl1 \

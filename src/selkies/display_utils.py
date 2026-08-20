@@ -25,6 +25,7 @@ import base64
 import io
 import re
 import os
+import shutil
 import signal
 import stat
 import struct
@@ -35,7 +36,7 @@ from asyncio import subprocess
 import asyncio
 import threading
 from shutil import which
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from PIL import Image, ImageMath
 
@@ -481,6 +482,25 @@ def compute_dual_layout(
     return layouts, (total_w + 7) & ~7, total_h
 
 
+def layout_extent(layouts: Optional[Dict[str, Dict[str, int]]]) -> Tuple[int, int]:
+    """Size of the region the laid-out displays cover together.
+
+    A layout table is normalized to a non-negative origin, so its extent is
+    the furthest right and bottom edge over all entries. An entry with a
+    missing or null field contributes only what it does carry, and an empty
+    table has no extent at all.
+
+    Returns:
+        ``(width, height)``; either is 0 when nothing bounds that axis.
+    """
+    width = 0
+    height = 0
+    for layout in (layouts or {}).values():
+        width = max(width, int(layout.get("x") or 0) + int(layout.get("w") or 0))
+        height = max(height, int(layout.get("y") or 0) + int(layout.get("h") or 0))
+    return width, height
+
+
 def clamp_primary_feedback(
     primary_wh: Tuple[int, int],
     layouts: Optional[Dict[str, Dict[str, int]]],
@@ -502,8 +522,7 @@ def clamp_primary_feedback(
     if not prev_primary:
         return primary_wh
     p_w, p_h = primary_wh
-    cur_total_w = max(l["x"] + l["w"] for l in layouts.values())
-    cur_total_h = max(l["y"] + l["h"] for l in layouts.values())
+    cur_total_w, cur_total_h = layout_extent(layouts)
     if (position in ("right", "left") and p_w >= cur_total_w) or (
         position in ("up", "down") and p_h >= cur_total_h
     ):
@@ -864,6 +883,61 @@ def _sync_wm_name() -> str:
             return ""
 
 
+class MultiMonitorWindowManager:
+    """Hands X11 window management to Openbox once a session has two displays.
+
+    XFCE and Plasma tile a maximized window across the whole framebuffer rather
+    than against the per-display regions an extended layout defines, so a
+    session running one of them swaps to Openbox the first time it extends.
+    Both transports share this state: the swap is attempted once per session
+    either way, since a second one would restart window management under
+    whoever is using it. Wayland sessions manage their own windows and never
+    swap.
+    """
+
+    def __init__(self) -> None:
+        self._swapped = False
+        self._supported: Optional[bool] = None
+
+    async def ensure_for(self, display_count: int, is_wayland: bool) -> None:
+        """Swap if this session needs it and has not already been swapped."""
+        if is_wayland or self._swapped or display_count <= 1:
+            return
+        if self._supported is None:
+            self._supported = bool(
+                shutil.which("xfce4-session") or shutil.which("startplasma-x11"))
+        if not self._supported:
+            return
+        self._swapped = True
+        if "openbox" in (await current_wm_name()).lower():
+            logger_app_resize.info(
+                "Multi-monitor setup: Openbox already manages the session; no WM swap.")
+            return
+        logger_app_resize.info("Multi-monitor setup: switching to Openbox.")
+        try:
+            # Openbox resolves its stock config chain (user/system rc.xml): a
+            # hand-written minimal config would strip the stock <mouse>
+            # bindings (titlebar double-click maximize, middle-click, menus)
+            # that the compiled-in defaults do not cover, leaving presses on
+            # decorations dead. Detached, so the window manager outlives this
+            # process's session.
+            await asyncio.create_subprocess_exec(
+                "openbox", "--replace",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:
+            logger_app_resize.error(f"Failed to switch to Openbox: {e}")
+            return
+        # The takeover must finish BEFORE the layout applies: the incoming WM
+        # snapshots the monitor set it starts against, and a snapshot taken
+        # mid-swap re-tiles maximized windows across the whole framebuffer.
+        if not await wait_for_wm("openbox"):
+            logger_app_resize.warning(
+                "Openbox takeover not confirmed; applying layout anyway.")
+
+
 async def current_wm_name() -> str:
     """Name of the running EWMH window manager, '' when undetectable."""
     return await asyncio.to_thread(_sync_wm_name)
@@ -983,6 +1057,74 @@ async def clear_selkies_monitors() -> None:
         await delete_logical_monitor(monitor_name)
 
 
+class RealizedFit(NamedTuple):
+    """What fitting a layout to the realized root changed.
+
+    ``dropped`` displays are gone from the layout, ``clamped`` ones kept a
+    smaller rectangle, and ``reanchored`` means the primary moved back to the
+    origin (which voids the arrangement, so every secondary is dropped).
+    """
+    dropped: List[str]
+    reanchored: bool
+    clamped: List[str]
+
+
+def reconcile_realized_layout(
+    layouts: Dict[str, Dict[str, int]], realized_w: int, realized_h: int
+) -> RealizedFit:
+    """Fit ``layouts`` to the root the server actually realized, in place.
+
+    The X server, not the request, is the authority on the realized geometry: a
+    driver can reject the mode or framebuffer size and leave the root at its
+    old dimensions, and a capture region outside the root fails or grabs
+    garbage while a pointer warp cannot reach it. Rectangles are clamped inside
+    the root; a primary that no longer fits at its offset is re-anchored at the
+    origin, which voids the arrangement and drops every secondary with it.
+
+    Callers own the side effects the result implies: stopping captures, telling
+    the client, and re-swapping the logical monitors.
+    """
+    # A primary placed at an offset (a secondary to its left or above) that now
+    # runs past the realized root — fully outside OR truncated to a sliver —
+    # must stay usable above all else.
+    primary = layouts.get("primary")
+    reanchored = bool(primary) and (
+        (primary["x"] > 0 and primary["x"] + primary["w"] > realized_w)
+        or (primary["y"] > 0 and primary["y"] + primary["h"] > realized_h)
+    )
+    if reanchored:
+        primary["x"], primary["y"] = 0, 0
+    dropped: List[str] = []
+    clamped: List[str] = []
+    for did, layout in list(layouts.items()):
+        if did != "primary" and (
+            reanchored or layout["x"] >= realized_w or layout["y"] >= realized_h
+        ):
+            # Entirely outside the realized root, or the arrangement collapsed:
+            # no capture can grab it and no pointer warp can reach it (clicks
+            # would clamp to the primary's edge). Refuse the display instead of
+            # leaving a broken sliver laid out.
+            del layouts[did]
+            dropped.append(did)
+            continue
+        fit_w = max(2, min(layout["w"], realized_w - layout["x"]) & ~1)
+        fit_h = max(2, min(layout["h"], realized_h - layout["y"]) & ~1)
+        if (fit_w, fit_h) != (layout["w"], layout["h"]):
+            layout["w"], layout["h"] = fit_w, fit_h
+            clamped.append(did)
+    return RealizedFit(dropped, reanchored, clamped)
+
+
+async def read_realized_root(fallback: Tuple[int, int]) -> Tuple[int, int]:
+    """The root window's realized size, or ``fallback`` when it cannot be read."""
+    realized_res, _, _, _, _ = await get_new_res("1x1")
+    try:
+        w, h = (int(v) for v in (realized_res or "").lower().replace(" ", "").split("x"))
+    except (ValueError, AttributeError):
+        return fallback
+    return (w, h) if w > 0 and h > 0 else fallback
+
+
 async def apply_extended_layout(
     layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int
 ) -> bool:
@@ -994,7 +1136,12 @@ async def apply_extended_layout(
     per-display regions. Mirrors the websockets engine's command sequence.
 
     Returns:
-        True when the framebuffer was set.
+        True when the framebuffer and monitors were set. ``layouts`` is fitted
+        in place to the root the server actually produced, so the caller must
+        read the rectangles back rather than reuse the ones it passed in: a
+        display kept at a smaller size carries the smaller one, and a display
+        that could not be placed at all is gone from the mapping. False when
+        nothing could be laid out; the monitors are torn down.
     """
     total_mode = f"{total_w}x{total_h}"
     curr_res, _, available, _, screen_name = await get_new_res(total_mode)
@@ -1024,21 +1171,46 @@ async def apply_extended_layout(
             # keeps its mode while captures and pointer warps address the
             # enlarged root (websockets-engine parity).
             if not await grow_framebuffer(total_w, total_h):
-                await clear_selkies_monitors()
-                return False
-            realized, _, _, _, _ = await get_new_res("1x1")
-            try:
-                realized_w, realized_h = (int(v) for v in (realized or "").lower().split("x"))
-            except (ValueError, AttributeError):
-                await clear_selkies_monitors()
-                return False
-            if realized_w < total_w or realized_h < total_h:
                 logger_app_resize.error(
-                    f"Framebuffer grow reached {realized_w}x{realized_h}, short of {total_mode}; "
-                    "extended layout aborted."
+                    f"Neither a mode-set nor a framebuffer grow reached {total_mode}; "
+                    "fitting the layout to whatever the root realized."
                 )
-                await clear_selkies_monitors()
-                return False
+    # The server, not the request, is the authority on the realized geometry,
+    # and it can report success while leaving the root short. Fit the layout to
+    # what is really there before any capture is pointed at it.
+    realized_w, realized_h = await read_realized_root((total_w, total_h))
+    if (realized_w, realized_h) == (total_w, total_h):
+        return True
+    logger_app_resize.warning(
+        f"Realized screen size {realized_w}x{realized_h} differs from target "
+        f"{total_mode}; fitting the display layouts to it."
+    )
+    offsets = {d: (l["x"], l["y"]) for d, l in layouts.items()}
+    fit = reconcile_realized_layout(layouts, realized_w, realized_h)
+    if fit.reanchored:
+        logger_app_resize.error(
+            f"Primary at +{offsets['primary'][0]}+{offsets['primary'][1]} does not fit the "
+            f"realized {realized_w}x{realized_h} root; re-anchored at the origin."
+        )
+    for did in fit.dropped:
+        logger_app_resize.error(
+            f"Display '{did}' at +{offsets[did][0]}+{offsets[did][1]} does not fit the realized "
+            f"{realized_w}x{realized_h} root; dropping it. The X server must allow a framebuffer "
+            "covering all displays (e.g. a larger Xvfb -screen) for extended layouts."
+        )
+    for did in fit.clamped:
+        logger_app_resize.warning(
+            f"Display '{did}': layout clamped to {layouts[did]['w']}x{layouts[did]['h']} "
+            "inside the realized root."
+        )
+    # The monitors above were defined at the requested rectangles; where fitting
+    # moved one, redefine them all at the fitted rectangles (a dropped display's
+    # monitor disappears with the swap). A root that merely came back larger
+    # than asked for leaves them alone: every swap makes window managers re-tile.
+    if fit.dropped or fit.reanchored or fit.clamped:
+        if not await replace_selkies_monitors(layouts, screen_name=screen_name):
+            await clear_selkies_monitors()
+            return False
     return True
 
 
@@ -1800,6 +1972,12 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
         if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
             
+    elif which("lxqt-session"):
+        de_name_for_log = "LXQt"
+        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
+        if await _run_xrdb(dpi_value, logger_app_resize):
+            any_method_succeeded = True
+
     elif which("openbox-session") or which("openbox"):
         de_name_for_log = "Openbox"
         logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
@@ -1808,7 +1986,7 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
             
     else:
         de_name_for_log = "Generic/Unknown DE"
-        logger_app_resize.info(f"No specific DE session binary found (KDE, XFCE, MATE, i3, Openbox). Attempting generic xrdb as a fallback for DPI {dpi_value}.")
+        logger_app_resize.info(f"No specific DE session binary found (KDE, XFCE, MATE, i3, LXQt, Openbox). Attempting generic xrdb as a fallback for DPI {dpi_value}.")
         if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
 

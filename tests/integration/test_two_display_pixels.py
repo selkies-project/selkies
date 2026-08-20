@@ -71,7 +71,7 @@ def paint_regions(layout: dict):
     """
     from selkies.Xlib import display as xdisp
 
-    d = xdisp.Display(H.TEST_DISPLAY)
+    d = xdisp.Display(H.require_display())
     root = d.screen().root
     for did, rect in sorted(layout.items()):
         rgb = PRIMARY_RGB if did == "primary" else SECONDARY_RGB

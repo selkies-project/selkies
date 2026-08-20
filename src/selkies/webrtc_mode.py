@@ -43,7 +43,6 @@ import json
 import logging
 import asyncio
 import argparse
-import shutil
 
 from aiohttp import web
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
@@ -60,7 +59,7 @@ from .input_handler import WebRTCInput
 from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_id,
                             compute_dual_layout, apply_extended_layout, get_new_res,
                             clear_selkies_monitors, clamp_primary_feedback,
-                            current_wm_name, wait_for_wm,
+                            MultiMonitorWindowManager,
                             wayland_output_id, wayland_reposition_primary,
                             session_screen_index,
                             parse_resize_dims, cursor_size_for_dpi, align_dims_16)
@@ -229,8 +228,7 @@ class WebRTCService(BaseStreamingService):
         self._last_resize_request: Optional[Tuple[int, int]] = None
         # Multi-monitor WM swap (websockets parity): heavy DEs tile poorly across the
         # per-display regions, so swap to a minimal Openbox once a secondary joins.
-        self._wm_swap_is_supported: Optional[bool] = None
-        self._is_wm_swapped = False
+        self._wm_swap = MultiMonitorWindowManager()
 
         # Shared SelkiesVirtualMic control plane for the WebRTC mic path: one pulse
         # connection and one virtual-source module for the service, provisioned once
@@ -428,7 +426,7 @@ class WebRTCService(BaseStreamingService):
         using_basic_auth = self.args.enable_basic_auth
         ws_protocol = "wss:" if using_https else "ws:"
 
-        prefix = ("/" + self.settings.subfolder.strip("/")) if settings.subfolder else ""
+        prefix = self.settings.subfolder
         username = self.settings.basic_auth_user
         password = self.settings.basic_auth_password
         client = WebRTCSignalingClient(
@@ -1074,43 +1072,6 @@ class WebRTCService(BaseStreamingService):
                 await pipeline.stop_media_pipeline()
         await self.reconfigure_displays()
 
-    async def _maybe_swap_wm_for_multimonitor(self) -> None:
-        """Swap a heavy DE (XFCE/Plasma) to a minimal Openbox once a secondary display
-        joins, so windows tile cleanly against the per-display regions (websockets parity)."""
-        if IS_WAYLAND or self._is_wm_swapped:
-            return
-        if self._wm_swap_is_supported is None:
-            self._wm_swap_is_supported = bool(
-                shutil.which("xfce4-session") or shutil.which("startplasma-x11")
-            )
-        if not self._wm_swap_is_supported:
-            return
-        # One attempt per session, succeed or not — the websockets engine likewise
-        # fires its swap once and does not retry on later reconfigures.
-        self._is_wm_swapped = True
-        if "openbox" in (await current_wm_name()).lower():
-            logger.info("Multi-monitor setup: Openbox already manages the session; no WM swap.")
-            return
-        # Openbox resolves its stock config chain (user/system rc.xml): a
-        # hand-written minimal config would strip the stock <mouse> bindings
-        # (titlebar double-click maximize, middle-click, menus) that the
-        # compiled-in defaults do not cover, leaving presses on decorations dead.
-        try:
-            await asyncio.create_subprocess_exec(
-                "openbox", "--replace",
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            # The takeover must finish BEFORE the layout applies: the incoming
-            # WM snapshots the monitor set it starts against, and a snapshot
-            # taken mid-swap re-tiles maximized windows across the whole
-            # framebuffer.
-            if await wait_for_wm("openbox"):
-                logger.info("Multi-monitor setup: switched to Openbox.")
-            else:
-                logger.warning("Openbox takeover not confirmed; applying layout anyway.")
-        except Exception as e:
-            logger.error(f"Failed to switch to Openbox: {e}")
-
     def _wayland_capture_handle(self) -> Optional[Any]:
         """A pixelflux handle for compositor output management (any ScreenCapture
         reaches the shared Wayland backend); prefers the primary pipeline's live
@@ -1177,11 +1138,15 @@ class WebRTCService(BaseStreamingService):
         if existing is not None:
             return True
         try:
-            return bool(await asyncio.to_thread(
+            created = bool(await asyncio.to_thread(
                 module.create_output, oid, s["w"], s["h"], s["x"], s["y"], scale))
         except Exception as e:
             logger.error(f"Wayland create_output {oid} failed: {e}")
             return False
+        if created and self.input_handler:
+            # Which of the session's own screens a capture drives just changed.
+            self.input_handler.resync_session_screens()
+        return created
 
     async def _wayland_capture_live(self, did: str, pipeline: MediaPipelinePixel) -> bool:
         """Whether the display's capture really runs in the compositor. The
@@ -1500,6 +1465,49 @@ class WebRTCService(BaseStreamingService):
             await self.rtc_app.close_display_peers(did)
         logger.error(f"Secondary display '{did}' dropped on Wayland: {reason}")
 
+    async def _drop_x11_secondary(self, did: str, reason: str) -> None:
+        """Refuse a secondary display the X server cannot fit in its root:
+        unregister it, stop its pipeline, and close its peers with a fatal
+        signaling verdict (4000) so the client does not reload and re-register
+        in a loop — the X11 mirror of the compositor-side drop, and the
+        websockets engine's KILL parity. Caller holds _display_lock.
+
+        Unregistering inline rather than through stop_display_media, which
+        would re-acquire the lock.
+        """
+        pipeline = self.display_pipelines.pop(did, None)
+        self.display_clients.pop(did, None)
+        self.display_layouts.pop(did, None)
+        primary_layout = self.display_layouts.get("primary")
+        if primary_layout:
+            # Input offsets follow the layout: with the arrangement void, the
+            # primary is back at the origin.
+            primary_layout["x"], primary_layout["y"] = 0, 0
+        if pipeline is not None:
+            await pipeline.stop_media_pipeline()
+        if self.peer_manager is not None:
+            async with self.peer_manager.lock:
+                doomed = [
+                    p.ws for p in self.peer_manager.peers.values()
+                    if p.peer_type != "server"
+                    and getattr(p, "display_id", "primary") == did
+                    and getattr(p, "ws", None) is not None and not p.ws.closed
+                ]
+            for peer_ws in doomed:
+                try:
+                    await asyncio.wait_for(
+                        peer_ws.close(code=4000, message=reason.encode("utf-8")),
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+        if self.rtc_app is not None:
+            await self.rtc_app.close_display_peers(did)
+        logger.error(
+            f"Extended layout for '{did}' is unrealizable; the secondary display stays "
+            f"disabled. {reason}"
+        )
+
     async def reconfigure_displays(self) -> None:
         """Lay the extended desktop out for the connected displays and point each
         display's capture at its region — the WR counterpart of the websockets
@@ -1556,7 +1564,7 @@ class WebRTCService(BaseStreamingService):
                 self._broadcast_display_config()
                 return
             did, info = secondary
-            await self._maybe_swap_wm_for_multimonitor()
+            await self._wm_swap.ensure_for(len(self.display_clients), IS_WAYLAND)
             if self._primary_dims is None:
                 # The primary never resized through the layout path: take its
                 # pipeline dimensions (kept current by the single-display path),
@@ -1598,47 +1606,34 @@ class WebRTCService(BaseStreamingService):
                         did, "The compositor cannot create an output for this display."
                     )
                     return
-            elif not await apply_extended_layout(layouts, total_w, total_h):
-                # The extension is unrealizable on this X server (the layout
-                # helper already tore its monitors down). Drop the secondary's
-                # registration (inline: stop_display_media would re-acquire
-                # _display_lock) and close its peers — an input channel left
-                # connected would otherwise keep feeding a display that has no
-                # laid-out region. The signaling socket is closed with a fatal
-                # verdict FIRST: a bare peer failure looks transient to the
-                # client, which would reload and re-register in a loop (the
-                # websockets engine's KILL parity).
-                pipeline = self.display_pipelines.pop(did, None)
-                self.display_clients.pop(did, None)
-                self.display_layouts.pop(did, None)
-                if pipeline is not None:
-                    await pipeline.stop_media_pipeline()
-                if self.peer_manager is not None:
-                    async with self.peer_manager.lock:
-                        doomed = [
-                            p.ws for p in self.peer_manager.peers.values()
-                            if p.peer_type != "server"
-                            and getattr(p, "display_id", "primary") == did
-                            and getattr(p, "ws", None) is not None and not p.ws.closed
-                        ]
-                    for peer_ws in doomed:
-                        try:
-                            await asyncio.wait_for(
-                                peer_ws.close(
-                                    code=4000,
-                                    message=b"The X server cannot extend the desktop to fit this display.",
-                                ),
-                                timeout=2.0,
-                            )
-                        except Exception:
-                            pass
-                if self.rtc_app is not None:
-                    await self.rtc_app.close_display_peers(did)
-                logger.error(
-                    f"Extended layout for '{did}' is unrealizable; the secondary display stays disabled. "
-                    "The X server must allow a framebuffer covering all displays."
-                )
-                return
+            else:
+                # An input channel left connected would keep feeding a display
+                # that has no laid-out region, so a layout the server cannot
+                # realize takes the secondary down with it. The helper fits the
+                # layout to the root that was really produced: the displays it
+                # keeps may come back smaller than the request, and one it
+                # cannot place at all disappears from `layouts`.
+                requested = {d: (r["w"], r["h"]) for d, r in layouts.items()}
+                if (not await apply_extended_layout(layouts, total_w, total_h)
+                        or did not in layouts):
+                    await self._drop_x11_secondary(
+                        did, "The X server cannot extend the desktop to fit this display."
+                    )
+                    return
+                # Only what the server refused is written back. The roster feeds
+                # the resolution reports and _primary_dims feeds the next
+                # layout, so a display the root cut down has to be recorded at
+                # the size it really got — while a rectangle the layout itself
+                # derived must not be, or each pass would recompute the layout
+                # from its own previous output.
+                for fitted_id, fitted in layouts.items():
+                    if (fitted["w"], fitted["h"]) == requested[fitted_id]:
+                        continue
+                    client = self.display_clients.get(fitted_id)
+                    if client is not None:
+                        client["width"], client["height"] = fitted["w"], fitted["h"]
+                    if fitted_id == "primary":
+                        self._primary_dims = (fitted["w"], fitted["h"])
             self.display_layouts = layouts
             p = layouts["primary"]
             if IS_WAYLAND:
@@ -2231,6 +2226,14 @@ class WebRTCService(BaseStreamingService):
         if not IS_WAYLAND and settings.cursor_size > 0:
             initial_dpi = float(getattr(settings, "scaling_dpi", "96"))
             await set_cursor_size(cursor_size_for_dpi(initial_dpi, CURSOR_SIZE))
+
+        # Logical monitors describe the layout of whichever transport defined
+        # them, and a live switch leaves the previous one's behind: a desktop
+        # keeps tiling its panels and maximized windows against a rectangle
+        # that is no longer the screen. This service defines its own when a
+        # second display arrives, and needs none for a single one.
+        if not IS_WAYLAND:
+            await clear_selkies_monitors()
 
         # The pacer rides this loop's 1 s tick but is an independent feature:
         # encoder steering stays gated on --congestion-control, the pacer on

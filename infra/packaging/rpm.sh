@@ -41,6 +41,12 @@ fpm -s dir -t rpm \
     --depends libX11-xcb \
     --depends libva \
     --depends libdrm \
+    --depends mesa-libgbm \
+    --depends mesa-libEGL \
+    --depends glib2 \
+    --depends pixman \
+    --depends libXfixes \
+    --depends libXext \
     --rpm-os linux \
     -C /pkg-root opt usr
 ls -la /out

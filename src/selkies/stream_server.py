@@ -105,6 +105,144 @@ def _sock_rtt_us(sock: Any) -> Optional[int]:
     return r68 or None
 
 
+def _scan_directory(path: str, include_parent: bool) -> List[Dict[str, Any]]:
+    """One directory's entries, as the file index renders them.
+
+    Raises:
+        PermissionError: The directory cannot be read.
+    """
+    items: List[Dict[str, Any]] = []
+    if include_parent:
+        items.append({"name": "../", "size": "-", "mtime": "-", "is_dir": True})
+    with os.scandir(path) as it:
+        for entry in it:
+            try:
+                stats = entry.stat()
+                mtime = datetime.fromtimestamp(stats.st_mtime).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                is_dir = entry.is_dir()
+            except OSError as e:
+                # Entries can vanish or be unstat-able (broken symlinks, races).
+                logger.warning(f"Skipping unreadable directory entry {entry.name!r}: {e}")
+                continue
+            items.append({
+                "name": entry.name + ("/" if is_dir else ""),
+                "size": f"{stats.st_size / 1024:.1f} KB" if not is_dir else "-",
+                "mtime": mtime,
+                "is_dir": is_dir,
+            })
+    return items
+
+
+class UplinkAllowance:
+    """Read pacing for a client upload, sized from what that client can send.
+
+    An upload allowed to run at the client's full uplink rate stands a queue
+    in the first hop, and everything else the session sends — input, feedback,
+    the acknowledgements the video stream's own delivery depends on — waits
+    behind it. That wait is what a user reports as the session breaking down
+    mid-transfer, and it is bounded by the buffer rather than by the file, so
+    it does not improve as the transfer proceeds.
+
+    Nothing on this side can measure the client's uplink directly, and reading
+    flat out to find it would fill the very queue this exists to keep empty —
+    and would measure the buffers it drained rather than the link. So the
+    allowance steps up instead, and watches for the one moment the arithmetic
+    is honest: while a transfer is paced below the client's rate its data
+    banks up here and reads never wait, so a read that DOES wait means the
+    backlog is gone and what arrives from then on is arriving at the link's
+    own rate. That window is the measurement, and the transfer settles below
+    it — the link keeps an idle share, the queue drains, and the session's
+    traffic crosses at its unloaded delay.
+
+    Reads are what apply the rate, since a paused read closes the receive
+    window and the data waits in the client's kernel, so no client
+    cooperation is needed.
+    """
+
+    # Half the client's link. Measured on a modeled 6 Mbit/s uplink behind a
+    # 1 MiB first-hop buffer, with a session streaming beside the transfer: a
+    # small request took 1421 ms while an unpaced upload ran, 1116 ms at a
+    # three-quarter share, and 2 ms — its unloaded time — at a half, for 60%
+    # of the unpaced transfer rate.
+    SHARE: float = 0.5
+    WINDOW_SECONDS: float = 0.5
+    GROWTH: float = 1.5
+    START_BPS: int = 256 * 1024
+    # How much of a window may be spent waiting for the client before the
+    # backlog counts as gone and the window's rate as the link's own.
+    STARVED_FRACTION: float = 0.15
+    # Finding the rate leaves the link's queue full; this is the share and the
+    # time given to emptying it before the transfer settles at SHARE.
+    DRAIN_SHARE: float = 0.45
+    DRAIN_SECONDS: float = 2.5
+    FLOOR_BPS: int = 64 * 1024
+    # Below this a transfer is over before a queue could matter, and pacing it
+    # would only make a small file feel slow.
+    MIN_PACED_BYTES: int = 4 * 1024 * 1024
+    # One read's worth of receive window, and so the burst the client answers
+    # with: small enough that the burst cannot itself become the queue.
+    READ_BYTES: int = 64 * 1024
+
+    def transfer(self) -> Dict[str, Any]:
+        """State for one upload: its own ramp, its own bucket."""
+        return {"rate_bps": float(self.START_BPS), "seen": 0, "window_start": None,
+                "phase": "ramp", "starved": 0.0, "tokens": 0.0, "ts": 0.0,
+                "drain_until": 0.0, "capacity_bps": 0.0}
+
+    def _step(self, state: Dict[str, Any], now: float) -> None:
+        """Close one window: step up while data is banked, settle when it runs out."""
+        elapsed = now - state["window_start"]
+        observed = state["seen"] / elapsed if elapsed > 0 else 0.0
+        starved = state["starved"]
+        state["window_start"] = now
+        state["seen"] = 0
+        state["starved"] = 0.0
+        if state["phase"] == "ramp":
+            if starved < elapsed * self.STARVED_FRACTION:
+                state["rate_bps"] *= self.GROWTH
+                return
+            # The backlog ran out during this window, so part of it still
+            # counted buffered bytes. The next one is all link.
+            state["phase"] = "measure"
+            return
+        if state["phase"] == "measure":
+            state["capacity_bps"] = observed
+            state["phase"] = "drain"
+            # Reaching the client's rate left the link's queue standing, and at
+            # the steady share it would take most of a transfer to come back
+            # out. A wider share first clears it.
+            state["drain_until"] = now + self.DRAIN_SECONDS
+            state["rate_bps"] = max(self.FLOOR_BPS, observed * self.DRAIN_SHARE)
+            return
+        if state["phase"] == "drain" and now >= state["drain_until"]:
+            state["phase"] = "steady"
+            state["rate_bps"] = max(self.FLOOR_BPS,
+                                    state["capacity_bps"] * self.SHARE)
+
+    async def pace(self, nbytes: int, state: Dict[str, Any],
+                   waited: float = 0.0) -> None:
+        """Account one read of `nbytes` that spent `waited` seconds arriving."""
+        now = time.monotonic()
+        if state["window_start"] is None:
+            state["window_start"] = now
+            state["ts"] = now
+        state["seen"] += nbytes
+        state["starved"] += waited
+        if now - state["window_start"] >= self.WINDOW_SECONDS:
+            self._step(state, now)
+        rate = state["rate_bps"]
+        state["tokens"] = min(rate * 0.25,
+                              state["tokens"] + (now - state["ts"]) * rate)
+        state["ts"] = now
+        state["tokens"] -= nbytes
+        if state["tokens"] < 0:
+            # The deficit is slept off here and repaid by the next call's
+            # elapsed-time refill, as in TransferPacer.
+            await asyncio.sleep(-state["tokens"] / rate)
+
+
 class TransferPacer:
     """File-transfer pacing shared across all transfers of one server.
 
@@ -694,11 +832,19 @@ class CentralizedStreamServer:
                 f"Ignoring file_transfer_limit_mbps={limit_mbps!r}: not a usable rate."
             )
             limit_mbps = 0.0
-        cc = self.settings.file_transfer_cc
         self.transfer_pacer = TransferPacer(
             static_bps=int(limit_mbps * 125000),
-            adaptive=bool(cc[0] if isinstance(cc, (list, tuple)) else cc),
+            adaptive=bool(self.settings.file_transfer_cc[0]),
         )
+        # Uploads have no congestion gauge on this side, so they are held below
+        # the rate the client itself demonstrates. Same switch as download
+        # pacing: an operator who turns congestion control off gets the raw
+        # link in both directions. A static cap is the operator's own answer to
+        # the same question, and measuring a rate this side is already holding
+        # down would only ratchet it further.
+        self.uplink_allowance = (
+            UplinkAllowance()
+            if self.settings.file_transfer_cc[0] and not limit_mbps else None)
         self.upload_dir = pathlib.Path(
             os.path.expanduser(self.settings.file_manager_path)
         ).resolve()
@@ -1051,11 +1197,7 @@ class CentralizedStreamServer:
                 )
                 return web.Response(status=403, text="Forbidden origin")
         # Match the exact route, not a suffix, so /foo/tokens isn't treated as control-plane.
-        api_prefix = (
-            ("/" + settings.subfolder.strip("/"))
-            if settings.subfolder
-            else ""
-        )
+        api_prefix = settings.subfolder
         # Health/liveness endpoints stay open so k8s/LB probes reach them without credentials.
         if path in (f"{api_prefix}/api/status", f"{api_prefix}/api/health"):
             return await handler(request)
@@ -1307,19 +1449,39 @@ class CentralizedStreamServer:
         # Reads pace against the shared transfer allowance: a paused read
         # fills aiohttp's flow-control buffer, the TCP window closes, and the
         # client's uplink is freed for the input/feedback traffic the stream
-        # depends on. Ungauged — only a static cap actually paces here.
+        # depends on. That allowance has no gauge in this direction, so the
+        # operator's static cap is all of it; the uplink allowance beside it
+        # is what holds an unconfigured session below the client's own rate.
         pacer = self.transfer_pacer
         pace_conn = pacer.connection_state(gauged=False) if pacer.active else None
+        uplink = self.uplink_allowance
+        # A transfer too small to stand a queue is not worth slowing down.
+        uplink_state = (
+            uplink.transfer()
+            if uplink is not None and (declared or 0) >= uplink.MIN_PACED_BYTES
+            else None)
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_TRUNC)
         fd = os.open(path, flags, 0o644)
         fh = os.fdopen(fd, "wb")
         written = 0
         try:
-            async for chunk in request.content.iter_chunked(1 << 20):
+            # Read granularity is what the client is handed back as receive
+            # window, and it sends every byte of it at once: a megabyte at a
+            # time refills the link's queue in one burst however slowly the
+            # average is paced, so a paced transfer is read in small steps.
+            read_size = (uplink.READ_BYTES if uplink_state is not None else 1 << 20)
+            while True:
+                waited = time.monotonic()
+                chunk = await request.content.read(read_size)
+                waited = time.monotonic() - waited
+                if not chunk:
+                    break
                 if declared is not None and written + len(chunk) > declared:
                     raise ValueError("body exceeds declared Content-Length")
                 if pace_conn is not None:
                     await pacer.pace(None, len(chunk), pace_conn)
+                if uplink_state is not None:
+                    await uplink.pace(len(chunk), uplink_state, waited)
                 await loop.run_in_executor(None, fh.write, chunk)
                 written += len(chunk)
             await loop.run_in_executor(None, fh.close)
@@ -1722,33 +1884,11 @@ class CentralizedStreamServer:
                 location += "?" + request.query_string
             raise web.HTTPMovedPermanently(location)
 
-        items: List[Dict[str, Any]] = []
-        if full_path != self.upload_dir:
-            items.append({"name": "../", "size": "-", "mtime": "-", "is_dir": True})
-
+        # Off the loop: one stat per entry is a syscall per file, and this
+        # handler shares its thread with the stream.
         try:
-            with os.scandir(full_path) as it:
-                for entry in it:
-                    try:
-                        stats = entry.stat()
-                        mtime = datetime.fromtimestamp(stats.st_mtime).strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
-                        is_dir = entry.is_dir()
-                    except OSError as e:
-                        # Entries can vanish or be unstat-able (broken symlinks, races).
-                        logger.warning(f"Skipping unreadable directory entry {entry.name!r}: {e}")
-                        continue
-                    items.append(
-                        {
-                            "name": entry.name + ("/" if is_dir else ""),
-                            "size": f"{stats.st_size / 1024:.1f} KB"
-                            if not is_dir
-                            else "-",
-                            "mtime": mtime,
-                            "is_dir": is_dir,
-                        }
-                    )
+            items = await asyncio.to_thread(
+                _scan_directory, full_path, full_path != self.upload_dir)
         except PermissionError:
             return web.Response(status=403, text="Permission Denied")
 
@@ -1809,11 +1949,7 @@ class CentralizedStreamServer:
         self.app["supervisor"] = self
         self.app["settings"] = self.settings
 
-        api_prefix = (
-            ("/" + self.settings.subfolder.strip("/"))
-            if self.settings.subfolder
-            else ""
-        )
+        api_prefix = self.settings.subfolder
         if api_prefix:
             logger.info(f"Prepending api prefix: {api_prefix!r} to router handlers")
 

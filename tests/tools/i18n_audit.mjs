@@ -50,6 +50,17 @@ const has = (dict, key) => {
   return typeof o === "string";
 };
 
+const read = (dict, key) => {
+  let o = dict;
+  for (const k of key.split(".")) {
+    if (!o || typeof o !== "object") return undefined;
+    o = o[k];
+  }
+  return o;
+};
+
+const trailingColon = (value) => typeof value === "string" && /[:：]\s*$/.test(value);
+
 const flatten = (dict, prefix = "", out = []) => {
   for (const [k, v] of Object.entries(dict || {})) {
     if (v && typeof v === "object") flatten(v, prefix + k + ".", out);
@@ -89,6 +100,17 @@ for (const [name, dir, dicts] of [
     const missing = enKeys.filter((k) => !has(dict[l], k));
     if (missing.length) gaps[l] = missing;
   }
-  report[name] = { keys, locales: LOCALES.length, enKeys: enKeys.length, unresolved, gaps };
+  // A label's punctuation belongs to the phrase, not to the locale: the call
+  // site decides whether a colon is followed by a value, so a translation that
+  // adds one English does not have renders it dangling on its own.
+  const punctuation = {};
+  for (const key of enKeys) {
+    const enColon = trailingColon(read(dict.en, key));
+    const off = LOCALES.filter((l) => l !== "en" && typeof read(dict[l], key) === "string" &&
+                                      trailingColon(read(dict[l], key)) !== enColon);
+    if (off.length) punctuation[key] = off;
+  }
+  report[name] = { keys, locales: LOCALES.length, enKeys: enKeys.length, unresolved, gaps,
+                   punctuation };
 }
 process.stdout.write(JSON.stringify(report));

@@ -7,6 +7,7 @@
 import React from 'react';
 import DashboardOverlay from './components/DashboardOverlay';
 import { ThemeProvider } from './components/ui/theme-provider';
+import { UploadNotifications } from './components/dashboard/upload-notifications';
 import { Toaster } from 'sonner';
 
 interface AppProps {
@@ -17,7 +18,8 @@ function App({ dashboardRoot }: AppProps): React.ReactElement {
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
       <DashboardOverlay container={dashboardRoot} />
-      <Toaster 
+      <UploadNotifications />
+      <Toaster
         position="bottom-right"
         richColors
         closeButton

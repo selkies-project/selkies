@@ -165,7 +165,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "file_transfer_cc",
         "type": "bool",
         "default": True,
-        "help": 'Congestion-control pacing for file downloads: on a saturated uplink a greedy download otherwise queues ahead of the video stream (bufferbloat) and the session stalls. The pacer holds downloads inside a shared allowance that adapts from kernel queue depth (and RTT off-Linux) and needs no link estimate.',
+        "help": 'Congestion-control pacing for file transfers: a greedy transfer otherwise queues ahead of the video stream (bufferbloat) and the session stalls. Downloads are held inside a shared allowance that adapts from kernel queue depth (and RTT off-Linux); uploads, which no gauge on this side can see, are held to a share of the rate the client demonstrates. Neither needs a link estimate. Behind a reverse proxy the download gauge measures the hop to the proxy rather than the client\'s link, so a static cap is the lever there.',
     },
     {
         "name": "framerate",
@@ -563,7 +563,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "str",
         "default": "",
         "env_var": "SUBFOLDER",
-        "help": 'URL path prefix the server is reverse-proxied under; prepended to every route (websockets, tokens, metrics, static files). Needs both slashes, e.g. "/subfolder/".',
+        "help": 'URL path prefix the server is reverse-proxied under; prepended to every route (websockets, tokens, metrics, static files). Slashes are optional, so "desk", "/desk" and "/desk/" are the same prefix and "/" is the root. The web client reads its own prefix from the URL it was loaded from, so only the server needs telling.',
     },
     {
         "name": "run_after_connect",
@@ -1044,6 +1044,8 @@ class AppSettings:
     video_fullcolor: tuple[bool, bool]
     subfolder: str
     video_bitrate: tuple[float, float]
+    file_transfer_limit_mbps: float
+    file_transfer_cc: tuple[bool, bool]
 
     def __init__(self, setting: List[Dict[str, Any]]) -> None:
         parser = argparse.ArgumentParser(
@@ -1492,9 +1494,16 @@ class AppSettings:
 
     def _post_process_settings(self) -> None:
         """Normalize and cross-check settings whose meaning spans several
-        entries: transport mode spelling, rate-control resolution, the
-        audio/microphone dependency, the clipboard policy string, and the TURN
-        REST username default."""
+        entries: transport mode spelling, the deployment subfolder, rate-control
+        resolution, the audio/microphone dependency, the clipboard policy
+        string, and the TURN REST username default."""
+        # Every route is built by concatenating this in front of a path that
+        # begins with a slash, so it is stored the one way that composes:
+        # empty, or a leading slash and no trailing one. "/" is the root, which
+        # is the empty prefix rather than a prefix of one slash.
+        subfolder = str(self.subfolder).strip().strip("/")
+        self.subfolder = ("/" + subfolder) if subfolder else ""
+
         # One spelling of the transport for every consumer, normalized before
         # anything branches on it. The service registry is keyed on this value,
         # so a differently-cased one would otherwise abort the server at startup

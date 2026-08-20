@@ -68,6 +68,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - name: Build the test tools
         run: make -C tests/tools
+      # Without it the shell suite still passes, having run only bash -n: the
+      # lint half reports itself skipped inside a suite that exits zero, so
+      # nothing else notices it never ran.
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
       - name: Run the unit tier
         run: |
           # The suites reach into selkies.input_handler and
@@ -205,7 +210,12 @@ jobs:
       - name: Install selkies and the test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install . -r tests/requirements.txt
+          # Built once and installed from the wheel, rather than installed from
+          # the source tree: dist/ is where the packaging suite looks, so it
+          # packages the very artifact these suites ran against instead of
+          # spending another build on a second copy of it.
+          python -m pip wheel --no-deps -w dist .
+          python -m pip install dist/selkies-*.whl -r tests/requirements.txt
           TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
           WHEEL_GLOB="*${TAG}-*manylinux*$(uname -m)*.whl"
           # Fatal rather than a note: a run that quietly drops to PyPI tests a

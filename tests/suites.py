@@ -29,6 +29,7 @@ SUITES: list = [
     {"path": "unit/test_app_compositor_socket.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_lock.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_relative_motion.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_pointer_tracking.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_gpu_fallback.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_turn_address.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_env_case.py", "tier": "unit", "timeout": 180},
@@ -38,6 +39,7 @@ SUITES: list = [
     {"path": "unit/test_transfer_pacer.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_nvml_failfast.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_realized_layout.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_release_version.py", "tier": "unit", "timeout": 120},
 
     # --- integration ------------------------------------------------------
@@ -61,6 +63,7 @@ SUITES: list = [
     {"path": "integration/test_x_connection_leak.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_keymap_parity.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_basic_auth_challenge.py", "tier": "integration", "timeout": 120},
+    {"path": "packaging/test_packaging.py", "tier": "integration", "timeout": 1800},
 
     # --- e2e --------------------------------------------------------------
     {"path": "e2e/test_ime_composition.py", "tier": "e2e", "timeout": 300},
@@ -77,6 +80,8 @@ SUITES: list = [
     {"path": "e2e/test_cross_transition.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_two_displays.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["websockets-x11", "webrtc-x11", "websockets-wl", "webrtc-wl"]},
+    {"path": "e2e/test_constrained_root.py", "tier": "e2e", "timeout": 900,
+     "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_gamepad_uinput.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_dpi_accuracy.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_regressions.py", "tier": "e2e", "timeout": 1800,

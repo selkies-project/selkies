@@ -455,7 +455,8 @@ class RTCApp:
             raise RTCAppError("ERROR: ice candidate is not an instance of RTCIceCandidate")
 
     async def send_clipboard_data(self, data: Union[str, bytes], mime_type: str = "text/plain",
-                                  reply_to: Optional[str] = None) -> None:
+                                  reply_to: Optional[str] = None,
+                                  peer_id: Optional[str] = None) -> None:
         """Send clipboard data over the data channel, chunked when large.
 
         Chunk sends are paced against each channel's SCTP queue (see
@@ -473,6 +474,11 @@ class RTCApp:
                 / clipboard-msg-start payload so the client can treat the
                 payload cache-only without time heuristics (old clients ignore
                 the unknown field).
+            peer_id: Peer that asked for this payload, addressed alone the way
+                `send_system_action` addresses a requester: the other peers
+                already hold the content, and a reply they did not ask for is
+                read as their own fetch and cached rather than pasted. A
+                requester whose channel has closed receives nothing.
         """
         # An empty payload is only meaningful as a tagged reply (settling a
         # client fetch against an empty server clipboard).
@@ -482,6 +488,20 @@ class RTCApp:
         is_text = mime_type == "text/plain"
         data_bytes: bytes = data.encode() if isinstance(data, str) else data
         clipboard_chunk_size = get_adjusted_chunk_size(self.peer_connections)
+        requester = None
+        if peer_id is not None:
+            peer_obj = self.peer_connections.get(peer_id)
+            channel = peer_obj.get("data_channel") if peer_obj else None
+            if channel is None or channel.readyState != "open":
+                return
+            requester = channel
+
+        def send_typed(msg_type: str, payload: Any) -> None:
+            if requester is not None:
+                self.send_message_to_channel(requester, msg_type, payload)
+            else:
+                self.__send_data_channel_message(msg_type, payload)
+
         if len(data_bytes) <= clipboard_chunk_size:
             b64data = base64.b64encode(data_bytes).decode('utf-8')
             payload = {
@@ -492,7 +512,7 @@ class RTCApp:
             }
             if reply_to:
                 payload["reply_to"] = reply_to
-            self.__send_data_channel_message("clipboard-msg", payload)
+            send_typed("clipboard-msg", payload)
         else:
             read = 0
             start_payload = {
@@ -502,7 +522,7 @@ class RTCApp:
             }
             if reply_to:
                 start_payload["reply_to"] = reply_to
-            self.__send_data_channel_message("clipboard-msg-start", start_payload)
+            send_typed("clipboard-msg-start", start_payload)
             while read < len(data_bytes):
                 chunk = data_bytes[read:read + clipboard_chunk_size]
                 chunk_payload = json.dumps({
@@ -512,7 +532,8 @@ class RTCApp:
                 # One compression per chunk, shared by every gzip-capable
                 # channel; skipped when no open channel completed the handshake.
                 gz_payload = None
-                channels = list(self._iter_open_data_channels())
+                channels = ([requester] if requester is not None
+                            else list(self._iter_open_data_channels()))
                 if any(getattr(c, "_selkies_gz_tx", False) for c in channels):
                     gz_payload = await asyncio.to_thread(
                         gzip.compress, chunk_payload.encode("utf-8"), 6)
@@ -522,7 +543,7 @@ class RTCApp:
                 for channel in channels:
                     await drain_data_channel(channel)
                 read += len(chunk)
-            self.__send_data_channel_message("clipboard-msg-end", {})
+            send_typed("clipboard-msg-end", {})
 
         logger.info(f"Sent clipboard data of length {len(data_bytes)} with mime type {mime_type}")
 

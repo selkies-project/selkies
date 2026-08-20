@@ -45,5 +45,14 @@ fpm -s dir -t deb \
     --depends libx11-xcb1 \
     --depends libva2 \
     --depends libdrm2 \
+    --depends libgbm1 \
+    --depends libegl1 \
+    --depends libglib2.0-0 \
+    --depends libpixman-1-0 \
+    --depends libxcb-render0 \
+    --depends libxcb-shm0 \
+    --depends libxcb-dri3-0 \
+    --depends libxfixes3 \
+    --depends libxext6 \
     -C /pkg-root opt usr
 ls -la /out

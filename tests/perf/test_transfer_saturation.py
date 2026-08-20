@@ -15,8 +15,12 @@ Scenarios:
   download-static  6 Mbit/s downlink, 3 Mbit/s static cap — the cap is
                    honored and the stream stays clean.
   upload-static    6 Mbit/s uplink, 3 Mbit/s cap — upload reads pace the
-                   client down to the cap; with the cap off the same upload
-                   runs at the relay rate.
+                   client down to the cap.
+  upload-auto      6 Mbit/s uplink behind a fat first-hop buffer, no cap —
+                   the uplink allowance holds the upload to a share of what
+                   the client can send, so a small request beside it crosses
+                   at its unloaded latency (2 ms measured) instead of waiting
+                   out the buffer (1421 ms unpaced).
 """
 import os
 import statistics
@@ -54,14 +58,27 @@ def damage_window() -> subprocess.Popen:
     for the transfer under test and measures only its own saturation."""
     return H.spawn(
         ["glxgears", "-geometry", "900x700+100+50"],
-        env=dict(os.environ, DISPLAY=H.TEST_DISPLAY),
+        env=dict(os.environ, DISPLAY=H.require_display()),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def small_request_ms() -> float:
+    """How long a small request takes right now, in milliseconds."""
+    t0 = time.monotonic()
+    try:
+        code, _ = H.curl("/api/health", timeout=30)
+    except Exception:
+        return float("nan")
+    return (time.monotonic() - t0) * 1000 if code == 200 else float("nan")
+
+
 def scenario(tag: str, down_kbit: int, up_kbit: int, limit_mbps: float,
-             transfer: Callable) -> tuple:
-    """Boot server+relay, stream with churn, run `transfer(page, files_root)`
-    while sampling fps once a second. Returns (result, fps_samples)."""
+             transfer: Callable, rcvbuf: int = 0) -> tuple:
+    """Boot server+relay, stream with churn, run `transfer(files_root)` while
+    sampling fps and small-request latency once a second.
+
+    `rcvbuf` sizes the relay's modeled first-hop queue; the default models a
+    shallow hop. Returns (result, fps_samples, latency_samples)."""
     files_root = os.path.join(H.WORKDIR, "sat-files")
     os.makedirs(files_root, exist_ok=True)
     blob = os.path.join(files_root, "blob.bin")
@@ -73,6 +90,7 @@ def scenario(tag: str, down_kbit: int, up_kbit: int, limit_mbps: float,
     relay = H.spawn(
         [sys.executable, RELAY, str(H.PORT), str(SERVER_PORT),
          str(down_kbit), str(up_kbit)],
+        env=(dict(os.environ, BWRELAY_RCVBUF=str(rcvbuf)) if rcvbuf else None),
         stdout=open(os.path.join(H.WORKDIR, "bwrelay.log"), "w"),
         stderr=subprocess.STDOUT)
     H.server_start(mode="websockets", wayland=False, port=SERVER_PORT, extra_env={
@@ -81,6 +99,7 @@ def scenario(tag: str, down_kbit: int, up_kbit: int, limit_mbps: float,
     })
     churn = damage_window()
     fps_samples = []
+    latency_samples = []
     try:
         with sync_playwright() as p:
             browser = C.launch_browser(p, "chromium")
@@ -100,6 +119,7 @@ def scenario(tag: str, down_kbit: int, up_kbit: int, limit_mbps: float,
             th.start()
             while th.is_alive():
                 fps_samples.append(page.evaluate("window.fps"))
+                latency_samples.append(small_request_ms())
                 time.sleep(1)
             th.join()
             browser.close()
@@ -107,7 +127,7 @@ def scenario(tag: str, down_kbit: int, up_kbit: int, limit_mbps: float,
         churn.terminate()
         relay.terminate()
         H.server_stop()
-    return done["result"], fps_samples
+    return done["result"], fps_samples, latency_samples
 
 
 def timed_curl(args: list) -> tuple:
@@ -127,7 +147,7 @@ def fps_health(fps_samples: list) -> tuple:
 def main() -> int:
     dl = lambda root: timed_curl([f"{H.BASE_URL}/api/files/blob.bin"])
 
-    result, fps = scenario("download-cc", 6000, 0, 0, dl)
+    result, fps, _lat = scenario("download-cc", 6000, 0, 0, dl)
     mbps, dt = result
     med, stall = fps_health(fps)
     check("download-cc: download completes through the shared link",
@@ -136,7 +156,7 @@ def main() -> int:
           med >= 30 and stall <= 0.25,
           f"median fps={med} stall_frac={stall:.2f} samples={fps[:12]}")
 
-    result, fps = scenario("download-static", 6000, 0, 3, dl)
+    result, fps, _lat = scenario("download-static", 6000, 0, 3, dl)
     mbps, dt = result
     med, stall = fps_health(fps)
     check("download-static: static cap is honored",
@@ -150,7 +170,7 @@ def main() -> int:
         "--data-binary", "@" + os.path.join(root, "blob.bin"),
         f"{H.BASE_URL}/api/upload"])
 
-    result, fps = scenario("upload-static", 50000, 6000, 3, up)
+    result, fps, _lat = scenario("upload-static", 50000, 6000, 3, up)
     mbps, dt = result
     med, stall = fps_health(fps)
     check("upload-static: upload reads pace the client to the cap",
@@ -159,10 +179,18 @@ def main() -> int:
           med >= 45 and stall <= 0.10,
           f"median fps={med} stall_frac={stall:.2f}")
 
-    result, fps = scenario("upload-open", 50000, 6000, 0, up)
+    # A fat first-hop buffer is what turns an upload into session-wide lag:
+    # 1 MiB at 6 Mbit/s is well over a second of queue for anything the client
+    # sends behind it.
+    result, fps, lat = scenario("upload-auto", 50000, 6000, 0, up,
+                                rcvbuf=1024 * 1024)
     mbps, dt = result
-    check("upload-open: without the cap the relay is the limit",
-          4.5 < mbps <= 7.0, f"{mbps:.2f} Mbit/s")
+    clean = sorted(v for v in lat if v == v)
+    median_ms = statistics.median(clean) if clean else float("nan")
+    check("upload-auto: the upload takes its share of the uplink and no more",
+          2.5 <= mbps <= 4.5, f"{mbps:.2f} Mbit/s")
+    check("upload-auto: a small request beside it is not stuck behind the queue",
+          median_ms < 250, f"median={median_ms:.0f}ms samples={len(clean)}")
 
     print(f"[saturation] {passed}/{passed + failed} passed")
     return 1 if failed else 0

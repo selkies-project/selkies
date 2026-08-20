@@ -121,10 +121,11 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
 }
 
 // Every delta lands on a half pixel, where rounding each event on its own
-// inflates the travel by a fifth.
+// inflates the travel by a fifth. One event per frame, so each half pixel
+// reaches the quantizer on its own rather than being summed away first.
 {
     const input = makeInput({ dpr: 1.25 });
-    drive(input, steps(40, 2));
+    drive(input, steps(40, 2), 1);
     check('dpr 1.25: half-pixel deltas do not inflate the travel',
           Math.abs(travel(input) - 100) <= 1, `${travel(input)}`);
 }
@@ -241,6 +242,34 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     check('absolute motion reaches every server pixel at dpr 2',
           queued !== null && queued.mtype === 'm' && queued.x === 201,
           `${queued && `${queued.mtype},${queued.x}`}`);
+}
+
+// --- a button event maps its own position ---------------------------------
+{
+    // The lock leaves movement deltas behind, so a release that arrives after
+    // it ends has no position of its own unless it maps one.
+    const input = makeInput({ dpr: 1 });
+    globalThis.document.pointerLockElement = input.element;
+    input._mouseButtonMovement({ type: 'mousemove', target: input.element,
+                                 movementX: 37, movementY: -21 });
+    globalThis.document.pointerLockElement = null;
+    input.buttonMask = 1;
+    input._mouseButtonMovement({ type: 'mouseup', target: input.element,
+                                 button: 0, clientX: 640, clientY: 360 });
+    check('a button event after the lock ends carries its own position',
+          input.sent[input.sent.length - 1] === 'm,640,360,0,0',
+          `${input.sent[input.sent.length - 1]}`);
+    check('the locked motion before it went out as a delta',
+          input.sent.includes('m2,37,-21,0,0'), `${input.sent}`);
+}
+
+// --- a non-finite delta cannot latch the accumulator ----------------------
+{
+    const input = makeInput({ dpr: 1 });
+    input._quantizeRelative(NaN, 0);
+    const [x, y] = input._relativeToServer(10, 4);
+    check('motion after a non-finite delta still lands', x === 10 && y === 4,
+          `${x},${y}`);
 }
 
 process.exit(failed === 0 ? 0 : 1);

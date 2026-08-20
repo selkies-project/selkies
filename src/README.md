@@ -54,7 +54,7 @@ This server provides the backend infrastructure for establishing and managing in
 
 9.  **Token-Based Authentication & Authorization:**
     *   Features an optional secure mode, enabled by setting a `master_token`.
-    *   When enabled, it exposes a token-management API (`POST /tokens`) on the main streaming port, gated by the master token.
+    *   When enabled, it exposes a token-management API (`POST /api/tokens`) on the main streaming port, gated by the master token.
     *   Clients must connect with a valid token (`?token=...`) to establish a WebSocket connection.
     *   Assigns roles (e.g., `controller`, `viewer`) and properties (e.g., gamepad `slot`) to clients based on their token.
     *   Enforces permissions on the server-side, restricting actions that viewers can perform.
@@ -64,7 +64,7 @@ This server provides the backend infrastructure for establishing and managing in
 
 When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server exposes a token-management API on the main streaming port (default: 8080), gated by the master token. It is used to dynamically set and update the access tokens that clients can use to connect.
 
-**Endpoint:** `POST /tokens`
+**Endpoint:** `POST /api/tokens`
 
 **Authentication:** The request must include an `Authorization` header with the master token: `Authorization: Bearer <your-master-token>`
 
@@ -87,7 +87,7 @@ When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server exposes 
 
 **Example `curl` Command:**
 ```bash
-curl -X POST http://localhost:8080/tokens \
+curl -X POST http://localhost:8080/api/tokens \
 -H "Authorization: Bearer my-secret-master-token" \
 -H "Content-Type: application/json" \
 -d '{
@@ -104,10 +104,6 @@ curl -X POST http://localhost:8080/tokens \
     *   WebRTC (SDP, ICE, SRTP, Data Channels) for P2P mode.
     *   WebSockets for signaling (WebRTC mode) and as a direct media transport (WebSockets streaming mode with custom protocols).
     *   HTTP/HTTPS for asset delivery and signaling endpoint.
-
-Of course. Here is a complete markdown section for your `README.md` based on the provided settings file. It explains the precedence, setting methods, special value types, and includes a comprehensive table of all available settings.
-
-Of course. Here is the updated introductory text for your "Server Settings" section with the requested additions.
 
 ## Server Settings
 
@@ -199,6 +195,8 @@ The table below lists all available server settings.
 | `SELKIES_ENABLE_CLIPBOARD` | `--enable-clipboard` | `'true'` | Clipboard policy for both transports: `true` (both directions), `in` (client-to-server only), `out` (server-to-client only), `false` (disabled). |
 | `SELKIES_COMMAND_ENABLED` | `--command-enabled` | `False` | Enable parsing of `command` websocket messages. Disabled by default for security; opt in explicitly. |
 | `SELKIES_FILE_TRANSFERS` | `--file-transfers` | `'upload,download'` | Allowed file transfer directions (comma-separated: "upload,download"). Set to "" or "none" to disable. |
+| `SELKIES_FILE_TRANSFER_CC` | `--file-transfer-cc` | `True` | Pace file transfers so they do not queue ahead of the stream. Downloads adapt from the kernel's queue depth; uploads, which the server cannot gauge, are held to a share of the rate the client demonstrates. Behind a reverse proxy the download gauge sees the hop to the proxy rather than the client's link, so use the static cap below there. |
+| `SELKIES_FILE_TRANSFER_LIMIT_MBPS` | `--file-transfer-limit-mbps` | `0.0` | Static file-transfer throttle in Mbit/s, shared by all transfers, for links whose rate is known. 0 leaves the pacing above to size itself. |
 | `SELKIES_ENCODER` | `--encoder` | `'h264enc'` | The default video encoder. |
 | `SELKIES_FRAMERATE` | `--framerate` | `'8-120'` | Allowed framerate range or a fixed value. |
 | `SELKIES_VIDEO_CRF` | `--video-crf` | `'5-50'` | Allowed H.264 CRF range or a fixed value. |
@@ -220,7 +218,8 @@ The table below lists all available server settings.
 | `SELKIES_USE_BROWSER_CURSORS` | `--use-browser-cursors` | `False` | Use browser CSS cursors instead of rendering to canvas. |
 | `SELKIES_USE_CSS_SCALING` | `--use-css-scaling` | `False` | HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched. |
 | `SELKIES_PORT` (or `CUSTOM_WS_PORT`) | `--port` | `8080` | Port for the data websocket server. |
-| `SELKIES_MASTER_TOKEN` | `--master-token` | `''` | Master token to enable secure mode. If set, clients must authenticate using tokens provided via the token-management API (`POST /tokens`). |
+| `SELKIES_SUBFOLDER` (or `SUBFOLDER`) | `--subfolder` | `''` | URL path prefix the server is reverse-proxied under, prepended to every route. Optional: set it only when the proxy does not strip the prefix before forwarding. Slashes are optional (`desk`, `/desk` and `/desk/` are the same prefix; `/` is the root). The web client derives its own prefix from the URL it was loaded from, so this configures the server alone. |
+| `SELKIES_MASTER_TOKEN` | `--master-token` | `''` | Master token to enable secure mode. If set, clients must authenticate using tokens provided via the token-management API (`POST /api/tokens`). |
 | `SELKIES_ENCODE_DRI` (or `DRI_NODE`) | `--encode-dri` | `''` | Path to the DRI render node the encoder uses (VA-API/NVENC device selection). When unset, the node is auto-selected. |
 | `SELKIES_RENDER_DRI` (or `DRINODE`) | `--render-dri` | `''` | Path to the DRI render node the Wayland compositor renders on. Defaults to the `auto_gpu` selection, else software rendering. |
 | `SELKIES_AUDIO_DEVICE_NAME` | `--audio-device-name` | `'output.monitor'` | Audio device name for pcmflux capture. |

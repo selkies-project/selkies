@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -22,8 +23,35 @@ TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
 # The interpreter that runs the server under test. Defaults to the one running
 # the tests, so a venv with selkies installed needs no further configuration.
 PYTHON = os.environ.get("SELKIES_TEST_PYTHON", sys.executable)
-TEST_DISPLAY = os.environ.get("E2E_DISPLAY", ":99")
-PORT = int(os.environ.get("E2E_PORT", "18080"))
+# Tools installed beside that interpreter -- ffmpeg/ffplay in a conda
+# environment, for instance -- are findable without the caller having activated
+# it. Appended rather than prepended: a system tool of the same name stays the
+# one that runs, so this cannot change what any other suite exercises.
+_PY_BIN = os.path.dirname(os.path.abspath(PYTHON))
+if _PY_BIN not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + _PY_BIN
+# Deliberately not defaulted, and never inherited from DISPLAY: the suites
+# resize the root window and inject input, which must not land on a session
+# someone is using. Suites that only need a throwaway server of their own call
+# private_x_server() instead and need nothing set.
+TEST_DISPLAY = os.environ.get("E2E_DISPLAY", "")
+
+
+def _free_port() -> int:
+    """A loopback port nothing is listening on, from the kernel's own pool.
+
+    Asked for rather than assumed, for the reason the display number is: a
+    fixed one makes two runs on a host collide, and the second reads the
+    first's server as its own.
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+# Each suite process gets its own, so runs do not have to be serialised; naming
+# one pins it (a proxy or firewall rule in front of the server needs that).
+PORT = int(os.environ.get("E2E_PORT") or _free_port())
 BASE_URL = f"http://localhost:{PORT}"
 
 CORE_DIST = os.path.join(REPO, "addons/selkies-web-core/dist")
@@ -121,6 +149,43 @@ def pulse_setup() -> None:
             [pactl, "load-module", "module-null-sink",
              "sink_name=output", "rate=48000", "channels=2"],
             capture_output=True, timeout=10)
+    # Anything played without naming a sink has to land where the capture
+    # checks listen. A suite that points the default elsewhere and dies before
+    # putting it back would otherwise leave every later audio check reading
+    # silence, on this run and on every one after it.
+    subprocess.run([pactl, "set-default-sink", "output"],
+                   capture_output=True, timeout=10)
+
+
+def pulse_null_sink(name: str, **opts: Any) -> Optional[str]:
+    """Load a null sink named `name`, returning the module id to unload later.
+
+    Nothing is loaded when a sink of that name already exists, and None comes
+    back: pactl would otherwise happily create a second one under the same
+    name, which is how a host ends up with six of them. Pass the id to
+    pulse_unload() when finished — a sink left behind outlives the run that
+    made it and every later run inherits it.
+    """
+    pactl = shutil.which("pactl")
+    if not pactl:
+        return None
+    existing = subprocess.run([pactl, "list", "short", "sinks"],
+                              capture_output=True, text=True).stdout
+    if any(line.split("\t")[1:2] == [name] for line in existing.splitlines()):
+        return None
+    args = [f"sink_name={name}"] + [f"{k}={v}" for k, v in opts.items()]
+    r = subprocess.run([pactl, "load-module", "module-null-sink"] + args,
+                       capture_output=True, text=True, timeout=10)
+    module_id = r.stdout.strip()
+    return module_id if module_id.isdigit() else None
+
+
+def pulse_unload(module_id: Optional[str]) -> None:
+    """Unload a module pulse_null_sink() loaded; a no-op for None."""
+    pactl = shutil.which("pactl")
+    if pactl and module_id:
+        subprocess.run([pactl, "unload-module", module_id],
+                       capture_output=True, timeout=10)
 
 
 PR_SET_PDEATHSIG = 1
@@ -190,7 +255,7 @@ def server_start(mode: str = "websockets", wayland: bool = False,
     if os.environ.get("PYTHONWARNINGS"):
         env["PYTHONWARNINGS"] = os.environ["PYTHONWARNINGS"]
     if not wayland:
-        env["DISPLAY"] = TEST_DISPLAY
+        env["DISPLAY"] = require_display()
     if extra_env:
         env.update(extra_env)
     with open(log, "w") as lf:
@@ -383,10 +448,118 @@ class Results:
 
 # ---------------- X11 helpers ----------------
 
+def require_display() -> str:
+    """The X display the suites drive, or a failure that says what to set."""
+    if not TEST_DISPLAY:
+        raise RuntimeError(
+            "E2E_DISPLAY is not set: point it at a throwaway X server for the "
+            "suites to drive (see tests/README.md). DISPLAY is not inherited, "
+            "because these suites resize the root and inject input.")
+    return TEST_DISPLAY
+
+
+def free_display(taken: Iterable[str] = ()) -> Iterable[str]:
+    """Display numbers no X server on this host holds, most likely first.
+
+    Both the lock file and the socket are consulted, since a server that died
+    without cleaning up leaves one or the other behind. The numbers start well
+    above those desktop sessions and container entrypoints take, so a throwaway
+    server never lands on a display someone is working on. Yields candidates
+    rather than one answer: only the server that wins the bind knows for sure.
+    """
+    skip = {d.lstrip(":").split(".")[0] for d in taken if d}
+    for number in range(64, 256):
+        if str(number) in skip:
+            continue
+        if os.path.exists(f"/tmp/.X{number}-lock"):
+            continue
+        if os.path.exists(f"/tmp/.X11-unix/X{number}"):
+            continue
+        yield f":{number}"
+
+
+def private_x_server(width: int = 1280, height: int = 720, depth: int = 24,
+                     extra_args: Iterable[str] = ()) -> tuple:
+    """A throwaway Xvfb of this suite's own, on a display nothing else holds.
+
+    GLX is off because it faults on some GPU hosts and no suite that wants a
+    private server needs it. A number another server takes first is simply the
+    next candidate, so suites running side by side do not collide; the attempts
+    are bounded, because a host where no server can start at all must report
+    that rather than work through every number in the range.
+
+    Args:
+        width: Screen width. Xvfb fixes its maximum screen size here, so a
+            suite that wants a server which refuses to grow asks for a small one.
+        height: Screen height.
+        depth: Colour depth.
+        extra_args: Further Xvfb arguments, appended.
+
+    Returns:
+        `(process, display)`; the caller terminates the process.
+
+    Raises:
+        RuntimeError: Xvfb or xdpyinfo is missing, or no candidate came up.
+    """
+    for tool in ("Xvfb", "xdpyinfo"):
+        if not shutil.which(tool):
+            raise RuntimeError(f"{tool} is not installed; a private X server needs it")
+    candidates = free_display(taken=(TEST_DISPLAY, os.environ.get("DISPLAY", "")))
+    for _, display in zip(range(8), candidates):
+        proc = spawn(
+            ["Xvfb", display, "-screen", "0", f"{width}x{height}x{depth}",
+             "-extension", "GLX", "-nolisten", "tcp", "-ac", "-noreset",
+             *extra_args],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            if subprocess.run(["xdpyinfo", "-display", display],
+                              capture_output=True).returncode == 0:
+                return proc, display
+            time.sleep(0.25)
+        proc.kill()
+        proc.wait(timeout=5)
+    raise RuntimeError("no display number yielded a working X server")
+
+
+def stop_x_server(proc: subprocess.Popen, display: str) -> None:
+    """Stop a private_x_server() and leave its display number reusable.
+
+    Asked to quit rather than killed outright: a killed X server never removes
+    its lock file or socket, and free_display() then treats that number as
+    taken for as long as the machine is up. Anything the server did leave
+    behind is cleaned here, but only when the lock names the process that has
+    just died, so a number already reissued to someone else is untouched.
+    """
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    number = display.lstrip(":").split(".")[0]
+    lock = f"/tmp/.X{number}-lock"
+    try:
+        with open(lock) as f:
+            stale = int(f.read().strip()) == proc.pid
+    except (OSError, ValueError):
+        return
+    if not stale:
+        return
+    for path in (lock, f"/tmp/.X11-unix/X{number}"):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def x_display() -> Any:
     """A selkies.Xlib Display connected to the test server."""
     from selkies.Xlib import display as xdisp
-    return xdisp.Display(TEST_DISPLAY)
+    return xdisp.Display(require_display())
 
 
 def x_own_clipboard(payload: bytes) -> tuple:
@@ -400,7 +573,7 @@ def x_own_clipboard(payload: bytes) -> tuple:
     """
     from selkies.Xlib import display as xdisp, X
     from selkies.Xlib.protocol import event as xevent
-    ext = xdisp.Display(TEST_DISPLAY)
+    ext = xdisp.Display(require_display())
     scr = ext.screen()
     win = scr.root.create_window(0, 0, 1, 1, 0, scr.root_depth, window_class=X.InputOutput)
     clip = ext.get_atom("CLIPBOARD")
@@ -458,7 +631,7 @@ def x_read_clipboard(timeout: float = 8.0) -> Optional[str]:
     """Read current CLIPBOARD text from the test X server."""
     from selkies.Xlib import display as xdisp, X
     from selkies.Xlib.protocol import event as xevent
-    d2 = xdisp.Display(TEST_DISPLAY)
+    d2 = xdisp.Display(require_display())
     # Closed on every path: an X server allows a bounded number of clients, and
     # a helper called once per clipboard assertion exhausts it part-way through a
     # full run, which surfaces as unrelated suites failing to reach the display.
@@ -497,7 +670,7 @@ def x_key_watcher() -> tuple:
         until `stop["flag"]` is set or 30 seconds pass.
     """
     from selkies.Xlib import display as xdisp, X
-    d = xdisp.Display(TEST_DISPLAY)
+    d = xdisp.Display(require_display())
     scr = d.screen()
     root = scr.root
     w, h = scr.width_in_pixels, scr.height_in_pixels
@@ -541,7 +714,7 @@ def x_root_size() -> tuple:
     RandR resize; it is closed here because callers poll this in a loop.
     """
     from selkies.Xlib import display as xdisp
-    d = xdisp.Display(TEST_DISPLAY)
+    d = xdisp.Display(require_display())
     try:
         return d.screen().width_in_pixels, d.screen().height_in_pixels
     finally:

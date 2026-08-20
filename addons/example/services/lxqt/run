@@ -8,11 +8,6 @@ until [ -f "${XDG_RUNTIME_DIR}/container-env" ]; do sleep 0.5; done
 . "${XDG_RUNTIME_DIR}/container-env"
 shopt -s nullglob
 
-# Both backends: without the prefix, libfm-qt searches for a bare
-# applications.menu, finds none, and the launcher menu and runner model
-# stay empty ("Menu file not defined").
-export XDG_MENU_PREFIX="lxqt-"
-
 # Canonicalized by container-entrypoint.sh, so one spelling is enough here.
 if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
   # The session belongs to the nested compositor: it manages the windows and
@@ -97,23 +92,21 @@ printf '[General]\nwindow_manager=%s\n' "${session_wm}" > "${HOME}/.config/lxqt/
 # every themed icon to blank. The session copy corrects it to a theme that is
 # actually present; the setting cascades per key, so everything else keeps its
 # packaged value.
-if grep -qs '#FancyMenu' /usr/share/lxqt/themes/light/lxqt-panel.qss; then
-  lxqt_icons="$(sed -n 's/^icon_theme=//p' /etc/xdg/lxqt/lxqt.conf /usr/share/lxqt/lxqt.conf 2>/dev/null | head -1)"
-  # The slim Adwaita packaging ships only symbolic glyphs, which leaves panel
-  # plugins that ask for fullcolor assets (volume among them) blank; prefer
-  # breeze when it exists and the named theme lacks the check glyph.
-  check_glyph="/usr/share/icons/${lxqt_icons}/22x22/status/audio-volume-high.png"
-  if [ -n "${lxqt_icons}" ] && [ -d "/usr/share/icons/breeze" ] && [ ! -e "${check_glyph}" ] && [ "${lxqt_icons}" != "breeze" ]; then
-    printf '[General]\nicon_theme=breeze\n' > "${HOME}/.config/lxqt/lxqt.conf"
-    echo "[lxqt] icon theme ${lxqt_icons} lacks volume glyphs; the session uses breeze"
-  elif [ -n "${lxqt_icons}" ] && [ ! -d "/usr/share/icons/${lxqt_icons}" ]; then
-    for icons in Adwaita breeze hicolor; do
-      [ -d "/usr/share/icons/${icons}" ] || continue
-      printf '[General]\nicon_theme=%s\n' "${icons}" > "${HOME}/.config/lxqt/lxqt.conf"
-      echo "[lxqt] icon theme ${lxqt_icons} is not installed; the session uses ${icons}"
-      break
-    done
-  fi
+lxqt_icons="$(sed -n 's/^icon_theme=//p' /etc/xdg/lxqt/lxqt.conf /usr/share/lxqt/lxqt.conf 2>/dev/null | head -1)"
+# The slim Adwaita packaging ships only symbolic glyphs, which leaves panel
+# plugins that ask for fullcolor assets (volume among them) blank; prefer
+# breeze when it exists and the named theme lacks the check glyph.
+check_glyph="/usr/share/icons/${lxqt_icons}/22x22/status/audio-volume-high.png"
+if [ -n "${lxqt_icons}" ] && [ -d "/usr/share/icons/breeze" ] && [ ! -e "${check_glyph}" ] && [ "${lxqt_icons}" != "breeze" ]; then
+  printf '[General]\nicon_theme=breeze\n' > "${HOME}/.config/lxqt/lxqt.conf"
+  echo "[lxqt] icon theme ${lxqt_icons} lacks volume glyphs; the session uses breeze"
+elif [ -n "${lxqt_icons}" ] && [ ! -d "/usr/share/icons/${lxqt_icons}" ]; then
+  for icons in Adwaita breeze hicolor; do
+    [ -d "/usr/share/icons/${icons}" ] || continue
+    printf '[General]\nicon_theme=%s\n' "${icons}" > "${HOME}/.config/lxqt/lxqt.conf"
+    echo "[lxqt] icon theme ${lxqt_icons} is not installed; the session uses ${icons}"
+    break
+  done
 fi
 # The panel, desktop, runner and PolicyKit agent are autostart entries carrying
 # OnlyShowIn=LXQt, and a session started outside a display manager has nobody

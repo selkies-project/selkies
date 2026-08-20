@@ -6,9 +6,16 @@ optional second rate shapes the client->target direction (the uplink) the
 same way, for upload scenarios; without it that direction passes unshaped.
 Also emits a throughput tick per direction.
 
+Each direction is one FIFO queue shared by every connection, drained at the
+rate: that is what a metered first hop is, and it is why a bulk transfer
+delays everything else going the same way. BWRELAY_RCVBUF sizes that queue —
+the default models a shallow hop, and a fat one (a consumer modem holding
+seconds of data) is what turns an upload into input lag.
+
 Usage: bwrelay.py LISTEN_PORT TARGET_PORT RATE_KBIT_S [UPLINK_RATE_KBIT_S]
 """
 import asyncio
+import os
 import socket
 import sys
 import time
@@ -23,7 +30,10 @@ GRAIN = 8192
 # (megabytes on loopback) the standing queue behind the bucket hides inside
 # this socket and no sender-side congestion gauge can see it for tens of
 # seconds. A real bottleneck queues in the PATH, so the model bounds it.
-TARGET_RCVBUF = 128 * 1024
+# BWRELAY_RCVBUF sizes that modeled queue: a metered first hop with a fat
+# buffer holds seconds of data, which is what turns a bulk transfer into
+# input lag for everything sharing the direction.
+TARGET_RCVBUF = int(os.environ.get("BWRELAY_RCVBUF", 128 * 1024))
 
 
 class Bucket:
@@ -63,31 +73,59 @@ class Bucket:
                 await asyncio.sleep(min((n - self.tokens) / self.rate, 0.01))
 
 
-async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-               bucket: Bucket, stats: dict) -> None:
-    try:
+class Link:
+    """One direction of the modeled link: a FIFO queue drained at the rate.
+
+    Every connection going this way feeds the same queue, so a small request
+    issued while a bulk transfer runs waits behind what the transfer already
+    queued, exactly as it does at a metered hop. The queue is bounded, and a
+    sender that fills it stops being read — which is the back-pressure a real
+    buffer applies once it is full.
+    """
+
+    def __init__(self, rate_bps: float, depth_bytes: int, stats: dict) -> None:
+        self.bucket = Bucket(rate_bps)
+        self.stats = stats
+        self.queue: asyncio.Queue = asyncio.Queue(
+            maxsize=max(1, depth_bytes // GRAIN))
+        self._drainer: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._drainer is None:
+            self._drainer = asyncio.ensure_future(self._drain())
+
+    async def _drain(self) -> None:
         while True:
-            data = await reader.read(CHUNK)
-            if not data:
-                break
-            for off in range(0, len(data), GRAIN):
-                piece = data[off:off + GRAIN]
-                await bucket.take(len(piece))
+            writer, piece = await self.queue.get()
+            await self.bucket.take(len(piece))
+            try:
                 writer.write(piece)
-                stats["bytes"] += len(piece)
+                self.stats["bytes"] += len(piece)
                 await writer.drain()
-    except (ConnectionResetError, asyncio.CancelledError, BrokenPipeError):
-        pass
-    finally:
+            except (ConnectionResetError, BrokenPipeError, RuntimeError):
+                pass
+
+    async def carry(self, reader: asyncio.StreamReader,
+                    writer: asyncio.StreamWriter) -> None:
+        """Move one connection's bytes onto this direction until it ends."""
         try:
-            writer.close()
-        except Exception:
+            while True:
+                data = await reader.read(CHUNK)
+                if not data:
+                    break
+                for off in range(0, len(data), GRAIN):
+                    await self.queue.put((writer, data[off:off + GRAIN]))
+        except (ConnectionResetError, asyncio.CancelledError, BrokenPipeError):
             pass
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
 
 
 async def handle(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter,
-                 target_port: int, bucket: Bucket, up_bucket: Optional[Bucket],
-                 stats: dict, up_stats: dict) -> None:
+                 target_port: int, down: "Link", up: Optional["Link"]) -> None:
     try:
         raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, TARGET_RCVBUF)
@@ -98,14 +136,14 @@ async def handle(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter,
         client_w.close()
         return
 
-    if up_bucket is not None:
+    if up is not None:
         # Bound the client-facing receive buffer like the target-facing one:
         # an uplink's standing queue must stand in the modeled path, not hide
         # in an autotuned relay buffer the sender never feels.
         csock = client_w.get_extra_info("socket")
         if csock is not None:
             csock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, TARGET_RCVBUF)
-        up = pump(client_r, target_w, up_bucket, up_stats)
+        upward = up.carry(client_r, target_w)
     else:
         async def passthrough():
             try:
@@ -121,9 +159,9 @@ async def handle(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter,
                 target_w.close()
             except Exception:
                 pass
-        up = passthrough()
+        upward = passthrough()
 
-    await asyncio.gather(up, pump(target_r, client_w, bucket, stats))
+    await asyncio.gather(upward, down.carry(target_r, client_w))
 
 
 async def main(listen_port: int, target_port: int, rate_kbit: int,
@@ -143,13 +181,17 @@ async def main(listen_port: int, target_port: int, rate_kbit: int,
                   f"total={now/1e6:.1f} MB{up_part}", flush=True)
             last, up_last = now, up_now
 
-    # One shared bucket per direction across ALL connections: the relay is the
-    # bottleneck link itself, so every byte of a direction competes for the
-    # same allowance.
-    bucket = Bucket(rate_bps)
-    up_bucket = Bucket(up_rate_kbit * 1000 / 8) if up_rate_kbit else None
+    # One queue per direction across ALL connections: the relay is the
+    # bottleneck link itself, so every byte of a direction waits in the same
+    # line for the same allowance.
+    down = Link(rate_bps, TARGET_RCVBUF, stats)
+    down.start()
+    up = None
+    if up_rate_kbit:
+        up = Link(up_rate_kbit * 1000 / 8, TARGET_RCVBUF, up_stats)
+        up.start()
     server = await asyncio.start_server(
-        lambda r, w: handle(r, w, target_port, bucket, up_bucket, stats, up_stats),
+        lambda r, w: handle(r, w, target_port, down, up),
         "127.0.0.1", listen_port)
     up_note = f", uplink cap {up_rate_kbit} kbit/s" if up_rate_kbit else ""
     print(f"[relay] :{listen_port} -> :{target_port} downlink cap {rate_kbit} kbit/s{up_note}", flush=True)

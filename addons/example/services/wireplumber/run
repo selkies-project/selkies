@@ -4,7 +4,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 export DISABLE_RTKIT="y"
-export PIPEWIRE_LATENCY="256/48000"
+export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-256/48000}"
 # The session manager must not start until PipeWire is actually answering: a
 # lock file appears before the daemon serves, and a wireplumber that connects to
 # a half-started daemon exits immediately and is respawned in a loop.
