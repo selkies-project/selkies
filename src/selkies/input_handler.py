@@ -70,7 +70,7 @@ import msgpack
 from PIL import Image
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Container, Iterable, Optional, Union
+from typing import Any, Callable, Container, Iterable, Optional, Tuple, Union
 from .display_utils import (
     pixelflux_x11_cursor,
     unpremultiply_rgba,
@@ -3065,6 +3065,7 @@ class WebRTCInput:
                     "clipboard_write_app", "clipboard_unwatch_app",
                     "list_outputs", "create_output", "set_keymap_overlay",
                     "hold_spare_app_screens", "set_app_output_scale",
+                    "set_app_screen_geometry",
                     "set_app_wayland_display", "type_text_wayland",
                     "get_keyboard_state",
                 ) if not hasattr(self.wayland_input, m)]
@@ -4802,7 +4803,26 @@ class WebRTCInput:
         self._app_wayland_display()
         return self._app_wl_is_separate
 
-    async def realize_wayland_dpi(self, dpi: Any, display_index: int = 0) -> float:
+    def _size_session_screen(self, display: str, display_index: int, scale: float,
+                             size: Optional[Tuple[int, int]]) -> bool:
+        """Give the session compositor's screen its scale, and its mode too when
+        the caller knows the size the screen is about to carry. Blocking.
+
+        A session lays its desktop out once per applied configuration, so a scale
+        that arrives on its own leaves the screen at the old mode under the new
+        scale — a fraction of the size it ends at, which is what a client that
+        does not lay out again keeps. Older pixelflux builds have no combined
+        call and take the scale alone.
+        """
+        geometry = getattr(self.wayland_input, "set_app_screen_geometry", None)
+        if geometry is not None and size and size[0] > 0 and size[1] > 0:
+            return bool(geometry(display, display_index,
+                                 int(size[0]), int(size[1]), scale))
+        return bool(self.wayland_input.set_app_output_scale(
+            display, display_index, scale))
+
+    async def realize_wayland_dpi(self, dpi: Any, display_index: int = 0,
+                                  size: Optional[Tuple[int, int]] = None) -> float:
         """Apply a DPI on the Wayland backend and return the capture output
         scale it leaves behind.
 
@@ -4814,7 +4834,18 @@ class WebRTCInput:
         output's scale, which it follows, and so does a plain pixelflux session,
         where the capture output is the only screen there is. XWayland
         applications need nothing merged: they run in the compositor's logical
-        space and are scaled with it."""
+        space and are scaled with it.
+
+        Args:
+            dpi: The desktop DPI to realize; 96 is unity.
+            display_index: Which of the session's screens backs this display.
+            size: The pixel size that screen is about to carry, when the caller
+                already knows it, so the mode and the scale land together.
+
+        Returns:
+            The scale left for the capture output: 1.0 once a session absorbed
+            it, the full scale otherwise.
+        """
         try:
             scale = max(0.1, float(dpi) / 96.0)
         except (TypeError, ValueError):
@@ -4824,7 +4855,7 @@ class WebRTCInput:
                 return scale
             display = self._app_wayland_display()
             applied = await asyncio.to_thread(
-                self.wayland_input.set_app_output_scale, display, display_index, scale)
+                self._size_session_screen, display, display_index, scale, size)
         except Exception as e:
             logger_webrtc_input.debug(f"Session output scale failed: {e}")
             return scale

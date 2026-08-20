@@ -260,6 +260,8 @@ Every workflow lives under [`.github/workflows`](https://github.com/selkies-proj
 
 Ruff's rule selection lives in `pyproject.toml`, codespell's exceptions in `.codespellrc`, and each dashboard's ESLint rules in its own `eslint.config.js`, so `ruff check`, `codespell`, and [`scripts/ci/lint-web.sh`](https://github.com/selkies-project/selkies/tree/main/scripts/ci/lint-web.sh) from the repository root reproduce the CI lint exactly.
 
+Shell is linted by `shellcheck`, which actionlint runs over every workflow `run:` block and the `unit` tier runs over every script the tree ships. Which findings it reports at that severity differs between releases, so both jobs install the pinned build with [`scripts/ci/install-shellcheck.sh`](https://github.com/selkies-project/selkies/tree/main/scripts/ci/install-shellcheck.sh); run it with a writable directory (`scripts/ci/install-shellcheck.sh ~/.local/bin`) to lint against the same one locally.
+
 The same three run as a pre-commit hook, which is the easier way to stay ahead of the lint gate:
 
 ```bash

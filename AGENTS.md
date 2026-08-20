@@ -54,8 +54,11 @@ is auto-detected: the compositor is the live `wayland-<N>` socket beside the cap
 differently named relay a session listens on, and aiming at the capture compositor instead is what silently kills
 every non-ASCII key. A DPI is an output scale on that same compositor (wlr-output-management, in-process), never Xft
 resources: XWayland runs in its logical space and is scaled with it, and scaling the CAPTURE output instead shrinks
-the session and upscales it. Only what that compositor leaves — a KWin session, or no session at all — becomes the
-capture scale, and only a changed capture scale restarts a capture. The Wayland path is subprocess-free by design — never reintroduce wtype, wl-copy or similar
+the session and upscales it. The scale carries the size that screen is about to take in the same configuration,
+because a session lays its desktop out once per applied configuration: a scale arriving alone leaves it at the
+pre-connect mode under the new scale, a fraction of its final size, which a client that does not lay out again keeps.
+Only what that compositor leaves — a KWin session, or no session at all — becomes the capture scale, and only a
+changed capture scale restarts a capture. The Wayland path is subprocess-free by design — never reintroduce wtype, wl-copy or similar
 forks where the in-process pixelflux harness exists.
 A defect that predates the change you are making is still in scope: finding it does not make it someone else's,
 and "pre-existing" is not a reason to leave it. Fix it, or say precisely what is broken, what you ruled out, and

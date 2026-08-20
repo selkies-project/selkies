@@ -117,15 +117,40 @@ for service in ("pipewire", "pipewire-pulse", "wireplumber"):
     check(f"{service} takes the audio latency an operator set",
           "${PIPEWIRE_LATENCY:-" in body, os.path.relpath(path, REPO))
 
+SKIP_DIRS = {".git", "node_modules", "dist", "__pycache__", ".venv", "venv"}
+
+
+def shell_scripts(root: str) -> list:
+    """Every shell script under `root`, by extension or by shebang.
+
+    Walked rather than globbed: `glob` does not descend into dot-directories,
+    which hides the devcontainer's scripts, and the scripts a container runs by
+    name (service `run`/`finish`, `selkies-proot`) carry no extension at all.
+    """
+    found = []
+    for base, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for name in files:
+            path = os.path.join(base, name)
+            if name.endswith(".sh"):
+                found.append(path)
+                continue
+            if os.path.splitext(name)[1] or os.path.islink(path):
+                continue
+            try:
+                with open(path, "rb") as f:
+                    shebang = f.readline(128)
+            except OSError:
+                continue
+            if shebang.startswith(b"#!") and re.search(rb"\b(?:ba|da|k|z)?sh\b", shebang):
+                found.append(path)
+    return sorted(found)
+
+
 # Every shell script the repository ships, not just the example container's:
 # the packaging, CI and tooling scripts run unattended, where a quoting slip is
 # the same class of failure and nobody is watching the output.
-ALL_SHELL = sorted(
-    p for p in (
-        glob.glob(os.path.join(REPO, "**", "*.sh"), recursive=True)
-        + glob.glob(os.path.join(REPO, "**", "services", "*", "run"), recursive=True)
-        + glob.glob(os.path.join(REPO, "**", "services", "*", "finish"), recursive=True))
-    if "node_modules" not in p)
+ALL_SHELL = shell_scripts(REPO)
 
 shellcheck = shutil.which("shellcheck")
 if shellcheck:
