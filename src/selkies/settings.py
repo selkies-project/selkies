@@ -345,7 +345,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "ui_show_core_buttons",
         "type": "bool",
         "default": True,
-        "help": "Show the core components buttons display, audio, microphone, and gamepad.",
+        "help": "Show the core components buttons display, audio, microphone, webcam, and gamepad.",
     },
     {
         "name": "ui_show_sidebar",
@@ -412,6 +412,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "bool",
         "default": True,
         "help": "Show the gamepads section in the sidebar.",
+    },
+    {
+        "name": "ui_sidebar_show_webcam",
+        "type": "bool",
+        "default": False,
+        "help": "Show the webcam toggle among the core buttons (classic sidebar) and stream controls (wish top menu). Hides the control only; webcam_enabled governs whether the server accepts webcam frames.",
     },
     {
         "name": "ui_sidebar_show_fullscreen",

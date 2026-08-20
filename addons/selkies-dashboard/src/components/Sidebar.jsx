@@ -861,7 +861,8 @@ function Sidebar() {
     newRenderable.videoToggle = isRenderable('video_enabled');
     newRenderable.audioToggle = isRenderable('audio_enabled');
     newRenderable.microphoneToggle = isRenderable('microphone_enabled');
-    newRenderable.webcamToggle = isRenderable('webcam_enabled');
+    newRenderable.webcamToggle = isRenderable('webcam_enabled')
+      && (s.ui_sidebar_show_webcam?.value ?? true);
     newRenderable.gamepadToggle = isRenderable('gamepad_enabled');
 
     // Rate control is on by default server-side, so a payload without the key
