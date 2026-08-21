@@ -233,6 +233,11 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # still dropped: screen lockers and power management (a container session
         # suspends nothing), gvfs, and the KDE portal.
         adwaita-icon-theme \
+        # LXQt ships no XSETTINGS manager, and Xft resources alone reach a
+        # toolkit only at process start: without a manager on the selection a
+        # DPI change moves nothing until the session restarts. Wayland has no
+        # equivalent gap, where the compositor hands applications the scale.
+        xsettingsd \
         lxqt-qtplugin \
         lxqt-config \
         lxqt-notificationd \

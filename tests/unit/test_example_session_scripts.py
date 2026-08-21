@@ -117,6 +117,23 @@ for service in ("pipewire", "pipewire-pulse", "wireplumber"):
     check(f"{service} takes the audio latency an operator set",
           "${PIPEWIRE_LATENCY:-" in body, os.path.relpath(path, REPO))
 
+# Xft resources reach a toolkit only when it starts, so on X11 the DPI ladder's
+# reload signal is what makes a change live. It has to have something to signal:
+# a session with no XSETTINGS manager leaves every running application at the
+# density it launched with, and the failure is silent on both sides.
+ladder = open(os.path.join(REPO, "src", "selkies", "display_utils.py")).read()
+xsettingsd_service = os.path.join(EXAMPLE, "services", "xsettingsd", "run")
+check("the DPI ladder's XSETTINGS manager is a service",
+      "xsettingsd" not in ladder or os.path.isfile(xsettingsd_service),
+      os.path.relpath(xsettingsd_service, REPO))
+# The platform theme is what carries the session's fonts and icons into Qt, and
+# it is the wrapper this service replaces that would otherwise export it.
+lxqt_run = open(os.path.join(EXAMPLE, "services", "lxqt", "run")).read()
+for var in ("QT_QPA_PLATFORMTHEME", "QT_AUTO_SCREEN_SCALE_FACTOR"):
+    check(f"the session exports {var} on both backends",
+          len(re.findall(rf'^export {var}=', lxqt_run, re.M)) == 1,
+          "services/lxqt/run")
+
 SKIP_DIRS = {".git", "node_modules", "dist", "__pycache__", ".venv", "venv"}
 
 

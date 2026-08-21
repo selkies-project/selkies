@@ -36,13 +36,12 @@
 }
 
 /* Fixed elements sit off-screen until they open, so the page must not scroll
-   sideways to reach them. */
+   sideways to reach them, from the first paint rather than from whenever the
+   core client's own body style lands. That style is injected at runtime, so it
+   sits after this one at equal specificity and owns the page colour and the
+   reset: stating either here would look authoritative and do nothing. */
 body {
-  margin: 0;
-  padding: 0;
   overflow-x: hidden;
-  background-color: var(--card);
-  color: var(--foreground);
 }
 
 /* The portal element main.jsx creates, above the stream it overlays. */

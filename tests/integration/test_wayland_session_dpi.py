@@ -143,11 +143,30 @@ try:
                              capture_output=True, text=True).stdout
         return dict(line.split(":\t") for line in out.splitlines() if ":\t" in line)
 
+    lxqt_conf = os.path.join(home, ".config", "lxqt", "lxqt.conf")
+    os.makedirs(os.path.dirname(lxqt_conf), exist_ok=True)
+
+    def seed_session_font() -> None:
+        """An LXQt configuration carrying the packaged font, in points."""
+        with open(lxqt_conf, "w") as f:
+            f.write('[General]\nicon_theme=breeze\n\n[Qt]\n'
+                    'font="Sans,11,-1,5,50,0,0,0,0,0"\nstyle=Fusion\n')
+
+    def session_font() -> str:
+        """The font line the platform theme would read back."""
+        return next((line.strip() for line in open(lxqt_conf)
+                     if line.strip().startswith("font=")), "")
+
     os.environ["DISPLAY"] = DISP
     display_utils._is_wayland = lambda: True
+    seed_session_font()
     check("wayland set_dpi merges nothing: the scale ladder owns the DPI",
           asyncio.run(display_utils.set_dpi(192)) is False
           and "Xft.dpi" not in query(), query().get("Xft.dpi"))
+    # The compositor scales the session's own screen, so a font pinned to
+    # pixels here would be scaled a second time.
+    check("wayland leaves the session font in points",
+          session_font() == 'font="Sans,11,-1,5,50,0,0,0,0,0"', session_font())
 
     display_utils._is_wayland = lambda: False
     ok = asyncio.run(display_utils.set_dpi(144))
@@ -155,6 +174,17 @@ try:
           ok and query().get("Xft.dpi") == "144", query().get("Xft.dpi"))
     check("xsettingsd config follows the merge",
           "Xft/DPI 147456" in open(os.path.join(home, ".xsettingsd")).read())
+    # Qt keeps a widget's font from the moment it is built, so Xft resources
+    # reach nothing already on screen. Resolving the point size to pixels is
+    # what the platform theme can tell apart, and so what repolishes them.
+    check("x11 resolves the session font to pixels for the density",
+          session_font() == 'font="Sans,11,22,5,50,0,0,0,0,0"', session_font())
+    check("the rest of the session configuration survives the rewrite",
+          "icon_theme=breeze" in open(lxqt_conf).read()
+          and "style=Fusion" in open(lxqt_conf).read())
+    asyncio.run(display_utils.set_dpi(288))
+    check("a later density rescales from the same point size",
+          session_font() == 'font="Sans,11,44,5,50,0,0,0,0,0"', session_font())
 finally:
     H.stop_x_server(xvfb, DISP)
     shutil.rmtree(home, ignore_errors=True)

@@ -1,0 +1,46 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+export DISPLAY="${DISPLAY:-:20}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
+until [ -f "${XDG_RUNTIME_DIR}/container-env" ]; do sleep 0.5; done
+# shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
+. "${XDG_RUNTIME_DIR}/container-env"
+
+# The XSETTINGS manager for the X11 session. Xft resources reach a toolkit only
+# when it starts, so a DPI change applied through xrdb alone leaves every
+# running application at the density it was launched with; delivered over
+# XSETTINGS the same change reaches them live, and everything drawn after it --
+# menus, dialogs, newly launched applications -- takes the new size. Widgets a
+# Qt application has already realized keep their metrics either way.
+#
+# LXQt supplies no manager of its own, so nothing else owns the selection here.
+if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
+  # The compositor hands applications their scale directly.
+  echo "[xsettingsd] Wayland backend active; the session takes its scale from the compositor"
+  exec sleep infinity
+fi
+
+if ! command -v xsettingsd >/dev/null 2>&1; then
+  echo "[xsettingsd] not installed; X11 DPI changes will only reach applications started after them"
+  exec sleep infinity
+fi
+
+until timeout 2 xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1; do sleep 0.5; done
+
+# xsettingsd exits when it finds no configuration at all, and the DPI ladder
+# only writes one on the first change. Seed unity so the manager is on the
+# selection from the start; the ladder rewrites this file wholesale and signals.
+CONFIG="${HOME}/.xsettingsd"
+if [ ! -s "${CONFIG}" ]; then
+  dpi="${SELKIES_SCALING_DPI:-96}"
+  case "${dpi}" in
+    '' | *[!0-9]*) dpi=96 ;;
+  esac
+  printf 'Xft/Antialias 1\nXft/Hinting 1\nXft/HintStyle "hintfull"\nXft/RGBA "rgb"\nXft/DPI %s\n' \
+    "$(( dpi * 1024 ))" > "${CONFIG}"
+fi
+
+echo "[xsettingsd] serving XSETTINGS on ${DISPLAY}"
+exec xsettingsd
