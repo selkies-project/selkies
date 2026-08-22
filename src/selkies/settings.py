@@ -130,6 +130,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Enable gamepad support.",
     },
     {
+        "name": "webcam_enabled",
+        "type": "bool",
+        "default": False,
+        "help": "Enable client-to-server webcam forwarding to the virtual V4L2 device.",
+    },
+    {
         "name": "enable_clipboard",
         "type": "str",
         "default": "true",
@@ -339,7 +345,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "ui_show_core_buttons",
         "type": "bool",
         "default": True,
-        "help": "Show the core components buttons display, audio, microphone, and gamepad.",
+        "help": "Show the core components buttons display, audio, microphone, webcam, and gamepad.",
     },
     {
         "name": "ui_show_sidebar",
@@ -406,6 +412,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "bool",
         "default": True,
         "help": "Show the gamepads section in the sidebar.",
+    },
+    {
+        "name": "ui_sidebar_show_webcam",
+        "type": "bool",
+        "default": False,
+        "help": "Show the webcam toggle among the core buttons (classic sidebar) and stream controls (wish top menu). Hides the control only; webcam_enabled governs whether the server accepts webcam frames.",
     },
     {
         "name": "ui_sidebar_show_fullscreen",
@@ -875,6 +887,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "str",
         "default": "/tmp",
         "help": "Directory to write the Selkies Joystick Interposer communication sockets to, default: /tmp, results in socket files: /tmp/selkies_js{0-3}.sock",
+    },
+    {
+        "name": "webcam_socket_path",
+        "type": "str",
+        "default": "/tmp",
+        "help": "Directory to write the Selkies V4L2 Interposer webcam socket to, default: /tmp, results in socket file: /tmp/selkies_webcam0.sock",
     },
     {
         "name": "uinput_gamepad",
@@ -1611,6 +1629,7 @@ CLIENT_PAYLOAD_EXCLUDED = [
     'audio_device_name', 'watermark_path', 'recording_socket',
     'file_manager_path', 'run_after_connect', 'run_after_disconnect',
     'https_cert', 'rtc_config_json', 'app_ready_file', 'js_socket_path',
+    'webcam_socket_path',
     'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind',
     'wayland_host_display', 'app_wayland_display',
 ]

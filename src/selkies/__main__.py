@@ -86,6 +86,10 @@ async def run() -> None:
     # same directory selkies uses, regardless of how the setting was configured.
     os.environ["SELKIES_JS_SOCKET_PATH"] = settings.js_socket_path
 
+    # Same rationale for the V4L2 webcam interposer, which reads
+    # SELKIES_WEBCAM_SOCKET_PATH in app processes.
+    os.environ["SELKIES_WEBCAM_SOCKET_PATH"] = settings.webcam_socket_path
+
     if settings.computer_use_bind:
         try:
             from pixelflux import start_computer_use

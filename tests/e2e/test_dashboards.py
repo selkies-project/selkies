@@ -205,7 +205,8 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
 
 
 def gates_block(dashboard: str, dist: str) -> "H.Results":
-    """ui_sidebar_show_shortcuts=false must hide the shortcuts UI on BOTH dashboards."""
+    """ui_sidebar_show_shortcuts=false and ui_sidebar_show_webcam=false must
+    hide the shortcuts UI and the webcam toggle on BOTH dashboards."""
     res = H.Results(f"gates-{dashboard}")
     H.server_start(mode="websockets", wayland=False, web_root=dist,
                    extra_env={
@@ -225,7 +226,10 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
         # The shortcuts gate needs the sidebar enabled, so it gets its own boot.
         browser.close()
     H.server_start(mode="websockets", wayland=False, web_root=dist,
-                   extra_env={"SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false"})
+                   extra_env={
+                       "SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false",
+                       "SELKIES_UI_SIDEBAR_SHOW_WEBCAM": "false",
+                   })
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
         ctx = browser.new_context(viewport={"width": 1440, "height": 900})
@@ -240,6 +244,29 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
         has_shortcuts = "Shortcuts" in body
         res.check("ui_sidebar_show_shortcuts=false hides Shortcuts section",
                   not has_shortcuts, has_shortcuts)
+        # The webcam gate hides one entry of the core-button group while its
+        # siblings stay, so the microphone control doubles as proof that the
+        # group itself was reached (sidebar opened / stream menu expanded).
+        if dashboard == "classic":
+            try:
+                page.locator('.toggle-handle').first.click()
+                time.sleep(0.8)
+            except Exception:
+                pass
+            mic, cam = page.evaluate("""(() => [
+              !!document.querySelector('button[title$="Microphone"]'),
+              !!document.querySelector('button[title$="Webcam"]')])()""")
+        else:
+            try:
+                page.locator('[role="menubar"] button').first.click()
+                time.sleep(0.8)
+            except Exception:
+                pass
+            menu = page.evaluate("""(() => [...document.querySelectorAll('[role="menu"]')]
+              .map(m => m.innerText).join('\\n'))()""")
+            mic, cam = "Microphone" in menu, "Webcam" in menu
+        res.check("core buttons reachable (microphone toggle present)", mic, mic)
+        res.check("ui_sidebar_show_webcam=false hides webcam toggle", not cam, cam)
         browser.close()
     res.summary()
     return res

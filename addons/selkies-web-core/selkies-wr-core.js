@@ -37,6 +37,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { storageKeyForServerKey } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName } from './lib/util.js';
+import { WebcamCapture } from './lib/webcam-capture.js';
 
 installAuthGuard();
 
@@ -269,6 +270,11 @@ export default function webrtc() {
 	let isVideoPipelineActive = true;
 	let isAudioPipelineActive = true;
 	let isMicrophoneActive = false;
+	let isWebcamActive = false;
+	let webcamCapture = null;
+	let webcamFrameId = 0;
+	let preferredWebcamDeviceId = null;
+	const WEBCAM_CHUNK_SIZE = 16000;
 	let isGamepadEnabled = true;
 
 	// Per-message budget on the data channel: the browser exposes the negotiated
@@ -1084,10 +1090,76 @@ export default function webrtc() {
 			video: isVideoPipelineActive,
 			audio: isAudioPipelineActive,
 			microphone: isMicrophoneActive,
+			webcam: isWebcamActive,
 			gamepad: isGamepadEnabled
 		};
 		console.log('Posting sidebarButtonStatusUpdate:', updatePayload);
 		window.postMessage(updatePayload, window.location.origin);
+	}
+
+	// Webcam uplink over the data channel: each JPEG frame is split into chunks
+	// tagged [0x06][flags][frameId][chunkIdx][chunkCount] so the server can
+	// reassemble frames larger than one SCTP message.
+	function sendWebcamFrame(jpeg) {
+		if (!webrtc || !isWebcamActive) {
+			return;
+		}
+		const frameId = webcamFrameId;
+		webcamFrameId = (webcamFrameId + 1) & 0xffff;
+		const total = Math.max(1, Math.ceil(jpeg.byteLength / WEBCAM_CHUNK_SIZE));
+		for (let i = 0; i < total; i++) {
+			const start = i * WEBCAM_CHUNK_SIZE;
+			const end = Math.min(start + WEBCAM_CHUNK_SIZE, jpeg.byteLength);
+			const buf = new ArrayBuffer(8 + (end - start));
+			const view = new DataView(buf);
+			view.setUint8(0, 0x06);
+			view.setUint8(1, 0);
+			view.setUint16(2, frameId, true);
+			view.setUint16(4, i, true);
+			view.setUint16(6, total, true);
+			new Uint8Array(buf, 8).set(jpeg.subarray(start, end));
+			try {
+				webrtc.sendDataChannelMessage(buf);
+			} catch (e) {
+				console.error('Webcam chunk send failed:', e);
+				break;
+			}
+		}
+	}
+
+	function startWebcamCapture() {
+		if (isSharedMode || webcamCapture) {
+			return;
+		}
+		webcamCapture = new WebcamCapture({
+			sendFrame: sendWebcamFrame,
+			canSend: () => {
+				try {
+					return typeof webrtc.dataChannelBufferedAmount !== 'function'
+						|| webrtc.dataChannelBufferedAmount() < 2 * 1024 * 1024;
+				} catch (_) {
+					return true;
+				}
+			},
+			onStateChange: (active) => { isWebcamActive = active; postSidebarButtonUpdate(); },
+			onError: (error) => {
+				console.error('Webcam capture error:', error);
+				isWebcamActive = false;
+				postSidebarButtonUpdate();
+			},
+		});
+		webcamCapture.start(preferredWebcamDeviceId);
+	}
+
+	function stopWebcamCapture() {
+		if (webcamCapture) {
+			webcamCapture.stop();
+			webcamCapture = null;
+		}
+		if (isWebcamActive) {
+			isWebcamActive = false;
+			postSidebarButtonUpdate();
+		}
 	}
 
 	function toggleGamepadConnection() {
@@ -1277,6 +1349,16 @@ export default function webrtc() {
 					isAudioPipelineActive = audioOn;
 					window.postMessage({ type: 'pipelineStatusUpdate', audio: audioOn }, window.location.origin);
 					postSidebarButtonUpdate();
+				} else if (message.pipeline === 'webcam') {
+					if (isSharedMode) {
+						console.log("Shared mode: Webcam control blocked.");
+						break;
+					}
+					if (!!message.enabled) {
+						startWebcamCapture();
+					} else {
+						stopWebcamCapture();
+					}
 				}
 				break;
 			case 'gamepadControl':
@@ -2601,6 +2683,7 @@ export default function webrtc() {
 			// reset the data
 			window.isManualResolutionMode = false;
 			window.fps = 0;
+			stopWebcamCapture();
 
 			// remove the listeners
 			window.removeEventListener("message", handleMessage);

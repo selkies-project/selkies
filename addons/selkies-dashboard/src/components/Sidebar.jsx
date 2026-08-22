@@ -249,6 +249,11 @@ const MicrophoneIcon = () => (
     <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z" />
   </svg>
 );
+const WebcamIcon = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+    <path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4z" />
+  </svg>
+);
 const GamepadIcon = () => (
   <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
     <path d="M15 7.5V2H9v5.5l3 3 3-3zM7.5 9H2v6h5.5l3-3-3-3zM9 16.5V22h6v-5.5l-3-3-3 3zM16.5 9l-3 3 3 3H22V9h-5.5z" />
@@ -856,6 +861,8 @@ function Sidebar() {
     newRenderable.videoToggle = isRenderable('video_enabled');
     newRenderable.audioToggle = isRenderable('audio_enabled');
     newRenderable.microphoneToggle = isRenderable('microphone_enabled');
+    newRenderable.webcamToggle = isRenderable('webcam_enabled')
+      && (s.ui_sidebar_show_webcam?.value ?? true);
     newRenderable.gamepadToggle = isRenderable('gamepad_enabled');
 
     // Rate control is on by default server-side, so a payload without the key
@@ -1120,6 +1127,7 @@ function Sidebar() {
   const [isVideoActive, setIsVideoActive] = useState(true);
   const [isAudioActive, setIsAudioActive] = useState(true);
   const [isMicrophoneActive, setIsMicrophoneActive] = useState(false);
+  const [isWebcamActive, setIsWebcamActive] = useState(false);
   const [isGamepadEnabled, setIsGamepadEnabled] = useState(true);
   const [dashboardClipboardContent, setDashboardClipboardContent] =
     useState("");
@@ -1971,6 +1979,15 @@ function Sidebar() {
       },
       window.location.origin
     );
+  const handleWebcamToggle = () =>
+    window.postMessage(
+      {
+        type: "pipelineControl",
+        pipeline: "webcam",
+        enabled: !isWebcamActive,
+      },
+      window.location.origin
+    );
   const handleGamepadToggle = () =>
     window.postMessage(
       { type: "gamepadControl", enabled: !isGamepadEnabled },
@@ -2307,6 +2324,8 @@ function Sidebar() {
           if (message.audio !== undefined) setIsAudioActive(message.audio);
           if (message.microphone !== undefined)
             setIsMicrophoneActive(message.microphone);
+          if (message.webcam !== undefined)
+            setIsWebcamActive(message.webcam);
         } else if (message.type === "effectiveCursorState" && typeof message.value === "boolean") {
           // The core reports the cursor value actually in effect (multi-monitor
           // forces browser cursors on); reflect it so the toggle can't lie.
@@ -2328,6 +2347,8 @@ function Sidebar() {
           if (message.audio !== undefined) setIsAudioActive(message.audio);
           if (message.microphone !== undefined)
             setIsMicrophoneActive(message.microphone);
+          if (message.webcam !== undefined)
+            setIsWebcamActive(message.webcam);
           if (message.gamepad !== undefined)
             setIsGamepadEnabled(message.gamepad);
         } else if (message.type === "clipboardContentUpdate") {
@@ -2804,6 +2825,19 @@ function Sidebar() {
                 )}
               >
                 <MicrophoneIcon />
+              </button>
+            )}
+            {(renderableSettings.webcamToggle ?? true) && (
+              <button
+                className={`action-button ${isWebcamActive ? "active" : ""}`}
+                onClick={handleWebcamToggle}
+                title={t(
+                  isWebcamActive
+                    ? "buttons.webcamDisableTitle"
+                    : "buttons.webcamEnableTitle"
+                )}
+              >
+                <WebcamIcon />
               </button>
             )}
             {(renderableSettings.gamepadToggle ?? true) && (

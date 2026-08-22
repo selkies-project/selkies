@@ -140,6 +140,8 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.videoToggle = true;
   newRenderable.audioToggle = isSettingRenderable(s.audio_enabled);
   newRenderable.microphoneToggle = isSettingRenderable(s.microphone_enabled);
+  newRenderable.webcamToggle = isSettingRenderable(s.webcam_enabled)
+    && (s.ui_sidebar_show_webcam?.value ?? true);
   newRenderable.gamepadToggle = isSettingRenderable(s.gamepad_enabled)
     && (s.ui_sidebar_show_gamepads?.value ?? true);
 

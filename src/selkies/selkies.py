@@ -78,6 +78,7 @@ from .input_handler import (
 )
 from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, effective_use_cpu, inflate_gz_bounded, sanitize_client_setting
 from .settings import settings as app_settings
+from .webcam import get_shared_webcam_server
 from .stream_server import BaseStreamingService
 from .webrtc_utils import Metrics
 
@@ -3112,6 +3113,7 @@ class DataStreamingServer(BaseStreamingService):
         mic_setup_done = False
         mic_disabled_sent = False
         mic_error = False
+        webcam_disabled_sent = False
         pa_module_index = None
         # Only the caller that loaded module-virtual-source unloads it on teardown
         # (parity with the WebRTC path): a reused pre-existing source is left for
@@ -3358,6 +3360,38 @@ class DataStreamingServer(BaseStreamingService):
                                     await asyncio.to_thread(_dead.stop)
                                 except Exception:
                                     pass
+
+                    elif msg_type == 0x06:
+                        # Opcode 0x06 carries one MJPEG webcam frame for the
+                        # virtual V4L2 device. Gate like the microphone: only a
+                        # controller (or a collab-authorized viewer) may feed it,
+                        # and never when the webcam is administratively locked off.
+                        cam_perms = client_permissions.get(websocket) or {}
+                        cam_ok = cam_perms.get("role") != "viewer" or (
+                            settings.enable_collab[0]
+                            and active_mk_token is not None
+                            and cam_perms.get("token") == active_mk_token
+                        )
+                        webcam_locked_off = (
+                            not settings.webcam_enabled[0] and settings.webcam_enabled[1]
+                        )
+                        if not cam_ok or webcam_locked_off:
+                            if not webcam_disabled_sent:
+                                webcam_disabled_sent = True
+                                try:
+                                    await websocket.send_str("WEBCAM_DISABLED")
+                                except (ConnectionResetError, OSError, RuntimeError):
+                                    pass
+                            continue
+                        if not payload:
+                            continue
+                        cam_server = await self.ensure_webcam_server()
+                        if cam_server is not None:
+                            try:
+                                cam_server.feed(bytes(payload))
+                            except Exception as e_cam:
+                                data_logger.error(
+                                    f"Webcam feed error: {e_cam}", exc_info=False)
 
                 elif msg.type == WSMsgType.TEXT:
                     message = msg.data
@@ -5479,6 +5513,19 @@ class DataStreamingServer(BaseStreamingService):
         finally:
             logger.info("Main loop ending or interrupted. Performing cleanup...")
             await self.shutdown()
+
+    async def ensure_webcam_server(self) -> Optional[Any]:
+        """Lazily starts and returns the process-wide virtual webcam server.
+
+        Started only when a client first forwards a webcam frame, so sessions
+        that never enable the camera pay nothing. Returns None if the server
+        cannot be started.
+        """
+        try:
+            return await get_shared_webcam_server(app_settings.webcam_socket_path)
+        except Exception as exc:
+            data_logger.error(f"Failed to start webcam server: {exc}", exc_info=False)
+            return None
 
     async def shutdown(self) -> None:
         """Shut down all components and release resources; idempotent.

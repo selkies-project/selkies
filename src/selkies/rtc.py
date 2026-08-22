@@ -41,6 +41,7 @@ Structural notes:
 
 import logging
 import asyncio
+import struct
 import gzip
 import inspect
 import re
@@ -55,6 +56,7 @@ except (ImportError, RuntimeError):
     pcmflux = None
 
 from .settings import settings as app_settings, inflate_gz_bounded
+from .webcam import get_shared_webcam_server
 from .webrtc import (
     RTCPeerConnection,
     RTCIceCandidate,
@@ -312,6 +314,11 @@ class RTCApp:
         self.turn_servers = turn_servers
         self.encoder = encoder
         self.last_cursor_sent = None
+
+        # Per-peer webcam frame reassembly. Frames arrive as chunks tagged with
+        # a frame id (0x06 binary opcode); a peer only ever assembles one frame
+        # at a time, so a single in-progress buffer per peer suffices.
+        self._webcam_reasm: Dict[str, Dict[str, Any]] = {}
 
         # Per-display media graphs: display_id -> {relay, video_bridge, video_media,
         # audio_bridge?, audio_media?}. A display's graph is created by its first
@@ -1327,6 +1334,56 @@ class RTCApp:
             return True
         return int(slot) - 1 != index
 
+    async def _feed_webcam(self, frame: bytes) -> None:
+        """Stages one reassembled MJPEG frame into the shared webcam server."""
+        try:
+            server = await get_shared_webcam_server(app_settings.webcam_socket_path)
+            server.feed(frame)
+        except Exception as exc:
+            logger.error("Webcam feed error: %s", exc)
+
+    def _handle_webcam_chunk(self, msg: Any, client_type: Optional[ClientType],
+                             client_token: Optional[str],
+                             peer_id: Optional[str]) -> Any:
+        """Reassembles a chunked webcam frame; returns a feed coroutine when done.
+
+        Wire layout per chunk: ``0x06`` opcode, a one-byte flags field (reserved),
+        then little-endian ``frame_id``, ``chunk_idx`` and ``chunk_count`` as
+        uint16, followed by the JPEG chunk. A single-chunk frame (``chunk_count``
+        1) is fed directly. Gated like other client input: viewers are denied
+        unless authorized collaborators, and a locked-off webcam is refused.
+        """
+        if client_type == ClientType.VIEWER and not self._viewer_is_collaborator(client_token):
+            return None
+        if not app_settings.webcam_enabled[0] and app_settings.webcam_enabled[1]:
+            return None
+        data = bytes(msg)
+        if len(data) < 8:
+            return None
+        frame_id, chunk_idx, chunk_count = struct.unpack_from("<HHH", data, 2)
+        payload = data[8:]
+        if chunk_count == 0:
+            return None
+        if chunk_count == 1:
+            return self._feed_webcam(payload)
+
+        key = peer_id or "primary"
+        st = self._webcam_reasm.get(key)
+        if st is None or st["frame_id"] != frame_id or st["count"] != chunk_count:
+            st = {"frame_id": frame_id, "count": chunk_count,
+                  "parts": [None] * chunk_count, "got": 0}
+            self._webcam_reasm[key] = st
+        if chunk_idx >= st["count"]:
+            return None
+        if st["parts"][chunk_idx] is None:
+            st["parts"][chunk_idx] = payload
+            st["got"] += 1
+        if st["got"] == st["count"]:
+            frame = b"".join(st["parts"])
+            self._webcam_reasm.pop(key, None)
+            return self._feed_webcam(frame)
+        return None
+
     def _on_input_channel_message(self, msg: Any,
                                   channel: Optional[RTCDataChannel] = None,
                                   client_type: Optional[ClientType] = None,
@@ -1353,6 +1410,11 @@ class RTCApp:
             except Exception:
                 logger.warning("Dropping undecodable compressed data channel message")
                 return
+        if isinstance(msg, (bytes, bytearray)) and len(msg) >= 1 and msg[0] == 0x06:
+            # Opcode 0x06: one chunk of an MJPEG webcam frame for the virtual
+            # V4L2 device. Reassembled per peer and fed to the shared webcam
+            # server; never reaches the string input dispatcher.
+            return self._handle_webcam_chunk(msg, client_type, client_token, peer_id)
         if msg == "_gz,1":
             # The peer can gunzip: echo the capability so it compresses its own large
             # sends, and mark THIS channel so outbound payloads to it may be gzipped.
@@ -1888,6 +1950,7 @@ class RTCApp:
             # Explicit stop deletes the registration before the 'closed' state
             # event can see it, so this peer's mic must be stopped here too.
             await self._stop_mic_playback_state(peer_obj.get("mic_state"))
+            self._webcam_reasm.pop(client_peer_id, None)
             removed = self.peer_connections.pop(client_peer_id, None)
             if removed is not None and self.on_peer_gone is not None:
                 # For the same reason, the input state this peer owns (gamepad

@@ -19,6 +19,7 @@ apk add --no-cache $(sed -n 's/^depends="\(.*\)"$/\1/p' /repo/infra/packaging/ap
 . /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
+/repo/infra/packaging/v4l2-interposer.sh /pkg-root
 # abuild writes src/ and pkg/ next to the APKBUILD, and /repo is read-only
 rm -rf /build
 mkdir -p /build /out
