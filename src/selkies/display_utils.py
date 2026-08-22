@@ -1591,6 +1591,88 @@ def _write_xresources_dpi(xresources_path_str: str, dpi_value: int) -> None:
     _atomic_write_text(xresources_path_str, "\n".join(lines) + "\n")
 
 
+_LXQT_FONT_LINE = re.compile(r'^(\s*font\s*=\s*)"?([^"\n]*)"?\s*$', re.I)
+
+
+def _rewrite_lxqt_font(path: str, dpi_value: int) -> Optional[Tuple[float, int]]:
+    """Resolve the session font's point size to pixels at `dpi_value`.
+
+    Returns (points, pixels) when the file was rewritten, None when there is no
+    LXQt configuration or no font in it. Only the font line changes; every other
+    setting in the file is left byte for byte.
+
+    Qt keeps a widget's font from the moment it is built, so a density delivered
+    as Xft resources alone reaches nothing already on screen. The LXQt platform
+    theme watches this file and answers a change with QApplication::setFont,
+    which is the one call that repolishes those widgets — but Qt drops a font it
+    considers equal, and a point size is equal at every density. Resolving it to
+    pixels is what makes the change land. The point size stays in the field Qt
+    ignores once a pixel size is set, so the next density has a base to scale.
+    """
+    try:
+        with open(path, "r") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return None
+
+    section, out, resolved = "", [], None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].lower()
+        match = _LXQT_FONT_LINE.match(line) if section == "qt" else None
+        if match is None or resolved is not None:
+            out.append(line)
+            continue
+        fields = match.group(2).split(",")
+        if len(fields) < 3:
+            out.append(line)
+            continue
+        try:
+            points, pixels = float(fields[1]), float(fields[2])
+        except ValueError:
+            out.append(line)
+            continue
+        if points <= 0:
+            # A file Qt has round-tripped carries pixels alone; the density
+            # those were resolved at is the one currently on the display.
+            points = pixels * 72.0 / max(1, _APPLIED_DPI or 96)
+        if points <= 0:
+            out.append(line)
+            continue
+        fields[1] = f"{points:g}"
+        fields[2] = str(max(1, round(points * dpi_value / 72.0)))
+        out.append(f'{match.group(1)}"{",".join(fields)}"\n')
+        resolved = (points, int(fields[2]))
+
+    if resolved is None:
+        return None
+    _atomic_write_text(path, "".join(out))
+    return resolved
+
+
+async def _run_lxqt_font(dpi_value: int, logger: logging.Logger) -> bool:
+    """Hand the density to a running LXQt session's Qt applications.
+
+    The X11 counterpart of the Wayland output scale: there the compositor tells
+    clients their scale and they redraw, here the platform theme repolishes them
+    from its own configuration. Applications on other toolkits, and any started
+    later, take the same density from the Xft resources instead.
+    """
+    path = os.path.expanduser("~/.config/lxqt/lxqt.conf")
+    try:
+        resolved = await asyncio.to_thread(_rewrite_lxqt_font, path, dpi_value)
+    except OSError as e:
+        logger.debug(f"LXQt session font not retargeted: {e}")
+        return False
+    if resolved is None:
+        return False
+    logger.info(
+        f"LXQt session font resolved to {resolved[1]}px for DPI {dpi_value} "
+        f"({resolved[0]:g}pt), repolishing running applications.")
+    return True
+
+
 async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
     """Apply DPI via Xresources/xrdb and the xsettingsd config.
 
@@ -1655,14 +1737,21 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
             pgrep_stdout, _ = await _communicate_or_kill(pgrep_proc)
 
             if pgrep_proc.returncode == 0:
-                pid_output = pgrep_stdout.decode().strip()
-                if pid_output:
-                    pid = int(pid_output.splitlines()[0])
+                # Every match, not the lowest pid: the one serving this display
+                # is not necessarily the oldest, and a daemon that is not ours
+                # only re-reads a configuration this write did not touch.
+                signalled = []
+                for line in pgrep_stdout.decode().split():
                     try:
-                        os.kill(pid, signal.SIGHUP)
-                        logger.info(f"Sent SIGHUP to xsettingsd process {pid} to reload config.")
-                    except OSError as e:
-                        logger.warning(f"Failed to send SIGHUP to xsettingsd process {pid}: {e}")
+                        os.kill(int(line), signal.SIGHUP)
+                        signalled.append(line)
+                    except (OSError, ValueError) as e:
+                        logger.debug(f"Failed to send SIGHUP to xsettingsd process {line}: {e}")
+                if signalled:
+                    logger.info(
+                        f"Sent SIGHUP to xsettingsd to reload config ({', '.join(signalled)}).")
+                else:
+                    logger.warning("No xsettingsd process could be signalled to reload.")
             else:
                 logger.info("xsettingsd process not found. Skipping reload.")
         
@@ -1989,6 +2078,12 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
         logger_app_resize.info(f"No specific DE session binary found (KDE, XFCE, MATE, i3, LXQt, Openbox). Attempting generic xrdb as a fallback for DPI {dpi_value}.")
         if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
+
+    # Independent of which branch above ran: the session that owns the windows
+    # decides whether anything already drawn follows, and it is the only one
+    # that can repolish them.
+    if await _run_lxqt_font(dpi_value, logger_app_resize):
+        any_method_succeeded = True
 
     if not any_method_succeeded:
         logger_app_resize.warning(f"No DPI setting method succeeded for DPI {dpi_value} (Attempted for: {de_name_for_log}).")

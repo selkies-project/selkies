@@ -12,32 +12,42 @@
 /* Default (Dark Theme) */
 :root,
 .theme-dark {
-    /* Core tokens */
+    /* Core tokens.
+       Text colours are picked against the surface they land on rather than
+       against the page: the sidebar, the section panel and a hovered row are
+       three different backgrounds, and the accent-tinted ones (an active
+       toggle, an error row) are lighter again. Accent as text is therefore a
+       separate, lighter tint of the same hue — the fill colour is too dark
+       against those surfaces at label sizes. */
     --accent: #ec4899;
     --accent-strong: #f472b6;
+    --accent-text: #f9a8d4;
+    --accent-text-strong: #fbc0de;
     --accent-soft: rgba(236, 72, 153, 0.14);
     --accent-border: rgba(236, 72, 153, 0.45);
-    --violet: #a99cf0;
-    --violet-strong: #beb3fa;
+    --violet: #c3b1f7;
+    --violet-strong: #cdc0fa;
+    --wordmark-from: #f4a6cf;
+    --wordmark-to: #c3b1f7;
     --bg: #12161d;
     --surface: #181d26;
     --surface-alt: #1f2530;
     --surface-inset: #12161d;
-    --border-soft: #232a35;
-    --border-strong: #323b49;
-    --text: #d7dde6;
-    --text-muted: #8b95a4;
+    --border-soft: #2b3441;
+    --border-strong: #6e7b94;
+    --text: #e6ebf3;
+    --text-muted: #aeb9c9;
     --radius-sm: 6px;
     --radius: 8px;
     --radius-lg: 12px;
     --focus-ring: 0 0 0 3px var(--accent-soft);
-    --select-arrow: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%228%22%3E%3Cpath%20fill%3D%22none%22%20stroke%3D%22%238b95a4%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20d%3D%22M1%201.5l5%205%205-5%22%2F%3E%3C%2Fsvg%3E');
+    --select-arrow: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%228%22%3E%3Cpath%20fill%3D%22none%22%20stroke%3D%22%23aeb9c9%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20d%3D%22M1%201.5l5%205%205-5%22%2F%3E%3C%2Fsvg%3E');
 
     /* Legacy aliases consumed by component markup and the rules below */
     --sidebar-bg: var(--surface);
     --sidebar-text: var(--text);
     --sidebar-text-secondary: var(--text-muted);
-    --sidebar-header-color: var(--accent);
+    --sidebar-header-color: var(--accent-text);
     --sidebar-border: var(--border-soft);
     --sidebar-shadow: rgba(0, 0, 0, 0.55);
     --section-bg: var(--surface-alt);
@@ -46,9 +56,11 @@
     --input-bg: var(--surface-inset);
     --input-text: var(--text);
     --input-border: var(--border-strong);
-    --button-bg: var(--accent);
+    /* A filled button carries near-black text, so its pink is lighter again
+       than the accent that only has to sit on a dark surface. */
+    --button-bg: #f795ca;
     --button-text: #12161d;
-    --button-hover-bg: var(--accent-strong);
+    --button-hover-bg: var(--accent-text);
     --link-color: var(--violet);
     --link-hover-color: var(--violet-strong);
     --pre-bg: var(--surface-alt);
@@ -70,12 +82,12 @@
     /* Notification specific */
     --notification-progress-bg: var(--surface-inset);
     --notification-progress-fill: var(--accent);
-    --notification-success-color: #4cd07d;
-    --notification-error-color: #ef4444;
-    --notification-warn-color: #eab308;
+    --notification-success-color: #5bd98a;
+    --notification-error-color: #fca5a5;
+    --notification-warn-color: #facc15;
     --notification-shadow: rgba(0, 0, 0, 0.4);
     --notification-close-hover-bg: rgba(255, 255, 255, 0.08);
-    --error-color: #ef4444;
+    --error-color: #fca5a5;
 
     /* Gamepad visualizer */
     --gamepad-shell-fill: #2a313d;
@@ -90,27 +102,33 @@
 
 /* Light Theme */
 .theme-light {
-    --accent: #c9317f;
-    --accent-strong: #ad2a6d;
-    --accent-soft: rgba(201, 49, 127, 0.1);
-    --accent-border: rgba(201, 49, 127, 0.4);
-    --violet: #6857b8;
-    --violet-strong: #55459e;
+    /* On a light surface the accent has to go the other way to carry text, so
+       --accent-text is darker than the fill rather than lighter. */
+    --accent: #a82a69;
+    --accent-strong: #8f2359;
+    --accent-text: var(--accent);
+    --accent-text-strong: var(--accent-strong);
+    --accent-soft: rgba(168, 42, 105, 0.1);
+    --accent-border: rgba(168, 42, 105, 0.4);
+    --violet: #5b4ba3;
+    --violet-strong: #4a3c87;
+    --wordmark-from: #b93a82;
+    --wordmark-to: #7b52b0;
     --bg: #f4f5f8;
     --surface: #ffffff;
     --surface-alt: #f6f7f9;
     --surface-inset: #ffffff;
-    --border-soft: #e6e8ee;
-    --border-strong: #d4d8e0;
+    --border-soft: #dfe2ea;
+    --border-strong: #7a8496;
     --text: #23272f;
-    --text-muted: #667084;
+    --text-muted: #5b6478;
     --focus-ring: 0 0 0 3px var(--accent-soft);
-    --select-arrow: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%228%22%3E%3Cpath%20fill%3D%22none%22%20stroke%3D%22%23667084%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20d%3D%22M1%201.5l5%205%205-5%22%2F%3E%3C%2Fsvg%3E');
+    --select-arrow: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%228%22%3E%3Cpath%20fill%3D%22none%22%20stroke%3D%22%235b6478%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20d%3D%22M1%201.5l5%205%205-5%22%2F%3E%3C%2Fsvg%3E');
 
     --sidebar-bg: var(--surface);
     --sidebar-text: var(--text);
     --sidebar-text-secondary: var(--text-muted);
-    --sidebar-header-color: var(--accent);
+    --sidebar-header-color: var(--accent-text);
     --sidebar-border: var(--border-soft);
     --sidebar-shadow: rgba(15, 23, 42, 0.12);
     --section-bg: var(--surface-alt);
@@ -139,12 +157,12 @@
 
     --notification-progress-bg: #e2e5eb;
     --notification-progress-fill: var(--accent);
-    --notification-success-color: #1f9d55;
-    --notification-error-color: #c0392b;
-    --notification-warn-color: #946c00;
+    --notification-success-color: #12703e;
+    --notification-error-color: #a12d21;
+    --notification-warn-color: #7d5b00;
     --notification-shadow: rgba(15, 23, 42, 0.1);
     --notification-close-hover-bg: rgba(0, 0, 0, 0.06);
-    --error-color: #c0392b;
+    --error-color: #a12d21;
 
     --gamepad-shell-fill: #c6cad3;
     --gamepad-shell-stroke: #9aa1ad;
@@ -237,7 +255,7 @@
 
 .header-action-button.active {
     background-color: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
 }
 
 .header-action-button svg {
@@ -249,12 +267,12 @@
    fallback where background-clip: text is unsupported. */
 .sidebar h2 {
     margin: 0;
-    font-size: 17px;
+    font-size: 20px;
     font-weight: 700;
     letter-spacing: 0.02em;
     line-height: 1.2;
     color: var(--sidebar-header-color);
-    background-image: linear-gradient(100deg, #d5499a 20%, #9c74ce 90%);
+    background-image: linear-gradient(100deg, var(--wordmark-from) 20%, var(--wordmark-to) 90%);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
@@ -263,7 +281,7 @@
 /* Sidebar section titles: uppercase micro-labels. */
 .sidebar h3 {
     margin: 0 0 10px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -391,12 +409,12 @@
 /* Active state: soft accent fill with accent icon, border carries the state. */
 .action-button.active {
     background-color: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent-border);
 }
 
 .action-button.active:hover {
-    color: var(--accent-strong);
+    color: var(--accent-text-strong);
     border-color: var(--accent);
 }
 
@@ -433,7 +451,7 @@
 /* Section title as an uppercase micro-label. */
 .sidebar-section-header h3 {
     margin: 0;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -478,7 +496,7 @@
 .dev-setting-item label,
 .gauge-label {
     font-weight: 500;
-    font-size: 12px;
+    font-size: 13px;
     letter-spacing: 0.01em;
     color: var(--text-muted);
 }
@@ -506,7 +524,7 @@
     background-color: var(--input-bg);
     color: var(--input-text);
     font: inherit;
-    font-size: 13px;
+    font-size: 14px;
     cursor: pointer;
     appearance: none;
     -webkit-appearance: none;
@@ -630,7 +648,7 @@
 .gauge-label {
     margin-top: 6px;
     font-weight: 500;
-    font-size: 11px;
+    font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
@@ -646,7 +664,7 @@
     color: var(--tooltip-text);
     border: 1px solid var(--tooltip-border);
     border-radius: var(--radius);
-    font-size: 12px;
+    font-size: 13px;
     z-index: 1030;
     pointer-events: none;
     white-space: nowrap;
@@ -720,7 +738,7 @@ body {
 
 .dashboard-clipboard-item label {
     font-weight: 500;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-muted);
 }
 
@@ -733,7 +751,7 @@ body {
     border-radius: var(--radius);
     background-color: var(--input-bg);
     color: var(--input-text);
-    font-size: 12px;
+    font-size: 13px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     line-height: 1.5;
     resize: vertical;
@@ -771,7 +789,7 @@ body {
 .gamepad-visualizer-instance h4 {
     margin-top: 0;
     margin-bottom: 10px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-muted);
     font-weight: 500;
 }
@@ -826,7 +844,7 @@ body {
     color: var(--text-muted);
     text-align: center;
     margin-top: 10px;
-    font-size: 13px;
+    font-size: 14px;
 }
 
 /* --- Resolution and Audio Settings --- */
@@ -850,7 +868,7 @@ body {
     background-color: var(--input-bg);
     color: var(--input-text);
     font: inherit;
-    font-size: 13px;
+    font-size: 14px;
     font-variant-numeric: tabular-nums;
     box-sizing: border-box;
     -moz-appearance: textfield;
@@ -890,7 +908,7 @@ body {
 
 .scale-locally-item label {
     font-weight: 400;
-    font-size: 13px;
+    font-size: 14px;
     color: var(--text);
     cursor: pointer;
     margin: 0;
@@ -914,7 +932,7 @@ body {
     background-color: var(--surface-inset);
     color: var(--text);
     font: inherit;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 500;
     cursor: pointer;
     transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
@@ -949,13 +967,13 @@ body {
     padding: 9px 11px;
     border-radius: var(--radius);
     margin-bottom: 10px;
-    font-size: 13px;
+    font-size: 14px;
     border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
 /* Notice style used in Audio Settings (e.g., device support). */
 .device-support-notice {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-muted);
     margin-top: 5px;
     margin-bottom: 0;
@@ -978,12 +996,12 @@ body {
 /* Active state (e.g., muted): soft accent fill, accent border and text. */
 .toggle-button.active {
     background-color: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent-border);
 }
 
 .toggle-button.active:hover {
-    color: var(--accent-strong);
+    color: var(--accent-text-strong);
     border-color: var(--accent);
 }
 
@@ -1065,7 +1083,7 @@ body {
 }
 
 .notification-status-text {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-muted);
 }
 
@@ -1104,7 +1122,7 @@ body {
 }
 
 .notification-error-message {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--notification-error-color);
     margin: 5px 0 0 0;
     padding: 0;
@@ -1128,7 +1146,7 @@ a.cite-link:visited {
   text-decoration: underline;
   text-underline-offset: 2px;
   cursor: pointer;
-  font-size: 0.82em;
+  font-size: 12px;
   transition: color 0.15s ease;
 }
 a.cite-link:hover,
@@ -1374,7 +1392,7 @@ a.cite-link:active {
 }
 
 .app-card-name {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 500;
     color: var(--sidebar-text);
     word-break: break-word;
@@ -1394,7 +1412,7 @@ a.cite-link:active {
     color: var(--notification-success-color);
     border: 1px solid var(--notification-success-color);
     padding: 1px 8px;
-    font-size: 10px;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     border-radius: 999px;
@@ -1422,7 +1440,7 @@ a.cite-link:active {
     border-radius: var(--radius);
     cursor: pointer;
     font: inherit;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 500;
     transition: border-color 0.15s ease;
 }
@@ -1533,7 +1551,7 @@ a.cite-link:active {
 
 .sharing-link-label {
     font-weight: 500;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-muted);
 }
 
@@ -1548,7 +1566,7 @@ a.cite-link:active {
 .sharing-link {
     color: var(--link-color);
     text-decoration: none;
-    font-size: 12px;
+    font-size: 13px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     word-break: break-all;
     flex-grow: 1;
@@ -1577,7 +1595,7 @@ a.cite-link:active {
 
 .copy-button:hover {
     border-color: var(--accent-border);
-    color: var(--accent);
+    color: var(--accent-text);
 }
 
 .copy-button svg {
@@ -1648,7 +1666,7 @@ a.cite-link:active {
     background-color: var(--surface-alt);
     color: var(--text-muted);
     font: inherit;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
     text-align: center;
     cursor: pointer;
@@ -1669,12 +1687,12 @@ a.cite-link:active {
 /* Active/toggled state (e.g., a held modifier). */
 .mobile-key-button.active {
     background-color: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent-border);
 }
 
 .mobile-key-button.active:hover {
-    color: var(--accent-strong);
+    color: var(--accent-text-strong);
     border-color: var(--accent);
 }
 

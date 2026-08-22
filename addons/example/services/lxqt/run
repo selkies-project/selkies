@@ -47,7 +47,6 @@ if [ "${SELKIES_WAYLAND:-false}" = "true" ]; then
   # wanted, not its exec.
   export XDG_SESSION_TYPE="wayland"
   export XDG_CURRENT_DESKTOP="LXQt:${SELKIES_WAYLAND_COMPOSITOR:-labwc}:wlroots"
-  export QT_QPA_PLATFORMTHEME="lxqt"
   echo "[lxqt] session draws on ${WAYLAND_DISPLAY} natively"
 else
   export DISPLAY="${DISPLAY:-:20}"
@@ -55,6 +54,15 @@ else
   # The multi-monitor layout code drives Openbox, so the session runs it
   session_wm="openbox"
 fi
+# What loads lxqt-qtplugin, and through it the session's icon theme, palette and
+# font settings into every Qt application. `startlxqt` exports it and this
+# service does not run that wrapper, so both backends have to name it here.
+export QT_QPA_PLATFORMTHEME="lxqt"
+# The density reaches Qt as a font DPI. Letting Qt derive a device pixel ratio
+# from the same screen would apply it a second time, at whole-number steps;
+# LXQt's own wrappers pin this off for that reason, and Qt 5 already defaults
+# there, so this holds the behaviour across Qt and base-image versions.
+export QT_AUTO_SCREEN_SCALE_FACTOR="0"
 # LXQt keeps its stock configuration — the panel's plugin list, the session and
 # window-manager defaults — under /usr/share/lxqt, which is a data directory rather
 # than a config one: only the startlxqt wrapper puts it on the config path, and this

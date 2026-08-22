@@ -53,9 +53,13 @@ jobs:
           python3 -m pip install "pre-commit==${PRE_COMMIT_VERSION}"
           pre-commit run --all-files --show-diff-on-failure ruff-check
           pre-commit run --all-files --show-diff-on-failure codespell
+      - name: Install shellcheck
+        # actionlint runs shellcheck over every `run:` block, and the same
+        # pinned build the shell suite gates on decides what it reports
+        run: scripts/ci/install-shellcheck.sh
       - name: Lint the workflow files
-        # actionlint validates the expression syntax and runs shellcheck over
-        # every `run:` block; shellcheck is preinstalled on the runner image
+        # actionlint validates the expression syntax and shellchecks every
+        # `run:` block
         run: |
           scripts/ci/fetch.sh "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint.tar.gz
           tar -xzf actionlint.tar.gz actionlint

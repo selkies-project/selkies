@@ -2814,7 +2814,8 @@ class DataStreamingServer(BaseStreamingService):
                         # which the restart below (the 'scale' trigger) reads.
                         display_state['scale'] = (
                             await self.input_handler.realize_wayland_dpi(
-                                new_dpi, session_screen_index(display_id))
+                                new_dpi, session_screen_index(display_id),
+                                (display_state.get('width'), display_state.get('height')))
                             if self.input_handler else float(new_dpi) / 96.0)
                         self._update_wayland_cursor_cap(new_dpi)
                         await self._apply_wayland_cursor_size(new_dpi)
@@ -4041,9 +4042,10 @@ class DataStreamingServer(BaseStreamingService):
                                 # capture keeps 1.0; a plain pixelflux session
                                 # takes the scale on the capture output, which
                                 # only a restart re-reads.
-                                scale_val = await self.input_handler.realize_wayland_dpi(
-                                    dpi_value, session_screen_index(client_display_id))
                                 entry = self.display_clients.get(client_display_id)
+                                size = ((entry or {}).get('width'), (entry or {}).get('height'))
+                                scale_val = await self.input_handler.realize_wayland_dpi(
+                                    dpi_value, session_screen_index(client_display_id), size)
                                 capture_scale_changed = (
                                     entry is not None and entry.get('scale') != scale_val)
                                 if entry is not None:

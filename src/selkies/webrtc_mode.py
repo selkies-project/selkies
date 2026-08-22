@@ -1682,7 +1682,7 @@ class WebRTCService(BaseStreamingService):
                     pipeline.scale = await self.input_handler.realize_wayland_dpi(
                         getattr(self, "_last_applied_dpi", None)
                         or getattr(settings, "scaling_dpi", 96) or 96,
-                        session_screen_index(did))
+                        session_screen_index(did), (s["w"], s["h"]))
                 else:
                     pipeline.scale = getattr(self.media_pipeline, "scale", 1.0)
                 # The native-cursor toggle is global across displays: a secondary
@@ -1790,7 +1790,8 @@ class WebRTCService(BaseStreamingService):
                 if pipeline is None:
                     continue
                 new_scale = (await self.input_handler.realize_wayland_dpi(
-                    dpi_value, session_screen_index(did))
+                    dpi_value, session_screen_index(did),
+                    (pipeline.width, pipeline.height))
                     if self.input_handler else float(dpi_value) / 96.0)
                 if pipeline.scale == new_scale:
                     continue

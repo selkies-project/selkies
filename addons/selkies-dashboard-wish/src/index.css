@@ -54,73 +54,79 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* Both themes carry the palette the classic dashboard uses, in shadcn's token
+   names so every component follows: layered slate surfaces (page, card,
+   popover are three distinct steps), the logo's magenta as the accent, and
+   borders solid enough to read as edges rather than a wash of the surface.
+   Text colours are picked against the surface they land on — a filled button's
+   pink is lighter than the accent, because near-black text sits on it. */
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.569 0.191 348.8);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --background: #f4f5f8;
+  --foreground: #23272f;
+  --card: #ffffff;
+  --card-foreground: #23272f;
+  --popover: #ffffff;
+  --popover-foreground: #23272f;
+  --primary: #a82a69;
+  --primary-foreground: #ffffff;
+  --secondary: #f6f7f9;
+  --secondary-foreground: #23272f;
+  --muted: #f6f7f9;
+  --muted-foreground: #5b6478;
+  --accent: #eceef3;
+  --accent-foreground: #23272f;
+  --destructive: #a12d21;
+  --border: #dfe2ea;
+  --input: #7a8496;
+  --ring: #a82a69;
+  --chart-1: #a82a69;
+  --chart-2: #7b52b0;
+  --chart-3: #2b6cb0;
+  --chart-4: #12703e;
+  --chart-5: #7d5b00;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #23272f;
+  --sidebar-primary: #a82a69;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f6f7f9;
+  --sidebar-accent-foreground: #23272f;
+  --sidebar-border: #dfe2ea;
+  --sidebar-ring: #a82a69;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.569 0.191 348.8);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --background: #12161d;
+  --foreground: #e6ebf3;
+  --card: #181d26;
+  --card-foreground: #e6ebf3;
+  --popover: #1f2530;
+  --popover-foreground: #e6ebf3;
+  --primary: #f795ca;
+  --primary-foreground: #12161d;
+  --secondary: #1f2530;
+  --secondary-foreground: #e6ebf3;
+  --muted: #1f2530;
+  --muted-foreground: #aeb9c9;
+  --accent: #2a3240;
+  --accent-foreground: #e6ebf3;
+  --destructive: #fca5a5;
+  --border: #2b3441;
+  --input: #6e7b94;
+  --ring: #ec4899;
+  --chart-1: #f9a8d4;
+  --chart-2: #c3b1f7;
+  --chart-3: #8ec5f0;
+  --chart-4: #5bd98a;
+  --chart-5: #facc15;
+  --sidebar: #181d26;
+  --sidebar-foreground: #e6ebf3;
+  --sidebar-primary: #f9a8d4;
+  --sidebar-primary-foreground: #12161d;
+  --sidebar-accent: #1f2530;
+  --sidebar-accent-foreground: #e6ebf3;
+  --sidebar-border: #2b3441;
+  --sidebar-ring: #ec4899;
 }
 
 @layer base {
