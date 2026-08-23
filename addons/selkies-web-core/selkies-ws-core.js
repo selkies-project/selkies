@@ -222,8 +222,7 @@ let micStream = null;
 let micAudioContext = null;
 let micSourceNode = null;
 let micWorkletNode = null;
-let micEncoder = null;
-let micTimestampUs = 0;
+let micEncodeWorker = null;
 let preferredInputDeviceId = null;
 let preferredOutputDeviceId = null;
 let metricsIntervalId = null;
@@ -5946,6 +5945,47 @@ class MicWorkletProcessor extends AudioWorkletProcessor {
 registerProcessor('mic-worklet-processor', MicWorkletProcessor);
 `;
 
+// Hosts the mic Opus AudioEncoder off the main thread (native WebCodecs in a worker,
+// mirroring the server->client decode worker). The page forwards captured s16 PCM here
+// and sends back the ready-to-transmit frame (0x02 + Opus) so only encoded bytes cross
+// the wire. Restricted low-delay is probed, as it is for every other codec here.
+const micEncodeWorkerCode = `
+  let encoder = null, tsUs = 0, active = true;
+  self.onmessage = async (e) => {
+    const m = e.data;
+    if (m.type === 'init') {
+      const base = { codec: 'opus', sampleRate: 24000, numberOfChannels: 1, bitrate: 32000 };
+      let cfg = { ...base, opus: { application: 'lowdelay' } };
+      try { const s = await AudioEncoder.isConfigSupported(cfg); if (!s || !s.supported) cfg = base; } catch (err) { cfg = base; }
+      try {
+        encoder = new AudioEncoder({
+          output: (chunk) => {
+            if (!active) return;
+            const buf = new ArrayBuffer(1 + chunk.byteLength);
+            new Uint8Array(buf)[0] = 0x02;
+            chunk.copyTo(new Uint8Array(buf, 1));
+            self.postMessage({ type: 'chunk', buffer: buf }, [buf]);
+          },
+          error: (err) => self.postMessage({ type: 'error', message: String(err && err.message) }),
+        });
+        encoder.configure(cfg);
+        self.postMessage({ type: 'ready' });
+      } catch (err) { self.postMessage({ type: 'error', message: String(err && err.message) }); }
+      return;
+    }
+    if (m.type === 'pcm') {
+      if (!active || !encoder || encoder.state !== 'configured') return;
+      const numFrames = m.buffer.byteLength / 2;
+      const audioData = new AudioData({ format: 's16', sampleRate: 24000, numberOfFrames: numFrames, numberOfChannels: 1, timestamp: tsUs, data: m.buffer });
+      tsUs += Math.round(numFrames * 1e6 / 24000);
+      try { encoder.encode(audioData); } catch (err) {}
+      audioData.close();
+      return;
+    }
+    if (m.type === 'stop') { active = false; try { encoder && encoder.state !== 'closed' && encoder.close(); } catch (err) {} encoder = null; return; }
+  };
+`;
+
 async function startMicrophoneCapture() {
   if (isSharedMode) {
     console.log("Shared mode: Microphone capture blocked.");
@@ -5996,37 +6036,30 @@ async function startMicrophoneCapture() {
     }
     micSourceNode = micAudioContext.createMediaStreamSource(micStream);
     micWorkletNode = new AudioWorkletNode(micAudioContext, 'mic-worklet-processor');
-    // Encode the mic to Opus in the page (WebCodecs) so only Opus crosses the wire; the
-    // server decodes it in pcmflux, symmetric with the server->client audio direction.
-    micTimestampUs = 0;
-    micEncoder = new AudioEncoder({
-      output: (chunk) => {
+    // Encode the mic to Opus off the main thread in a worker (native WebCodecs), so only
+    // Opus crosses the wire; the server decodes it in pcmflux, symmetric with the
+    // server->client audio direction, which also decodes in a worker. The worklet's PCM
+    // is forwarded straight in and the ready-to-send frame comes back.
+    const micEncodeWorkerURL = URL.createObjectURL(new Blob([micEncodeWorkerCode], { type: 'application/javascript' }));
+    micEncodeWorker = new Worker(micEncodeWorkerURL);
+    URL.revokeObjectURL(micEncodeWorkerURL);
+    micEncodeWorker.onmessage = (event) => {
+      const m = event.data;
+      if (m.type === 'chunk') {
         if (!(websocket && websocket.readyState === WebSocket.OPEN && isMicrophoneActive)) return;
-        const messageBuffer = new ArrayBuffer(1 + chunk.byteLength);
-        new Uint8Array(messageBuffer)[0] = 0x02;
-        chunk.copyTo(new Uint8Array(messageBuffer, 1));
-        try {
-          websocket.send(messageBuffer);
-        } catch (e) {
-          console.error("Error sending mic Opus:", e);
-        }
-      },
-      error: (e) => console.error("Mic AudioEncoder error:", e)
-    });
-    micEncoder.configure({ codec: 'opus', sampleRate: 24000, numberOfChannels: 1, bitrate: 32000 });
+        try { websocket.send(m.buffer); } catch (e) { console.error("Error sending mic Opus:", e); }
+      } else if (m.type === 'error') {
+        console.error("Mic AudioEncoder error:", m.message);
+      }
+    };
+    micEncodeWorker.onerror = (e) => console.error("Mic encode worker error:", e && e.message);
+    micEncodeWorker.postMessage({ type: 'init' });
     micWorkletNode.port.onmessage = (event) => {
       const pcm16Buffer = event.data;
-      if (!(micEncoder && micEncoder.state === 'configured' && isMicrophoneActive)) return;
+      if (!(micEncodeWorker && isMicrophoneActive)) return;
       if (!pcm16Buffer || !(pcm16Buffer instanceof ArrayBuffer) || pcm16Buffer.byteLength === 0) return;
-      // Mono s16: two bytes per frame.
-      const numFrames = pcm16Buffer.byteLength / 2;
-      const audioData = new AudioData({
-        format: 's16', sampleRate: 24000, numberOfFrames: numFrames,
-        numberOfChannels: 1, timestamp: micTimestampUs, data: pcm16Buffer
-      });
-      micTimestampUs += Math.round(numFrames * 1e6 / 24000);
-      try { micEncoder.encode(audioData); } catch (e) { console.error("Mic encode error:", e); }
-      audioData.close();
+      try { micEncodeWorker.postMessage({ type: 'pcm', buffer: pcm16Buffer }, [pcm16Buffer]); }
+      catch (e) { console.error("Mic PCM forward error:", e); }
     };
     micWorkletNode.port.onmessageerror = (event) => console.error("Error from mic worklet:", event);
     micSourceNode.connect(micWorkletNode);
@@ -6059,9 +6092,10 @@ function stopMicrophoneCapture() {
     } catch (e) {}
     micWorkletNode = null;
   }
-  if (micEncoder) {
-    try { if (micEncoder.state !== 'closed') micEncoder.close(); } catch (e) {}
-    micEncoder = null;
+  if (micEncodeWorker) {
+    try { micEncodeWorker.postMessage({ type: 'stop' }); } catch (e) {}
+    try { micEncodeWorker.terminate(); } catch (e) {}
+    micEncodeWorker = null;
   }
   if (micSourceNode) {
     try {

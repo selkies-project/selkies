@@ -20,9 +20,10 @@ pytest tests -k gamepad -v
 its tier, its selectors and its timeout. Add a suite there and it appears in
 both.
 
-`tests/requirements.txt` lists what the suites need on top of an installed
-`selkies`; the browsers themselves come from `playwright install chromium
-firefox webkit`.
+The suites' extra dependencies are the `test` optional-dependency group in
+`pyproject.toml`: `pip install .[test]` (or `selkies[test]`) on top of an
+installed `selkies`; the browsers themselves come from `playwright install
+chromium firefox webkit`.
 
 ## Tiers
 

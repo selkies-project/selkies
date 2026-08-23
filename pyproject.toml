@@ -56,6 +56,17 @@ dependencies = [
     "aitop",
 ]
 
+[project.optional-dependencies]
+# The test suites, on top of an installed selkies (which already brings
+# pixelflux/pcmflux, aiohttp and psutil): `pip install .[test]`. The browsers the
+# e2e tier drives come from `playwright install chromium firefox webkit`.
+test = [
+    "pytest",
+    "playwright",
+    "websockets",
+    "pywayland",
+]
+
 [project.urls]
 Homepage = "https://github.com/selkies-project/selkies"
 "Bug Tracker" = "https://github.com/selkies-project/selkies/issues"

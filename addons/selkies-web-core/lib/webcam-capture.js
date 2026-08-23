@@ -62,6 +62,126 @@ self.onmessage = async (e) => {
 };
 `;
 
+// A worker that runs the WebCodecs encoder off the page thread. The page reads
+// the camera on its own source (transferable VideoFrames, unlike a whole track)
+// and hands each one here; the worker encodes and posts only the encoded chunk
+// back for the page to send. The heavy encode never touches the UI thread, and a
+// backgrounded tab throttles the page's event loop but not a worker's, so the
+// encoder keeps pace instead of falling behind and breaking its reference chain
+// (the permanent-desync failure). `probe` confirms a codec is encodable here
+// before the page commits; anything without WebCodecs in workers reports
+// 'unsupported' and the page encodes on its own thread instead.
+const ENCODE_WORKER_SRC = `
+const CANDIDATES = ${JSON.stringify(ENCODER_CANDIDATES)};
+const KEYFRAME_INTERVAL_MS = ${KEYFRAME_INTERVAL_MS};
+let encoder = null, candIndex = 0, cand = null, configuring = false, active = true;
+let fps = 30, bitrate = 2500000, encodedSize = null, forceKeyframe = true, lastKeyframeMs = 0;
+let trackReader = null, trackRef = null;
+
+function encoderConfig(c, w, h) {
+  return { codec: c.codec, width: w, height: h, bitrate, framerate: fps, latencyMode: 'realtime', ...c.extra };
+}
+
+async function makeEncoder(w, h) {
+  configuring = true;
+  while (candIndex < CANDIDATES.length) {
+    cand = CANDIDATES[candIndex];
+    let support = null;
+    try { support = await VideoEncoder.isConfigSupported(encoderConfig(cand, w, h)); } catch (err) { support = null; }
+    if (!active) { configuring = false; return false; }
+    if (!support || !support.supported) { candIndex++; continue; }
+    try {
+      const enc = new VideoEncoder({
+        output: (chunk) => {
+          if (!active) return;
+          const buf = new ArrayBuffer(chunk.byteLength);
+          chunk.copyTo(new Uint8Array(buf));
+          self.postMessage({ type: 'chunk', codecId: cand.id, keyframe: chunk.type === 'key', buffer: buf }, [buf]);
+        },
+        error: (err) => { try { encoder && encoder.close(); } catch (x) {} encoder = null; encodedSize = null; candIndex++; },
+      });
+      enc.configure(support.config || encoderConfig(cand, w, h));
+      encoder = enc; encodedSize = { w: w, h: h }; forceKeyframe = true; configuring = false;
+      self.postMessage({ type: 'ready', codec: cand.name });
+      return true;
+    } catch (err) { candIndex++; }
+  }
+  encoder = null; encodedSize = null; configuring = false;
+  self.postMessage({ type: 'unsupported' });
+  return false;
+}
+
+function encodeWith(frame, w, h) {
+  if (!encoder || encoder.state !== 'configured' || !active) { frame.close(); return; }
+  // The encoder is behind: drop this input frame (never an encoded output) so no
+  // reference chain breaks; a worker rarely reaches this, which is the point.
+  if (encoder.encodeQueueSize > 1) { frame.close(); return; }
+  const now = performance.now();
+  const keyFrame = forceKeyframe || now - lastKeyframeMs >= KEYFRAME_INTERVAL_MS;
+  try {
+    encoder.encode(frame, { keyFrame: keyFrame });
+    if (keyFrame) { lastKeyframeMs = now; forceKeyframe = false; }
+  } catch (err) { try { encoder.close(); } catch (x) {} encoder = null; encodedSize = null; candIndex++; }
+  frame.close();
+}
+
+function handleFrame(frame) {
+  if (!active) { frame.close(); return; }
+  const w = frame.displayWidth || frame.codedWidth;
+  const h = frame.displayHeight || frame.codedHeight;
+  if (configuring) { frame.close(); return; }
+  if (!encoder || (encodedSize && (encodedSize.w !== w || encodedSize.h !== h))) {
+    makeEncoder(w, h).then(() => { if (encoder) encodeWith(frame, w, h); else frame.close(); });
+    return;
+  }
+  encodeWith(frame, w, h);
+}
+
+self.onmessage = async (e) => {
+  const m = e.data;
+  if (m.type === 'frame') { handleFrame(m.frame); return; }
+  if (m.type === 'track') {
+    // Combined read+encode: read the transferred camera track in this worker, so
+    // frames never reach the page thread. Needs a worker MediaStreamTrackProcessor.
+    if (typeof MediaStreamTrackProcessor === 'undefined') { self.postMessage({ type: 'track_unsupported' }); return; }
+    try { trackReader = new MediaStreamTrackProcessor({ track: m.track }).readable.getReader(); }
+    catch (err) { self.postMessage({ type: 'track_unsupported' }); return; }
+    trackRef = m.track;
+    self.postMessage({ type: 'track_reading' });
+    (async () => {
+      for (;;) {
+        let r;
+        try { r = await trackReader.read(); } catch (err) { break; }
+        if (r.done || !active) { if (r.value) r.value.close(); break; }
+        handleFrame(r.value);
+      }
+    })();
+    return;
+  }
+  if (m.type === 'keyframe') { forceKeyframe = true; return; }
+  if (m.type === 'config') { if (m.fps) fps = m.fps; if (m.bitrate) bitrate = m.bitrate; return; }
+  if (m.type === 'stop') {
+    active = false;
+    try { trackReader && trackReader.cancel(); } catch (x) {}
+    try { trackRef && trackRef.stop(); } catch (x) {}
+    trackReader = null; trackRef = null;
+    try { encoder && encoder.close(); } catch (x) {} encoder = null;
+    return;
+  }
+  if (m.type === 'probe') {
+    fps = m.fps || 30; bitrate = m.bitrate || 2500000;
+    if (typeof VideoEncoder === 'undefined') { self.postMessage({ type: 'unsupported' }); return; }
+    while (candIndex < CANDIDATES.length) {
+      let sup = null;
+      try { sup = await VideoEncoder.isConfigSupported(encoderConfig(CANDIDATES[candIndex], m.width || 1280, m.height || 720)); } catch (err) { sup = null; }
+      if (sup && sup.supported) { self.postMessage({ type: 'probed' }); return; }
+      candIndex++;
+    }
+    self.postMessage({ type: 'unsupported' });
+  }
+};
+`;
+
 export class WebcamCapture {
   // opts:
   //   sendFrame(codecId, keyframe, Uint8Array)  required, delivers one encoded frame
@@ -88,6 +208,7 @@ export class WebcamCapture {
     this._candidateIndex = 0;
     this._encodedSize = null;
     this._forceKeyframe = true;
+    this._chainBroken = false;
     this._lastKeyframeMs = 0;
     this._lastSendMs = 0;
     this._canvas = null;
@@ -95,6 +216,8 @@ export class WebcamCapture {
     this._jpegBusy = false;
     this._active = false;
     this._generation = 0;
+    this._encodeWorker = null;
+    this._encoderCodecName = null;
   }
 
   get active() {
@@ -103,6 +226,7 @@ export class WebcamCapture {
 
   // Name of the codec frames are sent as ("h264", "vp8", "mjpeg") or null.
   get codec() {
+    if (this._encoderCodecName) return this._encoderCodecName;
     return this._encoderCodec ? this._encoderCodec.name : (this._active ? "mjpeg" : null);
   }
 
@@ -152,6 +276,7 @@ export class WebcamCapture {
     this._track = track;
     this._active = true;
     this._forceKeyframe = true;
+    this._chainBroken = false;
     const generation = ++this._generation;
     track.addEventListener("ended", () => {
       if (this._generation === generation) {
@@ -159,7 +284,7 @@ export class WebcamCapture {
       }
     });
     this._onStateChange(true);
-    this._source = await this._openSource(track, generation);
+    this._source = await this._openCapture(track, generation);
     if (this._generation !== generation) {
       if (this._source) {
         this._source.close();
@@ -175,6 +300,13 @@ export class WebcamCapture {
   // The server lost its decoder reference (or just started): the next frame is a keyframe.
   requestKeyframe() {
     this._forceKeyframe = true;
+    if (this._encodeWorker) {
+      try {
+        this._encodeWorker.postMessage({ type: "keyframe" });
+      } catch (e) {
+        /* ignore */
+      }
+    }
   }
 
   stop() {
@@ -183,6 +315,7 @@ export class WebcamCapture {
     }
     this._generation++;
     this._active = false;
+    this._stopEncodeWorker();
     if (this._source) {
       this._source.close();
       this._source = null;
@@ -211,7 +344,148 @@ export class WebcamCapture {
     this._ctx = null;
     this._encodedSize = null;
     this._candidateIndex = 0;
+    this._encoderCodecName = null;
+    this._chainBroken = false;
     this._onStateChange(false);
+  }
+
+  // --- capture ------------------------------------------------------------
+
+  // Encode off the page thread when the engine can. The encode worker is opened
+  // first; then, if the engine will transfer the camera track into it (Safari, and
+  // Firefox as it ships transferable tracks), the worker reads and encodes the track
+  // itself and frames never touch the page. Otherwise the page reads frames its own
+  // way and hands each to the worker, and without a worker at all it feeds the
+  // page-thread encoder — same source paths either way.
+  async _openCapture(track, generation) {
+    await this._openEncodeWorker(generation);
+    if (this._generation !== generation) return null;
+    if (this._encodeWorker) {
+      const combined = await this._tryCombinedWorker(track, generation);
+      if (this._generation !== generation) {
+        if (combined) combined.close();
+        return null;
+      }
+      if (combined) return combined;
+    }
+    return this._openSource(track, generation);
+  }
+
+  // Try to hand the whole camera track to the encode worker for combined read+encode.
+  // Resolves to a source handle when the worker takes it (engine transfers tracks and
+  // the worker has a MediaStreamTrackProcessor), else null so the page reads frames
+  // and feeds the worker one at a time. A clone is transferred, so a refusal
+  // (DataCloneError on Chromium) leaves the original track intact for that fallback.
+  _tryCombinedWorker(track, generation) {
+    const worker = this._encodeWorker;
+    if (!worker) return Promise.resolve(null);
+    let clone;
+    try {
+      clone = track.clone();
+    } catch (error) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        worker.removeEventListener("message", onMessage);
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const onMessage = (e) => {
+        const m = e.data;
+        if (m.type === "track_reading") {
+          this._logPath("capture+encode: camera read and encoded in a worker");
+          finish({ close: () => this._stopEncodeWorker() });
+        } else if (m.type === "track_unsupported") {
+          try { clone.stop(); } catch (error) { /* ignore */ }
+          finish(null);
+        }
+      };
+      const timer = setTimeout(() => {
+        try { clone.stop(); } catch (error) { /* ignore */ }
+        finish(null);
+      }, 2000);
+      worker.addEventListener("message", onMessage);
+      try {
+        worker.postMessage({ type: "track", track: clone }, [clone]);
+      } catch (error) {
+        try { clone.stop(); } catch (e) { /* ignore */ }
+        finish(null);
+      }
+    });
+  }
+
+  // Stand up a worker that encodes the VideoFrames the page hands it (transferred,
+  // zero-copy) and posts back encoded chunks. Resolves once `probe` confirms a
+  // codec encodes in the worker (then `_handleFrame` routes frames to it), or
+  // leaves `_encodeWorker` null so the page encodes on its own thread.
+  _openEncodeWorker(generation) {
+    if (typeof VideoEncoder === "undefined" || typeof Worker === "undefined") {
+      return Promise.resolve();
+    }
+    let worker;
+    try {
+      const url = URL.createObjectURL(new Blob([ENCODE_WORKER_SRC], { type: "text/javascript" }));
+      worker = new Worker(url);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = () => { if (!settled) { settled = true; resolve(); } };
+      const drop = (why) => {
+        console.warn("[Webcam] encode-worker unavailable, encoding on the page:", why);
+        if (this._encodeWorker === worker) this._encodeWorker = null;
+        try { worker.terminate(); } catch (e) { /* ignore */ }
+        done();
+      };
+      const timer = setTimeout(() => drop("probe timeout"), 3000);
+      worker.onmessage = (e) => {
+        const m = e.data;
+        if (m.type === "probed") {
+          clearTimeout(timer);
+          this._encodeWorker = worker;
+          this._logPath("encode: VideoEncoder in a worker (frames from the page)");
+          done();
+          return;
+        }
+        if (m.type === "ready") { this._encoderCodecName = m.codec; return; }
+        if (m.type === "chunk") {
+          if (this._active && this._generation === generation) {
+            this._deliverEncoded(m.codecId, m.keyframe, new Uint8Array(m.buffer));
+          }
+          return;
+        }
+        if (m.type === "unsupported" || m.type === "error") {
+          clearTimeout(timer);
+          // Before the page commits, fall back to page encoding; after (a codec
+          // dropped out mid-stream), the next frame re-routes to the page too.
+          drop(m.type);
+        }
+      };
+      worker.onerror = (ev) => { clearTimeout(timer); drop("worker.onerror: " + (ev && ev.message)); };
+      this._encodeWorker = worker;
+      try {
+        worker.postMessage({ type: "probe", width: this.width, height: this.height, fps: this.fps, bitrate: this.bitrate });
+      } catch (error) {
+        clearTimeout(timer);
+        drop("probe postMessage threw: " + error);
+      }
+    });
+  }
+
+  // Tear down the encode worker (idempotent); the page-thread encoder takes over.
+  _stopEncodeWorker() {
+    const worker = this._encodeWorker;
+    this._encodeWorker = null;
+    if (worker) {
+      try { worker.postMessage({ type: "stop" }); } catch (e) { /* ignore */ }
+      setTimeout(() => { try { worker.terminate(); } catch (e) { /* ignore */ } }, 100);
+    }
   }
 
   // --- frame sources ------------------------------------------------------
@@ -426,6 +700,20 @@ export class WebcamCapture {
       closeFrame(frame);
       return;
     }
+    if (this._encodeWorker) {
+      // Hand the frame to the encode worker (transferred, zero-copy). It only
+      // takes VideoFrames; a <video>-element frame (non-transferable) or a dead
+      // worker throws, so drop back to encoding on this thread from here.
+      try {
+        this._encodeWorker.postMessage({ type: "frame", frame }, [frame]);
+        this._lastSendMs = now;
+        return;
+      } catch (error) {
+        this._stopEncodeWorker();
+        closeFrame(frame);
+        return;
+      }
+    }
     if (typeof VideoEncoder === "undefined" || this._candidateIndex >= ENCODER_CANDIDATES.length) {
       this._encodeJpeg(frame, now);
       return;
@@ -521,13 +809,35 @@ export class WebcamCapture {
     this._encodedSize = null;
   }
 
+  // One encoded frame out to the transport. When the socket is backed up the frame
+  // is dropped and the next one forced to a keyframe: the server's decoder must never
+  // get a delta built on a frame it never received. Independent JPEG frames, which
+  // carry no such dependency, do not go through here.
+  _deliverEncoded(codecId, keyframe, bytes) {
+    if (!this._canSend()) {
+      if (!this._chainBroken) {
+        this._chainBroken = true;
+        this.requestKeyframe();
+      }
+      return;
+    }
+    if (this._chainBroken && !keyframe) {
+      this.requestKeyframe();
+      return;
+    }
+    this._sendFrame(codecId, keyframe, bytes);
+    if (keyframe) {
+      this._chainBroken = false;
+    }
+  }
+
   _onChunk(cand, chunk, generation) {
     if (this._generation !== generation || !this._active) {
       return;
     }
     const buf = new Uint8Array(chunk.byteLength);
     chunk.copyTo(buf);
-    this._sendFrame(cand.id, chunk.type === "key", buf);
+    this._deliverEncoded(cand.id, chunk.type === "key", buf);
   }
 
   // An encoder that fails after reporting support (Firefox does this for H.264)

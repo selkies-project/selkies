@@ -1,6 +1,6 @@
 ---
 title: Secure Mode
-description: Token authentication for orchestrated sessions: the master token, session tokens, and how they bind the streaming and API routes.
+description: "Token authentication for orchestrated sessions: the master token, session tokens, and how they bind the streaming and API routes."
 ---
 
 Selkies has two authentication modes. Without a master token it is in **legacy mode**: the server is either open or behind HTTP Basic authentication (`--enable-basic-auth`, the default, with an optional view-only password), and the browser presents the same credentials on every route. Setting a master token (`--master-token` / `SELKIES_MASTER_TOKEN`) switches the server into **secure mode**, where an orchestrator provisions per-session tokens and every client presents its token instead of a shared login. This page describes secure mode; the login settings are in the [Settings Reference](settings.md).

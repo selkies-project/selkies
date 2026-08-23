@@ -215,7 +215,12 @@ jobs:
           # packages the very artifact these suites ran against instead of
           # spending another build on a second copy of it.
           python -m pip wheel --no-deps -w dist .
-          python -m pip install dist/selkies-*.whl -r tests/requirements.txt
+          # The pinned pixelflux/pcmflux are a pre-release, not on PyPI: resolve
+          # them from the main-HEAD wheels downloaded above. The test extras
+          # (pytest, playwright, ...) come from the wheel's own [test] group.
+          mkdir -p main-wheels
+          wheel="$(ls dist/selkies-*.whl)"
+          python -m pip install --find-links "$PWD/main-wheels" "${wheel}[test]"
           TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
           WHEEL_GLOB="*${TAG}-*manylinux*$(uname -m)*.whl"
           # Fatal rather than a note: a run that quietly drops to PyPI tests a

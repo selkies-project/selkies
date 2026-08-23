@@ -131,10 +131,16 @@ jobs:
 
   wheel:
     name: Build wheel
-    needs: [python-compat]
+    needs: [python-compat, pixelflux-pcmflux]
+    # Runs after the capture stack so the smoke test installs the sibling wheels
+    # built in this run rather than resolving them from PyPI (the pinned version
+    # is a pre-release there); still runs on PRs, where that job is skipped.
+    if: ${{ always() && needs.python-compat.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs['pixelflux-pcmflux'].result) }}
     permissions:
       contents: read
     uses: ./.github/workflows/build-wheel.yaml
+    with:
+      wheels_ready: ${{ needs['pixelflux-pcmflux'].result == 'success' }}
 
   pixelflux-pcmflux:
     name: Build pixelflux and pcmflux wheels (main HEAD)

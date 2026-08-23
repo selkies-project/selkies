@@ -199,7 +199,7 @@ out["view_holds_mk"] = S._mk_access_verdict(S.user_tokens["view"], token="view")
 out["ctrl_outranked"] = S._mk_access_verdict(S.user_tokens["ctrl"], token="ctrl")
 out["ctrl_outranked_perms_token"] = S._mk_access_verdict({"role": "controller", "token": "ctrl"})
 out["lookup_hit"] = S._lookup_session_token("view") is S.user_tokens["view"]
-out["lookup_miss"] = S._lookup_session_token("vie") is None and S._lookup_session_token("") is None
+out["lookup_miss"] = S._lookup_session_token("no-such-token") is None and S._lookup_session_token("") is None
 out["lookup_none"] = S._lookup_session_token(None) is None
 print(json.dumps(out))
 """

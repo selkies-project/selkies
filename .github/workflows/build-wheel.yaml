@@ -17,6 +17,10 @@ on:
         description: Version written into the wheel metadata
         type: string
         default: 0.0.0.dev0
+      wheels_ready:
+        description: The pixelflux/pcmflux wheels for this run are available as artifacts
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -70,12 +74,38 @@ jobs:
         # Loaded with ctypes for keymap handling, so the smoke test covers that
         # import path rather than its fallback
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon0
+      # The pinned pixelflux/pcmflux are a coordinated pre-release: not on PyPI
+      # yet, so the smoke test resolves them from local wheels. From this run's
+      # artifacts when the capture-stack job built them, else from each project's
+      # main-HEAD pre-release.
+      - name: Fetch the capture-stack wheels (this run)
+        if: ${{ inputs.wheels_ready }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: "*-wheels-x86_64-manylinux"
+          path: sibling-wheels
+          merge-multiple: true
+      - name: Fetch the capture-stack wheels (main-HEAD pre-release)
+        if: ${{ !inputs.wheels_ready }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p sibling-wheels
+          for project in pixelflux pcmflux; do
+            sha="$(gh api "repos/${{ github.repository_owner }}/${project}/commits/main" --jq .sha 2>/dev/null || true)"
+            if [ -n "${sha}" ] && gh release view "${sha}" --repo "${{ github.repository_owner }}/${project}" >/dev/null 2>&1; then
+              gh release download "${sha}" --repo "${{ github.repository_owner }}/${project}" \
+                --pattern "*manylinux*x86_64*.whl" --dir sibling-wheels --skip-existing
+            fi
+          done
+      - name: List the capture-stack wheels
+        run: mkdir -p sibling-wheels && ls -la sibling-wheels
       - name: Install smoke test
         run: |
           python3 -m venv /tmp/selkies-venv
           # Every dependency must resolve to a wheel: the images and packages
           # install this same set without a compiler
-          /tmp/selkies-venv/bin/pip install --only-binary=:all: dist/selkies-*.whl
+          /tmp/selkies-venv/bin/pip install --find-links "$PWD/sibling-wheels" --only-binary=:all: dist/selkies-*.whl
           /tmp/selkies-venv/bin/selkies --help >/dev/null && echo "selkies --help OK"
           /tmp/selkies-venv/bin/python -c "import importlib.resources as r; c = r.files('selkies.selkies_web'); assert (c / 'index.html').is_file(), 'web client missing from wheel'; print('bundled web client OK')"
       - name: Set up the oldest supported Python
@@ -90,7 +120,7 @@ jobs:
         # lost its __init__.py fails here and on no newer interpreter
         run: |
           "${{ steps.oldest-python.outputs.python-path }}" -m venv /tmp/selkies-venv-oldest
-          /tmp/selkies-venv-oldest/bin/pip install --only-binary=:all: dist/selkies-*.whl
+          /tmp/selkies-venv-oldest/bin/pip install --find-links "$PWD/sibling-wheels" --only-binary=:all: dist/selkies-*.whl
           /tmp/selkies-venv-oldest/bin/selkies --help >/dev/null && echo "selkies --help OK"
           /tmp/selkies-venv-oldest/bin/python -c "import importlib.resources as r; c = r.files('selkies.selkies_web'); assert (c / 'index.html').is_file(), 'web client missing from wheel'; print('bundled web client OK')"
       - uses: actions/upload-artifact@v7

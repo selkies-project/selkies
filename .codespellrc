@@ -6,4 +6,5 @@ skip = ./.git,./build,./addons/*/node_modules,./addons/*/dist,./website/node_mod
 # protocol field name. currentY/initialY: pointer coordinate variables.
 # chage: the shadow-utils command. anc: SDI ancillary-data region.
 # zink: the Mesa OpenGL-on-Vulkan driver. parm: the v4l2_streamparm member.
-ignore-words-list = renderd,requestor,requestors,currenty,initialy,chage,anc,zink,parm
+# datas: PipeWire spa_buffer field (buffer->datas, n_datas).
+ignore-words-list = renderd,requestor,requestors,currenty,initialy,chage,anc,zink,parm,datas
