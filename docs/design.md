@@ -51,7 +51,7 @@ The default WebSocket transport needs only a single TCP port. If you opt into th
 
 **Second, Selkies can utilize H.264 hardware acceleration of GPUs, as well as falling back to software H.264 or JPEG encoding.**
 
-Screen capture and video encoding are handled by `pixelflux`, a Rust (PyO3) extension that encodes with hardware NVENC (NVIDIA) or VA-API (Intel/AMD) when available, and otherwise falls back to software H.264 (`x264`, or the BSD-licensed OpenH264) or JPEG. Audio is captured from PulseAudio and encoded to Opus by `pcmflux`, a companion Rust (PyO3) extension. Check the [Components](component.md#encoders) section for the current list of encoders and interfaces.
+Screen capture and video encoding are handled by `pixelflux`, a Rust (PyO3) extension that encodes with hardware NVENC (NVIDIA) or VA-API (Intel/AMD) when available, and otherwise falls back to software H.264 (`x264`, or the BSD-licensed OpenH264 when `pixelflux` is built without GPL components) or JPEG. Audio is captured from PulseAudio and encoded to Opus by `pcmflux`, a companion Rust (PyO3) extension. Check the [Components](component.md#encoders) section for the current list of encoders and interfaces.
 
 Both the default WebSocket transport and the opt-in WebRTC transport are engineered for minimum latency from the server to the HTML5 web client. NVIDIA GPUs are supported with NVENC, and Intel and AMD GPUs with VA-API, with progress on supporting other GPU hardware. H.265 and AV1 in the capture path, as well as additional encoders, interfaces, or protocols, may be contributed from the community easily.
 

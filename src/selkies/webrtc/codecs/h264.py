@@ -31,23 +31,16 @@
 #   OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 #   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import fractions
 import logging
 import math
 import re
 from collections.abc import Iterable, Iterator, Sequence
 from itertools import tee
 from struct import pack, unpack_from
-from typing import Optional, Type, TypeVar, Union, cast
+from typing import Optional, Type, TypeVar, Union
 
-import av
-from av.frame import Frame
-from av.packet import Packet
-from av.video.codeccontext import VideoCodecContext
-
-from ..jitterbuffer import JitterFrame
 from ..mediastreams import VIDEO_TIME_BASE, convert_timebase
-from .base import Decoder, Encoder
+from .base import Decoder, Encoder, EncodedPacket
 
 logger = logging.getLogger(__name__)
 
@@ -143,27 +136,12 @@ class H264PayloadDescriptor:
 
 
 class H264Decoder(Decoder):
-    def __init__(self) -> None:
-        self.codec = av.CodecContext.create("h264", "r")
-
-    def decode(self, encoded_frame: JitterFrame) -> list[Frame]:
-        try:
-            packet = av.Packet(encoded_frame.data)
-            packet.pts = encoded_frame.timestamp
-            packet.time_base = VIDEO_TIME_BASE
-            return cast(list[Frame], self.codec.decode(packet))
-        except av.FFmpegError as e:
-            logger.warning(
-                "H264Decoder() failed to decode, skipping package: " + str(e)
-            )
-            return []
+    """H.264 receive codec. The webcam uplink is decoded by pixelflux off the
+    GIL, so this registry entry carries no libav decode of its own."""
 
 
 class H264Encoder(Encoder):
     def __init__(self) -> None:
-        self.buffer_data = b""
-        self.buffer_pts: Optional[int] = None
-        self.codec: Optional[VideoCodecContext] = None
         self.__target_bitrate = DEFAULT_BITRATE
 
     @staticmethod
@@ -254,7 +232,7 @@ class H264Encoder(Encoder):
         # joining them with their RTP headers. The start code cannot overlap
         # itself, so one non-overlapping scan finds every boundary.
         mv = buf if isinstance(buf, memoryview) else memoryview(buf)
-        # An empty av.Packet exposes a NULL buffer, which re refuses to scan.
+        # An empty buffer yields no NAL units, which re would refuse to scan anyway.
         if len(mv) == 0:
             return
         starts = [match.start() + 3 for match in NAL_START_CODE.finditer(mv)]
@@ -286,61 +264,11 @@ class H264Encoder(Encoder):
 
         return packetized_packages
 
-    def _encode_frame(
-        self, frame: av.VideoFrame, force_keyframe: bool
-    ) -> Iterator[memoryview]:
-        if self.codec and (
-            frame.width != self.codec.width
-            or frame.height != self.codec.height
-            # we only adjust bitrate if it changes by over 10%
-            or abs(self.target_bitrate - self.codec.bit_rate) / self.codec.bit_rate
-            > 0.1
-        ):
-            self.buffer_data = b""
-            self.buffer_pts = None
-            self.codec = None
-
-        if force_keyframe:
-            # force a complete image
-            frame.pict_type = av.video.frame.PictureType.I
-        else:
-            # reset the picture type, otherwise no B-frames are produced
-            frame.pict_type = av.video.frame.PictureType.NONE
-
-        if self.codec is None:
-            self.codec = av.CodecContext.create("libx264", "w")
-            self.codec.width = frame.width
-            self.codec.height = frame.height
-            self.codec.bit_rate = self.target_bitrate
-            self.codec.pix_fmt = "yuv420p"
-            self.codec.framerate = fractions.Fraction(MAX_FRAME_RATE, 1)
-            self.codec.time_base = fractions.Fraction(1, MAX_FRAME_RATE)
-            self.codec.options = {
-                "level": "31",
-                "tune": "zerolatency",
-            }
-            self.codec.profile = "Baseline"
-
-        data_to_send = b""
-        for package in self.codec.encode(frame):
-            data_to_send += bytes(package)
-
-        if data_to_send:
-            yield from self._split_bitstream(data_to_send)
-
-    def encode(
-        self, frame: Frame, force_keyframe: bool = False
-    ) -> tuple[list[bytes], int]:
-        assert isinstance(frame, av.VideoFrame)
-        packages = self._encode_frame(frame, force_keyframe)
-        timestamp = convert_timebase(frame.pts, frame.time_base, VIDEO_TIME_BASE)
-        return self._packetize(packages), timestamp
-
-    def pack(self, packet: Packet) -> tuple[list[bytes], int]:
-        assert isinstance(packet, av.Packet)
-        # av.Packet exposes its buffer, so the Annex-B walk needs no full-frame
-        # copy; the views are consumed inside _packetize, which returns bytes.
-        packages = self._split_bitstream(memoryview(packet))
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
+        # The encoder buffer is walked as a memoryview, so the Annex-B scan needs
+        # no full-frame copy; the views are consumed inside _packetize, which cuts
+        # them into the RTP payloads (the only bytes materialized).
+        packages = self._split_bitstream(memoryview(packet.data))
         timestamp = convert_timebase(packet.pts, packet.time_base, VIDEO_TIME_BASE)
         return self._packetize(packages), timestamp
 

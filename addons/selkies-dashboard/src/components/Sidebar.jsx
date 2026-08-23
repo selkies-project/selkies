@@ -6,7 +6,8 @@
 
 // src/components/Sidebar.jsx
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
-import { displayLabel, getRoutePrefix, getStorageAppName } from "../../../selkies-web-core/lib/util.js";
+import { displayLabel, decodableEncoders, getRoutePrefix, getStorageAppName } from "../../../selkies-web-core/lib/util.js";
+import { withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
@@ -41,7 +42,6 @@ const PER_DISPLAY_SETTINGS = [
 
 const encoderOptions = [
   "h264enc",
-  "openh264enc",
   "h264enc-striped",
   "jpeg",
 ];
@@ -51,7 +51,6 @@ const encoderOptions = [
 // webrtc pipeline produces (pixelflux emits H.264 only).
 const encoderOptionsWR = [
   "h264enc",
-  "openh264enc",
 ]
 
 const rateControlOptions = ["cbr", "crf"];
@@ -858,7 +857,9 @@ function Sidebar() {
     newRenderable.enablePlayer4 = s.enable_player4?.value ?? true;
     newRenderable.enableDualMode = s.enable_dual_mode?.value ?? false;
 
-    newRenderable.videoToggle = isRenderable('video_enabled');
+    // There is no server-side video on/off setting, so the video toggle
+    // always renders.
+    newRenderable.videoToggle = true;
     newRenderable.audioToggle = isRenderable('audio_enabled');
     newRenderable.microphoneToggle = isRenderable('microphone_enabled');
     newRenderable.webcamToggle = isRenderable('webcam_enabled')
@@ -1071,6 +1072,11 @@ function Sidebar() {
     // One knob for both transports: an out-of-set stored value is ignored by
     // the server's own fallback, and the serverSettings sync below re-seats it.
     activeEncoder: readStored("encoder") || encoder,
+    // The server's software H.264 encoder and whether software encoding is in
+    // effect (client choice, else the server's), for the rate-control default.
+    softwareH264Encoder: serverSettings?.software_h264_encoder?.value,
+    useCpu: readStored("use_cpu") !== null
+      ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
     allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
   };
   // Each conditional setting: one hook call over a shared spec. The hook owns
@@ -1192,9 +1198,12 @@ function Sidebar() {
   });
   const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
   // Seeded for the transport in use; the server's own allowed list replaces it
-  // as soon as settings arrive.
+  // as soon as settings arrive. On the WebSocket transport only encoders this
+  // engine can decode are offered (jpeg alone without WebCodecs).
+  const offeredEncoders = useCallback(
+    (list) => (isWebrtc ? list : decodableEncoders(list)), [isWebrtc]);
   const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState(
-    () => (isWebrtc ? encoderOptionsWR : encoderOptions));
+    () => offeredEncoders(isWebrtc ? encoderOptionsWR : encoderOptions));
   // Audio-bitrate choices from the server's allowed enum (fallback to the local
   // list before serverSettings); the slider below indexes into this.
   const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v) => parseInt(v, 10))) || audioBitrateOptions;
@@ -1245,10 +1254,12 @@ function Sidebar() {
     };
     const s_encoder = serverSettings.encoder;
     if (s_encoder) {
+      const allowed = offeredEncoders(s_encoder.allowed);
       const stored = localStorage.getItem(getPrefixedKey("encoder"));
-      const final = s_encoder.allowed.includes(stored) ? stored : s_encoder.value;
+      const final = allowed.includes(stored) ? stored
+        : (allowed.includes(s_encoder.value) || allowed.length === 0) ? s_encoder.value : allowed[0];
       setEncoder(final);
-      setDynamicEncoderOptions(s_encoder.allowed);
+      setDynamicEncoderOptions(allowed);
     }
     const s_framerate = serverSettings.framerate;
     if (s_framerate) {
@@ -1359,7 +1370,7 @@ function Sidebar() {
     if (s_ui_show_logo) {
         setUiShowLogo(s_ui_show_logo.value);
     }
-  }, [serverSettings, debouncedPostSetting]);
+  }, [serverSettings, debouncedPostSetting, offeredEncoders]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // The hook above only sets local UI state: when the resolved default
@@ -1587,7 +1598,13 @@ function Sidebar() {
     setAudioDeviceError(null);
     setAudioInputDevices([]);
     setAudioOutputDevices([]);
-    const supportsSinkId = "setSinkId" in HTMLMediaElement.prototype;
+    // Output routing goes through whatever the active core plays on: the
+    // WebRTC core's <video> element (HTMLMediaElement.setSinkId), the
+    // WebSocket core's AudioContext (AudioContext.setSinkId, which Firefox
+    // lacks). Probe the one in use, or the picker would render and do nothing.
+    const supportsSinkId = isWebrtc
+      ? "setSinkId" in HTMLMediaElement.prototype
+      : typeof AudioContext !== "undefined" && "setSinkId" in AudioContext.prototype;
     setIsOutputSelectionSupported(supportsSinkId);
     console.log(
       "Dashboard: Output device selection supported:",
@@ -1630,10 +1647,11 @@ function Sidebar() {
           outputs.push({ deviceId: device.deviceId, label: label });
         }
       });
+      // The selections stay as they are: the core keeps the devices this
+      // dashboard picked for the life of the page, so a reopened section
+      // shows them rather than defaulting.
       setAudioInputDevices(inputs);
       setAudioOutputDevices(outputs);
-      setSelectedInputDeviceId("default");
-      setSelectedOutputDeviceId("default");
       console.log(
         `Dashboard: Populated ${inputs.length} inputs, ${outputs.length} outputs.`
       );
@@ -1652,7 +1670,7 @@ function Sidebar() {
     } finally {
       setIsLoadingAudioDevices(false);
     }
-  }, [t]);
+  }, [t, isWebrtc]);
 
   const toggleSection = useCallback(
     (sectionKey) => {
@@ -1718,6 +1736,20 @@ function Sidebar() {
       scheduleNotificationRemoval(id, NOTIFICATION_TIMEOUT_ERROR);
     }
   };
+  // Rate control follows the encoder and software encoding unless pinned
+  // (explicit client/server choice). A derived change is not persisted, so it
+  // keeps following. `ctxOverrides` carries the value just chosen, ahead of the
+  // re-render that would put it in conditionalCtx.
+  const rederiveRateControl = (ctxOverrides) => {
+    if (!rateControlEnabled
+      || isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readRateControlStored)) return;
+    const rcResolved = resolveSpec(
+      RATE_CONTROL_SPEC, serverSettings,
+      { ...conditionalCtx, ...ctxOverrides }, readRateControlStored);
+    if (rcResolved !== rateControlMode) {
+      writeConditional(RATE_CONTROL_SPEC, rcResolved, setRateControlMode, { persist: false });
+    }
+  };
   const handleEncoderChange = (event) => {
     const selectedEncoder = event.target.value;
     // Persist the choice immediately so conditionalCtx.activeEncoder (read from
@@ -1727,17 +1759,7 @@ function Sidebar() {
     localStorage.setItem(getPrefixedKey("encoder"), selectedEncoder);
     // One knob for both transports; the server switches the pipeline encoder on this.
     debouncedPostSetting({ encoder: selectedEncoder });
-    // Rate control follows the encoder unless pinned (explicit client/server
-    // choice). A derived change is not persisted, so it keeps following.
-    if (rateControlEnabled
-      && !isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readRateControlStored)) {
-      const rcResolved = resolveSpec(
-        RATE_CONTROL_SPEC, serverSettings,
-        { ...conditionalCtx, activeEncoder: selectedEncoder }, readRateControlStored);
-      if (rcResolved !== rateControlMode) {
-        writeConditional(RATE_CONTROL_SPEC, rcResolved, setRateControlMode, { persist: false });
-      }
-    }
+    rederiveRateControl({ activeEncoder: selectedEncoder });
   };
   const handleFramerateChange = (event) => {
     const selectedFramerate = parseInt(event.target.value, 10);
@@ -1791,6 +1813,7 @@ function Sidebar() {
   };
   const handleUseCpuToggle = () => {
     writeConditional(USE_CPU_SPEC, !use_cpu, setUseCpu, { persist: true });
+    rederiveRateControl({ useCpu: !use_cpu });
   };
   const handleH264StreamingModeToggle = () => {
     writeConditional(VIDEO_STREAMING_MODE_SPEC, !videoStreamingMode, setVideoStreamingMode, { persist: true });
@@ -2331,11 +2354,17 @@ function Sidebar() {
           // forces browser cursors on); reflect it so the toggle can't lie.
           setEffectiveCursor(message.value);
         } else if (message.type === 'clientRoleUpdate') {
-          setIsViewerRole(message.role === 'viewer');
-          if (message.role === 'viewer') setIsToggleVisible(false);
+          const viewer = message.role === 'viewer';
+          setIsViewerRole(viewer);
+          // A viewer gets no sidebar: the handle goes, and a sidebar opened
+          // before the demotion folds.
+          if (viewer) {
+            setIsToggleVisible(false);
+            setIsOpen(false);
+          }
         } else if (message.type === "toggleDashboard") {
-          // Core-owned Ctrl+Shift+M chord.
-          setIsOpen((prev) => !prev);
+          // Core-owned Ctrl+Shift+M chord; viewers have no sidebar to open.
+          if (!isViewerRole) setIsOpen((prev) => !prev);
         } else if (message.type === "toggleTouchGamepad") {
           // Core-owned Ctrl+Shift+G chord.
           handleToggleTouchGamepad();
@@ -2499,10 +2528,10 @@ function Sidebar() {
         } else if (message.type === "serverSettings") {
             const encoders = message.payload?.encoder?.allowed
             if (encoders && Array.isArray(encoders)) {
-              const newEncoderOptions =
+              const newEncoderOptions = offeredEncoders(
                 Array.isArray(encoders) && encoders.length > 0
                   ? encoders
-                  : (isWebrtc? encoderOptionsWR: encoderOptions);
+                  : (isWebrtc? encoderOptionsWR: encoderOptions));
               setDynamicEncoderOptions(newEncoderOptions);
           }
         } else if (message.type === "trackpadModeUpdate") {
@@ -2530,6 +2559,8 @@ function Sidebar() {
     dynamicEncoderOptions,
     isOpen,
     isWebrtc,
+    offeredEncoders,
+    isViewerRole,
   ]);
 
   const gaugeSize = 80,
@@ -2600,12 +2631,11 @@ function Sidebar() {
 
   // The encoder relevant to the active transport; CBR/CRF applies to every H.264 encoder on both.
   const activeEncoder = encoder;
-  const H264_ENCODERS = ["h264enc", "h264enc-striped", "openh264enc", "nvh264enc"];
+  const H264_ENCODERS = ["h264enc", "h264enc-striped", "nvh264enc"];
   const showFPS = [
     "jpeg",
     "h264enc-striped",
     "h264enc",
-    "openh264enc",
   ].includes(encoder);
   const showCRF = H264_ENCODERS.includes(activeEncoder);
   const showH264Options = H264_ENCODERS.includes(activeEncoder);
@@ -2954,9 +2984,9 @@ function Sidebar() {
                       id="encoderSelect"
                       value={encoder}
                       onChange={handleEncoderChange}
-                      disabled={!serverSettings || serverSettings.encoder?.allowed?.length <= 1}
+                      disabled={!serverSettings || dynamicEncoderOptions.length <= 1}
                     >
-                      {(serverSettings?.encoder?.allowed || dynamicEncoderOptions).map((enc) => (
+                      {dynamicEncoderOptions.map((enc) => (
                         <option key={enc} value={enc}>
                           {displayLabel(enc)}
                         </option>
@@ -3171,8 +3201,8 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {/* use_cpu only changes behavior for full-frame h264enc (HW vs x264);
-                    the server forces it true for jpeg/striped/openh264 in both transports. */}
+                {/* use_cpu only changes behavior for full-frame h264enc (HW vs the server's
+                    software encoder); the server forces it true for jpeg/striped in both transports. */}
                 {activeEncoder === 'h264enc' && (renderableSettings.use_cpu ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="useCpuToggle">
@@ -4436,7 +4466,7 @@ function Sidebar() {
           >
             &times;
           </button>
-          <iframe src="./api/files/" title={t("filesModal.iframeTitle")} />
+          <iframe src={withSessionToken("./api/files/")} title={t("filesModal.iframeTitle")} />
         </div>
       )}
       {isAppsModalOpen && (

@@ -35,6 +35,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <dirent.h>
 #include <linux/joystick.h>
 #include <linux/input.h>
 #include <linux/input-event-codes.h>
@@ -198,6 +199,21 @@ static int (*real___fxstat)(int ver, int fd, struct stat *buf) = NULL;
 static int (*real___xstat64)(int ver, const char *pathname, struct stat64 *buf) = NULL;
 static int (*real___lxstat64)(int ver, const char *pathname, struct stat64 *buf) = NULL;
 static int (*real___fxstat64)(int ver, int fd, struct stat64 *buf) = NULL;
+#endif
+/* Directory listing: apps that scan /dev/input directly instead of asking
+ * libudev (SDL with udev disabled or a sandbox build, GLFW, evtest) find the
+ * gamepads only if the evdev nodes appear in the enumeration. */
+static DIR *(*real_opendir)(const char *name) = NULL;
+static struct dirent *(*real_readdir)(DIR *dirp) = NULL;
+static int (*real_closedir)(DIR *dirp) = NULL;
+static int (*real_scandir)(const char *dirp, struct dirent ***namelist,
+                           int (*filter)(const struct dirent *),
+                           int (*compar)(const struct dirent **, const struct dirent **)) = NULL;
+#ifdef SJI_LFS64
+static struct dirent64 *(*real_readdir64)(DIR *dirp) = NULL;
+static int (*real_scandir64)(const char *dirp, struct dirent64 ***namelist,
+                             int (*filter)(const struct dirent64 *),
+                             int (*compar)(const struct dirent64 **, const struct dirent64 **)) = NULL;
 #endif
 
 /**
@@ -580,6 +596,14 @@ __attribute__((constructor)) void init_interposer() {
     load_real_func((void *)&real_open64, "open64");
     load_real_func((void *)&real_openat, "openat");
     load_real_func((void *)&real_openat64, "openat64");
+    load_real_func((void *)&real_opendir, "opendir");
+    load_real_func((void *)&real_readdir, "readdir");
+    load_real_func((void *)&real_closedir, "closedir");
+    load_real_func((void *)&real_scandir, "scandir");
+#ifdef SJI_LFS64
+    load_real_func((void *)&real_readdir64, "readdir64");
+    load_real_func((void *)&real_scandir64, "scandir64");
+#endif
     sji_log_info("Selkies Joystick Interposer initialized. Logging is %s.", g_sji_log_enabled ? "ENABLED" : "DISABLED");
 }
 
@@ -979,6 +1003,365 @@ int __fxstat64(int ver, int fd, struct stat64 *buf) {
     return real___fxstat64(ver, fd, buf);
 }
 #endif /* __GLIBC__ */
+
+/* --- /dev/input directory enumeration --- */
+/**
+ * @brief The directory whose listing carries the interposer's evdev nodes.
+ */
+#define SJI_INPUT_DIR "/dev/input"
+
+/**
+ * @brief Distinct inode base for the synthetic evdev entries, so each has a
+ * unique non-zero d_ino independent of the real /dev/input inodes.
+ */
+#define SJI_SYNTH_INO_BASE 0x00534A49u /* "SJI" */
+
+/**
+ * @brief True when `path` names the /dev/input directory (trailing slashes
+ * tolerated), the only directory whose listing is augmented.
+ */
+static int is_dev_input_dir(const char *path) {
+    if (!path) return 0;
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') len--;
+    return len == strlen(SJI_INPUT_DIR) && strncmp(path, SJI_INPUT_DIR, len) == 0;
+}
+
+/**
+ * @brief The evdev interposer slot (0..NUM_EV_INTERPOSERS-1) whose node base
+ * name equals `name`, or -1. Used to dedupe against a real entry of the same
+ * name and to recognise the interposer's own nodes during a scan.
+ */
+static int ev_slot_for_basename(const char *name) {
+    if (!name) return -1;
+    for (int i = 0; i < NUM_EV_INTERPOSERS; i++) {
+        const char *dev = interposers[NUM_JS_INTERPOSERS + i].open_dev_name;
+        const char *slash = strrchr(dev, '/');
+        if (strcmp(name, slash ? slash + 1 : dev) == 0) return i;
+    }
+    return -1;
+}
+
+/**
+ * @brief Whether evdev slot `i` currently has a bound server socket. Only
+ * bound slots are advertised, so a scanner never opens a node the server is
+ * not serving (which would cost the full connect timeout before failing).
+ */
+static int ev_slot_socket_live(int i) {
+    if (!real_access) return 0;
+    /* A missing socket sets errno; this probe runs while a readdir/scandir is
+     * mid-listing, whose caller reads errno to tell end-of-directory from a
+     * real error, so the probe must leave it untouched. */
+    int saved = errno;
+    int live = real_access(interposers[NUM_JS_INTERPOSERS + i].socket_path, F_OK) == 0;
+    errno = saved;
+    return live;
+}
+
+/**
+ * @brief The base name of evdev slot `i`'s node (e.g. "event1000").
+ */
+static const char *ev_slot_basename(int i) {
+    const char *dev = interposers[NUM_JS_INTERPOSERS + i].open_dev_name;
+    const char *slash = strrchr(dev, '/');
+    return slash ? slash + 1 : dev;
+}
+
+/* Per-open() state for a /dev/input DIR* stream: which synthetic slots the
+ * real listing already carried (never emit those twice), which this stream has
+ * already emitted, the next slot to consider, and the buffers the emitted
+ * dirent points into (owned by the stream, valid until the next readdir). */
+typedef struct {
+    DIR *dir;
+    uint8_t seen_mask;
+    uint8_t emitted_mask;
+    int cursor;
+    struct dirent buf;
+#ifdef SJI_LFS64
+    struct dirent64 buf64;
+#endif
+} sji_dir_stream_t;
+
+#define SJI_MAX_DIR_STREAMS 32
+static sji_dir_stream_t dir_streams[SJI_MAX_DIR_STREAMS];
+static pthread_mutex_t dir_streams_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Must hold dir_streams_mutex. */
+static sji_dir_stream_t *find_dir_stream_locked(DIR *dir) {
+    for (int i = 0; i < SJI_MAX_DIR_STREAMS; i++) {
+        if (dir_streams[i].dir == dir) return &dir_streams[i];
+    }
+    return NULL;
+}
+
+/* The next unseen, unemitted, live evdev slot for this stream, or -1 when the
+ * synthetic entries are exhausted. Marks the slot emitted. Holds the mutex. */
+static int next_synth_slot_locked(sji_dir_stream_t *st) {
+    for (; st->cursor < NUM_EV_INTERPOSERS; st->cursor++) {
+        int slot = st->cursor;
+        if (st->seen_mask & (1u << slot)) continue;
+        if (st->emitted_mask & (1u << slot)) continue;
+        if (!ev_slot_socket_live(slot)) continue;
+        st->emitted_mask |= (1u << slot);
+        st->cursor++;
+        return slot;
+    }
+    return -1;
+}
+
+/**
+ * @brief Intercepted `opendir()`: tags a /dev/input stream so its readdir
+ * augments the listing. A stream that cannot be tagged (table full, or not our
+ * directory) behaves exactly like the real one.
+ */
+DIR *opendir(const char *name) {
+    if (!real_opendir && load_real_func((void *)&real_opendir, "opendir") < 0) {
+        errno = EFAULT;
+        return NULL;
+    }
+    DIR *dir = real_opendir(name);
+    if (dir && is_dev_input_dir(name)) {
+        pthread_mutex_lock(&dir_streams_mutex);
+        sji_dir_stream_t *slot = find_dir_stream_locked(NULL);
+        if (slot) {
+            memset(slot, 0, sizeof(*slot));
+            slot->dir = dir;
+        }
+        pthread_mutex_unlock(&dir_streams_mutex);
+        sji_log_debug("Intercepted opendir(%s); augmenting listing.", name);
+    }
+    return dir;
+}
+
+/**
+ * @brief Intercepted `closedir()`: release any tag before the DIR* is freed so
+ * a later opendir reusing the pointer starts clean.
+ */
+int closedir(DIR *dirp) {
+    if (!real_closedir && load_real_func((void *)&real_closedir, "closedir") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    pthread_mutex_lock(&dir_streams_mutex);
+    sji_dir_stream_t *st = find_dir_stream_locked(dirp);
+    if (st) st->dir = NULL;
+    pthread_mutex_unlock(&dir_streams_mutex);
+    return real_closedir(dirp);
+}
+
+/**
+ * @brief Intercepted `readdir()`: real entries first (noting any that match an
+ * interposer node so it is not duplicated), then one synthetic evdev entry per
+ * call until the bound slots are exhausted, then NULL.
+ */
+struct dirent *readdir(DIR *dirp) {
+    if (!real_readdir && load_real_func((void *)&real_readdir, "readdir") < 0) {
+        errno = EFAULT;
+        return NULL;
+    }
+    pthread_mutex_lock(&dir_streams_mutex);
+    int tagged = find_dir_stream_locked(dirp) != NULL;
+    pthread_mutex_unlock(&dir_streams_mutex);
+    if (!tagged) return real_readdir(dirp);
+
+    int saved_errno = errno;
+    struct dirent *ent = real_readdir(dirp);
+    if (ent) {
+        int slot = ev_slot_for_basename(ent->d_name);
+        if (slot >= 0) {
+            pthread_mutex_lock(&dir_streams_mutex);
+            sji_dir_stream_t *st = find_dir_stream_locked(dirp);
+            if (st) st->seen_mask |= (1u << slot);
+            pthread_mutex_unlock(&dir_streams_mutex);
+        }
+        return ent;
+    }
+
+    pthread_mutex_lock(&dir_streams_mutex);
+    sji_dir_stream_t *st = find_dir_stream_locked(dirp);
+    struct dirent *out = NULL;
+    if (st) {
+        int slot = next_synth_slot_locked(st);
+        if (slot >= 0) {
+            memset(&st->buf, 0, sizeof(st->buf));
+            st->buf.d_ino = SJI_SYNTH_INO_BASE + slot;
+            st->buf.d_type = DT_CHR;
+            st->buf.d_reclen = sizeof(st->buf);
+            snprintf(st->buf.d_name, sizeof(st->buf.d_name), "%s", ev_slot_basename(slot));
+            out = &st->buf;
+        }
+    }
+    pthread_mutex_unlock(&dir_streams_mutex);
+    /* Whether a synthetic entry was produced or the listing ended, the caller
+     * reads errno to tell EOF from error, so hand back what it was before. */
+    errno = saved_errno;
+    return out;
+}
+
+/**
+ * @brief Append the interposer's bound evdev nodes to a scandir result. The
+ * entries not already present and passing `filter` are allocated (the caller
+ * frees them and the array), the grown array re-sorted with `compar`. Shared
+ * by the 32- and 64-bit variants through the element size and dirent writer.
+ */
+static int augment_scandir(void ***namelist, int n, size_t entry_size,
+                           int (*passes)(const void *),
+                           int (*compare)(const void *, const void *),
+                           void (*fill)(void *ent, int slot)) {
+    if (n < 0) return n;
+    uint8_t seen = 0;
+    for (int i = 0; i < n; i++) {
+        /* d_name sits at the same offset in dirent and dirent64. */
+        int slot = ev_slot_for_basename(((struct dirent *)(*namelist)[i])->d_name);
+        if (slot >= 0) seen |= (1u << slot);
+    }
+    for (int slot = 0; slot < NUM_EV_INTERPOSERS; slot++) {
+        if (seen & (1u << slot)) continue;
+        if (!ev_slot_socket_live(slot)) continue;
+        void *ent = malloc(entry_size);
+        if (!ent) break;
+        fill(ent, slot);
+        if (passes && !passes(ent)) {
+            free(ent);
+            continue;
+        }
+        void **grown = realloc(*namelist, (size_t)(n + 1) * sizeof(void *));
+        if (!grown) {
+            free(ent);
+            break;
+        }
+        *namelist = grown;
+        grown[n++] = ent;
+    }
+    if (compare && n > 1) qsort(*namelist, (size_t)n, sizeof(void *), compare);
+    return n;
+}
+
+static void fill_scandir_dirent(void *ent, int slot) {
+    struct dirent *d = ent;
+    memset(d, 0, sizeof(*d));
+    d->d_ino = SJI_SYNTH_INO_BASE + slot;
+    d->d_type = DT_CHR;
+    d->d_reclen = sizeof(*d);
+    snprintf(d->d_name, sizeof(d->d_name), "%s", ev_slot_basename(slot));
+}
+
+/* scandir hands the comparator (const struct dirent **); qsort calls it with
+ * the addresses of the array elements, which are exactly those pointers. */
+struct sji_scandir_ctx {
+    int (*filter)(const struct dirent *);
+    int (*compar)(const struct dirent **, const struct dirent **);
+};
+static __thread struct sji_scandir_ctx sji_scandir_ctx;
+static int sji_scandir_passes(const void *ent) {
+    return sji_scandir_ctx.filter(ent);
+}
+static int sji_scandir_compare(const void *a, const void *b) {
+    return sji_scandir_ctx.compar((const struct dirent **)a, (const struct dirent **)b);
+}
+
+/**
+ * @brief Intercepted `scandir()`: the interposer's bound evdev nodes are added
+ * to the caller's result exactly as the kernel's would be.
+ */
+int scandir(const char *dirp, struct dirent ***namelist,
+            int (*filter)(const struct dirent *),
+            int (*compar)(const struct dirent **, const struct dirent **)) {
+    if (!real_scandir && load_real_func((void *)&real_scandir, "scandir") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    int n = real_scandir(dirp, namelist, filter, compar);
+    if (n < 0 || !is_dev_input_dir(dirp)) return n;
+    sji_scandir_ctx.filter = filter;
+    sji_scandir_ctx.compar = compar;
+    return augment_scandir((void ***)namelist, n, sizeof(struct dirent),
+                           filter ? sji_scandir_passes : NULL,
+                           compar ? sji_scandir_compare : NULL,
+                           fill_scandir_dirent);
+}
+
+#ifdef SJI_LFS64
+struct dirent64 *readdir64(DIR *dirp) {
+    if (!real_readdir64 && load_real_func((void *)&real_readdir64, "readdir64") < 0) {
+        errno = EFAULT;
+        return NULL;
+    }
+    pthread_mutex_lock(&dir_streams_mutex);
+    int tagged = find_dir_stream_locked(dirp) != NULL;
+    pthread_mutex_unlock(&dir_streams_mutex);
+    if (!tagged) return real_readdir64(dirp);
+
+    int saved_errno = errno;
+    struct dirent64 *ent = real_readdir64(dirp);
+    if (ent) {
+        int slot = ev_slot_for_basename(ent->d_name);
+        if (slot >= 0) {
+            pthread_mutex_lock(&dir_streams_mutex);
+            sji_dir_stream_t *st = find_dir_stream_locked(dirp);
+            if (st) st->seen_mask |= (1u << slot);
+            pthread_mutex_unlock(&dir_streams_mutex);
+        }
+        return ent;
+    }
+
+    pthread_mutex_lock(&dir_streams_mutex);
+    sji_dir_stream_t *st = find_dir_stream_locked(dirp);
+    struct dirent64 *out = NULL;
+    if (st) {
+        int slot = next_synth_slot_locked(st);
+        if (slot >= 0) {
+            memset(&st->buf64, 0, sizeof(st->buf64));
+            st->buf64.d_ino = SJI_SYNTH_INO_BASE + slot;
+            st->buf64.d_type = DT_CHR;
+            st->buf64.d_reclen = sizeof(st->buf64);
+            snprintf(st->buf64.d_name, sizeof(st->buf64.d_name), "%s", ev_slot_basename(slot));
+            out = &st->buf64;
+        }
+    }
+    pthread_mutex_unlock(&dir_streams_mutex);
+    errno = saved_errno;
+    return out;
+}
+
+static void fill_scandir_dirent64(void *ent, int slot) {
+    struct dirent64 *d = ent;
+    memset(d, 0, sizeof(*d));
+    d->d_ino = SJI_SYNTH_INO_BASE + slot;
+    d->d_type = DT_CHR;
+    d->d_reclen = sizeof(*d);
+    snprintf(d->d_name, sizeof(d->d_name), "%s", ev_slot_basename(slot));
+}
+
+struct sji_scandir64_ctx {
+    int (*filter)(const struct dirent64 *);
+    int (*compar)(const struct dirent64 **, const struct dirent64 **);
+};
+static __thread struct sji_scandir64_ctx sji_scandir64_ctx;
+static int sji_scandir64_passes(const void *ent) {
+    return sji_scandir64_ctx.filter(ent);
+}
+static int sji_scandir64_compare(const void *a, const void *b) {
+    return sji_scandir64_ctx.compar((const struct dirent64 **)a, (const struct dirent64 **)b);
+}
+
+int scandir64(const char *dirp, struct dirent64 ***namelist,
+              int (*filter)(const struct dirent64 *),
+              int (*compar)(const struct dirent64 **, const struct dirent64 **)) {
+    if (!real_scandir64 && load_real_func((void *)&real_scandir64, "scandir64") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    int n = real_scandir64(dirp, namelist, filter, compar);
+    if (n < 0 || !is_dev_input_dir(dirp)) return n;
+    sji_scandir64_ctx.filter = filter;
+    sji_scandir64_ctx.compar = compar;
+    return augment_scandir((void ***)namelist, n, sizeof(struct dirent64),
+                           filter ? sji_scandir64_passes : NULL,
+                           compar ? sji_scandir64_compare : NULL,
+                           fill_scandir_dirent64);
+}
+#endif /* SJI_LFS64 */
 
 /**
  * @brief Reads the joystick configuration (`js_config_t`) from a connected socket.

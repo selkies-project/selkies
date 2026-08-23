@@ -5,13 +5,18 @@
  */
 
 // src/components/GamepadVisualizer.jsx
+import { getTranslator } from "../translations";
 
 const GAMEPAD_VIS_THRESHOLD = 0.1;
 const STICK_VIS_MULTIPLIER = 10;
 
+// Browser language is fixed for the life of the document (same policy as the
+// sidebar), so the translator is resolved once.
+const { t } = getTranslator(typeof navigator !== "undefined" ? navigator.language : "en");
+
 function GamepadVisualizer({ gamepadState, gamepadIndex }) {
   if (!gamepadState) {
-    return <div>Loading Gamepad {gamepadIndex}...</div>;
+    return <div>{t("sections.gamepads.loadingGamepad", { index: gamepadIndex })}</div>;
   }
 
   const buttons = gamepadState.buttons || {};
@@ -54,7 +59,7 @@ function GamepadVisualizer({ gamepadState, gamepadIndex }) {
 
   return (
     <div className="gamepad-visualizer-instance">
-      <h4>Gamepad {gamepadIndex}</h4>
+      <h4>{t("sections.gamepads.gamepadTitle", { index: gamepadIndex })}</h4>
       <svg viewBox="0 0 260 100" width="100%" height="100" className="gamepad-svg-vis">
         {/* Base Rectangle */}
         <rect className="gp-vis-base" x="30" y="10" width="200" height="80" rx="10" ry="10" />

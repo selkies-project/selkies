@@ -65,11 +65,6 @@ const en = {
         previewAlt: "Clipboard preview",
     },
     shortcuts: { citeNotice: "Cite our paper academically" },
-    gamepads: {
-        loadingGamepad: "Loading Gamepad {index}...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Toggle Touch Gamepad",
-    },
 };
 
 const es = {
@@ -130,11 +125,6 @@ const es = {
         previewAlt: "Vista previa del portapapeles",
     },
     shortcuts: { citeNotice: "Cita nuestro artículo académicamente" },
-    gamepads: {
-        loadingGamepad: "Cargando mando {index}...",
-        gamepadTitle: "Mando {index}",
-        toggleTouchTitle: "Alternar mando táctil",
-    },
 };
 
 const zh = {
@@ -195,11 +185,6 @@ const zh = {
         previewAlt: "剪贴板预览",
     },
     shortcuts: { citeNotice: "学术引用我们的论文" },
-    gamepads: {
-        loadingGamepad: "正在加载手柄 {index}...",
-        gamepadTitle: "手柄 {index}",
-        toggleTouchTitle: "切换触屏手柄",
-    },
 };
 
 const hi = {
@@ -260,11 +245,6 @@ const hi = {
         previewAlt: "क्लिपबोर्ड पूर्वावलोकन",
     },
     shortcuts: { citeNotice: "हमारे शोधपत्र को अकादमिक रूप से उद्धृत करें" },
-    gamepads: {
-        loadingGamepad: "गेमपैड {index} लोड हो रहा है...",
-        gamepadTitle: "गेमपैड {index}",
-        toggleTouchTitle: "टच गेमपैड टॉगल करें",
-    },
 };
 
 const pt = {
@@ -325,11 +305,6 @@ const pt = {
         previewAlt: "Prévia da área de transferência",
     },
     shortcuts: { citeNotice: "Cite nosso artigo academicamente" },
-    gamepads: {
-        loadingGamepad: "Carregando gamepad {index}...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Alternar gamepad de toque",
-    },
 };
 
 const fr = {
@@ -390,11 +365,6 @@ const fr = {
         previewAlt: "Aperçu du presse-papiers",
     },
     shortcuts: { citeNotice: "Citez notre article académiquement" },
-    gamepads: {
-        loadingGamepad: "Chargement de la manette {index}...",
-        gamepadTitle: "Manette {index}",
-        toggleTouchTitle: "Basculer la manette tactile",
-    },
 };
 
 const ru = {
@@ -455,11 +425,6 @@ const ru = {
         previewAlt: "Предпросмотр буфера обмена",
     },
     shortcuts: { citeNotice: "Цитируйте нашу статью в научных работах" },
-    gamepads: {
-        loadingGamepad: "Загрузка геймпада {index}...",
-        gamepadTitle: "Геймпад {index}",
-        toggleTouchTitle: "Переключить сенсорный геймпад",
-    },
 };
 
 const de = {
@@ -520,11 +485,6 @@ const de = {
         previewAlt: "Zwischenablage-Vorschau",
     },
     shortcuts: { citeNotice: "Zitieren Sie unser Paper wissenschaftlich" },
-    gamepads: {
-        loadingGamepad: "Gamepad {index} wird geladen...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Touch-Gamepad umschalten",
-    },
 };
 
 const tr = {
@@ -585,11 +545,6 @@ const tr = {
         previewAlt: "Pano önizlemesi",
     },
     shortcuts: { citeNotice: "Makalemize akademik atıfta bulunun" },
-    gamepads: {
-        loadingGamepad: "Oyun kolu {index} yükleniyor...",
-        gamepadTitle: "Oyun kolu {index}",
-        toggleTouchTitle: "Dokunmatik oyun kolunu aç/kapat",
-    },
 };
 
 const it = {
@@ -650,11 +605,6 @@ const it = {
         previewAlt: "Anteprima degli appunti",
     },
     shortcuts: { citeNotice: "Cita il nostro articolo accademicamente" },
-    gamepads: {
-        loadingGamepad: "Caricamento gamepad {index}...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Attiva/disattiva gamepad touch",
-    },
 };
 
 const nl = {
@@ -715,11 +665,6 @@ const nl = {
         previewAlt: "Klembordvoorbeeld",
     },
     shortcuts: { citeNotice: "Citeer ons artikel academisch" },
-    gamepads: {
-        loadingGamepad: "Gamepad {index} wordt geladen...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Touch-gamepad wisselen",
-    },
 };
 
 const ar = {
@@ -780,11 +725,6 @@ const ar = {
         previewAlt: "معاينة الحافظة",
     },
     shortcuts: { citeNotice: "استشهد بورقتنا البحثية أكاديميًا" },
-    gamepads: {
-        loadingGamepad: "جارٍ تحميل ذراع التحكم {index}...",
-        gamepadTitle: "ذراع التحكم {index}",
-        toggleTouchTitle: "تبديل ذراع التحكم اللمسية",
-    },
 };
 
 const ko = {
@@ -845,11 +785,6 @@ const ko = {
         previewAlt: "클립보드 미리보기",
     },
     shortcuts: { citeNotice: "논문을 학술적으로 인용하기" },
-    gamepads: {
-        loadingGamepad: "게임패드 {index} 불러오는 중...",
-        gamepadTitle: "게임패드 {index}",
-        toggleTouchTitle: "터치 게임패드 전환",
-    },
 };
 
 const ja = {
@@ -910,11 +845,6 @@ const ja = {
         previewAlt: "クリップボードのプレビュー",
     },
     shortcuts: { citeNotice: "論文の学術的引用はこちら" },
-    gamepads: {
-        loadingGamepad: "ゲームパッド {index} を読み込み中...",
-        gamepadTitle: "ゲームパッド {index}",
-        toggleTouchTitle: "タッチゲームパッドの切り替え",
-    },
 };
 
 const vi = {
@@ -975,11 +905,6 @@ const vi = {
         previewAlt: "Xem trước bảng nhớ tạm",
     },
     shortcuts: { citeNotice: "Trích dẫn học thuật bài báo của chúng tôi" },
-    gamepads: {
-        loadingGamepad: "Đang tải tay cầm {index}...",
-        gamepadTitle: "Tay cầm {index}",
-        toggleTouchTitle: "Bật/tắt tay cầm cảm ứng",
-    },
 };
 
 const th = {
@@ -1040,11 +965,6 @@ const th = {
         previewAlt: "ตัวอย่างคลิปบอร์ด",
     },
     shortcuts: { citeNotice: "อ้างอิงบทความของเราเชิงวิชาการ" },
-    gamepads: {
-        loadingGamepad: "กำลังโหลดเกมแพด {index}...",
-        gamepadTitle: "เกมแพด {index}",
-        toggleTouchTitle: "สลับเกมแพดแบบสัมผัส",
-    },
 };
 
 const fil = {
@@ -1105,11 +1025,6 @@ const fil = {
         previewAlt: "Preview ng clipboard",
     },
     shortcuts: { citeNotice: "Banggitin ang aming papel nang akademiko" },
-    gamepads: {
-        loadingGamepad: "Nilo-load ang gamepad {index}...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "I-toggle ang touch gamepad",
-    },
 };
 
 const da = {
@@ -1170,11 +1085,6 @@ const da = {
         previewAlt: "Forhåndsvisning af udklipsholder",
     },
     shortcuts: { citeNotice: "Citér vores artikel akademisk" },
-    gamepads: {
-        loadingGamepad: "Indlæser gamepad {index}...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Slå touch-gamepad til/fra",
-    },
 };
 
 export const extras: Record<string, any> = { en, es, zh, hi, pt, fr, ru, de, tr, it, nl, ar, ko, ja, vi, th, fil, da };

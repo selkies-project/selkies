@@ -50,7 +50,8 @@ export LIBUDEV_PACKAGE="${LIBUDEV_PACKAGE:-libudev}"
 export LIBUDEV_PKG_VERSION="${LIBUDEV_PKG_VERSION:-1.0.0}"
 export FAKE_UDEV_LIB="${LIB_PREFIX}/${LIBUDEV_PACKAGE}.so.${LIBUDEV_PKG_VERSION}-fake"
 export LD_PRELOAD="${SELKIES_INTERPOSER}:${FAKE_UDEV_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
-export SDL_JOYSTICK_DEVICE="/dev/input/js0"
+# No SDL_JOYSTICK_DEVICE: fake-udev enumerates all four slots as their evdev
+# nodes, so a /dev/input/js0 hint would show slot 0 a second time.
 # Only when the container has no /dev/input of its own: a real one passed in
 # from the host keeps its own ownership and mode.
 if [ ! -d /dev/input ]; then

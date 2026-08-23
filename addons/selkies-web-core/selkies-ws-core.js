@@ -26,11 +26,13 @@ import {
 } from './lib/file-upload.js';
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
+import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder } from './lib/util.js';
 import { WebcamCapture } from './lib/webcam-capture.js';
 
 installAuthGuard();
+installSessionCookie();
 
 // Best-effort local keyboard layout, resolved once at script init so the value
 // is ready by the time the socket finishes connecting (getLayoutMap resolves in
@@ -826,7 +828,7 @@ let videoWorkerLastGeom = null;
 // frames while at the cap so GPU VideoFrames don't pile up and stall the decoder.
 let videoWorkerInFlight = 0;
 const VIDEO_WORKER_MAX_IN_FLIGHT = 3;
-// Decode-in-worker: for non-shared Safari/Firefox full-frame H.264 ('h264enc'/'openh264enc'), the worker
+// Decode-in-worker: for non-shared Safari/Firefox full-frame H.264 ('h264enc'), the worker
 // hosts the VideoDecoder so decode AND present stay off the main thread (no decoded frame
 // crosses the boundary). Only the encoded bytes are transferred in. Tracks the last config
 // pushed to the worker decoder; workerDecodeFailed sticks on a worker-decoder error so we
@@ -2099,8 +2101,7 @@ function clearAllVncStripeDecoders() {
 // are treated as the isolated handoff noise they are, not as one long burst.
 const STRIPE_SOFT_ERROR_WINDOW_MS = 10000;
 function handleStripeDecodeError(e, vncStripeYStart) {
-    if (decodeInWorker && !workerDecodeFailed &&
-        (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc')) {
+    if (decodeInWorker && !workerDecodeFailed && currentEncoderMode === 'h264enc') {
         const now = performance.now();
         const prev = stripeDecodeSoftErrors[vncStripeYStart];
         const soft = (prev && now - prev.last <= STRIPE_SOFT_ERROR_WINDOW_MS) ? prev.count + 1 : 1;
@@ -2144,7 +2145,7 @@ let decodedStripesQueue = [];
 // Off-screen back-buffer for the STRIPED paths (h264enc-striped, jpeg) only. Stripes
 // accumulate here so damage-gated undamaged rows persist, and a whole frame is blitted
 // to the visible canvas only at a frame boundary — so the display never shows a mix of
-// frame_ids (the per-band seam). Full-frame h264enc/openh264enc do NOT use this: they
+// frame_ids (the per-band seam). Full-frame h264enc does NOT use this: it
 // present one whole decoded frame atomically via the MSTG <video> path.
 let stripeBackCanvas = null;
 let stripeBackCtx = null;
@@ -2265,12 +2266,12 @@ function armSharedStallWatchdog() {
 }
 
 function handleDecodedVncStripeFrame(yPos, frame) {
-  // Full-frame H.264 ('h264enc' = NVENC/x264, 'openh264enc' = OpenH264, decoded
+  // Full-frame H.264 ('h264enc': NVENC/VA-API or the server's software encoder, decoded
   // by the single yPos=0 decoder): present the freshest frame the instant it decodes,
   // for the lowest glass-to-glass latency, instead of parking it in the queue for the
   // next rAF. h264enc-striped composites partial-height stripes on the 2D canvas and so
   // still drains through the rAF path below.
-  if (!isSharedMode && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc') && yPos === 0) {
+  if (!isSharedMode && currentEncoderMode === 'h264enc' && yPos === 0) {
     if (document.hidden || (clientMode === 'websockets' && !isVideoPipelineActive)) {
       try { frame.close(); } catch (e) {}
       return;
@@ -2410,25 +2411,29 @@ const initializeInput = () => {
     return [videoContainerRect.width, videoContainerRect.height];
   };
 
+  // The handler runs for a pad already present during attach() (the resync
+  // below), so it reads the manager off this instance, not the window mirror
+  // that is assigned only after attach.
   inputInstance.ongamepadconnected = (gamepad_id) => {
     gamepad.gamepadState = 'connected';
     gamepad.gamepadName = gamepad_id;
     console.log(`Client: Gamepad "${gamepad_id}" connected. isSharedMode: ${isSharedMode}, isGamepadEnabled (global toggle): ${isGamepadEnabled}`);
-    if (window.webrtcInput && window.webrtcInput.gamepadManager) {
+    const manager = inputInstance.gamepadManager;
+    if (manager) {
         if (isSharedMode) {
-            window.webrtcInput.gamepadManager.enable();
+            manager.enable();
             console.log("Shared mode: Gamepad connected, ensuring its GamepadManager is active for polling.");
         } else {
             if (!isGamepadEnabled) {
-                window.webrtcInput.gamepadManager.disable();
+                manager.disable();
                 console.log("Primary mode: Gamepad connected, but master gamepad toggle is OFF. Disabling its GamepadManager.");
             } else {
-                window.webrtcInput.gamepadManager.enable();
+                manager.enable();
                 console.log("Primary mode: Gamepad connected, master gamepad toggle is ON. Ensuring its GamepadManager is active.");
             }
         }
     } else {
-        console.warn("Client: window.webrtcInput.gamepadManager not found in ongamepadconnected. Cannot control its polling state.");
+        console.warn("Client: gamepadManager not found in ongamepadconnected. Cannot control its polling state.");
     }
   };
 
@@ -2821,7 +2826,7 @@ function receiveMessage(event) {
       disableAutoResize();
       sendResolutionToServer(manual_width, manual_height);
       applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
-      if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc' || currentEncoderMode === 'h264enc-striped') {
+      if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') {
         console.log("Clearing VNC stripe decoders due to manual resolution change.");
         clearAllVncStripeDecoders();
         if (canvasContext) canvasContext.setTransform(1, 0, 0, 1, 0, 0);
@@ -2848,7 +2853,7 @@ function receiveMessage(event) {
         const autoWidth = alignResolution(currentWindowRes[0]);
         const autoHeight = alignResolution(currentWindowRes[1]);
         resetCanvasStyle(autoWidth, autoHeight);
-        if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc' || currentEncoderMode === 'h264enc-striped') {
+        if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') {
           console.log("Clearing VNC stripe decoders due to resolution reset to window.");
           clearAllVncStripeDecoders();
           if (canvasContext) canvasContext.setTransform(1, 0, 0, 1, 0, 0);
@@ -3214,12 +3219,22 @@ function handleSettingsMessage(settings, fromServer) {
     settingsChanged = true;
   }
   if (settings.encoder !== undefined) {
-    const newEncoderSetting = settings.encoder;
+    let newEncoderSetting = settings.encoder;
+    if (!canDecodeEncoder(newEncoderSetting)) {
+      if (fromServer) {
+        showUndecodableEncoderNotice(newEncoderSetting);
+      } else {
+        console.warn(`Encoder ${newEncoderSetting} needs WebCodecs, which this browser lacks; keeping jpeg.`);
+      }
+      newEncoderSetting = 'jpeg';
+    } else {
+      clearUndecodableEncoderNotice();
+    }
     if (currentEncoderMode !== newEncoderSetting) {
         currentEncoderMode = newEncoderSetting;
         storeString('encoder', currentEncoderMode);
         settingsChanged = true;
-        if (newEncoderSetting === 'jpeg' || newEncoderSetting === 'h264enc' || newEncoderSetting === 'openh264enc' || newEncoderSetting === 'h264enc-striped') {
+        if (newEncoderSetting === 'jpeg' || newEncoderSetting === 'h264enc' || newEncoderSetting === 'h264enc-striped') {
             if (decoder && decoder.state !== 'closed') {
                 console.log(`Switching to ${newEncoderSetting}, closing main video decoder.`);
                 decoder.close();
@@ -3774,8 +3789,8 @@ function initWebsockets() {
     let videoPaintedThisFrame = false;
     let jpegPaintedThisFrame = false;
 
-    if (!isSharedMode && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc')) {
-      // Full-frame H.264 (NVENC/x264 'h264enc', OpenH264 'openh264enc'): present the
+    if (!isSharedMode && currentEncoderMode === 'h264enc') {
+      // Full-frame H.264 ('h264enc'): present the
       // freshest frame via the zero-copy <video> track generator (Chromium/Safari) or
       // the OffscreenCanvas worker (Firefox), falling back to the 2D canvas. One
       // full frame per decode, so drop older queued frames and present only the newest.
@@ -4640,12 +4655,12 @@ function initWebsockets() {
             return;
         }
 
-        // Non-shared full-frame H.264 (h264enc/openh264enc): decode inside the worker
+        // Non-shared full-frame H.264 (h264enc): decode inside the worker
         // (Safari/Firefox) so decode and present stay off the main thread. Falls through to
         // the main-thread stripe decoder while the worker is still handshaking or if worker
         // decode has failed. h264enc-striped composites partial stripes on the 2D canvas,
         // so it always decodes on the main thread.
-        if (decodeInWorker && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc') && isVideoPipelineActive) {
+        if (decodeInWorker && currentEncoderMode === 'h264enc' && isVideoPipelineActive) {
             if (h264Payload.byteLength === 0) return;
             // The SPS-based codec is derived on keyframes and cached; deltas reuse it
             // so the worker decoder is not reconfigured (dropping its keyframe state)
@@ -4667,7 +4682,7 @@ function initWebsockets() {
         }
 
         const canProcessVncStripe =
-            (!isSharedMode && isVideoPipelineActive && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc' || currentEncoderMode === 'h264enc-striped')) ||
+            (!isSharedMode && isVideoPipelineActive && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped')) ||
             (isSharedMode && currentEncoderMode === 'h264enc-striped');
 
         if (canProcessVncStripe) {
@@ -5069,8 +5084,11 @@ function initWebsockets() {
               // Server-applied values also drive the module-level mirrors the ingest and
               // decode paths read. Unlike the dashboard path this persists nothing, so a
               // server default stays re-pushable on the next load.
-              if (typeof window['encoder'] === 'string' && window['encoder'] !== currentEncoderMode) {
+              if (typeof window['encoder'] === 'string' && !canDecodeEncoder(window['encoder'])) {
+                  showUndecodableEncoderNotice(window['encoder']);
+              } else if (typeof window['encoder'] === 'string' && window['encoder'] !== currentEncoderMode) {
                   const newEnc = window['encoder'];
+                  clearUndecodableEncoderNotice();
                   console.log(`Server settings switch encoder ${currentEncoderMode} -> ${newEnc}.`);
                   currentEncoderMode = newEnc;
                   if (decoder && decoder.state !== 'closed') {
@@ -5165,7 +5183,7 @@ function initWebsockets() {
             if (obj.video !== undefined && obj.video !== isVideoPipelineActive) {
               isVideoPipelineActive = obj.video;
               statusChanged = true;
-              if (!isVideoPipelineActive && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc' || currentEncoderMode === 'h264enc-striped') && !isSharedMode) {
+              if (!isVideoPipelineActive && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') && !isSharedMode) {
                   clearAllVncStripeDecoders();
               }
             }
@@ -5533,6 +5551,9 @@ function initWebsockets() {
           webcamEnabled = false;
           stopWebcamCapture();
           window.postMessage({ type: 'pipelineStatusUpdate', webcam: false }, window.location.origin);
+        } else if (event.data === 'WEBCAM_KEYFRAME') {
+          // The server's decoder lost its reference (or just started): resync.
+          if (webcamCapture) webcamCapture.requestKeyframe();
         } else {
           if (window.webrtcInput && window.webrtcInput.on_message && !isSharedMode) {
             window.webrtcInput.on_message(event.data);
@@ -5685,7 +5706,7 @@ async function reloadPossiblyFlippingMode() {
       // exact route the connection would.
       const probeURL = new URL(window.location.href);
       probeURL.pathname = getRoutePrefix() + '/api/websockets';
-      const res = await fetch(probeURL.href, { cache: 'no-store' });
+      const res = await fetch(probeURL.href, { cache: 'no-store', headers: sessionAuthHeaders() });
       if (res.status === 409) {
         try { sessionStorage.setItem('selkies_mode_flip', '1'); } catch (e) { /* ignore */ }
         safeSetItem(`${storageAppName}_stream_mode`, 'webrtc');
@@ -6061,22 +6082,26 @@ function stopMicrophoneCapture() {
   }
 }
 
-// Webcam uplink: JPEG frames from the local camera are sent as binary opcode
-// 0x06 messages; the server stages them for the virtual V4L2 device. Binary
-// frames bypass the gzip wrapper by design (see the patched websocket.send).
+// Webcam uplink: the local camera is encoded in the page (WebCodecs H.264/VP8,
+// JPEG as the last resort) and each frame is sent as one binary opcode 0x06
+// message [0x06][codec][flags][payload]; the server's virtual camera decodes
+// it for the virtual V4L2 device. Binary frames bypass the gzip wrapper by
+// design (see the patched websocket.send).
 function startWebcamCapture() {
   if (isSharedMode || webcamCapture) {
     return;
   }
   webcamCapture = new WebcamCapture({
-    sendFrame: (jpeg) => {
+    sendFrame: (codec, keyframe, payload) => {
       if (!(websocket && websocket.readyState === WebSocket.OPEN && isWebcamActive)) {
         return;
       }
-      const messageBuffer = new ArrayBuffer(1 + jpeg.byteLength);
+      const messageBuffer = new ArrayBuffer(3 + payload.byteLength);
       const bytes = new Uint8Array(messageBuffer);
       bytes[0] = 0x06;
-      bytes.set(jpeg, 1);
+      bytes[1] = codec;
+      bytes[2] = keyframe ? 0x01 : 0x00;
+      bytes.set(payload, 3);
       try {
         websocket.send(messageBuffer);
       } catch (e) {
@@ -6190,7 +6215,7 @@ function performServerInitiatedVideoReset(reason = "unknown") {
   cleanupJpegStripeQueue();
   clearDecodedStripesQueue();
 
-  if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc' || currentEncoderMode === 'h264enc-striped') {
+  if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') {
     clearAllVncStripeDecoders();
   } else if (currentEncoderMode !== 'jpeg') {
     if (decoder && decoder.state !== 'closed') {
@@ -6201,7 +6226,7 @@ function performServerInitiatedVideoReset(reason = "unknown") {
     console.log("  Main video decoder instance set to null.");
   }
 
-  if (canvasContext && canvas && !(currentEncoderMode === 'h264enc' || currentEncoderMode === 'openh264enc' || currentEncoderMode === 'h264enc-striped')) {
+  if (canvasContext && canvas && !(currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped')) {
     try {
       canvasContext.setTransform(1, 0, 0, 1, 0, 0);
       canvasContext.clearRect(0, 0, canvas.width, canvas.height);
@@ -6344,17 +6369,40 @@ function runPreflightChecks() {
     }
 
     if (typeof window.VideoDecoder === 'undefined') {
-        console.error("FATAL: Browser does not support the VideoDecoder API.");
-        if (statusDisplayElement) {
-            statusDisplayElement.textContent = 'Error: Your browser does not support the WebCodecs API required for video streaming.';
-            statusDisplayElement.classList.remove('hidden');
-        }
-        if (playButtonElement) playButtonElement.classList.add('hidden');
-        return false;
+        // No WebCodecs: the H.264 modes cannot play here, the striped-JPEG mode
+        // can (createImageBitmap onto the canvas). Pin it the way the fallback
+        // ladder's last rung does and carry on; the dashboards offer nothing
+        // else in this engine, and a server-locked H.264 encoder is reported
+        // when it arrives instead of being decoded into a crash loop.
+        console.warn("VideoDecoder API unavailable: the stream is pinned to the jpeg encoder.");
+        pinJpegEncoder();
+    } else {
+        console.log("Pre-flight checks passed: Secure context and VideoDecoder API are available.");
     }
-
-    console.log("Pre-flight checks passed: Secure context and VideoDecoder API are available.");
     return true;
+}
+
+function pinJpegEncoder() {
+    currentEncoderMode = 'jpeg';
+    setStringParam('encoder', 'jpeg');
+}
+
+let undecodableEncoderNoticeShown = false;
+// The server streams an encoder this engine cannot decode (locked server-side,
+// so it cannot be changed from here): say so rather than show nothing.
+function showUndecodableEncoderNotice(encoderName) {
+    console.error(`Encoder ${encoderName} needs the WebCodecs API, which this browser lacks.`);
+    if (statusDisplayElement) {
+        statusDisplayElement.textContent = 'Error: The session streams an encoder this browser cannot decode without the WebCodecs API.';
+        statusDisplayElement.classList.remove('hidden');
+    }
+    undecodableEncoderNoticeShown = true;
+}
+
+function clearUndecodableEncoderNotice() {
+    if (!undecodableEncoderNoticeShown) return;
+    undecodableEncoderNoticeShown = false;
+    if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
 }
 
 window.addEventListener('beforeunload', cleanup);

@@ -36,8 +36,9 @@ from typing import Awaitable, Callable, Dict, Set, Optional, Any, Tuple, List
 
 from .webrtc_utils import _is_trusted_config_file
 from .settings import settings as app_settings
-# Live control-plane token view (provisioned via /api/tokens), read per handshake.
-from .selkies import current_session_tokens
+# Constant-time lookup in the live control-plane token table (provisioned via
+# /api/tokens), read per handshake.
+from .selkies import _lookup_session_token
 
 logger = logging.getLogger("signaling")
 
@@ -216,22 +217,15 @@ class WebRTCPeerManagement:
 
             if not peer:
                 return
-            # A PRIMARY controller closing also closes the server-side connection
-            # (the legacy full-session reset). A secondary display's controller must
-            # NOT: the server socket is shared by every display's session, so it is
-            # only told the session ended — like a viewer — and the primary lives on.
-            if peer.client_type == "controller" and peer.display_id == "primary":
-                other_peer = self.peers.get(other_id)
-                if other_peer:
-                    logger.info(
-                        "Closing connection to {}, client type {!r}".format(
-                            other_id, other_peer.client_type
-                        )
-                    )
-                    wso: WebSocketResponse = other_peer.ws
-                    await wso.close(code=1000, message=b"Connection closed")
-            elif peer.client_type in ("controller", "viewer"):
-                # Notify the server the session ended without dropping its socket.
+            if peer.client_type in ("controller", "viewer"):
+                # Every client — a primary controller included — only tells the
+                # server its session ended; the server socket is shared by every
+                # display's session and every viewer, so dropping it on a primary
+                # controller's departure would reset the whole session (the old
+                # full-reset). The server side reaps just this peer and keeps a
+                # reconnect grace on the primary capture, so a controller tab
+                # reload never kicks the viewers or the second display (websockets
+                # _teardown_if_unclaimed parity).
                 other_peer = self.peers.get(other_id)
                 if other_peer:
                     wso = other_peer.ws
@@ -285,12 +279,11 @@ class WebRTCPeerManagement:
                 other_peer = self.peers.get(other_id)
                 if other_peer is not None:
                     wso = other_peer.ws
-                    # This runs only for slot-reconnect eviction (the sole caller). Unlike a
-                    # normal controller disconnect (cleanup_session closes the server), here a
-                    # replacement client is connecting into the same slot, so closing the
-                    # server socket would cascade (remove_peer(server) closes ALL clients,
-                    # including the just-registered replacement -> self-terminating reconnect).
-                    # Notify the server the session ended (as for viewers) and keep it alive.
+                    # A replacement client is connecting into the same slot, so
+                    # tell the server the session ended and keep its socket: it
+                    # serves every client, and closing it would cascade
+                    # (remove_peer(server) closes ALL clients, including the
+                    # replacement just registered -> self-terminating reconnect).
                     msg = "SESSION_END {} {}".format(pid, peer.client_type)
                     logger.info("{} -> {}: {}".format(pid, other_id, msg))
                     deferred.append(lambda ws=wso, m=msg: ws.send_str(m))
@@ -617,8 +610,9 @@ class WebRTCPeerManagement:
         a client peer would reach signaling unauthenticated."""
         if not app_settings.master_token:
             return False
-        tokens, _ = current_session_tokens()
-        return not client_token or client_token not in tokens
+        if not isinstance(client_token, str):
+            return True
+        return _lookup_session_token(client_token) is None
 
     def _secure_server_token_rejected(self, server_token: Any) -> bool:
         """Secure mode: the server peer owns the media graph for every client, and a
@@ -644,8 +638,7 @@ class WebRTCPeerManagement:
         input — mirroring ws_handler's token-derived role."""
         if not app_settings.master_token or client_type != "controller":
             return client_type
-        tokens, _ = current_session_tokens()
-        perms = tokens.get(client_token) if client_token else None
+        perms = _lookup_session_token(client_token) if isinstance(client_token, str) else None
         if perms and perms.get("role") == "controller":
             return client_type
         return "viewer"
@@ -902,10 +895,9 @@ class WebRTCPeerManagement:
                                 )
                             )
                     if client_type == "viewer":
-                        # Admit a viewer only against a LIVE controller. Reap a
-                        # dead (closed, unreaped) controller and treat as absent,
-                        # matching the liveness-aware sibling checks above instead
-                        # of admitting the viewer to a stale peer.
+                        # Reap a dead (closed, unreaped) controller and treat it
+                        # as absent, matching the liveness-aware sibling checks
+                        # above instead of pairing the viewer with a stale peer.
                         if peer_controller is not None:
                             assert controller_entry is not None
                             ctrl_pid, ctrl_peer = controller_entry
@@ -916,18 +908,23 @@ class WebRTCPeerManagement:
                                 )
                                 peer_controller = None
                                 logger.info(
-                                    "Evicting dead controller {!r}; rejecting viewer from {!r}".format(
+                                    "Evicting dead controller {!r} ahead of viewer from {!r}".format(
                                         ctrl_pid, raddr
                                     )
                                 )
-                        if not peer_controller:
+                        # A viewer of the primary display needs no controller:
+                        # the desktop exists regardless and the server starts
+                        # its capture for a lone viewer (websockets parity). A
+                        # secondary display exists only through its controller's
+                        # layout, so a viewer of one is refused without it.
+                        if not peer_controller and display_id != "primary":
                             await ws.close(
                                 code=4000,
-                                message=b"No controller detected. Viewer clients require an existing controller client.",
+                                message=b"No controller detected. A secondary display's viewer requires that display's controller.",
                             )
                             raise Exception(
-                                "No controller detected for client of type 'viewer'; connection from {!r}".format(
-                                    raddr
+                                "No controller for display {!r}; rejecting viewer from {!r}".format(
+                                    display_id, raddr
                                 )
                             )
 
@@ -1029,6 +1026,9 @@ class WebRTCPeerManagement:
 
     async def handle_turn_req(self, request: web.Request) -> web.Response:
         """GET /api/turn: serve the RTC/TURN configuration to clients.
+
+        Who may ask is the auth middleware's call (Basic credentials, or a
+        session token in secure mode); this only serves the config.
 
         Returns:
             The RTC configuration as JSON, or 404 when none is resolved.

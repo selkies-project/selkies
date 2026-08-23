@@ -1,321 +1,206 @@
-"""Virtual webcam plumbing for the Selkies V4L2 interposer.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+"""Virtual webcam: the client's camera uplink, served to applications as a V4L2 device.
 
-The browser captures its camera, encodes frames as MJPEG, and sends them to the
-server over the WebSocket or WebRTC data channel. This module stages each frame
-into a shared-memory ring and notifies the ``selkies_v4l2_interposer.so``
-``LD_PRELOAD`` library over a Unix domain socket, which presents the frames as a
-virtual ``/dev/videoN`` capture device inside the container.
+Both transports deliver encoded camera frames here — the WebSocket as ``0x06``
+binary messages carrying WebCodecs output, WebRTC as the depacketized frames of
+the recvonly video m-line — and this module forwards them to the process-wide
+``pixelflux.VirtualCamera``. Decoding, fitting, and publishing to every device
+sink (the shared-memory ring behind the ``selkies_v4l2_interposer.so``
+``LD_PRELOAD`` library, and a v4l2loopback device where one is configured)
+happen on pixelflux's own thread; Python only gates the sender and hands the
+bytes over without copying them.
 
-Frame pixels never cross the socket. The staging ring lives in an anonymous
-``memfd`` whose file descriptor is handed to each interposer client once via
-``SCM_RIGHTS``; the socket then carries only a one-byte doorbell per staged
-frame. The shared-memory layout and the on-connect configuration struct are
-kept byte-for-byte identical to the constants in
-``addons/v4l2-interposer/v4l2_interposer.c``.
+Lifetime is process-wide, like the gamepad interposer servers: applications
+open ``/dev/videoN`` once at their own startup and must survive transport-mode
+switches and browser reconnects, so one camera is shared by every client and is
+only stopped with the server. Its format is fixed when it comes up: by default
+it follows the first uplink, so a browser sending JPEG gets an MJPEG device its
+frames pass through untouched and a WebCodecs/WebRTC browser an I420 device.
 """
 
 import asyncio
 import logging
-import mmap
 import os
-import socket
-import struct
-import time
-from typing import Optional, Set
+from typing import Any, Dict, Optional
+
+try:
+    from pixelflux import VirtualCamera, VirtualCameraSettings
+except (ImportError, RuntimeError):
+    VirtualCamera = VirtualCameraSettings = None
+
+from .settings import settings as app_settings
 
 logger = logging.getLogger("webcam")
 
-# V4L2 FourCC for Motion-JPEG, the single format the virtual device advertises.
-V4L2_PIX_FMT_MJPEG = (
-    ord("M") | (ord("J") << 8) | (ord("P") << 16) | (ord("G") << 24)
-)
+WEBCAM_SOCKET_NAME = "selkies_webcam0.sock"
 
-# Shared-memory layout constants; must match the interposer's WC_SHM_* defines.
-SHM_MAGIC = 0x434B5753  # 'SKWC'
-SHM_VERSION = 1
-SHM_CTRL_OFFSET = 128
-SHM_CTRL_STRIDE = 64
-SHM_DATA_OFFSET = 4096
-MAX_SLOTS = 4
+# Codec ids shared by the WebSocket frame header, the WebRTC codec names and
+# pixelflux's VirtualCamera.CODEC_* constants.
+CODEC_MJPEG = 0
+CODEC_H264 = 1
+CODEC_VP8 = 2
+CODEC_VP9 = 3
+CODEC_AV1 = 4
+CODEC_HEVC = 5
+CODEC_BY_NAME: Dict[str, int] = {
+    "mjpeg": CODEC_MJPEG, "jpeg": CODEC_MJPEG, "h264": CODEC_H264, "vp8": CODEC_VP8,
+    "vp9": CODEC_VP9, "av1": CODEC_AV1, "hevc": CODEC_HEVC, "h265": CODEC_HEVC,
+}
 
-# Header field byte offsets within the staging memfd (little-endian).
-_HDR_LATEST_SLOT = 40
-_HDR_LATEST_FRAME_SEQ = 48
+# WebSocket framing of one encoded frame: opcode, codec id, flags, payload.
+WS_OPCODE_WEBCAM = 0x06
+WS_HEADER_LEN = 3
+WS_FLAG_KEYFRAME = 0x01
 
-# The on-connect configuration struct: 12 * uint32 followed by 16 reserved
-# bytes, matching webcam_config_t.
-_CONFIG_FMT = "<12I16s"
-_CONFIG_SIZE = struct.calcsize(_CONFIG_FMT)
-
-_MIN_SLOT_SIZE = 256 * 1024
-_MAX_SLOT_SIZE = 4 * 1024 * 1024
-
-
-def _clamp_slot_size(width: int, height: int) -> int:
-    """Returns a per-slot byte budget large enough for one MJPEG frame."""
-    estimate = max(1, width) * max(1, height)
-    return max(_MIN_SLOT_SIZE, min(estimate, _MAX_SLOT_SIZE))
+# Text control messages the server sends back on the WebSocket.
+MSG_WEBCAM_DISABLED = "WEBCAM_DISABLED"
+MSG_WEBCAM_KEYFRAME = "WEBCAM_KEYFRAME"
 
 
-class WebcamRing:
-    """A shared-memory ring of MJPEG frame slots backed by an anonymous memfd.
+def webcam_available() -> bool:
+    """Whether the installed pixelflux provides the virtual camera."""
+    return VirtualCamera is not None
 
-    A single writer (the server) publishes frames; any number of interposer
-    processes map the ring read-only and read the newest frame. Each slot
-    carries a seqlock so a reader can detect and retry a torn read without any
-    cross-process lock.
+
+def webcam_locked_off() -> bool:
+    """True when the operator locked the webcam off, so no client may feed it."""
+    enabled, locked = app_settings.webcam_enabled
+    return locked and not enabled
+
+
+def webcam_uplink_allowed(is_viewer: bool, is_collaborator: bool) -> bool:
+    """The shared gate for both transports: controllers and authorized collaborators may feed
+    the camera, read-only viewers may not, and nobody may when it is locked off."""
+    if webcam_locked_off():
+        return False
+    return not is_viewer or is_collaborator
+
+
+def webcam_socket_path() -> str:
+    """Full path of the interposer socket, inside the configured socket directory."""
+    return os.path.join(app_settings.webcam_socket_path or "/tmp", WEBCAM_SOCKET_NAME)
+
+
+def device_pixel_format(setting: str, codec: Optional[int]) -> str:
+    """The device format for a ``webcam_pixel_format`` value and the codec of the frame that
+    brings the camera up.
+
+    ``auto`` follows that first uplink: an MJPEG uplink (a browser without WebCodecs) becomes
+    an MJPEG device carrying the browser's JPEG frames as received, with no decode on the
+    server, and anything else an I420 device; an explicit format is used as given.
+    """
+    name = (setting or "auto").strip()
+    if name.lower() != "auto":
+        return name
+    return "MJPEG" if codec == CODEC_MJPEG else "I420"
+
+
+class VirtualWebcam:
+    """Lazy owner of the process-wide ``pixelflux.VirtualCamera``.
+
+    The camera is started on the first frame rather than at server start, so sessions that never
+    enable the webcam pay nothing; a start failure is logged once and retried on a later frame.
     """
 
-    def __init__(self, width: int, height: int, fps_num: int, fps_den: int,
-                 n_slots: int = 3) -> None:
-        """Allocates and zero-initializes the staging ring.
-
-        Args:
-            width: Advertised frame width in pixels.
-            height: Advertised frame height in pixels.
-            fps_num: Frame-rate numerator (frames per ``fps_den`` seconds).
-            fps_den: Frame-rate denominator.
-            n_slots: Number of frame slots in the ring (clamped to ``MAX_SLOTS``).
-        """
-        self.width = width
-        self.height = height
-        self.fps_num = fps_num
-        self.fps_den = fps_den
-        self.n_slots = max(2, min(n_slots, MAX_SLOTS))
-        self.slot_size = _clamp_slot_size(width, height)
-        self.total_size = SHM_DATA_OFFSET + self.n_slots * self.slot_size
-
-        self._fd = os.memfd_create("selkies-webcam-staging", os.MFD_CLOEXEC)
-        os.ftruncate(self._fd, self.total_size)
-        self._map = mmap.mmap(self._fd, self.total_size, mmap.MAP_SHARED,
-                              mmap.PROT_READ | mmap.PROT_WRITE)
-        self._view = memoryview(self._map)
-
-        self._next_slot = 0
-        self._slot_seq = [0] * self.n_slots
-        self._frame_seq = 0
-
-        self._write_header()
+    def __init__(self) -> None:
+        self._cam: Optional[Any] = None
+        self._lock = asyncio.Lock()
+        self._start_failed_logged = False
 
     @property
-    def fd(self) -> int:
-        """The memfd file descriptor to pass to interposer clients."""
-        return self._fd
+    def camera(self) -> Optional[Any]:
+        """The running camera, or None until the first successful start."""
+        return self._cam
 
-    def config_bytes(self) -> bytes:
-        """Serializes the on-connect configuration struct for the interposer."""
-        return struct.pack(
-            _CONFIG_FMT,
-            SHM_MAGIC, SHM_VERSION,
-            self.width, self.height, V4L2_PIX_FMT_MJPEG,
-            self.fps_num, self.fps_den,
-            self.n_slots, self.slot_size, SHM_DATA_OFFSET,
-            SHM_CTRL_OFFSET, SHM_CTRL_STRIDE,
-            b"\x00" * 16,
-        )
+    def _settings(self, codec: Optional[int]) -> Any:
+        s = VirtualCameraSettings()
+        s.socket_path = webcam_socket_path()
+        s.width = int(app_settings.webcam_width)
+        s.height = int(app_settings.webcam_height)
+        s.fps_num = 30
+        s.fps_den = 1
+        s.pixel_format = device_pixel_format(str(app_settings.webcam_pixel_format), codec)
+        s.device_path = str(app_settings.webcam_device)
+        s.pipewire = bool(app_settings.webcam_pipewire[0])
+        return s
 
-    def _write_header(self) -> None:
-        struct.pack_into(
-            "<12I", self._map, 0,
-            SHM_MAGIC, SHM_VERSION,
-            self.width, self.height, V4L2_PIX_FMT_MJPEG,
-            self.fps_num, self.fps_den,
-            self.n_slots, self.slot_size, SHM_DATA_OFFSET,
-            0, 0,  # latest_slot, _pad
-        )
-        struct.pack_into("<Q", self._map, _HDR_LATEST_FRAME_SEQ, 0)
+    async def ensure(self, codec: Optional[int] = None) -> Optional[Any]:
+        """Returns the running camera, starting it on first use (off the event loop).
 
-    def write_frame(self, data: bytes) -> None:
-        """Publishes one MJPEG frame into the next slot.
-
-        The slot's seqlock is bumped to odd before the copy and back to even
-        after, and the header's ``latest_slot``/``latest_frame_seq`` are
-        published last, so a reader either sees the previous frame or the new
-        one, never a mix.
+        Args:
+            codec: Codec of the frame that brings the camera up; an ``auto`` device format
+                follows it (see ``device_pixel_format``).
         """
-        slot = self._next_slot
-        base = SHM_CTRL_OFFSET + slot * SHM_CTRL_STRIDE
-        data_off = SHM_DATA_OFFSET + slot * self.slot_size
-        n = min(len(data), self.slot_size)
-
-        seq = self._slot_seq[slot]
-        struct.pack_into("<I", self._map, base, seq + 1)  # begin write (odd)
-        self._view[data_off:data_off + n] = data[:n]
-        self._frame_seq += 1
-        struct.pack_into("<IQQ", self._map, base + 4,
-                         n, self._frame_seq, time.monotonic_ns())
-        struct.pack_into("<I", self._map, base, seq + 2)  # end write (even)
-        self._slot_seq[slot] = seq + 2
-
-        struct.pack_into("<I", self._map, _HDR_LATEST_SLOT, slot)
-        struct.pack_into("<Q", self._map, _HDR_LATEST_FRAME_SEQ, self._frame_seq)
-
-        self._next_slot = (slot + 1) % self.n_slots
-
-    def close(self) -> None:
-        """Releases the mapping and the backing memfd."""
-        try:
-            self._view.release()
-            self._map.close()
-        finally:
-            if self._fd >= 0:
-                os.close(self._fd)
-                self._fd = -1
-
-
-class WebcamServer:
-    """Serves the staging ring to interposer clients over a Unix socket.
-
-    Lifetime is process-wide, like the gamepad interposer servers: applications
-    open ``/dev/videoN`` once at their own startup and must survive a transport
-    mode switch. A single ring is shared by all clients; every client is handed
-    the ring fd on connect and a one-byte doorbell per staged frame.
-    """
-
-    def __init__(self, socket_path: str, width: int = 1280, height: int = 720,
-                 fps_num: int = 30, fps_den: int = 1) -> None:
-        self.socket_path = socket_path
-        self.ring = WebcamRing(width, height, fps_num, fps_den)
-        self._config = self.ring.config_bytes()
-        self._server: Optional[asyncio.AbstractServer] = None
-        self._clients: Set[socket.socket] = set()
-        self._active = False
-
-    async def start(self) -> None:
-        """Binds the Unix socket and begins accepting interposer clients."""
-        os.makedirs(os.path.dirname(self.socket_path) or ".", exist_ok=True)
-        try:
-            os.unlink(self.socket_path)
-        except FileNotFoundError:
-            pass
-        self._server = await asyncio.start_unix_server(
-            self._handle_client, path=self.socket_path)
-        self._active = True
-        logger.info("Webcam socket serving at %s (%dx%d @ %d/%d)",
-                    self.socket_path, self.ring.width, self.ring.height,
-                    self.ring.fps_num, self.ring.fps_den)
-
-    async def _handle_client(self, reader: asyncio.StreamReader,
-                             writer: asyncio.StreamWriter) -> None:
-        # asyncio wraps the connection in a TransportSocket that blocks sendmsg,
-        # so the SCM_RIGHTS handoff and the doorbells go through an independent
-        # socket dup'd from the same underlying connection. The reader/writer
-        # pair is kept only to detect the client closing.
-        transport_sock = writer.get_extra_info("socket")
-        try:
-            raw = socket.socket(transport_sock.family, transport_sock.type,
-                                fileno=os.dup(transport_sock.fileno()))
-        except OSError as exc:
-            logger.warning("Webcam client socket dup failed: %s", exc)
-            writer.close()
-            return
-        try:
-            raw.setblocking(True)
-            socket.send_fds(raw, [self._config], [self.ring.fd])
-            raw.setblocking(False)
-        except OSError as exc:
-            logger.warning("Webcam client fd handoff failed: %s", exc)
-            raw.close()
-            writer.close()
-            return
-
-        # The interposer replies with a one-byte architecture specifier and then
-        # only reads doorbells; the read loop below blocks until the client
-        # closes, at which point the connection is retired.
-        try:
-            await reader.readexactly(1)
-        except (asyncio.IncompleteReadError, ConnectionError):
-            raw.close()
-            writer.close()
-            return
-
-        self._clients.add(raw)
-        logger.info("Webcam client connected (%d active)", len(self._clients))
-        try:
-            while True:
-                chunk = await reader.read(64)
-                if not chunk:
-                    break
-        except (ConnectionError, OSError):
-            pass
-        finally:
-            self._clients.discard(raw)
-            raw.close()
-            writer.close()
-            logger.info("Webcam client disconnected (%d active)",
-                        len(self._clients))
-
-    def has_clients(self) -> bool:
-        """Whether any interposer is currently connected."""
-        return bool(self._clients)
-
-    def feed(self, data: bytes) -> None:
-        """Stages one MJPEG frame and rings the doorbell for every client."""
-        if not self._active:
-            return
-        self.ring.write_frame(data)
-        for sock in list(self._clients):
+        if self._cam is not None:
+            return self._cam
+        if not webcam_available():
+            if not self._start_failed_logged:
+                self._start_failed_logged = True
+                logger.error("pixelflux VirtualCamera unavailable; webcam forwarding disabled.")
+            return None
+        async with self._lock:
+            if self._cam is not None:
+                return self._cam
+            cam = VirtualCamera()
             try:
-                sock.send(b"\x01", socket.MSG_DONTWAIT)
-            except (BlockingIOError, InterruptedError):
-                # Doorbell backlog already pending; the client will still wake.
-                pass
-            except OSError:
-                self._clients.discard(sock)
+                settings = self._settings(codec)
+                await asyncio.to_thread(cam.start, settings)
+            except Exception as exc:
+                if not self._start_failed_logged:
+                    self._start_failed_logged = True
+                    logger.error("Virtual webcam start failed: %s", exc)
+                return None
+            self._cam = cam
+            stats = cam.stats()
+            logger.info("Virtual webcam serving %s (%dx%d %s, kernel device: %s, PipeWire node: %s)",
+                        cam.socket_path, settings.width, settings.height, settings.pixel_format,
+                        cam.device_path or "none", "yes" if stats.get("pipewire") else "no")
+            return cam
+
+    def push(self, data: Any, codec: int, keyframe: bool = False, offset: int = 0) -> int:
+        """Hands one encoded frame to the camera; returns its flags (``KEYFRAME_WANTED`` bit).
+
+        A camera that is not running yet (``ensure`` pending) drops the frame silently.
+        """
+        cam = self._cam
+        if cam is None:
+            return 0
+        try:
+            return int(cam.push(data, codec, keyframe, offset))
+        except Exception as exc:
+            logger.error("Virtual webcam push failed: %s", exc)
+            return 0
+
+    def keyframe_wanted(self, flags: int) -> bool:
+        return bool(flags & getattr(VirtualCamera, "KEYFRAME_WANTED", 1))
 
     async def stop(self) -> None:
-        """Stops accepting clients, closes connections and frees the ring."""
-        self._active = False
-        for sock in list(self._clients):
+        cam = self._cam
+        self._cam = None
+        if cam is not None:
             try:
-                sock.close()
-            except OSError:
-                pass
-        self._clients.clear()
-        if self._server is not None:
-            self._server.close()
-            try:
-                await self._server.wait_closed()
+                await asyncio.to_thread(cam.stop)
             except Exception:
                 pass
-            self._server = None
-        self.ring.close()
-        try:
-            os.unlink(self.socket_path)
-        except FileNotFoundError:
-            pass
 
 
-_shared_server: Optional[WebcamServer] = None
-_shared_lock: Optional[asyncio.Lock] = None
+_shared_webcam: Optional[VirtualWebcam] = None
 
 
-async def get_shared_webcam_server(socket_dir: str, width: int = 1280,
-                                   height: int = 720, fps_num: int = 30,
-                                   fps_den: int = 1) -> WebcamServer:
-    """Returns the process-wide webcam server, starting it on first use.
-
-    The whole Selkies process runs on a single event loop, so one shared server
-    survives transport-mode switches and individual client reconnects: an
-    application opens ``/dev/videoN`` once and keeps that connection while
-    browser clients come and go. ``socket_dir`` mirrors the joystick interposer
-    convention; the socket basename is fixed at ``selkies_webcam0.sock``.
-    """
-    global _shared_server, _shared_lock
-    if _shared_lock is None:
-        _shared_lock = asyncio.Lock()
-    async with _shared_lock:
-        if _shared_server is None:
-            path = os.path.join(socket_dir or "/tmp", "selkies_webcam0.sock")
-            server = WebcamServer(path, width, height, fps_num, fps_den)
-            await server.start()
-            _shared_server = server
-    return _shared_server
+def get_shared_webcam() -> VirtualWebcam:
+    """The process-wide webcam (created lazily, started on the first frame)."""
+    global _shared_webcam
+    if _shared_webcam is None:
+        _shared_webcam = VirtualWebcam()
+    return _shared_webcam
 
 
-async def stop_shared_webcam_server() -> None:
-    """Stops and clears the process-wide webcam server, if any."""
-    global _shared_server
-    if _shared_server is not None:
-        await _shared_server.stop()
-        _shared_server = None
+async def stop_shared_webcam() -> None:
+    """Stops and clears the process-wide webcam, if any."""
+    global _shared_webcam
+    cam = _shared_webcam
+    _shared_webcam = None
+    if cam is not None:
+        await cam.stop()

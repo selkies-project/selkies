@@ -36,9 +36,9 @@ Clipboard behaviour is controlled by the server option `SELKIES_ENABLE_CLIPBOARD
 
 ## Command-Line Options and Environment Variables
 
-Use `selkies --help` for all command-line options.
+Use `selkies --help` for all command-line options, and `selkies --version` to print the installed version.
 
-Every command-line option has a matching environment variable, formed by capitalizing the option and prepending `SELKIES_` (such as `SELKIES_VIDEO_BITRATE` for `--video-bitrate`). The full list of settings, their flags, environment variables, and defaults is defined in [`src/selkies/settings.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/settings.py).
+Every command-line option has a matching environment variable, formed by capitalizing the option and prepending `SELKIES_` (such as `SELKIES_VIDEO_BITRATE` for `--video-bitrate`). The [Settings Reference](settings.md) lists every setting with its flag, environment variables, type, and default; it is generated from [`src/selkies/settings.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/settings.py), where the settings are defined.
 
 `SELKIES_VIDEO_BITRATE` is in **kilobits per second (kbps)**, range `100-1000000`, default `8000` (8 Mbps); no unit multiplier is applied, e.g. `4000` is 4 Mbps.
 

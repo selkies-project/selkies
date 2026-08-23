@@ -35,6 +35,8 @@
  * coherent. `canUpload` is a per-core gate (e.g. shared/viewer sessions must
  * not upload).
  */
+import { sessionAuthHeaders } from './session-token.js';
+
 const UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
 
 export function createFileUploader({ canUpload = () => true } = {}) {
@@ -64,7 +66,8 @@ export function createFileUploader({ canUpload = () => true } = {}) {
             xhr.withCredentials = true;
             xhr.setRequestHeader('Content-Type', 'application/octet-stream');
             xhr.setRequestHeader('X-Upload-Path', encodeURIComponent(pathToSend));
-            for (const [name, value] of Object.entries(extraHeaders || {})) {
+            // The secure-mode session token rides as a Bearer header.
+            for (const [name, value] of Object.entries(sessionAuthHeaders(extraHeaders))) {
                 xhr.setRequestHeader(name, value);
             }
             xhr.upload.onprogress = onProgress;

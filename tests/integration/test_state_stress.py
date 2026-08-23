@@ -87,7 +87,7 @@ async def drive() -> "H.Results":
             res.check("10 stop/start cycles all restart", True, "")
 
         # Phase 2: encoder toggles must each bring the capture back up.
-        for enc in ("jpeg", "h264enc", "openh264enc", "h264enc"):
+        for enc in ("jpeg", "h264enc", "h264enc-striped", "h264enc"):
             st = loglen()
             await ws.send("SETTINGS," + json.dumps(_settings_payload(encoder=enc)))
             await asyncio.sleep(2.0)

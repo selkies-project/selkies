@@ -9,9 +9,11 @@ set -eux
 # python3-devel and the compilers: dependencies without a wheel for this
 # distribution's Python are compiled from their sdist. libxkbcommon is loaded
 # with ctypes at runtime and lets mkvenv.sh's smoke test exercise that path
+# pipewire-devel gives the V4L2 interposer its PipeWire frame source (headers
+# only; the library is loaded at runtime when an application uses it)
 dnf install -y \
     python3 python3-pip python3-devel \
-    libxkbcommon pkgconf-pkg-config \
+    libxkbcommon pkgconf-pkg-config pipewire-devel \
     ruby rubygems ruby-devel gcc gcc-c++ make rpm-build ca-certificates
 # The i686 glibc builds the interposer's 32-bit variant, which the Wine and
 # Steam catalog loads through `/usr/$LIB`

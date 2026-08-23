@@ -103,6 +103,12 @@ export default function PlayerGamepadButton() {
         handleToggleTouchGamepad();
     };
 
+    // Same wording as the classic sidebar's touch-gamepad button: the title
+    // names the action the click performs.
+    const title = t(isTouchGamepadActive
+        ? "sections.gamepads.touchDisableTitle"
+        : "sections.gamepads.touchEnableTitle");
+
     return (
         <button
             className={`player-gamepad-button ${isTouchGamepadActive ? "active" : ""}`}
@@ -130,8 +136,8 @@ export default function PlayerGamepadButton() {
                 boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
                 transition: 'background-color 0.2s ease-in-out',
             }}
-            title={t('gamepads.toggleTouchTitle')}
-            aria-label={t('gamepads.toggleTouchTitle')}
+            title={title}
+            aria-label={title}
         >
             <GamepadIcon />
         </button>

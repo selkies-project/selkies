@@ -8,7 +8,8 @@
 // Auth moving under a live page (basic auth enabled on the server/proxy, or a
 // session expiring): the stream either dead-stalls or keeps streaming while
 // every API call 401s. Either way only a fresh document can re-present the
-// login, so any observed 401 reloads the page once. installAuthGuard wraps
+// login, so any observed 401 reloads the page once — except the server's own
+// Bearer verdicts, which a reload cannot change. installAuthGuard wraps
 // window.fetch for the whole page (cores and dashboards share it); close
 // handlers probe the origin once so a WS dropped BY the auth wall triggers
 // the same reload instead of silently retrying.
@@ -87,10 +88,21 @@ export function installAuthGuard() {
             return true;
         }
     };
+    // The server's own token verdicts (secure mode: a route wanting a
+    // session or master token) name the Bearer scheme; a reload re-presents
+    // the very same token, so those are left to the caller — the file-upload
+    // error, the mode-switch master-token prompt — instead of reloading.
+    const isTokenVerdict = (res) => {
+        try {
+            return /^Bearer realm="Selkies/i.test(res.headers.get('WWW-Authenticate') || '');
+        } catch (_) {
+            return false;
+        }
+    };
     window.__selkiesAuthReload = reloadOnce;
     window.fetch = async (...args) => {
         const res = await realFetch(...args);
-        if (res.status === 401 && sameOrigin(args[0])) reloadOnce();
+        if (res.status === 401 && sameOrigin(args[0]) && !isTokenVerdict(res)) reloadOnce();
         return res;
     };
     // A close-driven probe: the next fetch going through the guard above

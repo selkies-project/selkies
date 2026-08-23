@@ -9,15 +9,19 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { computeRenderableSettings, getLastServerSettings, getPrefixedKey } from "@/utils";
+import { computeRenderableSettings, getLastClipboardContent, getLastServerSettings, getPrefixedKey } from "@/utils";
 import { t } from "@/i18n";
 
 export function Clipboard() {
-	const [dashboardClipboardContent, setDashboardClipboardContent] = useState('');
+	// Seeded from the cached clipboardContentUpdate: this panel mounts when its
+	// submenu opens, usually long after the core last reported the clipboard.
+	const [dashboardClipboardContent, setDashboardClipboardContent] = useState(
+		() => getLastClipboardContent()?.text ?? '');
 	// Large server clipboards arrive as a bounded, truncated preview; editing it
 	// would echo the cut-down text back over the real server clipboard on blur,
 	// so truncated content renders read-only.
-	const [clipboardTruncated, setClipboardTruncated] = useState(false);
+	const [clipboardTruncated, setClipboardTruncated] = useState(
+		() => getLastClipboardContent()?.truncated ?? false);
 	const [clipboardImageUrl, setClipboardImageUrl] = useState<string | null>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
 	const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {

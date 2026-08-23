@@ -26,7 +26,7 @@ export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-proje
 cd /tmp && curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-py3-none-any.whl" && sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall "selkies-${SELKIES_VERSION}-py3-none-any.whl" && rm -f "selkies-${SELKIES_VERSION}-py3-none-any.whl"
 ```
 
-Alternatively, install directly from the source tree. Note that a source checkout **does not contain the prebuilt web client**: the web files are built from `addons/selkies-web-core` and injected into the wheel only by the CI build pipeline. After a source install you must either point Selkies at an existing web build with `--web-root=` / `SELKIES_WEB_ROOT`, or embed the web files before building the wheel (see [Components](component.md#web-client)):
+Alternatively, install directly from the source tree. Note that a source checkout **does not contain the prebuilt web client**: the web files are built from `addons/selkies-web-core` and injected into the wheel only by the CI build pipeline. After a source install you must either point Selkies at an existing web build with `--web-root=` / `SELKIES_WEB_ROOT`, or embed the web files before building the wheel by running `scripts/ci/build-web.sh` (needs `npm`; see [Components](component.md#web-client)):
 
 ```bash
 git clone https://github.com/selkies-project/selkies.git
@@ -58,11 +58,11 @@ export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DI
 selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
-In the default WebSocket mode, `--encoder=` accepts `h264enc` (default; hardware NVENC or VA-API when a supported GPU is available, otherwise software `x264`), `h264enc-striped`, `openh264enc` (software OpenH264), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc`; the same `--encoder=` knob applies, filtered to what WebRTC can produce (`h264enc`, the hardware-first default, or `openh264enc`) — any other value falls back to the default with a logged warning.
+In the default WebSocket mode, `--encoder=` accepts `h264enc` (default; hardware NVENC or VA-API when a supported GPU is available, otherwise the software encoder `pixelflux` was built with — `x264`, or OpenH264 in a GPL-free build), `h264enc-striped` (striped software H.264 on that same encoder), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc`; the same `--encoder=` knob applies, filtered to what WebRTC can produce (`h264enc`, the hardware-first default) — any other value falls back to it with a logged warning.
 
-The default username (set with `--basic-auth-user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is the current user environment variable `$USER` (empty username if nonexistent). The password has no default: set it with `--basic-auth-password=`, `SELKIES_BASIC_AUTH_PASSWORD`, `PASSWORD`, or `PASSWD`, or pass `--enable-basic-auth=false` to serve without a login. Selkies refuses to start with basic authentication enabled and no password, so a login is never served that nobody chose a password for.
+The default username (set with `--basic-auth-user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is taken from the `CUSTOM_USER`, then `USERNAME`, then `USER` environment variable, and is `ubuntu` when none of them is set. The password has no default: set it with `--basic-auth-password=`, `SELKIES_BASIC_AUTH_PASSWORD`, `PASSWORD`, or `PASSWD`, or pass `--enable-basic-auth=false` to serve without a login. Selkies refuses to start with basic authentication enabled and no password, so a login is never served that nobody chose a password for.
 
-Use `--enable-resize=true` if you want to fit the remote resolution to the client window and skip the next step. You **must NOT** enable this option when streaming a physical monitor.
+Dynamic resizing (`--enable-resize`, **on by default**) fits the remote resolution to the client window; the command above turns it off because it **must NOT** be enabled when streaming a physical monitor. Leave it on when streaming a virtual display (`Xvfb` or the Wayland backend) and skip the next step.
 
 **5. Resize to your intended resolution (DO NOT resize when streaming a physical monitor):**
 
@@ -109,7 +109,7 @@ This section installs from Ubuntu packages and shows a full run script, includin
 Selkies has a modularized architecture, but at runtime it is a **single Python application**, packaged as the `selkies` wheel, that:
 
 - serves the HTML5 web client, which is bundled inside the wheel (at `src/selkies/selkies_web`) and served from the same single port;
-- captures and encodes the screen through the `pixelflux` extension (hardware H.264 via NVENC or VA-API, software H.264 via `x264` or OpenH264, or JPEG);
+- captures and encodes the screen through the `pixelflux` extension (hardware H.264 via NVENC or VA-API, software H.264 via `x264` — or OpenH264 in a GPL-free `pixelflux` build — or JPEG);
 - captures and encodes audio through the `pcmflux` extension (Opus);
 - injects keyboard, mouse, and gamepad input through a vendored `python-xlib` (XTEST/XFixes);
 - and, only for the opt-in WebRTC transport, uses a vendored fork of `aiortc`.
@@ -183,6 +183,8 @@ More information can be found in [Joystick Interposer](component.md#joystick-int
 
 You can install `selkies_joystick_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` at it.
 
+SDL2 applications discover the four pads through `fake-udev`. Where discovery through `libudev` is unavailable — `SDL_JOYSTICK_DISABLE_UDEV=1`, an SDL sandbox build, or an SDL built without udev — export `SDL_JOYSTICK_DEVICE=/dev/input/event1000:/dev/input/event1001:/dev/input/event1002:/dev/input/event1003` instead, which needs no placeholder files. Never name the joydev nodes there: with `fake-udev` active, a `/dev/input/js0` hint is a second, different node for the slot SDL already enumerated as `event1000`, so the pad shows up twice.
+
 **4. Run Selkies after changing the below script appropriately** (install `xvfb` and uncomment relevant sections if there is no real display, **DO NOT resize when streaming a physical monitor**)**:**
 
 **Check that you are using X.Org instead of Wayland (which is the default in many distributions) when attaching to an existing display -- an already-running Wayland session cannot be captured. A separate headless Wayland mode (started and owned by Selkies itself) is available with `--wayland=true` / `SELKIES_WAYLAND=true`, but when attaching to an existing graphical session that session must be X.Org. You also need to be logged in from the login screen or autologin should be enabled.**
@@ -192,15 +194,13 @@ export DISPLAY="${DISPLAY:-:0}"
 # Configure the Joystick Interposer
 export SELKIES_INTERPOSER='/usr/$LIB/selkies_joystick_interposer.so'
 export LD_PRELOAD="${SELKIES_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
-export SDL_JOYSTICK_DEVICE=/dev/input/js0
 sudo mkdir -pm1777 /dev/input
-sudo touch /dev/input/js0 /dev/input/js1 /dev/input/js2 /dev/input/js3
-sudo chmod 777 /dev/input/js*
 
 # Commented sections are optional but may be mandatory based on setup
 
 # Start a virtual X11 server if not already running, skip this line if an X server already exists or you are already using a display
-# Xvfb "${DISPLAY}" -screen 0 8192x4096x24 +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem >/tmp/Xvfb_selkies.log 2>&1 &
+# (-s 0 -dpms keeps the server's own screen saver and DPMS from ever blanking the framebuffer, as the example container and the AppImage do; see the FAQ on screen locking)
+# Xvfb "${DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem >/tmp/Xvfb_selkies.log 2>&1 &
 
 # Wait for X server to start
 # echo 'Waiting for X Socket' && until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done && echo 'X Server is ready'
@@ -232,13 +232,13 @@ sudo chmod 777 /dev/input/js*
 # selkies-resize 1920x1080
 
 # Starts the remote desktop process
-# In the default WebSocket mode, change `--encoder=` to `h264enc-striped`, `openh264enc`, or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
-# For the WebRTC transport instead, add `--mode=webrtc` and set `--encoder=` to `h264enc` or `openh264enc`
+# In the default WebSocket mode, change `--encoder=` to `h264enc-striped` or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
+# For the WebRTC transport instead, add `--mode=webrtc` (`--encoder=h264enc` is the only WebRTC encoder)
 # DO NOT set `--enable-resize=true` if there is a physical display
 selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
 ```
 
-The default username (set with `--basic-auth-user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is the current user environment variable `$USER` (empty username if nonexistent). The password has no default: set it with `--basic-auth-password=`, `SELKIES_BASIC_AUTH_PASSWORD`, `PASSWORD`, or `PASSWD`, or pass `--enable-basic-auth=false` to serve without a login. Selkies refuses to start with basic authentication enabled and no password, so a login is never served that nobody chose a password for.
+The default username (set with `--basic-auth-user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is taken from the `CUSTOM_USER`, then `USERNAME`, then `USER` environment variable, and is `ubuntu` when none of them is set. The password has no default: set it with `--basic-auth-password=`, `SELKIES_BASIC_AUTH_PASSWORD`, `PASSWORD`, or `PASSWD`, or pass `--enable-basic-auth=false` to serve without a login. Selkies refuses to start with basic authentication enabled and no password, so a login is never served that nobody chose a password for.
 
 **5. (WebRTC mode only) If you switched to `--mode=webrtc` and the HTML5 web interface loads and the signaling connection works, but the WebRTC connection fails or the remote desktop does not start:**
 

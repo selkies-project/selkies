@@ -13,6 +13,16 @@ PKG_ROOT="${1:?usage: v4l2-interposer.sh <pkg-root>}"
 SRC="$(dirname "$(readlink -f "$0")")/../../addons/v4l2-interposer/v4l2_interposer.c"
 CC="${CC:-gcc}"
 
+# The PipeWire frame backend (frames taken from a Video/Source node instead of
+# the Selkies socket) only needs the libpipewire headers at build time; the
+# library itself is dlopen'ed when an application asks for it.
+PW_CFLAGS="$(pkg-config --cflags libpipewire-0.3 2>/dev/null || true)"
+if [ -n "${PW_CFLAGS}" ]; then
+    PW_CFLAGS="-DHAVE_PIPEWIRE ${PW_CFLAGS}"
+else
+    echo "v4l2-interposer: libpipewire headers not found, building without the PipeWire backend" >&2
+fi
+
 # `/usr/$LIB`, which is how the interposer is preloaded, expands at load time to
 # the multiarch triplet on Debian-family systems and to lib64 elsewhere on
 # 64-bit (Arch symlinks lib64 onto lib, and musl has neither).
@@ -25,7 +35,8 @@ else
     LIBDIR="usr/lib"
 fi
 mkdir -p "${PKG_ROOT}/${LIBDIR}"
-"${CC}" -O2 -shared -fPIC -o "${PKG_ROOT}/${LIBDIR}/selkies_v4l2_interposer.so" \
+# shellcheck disable=SC2086
+"${CC}" -O2 ${PW_CFLAGS} -shared -fPIC -o "${PKG_ROOT}/${LIBDIR}/selkies_v4l2_interposer.so" \
     "${SRC}" -ldl -pthread
 echo "v4l2-interposer: /${LIBDIR}/selkies_v4l2_interposer.so"
 
@@ -43,6 +54,7 @@ else
     LIB32DIR="usr/lib"
 fi
 mkdir -p "${PKG_ROOT}/${LIB32DIR}"
-"${CC}" -m32 -O2 -shared -fPIC -o "${PKG_ROOT}/${LIB32DIR}/selkies_v4l2_interposer.so" \
+# shellcheck disable=SC2086
+"${CC}" -m32 -O2 ${PW_CFLAGS} -shared -fPIC -o "${PKG_ROOT}/${LIB32DIR}/selkies_v4l2_interposer.so" \
     "${SRC}" -ldl -pthread
 echo "v4l2-interposer: /${LIB32DIR}/selkies_v4l2_interposer.so"

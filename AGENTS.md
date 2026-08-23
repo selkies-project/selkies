@@ -59,10 +59,58 @@ because a session lays its desktop out once per applied configuration: a scale a
 pre-connect mode under the new scale, a fraction of its final size, which a client that does not lay out again keeps.
 Only what that compositor leaves — a KWin session, or no session at all — becomes the capture scale, and only a
 changed capture scale restarts a capture. The Wayland path is subprocess-free by design — never reintroduce wtype, wl-copy or similar
-forks where the in-process pixelflux harness exists.
+forks where the in-process pixelflux harness exists. One X11 exception is deliberate: an X11 desktop hosted by a
+ROOTFUL Xwayland that talks to the capture compositor directly (no nested session compositor) bridges no selection
+on its own, so on the Wayland backend the X11 XFixes monitor is also built, on that live `$DISPLAY`, and the
+clipboard loop waits on both it and the compositor feed; client writes are offered there too. Under a nested
+compositor its XWM bridges its Xwayland, so no X monitor is built. Client-requested commands (the apps panel) run in
+the session the applications live in (`WebRTCInput.app_session`): the nested compositor's socket and its Xwayland,
+a rootful Xwayland's `DISPLAY` with no `WAYLAND_DISPLAY` (a Wayland toolkit would otherwise leave the desktop as a
+fullscreen toplevel of the capture compositor), else the capture socket — plus the desktop's session bus and
+identity adopted from its processes. The server publishes `app_terminal` (foot for a Wayland session, st for X11,
+first installed) and the dashboards build the launch command from it. pixelflux answers the frame callbacks of a
+surface-backed cursor and delivers a sprite on its commit: Xwayland and libwayland-cursor clients attach no new
+sprite while the previous cursor frame callback is pending, which is what froze X cursors under rootful Xwayland.
 A defect that predates the change you are making is still in scope: finding it does not make it someone else's,
 and "pre-existing" is not a reason to leave it. Fix it, or say precisely what is broken, what you ruled out, and
 what you would do next. The same applies to a failure you cannot reproduce yet -- narrow it until it is either
 fixed or precisely described, and never let a test that fails for an unknown reason pass unremarked.
+
+Software H.264 is a property of the installed pixelflux build, never a Selkies setting: the default build encodes
+with libx264 and a `PIXELFLUX_ENABLE_GPL=0` build with OpenH264, behind the same `h264enc` (full-frame) and
+`h264enc-striped` encoders. `settings.software_h264_encoder()` reads `pixelflux.SOFTWARE_H264_ENCODER`
+(`"x264"` | `"openh264"`); it is published to clients as `software_h264_encoder`, named in the capture-start log,
+and drives the one decision that differs between the two: a session known to be on the software path (the striped
+encoder, or `h264enc` with software encoding forced) defaults to CBR rate control on OpenH264, in
+`resolve_rate_control_default` and in the dashboards' `softwareH264RcDefault` alike. OpenH264 is 4:2:0-only, so a
+WebRTC offer for such a session never advertises the 4:4:4 profile. The retired `openh264enc` encoder name is an
+alias of `h264enc` (`canonical_encoder`), like the historical `x264enc`. `tests/unit/test_rate_control_defaults.py`
+stubs the build both ways; `tests/e2e/test_software_h264.py` streams the software path against whichever build the
+server interpreter carries (`SELKIES_TEST_PYTHON`).
+
+The webcam uplink mirrors the microphone: the browser encodes its camera (a sendonly video transceiver the server
+reserved recvonly in the bundled SDP on WebRTC; WebCodecs H.264/VP8 or a JPEG canvas fallback as `0x06` frames on the
+websocket, `lib/webcam-capture.js`), `src/selkies/webcam.py` gates and hands every frame to the process-wide
+`pixelflux.VirtualCamera`, and applications see a V4L2 device through the Joystick-Interposer-style
+`addons/v4l2-interposer` (`LD_PRELOAD`, unprivileged), a v4l2loopback device (`webcam_device`, the uinput-like
+privileged/bare-metal path) or a PipeWire node (`webcam_pipewire`). The interposer takes frames from the backend
+socket or from that PipeWire node (`SELKIES_WEBCAM_SOURCE`), so a node alone serves every consumer it covers; because
+PipeWire's loops then run inside the application through the interposer's own hooks, no hook may hold
+`handles_mutex` across a wait or a source release, and "not our fd" is decided from a lock-free bitmap. Nothing about
+a frame is decoded or copied in Python. The device format follows the first uplink by default
+(`webcam_pixel_format=auto`): a browser without WebCodecs sends JPEG and gets an MJPEG device its frames pass
+through untouched, every other uplink an I420 device. Without WebCodecs the screen stream likewise degrades to the
+striped-JPEG encoder (the WS pre-flight pins `encoder=jpeg` instead of failing; both dashboards offer only
+decodable encoders) — the one case the client's JPEG rungs exist for, in both directions. `tests/unit/test_webcam_abi.py` pins the ring ABI the interposer shares with pixelflux;
+`tests/integration/test_webcam_device.py` and `tests/e2e/test_webcam.py` cover the device and the browsers.
+
+The sound-server control plane both transports share -- the capture null sink, capture-source resolution, the
+SelkiesVirtualMic (``input`` null sink plus module-virtual-source), system defaults, and moving a strayed pcmflux
+record stream -- is `src/selkies/audio_control.py` (`AudioControl`), in-process over pulsectl_asyncio: every
+operation runs in a task that is never cancelled (a timeout abandons the connection instead, because libpulse holds
+raw pointers to per-operation ctypes callbacks that die with the awaiting frame), clients bind to one loop and are
+closed through `aclose`, and `pactl` subprocesses are the fallback only when the bindings are missing or cannot
+connect (announced in one log line). `tests/unit/test_audio_control.py` drives it against a stub;
+`tests/e2e/test_microphone.py` proves the microphone uplink and the absence of any pactl fork on both transports.
 
 Update this file when certain details change.

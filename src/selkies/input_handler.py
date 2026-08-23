@@ -31,7 +31,8 @@ rung rather than latching into a fallback:
   wtype, wl-copy or similar forks where the in-process pixelflux harness
   exists.
 - X11 keyboard: in-process XTEST (`_XTestKeyboard`, with a dynamic
-  spare-keycode overlay for unmapped keysyms), then an xdotool fork.
+  spare-keycode overlay for unmapped keysyms and an XKB group lock for
+  keysyms a later layout group carries), then an xdotool fork.
 - Clipboard: native event-driven monitors (XFixes on X11, compositor
   callbacks / data-control on Wayland), with xclip polling as the X11
   fallback.
@@ -59,6 +60,7 @@ import threading
 import time
 import asyncio
 from asyncio import subprocess
+import shutil
 import socket
 import os
 import base64
@@ -121,6 +123,7 @@ try:
     from .Xlib.ext import xfixes, xtest
     from .Xlib.protocol import event as xevent
     from .Xlib import error as xlib_error
+    from .x11_xkb import open_xkb_link
     X11_LIBS_AVAILABLE = True
 except ImportError:
     X11_LIBS_AVAILABLE = False
@@ -132,6 +135,7 @@ except ImportError:
     xfixes = None
     xtest = None
     xevent = None
+    open_xkb_link = None
 
 try:
     from pixelflux import ScreenCapture
@@ -575,6 +579,44 @@ class _WaylandKeymapOwner:
         self._mod_refs.clear()
         self._down.clear()
 
+    def adopt_held(self, previous: "_WaylandKeymapOwner") -> None:
+        """Carry what a previous owner left down across a base-layout change.
+
+        Held keys and synthesized modifiers are physical keycodes the compositor
+        still has pressed, valid under any base keymap, so the releases that
+        follow the change must reach them: a fresh owner would drop them as
+        no-ops and leave the keys held for good. Overlay binds are not carried —
+        the compositor rebuilds its keymap from the new base without them.
+        """
+        self._pressed.update(previous._pressed)
+        self._mod_refs.update(previous._mod_refs)
+        self._down.update(previous._down)
+
+
+def x_display_socket(name: str) -> Optional[str]:
+    """Unix socket path of a local X display name (":N", ":N.S", "unix:N");
+    None for a TCP/remote name."""
+    m = re.fullmatch(r"(?:unix)?:(\d+)(?:\.\d+)?", name.strip())
+    return f"/tmp/.X11-unix/X{m.group(1)}" if m else None
+
+
+def x_display_live(name: str) -> bool:
+    """True when an X server accepts connections on the local display ``name``
+    right now (a stale socket file or an unstarted server answers False)."""
+    path = x_display_socket(name)
+    if path is None:
+        return False
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        try:
+            s.connect(path)
+            return True
+        finally:
+            s.close()
+    except OSError:
+        return False
+
 
 class _X11ClipboardMonitor:
     """Event-driven X11 CLIPBOARD access on a dedicated Display connection.
@@ -684,6 +726,9 @@ class _X11ClipboardMonitor:
         self._pending_own = None
         self._own_done = threading.Event()
         self._own_ok = False
+        # CLIPBOARD ownership on its own: the payload stays staged while PRIMARY
+        # is still ours, but a reader only cares whether CLIPBOARD is.
+        self._own_clipboard = False
         self._cmd_r, self._cmd_w = os.pipe()
         self._stop = False
         self._thread = threading.Thread(target=self._event_loop, daemon=True,
@@ -733,6 +778,8 @@ class _X11ClipboardMonitor:
         elif ev.type == X.SelectionRequest:
             self._serve_selection(ev)
         elif ev.type == X.SelectionClear:
+            if ev.atom == self._clipboard:
+                self._own_clipboard = False
             # We serve one payload on CLIPBOARD and PRIMARY; drop it only once a
             # foreign owner has taken BOTH (a text-selection steal of PRIMARY must
             # not orphan the browser-written CLIPBOARD payload, and vice versa).
@@ -763,6 +810,7 @@ class _X11ClipboardMonitor:
             self._own_ok = (getattr(owner, 'id', owner) == self._win.id)
         except Exception:
             self._own_ok = False
+        self._own_clipboard = self._own_ok
         self._own_done.set()
 
     def _serve_selection(self, ev: Any) -> None:
@@ -974,18 +1022,32 @@ class _X11ClipboardMonitor:
             return self._own_ok
 
     async def wait_change(self, timeout: float) -> bool:
-        """Await a selection-owner change (True) or timeout (False)."""
+        """Await a selection-owner change (True) or timeout (False), consuming
+        it: the outbound monitor loop is the one consumer of the change edge."""
         loop = asyncio.get_running_loop()
         got = await loop.run_in_executor(None, self._changed.wait, timeout)
         if got:
             self._changed.clear()
         return got
 
+    async def peek_change(self, timeout: float) -> bool:
+        """Await a selection-owner change without consuming it, for a reader
+        that wants the fresh content but must leave the edge to the monitor
+        loop (which broadcasts it to every client)."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._changed.wait, timeout)
+
     def alive(self) -> bool:
         """False once the event thread has exited (display disruption, XFixes
         error). A dead monitor never reports another change, so the outbound
         monitor loop rebuilds it instead of waiting on it forever."""
         return not self._stop and self._thread.is_alive()
+
+    def owns_selection(self) -> bool:
+        """True while CLIPBOARD still belongs to the last offer(), i.e. no X
+        application has copied since (a PRIMARY steal alone does not count,
+        nor does PRIMARY being ours after an X copy took CLIPBOARD)."""
+        return self._own_clipboard
 
     def close(self) -> None:
         self._stop = True
@@ -1010,15 +1072,37 @@ class _XTestKeyboard:
     of forking xdotool. The bindings are round-robin recycled; the reverse of
     TigerVNC/x0vncserver's XkbAddKeyKeysym, done through core
     ChangeKeyboardMapping.
+
+    On a multi-group layout (`setxkbmap us,ru`) a keysym of a later group sits
+    on the same keycode as its group-1 glyph, and the server translates an
+    injected keycode under its current group, so the keysym's group is locked
+    around the injection and the previous lock restored once the last key that
+    needed it is up. The physical keycode is kept (Cyrillic_ef presses the 'a'
+    key, as a Russian keyboard does), so scancode-driven clients see the key
+    they expect. Keysyms group 1 carries never switch: the server's own group
+    then decides, exactly as for a single-group layout.
     """
 
     # Settle after rebinding a RECYCLED keycode: the server applies the mapping
     # synchronously (sync()), but xcb-class toolkits refetch keymaps
     # asynchronously and could translate the queued press with the old symbol.
     _RECYCLE_SETTLE_S = 0.01
+    # A group lock outlives the last key that needed it by this long, so a run
+    # of keystrokes on one group costs one switch and the desktop's layout
+    # indicator does not flip on every key.
+    _GROUP_LINGER_S = 0.5
 
     def __init__(self, xdisplay: Any) -> None:
         self._d = xdisplay
+        # XKB link for group placement and locking; None leaves the core-keymap
+        # resolution, which cannot tell groups apart, as the only path.
+        self._xkb = open_xkb_link(xdisplay) if open_xkb_link is not None else None
+        # Group lock held for injected keys: [locked group before the switch,
+        # group locked now, keysym -> group it was pressed under]; None while
+        # the server's own lock is in force. _group_restore is the pending
+        # linger timer.
+        self._group_hold = None
+        self._group_restore = None
         # XK_Shift_L; may be 0 on an exotic keymap (then capitals just skip shift).
         self._shift_kc = xdisplay.keysym_to_keycode(0xffe1)
         # XK_Shift_R: a client-held Shift may be down on either keycode.
@@ -1282,22 +1366,107 @@ class _XTestKeyboard:
         self._spare_keycodes = None
         self._spare_set = frozenset()
         self._dirty_spares.clear()
+        if self._xkb is not None:
+            self._xkb.invalidate()
         self.refresh_modifier_keycodes()
 
+    def note_mapping_change(self, first_keycode: int, count: int) -> None:
+        """A keyboard MappingNotify arrived for this keycode range: refetch the
+        XKB placement on the next lookup unless the range lies inside the spare
+        pool, where only overlay binds live and the placement never trusts
+        them anyway — so this shim's own binds cost no refetch."""
+        if self._xkb is None:
+            return
+        if self._spare_keycodes is not None and all(
+                kc in self._spare_set for kc in range(first_keycode, first_keycode + count)):
+            return
+        self._xkb.invalidate()
+
+    def keyboard_replaced(self, event: Any) -> Optional[tuple]:
+        """`(min_keycode, max_keycode)` when the event announces a replaced
+        keyboard on the XKB link, else None."""
+        if self._xkb is None:
+            return None
+        return self._xkb.replaced_keyboard(event)
+
+    def outside_base_group(self, keysym: int) -> bool:
+        """Whether this keysym must inject through press()/release() rather
+        than a bare keycode: it is down under a group lock of this shim's, or
+        the layout carries it only in a group past the first."""
+        if keysym in self._pressed_kc and self._group_hold is not None:
+            return True
+        if self._xkb is None:
+            return False
+        try:
+            placed = self._xkb.locate(keysym)
+        except Exception as e:
+            logger_webrtc_input.debug(f"XKB placement lookup failed ({e}); core keymap only")
+            return False
+        return placed is not None and placed[1] != 0
+
+    def layout_carries(self, keysym: int) -> bool:
+        """Whether the layout itself (not an overlay bind) carries the keysym."""
+        try:
+            if self._xkb is not None:
+                return self._placement(keysym) is not None
+        except Exception as e:
+            logger_webrtc_input.debug(f"XKB placement lookup failed ({e}); core keymap only")
+        return bool(self._layout_keycode(keysym))
+
+    def _placement(self, keysym: int) -> Optional[tuple]:
+        """`(keycode, group, level)` from the XKB map, with the spare-pool
+        distrust of _layout_keycode applied; None when XKB is unavailable or
+        the keymap lacks the keysym."""
+        if self._xkb is None:
+            return None
+        placed = self._xkb.locate(keysym)
+        if placed is None:
+            return None
+        kc, group, level = placed
+        if (keysym & 0xFF000000) == 0x01000000 or 0xA0 <= keysym <= 0xFF:
+            if self._spare_keycodes is None:
+                self._spare_keycodes = self._find_spare_keycodes()
+            if kc in self._spare_set:
+                kc = self._overlay_value_kc.get(keysym, 0)
+                if not kc:
+                    return None
+                return kc, 0, 0
+        return kc, group, level
+
     def _resolve(self, keysym: int) -> tuple:
-        """Return (keycode, modifier_keycodes) to inject this keysym.
+        """Return (keycode, modifier_keycodes, group) to inject this keysym.
 
         The modifiers are the Shift / AltGr keycodes whose held state selects
         the keymap level the keysym sits at, so a glyph bound above the Shift
         level (e.g. AltGr '@') types correctly instead of falling through to
-        its level-0 glyph.
+        its level-0 glyph. The group is the layout group the keycode carries
+        the keysym in; None for an overlay keycode, which carries one group
+        and so types the same under any lock, and when XKB is unavailable and
+        the core keymap's flattened columns are all there is.
 
         Raises:
             ValueError: No keycode exists and no spare keycode can be bound;
                 the caller falls back to xdotool.
         """
         d = self._d
-        kc = self._layout_keycode(keysym)
+        group = None
+        placed = None
+        xkb_answered = self._xkb is not None
+        if xkb_answered:
+            try:
+                placed = self._placement(keysym)
+            except Exception as e:
+                logger_webrtc_input.debug(f"XKB placement lookup failed ({e}); core keymap only")
+                xkb_answered = False
+        if placed is not None:
+            kc, group, level = placed
+        elif xkb_answered:
+            kc = 0
+        else:
+            kc = self._layout_keycode(keysym)
+            # Lowest column carrying this glyph: 0 base, 1 Shift, 2 AltGr, 3 Shift+AltGr.
+            level = next((lvl for lvl in range(4)
+                          if d.keycode_to_keysym(kc, lvl) == keysym), 0)
         if not kc:
             # Not in the layout: map it to a spare keycode in-process (no xdotool
             # fork). Overlay keysyms sit at level 0, so they never need modifiers.
@@ -1305,10 +1474,7 @@ class _XTestKeyboard:
             if not kc:
                 # No spare keycode: raise so the caller falls back to xdotool.
                 raise ValueError("no keycode for keysym %r" % (keysym,))
-            return kc, ()
-        # Lowest column carrying this glyph: 0 base, 1 Shift, 2 AltGr, 3 Shift+AltGr.
-        level = next((lvl for lvl in range(4)
-                      if d.keycode_to_keysym(kc, lvl) == keysym), 0)
+            return kc, (), None
         mods = []
         if level & 1 and self._shift_kc:
             mods.append(self._shift_kc)
@@ -1321,8 +1487,8 @@ class _XTestKeyboard:
             # the server will not act on.
             overlay_kc = self._overlay_keycode(keysym)
             if overlay_kc:
-                return overlay_kc, ()
-        return kc, tuple(mods)
+                return overlay_kc, (), None
+        return kc, tuple(mods), group
 
     def _modifiers_engage(self, mods: Iterable[int]) -> bool:
         """Whether holding these keycodes actually selects a shifted level."""
@@ -1370,7 +1536,8 @@ class _XTestKeyboard:
             held_keysyms: Level-selecting modifier keysyms the client itself
                 holds, consulted instead of a per-press server query.
         """
-        kc, mods = self._resolve(keysym)
+        kc, mods, group = self._resolve(keysym)
+        self._enter_group(keysym, group)
         down = self._down_mod_keycodes(held_keysyms)
         # A held Shift/AltGr the level does not want selects a different glyph
         # (and pushes an overlay bind onto its empty AltGr levels): lift it for
@@ -1400,11 +1567,98 @@ class _XTestKeyboard:
         # (the layout may have changed mid-keystroke, orphaning a re-resolve).
         kc = self._pressed_kc.pop(keysym, None)
         if kc is None:
-            kc, _ = self._resolve(keysym)
+            kc, _, _ = self._resolve(keysym)
+        self._leave_group(keysym)
         xtest.fake_input(self._d, Xlib.X.KeyRelease, kc)
         for m in reversed(self._synth_mods.pop(keysym, ())):
             xtest.fake_input(self._d, Xlib.X.KeyRelease, m)
+        self._settle_group()
         self._d.flush()
+
+    def _enter_group(self, keysym: int, group: Optional[int]) -> None:
+        """Lock the group a press needs, queued ahead of the press itself.
+
+        Without a hold of ours in force, a group-1 keysym injects under the
+        server's own lock (a later group locked by the user's desktop switcher
+        then decides, as for any single-group layout) and only a keysym of a
+        later group reads the locked group — one round trip — and switches
+        when it differs. While a hold is in force every key is tracked under
+        it, so a group-1 key typed during a Cyrillic run switches back and the
+        original lock returns once the last tracked key is up.
+        """
+        if group is None or self._xkb is None:
+            return
+        hold = self._group_hold
+        if hold is None:
+            if group == 0:
+                return
+            before = self._xkb.locked_group()
+            if before == group:
+                return
+            self._xkb.lock_group(group)
+            self._group_hold = [before, group, {keysym: group}]
+            return
+        self._cancel_group_restore()
+        if hold[1] != group:
+            self._xkb.lock_group(group)
+            hold[1] = group
+        hold[2][keysym] = group
+
+    def _leave_group(self, keysym: int) -> None:
+        """Take a key out of the group hold ahead of its release, putting its
+        press-time group back if a later key moved the lock on, so the release
+        carries the keysym the press did."""
+        hold = self._group_hold
+        if hold is None:
+            return
+        group = hold[2].pop(keysym, None)
+        if group is not None and group != hold[1]:
+            self._xkb.lock_group(group)
+            hold[1] = group
+
+    def _settle_group(self) -> None:
+        """With no tracked key left down, schedule the restore of the lock
+        found before the switch — immediately when no event loop is running to
+        defer it."""
+        hold = self._group_hold
+        if hold is None or hold[2]:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._restore_group()
+            return
+        self._cancel_group_restore()
+        self._group_restore = loop.call_later(self._GROUP_LINGER_S, self._restore_group)
+
+    def _cancel_group_restore(self) -> None:
+        if self._group_restore is not None:
+            self._group_restore.cancel()
+            self._group_restore = None
+
+    def _restore_group(self) -> None:
+        """The linger elapsed: put the group lock back unless a key of ours
+        is still down under it."""
+        self._group_restore = None
+        hold = self._group_hold
+        if hold is None or hold[2]:
+            return
+        self.release_group_lock()
+
+    def release_group_lock(self) -> None:
+        """Put back the group lock found before this shim switched it, now:
+        after a keyboard reset, or before the connection closes, no keystroke
+        follows that a lingering lock would serve, and a lock left behind
+        would have the desktop translate every later key under it."""
+        self._cancel_group_restore()
+        hold, self._group_hold = self._group_hold, None
+        if hold is None or hold[0] == hold[1] or self._xkb is None:
+            return
+        try:
+            self._xkb.lock_group(hold[0])
+            self._d.flush()
+        except Exception as e:
+            logger_webrtc_input.debug(f"group lock restore failed: {e}")
 
 
 class _XTestMouse:
@@ -1545,9 +1799,20 @@ INTERPOSER_MAX_AXES = 64
 CONTROLLER_NAME_MAX_LEN = 255 
 C_INTERPOSER_STRUCT_SIZE = 1360
 
-# Raw bytes per multipart message: fill the shared WebSocket frame ceiling, with
-# margin for the verb prefix and base64 expansion (limit/4*3 of the payload budget).
-CLIPBOARD_CHUNK_SIZE = ((WS_MAX_MESSAGE_BYTES - 4096) * 3) // 4 
+# How long one client may take to accept a bulk (clipboard) chunk before it
+# is left out of the rest of that payload — the data channel's drain timeout
+# and the WebSocket payload-frame send bound alike, so a slow link is tolerated
+# the same way on both transports while a dead one still cannot wedge delivery.
+BULK_DRAIN_TIMEOUT_S = 15.0
+
+# Raw bytes per multipart clipboard message on the WebSocket transport: the
+# data channel's 1 MiB message ceiling (rtc.get_adjusted_chunk_size), so both
+# transports segment a large payload the same way and one slow client holds at
+# most one chunk in its transport buffer; never above the shared WebSocket frame
+# ceiling. Margin for the verb prefix and base64 expansion (limit/4*3 of the
+# payload budget); a multiple of 3, so chunks concatenate as one base64 stream.
+CLIPBOARD_CHUNK_SIZE = min(((WS_MAX_MESSAGE_BYTES - 4096) * 3) // 4,
+                           ((1024 * 1024 - 512) * 3) // 4)
 
 # For mouse input to send fake back and forward events
 KEYSYM_ALT_L = 0xFFE9
@@ -2355,7 +2620,7 @@ class SelkiesGamepad:
             base_struct_fmt = f"={CONTROLLER_NAME_MAX_LEN}sxHHHHH{INTERPOSER_MAX_BTNS}H{INTERPOSER_MAX_AXES}B"
             
             # Calculate size of the base structure without any explicit end padding
-            # (1353 bytes with the current constants)
+            # (1354 bytes with the current constants; +6 pad reaches 1360)
             size_without_explicit_end_padding = struct.calcsize(base_struct_fmt)
 
             # Calculate how much padding is needed to reach the C struct's total size
@@ -2742,12 +3007,212 @@ class SelkiesGamepad:
 # Watch tasks for client-requested commands; referenced so they cannot be
 # garbage-collected mid-watch.
 _command_watch_tasks: set = set()
+# Pids of the client-requested commands launched here and still running.
+_launched_command_pids: set = set()
+
+# Launch command prefixes the apps panel runs proot-apps under, by the
+# windowing system the session's applications run on: the terminal plus the
+# flag that makes it run the command that follows (st and foot take it
+# bare, xterm wants -e). The first one whose terminal is installed is
+# published to clients as app_terminal.
+X11_APP_TERMINALS = ("st", "xterm -e")
+WAYLAND_APP_TERMINALS = ("foot", "st", "xterm -e")
+
+# Environment a desktop session exports to its applications and that a
+# launch from outside the session has to adopt from one of its processes:
+# the session bus above all (dbus-launch/dbus-run-session addresses live only
+# in the session's own environment), plus the desktop identity toolkits and
+# xdg-desktop-portal read.
+SESSION_ENV_ADOPTED = ("DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "XDG_CURRENT_DESKTOP",
+                       "DESKTOP_SESSION", "XDG_SESSION_DESKTOP", "XDG_MENU_PREFIX",
+                       "XDG_SESSION_CLASS", "XDG_SESSION_ID")
+
+
+def live_x_displays() -> list:
+    """Local X display names (":N") with a server accepting connections,
+    lowest number first."""
+    found = []
+    try:
+        for name in os.listdir("/tmp/.X11-unix"):
+            if name.startswith("X") and name[1:].isdigit():
+                disp = ":" + name[1:]
+                if x_display_live(disp):
+                    found.append(int(name[1:]))
+    except OSError:
+        pass
+    return [f":{n}" for n in sorted(found)]
+
+
+def _proc_is_xwayland(pid: int, display: str) -> bool:
+    """Whether ``pid`` is an Xwayland of this user serving ``display`` (its
+    basename is Xwayland and ``display`` is one of its argv tokens)."""
+    try:
+        if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+            return False
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = f.read().split(b"\0")
+    except (OSError, ValueError):
+        return False
+    if not argv or not argv[0]:
+        return False
+    want = display.encode()
+    return (os.path.basename(argv[0]).split(b"/")[-1] == b"Xwayland"
+            and any(a == want for a in argv[1:]))
+
+
+_xwayland_pid_cache: dict = {}
+
+
+def x_display_is_xwayland(display: str) -> bool:
+    """True when the live X server on local display ``display`` is a rootful
+    Xwayland of this user — an X11 desktop hosted directly on the capture
+    compositor, whose selection nothing bridges — rather than a plain Xvfb/Xorg
+    that merely happens to hold the display number. Cached per display while its
+    serving process lives, so a `cmd` burst does not rescan /proc each time."""
+    display = (display or "").strip()
+    if not display:
+        return False
+    cached = _xwayland_pid_cache.get(display)
+    if cached is not None:
+        if _proc_is_xwayland(cached, display):
+            return True
+        _xwayland_pid_cache.pop(display, None)
+    try:
+        pids = [int(n) for n in os.listdir("/proc") if n.isdigit()]
+    except OSError:
+        return False
+    for pid in pids:
+        if _proc_is_xwayland(pid, display):
+            _xwayland_pid_cache[display] = pid
+            return True
+    return False
+
+
+def dbus_address_live(address: str) -> bool:
+    """True when the first transport of a D-Bus address is a Unix socket that
+    accepts a connection, or is not a Unix socket at all (unverifiable, kept)."""
+    first = address.split(";", 1)[0]
+    if not first.startswith("unix:"):
+        return True
+    params = dict(kv.split("=", 1) for kv in first[len("unix:"):].split(",") if "=" in kv)
+    if "path" in params:
+        target = params["path"]
+    elif "abstract" in params:
+        target = "\0" + params["abstract"]
+    else:
+        return True
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(0.2)
+        try:
+            sock.connect(target)
+            return True
+        finally:
+            sock.close()
+    except OSError:
+        return False
+
+
+def _descendants(roots: Iterable[int]) -> set:
+    """The given pids plus every live descendant of theirs (from /proc/*/stat)."""
+    children: dict = {}
+    try:
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{name}/stat") as f:
+                    stat = f.read()
+                ppid = int(stat.rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(ppid, []).append(int(name))
+    except OSError:
+        return set()
+    out, todo = set(roots), list(roots)
+    while todo:
+        for child in children.get(todo.pop(), []):
+            if child not in out:
+                out.add(child)
+                todo.append(child)
+    return out
+
+
+def _process_environ(pid: int) -> Optional[dict]:
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    env = {}
+    for item in raw.split(b"\0"):
+        if b"=" in item:
+            k, v = item.split(b"=", 1)
+            env[k.decode("utf-8", "replace")] = v.decode("utf-8", "replace")
+    return env
+
+
+def session_environment(x11_display: Optional[str], wayland_display: Optional[str]) -> dict:
+    """The SESSION_ENV_ADOPTED subset of the environment of the desktop session
+    running on the given display(s), read from the oldest process of this user
+    that carries a session bus address and exports one of those displays. Empty
+    when no such process exists (the session has not started, or runs no bus)."""
+    if not x11_display and not wayland_display:
+        return {}
+    uid = os.getuid()
+    me = os.getpid()
+    # A Wayland socket name is relative to XDG_RUNTIME_DIR, so it identifies a
+    # session only together with it; an X display name is host-wide.
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    candidates = []
+    try:
+        pids = [int(n) for n in os.listdir("/proc") if n.isdigit()]
+    except OSError:
+        return {}
+    # Commands launched from here carry whatever was adopted for them; only the
+    # session's own processes are a source.
+    own = _descendants(_launched_command_pids) if _launched_command_pids else set()
+    for pid in pids:
+        if pid == me or pid in own:
+            continue
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != uid:
+                continue
+        except OSError:
+            continue
+        env = _process_environ(pid)
+        if not env or not env.get("DBUS_SESSION_BUS_ADDRESS"):
+            continue
+        same_runtime = not runtime_dir or env.get("XDG_RUNTIME_DIR") == runtime_dir
+        same_x = bool(x11_display) and env.get("DISPLAY") == x11_display
+        same_wl = bool(wayland_display) and env.get("WAYLAND_DISPLAY") == wayland_display and same_runtime
+        if same_x or same_wl:
+            # An X display name outlives the server that used it, so a process of
+            # this runtime dir ranks before a leftover of an earlier session.
+            candidates.append((0 if same_runtime else 1, pid, env))
+    for _, _, env in sorted(candidates, key=lambda c: c[:2]):
+        if dbus_address_live(env["DBUS_SESSION_BUS_ADDRESS"]):
+            return {k: env[k] for k in SESSION_ENV_ADOPTED if env.get(k)}
+    return {}
+
+
+def first_installed(commands: Iterable[str]) -> Optional[str]:
+    """The first command prefix whose executable (its first word) is installed."""
+    for command in commands:
+        words = command.split()
+        if words and shutil.which(words[0]):
+            return command
+    return None
 
 
 async def run_client_command(command_to_run: str, logger: logging.Logger,
-                             notify: Optional[Callable[[str], Any]] = None) -> None:
+                             notify: Optional[Callable[[str], Any]] = None,
+                             env: Optional[dict] = None) -> None:
     """Launch a client-requested command and watch it to completion.
 
+    ``env`` is the environment the command runs in — the session's (see
+    WebRTCInput.app_launch_env), so a launched application lands on the
+    display and session bus the desktop uses; None inherits the server's.
     Output stays discarded (a long-running app must never block on a full
     pipe), but a launch failure or any nonzero exit — above all 127, the
     command-not-installed case — is reported through ``notify`` (async, one
@@ -2763,6 +3228,7 @@ async def run_client_command(command_to_run: str, logger: logging.Logger,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             cwd=os.path.expanduser("~"),
+            env=env,
         )
     except Exception as e:
         logger.error(f"Failed to launch command '{command_to_run}': {e}")
@@ -2773,6 +3239,7 @@ async def run_client_command(command_to_run: str, logger: logging.Logger,
                 pass
         return
     logger.info(f"Launched command '{command_to_run}' with PID {process.pid}")
+    _launched_command_pids.add(process.pid)
 
     started = time.monotonic()
 
@@ -2781,6 +3248,8 @@ async def run_client_command(command_to_run: str, logger: logging.Logger,
             code = await process.wait()
         except Exception:
             return
+        finally:
+            _launched_command_pids.discard(process.pid)
         if not code:
             return
         runtime = time.monotonic() - started
@@ -2931,6 +3400,8 @@ class WebRTCInput:
         self.max_cursor_size = max_cursor_size
         self.system_dpi = 96.0
         self.cursor_size_cap = max_cursor_size
+        # (serial, size cap) -> encoded cursor message, see _encode_cursor.
+        self._cursor_msg_cache = None
         self.keyboard = None
         self.mouse = None
         self.xdisplay = None
@@ -2976,11 +3447,16 @@ class WebRTCInput:
         self.on_update_settings = lambda settings_json, display_id="primary": logger_webrtc_input.warning("unhandled update_settings")
         self.is_wayland = is_wayland
         self.wayland_input = None
-        # Last applied client keyboardLayout hint (SETTINGS), both transports.
+        # Last client keyboardLayout hint seen (SETTINGS), both transports, and
+        # the one the Wayland seat's base layout currently carries (None while
+        # the seat is on the deployment layout).
         self._client_kb_layout = None
+        self._wl_seat_client_layout = None
         # Keysym policy lives here, not in the compositor: built lazily from the
-        # compositor's keymap, retried on a cooldown if that read fails.
+        # compositor's keymap, retried on a cooldown if that read fails, and
+        # rebuilt (carrying held keys) once a base-layout change marks it stale.
         self._wl_keymap_owner = None
+        self._wl_keymap_stale = False
         self._wl_keymap_owner_lock = asyncio.Lock()
         self._wl_keymap_retry_at = 0.0
         # One-shot zwp_virtual_keyboard_v1 injection via pixelflux, serialized so
@@ -3000,6 +3476,20 @@ class WebRTCInput:
         self._x11_clipboard_monitor = None
         self._x11_monitor_retry_at = 0.0
         self._x11_monitor_unavail_logged = False
+        # Last (display, error) the app-compositor selection watch / read
+        # failed with, so a persistent one is reported once, not per tick.
+        self._app_watch_failure = None
+        self._app_clip_read_failure = None
+        # Last error the compositor clipboard callback failed to arm with; the
+        # monitor retries the arm each tick and reports each distinct error once.
+        self._wl_native_arm_failure = None
+        # Session environment adopted for application launches, keyed by the
+        # (x11_display, wayland_display) pair it was read for; the negative
+        # cache holds the monotonic time of the last empty scan per key so a
+        # command burst on a session with no bus does not rescan /proc each time.
+        self._session_env_cache = {}
+        self._session_env_empty_at = {}
+        self._session_env_negcache_ttl = 5.0
         self._xclip_missing_warned = False
         # Debounce REQUEST_CLIPBOARD (Ctrl/Cmd+C): coalesce bursts so a keypress
         # storm can't stack clipboard reads. Keyed per requesting connection so
@@ -3092,14 +3582,19 @@ class WebRTCInput:
         # (SelkiesStreamingApp.send_ws_clipboard_data / RTCApp.send_clipboard_data),
         # and each addresses one requester by the identity its own connections
         # carry.
-        if self.rtc_app.mode == "websockets":
+        if self._ws_transport():
             await self.rtc_app.send_ws_clipboard_data(data, mime_type, reply_to=reply_to,
                                                       conn_id=conn_id)
         else:
             await self.rtc_app.send_clipboard_data(data, mime_type, reply_to=reply_to,
                                                    peer_id=conn_id)
+    def _ws_transport(self) -> bool:
+        """Whether the owning app is the websockets transport (it carries a
+        `mode`); the WebRTC app has no such attribute and routes the other way."""
+        return getattr(self.rtc_app, "mode", None) == "websockets"
+
     def send_cursor_data(self, data: dict) -> None:
-        if self.rtc_app.mode == "websockets": self.rtc_app.send_ws_cursor_data(data)
+        if self._ws_transport(): self.rtc_app.send_ws_cursor_data(data)
         else: self.rtc_app.send_cursor_data(data)
     def send_command_error(self, text: str, conn_id: Optional[str] = None) -> None:
         """Route a command failure notice to the transport (see send_cursor_data).
@@ -3110,7 +3605,7 @@ class WebRTCInput:
         socket in its own cmd branch and only broadcasts here.
         """
         try:
-            if self.rtc_app.mode == "websockets":
+            if self._ws_transport():
                 self.rtc_app.send_system_action(f"command_error,{text}")
             else:
                 self.rtc_app.send_system_action(f"command_error,{text}", peer_id=conn_id)
@@ -3450,6 +3945,9 @@ class WebRTCInput:
         if self.is_wayland:
             self.keyboard_worker_task = asyncio.create_task(self._keyboard_worker())
             await self._push_wayland_base_layout()
+            # Same connect-time reset as X11 (a Lock left engaged by a previous
+            # session inverts every letter); it rides the fresh worker.
+            await self.reset_keyboard()
         if self.key_sweep_task is None:
             self.key_sweep_task = asyncio.create_task(self._key_stale_sweep())
         if self.key_repeat_enabled and self.key_repeat_task is None:
@@ -3522,6 +4020,8 @@ class WebRTCInput:
         await self.release_mouse_buttons()
         self.__mouse_disconnect()
         self._disarm_x_event_watcher()
+        if self.keyboard is not None:
+            self.keyboard.release_group_lock()
         # Closed, not just dropped: the keyboard shim holds the same Display and
         # python-xlib's root-window back-reference makes the graph a cycle with no
         # finalizer, so a dropped connection keeps its X client slot until a cyclic
@@ -3711,72 +4211,41 @@ class WebRTCInput:
         except asyncio.CancelledError:
             pass
 
+    # Bound on waiting for a queued Wayland reset: the worker drains key work
+    # in client order, each item a bounded compositor round-trip at most.
+    _WL_RESET_WAIT_S = 5.0
+
     async def reset_keyboard(self) -> None:
         """Release every held key/modifier and normalize a stuck Caps Lock.
 
-        Runs on client 'kr' (blur/visibility loss) and at connect, on both
-        backends: the client resolves letter case itself, so an engaged Lock
-        modifier on the server would invert every letter it types.
+        Runs on client 'kr' (blur/visibility loss), at connect, and when a
+        client holding input departs, on both backends: the client resolves
+        letter case itself, so an engaged Lock modifier on the server would
+        invert every letter it types. On Wayland every key goes through the
+        serialized keyboard worker, so the reset is queued behind the key work
+        in flight like a client 'kr' is (a press still queued behind a text
+        batch would otherwise land after the reset, untracked and held for
+        good); it runs in place only when no worker is draining the queue.
         """
         if self.is_wayland:
-            if self.wayland_input:
-                # Release common modifiers
-                # Ctrl, Shift, Alt, AltGr, Meta, Super, Hyper (the client maps the
-                # Meta/Windows key to Super, so Super must be released here too).
-                modifiers = [65507, 65505, 65513, 65508, 65506, 65514, 65027,
-                             65511, 65512, 65515, 65516, 65517, 65518]
-                owner = self._wl_keymap_owner
-                if owner is not None:
-                    for k in modifiers:
-                        try:
-                            owner.release(k)
-                        except Exception:
-                            pass
-                    try:
-                        owner.reset()
-                    except Exception:
-                        pass
-            # Release any in-flight translated (Cyrillic) keys before clearing the
-            # map, else the injected QWERTY key stays down after reset. The original
-            # keysym down=False routes through send_x11_keypress's translation.
-            for k in list(self.translated_keys):
-                try: await self.send_x11_keypress(k, down=False)
-                except Exception: pass
-            # Release every still-held key (not just modifiers/hotkeys): a held
-            # non-modifier key (e.g. 'w' in a game) would otherwise stay pressed
-            # in the compositor forever once pressed_keys is cleared below, since
-            # the stale-sweep is the only other releaser and it never runs after
-            # the clear. Atomically-typed (single-shot) keys were never physically
-            # held, so skip them.
-            for keysym in list(self.pressed_keys):
-                if keysym in self.atomically_typed_keys:
-                    continue
-                try: await self.send_x11_keypress(keysym, down=False)
-                except Exception as e: logger_webrtc_input.warning(f"Error releasing held key {keysym}: {e}")
-            # Clear server-side key state so a reset can't leave stuck-modifier desync.
-            self.active_modifiers.clear()
-            self.active_shortcut_modifiers.clear()
-            self.atomically_typed_keys.clear()
-            self.translated_keys.clear()
-            # Drop heartbeat-tracked keys too; otherwise the stale-sweep would
-            # auto-release a key the reset just cleared (mirrors disconnect()).
-            self.pressed_keys.clear()
-            self.reaped_atomic_keys.clear()
-            # X11 parity: normalize a stuck Lock. The client resolves letter case
-            # itself (XK_a vs XK_A), so an engaged compositor Caps Lock inverts
-            # every letter. get_keyboard_state mods bit 4 is caps_lock; toggle it
-            # off with a virtual Caps_Lock press+release (keysym 0xffe5).
-            try:
-                if self.wayland_input and hasattr(self.wayland_input, 'get_keyboard_state'):
-                    _pressed, mods = self.wayland_input.get_keyboard_state()
-                    if mods & 0x10:
-                        keymap_owner = self._wl_keymap_owner
-                        if keymap_owner is not None:
-                            keymap_owner.press(0xffe5)
-                            await asyncio.sleep(0.02)
-                            keymap_owner.release(0xffe5)
-            except Exception as e:
-                logger_webrtc_input.debug(f"Wayland caps-lock normalization skipped: {e}")
+            worker = self.keyboard_worker_task
+            if (worker is None or worker.done()
+                    or asyncio.current_task() is worker):
+                await self._reset_keyboard_wayland()
+                return
+            done = asyncio.get_running_loop().create_future()
+            self._keyboard_enqueue(("kr", done))
+            await asyncio.wait({done, worker}, timeout=self._WL_RESET_WAIT_S,
+                               return_when=asyncio.FIRST_COMPLETED)
+            if done.done():
+                return
+            if worker.done():
+                # The worker went away with the reset still queued: nothing
+                # else injects now, so it runs in place.
+                await self._reset_keyboard_wayland()
+            else:
+                logger_webrtc_input.warning(
+                    "Keyboard reset still queued behind pending key work.")
             return
 
         if not self.keyboard or not self.xdisplay :
@@ -3823,6 +4292,10 @@ class WebRTCInput:
                     self.xdisplay.flush()
         except Exception as e:
             logger_webrtc_input.warning(f"Could not normalize Lock modifier: {e}")
+        # Every key is up now, so a group lock of ours goes back at once rather
+        # than after its linger.
+        if self.keyboard is not None:
+            self.keyboard.release_group_lock()
         # Clear server-side key state (after the release loop consumes it) to avoid stuck-modifier desync.
         self.active_modifiers.clear()
         self.active_shortcut_modifiers.clear()
@@ -3833,6 +4306,71 @@ class WebRTCInput:
         self.pressed_keys.clear()
         self.reaped_atomic_keys.clear()
         self.key_repeat_state.clear()
+
+    async def _reset_keyboard_wayland(self) -> None:
+        """The Wayland reset itself — see reset_keyboard for when it runs."""
+        if self.wayland_input:
+            # Release common modifiers
+            # Ctrl, Shift, Alt, AltGr, Meta, Super, Hyper (the client maps the
+            # Meta/Windows key to Super, so Super must be released here too).
+            modifiers = [65507, 65505, 65513, 65508, 65506, 65514, 65027,
+                         65511, 65512, 65515, 65516, 65517, 65518]
+            # A stale owner (base layout changed, rebuild backing off) still
+            # knows what is down, so it releases when the rebuild cannot.
+            owner = await self._ensure_wayland_keymap_owner() or self._wl_keymap_owner
+            if owner is not None:
+                for k in modifiers:
+                    try:
+                        owner.release(k)
+                    except Exception:
+                        pass
+                try:
+                    owner.reset()
+                except Exception:
+                    pass
+        # Release any in-flight translated (Cyrillic) keys before clearing the
+        # map, else the injected QWERTY key stays down after reset. The original
+        # keysym down=False routes through send_x11_keypress's translation.
+        for k in list(self.translated_keys):
+            try: await self.send_x11_keypress(k, down=False)
+            except Exception: pass
+        # Release every still-held key (not just modifiers/hotkeys): a held
+        # non-modifier key (e.g. 'w' in a game) would otherwise stay pressed
+        # in the compositor forever once pressed_keys is cleared below, since
+        # the stale-sweep is the only other releaser and it never runs after
+        # the clear. Atomically-typed (single-shot) keys were never physically
+        # held, so skip them.
+        for keysym in list(self.pressed_keys):
+            if keysym in self.atomically_typed_keys:
+                continue
+            try: await self.send_x11_keypress(keysym, down=False)
+            except Exception as e: logger_webrtc_input.warning(f"Error releasing held key {keysym}: {e}")
+        # Clear server-side key state so a reset can't leave stuck-modifier desync.
+        self.active_modifiers.clear()
+        self.active_shortcut_modifiers.clear()
+        self.atomically_typed_keys.clear()
+        self.translated_keys.clear()
+        # Drop heartbeat-tracked keys too; otherwise the stale-sweep would
+        # auto-release a key the reset just cleared (mirrors disconnect()).
+        self.pressed_keys.clear()
+        self.reaped_atomic_keys.clear()
+        # X11 parity: normalize a stuck Lock. The client resolves letter case
+        # itself (XK_a vs XK_A), so an engaged compositor Caps Lock inverts
+        # every letter. get_keyboard_state mods bit 4 is caps_lock; toggle it
+        # off with a virtual Caps_Lock press+release (keysym 0xffe5). The
+        # readback is a compositor round-trip answered by the thread that also
+        # renders, so it waits off the loop.
+        try:
+            if self.wayland_input and hasattr(self.wayland_input, 'get_keyboard_state'):
+                _pressed, mods = await asyncio.to_thread(self.wayland_input.get_keyboard_state)
+                if mods & 0x10:
+                    keymap_owner = await self._ensure_wayland_keymap_owner()
+                    if keymap_owner is not None:
+                        keymap_owner.press(0xffe5)
+                        await asyncio.sleep(0.02)
+                        keymap_owner.release(0xffe5)
+        except Exception as e:
+            logger_webrtc_input.debug(f"Wayland caps-lock normalization skipped: {e}")
 
     async def release_mouse_buttons(self) -> None:
         """Release every pointer button still held server-side.
@@ -4000,6 +4538,11 @@ class WebRTCInput:
             if allow_xtest and xtest is not None and self.xdisplay is not None:
                 try:
                     keycode = self.xdisplay.keysym_to_keycode(keysym)
+                    if self.keyboard and self.keyboard.outside_base_group(keysym):
+                        # Carried only by a later layout group (Cyrillic on
+                        # us,ru): a bare keycode would type the group-1 glyph,
+                        # so the shim locks the group around the injection.
+                        keycode = 0
                     if keycode:
                         xtest.fake_input(
                             self.xdisplay,
@@ -4010,10 +4553,12 @@ class WebRTCInput:
                         return
                     if self.keyboard:
                         # In the map but not in the current layout (e.g. Cyrillic
-                        # keysyms on a US keymap): the shim overlay-binds it once
-                        # and reuses the binding — never a per-key xdotool fork,
-                        # whose transient rebind floods MappingNotify and lags
-                        # the whole input queue behind real typing.
+                        # keysyms on a US keymap), or only in a later group: the
+                        # shim overlay-binds the former once and reuses the
+                        # binding, and injects the latter under its group —
+                        # never a per-key xdotool fork, whose transient rebind
+                        # floods MappingNotify and lags the whole input queue
+                        # behind real typing.
                         if down:
                             self.keyboard.press(keysym, neutralize=neutralize,
                                                 held_keysyms=held_level_mods)
@@ -4059,9 +4604,12 @@ class WebRTCInput:
         """Type a string in-process via the XTEST shim.
 
         Each char is a press+release of its keysym (mapped chars with shift
-        synthesis, unmapped ones via the spare-keycode overlay). With
-        neutralize, conflicting held Shift/AltGr are lifted around the whole
-        run (one keymap query, not one per char).
+        synthesis, unmapped ones via the spare-keycode overlay). A char prefers
+        its canonical layout keysym, as the Wayland owner's type_text does, so
+        a layout that carries the script types on its own keys (Cyrillic on
+        ru, or on us,ru under a group lock) instead of spending overlay slots
+        on every letter. With neutralize, conflicting held Shift/AltGr are
+        lifted around the whole run (one keymap query, not one per char).
 
         Returns:
             True on full success; False (having typed nothing) if the shim is
@@ -4073,8 +4621,11 @@ class WebRTCInput:
         # Pre-resolve every char so a mid-string failure doesn't type a partial line.
         keysyms = []
         for ch in text:
-            cp = ord(ch)
-            keysyms.append(cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp))
+            ks = character_to_layout_keysym(ch)
+            if not self.keyboard.layout_carries(ks):
+                cp = ord(ch)
+                ks = cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp)
+            keysyms.append(ks)
         try:
             # One batched bind for every unmapped char (O(1) MappingNotify
             # broadcasts instead of one per char); nothing typed on failure.
@@ -4115,15 +4666,26 @@ class WebRTCInput:
         task.add_done_callback(_done)
         return task
 
-    async def _push_wayland_base_layout(self) -> None:
-        """Set the compositor seat's BASE xkb layout at session start from the
-        deployment's XKB env config (XKB_DEFAULT_LAYOUT et al.), so common
-        non-US keysyms resolve as base keys instead of overlay binds. The
-        compositor re-splices its overlay binds on top with unchanged keycodes;
-        the keymap owner is dropped so it rebuilds from the new base."""
+    def _invalidate_wayland_keymap_owner(self) -> None:
+        """The seat's base layout changed: the owner's keycode resolution is
+        against the old base, so it is rebuilt — on the keyboard worker, where
+        nothing injects concurrently — carrying what it holds down."""
+        self._wl_keymap_stale = True
+        self._wl_keymap_retry_at = 0.0
+
+    async def _push_wayland_base_layout(self, restore: bool = False) -> None:
+        """Set the compositor seat's BASE xkb layout from the deployment's XKB
+        env config (XKB_DEFAULT_LAYOUT et al.): at session start, so common
+        non-US keysyms resolve as base keys instead of overlay binds, and again
+        (`restore`) when a nested session compositor turns up after a client
+        hint moved the seat off that layout — the nested compositor translates
+        keycodes with the keymap it built from the same env, so the seat must
+        resolve keysyms against it; with no env layout the xkbcommon default is
+        what both run on. The compositor re-splices its overlay binds on top
+        with unchanged keycodes; the keymap owner rebuilds from the new base."""
         layout = os.environ.get("XKB_DEFAULT_LAYOUT", "")
         setter = getattr(self.wayland_input, 'set_xkb_layout', None)
-        if not layout or setter is None:
+        if setter is None or not (layout or restore):
             return
         variant = os.environ.get("XKB_DEFAULT_VARIANT", "")
         options = os.environ.get("XKB_DEFAULT_OPTIONS", "")
@@ -4136,22 +4698,40 @@ class WebRTCInput:
             logger_webrtc_input.warning(f"Wayland base layout push failed: {e}")
             return
         if ok:
-            self._wl_keymap_owner = None
+            self._wl_seat_client_layout = None
+            self._invalidate_wayland_keymap_owner()
             logger_webrtc_input.info(
-                f"Wayland base layout set to '{layout}'"
-                + (f" ({variant})" if variant else ""))
+                f"Wayland base layout set to '{layout or 'default'}'"
+                + (f" ({variant})" if variant else "")
+                + (" (restored for the session compositor)" if restore else ""))
         else:
             logger_webrtc_input.warning(
                 f"Wayland base layout '{layout}' rejected by the compositor; "
                 "keeping the default.")
 
+    def _schedule_seat_layout_restore(self) -> None:
+        """A nested session compositor was just adopted while the seat carries
+        a client layout hint: put the seat back on the deployment layout the
+        session translates keycodes with."""
+        if getattr(self, "_wl_seat_client_layout", None) is None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._spawn_task(self._push_wayland_base_layout(restore=True))
+
     async def apply_client_keyboard_layout(self, layout_hint: Any) -> None:
         """Client SETTINGS 'keyboardLayout' hint ("de", "ch(fr)", ...). On
-        pixelflux Wayland it becomes the compositor seat's BASE xkb layout
-        (set_xkb_layout), so the client's physical layout resolves as base keys
-        instead of per-keysym overlay binds; on X11 it is informational only
-        (the X keymap is deployment-owned). Idempotent per value — clients
-        re-assert SETTINGS on reconnects and broadcasts."""
+        pixelflux Wayland with the apps on the capture compositor it becomes
+        the seat's BASE xkb layout (set_xkb_layout), so the client's physical
+        layout resolves as base keys instead of per-keysym overlay binds.
+        Under a nested session compositor it is informational, as on X11: the
+        session translates keycodes with its own keymap, so a seat moved to
+        the client layout transposes every key the two layouts place apart.
+        Idempotent per value — clients re-assert SETTINGS on reconnects and
+        broadcasts — and a hint only noted under a session compositor is
+        applied once the apps are back on the capture compositor."""
         hint = str(layout_hint or "").strip()
         m = re.fullmatch(r"([A-Za-z0-9_,\- ]{1,32})(?:\(([A-Za-z0-9_,\- ]{1,32})\))?", hint)
         if not m:
@@ -4159,14 +4739,22 @@ class WebRTCInput:
                 logger_webrtc_input.warning(
                     f"Ignoring malformed keyboardLayout hint: {hint[:48]!r}")
             return
-        if hint == self._client_kb_layout:
-            return
         layout, variant = m.group(1).strip(), (m.group(2) or "").strip()
+        noted = hint == self._client_kb_layout
+        self._client_kb_layout = hint
         if not self.is_wayland:
-            self._client_kb_layout = hint
-            logger_webrtc_input.info(
-                f"Client keyboard layout hint '{hint}' noted (X11 keymap is "
-                "deployment-owned; not applied).")
+            if not noted:
+                logger_webrtc_input.info(
+                    f"Client keyboard layout hint '{hint}' noted (X11 keymap is "
+                    "deployment-owned; not applied).")
+            return
+        if self._has_separate_app_compositor():
+            if not noted:
+                logger_webrtc_input.info(
+                    f"Client keyboard layout hint '{hint}' noted (the session "
+                    "compositor owns the keymap; not applied).")
+            return
+        if hint == self._wl_seat_client_layout:
             return
         setter = getattr(self.wayland_input, 'set_xkb_layout', None) if self.wayland_input else None
         if setter is None:
@@ -4180,10 +4768,8 @@ class WebRTCInput:
             logger_webrtc_input.warning(f"Wayland base layout push failed: {e}")
             return
         if ok:
-            self._client_kb_layout = hint
-            # The keymap owner caches keycode resolution against the old base;
-            # drop it so it rebuilds from the new one.
-            self._wl_keymap_owner = None
+            self._wl_seat_client_layout = hint
+            self._invalidate_wayland_keymap_owner()
             logger_webrtc_input.info(
                 f"Wayland base layout set to '{layout}'"
                 + (f" ({variant})" if variant else "") + " from client hint")
@@ -4193,10 +4779,13 @@ class WebRTCInput:
                 "keeping the current layout.")
 
     async def _ensure_wayland_keymap_owner(self) -> Optional[_WaylandKeymapOwner]:
-        """Get-or-build the keymap owner. Reading the compositor keymap blocks
-        (bounded) and compiling it costs milliseconds, so both run off the loop;
-        after that, press/release are sync dict work + channel sends."""
-        if self._wl_keymap_owner is not None:
+        """Get-or-build the keymap owner; a stale one (base layout changed) is
+        rebuilt the same way, adopting the keys it holds down. Reading the
+        compositor keymap blocks (bounded) and compiling it costs milliseconds,
+        so both run off the loop; after that, press/release are sync dict work
+        + channel sends. None while a failed build backs off (callers fall to
+        the next injection rung)."""
+        if self._wl_keymap_owner is not None and not self._wl_keymap_stale:
             return self._wl_keymap_owner
         if not hasattr(self.wayland_input, 'set_keymap_string'):
             return None
@@ -4204,20 +4793,28 @@ class WebRTCInput:
         if now < self._wl_keymap_retry_at:
             return None
         async with self._wl_keymap_owner_lock:
-            if self._wl_keymap_owner is not None:
+            if self._wl_keymap_owner is not None and not self._wl_keymap_stale:
                 return self._wl_keymap_owner
             loop = asyncio.get_running_loop()
+            previous = self._wl_keymap_owner
             try:
                 def _build():
                     text = self.wayland_input.get_xkb_keymap_string()
-                    return _WaylandKeymapOwner(self.wayland_input, text)
+                    owner = _WaylandKeymapOwner(self.wayland_input, text)
+                    if previous is not None:
+                        owner.adopt_held(previous)
+                    return owner
                 self._wl_keymap_owner = await loop.run_in_executor(None, _build)
+                self._wl_keymap_stale = False
                 logger_webrtc_input.info(
-                    f"Wayland keymap owner ready ({len(self._wl_keymap_owner._map)} keysyms).")
+                    f"Wayland keymap owner ready ({len(self._wl_keymap_owner._map)} keysyms"
+                    + (f", {len(previous._pressed)} held keys carried)" if previous is not None
+                       else ")"))
             except Exception as e:
                 self._wl_keymap_retry_at = time.monotonic() + 5.0
                 logger_webrtc_input.warning(
                     f"Wayland keymap owner unavailable ({e}); retrying in 5s.")
+                return None
             return self._wl_keymap_owner
 
     async def _wl_type_text(self, text: str) -> None:
@@ -4396,7 +4993,7 @@ class WebRTCInput:
                     char_to_type = keysym_name_from_xlib
                 
                 if down and char_to_type and (0x20 <= ord(char_to_type) <= 0x7E or ord(char_to_type) >= 0xA0) and char_to_type.isprintable():
-                    command_type = ["xdotool", "type", "--clearmodifiers", char_to_type]
+                    command_type = ["xdotool", "type", "--clearmodifiers", "--", char_to_type]
                     try:
                         process_type = await subprocess.create_subprocess_exec(
                             *command_type,
@@ -4779,7 +5376,87 @@ class WebRTCInput:
                     f"pixelflux set_app_wayland_display failed: {e}")
             self._schedule_session_scale()
             self._schedule_spare_screen_hold()
+            self._schedule_seat_layout_restore()
         return resolved
+
+    def app_session(self) -> dict:
+        """Where the session's applications run: ``x11_display`` (the X server
+        they connect to, if any), ``wayland_display`` (the compositor socket,
+        when they are Wayland clients) and ``type`` ("x11" or "wayland").
+
+        X11 backend: the server's own DISPLAY. Wayland backend: apps under a
+        nested session compositor use its socket and the Xwayland it spawned (the
+        one live X server; $DISPLAY when that is live); with no nested compositor
+        a rootful Xwayland on $DISPLAY hosts an X11 desktop — its apps are X
+        clients and must not be offered the capture compositor's socket, which
+        would take them out of the desktop as fullscreen toplevels. The server
+        on $DISPLAY counts only when it is that Xwayland (not a leftover
+        Xvfb/Xorg holding the number); otherwise the apps are Wayland clients of
+        the capture compositor itself.
+        """
+        env_display = os.environ.get("DISPLAY", "").strip() or None
+        if not self.is_wayland:
+            return {"x11_display": env_display, "wayland_display": None, "type": "x11"}
+        wayland = self._app_wayland_display()
+        if self._has_separate_app_compositor():
+            live = live_x_displays()
+            x11 = env_display if env_display in live else (live[0] if live else None)
+            return {"x11_display": x11, "wayland_display": wayland, "type": "wayland"}
+        if env_display and x_display_live(env_display) and x_display_is_xwayland(env_display):
+            return {"x11_display": env_display, "wayland_display": None, "type": "x11"}
+        return {"x11_display": None, "wayland_display": wayland, "type": "wayland"}
+
+    def app_launch_env(self) -> dict:
+        """Environment for a client-requested command: the server's, with
+        DISPLAY / WAYLAND_DISPLAY / XDG_SESSION_TYPE set for the session the
+        applications run in (app_session) and the session bus plus desktop
+        identity adopted from that session's processes when the server has
+        none of its own. The adopted subset is cached per session and refreshed
+        when its bus stops answering; an empty scan is negative-cached briefly
+        so a command burst on a session with no bus does not rescan /proc (a
+        synchronous walk on the loop) each time."""
+        session = self.app_session()
+        env = dict(os.environ)
+        for key in ("DISPLAY", "WAYLAND_DISPLAY"):
+            env.pop(key, None)
+        if session["x11_display"]:
+            env["DISPLAY"] = session["x11_display"]
+        if session["wayland_display"]:
+            env["WAYLAND_DISPLAY"] = session["wayland_display"]
+        env["XDG_SESSION_TYPE"] = session["type"]
+        key = (session["x11_display"], session["wayland_display"])
+        adopted = self._session_env_cache.get(key)
+        if adopted is None or not dbus_address_live(
+                adopted.get("DBUS_SESSION_BUS_ADDRESS", "")):
+            now = time.monotonic()
+            if adopted is None and (now - self._session_env_empty_at.get(key, -1e9)
+                                    ) < self._session_env_negcache_ttl:
+                # A recent scan found no session on this key; do not rescan yet.
+                adopted = {}
+            else:
+                adopted = session_environment(
+                    session["x11_display"], session["wayland_display"])
+                if adopted:
+                    self._session_env_cache[key] = adopted
+                    self._session_env_empty_at.pop(key, None)
+                    logger_webrtc_input.info(
+                        f"Application launches adopt the session on {key}: "
+                        f"{', '.join(sorted(adopted))}")
+                else:
+                    self._session_env_cache.pop(key, None)
+                    self._session_env_empty_at[key] = now
+        for name, value in adopted.items():
+            env.setdefault(name, value)
+        return env
+
+    def app_terminal(self) -> Optional[str]:
+        """Terminal command prefix clients launch proot-apps under (the
+        terminal plus its run-this flag, e.g. `xterm -e`): the first installed
+        one for the windowing system the session's applications use (foot on a
+        Wayland session, st on an X11 one), published as app_terminal."""
+        session = self.app_session()
+        return first_installed(WAYLAND_APP_TERMINALS if session["type"] == "wayland"
+                               else X11_APP_TERMINALS)
 
     def _invalidate_app_wl_display(self) -> None:
         """Drop the cached app-compositor resolution so the next call re-detects
@@ -4794,6 +5471,19 @@ class WebRTCInput:
         self._app_wl_is_separate = False
         self._app_wl_negcache = None
         self._app_wl_negcache_at = 0.0
+
+    def _invalidate_app_wl_display_if_dead(self, display: str) -> None:
+        """Re-detect the app compositor when its socket no longer answers (a
+        nested compositor that died or restarted under another name); a live
+        socket that merely failed one request is kept."""
+        if not display:
+            return
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or ""
+        path = display if display.startswith("/") else os.path.join(runtime, display)
+        if not self._wl_socket_live(path):
+            logger_webrtc_input.info(
+                f"Wayland app compositor '{display}' no longer answers; re-detecting.")
+            self._invalidate_app_wl_display()
 
     def _has_separate_app_compositor(self) -> bool:
         """True when apps live under a compositor distinct from pixelflux's own,
@@ -4889,10 +5579,10 @@ class WebRTCInput:
         pixelflux resizes one to its full size the moment it gets an output,
         and back when it loses one."""
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._hold_spare_screens())
+        self._spawn_task(self._hold_spare_screens())
 
     async def _hold_spare_screens(self) -> None:
         display = self._app_wayland_display()
@@ -4925,10 +5615,10 @@ class WebRTCInput:
         if dpi == 96:
             return
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self.realize_wayland_dpi(dpi))
+        self._spawn_task(self.realize_wayland_dpi(dpi))
 
     async def _get_file(self, file_path: str, target_mime: str) -> tuple:
         """Read a clipboard-referenced file, bounded to 10MB; (bytes, mime) or (None, None)."""
@@ -5006,6 +5696,7 @@ class WebRTCInput:
         try:
             available_types = await loop.run_in_executor(
                 None, types_fn, display)
+            self._app_clip_read_failure = None
             if use_binary:
                 image_mimes = ['image/png', 'image/jpeg', 'image/bmp', 'image/webp',
                                'image/svg+xml', 'image/svg']
@@ -5023,7 +5714,14 @@ class WebRTCInput:
                 if data is not None:
                     return data.decode('utf-8', errors='replace'), 'text/plain'
         except Exception as e:
-            logger_webrtc_input.warning(f"data-control clipboard read failed: {e}")
+            # Once per distinct failure: the poll rung and every 'cr' would
+            # otherwise repeat it for a compositor that lacks data-control.
+            failure = (display, str(e))
+            log = (logger_webrtc_input.debug if failure == self._app_clip_read_failure
+                   else logger_webrtc_input.warning)
+            self._app_clip_read_failure = failure
+            log(f"data-control clipboard read failed: {e}")
+            self._invalidate_app_wl_display_if_dead(display)
         return None, None
 
     async def read_clipboard(self, use_binary: bool = False) -> tuple:
@@ -5041,6 +5739,19 @@ class WebRTCInput:
             with their mime, or (None, None) when nothing is readable.
         """
         if self.is_wayland:
+            # An X server on the capture compositor bridges no selection of its
+            # own (rootful Xwayland), so the X11 desktop's copies are read from
+            # it directly; a selection we still own there is our own write and
+            # the compositor side is authoritative for it.
+            monitor = await self._ensure_x11_clipboard_monitor_async()
+            if monitor is not None and not monitor.owns_selection():
+                try:
+                    loop = asyncio.get_running_loop()
+                    data, mime = await loop.run_in_executor(None, monitor.read, use_binary)
+                    if data is not None:
+                        return data, mime
+                except Exception as e:
+                    logger_webrtc_input.warning(f"X11 clipboard read on the Wayland session failed: {e}")
             # The compositor callback caches the capture compositor's selection;
             # with a separate app compositor that cache is the wrong session, so
             # the data-control client reads whichever socket the apps use.
@@ -5156,10 +5867,25 @@ class WebRTCInput:
             if not self._has_separate_app_compositor():
                 try:
                     self.wayland_input.set_clipboard(mime_type, input_bytes)
-                    return True
+                    # The compositor does not echo its own selection back, so a
+                    # later read (another client joining) must see this write.
+                    self._wl_native_last = (input_bytes, mime_type)
+                    ok = True
                 except Exception as e:
                     logger_webrtc_input.warning(f"native wayland clipboard set failed: {e}")
-                    return False
+                    ok = False
+                # An X server on the capture compositor sees no Wayland selection
+                # (rootful Xwayland bridges none): offer the same payload there
+                # so the X11 desktop's applications can paste it.
+                monitor = await self._ensure_x11_clipboard_monitor_async()
+                if monitor is not None:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        if await loop.run_in_executor(None, monitor.offer, input_bytes, mime_type):
+                            ok = True
+                    except Exception as e:
+                        logger_webrtc_input.warning(f"X11 clipboard offer on the Wayland session failed: {e}")
+                return ok
             # Apps paste whichever mime they prefer, so text is offered under
             # every conventional text target.
             if mime_type == "text/plain":
@@ -5175,6 +5901,7 @@ class WebRTCInput:
                 return True
             except Exception as e:
                 logger_webrtc_input.warning(f"data-control clipboard write failed: {e}")
+                self._invalidate_app_wl_display_if_dead(self._app_wayland_display())
                 return False
 
         env = os.environ.copy()
@@ -5224,20 +5951,44 @@ class WebRTCInput:
         except Exception:
             logger_webrtc_input.warning("Error writing to clipboard with xclip", exc_info=True)
             return False
-    def _ensure_x11_clipboard_monitor(self) -> Optional[_X11ClipboardMonitor]:
-        """Get-or-create the event-driven X11 monitor; None if unavailable."""
+    def _x11_session_display(self) -> Optional[str]:
+        """Display of an X server whose selections nothing bridges into the
+        Wayland session: on the Wayland backend without a nested session
+        compositor, a live server on $DISPLAY is a rootful (or unmanaged)
+        Xwayland client of the capture compositor hosting an X11 desktop, and
+        Xwayland bridges no selection by itself. A nested compositor's own XWM
+        bridges its Xwayland into the selection selkies already watches, and on
+        the X11 backend the display is the session itself, so both answer None.
+        The server must be an Xwayland (not a leftover Xvfb/Xorg that merely
+        holds the display number), or nothing on it belongs to this session."""
+        if not self.is_wayland or self._has_separate_app_compositor():
+            return None
+        name = os.environ.get("DISPLAY", "").strip()
+        if not name or not x_display_live(name) or not x_display_is_xwayland(name):
+            return None
+        return name
+
+    def _ensure_x11_clipboard_monitor(self, display_name: Optional[str] = None) -> Optional[_X11ClipboardMonitor]:
+        """Get-or-create the event-driven X11 monitor; None if unavailable. On
+        the Wayland backend ``display_name`` names the unbridged X server to
+        watch (see _x11_session_display) and None means there is none."""
         if self._x11_clipboard_monitor is not None:
             return self._x11_clipboard_monitor
-        if self.is_wayland or not X11_LIBS_AVAILABLE:
+        if not X11_LIBS_AVAILABLE or (self.is_wayland and display_name is None):
             return None
         try:
-            self._x11_clipboard_monitor = _X11ClipboardMonitor()
+            self._x11_clipboard_monitor = _X11ClipboardMonitor(display_name)
             self._x11_monitor_unavail_logged = False
-            logger_webrtc_input.info("X11 clipboard: XFixes event monitor active (no polling).")
+            where = f" on {display_name} (unbridged X server of the Wayland session)" if self.is_wayland else ""
+            logger_webrtc_input.info(f"X11 clipboard: XFixes event monitor active{where}.")
         except Exception as e:
             log = (logger_webrtc_input.debug if self._x11_monitor_unavail_logged
                    else logger_webrtc_input.info)
-            log(f"X11 clipboard: XFixes monitor unavailable ({e}); falling back to polling.")
+            # On X11 the fallback is xclip polling; on the Wayland backend there
+            # is no X poll rung (the compositor feed carries the selection), so
+            # the monitor is simply retried.
+            fallback = "retrying" if self.is_wayland else "falling back to polling"
+            log(f"X11 clipboard: XFixes monitor unavailable ({e}); {fallback}.")
             self._x11_monitor_unavail_logged = True
             self._x11_clipboard_monitor = None
         return self._x11_clipboard_monitor
@@ -5256,14 +6007,46 @@ class WebRTCInput:
         async with self._x11_monitor_build_lock:
             if self._x11_clipboard_monitor is not None:
                 return self._x11_clipboard_monitor
-            monitor = await asyncio.to_thread(self._ensure_x11_clipboard_monitor)
+            display_name = self._x11_session_display() if self.is_wayland else None
+            if self.is_wayland and display_name is None:
+                # No unbridged X server right now: nothing to build, and no
+                # backoff — the next tick re-probes the display socket (cheap),
+                # so an Xwayland starting later is caught within a tick.
+                return None
+            monitor = await asyncio.to_thread(self._ensure_x11_clipboard_monitor, display_name)
             if monitor is None:
                 self._x11_monitor_retry_at = time.monotonic() + 10.0
             return monitor
 
+    @staticmethod
+    async def _wait_x11_or_compositor_change(x11_monitor: _X11ClipboardMonitor,
+                                             queue: "asyncio.Queue", timeout: float) -> tuple:
+        """Wait for whichever signals first: the X server's selection-owner
+        change or a compositor clipboard delivery. Returns (changed, item) where
+        item is the compositor delivery, if that is what fired."""
+        x_wait = asyncio.ensure_future(x11_monitor.wait_change(timeout))
+        q_get = asyncio.ensure_future(queue.get())
+        try:
+            done, _ = await asyncio.wait({x_wait, q_get}, timeout=timeout + 0.5,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            item = q_get.result() if q_get in done else None
+            x_changed = bool(x_wait.result()) if x_wait in done else False
+            return (item is not None or x_changed), item
+        finally:
+            # Cancel whichever did not fire (and, if the loop task itself was
+            # cancelled, both) so no orphaned queue.get() lingers.
+            for fut in (x_wait, q_get):
+                if not fut.done():
+                    fut.cancel()
+
     def _arm_wayland_native_clipboard(self) -> Optional[asyncio.Queue]:
         """Register the compositor clipboard callback (fork-free watch+read);
-        returns the delivery queue, or None when the API is unavailable."""
+        returns the delivery queue, or None when the API is unavailable.
+
+        Registered once per monitor start: the compositor keeps the callback
+        across capture stops and starts, and every registration stages a
+        fresh read of the whole current selection (so a copy made before the
+        monitor ran is delivered), which must not recur while idle."""
         if not (self.wayland_input is not None
                 and hasattr(self.wayland_input, 'set_clipboard_callback')):
             return None
@@ -5282,26 +6065,36 @@ class WebRTCInput:
                     queue.put_nowait((data, mime))
                 loop.call_soon_threadsafe(_put)
 
-            # Kept on self so the monitor loop can re-arm the SAME callback after
-            # capture cycles (the compositor drops callbacks on StopCapture).
-            self._wl_native_deliver = _on_clip
             self.wayland_input.set_clipboard_callback(_on_clip)
+            self._wl_native_arm_failure = None
             logger_webrtc_input.info("Wayland clipboard: native compositor callback active (no polling).")
             return queue
         except Exception as e:
-            logger_webrtc_input.warning(f"Wayland clipboard: native callback failed to arm ({e}).")
+            if str(e) != getattr(self, '_wl_native_arm_failure', None):
+                self._wl_native_arm_failure = str(e)
+                logger_webrtc_input.warning(
+                    f"Wayland clipboard: native callback failed to arm ({e}); retrying.")
             return None
 
-    def _arm_app_compositor_watch(self) -> Optional[asyncio.Queue]:
+    async def _arm_app_compositor_watch(self) -> Optional[asyncio.Queue]:
         """Selection-change signals from the app compositor over the pixelflux
-        data-control ABI (fork-free); returns the signal queue, or None when
-        arming failed (retried by the monitor loop)."""
+        data-control ABI (fork-free); returns the signal queue, or None when no
+        watch could be armed — the monitor loop then polls that compositor and
+        retries the arm each tick. The watch itself only reports a failed
+        data-control handshake on its own thread, so the same handshake is
+        made here first (one-shot, off the loop): a compositor that offers
+        neither ext- nor zwlr-data-control is known at arm time instead of
+        leaving a watch that never fires. Each failure is logged once."""
         watch_fn = getattr(self.wayland_input, 'clipboard_watch_app', None)
         if watch_fn is None:
             # Without the app-compositor data-control ABI, the native callback
             # monitor covers this display.
             return None
+        display = self._app_wayland_display()
         try:
+            probe = getattr(self.wayland_input, 'clipboard_types_app', None)
+            if probe is not None:
+                await asyncio.to_thread(probe, display)
             loop = asyncio.get_running_loop()
             queue = asyncio.Queue(maxsize=4)
 
@@ -5312,13 +6105,19 @@ class WebRTCInput:
                     queue.put_nowait(mimes)
                 loop.call_soon_threadsafe(_put)
 
-            watch_fn(self._app_wayland_display(), _on_change)
+            watch_fn(display, _on_change)
+            self._app_watch_failure = None
             logger_webrtc_input.info(
                 "Wayland clipboard: app-compositor data-control watch active (no forks).")
             return queue
         except Exception as e:
-            logger_webrtc_input.warning(
-                f"Wayland clipboard: app-compositor watch failed to arm ({e}).")
+            failure = (display, str(e))
+            if failure != self._app_watch_failure:
+                self._app_watch_failure = failure
+                logger_webrtc_input.warning(
+                    f"Wayland clipboard: no selection watch on app compositor "
+                    f"'{display}' ({e}); polling it instead.")
+            self._invalidate_app_wl_display_if_dead(display)
             return None
 
     async def start_clipboard(self) -> None:
@@ -5372,15 +6171,32 @@ class WebRTCInput:
                     # remains as the last fallback.
                     wl_native_item = None
                     if self.is_wayland and self._has_separate_app_compositor():
+                        if x11_monitor is not None:
+                            # A nested session compositor appeared after the loop
+                            # built an X monitor for a rootful Xwayland: its XWM
+                            # now bridges its own Xwayland, so the X monitor is
+                            # torn down and the app-compositor watch below takes
+                            # over.
+                            try:
+                                x11_monitor.close()
+                            except Exception:
+                                pass
+                            self._x11_clipboard_monitor = None
+                            x11_monitor = None
                         disp = self._app_wayland_display()
                         if app_watch_queue is None or disp != app_watch_display:
-                            q = self._arm_app_compositor_watch()
+                            q = await self._arm_app_compositor_watch()
                             if q is not None:
                                 app_watch_queue, app_watch_display = q, disp
                     elif self.is_wayland and wl_native_queue is None:
                         # Direct mode reached only now (a nested compositor died
                         # or never appeared): arm the compositor callback late.
                         wl_native_queue = self._arm_wayland_native_clipboard()
+                    if self.is_wayland and x11_monitor is None:
+                        # An X11 desktop's Xwayland comes up after the compositor
+                        # it connects to; its unbridged selection is watched from
+                        # the moment the server answers (probe backs off itself).
+                        x11_monitor = await self._ensure_x11_clipboard_monitor_async()
                     if first_pass:
                         changed = True
                         first_pass = False
@@ -5405,29 +6221,42 @@ class WebRTCInput:
                                 # Republish current content on the fresh monitor; the
                                 # baseline compare below still suppresses no-op sends.
                                 changed = True
+                        elif wl_native_queue is not None:
+                            changed, wl_native_item = await self._wait_x11_or_compositor_change(
+                                x11_monitor, wl_native_queue, 2.0)
                         else:
                             changed = await x11_monitor.wait_change(2.0)
                     elif wl_native_queue is not None and not self._has_separate_app_compositor():
+                        # An idle timeout only re-checks the liveness flags: the
+                        # compositor callback stays registered across capture
+                        # cycles, and re-registering it here would stage a read
+                        # of the whole selection on every tick.
                         try:
                             wl_native_item = await asyncio.wait_for(wl_native_queue.get(), 2.0)
                             changed = True
                         except asyncio.TimeoutError:
                             changed = False
-                            # The compositor drops its callbacks on every capture stop
-                            # (interpreter-finalization safety), and captures cycle with
-                            # client connects. Re-arming is an idempotent channel send;
-                            # doing it each idle tick keeps the watch alive across cycles.
-                            try:
-                                self.wayland_input.set_clipboard_callback(
-                                    self._wl_native_deliver)
-                            except Exception:
-                                pass
                     elif app_watch_queue is not None:
                         try:
                             await asyncio.wait_for(app_watch_queue.get(), 2.0)
                             changed = True
                         except asyncio.TimeoutError:
                             changed = False
+                            # A watch on a compositor that went away never fires
+                            # again; an idle tick checks the socket, and a dead one
+                            # drops the cached detection so the loop re-arms on
+                            # whatever compositor is live now.
+                            self._invalidate_app_wl_display_if_dead(app_watch_display)
+                            if self._app_wl_display_cached is None:
+                                app_watch_queue, app_watch_display = None, None
+                    elif self.is_wayland and self._has_separate_app_compositor():
+                        # Poll rung: the app compositor offers no selection
+                        # watch (no data-control, or the arm failed), so its
+                        # selection is read and compared once per tick; the
+                        # arm above is retried every tick, and the watch takes
+                        # over the moment one holds.
+                        await asyncio.sleep(2.0)
+                        changed = True
                     elif self.is_wayland:
                         # Neither watch armed yet (compositor briefly absent);
                         # the arming above retries on the next tick.
@@ -5524,6 +6353,7 @@ class WebRTCInput:
             logger_webrtc_input.warning(f"keymap cache refresh failed: {e}")
         if kb is None:
             return
+        kb.note_mapping_change(event.first_keycode, event.count)
         if kb.bindings_intact():
             # Our own overlay bind (or a change that left the overlay alone):
             # the bookkeeping is authoritative, keep it.
@@ -5533,6 +6363,30 @@ class WebRTCInput:
             "invalidating XTEST overlay state.",
             event.request, event.first_keycode, event.count)
         kb.invalidate_mapping()
+
+    def _dispatch_keymap_event(self, event: Any) -> bool:
+        """Hand a keymap change on the input connection to _handle_mapping_notify.
+
+        A core MappingNotify goes as is. A whole-keyboard replacement
+        (setxkbmap, a desktop layout switcher) reaches the XKB-aware input
+        connection only as XkbNewKeyboardNotify, which is handed on as the
+        full-range keyboard MappingNotify it stands for.
+
+        Returns:
+            True when the event was a keymap change and has been handled.
+        """
+        if event.type == X.MappingNotify:
+            self._handle_mapping_notify(event)
+            return True
+        kb = self.keyboard
+        span = kb.keyboard_replaced(event) if kb is not None else None
+        if span is None:
+            return False
+        lo, hi = span
+        self._handle_mapping_notify(xevent.MappingNotify(
+            sequence_number=event.sequence_number, request=X.MappingKeyboard,
+            first_keycode=lo, count=hi - lo + 1))
+        return True
 
     async def _keymap_watch_loop(self) -> None:
         """Drain X events for MappingNotify when the cursor monitor is not the
@@ -5554,9 +6408,7 @@ class WebRTCInput:
                 continue
             try:
                 while self.xdisplay.pending_events():
-                    event = self.xdisplay.next_event()
-                    if event.type == X.MappingNotify:
-                        self._handle_mapping_notify(event)
+                    self._dispatch_keymap_event(self.xdisplay.next_event())
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -5604,7 +6456,7 @@ class WebRTCInput:
             # The X fetch must stay on this thread (python-xlib connections are not
             # thread-safe and the loop also injects input on this display), but the
             # PIL resize + PNG encode is pure CPU: keep it off the event loop.
-            cursor_data = await asyncio.to_thread(self.cursor_to_msg, cursor_image)
+            cursor_data = await asyncio.to_thread(self._encode_cursor, cursor_image)
             self.on_cursor_change(cursor_data)
         except Exception as e:
             logger_webrtc_input.warning("exception from fetching initial cursor image: %s", e)
@@ -5631,13 +6483,12 @@ class WebRTCInput:
                 continue
 
             event = self.xdisplay.next_event()
-            if event.type == X.MappingNotify:
-                self._handle_mapping_notify(event)
+            if self._dispatch_keymap_event(event):
                 continue
             if (event.type, 0) == self.xdisplay.extension_event.DisplayCursorNotify:
                 try:
                     cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
-                    cursor_data = await asyncio.to_thread(self.cursor_to_msg, cursor_image)
+                    cursor_data = await asyncio.to_thread(self._encode_cursor, cursor_image)
                     self.on_cursor_change(cursor_data)
                 except Exception as e:
                     logger_webrtc_input.warning(
@@ -5675,10 +6526,24 @@ class WebRTCInput:
                 self._xfixes_negotiated = True
             screen = self.xdisplay.screen()
             cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
-            return self.cursor_to_msg(cursor_image)
+            return self._encode_cursor(cursor_image)
         except Exception as e:
             logger_webrtc_input.warning("exception from fetching current cursor image: %s", e)
             return None
+
+    def _encode_cursor(self, cursor: Any) -> dict:
+        """cursor_to_msg behind a one-entry cache keyed by the XFixes cursor
+        serial (and the size cap the encode depends on): the monitor encodes
+        each cursor once, off the loop, and the per-connect fetch — sync, on
+        the loop — reuses that instead of encoding the same PNG again."""
+        key = (getattr(cursor, "cursor_serial", None), self.cursor_size_cap)
+        cached = self._cursor_msg_cache
+        if key[0] is not None and cached is not None and cached[0] == key:
+            return cached[1]
+        msg = self.cursor_to_msg(cursor)
+        if key[0] is not None:
+            self._cursor_msg_cache = (key, msg)
+        return msg
 
     def _cursor_image_to_pil(self, cursor: Any) -> Image.Image:
         byte_data = b''.join(p.to_bytes(4, 'little') for p in cursor.cursor_image)
@@ -5759,8 +6624,12 @@ class WebRTCInput:
             self.keyboard_queue.put_nowait(item)
         except asyncio.QueueFull:
             try:
-                self.keyboard_queue.get_nowait()
+                evicted = self.keyboard_queue.get_nowait()
                 self.keyboard_queue.task_done()
+                # A queued server-side reset is awaited; its waiter must not
+                # sit out the timeout because a flood evicted it.
+                if evicted[0] == "kr" and evicted[1] is not None and not evicted[1].done():
+                    evicted[1].set_result(None)
             except asyncio.QueueEmpty:
                 pass
             try:
@@ -5932,9 +6801,15 @@ class WebRTCInput:
                             await self.send_x11_keypress(chord_keysym, down=down)
 
                     elif msg_type == "kr":
+                        # data is None for a client 'kr'; a server-side reset
+                        # queued by reset_keyboard carries the future it awaits.
                         self._wl_text_routed.clear()
                         await flush_buffer()
-                        await self.reset_keyboard()
+                        try:
+                            await self._reset_keyboard_wayland()
+                        finally:
+                            if data is not None and not data.done():
+                                data.set_result(None)
 
                     elif msg_type == "co_end":
                         if native_inject():
@@ -6335,10 +7210,12 @@ class WebRTCInput:
                                 # not published the new selection yet, and pushing
                                 # the pre-copy content settles the client's pending
                                 # copy with stale data. Wait briefly for the
-                                # selection-owner change, then re-read.
+                                # selection-owner change, then re-read — without
+                                # consuming the change edge, which the monitor
+                                # loop needs to broadcast the copy to every client.
                                 monitor = self._x11_clipboard_monitor
                                 if monitor is not None and monitor.alive():
-                                    await monitor.wait_change(0.15)
+                                    await monitor.peek_change(0.15)
                                 else:
                                     await asyncio.sleep(0.15)
                                 data, mime_type = await self.read_clipboard(use_binary=use_binary)
@@ -6406,7 +7283,8 @@ class WebRTCInput:
                     self.send_command_error(text, conn_id)
 
                 await run_client_command(
-                    command_to_run, logger_webrtc_input, notify=_notify_cmd_error)
+                    command_to_run, logger_webrtc_input, notify=_notify_cmd_error,
+                    env=self.app_launch_env())
             else:
                 logger_webrtc_input.warning("Received 'cmd' message without a command string.")
         elif msg_type == "_arg_fps":
@@ -6449,7 +7327,7 @@ class WebRTCInput:
                     # xdotool fork. Falls through to xdotool below only if that fails.
                     pass
                 else:
-                    cmd = ["xdotool", "type", text_to_type]
+                    cmd = ["xdotool", "type", "--", text_to_type]
                     process = await subprocess.create_subprocess_exec(
                         *cmd,
                         stdout=subprocess.PIPE,
@@ -6485,8 +7363,12 @@ class WebRTCInput:
             try:
                 settings_json = json.loads(settings_data)
                 # Settings apply to the display whose channel delivered them (the
-                # transport-level id, not a payload field a page could spoof).
-                self._spawn_task(self.on_update_settings(settings_json, display_id))
+                # transport-level id, not a payload field a page could spoof), and
+                # inline, so a resize that follows in the same stream runs against
+                # the policy this payload carries.
+                applied = self.on_update_settings(settings_json, display_id)
+                if asyncio.iscoroutine(applied):
+                    await applied
             except Exception as e:
                 logger_webrtc_input.error(f"Failed to parse SETTINGS data: {e}")
         elif toks[0] == "SET_NATIVE_CURSOR_RENDERING":

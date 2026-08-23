@@ -44,6 +44,7 @@ from .Xlib import X as x11_X
 from .Xlib import display as x11_display
 from .Xlib import error as x11_error
 from .Xlib.ext import randr
+from .Xlib.protocol import request as x11_request
 
 import logging
 
@@ -138,9 +139,16 @@ _x11_conn: Optional[x11_display.Display] = None
 def _module_display() -> x11_display.Display:
     """This module's cached X connection; call under ``_x11_lock``.
 
-    RandR user modes are owned by the connection that created them, so the
-    connection stays open for the process lifetime and retains its resources
-    past disconnect (RetainPermanent).
+    RandR user modes are owned by the connection that created them and die
+    with it (the screen falls back to a built-in mode), so the connection
+    stays open for the process lifetime and retains its resources past
+    disconnect. Retention is temporary: a retained client record holds one of
+    the server's client slots until something issues KillClient(AllTemporary),
+    and a server whose selkies is restarted many times would otherwise run out
+    of slots. So the first connection of a process reaps the records its
+    predecessors left, and when that takes the live mode with it (the screen
+    reverts), it recreates that mode at once — a brief revert on a restart,
+    no slot ever held by a finished process.
     """
     global _x11_conn
     if _x11_conn is None:
@@ -152,10 +160,37 @@ def _module_display() -> x11_display.Display:
         # the helpers drop this connection and fall back to their subprocess
         # paths.
         conn = x11_display.Display(blocking_timeout=15.0)
-        conn.set_close_down_mode(x11_X.RetainPermanent)
+        conn.set_close_down_mode(x11_X.RetainTemporary)
         conn.sync()
+        _reap_retained_predecessors(conn)
         _x11_conn = conn
     return _x11_conn
+
+
+def _reap_retained_predecessors(conn: x11_display.Display) -> None:
+    """Release the temporarily retained resources of earlier processes and
+    restore the screen size if the reap reverted it."""
+    try:
+        geom = conn.screen().root.get_geometry()
+        before = (int(geom.width), int(geom.height))
+        x11_request.KillClient(display=conn.display, resource=x11_X.AllTemporary)
+        conn.sync()
+        geom = conn.screen().root.get_geometry()
+        after = (int(geom.width), int(geom.height))
+    except Exception as e:
+        logger_app_resize.debug(f"Retained X client reap skipped: {e}")
+        return
+    if after == before:
+        return
+    try:
+        realized = _resize_on_display(conn, f"{before[0]}x{before[1]}", before[0], before[1])
+        logger_app_resize.info(
+            f"Restored the {before[0]}x{before[1]} screen mode a finished process had "
+            f"left retained (realized {realized[0]}x{realized[1]}).")
+    except Exception as e:
+        logger_app_resize.warning(
+            f"Screen reverted to {after[0]}x{after[1]} while reaping retained X clients "
+            f"and could not be restored: {e}")
 
 
 def _drop_module_display() -> None:
@@ -2292,8 +2327,7 @@ def apply_common_capture_settings(
     cs.video_paintover_burst_frames = paintover_burst
     cs.video_fullcolor = fullcolor
     cs.video_streaming_mode = streaming
-    cs.video_fullframe = encoder in ("h264enc", "openh264enc")
-    cs.use_openh264 = encoder == "openh264enc"
+    cs.video_fullframe = encoder == "h264enc"
     cs.video_cbr_mode = cbr
     cs.video_bitrate_kbps = int(round(float(bitrate_kbps)))
     # 0 = infinite GOP (on-demand keyframes only).
@@ -2301,7 +2335,13 @@ def apply_common_capture_settings(
     # CBR QP clamp (0 = encoder default).
     cs.video_min_qp = int(getattr(server, "video_min_qp", 0) or 0)
     cs.video_max_qp = int(getattr(server, "video_max_qp", 0) or 0)
-    cs.use_cpu = bool(use_cpu) or encoder == "openh264enc"
+    # Software encoding is the caller's resolved choice (effective_use_cpu);
+    # which software H.264 encoder then runs is the pixelflux build's.
+    cs.use_cpu = bool(use_cpu)
+    if cs.use_cpu and encoder != "jpeg":
+        from .settings import software_h264_encoder
+        logging.getLogger("display_utils").info(
+            f"Display '{display_name}' encodes H.264 in software ({software_h264_encoder()}).")
 
     cs.use_paint_over_quality = use_paint_over_quality
     cs.paint_over_trigger_frames = 15

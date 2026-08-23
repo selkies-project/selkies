@@ -44,8 +44,8 @@ interface AppsProps {
 }
 
 export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
-    const [isAppsModalOpen, setIsAppsModalOpen] = useState(isOpen);
-    const [appData, setAppData] = useState<{ include: App[] } | null>(null);
+    // The catalog survives remounts through the module-level cache.
+    const [appData, setAppData] = useState<{ include: App[] } | null>(() => cachedAppData);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [fetchAttempt, setFetchAttempt] = useState(0);
@@ -88,14 +88,8 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     const commandsKnown = serverSettings != null;
     const commandsAvailable = serverSettings?.command_enabled?.value === true;
 
-    // Sync with external isOpen prop
-    useEffect(() => {
-        setIsAppsModalOpen(isOpen);
-    }, [isOpen]);
-
-    // Handle modal close
+    // The dialog is controlled by the parent's isOpen; closing reports back.
     const handleModalClose = (open: boolean) => {
-        setIsAppsModalOpen(open);
         if (!open && onClose) {
             onClose();
         }
@@ -106,14 +100,13 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     // refetching. The fetch is aborted after a timeout and on close/unmount,
     // and the cleanup's `active` flag suppresses any late setState.
     useEffect(() => {
-        if (!isAppsModalOpen || appData) return;
-        if (cachedAppData) {
-            setAppData(cachedAppData);
-            return;
-        }
+        if (!isOpen || appData) return;
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), METADATA_FETCH_TIMEOUT_MS);
         let active = true;
+        // Not derivable during render: this is the transition into a fetch,
+        // and a Retry has to re-enter it.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setIsLoading(true);
         setError(null);
         (async () => {
@@ -141,7 +134,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
             clearTimeout(timeoutId);
             controller.abort();
         };
-    }, [isAppsModalOpen, appData, fetchAttempt]);
+    }, [isOpen, appData, fetchAttempt]);
 
     const handleSearchChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         setSearchTerm(event.target.value.toLowerCase());
@@ -190,7 +183,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
 
     return (
         <>
-            <Dialog open={isAppsModalOpen} onOpenChange={handleModalClose}>
+            <Dialog open={isOpen} onOpenChange={handleModalClose}>
                 <DialogContent className="max-h-screen sm:max-w-[50vw] p-0">
                     <DialogHeader className="sticky top-0 z-10 bg-background p-6 border-b">
                         <div className="flex flex-col space-y-6">

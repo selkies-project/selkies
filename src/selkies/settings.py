@@ -416,7 +416,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "ui_sidebar_show_webcam",
         "type": "bool",
-        "default": False,
+        "default": True,
         "help": "Show the webcam toggle among the core buttons (classic sidebar) and stream controls (wish top menu). Hides the control only; webcam_enabled governs whether the server accepts webcam frames.",
     },
     {
@@ -595,8 +595,8 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "encoder",
         "type": "enum",
         "default": "h264enc",
-        "meta": {"allowed": ["h264enc", "openh264enc", "h264enc-striped", "jpeg"]},
-        "help": "The default video encoder.",
+        "meta": {"allowed": ["h264enc", "h264enc-striped", "jpeg"]},
+        "help": "The default video encoder: h264enc is full-frame H.264 on NVENC or VA-API, falling back to the software encoder pixelflux was built with (x264, or OpenH264 in a GPL-free build); h264enc-striped is CPU-striped H.264 on that same software encoder; jpeg is CPU-striped JPEG. Only h264enc streams over WebRTC.",
     },
     {
         "name": "jpeg_quality",
@@ -895,6 +895,36 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Directory to write the Selkies V4L2 Interposer webcam socket to, default: /tmp, results in socket file: /tmp/selkies_webcam0.sock",
     },
     {
+        "name": "webcam_width",
+        "type": "int",
+        "default": 1280,
+        "help": "Width of the virtual webcam device; client camera frames are scaled and letterboxed to fit.",
+    },
+    {
+        "name": "webcam_height",
+        "type": "int",
+        "default": 720,
+        "help": "Height of the virtual webcam device; client camera frames are scaled and letterboxed to fit.",
+    },
+    {
+        "name": "webcam_pixel_format",
+        "type": "str",
+        "default": "auto",
+        "help": 'Pixel format of the virtual webcam device. "auto" follows the first uplink: a browser sending JPEG (no WebCodecs) gets an MJPEG device that carries its frames as received, any other uplink an I420 device. Or pin "I420" (planar 4:2:0, the browsers\' preference), "NV12", "YUYV" or "MJPEG".',
+    },
+    {
+        "name": "webcam_device",
+        "type": "str",
+        "default": "auto",
+        "help": 'Also mirror the webcam into a v4l2loopback kernel device, which applications find without the V4L2 Interposer: "auto" uses the first v4l2loopback output device found (typically a desktop host or privileged container), a path such as "/dev/video10" uses that device, and "false" never does. The interposer socket is always served.',
+    },
+    {
+        "name": "webcam_pipewire",
+        "type": "bool",
+        "default": True,
+        "help": "Also publish the webcam as a PipeWire Video/Source node when a PipeWire daemon is reachable, for PipeWire-native applications and the pipewire-v4l2 wrapper. The interposer socket is always served.",
+    },
+    {
         "name": "uinput_gamepad",
         "type": "str",
         "default": "auto",
@@ -1025,7 +1055,57 @@ def parse_bool(value: Any, default: bool = False) -> bool:
 # Encoders the WebRTC pipeline can produce (pixelflux emits H.264 only; the
 # jpeg/striped framing is a websockets-stream concept). The single `encoder`
 # knob is filtered to these in webrtc mode rather than carrying a second knob.
-WEBRTC_ENCODER_CHOICES = ("h264enc", "openh264enc")
+WEBRTC_ENCODER_CHOICES = ("h264enc",)
+
+# Encoder names accepted for their current spelling: x264enc is the historical
+# name base images still ship in SELKIES_ENCODER, and openh264enc was the
+# separate OpenH264 choice before software H.264 became a property of the
+# pixelflux build (software_h264_encoder). Both mean full-frame H.264.
+ENCODER_ALIASES = {"x264enc": "h264enc", "openh264enc": "h264enc"}
+_RETIRED_ENCODER_WARNED = set()
+
+
+def canonical_encoder(name: Any) -> str:
+    """Map a legacy encoder name onto the current one, warning once per retired name.
+
+    Any other value comes back unchanged (as a string), so the caller's own
+    validation still decides what it means.
+    """
+    text = str(name).strip()
+    key = text.lower()
+    if key == "openh264enc" and key not in _RETIRED_ENCODER_WARNED:
+        _RETIRED_ENCODER_WARNED.add(key)
+        logging.warning(
+            "Encoder 'openh264enc' is no longer a separate choice: software H.264 "
+            "is the encoder pixelflux was built with (%s); using 'h264enc'.",
+            software_h264_encoder(),
+        )
+    return ENCODER_ALIASES.get(key, text)
+
+
+def software_h264_encoder() -> str:
+    """The software H.264 encoder of the installed pixelflux build, "x264" or "openh264".
+
+    Read from pixelflux.SOFTWARE_H264_ENCODER, which a build sets from its
+    features (libx264 by default, OpenH264 for a GPL-free build). A pixelflux
+    that predates the attribute, or that cannot be imported here, reads as the
+    default x264 build.
+    """
+    try:
+        import pixelflux
+    except ImportError:
+        return "x264"
+    return str(getattr(pixelflux, "SOFTWARE_H264_ENCODER", "x264"))
+
+
+def software_h264_path(encoder: str, use_cpu: bool) -> bool:
+    """Whether a session with this encoder is known to encode H.264 on the CPU.
+
+    The striped encoder has no hardware path; h264enc encodes in software when
+    software encoding is forced. h264enc without that may still land on the CPU
+    (no usable GPU), which nothing here can know in advance.
+    """
+    return encoder == "h264enc-striped" or (encoder == "h264enc" and bool(use_cpu))
 
 
 
@@ -1049,6 +1129,13 @@ class AppSettings:
     webrtc_pacer: tuple[bool, bool]
     uinput_mouse_socket: str
     uinput_gamepad: str
+    webcam_enabled: tuple[bool, bool]
+    webcam_socket_path: str
+    webcam_width: int
+    webcam_height: int
+    webcam_pixel_format: str
+    webcam_device: str
+    webcam_pipewire: tuple[bool, bool]
     enable_cursors: tuple[bool, bool]
     debug_cursors: tuple[bool, bool]
     enable_resize: tuple[bool, bool]
@@ -1195,12 +1282,7 @@ class AppSettings:
                         else:
                             user_items = [item.strip() for item in raw_value_str.split(',') if item.strip()]
                             if name == "encoder":
-                                # Historical name from base images still shipping
-                                # SELKIES_ENCODER=x264enc in their env.
-                                user_items = [
-                                    "h264enc" if item.lower() == "x264enc" else item
-                                    for item in user_items
-                                ]
+                                user_items = [canonical_encoder(item) for item in user_items]
                             # Matched case-insensitively and carried forward in the
                             # spelling `allowed` uses, so an operator's SELKIES_ENCODER=JPEG
                             # selects the encoder every consumer compares against rather
@@ -1390,17 +1472,26 @@ class AppSettings:
         return bool(getattr(self, "_overridden", {}).get(name, False))
 
     # Rate-control default per encoder for websockets streams: quality-driven
-    # (CRF) except openh264enc, which targets a bandwidth (CBR). WebRTC streams
-    # default to CBR regardless of encoder (resolve_rate_control_default): a
-    # congestion-controlled transport needs the encoder holding a bandwidth
-    # target. An explicit rate_control_mode override wins; encoders not listed
-    # keep the built-in default.
+    # (CRF), except that OpenH264 — the software H.264 encoder of a GPL-free
+    # pixelflux build — targets a bandwidth, so a session known to be on the
+    # software path defaults to CBR there (resolve_rate_control_default). WebRTC
+    # streams default to CBR regardless of encoder: a congestion-controlled
+    # transport needs the encoder holding a bandwidth target. An explicit
+    # rate_control_mode override wins; encoders not listed keep the built-in
+    # default. The dashboards derive the same default client-side
+    # (conditional-settings.js) from the published software_h264_encoder.
     ENCODER_RC_DEFAULTS = {
         "h264enc": "crf",
-        "openh264enc": "cbr",
         "h264enc-striped": "crf",
         "jpeg": "crf",
     }
+
+    def on_software_h264_path(self) -> bool:
+        """Whether the server's own defaults put a session on the software
+        H.264 path: the striped encoder, or h264enc with software encoding
+        forced by use_cpu or gpu_id=-1."""
+        forced = bool(self.use_cpu[0]) or str(self.gpu_id).strip() == "-1"
+        return software_h264_path(self.encoder, forced)
 
     def resolve_rate_control_default(self) -> None:
         """Apply the transport's rate-control default for the current mode.
@@ -1412,6 +1503,8 @@ class AppSettings:
         if not self.enable_rate_control[0] or self.was_provided("rate_control_mode"):
             return
         if self.mode == "webrtc":
+            self.rate_control_mode = "cbr"
+        elif self.on_software_h264_path() and software_h264_encoder() == "openh264":
             self.rate_control_mode = "cbr"
         else:
             self.rate_control_mode = self.ENCODER_RC_DEFAULTS.get(
@@ -1598,7 +1691,7 @@ OPERATOR_LOCKED_WHEN_OVERRIDDEN = ("scaling_dpi",)
 
 # Encoders with no hardware path: selecting one implies software encoding
 # regardless of what the client asked for.
-CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped", "openh264enc")
+CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
 
 
 def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) -> bool:
@@ -1629,7 +1722,7 @@ CLIENT_PAYLOAD_EXCLUDED = [
     'audio_device_name', 'watermark_path', 'recording_socket',
     'file_manager_path', 'run_after_connect', 'run_after_disconnect',
     'https_cert', 'rtc_config_json', 'app_ready_file', 'js_socket_path',
-    'webcam_socket_path',
+    'webcam_socket_path', 'webcam_device',
     'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind',
     'wayland_host_display', 'app_wayland_display',
 ]
@@ -1704,6 +1797,9 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
     out['clipboard_enabled'] = {'value': clip != 'false'}
     out['clipboard_in_enabled'] = {'value': clip in ('true', 'in')}
     out['clipboard_out_enabled'] = {'value': clip in ('true', 'out')}
+    # The software H.264 encoder of the pixelflux build ("x264" | "openh264"):
+    # informational, and what the dashboards' rate-control default reads.
+    out['software_h264_encoder'] = {'value': software_h264_encoder()}
     return out
 
 
@@ -1767,6 +1863,8 @@ def sanitize_client_setting(name: str, client_value: Any, source: Any,
             return sanitized
         elif setting_def['type'] == 'enum':
             allowed_values = setting_def['meta']['allowed']
+            if name == 'encoder':
+                client_value = canonical_encoder(client_value)
             if str(client_value) in allowed_values:
                 # Normalize to str so later equality checks don't flip on str-vs-int.
                 return str(client_value)

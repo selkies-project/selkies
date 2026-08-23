@@ -37,6 +37,11 @@ cp addons/universal-touch-gamepad/universalTouchGamepad.js addons/selkies-dashbo
 rm -rf src/selkies/selkies_web
 cp -ar addons/selkies-dashboard/dist src/selkies/selkies_web
 
+# A regular package rather than an implicit namespace one: importlib.resources
+# on Python 3.9 cannot locate the files of a namespace package, and that is how
+# the server reads the bundled client.
+printf '%s\n' '"""Bundled web client, served by the stream server as package data."""' > src/selkies/selkies_web/__init__.py
+
 # start_url is relative so an installed client launches back into the subfolder
 # it was served from, which an absolute "/" would discard.
 printf '%s' '{"name":"Selkies","short_name":"Selkies","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon-512.png","type":"image/png","sizes":"512x512"}],"start_url":"."}' > src/selkies/selkies_web/manifest.json

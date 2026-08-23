@@ -43,10 +43,9 @@ const sharingLinks = [
 
 interface SharingProps {
 	show: boolean;
-	onClose: () => void;
 }
 
-export const Sharing = ({ show, onClose }: SharingProps) => {
+export const Sharing = ({ show }: SharingProps) => {
 	const [copiedId, setCopiedId] = useState<string | null>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
 

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""The rate-control default follows the transport. Websockets streams resolve
-per encoder (CRF everywhere but openh264enc), WebRTC streams resolve to CBR
-regardless of encoder, and an operator-provided rate_control_mode or disabled
-rate control always wins. The same rule must hold at startup for either mode
-and across a live transport switch, which re-resolves through
-resolve_rate_control_default() exactly as the stream server does.
+"""The rate-control default follows the transport and the software encoder.
+Websockets streams resolve per encoder (CRF), except that a session known to
+encode on OpenH264 — the software H.264 encoder of a GPL-free pixelflux build,
+read from pixelflux.SOFTWARE_H264_ENCODER — resolves to CBR; WebRTC streams
+resolve to CBR regardless of encoder, and an operator-provided rate_control_mode
+or disabled rate control always wins. The same rule must hold at startup for
+either mode and across a live transport switch, which re-resolves through
+resolve_rate_control_default() exactly as the stream server does. The retired
+openh264enc encoder name is accepted as an alias of h264enc wherever an encoder
+name enters.
 """
 import os
 import subprocess
@@ -30,26 +34,84 @@ def check(label: str, ok, detail="") -> None:
 BASE_ENV = {k: v for k, v in os.environ.items() if not k.startswith("SELKIES_")}
 
 
-def probe(code: str, **env: str) -> str:
-    """Run `code` against a freshly imported settings module; stripped stdout."""
+def probe(code: str, software_encoder: str = "", **env: str) -> str:
+    """Run `code` against a freshly imported settings module; stripped stdout.
+
+    `software_encoder` stands a stub pixelflux module in the interpreter before
+    settings imports, so the build-resolved encoder can be tried both ways here
+    (a GPL-free pixelflux build is not something this machine has installed).
+    """
+    pre = ""
+    if software_encoder:
+        pre = ("import sys, types; sys.modules['pixelflux'] = types.SimpleNamespace("
+               f"SOFTWARE_H264_ENCODER={software_encoder!r}); ")
     out = subprocess.run(
-        [sys.executable, "-c", f"import selkies.settings as s; {code}"],
+        [sys.executable, "-c", f"{pre}import selkies.settings as s; {code}"],
         capture_output=True, text=True, timeout=120,
         env=dict(BASE_ENV, PYTHONPATH=os.path.join(REPO, "src"), **env))
     return out.stdout.strip()
 
 
-def resolved(**env: str) -> str:
-    return probe("print(s.settings.rate_control_mode)", **env)
+def resolved(software_encoder: str = "", **env: str) -> str:
+    return probe("print(s.settings.rate_control_mode)", software_encoder, **env)
 
 
-for encoder, want in [("h264enc", "crf"), ("openh264enc", "cbr"),
-                      ("h264enc-striped", "crf"), ("jpeg", "crf")]:
+for encoder, want in [("h264enc", "crf"), ("h264enc-striped", "crf"), ("jpeg", "crf")]:
     got = resolved(SELKIES_MODE="websockets", SELKIES_ENCODER=encoder)
     check(f"websockets {encoder} defaults to {want}", got == want, got)
 
 got = resolved(SELKIES_MODE="webrtc")
 check("webrtc defaults to cbr", got == "cbr", got)
+
+# The software H.264 encoder is a property of the pixelflux build, read from
+# pixelflux.SOFTWARE_H264_ENCODER, and the installed build must agree with
+# what settings reports for it.
+got = probe("import pixelflux; print(s.software_h264_encoder() == pixelflux.SOFTWARE_H264_ENCODER,"
+            " s.software_h264_encoder() in ('x264', 'openh264'))")
+check("software_h264_encoder() reports the installed pixelflux build", got == "True True", got)
+
+# x264 is quality-driven: the software path keeps the CRF default. OpenH264
+# targets a bandwidth: a session known to be on the software path (the striped
+# encoder, or h264enc with software encoding forced by use_cpu or gpu_id=-1)
+# defaults to CBR, while a hardware-first h264enc — which may still land on the
+# CPU, unknowably — keeps CRF.
+for encoder, extra, want in [("h264enc", {}, "crf"),
+                             ("h264enc", {"SELKIES_USE_CPU": "true"}, "crf"),
+                             ("h264enc-striped", {}, "crf")]:
+    got = resolved("x264", SELKIES_MODE="websockets", SELKIES_ENCODER=encoder, **extra)
+    check(f"x264 build: websockets {encoder} {extra or ''} defaults to {want}", got == want, got)
+for encoder, extra, want in [("h264enc", {}, "crf"),
+                             ("h264enc", {"SELKIES_USE_CPU": "true"}, "cbr"),
+                             ("h264enc", {"SELKIES_GPU_ID": "-1"}, "cbr"),
+                             ("h264enc-striped", {}, "cbr"),
+                             ("jpeg", {}, "crf")]:
+    got = resolved("openh264", SELKIES_MODE="websockets", SELKIES_ENCODER=encoder, **extra)
+    check(f"openh264 build: websockets {encoder} {extra or ''} defaults to {want}", got == want, got)
+got = resolved("openh264", SELKIES_MODE="websockets", SELKIES_ENCODER="h264enc-striped",
+               SELKIES_RATE_CONTROL_MODE="crf")
+check("openh264 build: an operator crf pin beats the software-path cbr default", got == "crf", got)
+got = probe("print(s.build_client_settings_payload()['software_h264_encoder']['value'])", "openh264")
+check("the software encoder is published to clients", got == "openh264", got)
+
+# The retired openh264enc name (a separate OpenH264 choice before software H.264
+# became a property of the pixelflux build) still configures a session: it is an
+# alias of h264enc for an operator's env/CLI and for a client's stored setting,
+# like the historical x264enc.
+got = probe("print(s.settings.encoder)", SELKIES_MODE="websockets", SELKIES_ENCODER="openh264enc")
+check("an operator's openh264enc becomes h264enc", got == "h264enc", got)
+got = probe("print(s.settings.encoder)", SELKIES_MODE="websockets", SELKIES_ENCODER="x264enc")
+check("an operator's x264enc becomes h264enc", got == "h264enc", got)
+got = probe(
+    "import logging;"
+    " print(s.sanitize_client_setting('encoder', 'openh264enc', s.settings, logging),"
+    " s.sanitize_client_setting('encoder', 'X264ENC', s.settings, logging))",
+    SELKIES_MODE="websockets")
+check("a client's stored openh264enc/x264enc sanitize to h264enc", got == "h264enc h264enc", got)
+got = probe(
+    "print(','.join(next(d for d in s.settings._setting_definitions"
+    " if d['name'] == 'encoder')['meta']['allowed']))",
+    SELKIES_MODE="websockets")
+check("openh264enc is no longer a published encoder", got == "h264enc,h264enc-striped,jpeg", got)
 
 # One encoder knob, both transports: in webrtc mode a websockets-only choice
 # falls back to the default and the published menu is filtered; switching back
@@ -63,20 +125,20 @@ got = probe(
     "print(s.settings.encoder)", SELKIES_MODE="webrtc", SELKIES_ENCODER="jpeg")
 check("webrtc boot falls a websockets-only encoder back to the default", got == "h264enc", got)
 got = probe(
-    "print(s.settings.encoder)", SELKIES_MODE="webrtc", SELKIES_ENCODER="openh264enc")
-check("webrtc keeps a valid operator encoder", got == "openh264enc", got)
+    "print(s.settings.encoder)", SELKIES_MODE="webrtc", SELKIES_ENCODER="h264enc")
+check("webrtc keeps a valid operator encoder", got == "h264enc", got)
 got = probe(
     f"print({ENCODER_MENU})",
     SELKIES_MODE="webrtc")
-check("webrtc publishes only its producible encoders", got == "h264enc,openh264enc", got)
+check("webrtc publishes only its producible encoders", got == "h264enc", got)
 got = probe(
     f"print({ENCODER_MENU})",
     SELKIES_MODE="websockets", SELKIES_ENCODER="jpeg")
 check("an operator encoder pin narrows the published menu", got == "jpeg", got)
 got = probe(
     f"print({ENCODER_MENU})",
-    SELKIES_MODE="webrtc", SELKIES_ENCODER="openh264enc")
-check("an operator pin producible on webrtc stays locked there", got == "openh264enc", got)
+    SELKIES_MODE="webrtc", SELKIES_ENCODER="h264enc")
+check("an operator pin producible on webrtc stays locked there", got == "h264enc", got)
 got = probe(
     "import logging;"
     " print(s.sanitize_client_setting('encoder', 'h264enc', s.settings, logging))",
@@ -108,7 +170,7 @@ check("a client's websockets-only pick survives a webrtc round trip",
 got = probe(
     "s.settings.encoder = 'jpeg'; s.settings._encoder_client_set = True;"
     " s.settings.mode = 'webrtc'; s.settings.apply_webrtc_encoder_filter();"
-    " s.settings.encoder = 'openh264enc'; s.settings._encoder_client_set = True;"
+    " s.settings.encoder = 'h264enc'; s.settings._encoder_client_set = True;"
     " s.settings.mode = 'websockets'; s.settings.apply_webrtc_encoder_filter();"
     " out = [s.settings.encoder];"
     " s.settings.mode = 'webrtc'; s.settings.apply_webrtc_encoder_filter();"
@@ -117,7 +179,7 @@ got = probe(
     " out.append(s.settings.encoder); print('|'.join(out))",
     SELKIES_MODE="websockets")
 check("a fresh pick during the webrtc leg wins and never resurrects the stash",
-      got == "openh264enc|openh264enc|openh264enc", got)
+      got == "h264enc|h264enc|h264enc", got)
 
 # The mode comparison runs on the normalized transport name, so an operator's
 # casing must not silently swap which default applies.

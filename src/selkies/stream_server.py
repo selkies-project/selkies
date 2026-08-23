@@ -45,7 +45,8 @@ try:
 except ImportError:
     fcntl = None
 from aiohttp import web
-from datetime import datetime
+from aiohttp.abc import AbstractAccessLogger
+from datetime import datetime, timedelta
 from prometheus_client import generate_latest
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 try:
@@ -70,6 +71,40 @@ UPLOAD_PART_TTL_SECONDS: int = 3600
 # Uploads are written to a hidden staging sibling of their destination and
 # renamed onto it, so a destination is only ever replaced by a complete file.
 UPLOAD_STAGING_PREFIX: str = ".selkies-upload-"
+
+
+class PathOnlyAccessLogger(AbstractAccessLogger):
+    """aiohttp access log whose request line carries the path without its query.
+
+    The secure-mode session token rides the data WebSocket URL as a query
+    parameter, so the stock request-line atom (which logs ``path_qs``) would
+    write credentials into the access log. The line otherwise has the default
+    shape: remote address, start time, method + path + version, status, body
+    size, Referer and User-Agent.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        return self.logger.isEnabledFor(logging.INFO)
+
+    def log(self, request: web.BaseRequest, response: web.StreamResponse, time: float) -> None:
+        try:
+            started = datetime.now().astimezone() - timedelta(seconds=time)
+            self.logger.info(
+                '%s [%s] "%s %s HTTP/%d.%d" %s %s "%s" "%s"',
+                request.remote or "-",
+                started.strftime("%d/%b/%Y:%H:%M:%S %z"),
+                request.method,
+                request.path,
+                request.version.major,
+                request.version.minor,
+                response.status,
+                response.body_length,
+                request.headers.get("Referer", "-"),
+                request.headers.get("User-Agent", "-"),
+            )
+        except Exception:
+            self.logger.exception("Error in logging")
 
 
 def _sock_unsent_bytes(sock: Any) -> Optional[int]:
@@ -441,6 +476,19 @@ def _unix_socket_is_live(path: str) -> bool:
     return True
 
 
+# Realm both auth challenges name; the web client's 401 guard recognizes the
+# Bearer one as this server's own token verdict.
+AUTH_REALM: str = "Selkies Restricted"
+# The WebSocket routes the services register (data transport, WebRTC
+# signaling and its alias), whose handshakes carry their own token gate in the
+# ws handlers; the auth middleware exempts exactly these paths, never a
+# request that merely claims an Upgrade.
+WEBSOCKET_ROUTES: Tuple[str, ...] = ("/api/websockets", "/api/webrtc/signaling", "/api/ws")
+# Cookie the web client mirrors its secure-mode session token into, for the
+# requests it cannot put a header on (the file-manager iframe and its download
+# links); the client scopes it to the API prefix with SameSite=Strict.
+SESSION_TOKEN_COOKIE: str = "selkies_token"
+
 # Inlined header/footer HTML for the /api/files directory index.
 FILE_INDEX_HEADER: str = """<!DOCTYPE html>
 <html lang="en">
@@ -729,10 +777,18 @@ FILE_INDEX_FOOTER: str = """    </div> <!-- closes .page-container -->
             // sorting). nginx-served listings send no Content-Disposition
             // header, so without this a click inside the dashboard's
             // file-browser iframe renders the file inline instead.
+            // A secure-mode session token in the query (the dashboards open
+            // the listing with the page's token) rides every link, so the
+            // listing stays navigable where the token cookie cannot follow.
+            const sessionToken = new URLSearchParams(window.location.search).get('token');
             document.querySelectorAll('table#list td a').forEach(function(a) {
                 const href = a.getAttribute('href') || '';
-                if (href && !href.endsWith('/') && !href.startsWith('?')) {
+                if (!href || href.startsWith('?')) return;
+                if (!href.endsWith('/')) {
                     a.setAttribute('download', '');
+                }
+                if (sessionToken) {
+                    a.setAttribute('href', href + '?token=' + encodeURIComponent(sessionToken));
                 }
             });
 
@@ -1120,18 +1176,91 @@ class CentralizedStreamServer:
         return web.Response(
             status=401,
             headers={
-                "WWW-Authenticate": 'Basic realm="Selkies Restricted", charset="UTF-8"'
+                "WWW-Authenticate": f'Basic realm="{AUTH_REALM}", charset="UTF-8"'
             },
             text=text,
         )
 
     @staticmethod
-    def _is_ws_origin_allowed(request: web.Request, settings: Any) -> bool:
-        """Return whether a WebSocket upgrade's Origin is permitted.
+    def _bearer_challenge(text: str = "Unauthorized") -> web.Response:
+        """A 401 for a route that wants a token.
 
-        Empty ``allowed_origins`` means same-origin only (plus non-browser
-        clients that send no Origin); ``*`` allows any; otherwise the Origin
-        must be listed or match the Host header.
+        Names the Bearer scheme so the web client's 401 guard leaves it alone: a
+        reload cannot change the token a page holds, whereas a Basic challenge
+        is exactly what a reload re-presents. Browsers show no prompt for it.
+        """
+        return web.Response(
+            status=401,
+            headers={"WWW-Authenticate": f'Bearer realm="{AUTH_REALM}"'},
+            text=text,
+        )
+
+    @staticmethod
+    def _session_token_carriers(request: web.Request) -> List[Tuple[str, str]]:
+        """The session-token carriers a request presents, most explicit first.
+
+        The Bearer header is what scripts send; the ``?token=`` query is what
+        URLs the client navigates to rather than fetches carry (the page itself,
+        the file-manager listing it opens); the cookie is the mirror the client
+        keeps for requests it can put neither on. The cookie value is tried as
+        sent and URL-decoded, since the client stores it encoded.
+
+        Returns:
+            ``(source, token)`` pairs, source being "header", "query" or "cookie".
+        """
+        carriers: List[Tuple[str, str]] = []
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            parts = auth_header.split()
+            if len(parts) >= 2:
+                carriers.append(("header", parts[1]))
+        query_token = request.query.get("token")
+        if query_token:
+            carriers.append(("query", query_token))
+        cookie = request.cookies.get(SESSION_TOKEN_COOKIE)
+        if cookie:
+            carriers.append(("cookie", cookie))
+            decoded = urllib.parse.unquote(cookie)
+            if decoded != cookie:
+                carriers.append(("cookie", decoded))
+        return carriers
+
+    def _session_token_verdict(
+        self, request: web.Request, settings: Any
+    ) -> Optional[Tuple[str, str]]:
+        """Authenticate an API request by token in secure mode.
+
+        The master token (Bearer) counts as a controller, as does a
+        controller-role session token; a viewer-role token is tagged so the
+        handlers that refuse view-only credentials refuse it too. Session
+        tokens are looked up in the same constant-time table lookup the
+        WebSocket handshakes use.
+
+        Returns:
+            ``(role_ceiling, source)`` for the first carrier holding a valid
+            token, or None when none does.
+        """
+        # Resolved per call: selkies imports this module, so the token table
+        # it owns cannot be imported at module load.
+        from .selkies import _lookup_session_token
+
+        if self._check_master_token(request.headers.get("Authorization"), settings.master_token):
+            return "controller", "header"
+        for source, token in self._session_token_carriers(request):
+            perms = _lookup_session_token(token)
+            if perms is not None:
+                role = "controller" if perms.get("role") == "controller" else "viewer"
+                return role, source
+        return None
+
+    @staticmethod
+    def _is_origin_allowed(request: web.Request, settings: Any) -> bool:
+        """Return whether a browser request's Origin is permitted.
+
+        Applied to WebSocket upgrades and to the mode-switch POST. Empty
+        ``allowed_origins`` means same-origin only (plus non-browser clients
+        that send no Origin); ``*`` allows any; otherwise the Origin must be
+        listed or match the Host header.
         """
         origin = request.headers.get("Origin")
         if not origin:
@@ -1178,26 +1307,35 @@ class CentralizedStreamServer:
 
         Layered gates, in order: cross-site WebSocket upgrades are rejected by
         Origin; health/liveness endpoints pass without credentials; the token
-        and mode-switch control endpoints accept the Bearer master token; and
+        and mode-switch control endpoints accept the Bearer master token (a
+        mode switch not so authenticated is held to the same Origin rule as
+        the upgrades, since a browser attaches cached Basic credentials to a
+        cross-site POST); in secure mode every other API route accepts a
+        session token (Bearer header, ``?token=`` query, or the client's
+        cookie), which is the only credential when Basic auth is off; and
         everything else falls through to Basic Auth when enabled. A request
-        that authenticates with the view-only password is tagged with
-        ``auth_role_ceiling = "viewer"`` for downstream handlers to enforce.
+        that authenticates with the view-only password or a viewer-role token
+        is tagged with ``auth_role_ceiling = "viewer"`` for downstream handlers
+        to enforce.
         """
         settings = request.app["settings"]
         auth_header = request.headers.get("Authorization")
         path = request.path
+        is_ws_upgrade = request.headers.get("Upgrade", "").lower() == "websocket"
+        # Match the exact route, not a suffix, so /foo/tokens isn't treated as control-plane.
+        api_prefix = settings.subfolder
+        is_ws_handshake = is_ws_upgrade and path.rstrip("/") in {
+            f"{api_prefix}{route}" for route in WEBSOCKET_ROUTES}
         # Reject cross-site WebSocket upgrades: a page from another origin can open our
         # WS even where CORS blocks reading XHR responses. Non-browser clients send no
         # Origin and pass.
-        if request.headers.get("Upgrade", "").lower() == "websocket":
-            if not self._is_ws_origin_allowed(request, settings):
+        if is_ws_upgrade:
+            if not self._is_origin_allowed(request, settings):
                 logger.warning(
                     "Rejected WebSocket upgrade from disallowed Origin: %r",
                     request.headers.get("Origin", ""),
                 )
                 return web.Response(status=403, text="Forbidden origin")
-        # Match the exact route, not a suffix, so /foo/tokens isn't treated as control-plane.
-        api_prefix = settings.subfolder
         # Health/liveness endpoints stay open so k8s/LB probes reach them without credentials.
         if path in (f"{api_prefix}/api/status", f"{api_prefix}/api/health"):
             return await handler(request)
@@ -1205,7 +1343,7 @@ class CentralizedStreamServer:
         # Gate /tokens on the master token whenever set, independent of streaming mode.
         if settings.master_token and token_path:
             if not self._check_master_token(auth_header, settings.master_token):
-                return web.Response(status=401, text="Unauthorized")
+                return self._bearer_challenge()
             return await handler(request)
 
         # /api/switch (when master_token set): accept a Bearer master token, else fall
@@ -1215,14 +1353,51 @@ class CentralizedStreamServer:
             if self._check_master_token(auth_header, settings.master_token):
                 return await handler(request)
             if not settings.enable_basic_auth[0]:
-                return web.Response(status=401, text="Unauthorized")
+                return self._bearer_challenge()
+        if is_control_path and not self._is_origin_allowed(request, settings):
+            # Without the Bearer token the switch rides the browser's cached
+            # Basic credentials (or an open server), which a page on another
+            # origin can POST with: a JSON body in a text/plain form needs no
+            # preflight. Same Origin rule as the upgrades; curl sends none.
+            logger.warning(
+                "Rejected mode switch from disallowed Origin: %r",
+                request.headers.get("Origin", ""),
+            )
+            return web.Response(status=403, text="Forbidden origin")
+
+        # Secure mode: the session token is the credential for the remaining
+        # API routes (uploads, the file listing and downloads, TURN, metrics,
+        # and the plain GETs the client probes the transport routes with), the
+        # way it is for the WebSocket handshakes, whose own handlers check it
+        # (a browser cannot attach headers to an upgrade). The static client
+        # stays public, since it is what presents the token. A request without
+        # a valid token is refused when Basic auth is off and falls through to
+        # the Basic check otherwise.
+        if (settings.master_token and not is_ws_handshake and not token_path
+                and not is_control_path and path.startswith(f"{api_prefix}/api/")):
+            verdict = self._session_token_verdict(request, settings)
+            if verdict is not None:
+                ceiling, source = verdict
+                # The cookie is attached by the browser, so a request that
+                # changes state on it is held to the same Origin rule as the
+                # mode switch on cached Basic credentials.
+                if (source == "cookie" and request.method not in ("GET", "HEAD")
+                        and not self._is_origin_allowed(request, settings)):
+                    logger.warning(
+                        "Rejected cookie-authenticated %s %s from disallowed Origin: %r",
+                        request.method, path, request.headers.get("Origin", ""),
+                    )
+                    return web.Response(status=403, text="Forbidden origin")
+                request["auth_role_ceiling"] = ceiling
+                return await handler(request)
+            if not settings.enable_basic_auth[0]:
+                return self._bearer_challenge()
 
         # Authentication flow for regular Selkies deployment
         if not settings.enable_basic_auth[0]:
             logger.debug("Basic auth not enabled, forwarding to routers")
             return await handler(request)
-        is_ws_upgrade = request.headers.get("Upgrade", "").lower() == "websocket"
-        if is_ws_upgrade and settings.master_token:
+        if is_ws_handshake and settings.master_token:
             # A browser cannot attach fresh Basic credentials to a WebSocket
             # handshake, and these paths carry their own token gate (enforced in
             # the ws handlers) whenever a master token is configured -- Basic
@@ -1394,7 +1569,8 @@ class CentralizedStreamServer:
     @staticmethod
     def _viewer_ceiling(request: web.Request) -> bool:
         """Return whether the credential that authenticated this request caps it
-        at the viewer role (the view-only basic-auth password).
+        at the viewer role (the view-only basic-auth password, or a viewer-role
+        session token in secure mode).
 
         The control-plane endpoints that change host or session state — the
         streaming-mode switch and file uploads — refuse those requests the way
@@ -1548,7 +1724,8 @@ class CentralizedStreamServer:
           UPLOAD_PART_TTL_SECONDS are expired on the next chunked request.
 
         Both shapes carry the mode of the file they replace onto the replacement
-        and are refused for view-only credentials.
+        and are refused for view-only credentials (the view-only password, a
+        viewer-role session token).
         """
         if self._viewer_ceiling(request):
             return web.json_response(
@@ -2081,7 +2258,7 @@ class CentralizedStreamServer:
                 logger.error("Failed to create SSL context at startup: %s", exc)
                 raise
 
-        self.runner = web.AppRunner(self.app)
+        self.runner = web.AppRunner(self.app, access_log_class=PathOnlyAccessLogger)
         await self.runner.setup()
 
         try:

@@ -56,6 +56,96 @@ def set_range_slider(page, idx: int, value) -> None:
     }""", [idx, value])
 
 
+def wish_open_menu_item(page, label: str) -> bool:
+    """Open the Wish menubar menu that carries `label` and click that item.
+
+    The top menu is several Radix menubars; each is opened in turn until one
+    renders a menu item with the label (a submenu trigger counts).
+
+    Returns:
+        True when the item was found and clicked.
+    """
+    triggers = page.locator('[role="menubar"] button')
+    for i in range(triggers.count()):
+        try:
+            triggers.nth(i).click()
+            time.sleep(0.5)
+            item = page.locator(f'[role="menu"] [role="menuitem"]:has-text("{label}")').first
+            if item.count():
+                item.click()
+                time.sleep(0.8)
+                return True
+            page.keyboard.press("Escape")
+            time.sleep(0.2)
+        except Exception:
+            pass
+    return False
+
+
+def wish_clipboard_seed_check(page, res: "H.Results") -> None:
+    """A server clipboard change that arrives while the Wish Clipboard panel
+    is closed must show in the textarea when the panel is opened: the panel
+    mounts lazily, so it seeds from the last clipboardContentUpdate."""
+    push = f"e2e-wish-clip-{int(time.time())}"
+    _, stop = H.x_own_clipboard(push.encode())
+    got = []
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        got = page.evaluate("window.__clipMsgs.map(m => m.text)")
+        if push in got:
+            break
+        page.wait_for_timeout(500)
+    stop["flag"] = True
+    res.check("clipboard event reached the page while the panel was closed",
+              push in got, repr(got)[-120:])
+    opened = wish_open_menu_item(page, "Clipboard")
+    shown = ""
+    if opened:
+        try:
+            area = page.locator('#dashboardClipboardTextarea')
+            area.wait_for(state="visible", timeout=4000)
+            shown = area.input_value()
+        except Exception as e:
+            shown = f"<no textarea: {e}>"
+    res.check("clipboard panel opens with the text that arrived while closed",
+              opened and shown == push, shown[:80])
+    page.keyboard.press("Escape")
+    time.sleep(0.3)
+
+
+def classic_viewer_check(page, res: "H.Results") -> None:
+    """A client demoted to viewer by the server gets no classic sidebar: an
+    open sidebar folds, the handle goes, and Ctrl+Shift+M (the core's own
+    chord, and the toggleDashboard message it posts) opens nothing."""
+    is_open = "!!document.querySelector('.sidebar.is-open')"
+    # Positive control: the chord opens and closes the sidebar for a controller.
+    page.mouse.click(700, 450)
+    time.sleep(0.3)
+    page.keyboard.press("Control+Shift+M")
+    time.sleep(0.8)
+    chord_opens = page.evaluate(is_open)
+    res.check("Ctrl+Shift+M opens the sidebar for a controller", chord_opens, chord_opens)
+    # Demotion with the sidebar open (via the handle when the chord did not).
+    if not chord_opens:
+        try:
+            page.locator('.toggle-handle').first.click()
+            time.sleep(0.6)
+        except Exception:
+            pass
+    page.evaluate("window.postMessage({type: 'clientRoleUpdate', role: 'viewer'}, window.location.origin)")
+    time.sleep(0.6)
+    folded = not page.evaluate(is_open)
+    handle = page.locator('.toggle-handle').count()
+    res.check("viewer demotion folds the sidebar and removes the handle",
+              folded and handle == 0, f"open={not folded} handle={handle}")
+    page.keyboard.press("Control+Shift+M")
+    time.sleep(0.6)
+    page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+    time.sleep(0.6)
+    reopened = page.evaluate(is_open)
+    res.check("Ctrl+Shift+M does not open the sidebar for a viewer", not reopened, reopened)
+
+
 def dash_block(dashboard: str, dist: str) -> "H.Results":
     """Exercise one dashboard's settings loop and mode-switch round trip.
 
@@ -74,6 +164,14 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         ctx = browser.new_context(viewport={"width": 1440, "height": 900},
                                   device_scale_factor=1)
         ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+        # Records the core's clipboard postMessages so a check can tell that a
+        # server push arrived before a panel was opened.
+        ctx.add_init_script("""
+          window.__clipMsgs = [];
+          window.addEventListener('message', (e) => {
+            if (e.data && e.data.type === 'clipboardContentUpdate') window.__clipMsgs.push(e.data);
+          });
+        """)
         try:
             ctx.grant_permissions(["clipboard-read", "clipboard-write"], origin=H.BASE_URL)
         except Exception:
@@ -94,6 +192,17 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
                   chrome)
         info = wait_canvas(page)
         res.check("video streams", info is not None, info)
+
+        # Positive control for the gates block: with ui_sidebar_show_gamepads
+        # on (default), the gamepads section (classic) / card (Wish) exists.
+        if dashboard == "classic":
+            section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
+        else:
+            section = page.locator('text=/^Gamepad \\d+$/').count() > 0
+        res.check("gamepads section shown by default", section, section)
+
+        if dashboard == "wish":
+            wish_clipboard_seed_check(page, res)
 
         # A UI-driven framerate change must apply server-side.
         st = len(H.server_log())
@@ -192,6 +301,10 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         page3.goto(H.BASE_URL, wait_until="load")
         info3 = wait_canvas(page3)
         res.check("video flows back in websockets", info3 is not None, info3)
+        # On the fresh page (its input context is attached, so the chord is
+        # live); the demotion leaves it without a sidebar, so it goes last.
+        if dashboard == "classic":
+            classic_viewer_check(page3, res)
         page3.close()
 
         real_errors = [e for e in console_errors if not any(
@@ -206,7 +319,9 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
 
 def gates_block(dashboard: str, dist: str) -> "H.Results":
     """ui_sidebar_show_shortcuts=false and ui_sidebar_show_webcam=false must
-    hide the shortcuts UI and the webcam toggle on BOTH dashboards."""
+    hide the shortcuts UI and the webcam toggle on BOTH dashboards;
+    ui_sidebar_show_gamepads=false hides the gamepads section (the visualizer
+    card in Wish) and nothing else, so the gamepad input toggle stays."""
     res = H.Results(f"gates-{dashboard}")
     H.server_start(mode="websockets", wayland=False, web_root=dist,
                    extra_env={
@@ -229,6 +344,7 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
                    extra_env={
                        "SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false",
                        "SELKIES_UI_SIDEBAR_SHOW_WEBCAM": "false",
+                       "SELKIES_UI_SIDEBAR_SHOW_GAMEPADS": "false",
                    })
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
@@ -253,20 +369,33 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
                 time.sleep(0.8)
             except Exception:
                 pass
-            mic, cam = page.evaluate("""(() => [
+            mic, cam, pad = page.evaluate("""(() => [
               !!document.querySelector('button[title$="Microphone"]'),
-              !!document.querySelector('button[title$="Webcam"]')])()""")
+              !!document.querySelector('button[title$="Webcam"]'),
+              !!document.querySelector('button[title$="Gamepad Input"]')])()""")
+            section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
         else:
-            try:
-                page.locator('[role="menubar"] button').first.click()
-                time.sleep(0.8)
-            except Exception:
-                pass
-            menu = page.evaluate("""(() => [...document.querySelectorAll('[role="menu"]')]
-              .map(m => m.innerText).join('\\n'))()""")
-            mic, cam = "Microphone" in menu, "Webcam" in menu
+            # The stream controls live in one of several menubar menus; open each
+            # in turn and collect what they render.
+            menu = ""
+            triggers = page.locator('[role="menubar"] button')
+            for i in range(triggers.count()):
+                try:
+                    triggers.nth(i).click()
+                    time.sleep(0.6)
+                    menu += page.evaluate("""(() => [...document.querySelectorAll('[role="menu"]')]
+                      .map(m => m.innerText).join('\\n'))()""") + "\n"
+                    page.keyboard.press("Escape")
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+            mic, cam, pad = "Microphone" in menu, "Webcam" in menu, "Gamepad Input" in menu
+            # The card renders a titled visualizer ("Gamepad 0") when shown.
+            section = page.locator('text=/^Gamepad \\d+$/').count() > 0
         res.check("core buttons reachable (microphone toggle present)", mic, mic)
         res.check("ui_sidebar_show_webcam=false hides webcam toggle", not cam, cam)
+        res.check("ui_sidebar_show_gamepads=false keeps the gamepad input toggle", pad, pad)
+        res.check("ui_sidebar_show_gamepads=false hides the gamepads section", not section, section)
         browser.close()
     res.summary()
     return res

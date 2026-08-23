@@ -19,8 +19,10 @@ addons/selkies-dashboard/src/universalTouchGamepad.js
 # Built by tests/tools/Makefile
 tests/tools/*.so
 tests/tools/uinput_abi_truth
+tests/tools/v4l2probe
 tests/tools/gamepad/jsread
 tests/tools/gamepad/sdlenum
+tests/tools/gamepad/sdlread
 tests/tools/gamepad/udevscan
 
 # Written by pytest --junitxml

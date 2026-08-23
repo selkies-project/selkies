@@ -5,10 +5,15 @@
  */
 
 // src/components/PlayerGamepadButton.jsx
-import React from "react"; 
+import React from "react";
+import { getTranslator } from "../translations";
 
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
 const DRAG_THRESHOLD = 10;
+
+// Browser language is fixed for the life of the document (same policy as the
+// sidebar), so the translator is resolved once.
+const { t } = getTranslator(typeof navigator !== "undefined" ? navigator.language : "en");
 
 const GamepadIcon = () => (
     <svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28">
@@ -102,6 +107,12 @@ function PlayerGamepadButton() {
         handleToggleTouchGamepad();
     };
 
+    // Same wording as the sidebar's touch-gamepad button: the title names the
+    // action the click performs.
+    const title = t(isTouchGamepadActive
+        ? "sections.gamepads.touchDisableTitle"
+        : "sections.gamepads.touchEnableTitle");
+
     return (
         <button
             className={`player-gamepad-button ${isTouchGamepadActive ? "active" : ""}`}
@@ -129,8 +140,8 @@ function PlayerGamepadButton() {
                 boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
                 transition: 'background-color 0.2s ease-in-out',
             }}
-            title="Toggle Touch Gamepad"
-            aria-label="Toggle Touch Gamepad"
+            title={title}
+            aria-label={title}
         >
             <GamepadIcon />
         </button>

@@ -11,9 +11,11 @@ apt-get clean && apt-get update
 # python3-dev and build-essential: dependencies without a wheel for this
 # distribution's Python are compiled from their sdist. libxkbcommon0 is loaded
 # with ctypes at runtime and lets mkvenv.sh's smoke test exercise that path
+# libpipewire-0.3-dev gives the V4L2 interposer its PipeWire frame source
+# (headers only; the library is loaded at runtime when an application uses it)
 apt-get install --no-install-recommends -y \
     python3 python3-venv python3-pip python3-dev \
-    libxkbcommon0 pkg-config \
+    libxkbcommon0 pkg-config libpipewire-0.3-dev \
     ruby ruby-dev build-essential ca-certificates
 # gcc-multilib builds the interposer's 32-bit variant, which the Wine and Steam
 # catalog loads through `/usr/$LIB`

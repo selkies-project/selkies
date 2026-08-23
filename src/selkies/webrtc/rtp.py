@@ -38,8 +38,6 @@ from dataclasses import dataclass, field
 from struct import pack, unpack, unpack_from
 from typing import Any, Optional, Union
 
-from av import AudioFrame
-
 from .rtcrtpparameters import RTCRtpParameters
 
 # used for NACK and retransmission
@@ -394,7 +392,7 @@ def pack_header_extensions(extensions: list[tuple[int, bytes]]) -> tuple[int, by
     return extension_profile, extension_value
 
 
-def compute_audio_level_dbov(frame: AudioFrame) -> int:
+def compute_audio_level_dbov(frame: Any) -> int:
     """
     Compute the energy level as spelled out in RFC 6465, Appendix A.
     """

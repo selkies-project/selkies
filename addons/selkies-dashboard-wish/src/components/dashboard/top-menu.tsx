@@ -43,14 +43,14 @@ import {
 } from "lucide-react";
 
 import { Clipboard } from "@/components/dashboard/clipboard";
-import { Files } from "@/components/dashboard/files";
+import { Files, FilesDialog } from "@/components/dashboard/files";
 import { Apps } from "@/components/dashboard/apps";
 import { Settings } from "@/components/dashboard/settings";
 import { SystemMonitoring } from "@/components/dashboard/system-monitoring";
 import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
-import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, isSecondaryDisplay } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, isMobileClient, isSecondaryDisplay } from "@/utils";
 import { t } from "@/i18n";
 
 interface TopMenuProps {
@@ -85,6 +85,7 @@ export function TopMenu({
 
   const [activePanel, setActivePanel] = React.useState<string | null>(null);
   const [showAppsModal, setShowAppsModal] = React.useState(false);
+  const [showFilesModal, setShowFilesModal] = React.useState(false);
   const [showDropdown, setShowDropdown] = React.useState(false);
   const [showSystemMonitoring, setShowSystemMonitoring] = React.useState(false);
   const [isDragging, setIsDragging] = React.useState(false);
@@ -103,11 +104,11 @@ export function TopMenu({
   // --- Server Settings & UI Customization ---
   const [serverSettings, setServerSettings] = React.useState<any>(() => getLastServerSettings());
   const [renderableSettings, setRenderableSettings] = React.useState<any>(() => computeRenderableSettings(getLastServerSettings()));
-  const [uiTitle, setUiTitle] = React.useState('Selkies');
-  const [uiShowLogo, setUiShowLogo] = React.useState(true);
+  const uiTitle: string = serverSettings?.ui_title?.value ?? 'Selkies';
+  const uiShowLogo: boolean = serverSettings?.ui_show_logo?.value ?? true;
 
   // --- Mobile/Touch Detection ---
-  const [isMobile, setIsMobile] = React.useState(false);
+  const isMobile = isMobileClient;
   const [hasDetectedTouch, setHasDetectedTouch] = React.useState(false);
   const [isTrackpadModeActive, setIsTrackpadModeActive] = React.useState(false);
 
@@ -115,7 +116,6 @@ export function TopMenu({
   const [availablePlacements, setAvailablePlacements] = React.useState<any>(null);
 
   // --- Keyboard Assistance ---
-  const [isKeyboardButtonVisible, setIsKeyboardButtonVisible] = React.useState(true);
   const [heldKeys, setHeldKeys] = React.useState({
     Control: false,
     Alt: false,
@@ -173,32 +173,6 @@ export function TopMenu({
     };
     document.addEventListener("fullscreenchange", foldOnFullscreen);
     return () => document.removeEventListener("fullscreenchange", foldOnFullscreen);
-  }, []);
-
-  // --- Update UI Title and Logo from Server Settings ---
-  React.useEffect(() => {
-    if (!serverSettings) return;
-
-    const s_ui_title = serverSettings.ui_title;
-    if (s_ui_title) {
-      setUiTitle(s_ui_title.value);
-    }
-
-    const s_ui_show_logo = serverSettings.ui_show_logo;
-    if (s_ui_show_logo) {
-      setUiShowLogo(s_ui_show_logo.value);
-    }
-  }, [serverSettings]);
-
-  // --- Mobile Detection ---
-  React.useEffect(() => {
-    const mobileCheck =
-      typeof window !== "undefined" &&
-      (((navigator as any).userAgentData && (navigator as any).userAgentData.mobile) ||
-        /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-          navigator.userAgent
-        ));
-    setIsMobile(!!mobileCheck);
   }, []);
 
   // --- Touch Detection ---
@@ -530,10 +504,6 @@ export function TopMenu({
     }, 50);
   };
 
-  const toggleKeyboardButtonVisibility = () => {
-    setIsKeyboardButtonVisible(prev => !prev);
-  };
-
   const renderPanel = () => {
     switch (activePanel) {
       case 'settings':
@@ -738,7 +708,7 @@ export function TopMenu({
                       {t('sections.files.title')}
                     </MenubarSubTrigger>
                     <MenubarSubContent>
-                      <Files />
+                      <Files onOpenDownloads={() => setShowFilesModal(true)} />
                     </MenubarSubContent>
                   </MenubarSub>
                 )}
@@ -750,7 +720,7 @@ export function TopMenu({
                       {t('sections.sharing.title')}
                     </MenubarSubTrigger>
                     <MenubarSubContent>
-                      <Sharing show={true} onClose={() => { }} />
+                      <Sharing show={true} />
                     </MenubarSubContent>
                   </MenubarSub>
                 )}
@@ -1046,7 +1016,7 @@ export function TopMenu({
           >
             ESC
           </Button>
-          {isKeyboardButtonVisible && (renderableSettings.keyboardButton ?? true) && (
+          {(renderableSettings.keyboardButton ?? true) && (
             <Button
               variant="secondary"
               size="sm"
@@ -1114,6 +1084,13 @@ export function TopMenu({
       {/* Apps Modal - Separate from panels */}
       {showAppsModal && (
         <Apps isOpen={showAppsModal} onClose={() => setShowAppsModal(false)} />
+      )}
+
+      {/* Files dialog, beside the menubar like the Apps modal: a click in its
+          iframe blurs the window, which closes every menu, so it cannot live
+          inside the Files submenu. */}
+      {showFilesModal && (
+        <FilesDialog open={showFilesModal} onOpenChange={setShowFilesModal} />
       )}
     </>
   );

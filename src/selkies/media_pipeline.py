@@ -43,13 +43,13 @@ instead of the import failing.
 
 import asyncio
 import logging
-import re
 import time
 from enum import Enum
 from abc import ABCMeta, abstractmethod
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from .settings import settings as app_settings
+from .audio_control import AudioControl
 from .display_utils import apply_common_capture_settings, format_pixelflux_cursor
 
 # C-API (non-abi3) wheels: a missing/ABI-skewed build raises ImportError or
@@ -171,8 +171,9 @@ class MediaPipelinePixel(MediaPipeline):
         self.rc_mode = rc_mode
         self.video_crf = crf
         self.video_fullcolor = video_fullcolor
-        # Force software x264 for h264enc (openh264enc is always software). WS
-        # honors this too; a change is structural, so it restarts capture.
+        # Force the software H.264 encoder (x264, or OpenH264 in a GPL-free
+        # pixelflux build). WS honors this too; a change is structural, so it
+        # restarts capture.
         self.use_cpu = use_cpu
         # Turbo (stream every frame vs damage-gated) and the paint-over quality knobs —
         # the same pixelflux tunables the WS path exposes. Streaming mode and paint-over
@@ -227,6 +228,13 @@ class MediaPipelinePixel(MediaPipeline):
         self._audio_last_pts = -1
         self._audio_frame_samples = 480
         self._audio_routing_task: Optional[asyncio.Task] = None
+        # Sound-server control connection (sink provisioning, device
+        # resolution, pcmflux routing); opened on the first audio start and
+        # closed with the capture.
+        self._audio_control: Optional[AudioControl] = None
+        # Monotonic time of the last audio-recovery restart; floors the retry
+        # rate when a device keeps failing (recover_audio_if_failed).
+        self._audio_recover_last_attempt = 0.0
 
     async def set_pointer_visible(self, visible: bool) -> None:
         """Toggle pixelflux cursor capture.
@@ -295,7 +303,7 @@ class MediaPipelinePixel(MediaPipeline):
         if not self._is_screen_capturing or self.capture_module is None:
             return
         try:
-            # Live retarget: NVENC/x264/VAAPI re-read the CRF per frame; no restart.
+            # Live retarget: every encoder re-reads the CRF per frame; no restart.
             self.capture_module.update_tunables(self.generate_capture_settings())
             logger.info(f"Updated CRF live: {old_crf} -> {crf}")
         except Exception as e:
@@ -305,7 +313,8 @@ class MediaPipelinePixel(MediaPipeline):
             logger.info(f"Error updating CRF {e}", exc_info=True)
 
     async def set_use_cpu(self, use_cpu: bool) -> None:
-        """Switch h264enc between software x264 and hardware encoding.
+        """Switch h264enc between software (the pixelflux build's encoder) and
+        hardware encoding.
 
         Unlike CRF/bitrate this is structural (a different encoder instance), so
         it restarts the capture instead of going through the live update path.
@@ -340,8 +349,9 @@ class MediaPipelinePixel(MediaPipeline):
         await self.restart_screen_capture()
 
     async def set_encoder(self, encoder: str) -> None:
-        """Switch the WebRTC video encoder (h264enc or openh264enc). Structural (a
-        different encoder instance), so restart capture — same as use_cpu (WS parity)."""
+        """Switch the WebRTC video encoder (h264enc is the only one it can
+        stream). Structural (a different encoder instance), so restart capture —
+        same as use_cpu (WS parity)."""
         if self.encoder == encoder:
             return
         self.encoder = encoder
@@ -518,7 +528,7 @@ class MediaPipelinePixel(MediaPipeline):
             hdr = 0 if self._omit_stripe_headers else 10
             if len(frame) > hdr:
                 # frame owns its native buffer; pass a zero-copy memoryview (sliced
-                # past the header) downstream. consume_data wraps it in av.Packet(buf)
+                # past the header) downstream. consume_data wraps it in EncodedPacket
                 # (zero-copy) and keeps a reference so `frame` stays alive.
                 data_bytes = memoryview(frame)[hdr:]
                 # pts (90 kHz) comes from a pipeline-scoped monotonic clock,
@@ -701,9 +711,13 @@ class MediaPipelinePixel(MediaPipeline):
             )
             return
 
-        # Imported here because selkies reaches this module through input_handler.
-        from .selkies import ensure_capture_sink
-        await ensure_capture_sink(self.audio_device_name)
+        # The capture sink first, the device check second (websockets order):
+        # a PipeWire that comes up with no sink has no output.monitor to
+        # validate against yet, and the check would rewrite the device name to
+        # auto_null.monitor for good — a source the first mic enable retires.
+        control = self._get_audio_control()
+        await control.ensure_capture_sink(self.audio_device_name)
+        await self._ensure_audio_device()
         logger.info("Starting pcmflux audio pipeline...")
         try:
             capture_settings = AudioCaptureSettings()
@@ -743,7 +757,7 @@ class MediaPipelinePixel(MediaPipeline):
                 """Deliver one Opus frame; runs on the pcmflux capture thread."""
                 try:
                     if len(frame) > 0:
-                        # zero-copy view; consume_data wraps it in av.Packet(buf) (zero-copy)
+                        # zero-copy view; consume_data wraps it in EncodedPacket (zero-copy)
                         # and keeps a reference so `frame` stays alive.
                         data_bytes = memoryview(frame)
                         # Map the per-capture sample clock onto a continuous one:
@@ -778,6 +792,7 @@ class MediaPipelinePixel(MediaPipeline):
                 audio_capture_callback,
             )
             self._is_pcmflux_capturing = True
+            self._audio_recover_last_attempt = 0.0
             # Keep a reference: an unreferenced task can be garbage-collected
             # mid-flight, and a routing failure should be visible in the log.
             self._audio_routing_task = asyncio.create_task(self._enforce_audio_routing())
@@ -785,57 +800,22 @@ class MediaPipelinePixel(MediaPipeline):
                 lambda t: (not t.cancelled() and t.exception() is not None)
                 and logger.error(f"Audio routing task failed: {t.exception()}")
             )
-            logger.info("pcmflux audio capture started successfully.")
+            # start_capture returns Ok while the worker is still bringing the
+            # device up ("starting"), so this reports what pcmflux actually
+            # reached; a device that dies during bring-up surfaces through
+            # last_error on the next health poll (recover_audio_if_failed).
+            state = getattr(self.pcmflux_module, "state", "running")
+            logger.info(f"pcmflux audio capture started (state: {state}).")
         except Exception as e:
             logger.error(f"Failed to start pcmflux audio pipeline: {e}", exc_info=True)
             await self._stop_audio_pipeline()
             return
 
-    async def _pactl(self, *args: str) -> str:
-        """Run pactl and return its stdout (empty string on failure).
-
-        The PA control plane is driven via subprocess on this path: the
-        in-process asyncio PA bindings can run a native event callback against
-        freed state under load (observed SIGSEGV in the loop during peer
-        churn), and these are rare one-shot ops.
-        """
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "pactl", *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                out, err = await asyncio.wait_for(proc.communicate(), timeout=5)
-            except asyncio.TimeoutError:
-                # Reap the timed-out process instead of orphaning it: a pactl
-                # blocked on a stuck PA server would otherwise leak per call.
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                await proc.wait()
-                logger.warning(f"pactl {' '.join(args)} timed out after 5s; killed.")
-                return ""
-            if proc.returncode != 0:
-                logger.warning(
-                    f"pactl {' '.join(args)} failed: {err.decode(errors='replace').strip()}"
-                )
-                return ""
-            return out.decode(errors="replace")
-        except Exception as e:
-            logger.warning(f"pactl {' '.join(args)} failed: {e}")
-            return ""
-
-    async def _list_sources(self) -> Dict[str, str]:
-        """`{name: index}` of current sources via `pactl list short sources`."""
-        sources = {}
-        for line in (await self._pactl("list", "short", "sources")).splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                sources[parts[1]] = parts[0]
-        return sources
+    def _get_audio_control(self) -> AudioControl:
+        """The sound-server control client, created on the pipeline's loop."""
+        if self._audio_control is None:
+            self._audio_control = AudioControl("selkies-webrtc-audio")
+        return self._audio_control
 
     async def _enforce_audio_routing(self) -> None:
         """Move the pcmflux stream onto the configured source if PipeWire strayed.
@@ -847,37 +827,7 @@ class MediaPipelinePixel(MediaPipeline):
         # Give pcmflux a fraction of a second to initialize its PA stream.
         await asyncio.sleep(0.5)
         try:
-            sources = await self._list_sources()
-            correct_index = sources.get(self.audio_device_name)
-            if correct_index is None:
-                logger.warning(
-                    f"Routing enforcement: Target source '{self.audio_device_name}' not found."
-                )
-                return
-
-            blob = await self._pactl("list", "source-outputs")
-            for block in blob.split("Source Output #")[1:]:
-                index = block.split("\n", 1)[0].strip()
-                app = re.search(r'application\.name = "([^"]*)"', block)
-                if not app or app.group(1) != "pcmflux":
-                    continue
-                current = re.search(r"^\s*Source:\s*(\d+)", block, re.M)
-                if current and current.group(1) == correct_index:
-                    logger.info(
-                        f"WebRTC pcmflux correctly connected to '{self.audio_device_name}'"
-                    )
-                else:
-                    logger.warning(
-                        f"WebRTC pcmflux connected to the wrong source, moving to "
-                        f"'{self.audio_device_name}'"
-                    )
-                    await self._pactl(
-                        "move-source-output", index, self.audio_device_name
-                    )
-                    logger.info(
-                        f"Requested move of WebRTC pcmflux to '{self.audio_device_name}'"
-                    )
-                break
+            await self._get_audio_control().route_pcmflux([self.audio_device_name])
         except Exception as e:
             logger.error(f"Error enforcing WebRTC audio routing: {e}")
 
@@ -885,56 +835,20 @@ class MediaPipelinePixel(MediaPipeline):
         """Verify audio_device_name is a valid source, else fall back to the
         default sink's monitor (or PipeWire's `auto_null.monitor`)."""
         try:
-            default_sink_name = (await self._pactl("get-default-sink")).strip()
-            default_monitor_name = None
-            if default_sink_name:
-                logger.info(
-                    f"Default sink from PulseAudio/PipeWire: '{default_sink_name}'"
-                )
-                default_monitor_name = f"{default_sink_name}.monitor"
-            else:
-                logger.warning("Could not determine default sink.")
-
-            available_sources = set(await self._list_sources())
-            if not available_sources:
-                logger.error("Failed to enumerate audio sources.")
-                return
-
-            if self.audio_device_name and self.audio_device_name in available_sources:
-                logger.info(
-                    f"Configured audio device '{self.audio_device_name}' is valid."
-                )
-            else:
-                if self.audio_device_name:
-                    logger.warning(
-                        f"Configured audio device '{self.audio_device_name}' not found "
-                        f"in available sources."
-                    )
-                # Fallback to default sink's monitor if available
-                if default_monitor_name and default_monitor_name in available_sources:
-                    logger.info(
-                        f"Falling back to default sink monitor: '{default_monitor_name}'"
-                    )
-                    self.audio_device_name = default_monitor_name
-                elif "auto_null.monitor" in available_sources:
-                    logger.info(
-                        "Default sink monitor not available; falling back to 'auto_null.monitor'"
-                    )
-                    self.audio_device_name = "auto_null.monitor"
-                else:
-                    logger.error(
-                        "No valid audio source found. Audio capture will likely fail. "
-                        f"Available sources: {sorted(available_sources)}"
-                    )
+            resolved = await self._get_audio_control().resolve_capture_source(
+                self.audio_device_name
+            )
+            if resolved:
+                self.audio_device_name = resolved
         except Exception as e:
             logger.error(f"Error validating the audio device: {e}")
 
     async def _stop_audio_pipeline(self) -> None:
-        """Cancel routing enforcement and stop the pcmflux capture.
+        """Cancel routing enforcement, release the sound-server control
+        connection, and stop the pcmflux capture.
 
         Routing enforcement belongs to the capture session that armed it: a
-        stop inside its start-up delay must not pactl-move a stream that is
-        gone, and a pending subprocess must not outlive the loop.
+        stop inside its start-up delay must not move a stream that is gone.
         """
         task = self._audio_routing_task
         self._audio_routing_task = None
@@ -943,6 +857,8 @@ class MediaPipelinePixel(MediaPipeline):
             # return_exceptions: the task's own cancellation is the expected
             # outcome; only a cancel of this coroutine propagates.
             await asyncio.gather(task, return_exceptions=True)
+        if self._audio_control is not None:
+            await self._audio_control.aclose()
         if not self._is_pcmflux_capturing or not self.pcmflux_module:
             return
 
@@ -959,6 +875,42 @@ class MediaPipelinePixel(MediaPipeline):
             logger.info("pcmflux audio pipeline stopped.")
         return
 
+    async def recover_audio_if_failed(self) -> bool:
+        """Restart the audio capture if its worker has died, else no-op.
+
+        pcmflux reports the start handshake as Ok while the worker is still
+        "starting", so a device that fails right after start surfaces only
+        later, as ``last_error`` on the capture object. This is polled where
+        pipeline health is already evaluated and cycles the audio capture
+        through the normal stop/start path; the video pipeline is untouched.
+        A short floor between attempts keeps a permanently broken device from
+        restarting every tick.
+
+        Returns:
+            True when a restart was attempted.
+        """
+        if not self.audio_enabled or not self._is_pcmflux_capturing:
+            return False
+        module = self.pcmflux_module
+        if module is None:
+            return False
+        err = getattr(module, "last_error", None)
+        if not err:
+            return False
+        now = time.monotonic()
+        if now - self._audio_recover_last_attempt < 5.0:
+            return False
+        self._audio_recover_last_attempt = now
+        async with self.async_lock:
+            # Re-check under the lock: a concurrent restart may already have
+            # replaced the module, or the pipeline may have stopped.
+            if self.pcmflux_module is not module or not self._running:
+                return False
+            logger.warning(f"pcmflux audio worker failed ({err}); restarting audio capture.")
+            await self._stop_audio_pipeline()
+            await self._start_audio_pipeline()
+        return True
+
     async def start_media_pipeline(self) -> None:
         """Start video (and, when enabled, audio) capture and mark the pipeline
         running; a start failure tears both back down and stays stopped."""
@@ -971,7 +923,6 @@ class MediaPipelinePixel(MediaPipeline):
                 await self.start_screen_capture()
 
                 if self.audio_enabled:
-                    await self._ensure_audio_device()
                     await self._start_audio_pipeline()
                 else:
                     logger.info(
@@ -1016,3 +967,9 @@ class MediaPipelinePixel(MediaPipeline):
 
     def is_media_pipeline_running(self) -> bool:
         return self._running
+
+    def is_screen_capturing(self) -> bool:
+        """True once the screen capture runs, which precedes `_running` (the
+        audio half of the pipeline may still be starting); settings that must
+        reach a live capture key on this, not on the whole pipeline."""
+        return self._is_screen_capturing

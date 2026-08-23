@@ -5,7 +5,7 @@
  */
 
 import { Card, CardContent } from "@/components/ui/card";
-import { displayLabel } from "../../../../selkies-web-core/lib/util.js";
+import { displayLabel, decodableEncoders } from "../../../../selkies-web-core/lib/util.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
@@ -21,8 +21,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { ChevronUp } from "lucide-react";
-import React, { useState, useEffect, useCallback } from "react";
-import { getPrefixedKey, getRoutePrefix, computeRenderableSettings, getLastServerSettings, isSecondaryDisplay } from "@/utils";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { getPrefixedKey, getRoutePrefix, computeRenderableSettings, getLastServerSettings,
+    getLastEffectiveCursorState, getLastAudioDevices, isSecondaryDisplay } from "@/utils";
 import { t, tl } from "@/i18n";
 
 // Constants
@@ -72,7 +73,6 @@ const commonResolutionValues = [
 
 const encoderOptions = [
     "h264enc",
-    "openh264enc",
     "h264enc-striped",
     "jpeg",
 ];
@@ -82,11 +82,10 @@ const encoderOptions = [
 // pipeline produces.
 const encoderOptionsRTC = [
     "h264enc",
-    "openh264enc",
 ];
 
 // Every H.264 encoder supports both CBR and CRF (constant-QP) rate control.
-const H264_ENCODERS = ["h264enc", "h264enc-striped", "openh264enc", "nvh264enc"];
+const H264_ENCODERS = ["h264enc", "h264enc-striped", "nvh264enc"];
 
 const FRAMERATE_STEPS = [8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144, 165, 240];
 
@@ -123,7 +122,9 @@ const readExplicitStored = (spec: any) => (key: string) => (
 function useConditionalSetting(spec: any, serverSettings: any, ctx: any, deps: any[], read: any = readStored) {
     const compute = () => resolveSpec(spec, serverSettings, ctx, read);
     const [value, setValue] = useState(compute);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Re-resolving writes state rather than deriving during render because the
+    // caller edits this value afterwards; deriving would discard their choice.
+    // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
     useEffect(() => { setValue(compute()); }, deps);
     return [value, setValue] as const;
 }
@@ -146,20 +147,20 @@ const roundDownToEven = (num: number) => {
     return Math.floor(n / 2) * 2;
 };
 
-// Debounce function
-function debounce(func: (...args: any[]) => void, delay: number) {
-    let timeoutId: ReturnType<typeof setTimeout>;
-    return function (this: unknown, ...args: any[]) {
-        const context = this;
+// Trailing-edge debounce: the last call within `delay` wins.
+function debounce<A extends unknown[]>(func: (...args: A) => void, delay: number) {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    return (...args: A) => {
         clearTimeout(timeoutId);
-        timeoutId = setTimeout(() => {
-            func.apply(context, args);
-        }, delay);
+        timeoutId = setTimeout(() => func(...args), delay);
     };
 }
 
-interface SettingsProps {
-    scale?: number;
+// Cross-script flag the cores read around a transport switch (the old peer's
+// teardown must not surface a "Server disconnected" alert). Kept outside the
+// component: it is a signal to the runtime core, not component state.
+function setModeSwitching(active: boolean) {
+    window.__selkiesModeSwitching = active;
 }
 
 export function Settings() {
@@ -177,8 +178,12 @@ export function Settings() {
     });
     const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
 
+    // On the WebSocket transport only encoders this engine can decode are
+    // offered (jpeg alone without WebCodecs).
+    const offeredEncoders = useCallback(
+        (list: string[]): string[] => (isWebrtc ? list : decodableEncoders(list)), [isWebrtc]);
     const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState(
-        isWebrtc ? encoderOptionsRTC : encoderOptions
+        offeredEncoders(isWebrtc ? encoderOptionsRTC : encoderOptions)
     );
 
     // Screen Settings State (localStorage keys mirror the streaming core's)
@@ -227,12 +232,43 @@ export function Settings() {
         // One knob for both transports: an out-of-set stored value is ignored
         // by the server's own fallback, and the serverSettings sync re-seats it.
         activeEncoder: readStored("encoder") || encoder,
+        // The server's software H.264 encoder and whether software encoding is
+        // in effect (client choice, else the server's), for the rate-control default.
+        softwareH264Encoder: serverSettings?.software_h264_encoder?.value,
+        useCpu: readStored("use_cpu") !== null
+            ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
         allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
     };
+    // --- Debounced Settings Handler ---
+    const DEBOUNCE_DELAY = 500;
+    const debouncedPostSetting = useMemo(() => debounce((setting: any) => {
+        window.postMessage(
+            { type: "settings", settings: setting },
+            window.location.origin
+        );
+    }, DEBOUNCE_DELAY), []);
+
+    // Uniform write path for conditional settings: optimistic setState, optional
+    // persist (explicit choices pin; derived ones don't), and propagate via the
+    // spec. `io` routes the two push channels; the specs decide which to use.
+    const conditionalIo = {
+        postSetting: (obj: any) => debouncedPostSetting(obj),
+        postToCore: (obj: any) => window.postMessage(obj, window.location.origin),
+    };
+    const writeConditional = (spec: any, uiValue: any, setValue: any, opts: any = {}) => {
+        setValue(uiValue);
+        if (opts.persist) {
+            localStorage.setItem(getPrefixedKey(spec.storageKey),
+                spec.serialize ? spec.serialize(uiValue) : String(uiValue));
+            localStorage.setItem(explicitChoiceKey(spec), "true");
+        }
+        spec.propagate(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
+    };
+
     // Each conditional setting: one hook call over a shared spec. The hook owns
     // init + server-sync; client-driven changes (explicit toggle, or a
     // dependency like the encoder/resolution) flow through writeConditional
-    // below, which sets state, persists, and propagates uniformly.
+    // above, which sets state, persists, and propagates uniformly.
     const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
         HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
     const [rateControlMode, setRateControlMode] = useConditionalSetting(
@@ -287,8 +323,9 @@ export function Settings() {
         VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
         VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    // Pre-settings fallbacks mirror the server defaults (settings.py).
     const [jpegQuality, setJpegQuality] = useState(() =>
-        parseInt(localStorage.getItem(getPrefixedKey("jpeg_quality")) ?? "", 10) || 60
+        parseInt(localStorage.getItem(getPrefixedKey("jpeg_quality")) ?? "", 10) || 40
     );
     const [paintOverJpegQuality, setPaintOverJpegQuality] = useState(() =>
         parseInt(localStorage.getItem(getPrefixedKey("paint_over_jpeg_quality")) ?? "", 10) || 90
@@ -337,48 +374,23 @@ export function Settings() {
         USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     // The value the core reports as actually in effect (multi-monitor forces
     // browser cursors on); null until the core reports. The toggle displays this
-    // over the stored preference so it never lies about the live state.
-    const [effectiveCursor, setEffectiveCursor] = useState<boolean | null>(null);
+    // over the stored preference so it never lies about the live state. Seeded
+    // from the cached report: the core emits it at connect / display-config
+    // time, before this panel mounts.
+    const [effectiveCursor, setEffectiveCursor] = useState<boolean | null>(getLastEffectiveCursorState);
     const [forceAlignedResolution, setForceAlignedResolution] = useConditionalSetting(
         FORCE_ALIGNED_RESOLUTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
 
     // Audio device state
     const [audioInputDevices, setAudioInputDevices] = useState<any[]>([]);
     const [audioOutputDevices, setAudioOutputDevices] = useState<any[]>([]);
-    const [selectedInputDeviceId, setSelectedInputDeviceId] = useState('default');
-    const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState('default');
+    // The core keeps the devices this dashboard picked for the life of the
+    // page; a remounted panel shows them rather than defaulting.
+    const [selectedInputDeviceId, setSelectedInputDeviceId] = useState(() => getLastAudioDevices().input ?? 'default');
+    const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState(() => getLastAudioDevices().output ?? 'default');
     const [isOutputSelectionSupported, setIsOutputSelectionSupported] = useState(false);
     const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
     const [isLoadingAudioDevices, setIsLoadingAudioDevices] = useState(false);
-
-    // --- Debounced Settings Handler ---
-    const DEBOUNCE_DELAY = 500;
-    const debouncedPostSetting = useCallback(
-        debounce((setting: any) => {
-            window.postMessage(
-                { type: "settings", settings: setting },
-                window.location.origin
-            );
-        }, DEBOUNCE_DELAY),
-        []
-    );
-
-    // Uniform write path for conditional settings: optimistic setState, optional
-    // persist (explicit choices pin; derived ones don't), and propagate via the
-    // spec. `io` routes the two push channels; the specs decide which to use.
-    const conditionalIo = {
-        postSetting: (obj: any) => debouncedPostSetting(obj),
-        postToCore: (obj: any) => window.postMessage(obj, window.location.origin),
-    };
-    const writeConditional = (spec: any, uiValue: any, setValue: any, opts: any = {}) => {
-        setValue(uiValue);
-        if (opts.persist) {
-            localStorage.setItem(getPrefixedKey(spec.storageKey),
-                spec.serialize ? spec.serialize(uiValue) : String(uiValue));
-            localStorage.setItem(explicitChoiceKey(spec), "true");
-        }
-        spec.propagate(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
-    };
 
     // --- Server Settings Message Listener ---
     useEffect(() => {
@@ -411,23 +423,26 @@ export function Settings() {
     }, []);
 
     // --- Server Settings Integration ---
+    // Seeding and re-clamping from the server's settings. This writes state
+    // instead of deriving during render because every value below stays
+    // editable afterwards, with localStorage taking precedence: recomputing
+    // each render would discard the user's edits.
+    /* eslint-disable react-hooks/set-state-in-effect */
     useEffect(() => {
         if (!serverSettings) return;
 
         const getStoredInt = (key: string) => parseInt(localStorage.getItem(getPrefixedKey(key)) ?? "", 10);
-        const getStoredBool = (key: string, fallback = false) => {
-            const v = localStorage.getItem(getPrefixedKey(key));
-            return v === null ? fallback : v === 'true';
-        };
 
         // One encoder knob on both transports; the server payload's allowed
         // list is already filtered for the active transport.
         const s_encoder = serverSettings.encoder;
         if (s_encoder) {
+            const allowed = offeredEncoders(s_encoder.allowed);
             const stored = localStorage.getItem(getPrefixedKey("encoder"));
-            const final = s_encoder.allowed.includes(stored) ? stored : s_encoder.value;
+            const final = stored !== null && allowed.includes(stored) ? stored
+                : (allowed.includes(s_encoder.value) || allowed.length === 0) ? s_encoder.value : allowed[0];
             setEncoder(final);
-            setDynamicEncoderOptions(s_encoder.allowed);
+            setDynamicEncoderOptions(allowed);
         }
 
         // HiDPI and rate control are conditional settings handled by their
@@ -537,7 +552,8 @@ export function Settings() {
                 debouncedPostSetting({ scaling_dpi: derived });
             }
         }
-    }, [serverSettings, streamMode]);
+    }, [serverSettings, streamMode, debouncedPostSetting, offeredEncoders]);
+    /* eslint-enable react-hooks/set-state-in-effect */
 
     // Audio device population. Enumerating labelled devices needs a getUserMedia
     // grant, so it is deferred until the Audio tab is actually shown: merely
@@ -552,7 +568,14 @@ export function Settings() {
             setAudioInputDevices([]);
             setAudioOutputDevices([]);
 
-            const supportsSinkId = 'setSinkId' in HTMLMediaElement.prototype;
+            // Output routing goes through whatever the active core plays on:
+            // the WebRTC core's <video> element (HTMLMediaElement.setSinkId),
+            // the WebSocket core's AudioContext (AudioContext.setSinkId, which
+            // Firefox lacks). Probe the one in use, or the picker would render
+            // and do nothing.
+            const supportsSinkId = isWebrtc
+                ? 'setSinkId' in HTMLMediaElement.prototype
+                : typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
             setIsOutputSelectionSupported(supportsSinkId);
 
             try {
@@ -576,20 +599,22 @@ export function Settings() {
 
                 setAudioInputDevices(inputs);
                 setAudioOutputDevices(outputs);
-                setSelectedInputDeviceId('default');
-                setSelectedOutputDeviceId('default');
-
             } catch (err) {
                 const error = err instanceof Error ? err : new Error(String(err));
                 console.error('Error getting media devices:', error);
-                setAudioDeviceError(error.message || t('sections.audio.deviceErrorDefault', { errorName: error.name || 'unknown' }));
+                // Same mapping as classic: the user-facing message names the
+                // remedy (permission) or the condition (no devices).
+                const messageKey = error.name === 'NotAllowedError' ? 'sections.audio.deviceErrorPermission'
+                    : error.name === 'NotFoundError' ? 'sections.audio.deviceErrorNotFound'
+                    : 'sections.audio.deviceErrorDefault';
+                setAudioDeviceError(t(messageKey, { errorName: error.name || 'unknown' }));
             } finally {
                 setIsLoadingAudioDevices(false);
             }
         };
 
         populateAudioDevices();
-    }, []);
+    }, [isWebrtc]);
 
     // Screen Settings Handlers. A half-typed size stays in component state: the
     // stored manual_width/manual_height mean "a manual resolution is applied",
@@ -632,7 +657,7 @@ export function Settings() {
         // Mark the switch before asking the server to swap transports: /api/switch tears
         // down the old peer (WS close code 4000) before it responds, so the flag must be
         // set first or the active core surfaces a spurious "Server disconnected" alert.
-        window.__selkiesModeSwitching = true;
+        setModeSwitching(true);
         try {
             // /switch is gated on the master token (Bearer) when set, or Basic creds via
             // same-origin. With Basic Auth off, the Bearer is required but the dashboard
@@ -670,28 +695,32 @@ export function Settings() {
         } catch (error) {
             // The switch failed, so no reload follows; clear the flag or a real
             // disconnect afterwards would be silently suppressed.
-            window.__selkiesModeSwitching = false;
+            setModeSwitching(false);
             console.error("Error switching stream mode:", error);
         }
     };
 
     // Video Settings Handlers
+    // Rate control follows the encoder and software encoding unless pinned
+    // (explicit client/server choice). A derived change is not persisted, so it
+    // keeps following. `ctxOverrides` carries the value just chosen, ahead of
+    // the re-render that would put it in conditionalCtx.
+    const rederiveRateControl = (ctxOverrides: Record<string, unknown>) => {
+        if (!rateControlEnabled
+            || isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readRateControlStored)) return;
+        const rcResolved = resolveSpec(
+            RATE_CONTROL_SPEC, serverSettings,
+            { ...conditionalCtx, ...ctxOverrides }, readRateControlStored);
+        if (rcResolved !== rateControlMode) {
+            writeConditional(RATE_CONTROL_SPEC, rcResolved, setRateControlMode, { persist: false });
+        }
+    };
     const handleEncoderChange = (selectedEncoder: string) => {
         setEncoder(selectedEncoder);
         localStorage.setItem(getPrefixedKey('encoder'), selectedEncoder);
         // One knob for both transports; the server switches the pipeline encoder on this.
         debouncedPostSetting({ encoder: selectedEncoder });
-        // Rate control follows the encoder unless pinned (explicit client/server
-        // choice). A derived change is not persisted, so it keeps following.
-        if (rateControlEnabled
-            && !isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readRateControlStored)) {
-            const rcResolved = resolveSpec(
-                RATE_CONTROL_SPEC, serverSettings,
-                { ...conditionalCtx, activeEncoder: selectedEncoder }, readRateControlStored);
-            if (rcResolved !== rateControlMode) {
-                writeConditional(RATE_CONTROL_SPEC, rcResolved, setRateControlMode, { persist: false });
-            }
-        }
+        rederiveRateControl({ activeEncoder: selectedEncoder });
     };
 
     const handleFramerateChange = (selectedFramerate: number) => {
@@ -756,6 +785,7 @@ export function Settings() {
 
     const handleUseCpuToggle = () => {
         writeConditional(USE_CPU_SPEC, !useCpu, setUseCpu, { persist: true });
+        rederiveRateControl({ useCpu: !useCpu });
     };
 
     // Anti-aliasing stays client-only; the core persists antiAliasingEnabled itself.
@@ -1395,8 +1425,8 @@ export function Settings() {
                             </div>
                         )}
 
-                        {/* use_cpu only changes behavior for full-frame h264enc (HW vs x264);
-                            the server forces it true for jpeg/striped/openh264 in both transports. */}
+                        {/* use_cpu only changes behavior for full-frame h264enc (HW vs the server's
+                            software encoder); the server forces it true for jpeg/striped in both transports. */}
                         {activeEncoder === 'h264enc' && (renderableSettings.useCpu ?? true) && (
                             <div className="flex items-center justify-between">
                                 <div className="space-y-0.5">

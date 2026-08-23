@@ -35,11 +35,12 @@ import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
+import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName } from './lib/util.js';
-import { WebcamCapture } from './lib/webcam-capture.js';
 
 installAuthGuard();
+installSessionCookie();
 
 // Best-effort local keyboard layout, resolved once at script init so the value
 // is ready by the time signaling + ICE bring the data channel up (getLayoutMap
@@ -271,10 +272,8 @@ export default function webrtc() {
 	let isAudioPipelineActive = true;
 	let isMicrophoneActive = false;
 	let isWebcamActive = false;
-	let webcamCapture = null;
-	let webcamFrameId = 0;
+	let webcamBusy = false;
 	let preferredWebcamDeviceId = null;
-	const WEBCAM_CHUNK_SIZE = 16000;
 	let isGamepadEnabled = true;
 
 	// Per-message budget on the data channel: the browser exposes the negotiated
@@ -760,6 +759,12 @@ export default function webrtc() {
 					setBoolParam(storeKey, clientValue);
 				}
 			}
+			else if (setting.value !== undefined) {
+				// Plain int/float/string settings (e.g. audio_channels, app_terminal):
+				// runtime-only — they configure pipelines, not user preferences, so
+				// never persist.
+				window[key] = setting.value;
+			}
 		}
 		return changes;
 	}
@@ -1006,22 +1011,34 @@ export default function webrtc() {
 			setTimeout(() => { resizeEnd() }, rdelta);
 		} else {
 			rtimeout = false;
-			// enable_resize=false pins the PRIMARY's resolution server-side:
-			// the resize it ignores must not be requested nor restyled onto.
-			// A secondary's resize stays allowed (server gate matches).
-			if (window.enable_resize === false && storageDisplayId !== 'display2') {
-				return;
-			}
-			windowResolution = input.getWindowResolution();
-			// Clamp the CSS-px size so the physical request stays within the
-			// 4080 cap and the element box matches what the server realizes
-			// (mirrors ws-core handleResizeUI).
-			const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
-			if (windowResolution[0] * dpr > 4080) windowResolution[0] = Math.floor(4080 / dpr);
-			if (windowResolution[1] * dpr > 4080) windowResolution[1] = Math.floor(4080 / dpr);
-			sendResolutionToServer(windowResolution[0], windowResolution[1])
-			resetToWindowResolution(windowResolution[0], windowResolution[1])
+			handleResizeUI();
 		}
+	}
+
+	// Auto-mode resize: the window's CSS-px size is requested from the server
+	// (sendResolutionToServer applies the device pixel ratio) and the element
+	// is restyled onto it. Shared by the debounced resize tail and the
+	// reset-to-window path, matching the websockets core's handleResizeUI.
+	function handleResizeUI() {
+		// A manual preset applied while a resize debounce is pending must not
+		// be overwritten by the window size when the debounce fires.
+		if (window.isManualResolutionMode) {
+			return;
+		}
+		// enable_resize=false pins the PRIMARY's resolution server-side:
+		// the resize it ignores must not be requested nor restyled onto.
+		// A secondary's resize stays allowed (server gate matches).
+		if (window.enable_resize === false && storageDisplayId !== 'display2') {
+			return;
+		}
+		windowResolution = input.getWindowResolution();
+		// Clamp the CSS-px size so the physical request stays within the
+		// 4080 cap and the element box matches what the server realizes.
+		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+		if (windowResolution[0] * dpr > 4080) windowResolution[0] = Math.floor(4080 / dpr);
+		if (windowResolution[1] * dpr > 4080) windowResolution[1] = Math.floor(4080 / dpr);
+		sendResolutionToServer(windowResolution[0], windowResolution[1]);
+		resetToWindowResolution(windowResolution[0], windowResolution[1]);
 	}
 
 	// Auto-mode framebuffer resolution is logical-size x devicePixelRatio, but a DPR
@@ -1097,64 +1114,40 @@ export default function webrtc() {
 		window.postMessage(updatePayload, window.location.origin);
 	}
 
-	// Webcam uplink over the data channel: each JPEG frame is split into chunks
-	// tagged [0x06][flags][frameId][chunkIdx][chunkCount] so the server can
-	// reassemble frames larger than one SCTP message.
-	function sendWebcamFrame(jpeg) {
-		if (!webrtc || !isWebcamActive) {
+	// Webcam uplink: the camera track rides the sendonly video transceiver the
+	// server reserved in the bundled SDP (the mirror of the microphone), so the
+	// browser's own encoder produces the H.264/VP8 the server's virtual camera
+	// decodes, with RTP congestion control and no data-channel framing.
+	async function startWebcamCapture() {
+		if (isSharedMode || !webrtc || isWebcamActive || webcamBusy) {
 			return;
 		}
-		const frameId = webcamFrameId;
-		webcamFrameId = (webcamFrameId + 1) & 0xffff;
-		const total = Math.max(1, Math.ceil(jpeg.byteLength / WEBCAM_CHUNK_SIZE));
-		for (let i = 0; i < total; i++) {
-			const start = i * WEBCAM_CHUNK_SIZE;
-			const end = Math.min(start + WEBCAM_CHUNK_SIZE, jpeg.byteLength);
-			const buf = new ArrayBuffer(8 + (end - start));
-			const view = new DataView(buf);
-			view.setUint8(0, 0x06);
-			view.setUint8(1, 0);
-			view.setUint16(2, frameId, true);
-			view.setUint16(4, i, true);
-			view.setUint16(6, total, true);
-			new Uint8Array(buf, 8).set(jpeg.subarray(start, end));
-			try {
-				webrtc.sendDataChannelMessage(buf);
-			} catch (e) {
-				console.error('Webcam chunk send failed:', e);
-				break;
-			}
-		}
-	}
-
-	function startWebcamCapture() {
-		if (isSharedMode || webcamCapture) {
-			return;
-		}
-		webcamCapture = new WebcamCapture({
-			sendFrame: sendWebcamFrame,
-			canSend: () => {
-				try {
-					return typeof webrtc.dataChannelBufferedAmount !== 'function'
-						|| webrtc.dataChannelBufferedAmount() < 2 * 1024 * 1024;
-				} catch (_) {
-					return true;
+		webcamBusy = true;
+		try {
+			const ok = await webrtc.setWebcam(true, preferredWebcamDeviceId);
+			if (ok) {
+				const track = webrtc.webcamTrack;
+				if (track) {
+					track.addEventListener('ended', () => {
+						if (isWebcamActive) stopWebcamCapture();
+					});
 				}
-			},
-			onStateChange: (active) => { isWebcamActive = active; postSidebarButtonUpdate(); },
-			onError: (error) => {
-				console.error('Webcam capture error:', error);
+				isWebcamActive = true;
+			} else {
 				isWebcamActive = false;
-				postSidebarButtonUpdate();
-			},
-		});
-		webcamCapture.start(preferredWebcamDeviceId);
+			}
+		} catch (error) {
+			console.error('Webcam capture error:', error);
+			isWebcamActive = false;
+		} finally {
+			webcamBusy = false;
+		}
+		postSidebarButtonUpdate();
 	}
 
 	function stopWebcamCapture() {
-		if (webcamCapture) {
-			webcamCapture.stop();
-			webcamCapture = null;
+		if (webrtc) {
+			webrtc.setWebcam(false).catch(() => {});
 		}
 		if (isWebcamActive) {
 			isWebcamActive = false;
@@ -1196,13 +1189,14 @@ export default function webrtc() {
 				// Shared-mode parity with ws-core: a viewer must not drive resolution policy.
 				if (isSharedMode) { break; }
 				if (typeof message.value === 'boolean') {
-					console.log("Scaling the stream locally: ", message.value);
-					// setScaleLocally returns true or false; false, to turn off the scaling
-					if (message.value === true) disableAutoResize();
+					// A display preference only: it is persisted and, in manual
+					// mode, restyles the element. Auto mode keeps its resize
+					// listener; the choice takes effect at the next preset.
 					scaleLocal = message.value;
-					if (manualWidth && manualHeight) {
+					setBoolParam("scaleLocallyManual", scaleLocal);
+					console.log(`Set scaleLocallyManual to ${scaleLocal} and persisted.`);
+					if (window.isManualResolutionMode && manualWidth && manualHeight) {
 						applyManualStyle(manualWidth, manualHeight, scaleLocal);
-						setBoolParam("scaleLocallyManual", scaleLocal);
 					}
 				} else {
 					console.warn("Invalid value received for setScaleLocally:", message.value);
@@ -1211,22 +1205,19 @@ export default function webrtc() {
 			case "resetResolutionToWindow":
 				if (isSharedMode) { break; }
 				console.log("Resetting to window size");
-				// Clear the manual dimensions before re-deriving from the window.
+				// The manual flag drops first so the re-send below takes the auto
+				// path, where the window size is multiplied by the device pixel
+				// ratio; the manual dimensions and their persisted keys
+				// (snake_case: the ones read back at init) go with it.
+				window.isManualResolutionMode = false;
 				manualHeight = manualWidth = 0;
-				// With the primary pinned (enable_resize=false) the stream is
-				// not moving: only return to auto mode, without a resend or
-				// restyle (resizeEnd gates later resizes itself).
-				if (window.enable_resize !== false || storageDisplayId === 'display2') {
-					let currentWindowRes = input.getWindowResolution();
-					resetToWindowResolution(...currentWindowRes);
-					sendResolutionToServer(...currentWindowRes);
-				}
-				enableAutoResize();
-				// snake_case keys: these are the ones read back at init.
 				setIntParam('manual_width', null);
 				setIntParam('manual_height', null);
 				setBoolParam('is_manual_resolution_mode', false);
-				window.isManualResolutionMode = false;
+				enableAutoResize();
+				// With the primary pinned (enable_resize=false) the stream is
+				// not moving: handleResizeUI gates the resend and restyle itself.
+				handleResizeUI();
 				break;
 			case "setManualResolution":
 				if (isSharedMode) { break; }
@@ -1237,16 +1228,18 @@ export default function webrtc() {
 					break;
 				}
 				console.log(`Setting manual resolution: ${width}x${height}`);
-				disableAutoResize();
+				// The manual flag is raised before the send: a preset is exact
+				// framebuffer pixels, and the auto path would multiply it by the
+				// device pixel ratio. snake_case keys are the ones read at init.
+				window.isManualResolutionMode = true;
 				manualWidth = width;
 				manualHeight = height;
-				applyManualStyle(manualWidth, manualHeight, scaleLocal);
-				sendResolutionToServer(manualWidth, manualHeight);
-				// Use snake_case keys (read at init) so the choice persists across reloads.
 				setIntParam('manual_width', manualWidth);
 				setIntParam('manual_height', manualHeight);
 				setBoolParam('is_manual_resolution_mode', true);
-				window.isManualResolutionMode = true;
+				disableAutoResize();
+				sendResolutionToServer(manualWidth, manualHeight);
+				applyManualStyle(manualWidth, manualHeight, scaleLocal);
 				break;
 			case "setUseCssScaling":
 				// ws-core parity. hiDPI is handled by re-deriving the DPR everywhere the
@@ -1534,7 +1527,7 @@ export default function webrtc() {
 		if (settings.video_paintover_burst_frames !== undefined) passthrough.video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames, 10);
 		if (settings.force_aligned_resolution !== undefined) passthrough.force_aligned_resolution = !!settings.force_aligned_resolution;
 		if (settings.use_cpu !== undefined) passthrough.use_cpu = !!settings.use_cpu;
-		// Encoder switch (h264enc <-> openh264enc): the server restarts the pipeline on this.
+		// Encoder switch: the server restarts the pipeline on this.
 		if (settings.encoder !== undefined) passthrough.encoder = settings.encoder;
 	// A secondary page's runtime move to another side of the primary (WS
 	// displayPosition parity): the server applies and re-lays out; unguarded
@@ -1756,12 +1749,15 @@ export default function webrtc() {
 	}
 
 	// Focus/gesture local->server sync (lib/clipboard-sync.js), identical in the
-	// WebSocket core; text re-sends are deduped here client-side.
+	// WebSocket core; text re-sends are deduped here client-side. Every local
+	// read/send is gated on the server's clipboard policy (window.clipboard_enabled,
+	// mirrored from server settings) as well as browser capability, so a
+	// clipboard-disabled server never arms the focus read or its permission prompt.
 	const localClipboardSender = createLocalClipboardSender({
 		isChromium,
 		getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
 		isSharedMode: () => isSharedMode,
-		canSync: () => clipboardStatus === "enabled",
+		canSync: () => clipboardStatus === "enabled" && !!window.clipboard_enabled,
 		canRead: () => !!clipboard_in_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
 		sendClipboardData: (data, mime) => sendClipboardData(data, mime),
@@ -1777,7 +1773,7 @@ export default function webrtc() {
 		isChromium,
 		clipboardSync,
 		sendClipboardData: (data, mime) => sendClipboardData(data, mime),
-		canSync: () => !isSharedMode && clipboardStatus === "enabled",
+		canSync: () => !isSharedMode && clipboardStatus === "enabled" && !!window.clipboard_enabled,
 		canRead: () => !!clipboard_in_enabled,
 		canWrite: () => !!clipboard_out_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
@@ -1840,7 +1836,7 @@ export default function webrtc() {
 
 	async function sendClipboardData(data, mimeType = 'text/plain', onSkip = null) {
 		const skip = (reason, code) => { if (onSkip) onSkip(reason, code); };
-		if (clipboardStatus !== "enabled" || !clipboard_in_enabled || data == null) {
+		if (clipboardStatus !== "enabled" || !window.clipboard_enabled || !clipboard_in_enabled || data == null) {
 			skip('clipboard-in disabled', 'clipboardSkipInDisabled');
 			return;
 		}
@@ -2130,7 +2126,7 @@ export default function webrtc() {
 					try {
 						const probeURL = new URL(url.href);
 						probeURL.protocol = (location.protocol === 'http:' ? 'http:' : 'https:');
-						const res = await fetch(probeURL.href, { cache: 'no-store' });
+						const res = await fetch(probeURL.href, { cache: 'no-store', headers: sessionAuthHeaders() });
 						if (res.status === 409) {
 							try { sessionStorage.setItem('selkies_mode_flip', '1'); } catch (e) { /* ignore */ }
 							setStringParam('stream_mode', 'websockets');
@@ -2148,6 +2144,24 @@ export default function webrtc() {
 				webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
+			// Assigned before attach(): the pad resync inside attach(), and a pad
+			// pressed before the data channel opens, go through the persisted
+			// gamepad toggle like any later connect event. A disconnect only
+			// updates the reported state; the manager polls every slot, so the
+			// remaining pads keep working.
+			input.ongamepadconnected = (gamepad_id) => {
+				const connected = toggleGamepadConnection();
+				if (connected) {
+					gamepad.gamepadState = "connected";
+					gamepad.gamepadName = gamepad_id;
+					webrtc._setStatus('Gamepad connected: ' + gamepad_id);
+				}
+			};
+			input.ongamepaddisconnected = () => {
+				gamepad.gamepadState = "disconnected";
+				gamepad.gamepadName = "none";
+				webrtc._setStatus('Gamepad disconnected');
+			};
 			if (!isSharedMode) {
 				// Actions to take whenever window changes focus
 				window.addEventListener('focus', handleWindowFocus);
@@ -2284,27 +2298,8 @@ export default function webrtc() {
 
 			webrtc.ondatachannelopen = () => {
 				console.log("Data channel opened");
-				if (!isStrictViewer) {
-					input.ongamepadconnected = (gamepad_id) => {
-					let connected = toggleGamepadConnection();
-					if (connected) {
-						gamepad.gamepadState = "connected";
-						gamepad.gamepadName = gamepad_id;
-						webrtc._setStatus('Gamepad connected: ' + gamepad_id);
-					}
-					}
-					input.ongamepaddisconnected = () => {
-						if (input.gamepadManager !== null) {
-							input.gamepadManager.disable();
-							gamepad.gamepadState = "disconnected";
-							gamepad.gamepadName = "none";
-							webrtc._setStatus('Gamepad disconnected');
-						}
-					}
-				}
-
-				// Input is bound for the page lifetime at construction, so a
-				// reopened channel needs no rebind.
+				// Input (gamepad hooks included) is bound for the page lifetime
+				// at construction, so a reopened channel needs no rebind.
 
 				// Pull the current server clipboard once on connect (cache-only),
 				// mirroring the websockets core. Without this a WebRTC session (or
@@ -2657,8 +2652,9 @@ export default function webrtc() {
 				webrtc.connect();
 			};
 
-			// Fetch RTC configuration containing STUN/TURN servers.
-			fetch(getRoutePrefix() + "/api/turn")
+			// Fetch RTC configuration containing STUN/TURN servers (a secure-mode
+			// session token rides as a Bearer header, the route wants one).
+			fetch(getRoutePrefix() + "/api/turn", { headers: sessionAuthHeaders() })
 				.then(function (response) {
 					if (!response.ok) {
 						throw new Error(`Status: ${response.status}`);

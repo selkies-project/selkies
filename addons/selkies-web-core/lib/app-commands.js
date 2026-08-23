@@ -12,12 +12,20 @@ const PENDING_COMMAND_TTL_MS = 10 * 60 * 1000;
 const LAUNCH_FAILURE_WINDOW_MS = 15 * 1000;
 
 // The wrapper is on PATH in the image, and the server runs these through a
-// shell, so ~ in the launch command is the session user's home.
+// shell, so ~ in the launch command is the session user's home. The launch
+// terminal is the one the server publishes as app_terminal for the session's
+// windowing system (foot on a Wayland session, st on X11); the server runs the
+// command in that session's environment (display, compositor socket, session bus).
+const DEFAULT_APP_TERMINAL = "st";
+const appTerminal = () =>
+    typeof window.app_terminal === "string" && window.app_terminal
+        ? window.app_terminal
+        : DEFAULT_APP_TERMINAL;
 const appCommandBuilders = {
     install: (app) => `selkies-proot install ${app}`,
     remove: (app) => `selkies-proot remove ${app}`,
     update: (app) => `selkies-proot update ${app}`,
-    launch: (app) => `st ~/.local/bin/${app}-pa`,
+    launch: (app) => `${appTerminal()} ~/.local/bin/${app}-pa`,
 };
 
 const pendingAppCommands = new Map();

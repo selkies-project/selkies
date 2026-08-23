@@ -39,6 +39,13 @@ export const isSecondaryDisplay = displayId === 'display2';
 export const isViewerUrlMode =
   urlHash.toLowerCase().startsWith('#shared') || /^#player[234]$/.test(urlHash.toLowerCase());
 
+// Form factor is fixed for the life of the document, so it is resolved once
+// and is available to the first render.
+export const isMobileClient = typeof window !== 'undefined' && !!(
+  (navigator as any).userAgentData?.mobile ||
+  /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+);
+
 const storageAppName = getStorageAppName();
 
 export function getPrefixedKey(key: string): string {
@@ -49,25 +56,57 @@ export function getPrefixedKey(key: string): string {
   return prefixedKey;
 }
 
-// --- Server Settings ---
+// --- Core state cache ---
 
-// The core broadcasts serverSettings once per connection, but panel
-// components (Settings, Sharing, Files, Clipboard) mount lazily when their
-// menu opens — after the broadcast. Cache the latest payload at module scope
-// so late mounts can read it synchronously; their own listeners still pick
-// up subsequent broadcasts (e.g. reconnects).
+// The core broadcasts serverSettings once per connection and the rest of the
+// messages below only when something changes, but the panel components
+// (Settings, Sharing, Files, Clipboard) mount lazily when their menu opens —
+// after those messages. Cache the latest of each at module scope so a late
+// mount can seed its state synchronously; the panels' own listeners still
+// pick up later messages (reconnects, new clipboard events).
 let lastServerSettings: any = null;
+// clipboardContentUpdate: the server clipboard preview the Clipboard panel
+// shows; the core emits it only on clipboard events.
+let lastClipboardContent: { text: string; truncated: boolean } | null = null;
+// effectiveCursorState: the cursor mode actually in effect (multi-monitor
+// forces browser cursors on), emitted at connect / display-config time.
+let lastEffectiveCursorState: boolean | null = null;
+// audioDeviceSelected: the dashboard's own device picks, which the core keeps
+// for the life of the page; a remounted Settings panel shows them again
+// instead of pretending the defaults are in use.
+const lastAudioDevices: { input: string | null; output: string | null } = { input: null, output: null };
 if (typeof window !== 'undefined') {
   window.addEventListener('message', (event: MessageEvent) => {
     if (event.origin !== window.location.origin) return;
-    if (event.data?.type === 'serverSettings') {
-      lastServerSettings = event.data.payload;
+    const message = event.data;
+    if (typeof message !== 'object' || message === null) return;
+    if (message.type === 'serverSettings') {
+      lastServerSettings = message.payload;
+    } else if (message.type === 'clipboardContentUpdate' && typeof message.text === 'string') {
+      lastClipboardContent = { text: message.text, truncated: message.truncated === true };
+    } else if (message.type === 'effectiveCursorState' && typeof message.value === 'boolean') {
+      lastEffectiveCursorState = message.value;
+    } else if (message.type === 'audioDeviceSelected' && message.deviceId) {
+      if (message.context === 'input') lastAudioDevices.input = message.deviceId;
+      else if (message.context === 'output') lastAudioDevices.output = message.deviceId;
     }
   });
 }
 
 export function getLastServerSettings(): any {
   return lastServerSettings;
+}
+
+export function getLastClipboardContent(): { text: string; truncated: boolean } | null {
+  return lastClipboardContent;
+}
+
+export function getLastEffectiveCursorState(): boolean | null {
+  return lastEffectiveCursorState;
+}
+
+export function getLastAudioDevices(): { input: string | null; output: string | null } {
+  return lastAudioDevices;
 }
 
 // A control is worth rendering only when the user can actually change it:
@@ -104,6 +143,9 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.softButtons = s.ui_sidebar_show_soft_buttons?.value ?? true;
   newRenderable.coreButtons = s.ui_show_core_buttons?.value ?? true;
   newRenderable.shortcuts = s.ui_sidebar_show_shortcuts?.value ?? true;
+  // The floating gamepad card is wish's gamepads section (classic parity):
+  // the flag hides the visualizer only, never the gamepad input toggle.
+  newRenderable.gamepads = s.ui_sidebar_show_gamepads?.value ?? true;
 
   // Per-control renderability derived from the settings' own constraints.
   newRenderable.encoder = isSettingRenderable(s.encoder);
@@ -142,8 +184,7 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.microphoneToggle = isSettingRenderable(s.microphone_enabled);
   newRenderable.webcamToggle = isSettingRenderable(s.webcam_enabled)
     && (s.ui_sidebar_show_webcam?.value ?? true);
-  newRenderable.gamepadToggle = isSettingRenderable(s.gamepad_enabled)
-    && (s.ui_sidebar_show_gamepads?.value ?? true);
+  newRenderable.gamepadToggle = isSettingRenderable(s.gamepad_enabled);
 
   newRenderable.enableRateControl = s.enable_rate_control?.value ?? true;
   const ftValue = s.file_transfers?.value;

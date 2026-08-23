@@ -32,14 +32,13 @@ dependencies = [
     "psutil",
     "watchdog",
     "Pillow",
-    "pixelflux",
-    "pcmflux",
+    "pixelflux~=2.1.0",
+    "pcmflux~=2.1.0",
     # PulseAudio Microphone
     "pulsectl-asyncio",
     # WebRTC
     "dnspython>=2.0.0",
     "ifaddr>=0.2.0",
-    "av",
     "cffi>=1.0.0",
     "cryptography>=44.0.0",
     "google-crc32c>=1.1",
@@ -49,6 +48,9 @@ dependencies = [
     "aiohttp>=3.7.0",
     "aiofiles>=25.1.0",
     "uvloop>=0.19.0; platform_system == 'Linux' or platform_system == 'Darwin'",
+    # importlib.resources.files() in the 3.9 standard library cannot read a
+    # namespace package; the backport is preferred when importable
+    "importlib_resources>=5.10; python_version < '3.10'",
     # GPU stats
     "nvidia-ml-py",
     "aitop",
@@ -63,9 +65,11 @@ selkies = "selkies.__main__:main"
 selkies-resize = "selkies.display_utils:entrypoint"
 selkies-gpu-probe = "selkies.gpu_probe:main"
 
-# Package Static web files as part of distribution wheel
+# Package the static web files, and the licence of the vendored python-xlib
+# fork, as part of the distribution wheel
 [tool.setuptools.package-data]
 "selkies.selkies_web" = ["**/*"]
+"selkies.Xlib" = ["LICENSE"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

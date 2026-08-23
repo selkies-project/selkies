@@ -16,7 +16,7 @@ First of all, ensure that there is a running PulseAudio or PipeWire-Pulse sessio
 
 **Then, if you are using WebRTC mode, please read [WebRTC and Firewall Issues](firewall.md).**
 
-In WebRTC mode, also check that H.264 decoding is available in your web browser; both `--encoder=` choices available there (`h264enc` and `openh264enc`) produce H.264, which all major web browsers support.
+In WebRTC mode, also check that H.264 decoding is available in your web browser; the only `--encoder=` choice available there (`h264enc`) produces H.264, which all major web browsers support.
 
 Moreover, if using HTTP but not HTTPS on a remote host that is not `localhost`, use port forwarding to `localhost` as much as possible. Many browsers do not support WebRTC or relevant features including pointer and keyboard lock in HTTP outside localhost.
 
@@ -118,26 +118,28 @@ In order to use the web interface when this is not possible (or when you are usi
 
 </details>
 
-## The video goes black when the screen locks or blanks on an existing desktop.
+## The video goes black, dims, or shows a lock screen when the session idles, blanks, or locks.
 
 <details>
   <summary>Open Answer</summary>
 
-Selkies captures one display, and locking or blanking takes the desktop off it. An X11 display manager runs its greeter on a **separate** X server (LightDM spawns `:1` for it), a Wayland session hands its output to the locker, and DPMS blanks the framebuffer on either. Capture keeps running against a display that has stopped drawing, so the stream stays black until the session is unlocked.
+Selkies never inhibits idle for you: on either backend it makes no `xset`/`XResetScreenSaver` call and holds no Wayland idle inhibitor, so whatever screen saver, power management, or screen locker the captured session runs takes its normal course. Input sent through the stream does count as activity — X11 input arrives through XTEST, Wayland input reaches the session compositor as ordinary seat input, and both reset the idle timers — so a timer only runs down while nobody is interacting with the desktop. What happens then depends on which layer it belongs to:
 
-The fix is to stop the captured session from idling or locking in the first place. This block is safe to paste on either backend — each line applies where it is meaningful and is skipped where it is not:
+- **The capture layer Selkies owns never blanks or locks.** The [Example Container](component.md#example-container) and the AppImage start their `Xvfb` with `-s 0 -dpms` (screen saver and DPMS off at the server) and ship no locker, and the headless Wayland capture compositor has no screen saver, DPMS, idle notifier, or locker at all. A session Selkies brings up goes dark only if something running *inside* it does so.
+- **An existing X11 desktop** (the report in [issue #174](https://github.com/selkies-project/selkies/issues/174)) brings the X server's own screen saver and DPMS plus the desktop's locker, and the locker decides whether you can recover from the stream. One that hands over to the display manager's greeter — `light-locker` under LightDM, which starts the greeter on a second X server, `:1` — takes the desktop off the captured display entirely: the stream goes black or freezes, nothing typed through Selkies reaches a greeter on another X server (running Selkies as root or changing `DISPLAY` does not help), and only unlocking at the console brings it back. One that draws on the captured display itself (`xscreensaver`, `xfce4-screensaver`, `xsecurelock`, GNOME Shell's lock screen under GDM) stays in the stream, so the password can be typed through Selkies, but the desktop is hidden until then. Whether the screen saver or DPMS also takes the picture with it depends on the driver; turning both off costs nothing. To tell them apart, lock the session by hand: black at once is the locker, black only after the idle timeout with nothing locked is the screen saver or DPMS.
+- **A session compositor on the Wayland backend** — the nested `labwc` of the example container (or whatever `SELKIES_WAYLAND_COMPOSITOR` names there) and an external compositor captured through `SELKIES_WAYLAND_HOST_DISPLAY` — keeps its own idle machinery while the capture underneath keeps running. wlroots compositors such as labwc and sway do nothing on idle unless an idle daemon (`swayidle`, `hypridle`) tells them to; KDE's `powerdevil` dims and switches off the screen and `kscreenlocker` locks; GNOME blanks and locks after its `idle-delay`. A locked nested session shows its lock screen in the stream and is unlocked by typing into it; a dimmed or switched-off output keeps the stream connected but dark. The example container installs no idle daemon and no locker on either backend, so this arises only in a session you assemble yourself.
+
+The remedy is to stop the captured session from idling or locking. Each of these applies where it is meaningful and is harmless elsewhere:
 
 ```bash
-xset s off -dpms                                                    # X11 server-wide
-gsettings set org.gnome.desktop.session idle-delay 0                # GNOME, either backend
+xset s off -dpms                                        # X11 server-wide; or start Xvfb with -s 0 -dpms
+gsettings set org.gnome.desktop.session idle-delay 0    # GNOME, X11 or Wayland
 gsettings set org.gnome.desktop.screensaver lock-enabled false
 ```
 
-Other desktops keep the same two switches elsewhere: KDE under *Energy Saving* and *Screen Locking* in System Settings, XFCE under *Power Manager* and *Screensaver*, and sway or labwc simply by not running `swayidle`/`swaylock`.
+Other desktops keep the same switches elsewhere: KDE under *Power Management* (*Energy Saving* on Plasma 5; screen dimming and switch-off) and *Screen Locking* (*Lock screen automatically*; `Autolock=false` in the `[Daemon]` section of `~/.config/kscreenlockerrc` scripts it), XFCE under *Power Manager* and *Screensaver*, LXQt in `lxqt-powermanagement`'s idle watcher, and labwc, sway, or Hyprland by not running `swayidle`/`hypridle` (or by dropping the `timeout` actions that run `swaylock` or switch the output off).
 
-These apply to the running session only, so also stop the desktop from autostarting a screen locker (`light-locker`, `xscreensaver`, `gnome-screensaver`), or it returns at the next login. With NVIDIA GPUs, DPMS blanking may additionally need `Option "HardDPMS" "False"` under the `Device` or `Screen` section of `/etc/X11/xorg.conf`.
-
-None of this applies to a session Selkies brings up itself. The [Example Container](component.md#example-container) starts its X server with `-s 0 -dpms` and installs no locker, and the headless Wayland backend has no display manager to lock.
+These apply to the running session only, so also stop the desktop from autostarting a locker or idle daemon (`light-locker`, `xscreensaver`, `xfce4-screensaver`, `gnome-screensaver`, `xss-lock`, `swayidle`) from `/etc/xdg/autostart`, `~/.config/autostart`, or the compositor's own autostart file, or it returns at the next login; in a container image, leave the package out. With NVIDIA GPUs, DPMS blanking may additionally need `Option "HardDPMS" "False"` under the `Device` or `Screen` section of `/etc/X11/xorg.conf`. When the locker cannot be disabled at all, run the desktop in a container session such as the example container instead, which has no display manager or locker to begin with.
 
 </details>
 

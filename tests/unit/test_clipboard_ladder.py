@@ -4,8 +4,9 @@
 The XFixes monitor is the top X11 rung: a failed build must back off instead
 of hammering the display with a connection attempt per poll, must keep
 re-probing after the cooldown so a late X server upgrades polling back to
-events, and must never be built at all on the Wayland backend. A missing
-xclip warns once — not a traceback per poll.
+events, and on the Wayland backend is built only for an X server whose
+selections nothing bridges (a rootful Xwayland on the capture compositor),
+on that display. A missing xclip warns once — not a traceback per poll.
 """
 import asyncio
 import logging
@@ -48,7 +49,7 @@ builds = []
 class FailingMonitor:
     """Counts construction attempts and fails like a monitor with no display."""
 
-    def __init__(self) -> None:
+    def __init__(self, display_name=None) -> None:
         builds.append(1)
         raise RuntimeError("no display")
 
@@ -88,8 +89,25 @@ async def main() -> None:
 
     builds.clear()
     hw = make_handler(is_wayland=True)
+    hw._x11_session_display = lambda: None
     await hw._ensure_x11_clipboard_monitor_async()
-    check("wayland backend never builds the X11 monitor", len(builds) == 0)
+    check("wayland backend without an unbridged X server builds no X11 monitor", len(builds) == 0)
+    check("and does not back off (the X server may appear later)", hw._x11_monitor_retry_at == 0.0)
+
+    # A rootful Xwayland on the capture compositor bridges no selection: the
+    # monitor is built on that display, through the same backoff ladder.
+    class RecordingMonitor(FailingMonitor):
+        def __init__(self, display_name=None) -> None:
+            displays.append(display_name)
+            super().__init__(display_name)
+    displays = []
+    ih._X11ClipboardMonitor = RecordingMonitor
+    hw._x11_session_display = lambda: ":81"
+    await hw._ensure_x11_clipboard_monitor_async()
+    check("wayland backend with a rootful Xwayland builds the X11 monitor on its display",
+          displays == [":81"], str(displays))
+    check("a failed build on that display backs off like on X11", hw._x11_monitor_retry_at > 0.0)
+    ih._X11ClipboardMonitor = FailingMonitor
 
     def raise_missing(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory")

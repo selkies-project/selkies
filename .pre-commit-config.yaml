@@ -34,3 +34,13 @@ repos:
         language: script
         pass_filenames: false
         files: ^addons/selkies-dashboard(-wish)?/.*\.(js|jsx|ts|tsx|json)$
+
+      - id: settings-doc
+        name: settings reference (docs/settings.md)
+        # The page is rendered from the setting definitions; a change to either
+        # side without regenerating it fails here
+        entry: scripts/generate-settings-doc.py
+        args: [--check]
+        language: script
+        pass_filenames: false
+        files: ^(src/selkies/settings\.py|docs/settings\.md|scripts/generate-settings-doc\.py)$

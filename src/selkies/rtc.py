@@ -41,7 +41,7 @@ Structural notes:
 
 import logging
 import asyncio
-import struct
+import time
 import gzip
 import inspect
 import re
@@ -55,8 +55,8 @@ try:
 except (ImportError, RuntimeError):
     pcmflux = None
 
-from .settings import settings as app_settings, inflate_gz_bounded
-from .webcam import get_shared_webcam_server
+from .settings import settings as app_settings, inflate_gz_bounded, software_h264_encoder, software_h264_path
+from .webcam import CODEC_BY_NAME, get_shared_webcam, webcam_locked_off, webcam_uplink_allowed
 from .webrtc import (
     RTCPeerConnection,
     RTCIceCandidate,
@@ -74,15 +74,17 @@ from .webrtc.rtcicetransport import (
     candidate_from_aioice
 )
 from .webrtc.exceptions import InvalidStateError
-import av
 from fractions import Fraction
+
+from .webrtc.codecs.base import EncodedPacket
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
-from .webrtc.contrib.media import MediaRelay
+from .webrtc.contrib.relay import MediaRelay
 from enum import Enum
 from .media_pipeline import MediaPipeline
 # The viewer/collaborator input-authority lists live with the input protocol
 # (input_handler) and are shared verbatim with the websockets gate.
 from .input_handler import (
+    BULK_DRAIN_TIMEOUT_S,
     VIEWER_ALLOWED_PREFIXES,
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
@@ -148,7 +150,7 @@ DATA_CHANNEL_BULK_HIGH_WATER = 1024 * 1024
 
 async def drain_data_channel(channel: RTCDataChannel,
                              high: int = DATA_CHANNEL_BULK_HIGH_WATER,
-                             timeout: float = 15.0) -> None:
+                             timeout: float = BULK_DRAIN_TIMEOUT_S) -> bool:
     """Wait until `channel` has at most `high` queued bytes.
 
     Uses the channel's bufferedamountlow event with a temporarily lowered
@@ -159,9 +161,13 @@ async def drain_data_channel(channel: RTCDataChannel,
         channel: Data channel whose SCTP send queue is being paced.
         high: Maximum queued bytes to allow before returning.
         timeout: Seconds to wait before giving up on a stalled channel.
+
+    Returns:
+        True once the queue is below `high`; False when the channel did not
+        drain within `timeout` (still open, still stalled).
     """
     if channel.bufferedAmount <= high:
-        return
+        return True
     prev = channel.bufferedAmountLowThreshold
     loop = asyncio.get_running_loop()
     low = loop.create_future()
@@ -176,10 +182,11 @@ async def drain_data_channel(channel: RTCDataChannel,
         if channel.bufferedAmount > high:
             await asyncio.wait_for(low, timeout)
     except asyncio.TimeoutError:
-        pass
+        return False
     finally:
         channel.remove_listener("bufferedamountlow", _on_low)
         channel.bufferedAmountLowThreshold = prev
+    return True
 
 
 def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
@@ -267,7 +274,7 @@ class AudioMedia(AudioStreamTrack):
         super().__init__()
         self.data_pipeline = data_pipeline
 
-    async def recv(self) -> av.Packet:
+    async def recv(self) -> EncodedPacket:
         """Return the next encoded audio packet from the bridge."""
         packet = await self.data_pipeline.get_data()
         return packet
@@ -279,7 +286,7 @@ class VideoMedia(VideoStreamTrack):
         super().__init__()
         self.data_pipeline = data_pipeline
 
-    async def recv(self) -> av.Packet:
+    async def recv(self) -> EncodedPacket:
         """Return the next encoded video packet from the bridge."""
         packet = await self.data_pipeline.get_data()
         return packet
@@ -315,19 +322,16 @@ class RTCApp:
         self.encoder = encoder
         self.last_cursor_sent = None
 
-        # Per-peer webcam frame reassembly. Frames arrive as chunks tagged with
-        # a frame id (0x06 binary opcode); a peer only ever assembles one frame
-        # at a time, so a single in-progress buffer per peer suffices.
-        self._webcam_reasm: Dict[str, Dict[str, Any]] = {}
-
         # Per-display media graphs: display_id -> {relay, video_bridge, video_media,
-        # audio_bridge?, audio_media?}. A display's graph is created by its first
-        # controller and torn down with it; only the primary display carries audio.
+        # audio_bridge?, audio_media?}. A graph is built by the display's first
+        # peer (a secondary's must be its controller) and released with its last
+        # consumer — or, for a secondary, with its controller; only the primary
+        # display carries audio.
         self.displays: Dict[str, Dict[str, Any]] = {}
         self.media_pipeline: Optional[MediaPipeline] = None
         # Per-display capture start/stop, overridable by the owning service so a
         # secondary display can drive its own pipeline; the defaults preserve the
-        # single-display behavior (the primary pipeline follows its controller).
+        # single-display behavior (the primary pipeline follows its consumers).
         self.start_display_media = self._default_start_display_media
         self.stop_display_media = self._default_stop_display_media
         # Per-display encoder resolution for offer building (codec preference and
@@ -339,6 +343,10 @@ class RTCApp:
         # the display is producing NOW, not the startup setting. The owning service
         # overrides this when the value is client-tunable.
         self.get_fullcolor_for_display = lambda display_id: bool(app_settings.video_fullcolor[0])
+        # Per-display software-encoding flag, resolved at offer time for the same
+        # reason: together with the encoder it says whether the display is known to
+        # encode on the CPU, which decides whether a 4:4:4 profile may be advertised.
+        self.get_use_cpu_for_display = lambda display_id: bool(app_settings.use_cpu[0])
 
         # Data channel events. on_data_open receives the channel that opened so
         # per-connection greetings (server settings, current cursor) reach the
@@ -521,7 +529,6 @@ class RTCApp:
                 payload["reply_to"] = reply_to
             send_typed("clipboard-msg", payload)
         else:
-            read = 0
             start_payload = {
                 "mime_type": mime_type,
                 "is_binary_data": not is_text,
@@ -529,28 +536,62 @@ class RTCApp:
             }
             if reply_to:
                 start_payload["reply_to"] = reply_to
-            send_typed("clipboard-msg-start", start_payload)
-            while read < len(data_bytes):
-                chunk = data_bytes[read:read + clipboard_chunk_size]
-                chunk_payload = json.dumps({
-                    "type": "clipboard-msg-data",
-                    "data": {"content": base64.b64encode(chunk).decode("utf-8")},
-                })
-                # One compression per chunk, shared by every gzip-capable
-                # channel; skipped when no open channel completed the handshake.
-                gz_payload = None
-                channels = ([requester] if requester is not None
-                            else list(self._iter_open_data_channels()))
-                if any(getattr(c, "_selkies_gz_tx", False) for c in channels):
-                    gz_payload = await asyncio.to_thread(
-                        gzip.compress, chunk_payload.encode("utf-8"), 6)
-                for channel in channels:
+            channels = ([requester] if requester is not None
+                        else list(self._iter_open_data_channels()))
+            offsets = list(range(0, len(data_bytes), clipboard_chunk_size))
+            # Chunk payloads are built once and shared by every channel; an
+            # entry is dropped once the slowest channel has passed it, so the
+            # cache holds what is in flight, not the whole payload.
+            prepared: dict = {}
+            prepare_lock = asyncio.Lock()
+            progress = {id(c): 0 for c in channels}
+
+            async def chunk_for(offset: int, want_gz: bool) -> tuple:
+                async with prepare_lock:
+                    entry = prepared.get(offset)
+                    if entry is None:
+                        chunk = data_bytes[offset:offset + clipboard_chunk_size]
+                        entry = (json.dumps({
+                            "type": "clipboard-msg-data",
+                            "data": {"content": base64.b64encode(chunk).decode("utf-8")},
+                        }), None)
+                    if want_gz and entry[1] is None:
+                        entry = (entry[0], await asyncio.to_thread(
+                            gzip.compress, entry[0].encode("utf-8"), 6))
+                    prepared[offset] = entry
+                    return entry
+
+            def passed(channel: Any, offset: int) -> None:
+                progress[id(channel)] = offset + clipboard_chunk_size
+                floor = min(progress.values())
+                for done in [o for o in prepared if o + clipboard_chunk_size <= floor]:
+                    prepared.pop(done, None)
+
+            async def deliver(channel: Any) -> None:
+                # One pipeline per channel, a chunk at a time: a slow peer paces
+                # only its own transfer, and one that cannot drain a chunk within
+                # the bulk timeout is left out of the rest of this payload (it
+                # keeps its stream; the partial transfer is discarded client-side
+                # at the next start) instead of wedging the monitor or the others.
+                want_gz = bool(getattr(channel, "_selkies_gz_tx", False))
+                self.send_message_to_channel(channel, "clipboard-msg-start", start_payload)
+                for offset in offsets:
+                    if channel.readyState != "open":
+                        progress.pop(id(channel), None)
+                        return
+                    payload, gz_payload = await chunk_for(offset, want_gz)
                     self._send_prepared_to_channel(
-                        channel, "clipboard-msg-data", chunk_payload, gz_payload)
-                for channel in channels:
-                    await drain_data_channel(channel)
-                read += len(chunk)
-            send_typed("clipboard-msg-end", {})
+                        channel, "clipboard-msg-data", payload, gz_payload)
+                    if not await drain_data_channel(channel):
+                        logger.warning(
+                            "Data channel did not drain a clipboard chunk within "
+                            f"{BULK_DRAIN_TIMEOUT_S:.0f}s; leaving it out of this payload.")
+                        progress.pop(id(channel), None)
+                        return
+                    passed(channel, offset)
+                self.send_message_to_channel(channel, "clipboard-msg-end", {})
+
+            await asyncio.gather(*(deliver(c) for c in channels), return_exceptions=True)
 
         logger.info(f"Sent clipboard data of length {len(data_bytes)} with mime type {mime_type}")
 
@@ -568,12 +609,6 @@ class RTCApp:
             "mem_total": memory_total * 1024 * 1024,
             "mem_used": memory_used * 1024 * 1024,
         })
-
-    def send_reload_window(self) -> None:
-        """Broadcast a window-reload command to all peers."""
-        logger.info("sending window reload")
-        self.__send_data_channel_message(
-            "system", {"action": "reload"})
 
     def send_system_action(self, action: str, peer_id: Optional[str] = None) -> None:
         """Send a system action (e.g. ``command_error,<text>``) to clients.
@@ -793,20 +828,23 @@ class RTCApp:
         )
 
     def munge_sdp(self, sdp: str, encoder: Optional[str] = None,
-                  fullcolor: Optional[bool] = None) -> str:
+                  fullcolor: Optional[bool] = None,
+                  use_cpu: Optional[bool] = None) -> str:
         """Rewrite the local offer SDP for optimal streaming behavior.
 
         Injects rtx-time, keyframe parameter-set repetition, the 4:4:4 H.264
-        profile when full colour is active, the real Opus ptime, and generous
-        bandwidth ceilings. Displays can run different encoders and chroma
-        formats; the caller passes the ones this offer's display is using
-        (defaults: the primary/global encoder and the configured full-colour
-        setting).
+        profile when full colour is active and the encoder carries it, the real
+        Opus ptime, and generous bandwidth ceilings. Displays can run different
+        encoders, chroma formats and software-encoding flags; the caller passes
+        the ones this offer's display is using (defaults: the primary/global
+        encoder and the configured full-colour and software-encoding settings).
 
         Args:
             sdp: The local offer SDP text.
             encoder: Encoder the display is running; None means the global one.
             fullcolor: Whether the display emits a 4:4:4 bitstream; None reads
+                the configured setting.
+            use_cpu: Whether the display forces software encoding; None reads
                 the configured setting.
 
         Returns:
@@ -815,6 +853,10 @@ class RTCApp:
         encoder = encoder or self.encoder
         if fullcolor is None:
             fullcolor = bool(app_settings.video_fullcolor[0])
+        if use_cpu is None:
+            use_cpu = bool(app_settings.use_cpu[0])
+        software_path = software_h264_path(
+            encoder, use_cpu or str(getattr(app_settings, "gpu_id", "")).strip() == "-1")
         sdp_text = sdp
         # rtx-time needs to be set to 125 milliseconds for optimal performance
         if 'rtx-time' not in sdp_text:
@@ -831,13 +873,15 @@ class RTCApp:
             elif 'sps-pps-idr-in-keyframe=1' not in sdp_text:
                 logger.warning("injecting modified sps-pps-idr-in-keyframe to SDP")
                 sdp_text = re.sub(r'sps-pps-idr-in-keyframe=\d+', r'sps-pps-idr-in-keyframe=1', sdp_text)
-            if ("h264" in encoder or "x264" in encoder) \
-                    and "openh264" not in encoder and fullcolor:
+            if ("h264" in encoder or "x264" in encoder) and fullcolor \
+                    and not (software_path and software_h264_encoder() == "openh264"):
                 # Full-colour is a 4:4:4 bitstream: advertise the High 4:4:4 profile so a
                 # decoder isn't handed a 4:2:0 baseline profile-level-id that can't match
                 # what it receives. 4:2:0 keeps 42e01f (the Firefox negotiation trick).
-                # OpenH264 is excluded: it always emits limited-range 4:2:0, and a 4:4:4
-                # profile makes decoders misread its color range (visibly darker output).
+                # A session known to encode on OpenH264 (the software encoder of a
+                # GPL-free pixelflux build, forced onto the CPU) is excluded: it always
+                # emits limited-range 4:2:0, and a 4:4:4 profile makes decoders misread
+                # its color range (visibly darker output).
                 sdp_text = re.sub(r'profile-level-id=[0-9A-Fa-f]{6}',
                                   'profile-level-id=f4001f', sdp_text)
         if "opus/" in sdp_text.lower():
@@ -965,14 +1009,11 @@ class RTCApp:
         if kind == "video":
             if buf:
                 try:
-                    # av.Packet accepts a buffer-protocol object zero-copy and
-                    # keeps it as the owning ref, avoiding a per-frame copy.
-                    packet = av.Packet(buf)
+                    # EncodedPacket references the encoder buffer with no copy; the
+                    # packers walk it as a memoryview, so no per-frame FFmpeg object
+                    # is allocated and no whole-frame copy is taken.
                     RTP_VIDEO_CLOCK_RATE = 90000
-                    packet.time_base = Fraction(1, RTP_VIDEO_CLOCK_RATE)
-                    if pts is not None:
-                        packet.pts = pts
-                        packet.dts = packet.pts
+                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE))
                     bridge = graph.get("video_bridge")
                     if bridge is not None:
                         bridge.set_data(packet)
@@ -981,11 +1022,8 @@ class RTCApp:
         elif kind == "audio":
             if buf:
                 try:
-                    # Zero-copy: av.Packet takes the buffer directly as owner.
-                    packet = av.Packet(buf)
-                    packet.time_base = Fraction(1, 48000)
-                    if pts is not None:
-                        packet.pts = pts
+                    # Zero-copy: EncodedPacket owns the buffer ref, no copy.
+                    packet = EncodedPacket(buf, pts, Fraction(1, 48000))
                     bridge = graph.get("audio_bridge")
                     if bridge is not None:
                         bridge.set_data(packet)
@@ -1334,56 +1372,6 @@ class RTCApp:
             return True
         return int(slot) - 1 != index
 
-    async def _feed_webcam(self, frame: bytes) -> None:
-        """Stages one reassembled MJPEG frame into the shared webcam server."""
-        try:
-            server = await get_shared_webcam_server(app_settings.webcam_socket_path)
-            server.feed(frame)
-        except Exception as exc:
-            logger.error("Webcam feed error: %s", exc)
-
-    def _handle_webcam_chunk(self, msg: Any, client_type: Optional[ClientType],
-                             client_token: Optional[str],
-                             peer_id: Optional[str]) -> Any:
-        """Reassembles a chunked webcam frame; returns a feed coroutine when done.
-
-        Wire layout per chunk: ``0x06`` opcode, a one-byte flags field (reserved),
-        then little-endian ``frame_id``, ``chunk_idx`` and ``chunk_count`` as
-        uint16, followed by the JPEG chunk. A single-chunk frame (``chunk_count``
-        1) is fed directly. Gated like other client input: viewers are denied
-        unless authorized collaborators, and a locked-off webcam is refused.
-        """
-        if client_type == ClientType.VIEWER and not self._viewer_is_collaborator(client_token):
-            return None
-        if not app_settings.webcam_enabled[0] and app_settings.webcam_enabled[1]:
-            return None
-        data = bytes(msg)
-        if len(data) < 8:
-            return None
-        frame_id, chunk_idx, chunk_count = struct.unpack_from("<HHH", data, 2)
-        payload = data[8:]
-        if chunk_count == 0:
-            return None
-        if chunk_count == 1:
-            return self._feed_webcam(payload)
-
-        key = peer_id or "primary"
-        st = self._webcam_reasm.get(key)
-        if st is None or st["frame_id"] != frame_id or st["count"] != chunk_count:
-            st = {"frame_id": frame_id, "count": chunk_count,
-                  "parts": [None] * chunk_count, "got": 0}
-            self._webcam_reasm[key] = st
-        if chunk_idx >= st["count"]:
-            return None
-        if st["parts"][chunk_idx] is None:
-            st["parts"][chunk_idx] = payload
-            st["got"] += 1
-        if st["got"] == st["count"]:
-            frame = b"".join(st["parts"])
-            self._webcam_reasm.pop(key, None)
-            return self._feed_webcam(frame)
-        return None
-
     def _on_input_channel_message(self, msg: Any,
                                   channel: Optional[RTCDataChannel] = None,
                                   client_type: Optional[ClientType] = None,
@@ -1410,11 +1398,6 @@ class RTCApp:
             except Exception:
                 logger.warning("Dropping undecodable compressed data channel message")
                 return
-        if isinstance(msg, (bytes, bytearray)) and len(msg) >= 1 and msg[0] == 0x06:
-            # Opcode 0x06: one chunk of an MJPEG webcam frame for the virtual
-            # V4L2 device. Reassembled per peer and fed to the shared webcam
-            # server; never reaches the string input dispatcher.
-            return self._handle_webcam_chunk(msg, client_type, client_token, peer_id)
         if msg == "_gz,1":
             # The peer can gunzip: echo the capability so it compresses its own large
             # sends, and mark THIS channel so outbound payloads to it may be gzipped.
@@ -1472,16 +1455,14 @@ class RTCApp:
         return self.on_data_message(msg, display_id or "primary", conn_id=peer_id)
 
     async def on_peer_connection_established(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary") -> None:
-        """Start the display's capture when its controller finishes connecting."""
-        if client_type == ClientType.CONTROLLER:
-            await self.start_display_media(display_id)
-            logger.info(f"Media pipeline start requested for {client_peer_id} (display '{display_id}')")
+        """Start the display's capture when a peer finishes connecting.
 
-    async def on_peer_connection_lost(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary") -> None:
-        """Stop the display's capture when its controller's connection ends."""
-        if client_type == ClientType.CONTROLLER:
-            await self.stop_display_media(display_id)
-            logger.info(f"Media pipeline stop requested for {client_peer_id} (display '{display_id}')")
+        Every consumer asks, not just the controller: a lone viewer must get
+        the desktop it joined for (websockets parity), and the start is
+        idempotent on a display whose capture is already running.
+        """
+        await self.start_display_media(display_id)
+        logger.info(f"Media pipeline start requested for {client_peer_id} (display '{display_id}')")
 
     async def _default_start_display_media(self, display_id: str) -> None:
         """Single-display default: only the primary pipeline is started."""
@@ -1496,10 +1477,10 @@ class RTCApp:
     async def on_connectionstatechange(self, client_peer_id: str) -> None:
         """React to a peer connection's state changes.
 
-        The "closed" branch is the peer's single teardown point for state
-        that a vanished client cannot release itself: consumer tasks, mic
-        playback, the display media graph (for controllers), and the
-        on_peer_gone input-state hook.
+        The "closed" branch is the teardown point for a peer whose client
+        vanished without a session end: it deregisters the peer and reaps
+        what the peer owned (consumer tasks, mic playback, the display's
+        media while nothing else consumes it, the on_peer_gone hook).
         """
         peer_conn = None
         peer_obj = None
@@ -1523,31 +1504,12 @@ class RTCApp:
             await self.on_peer_connection_established(client_peer_id, client_type, display_id)
             logger.info("Peer connection established", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "closed":
-            await self.on_peer_connection_lost(client_peer_id, client_type, display_id)
-            # Pop by identity, not key: a reconnect may have re-registered the same
-            # client_peer_id during the await above, and we must not orphan it.
-            removed = None
-            if self.peer_connections.get(client_peer_id) is peer_obj:
-                removed = self.peer_connections.pop(client_peer_id, None)
-            if removed is not None and self.on_peer_gone is not None:
-                # Identity-gated like the pop above: when a reconnect re-registered
-                # this client_peer_id, the id's input state (gamepad associations)
-                # belongs to the successor and must survive the old peer's close.
-                # The popped entry rides along: the hook needs the departing peer's
-                # type and token to judge what input authority left with it.
-                try:
-                    await self.on_peer_gone(client_peer_id, removed)
-                except Exception:
-                    logger.exception("on_peer_gone hook failed")
-            # This peer is done either way; its never-established channels emit
-            # no 'close', so stop their consumers here.
-            await self._cancel_channel_consumers(peer_obj)
-            # Per-peer mic teardown: only THIS peer's playback stops; the other
-            # primary peers (controller + co-op viewers) keep their mics.
-            await self._stop_mic_playback_state(peer_obj.get("mic_state"))
-            if removed is not None and removed.get('client_type') == ClientType.CONTROLLER:
-                await self._teardown_display_graph(display_id)
-            await self._notify_consumers_changed(display_id)
+            # Reaches here only for a peer that closed on its own (ICE failure,
+            # the browser going away): an explicit stop deregisters the peer
+            # before closing it, so this handler then finds no entry above and
+            # the stop reaps the peer itself.
+            self.peer_connections.pop(client_peer_id, None)
+            await self._reap_peer(client_peer_id, peer_obj)
             logger.info("Peer connection closed", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "connecting":
             logger.info("Peer connection is connecting", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
@@ -1601,11 +1563,11 @@ class RTCApp:
     ) -> None:
         """Create a peer connection and send its offer over signaling.
 
-        Builds the display's media graph when the peer is its controller,
-        attaches the media tracks, the mic receiver, and the serialized input
-        channel, and registers the peer entry only after the offer was sent —
-        a failure before registration tears the half-built connection down
-        here because no other teardown path could ever find it.
+        Builds the display's media graph when none exists yet, attaches the
+        media tracks, the mic receiver, and the serialized input channel, and
+        registers the peer entry only after the offer was sent — a failure
+        before registration tears the half-built connection down here because
+        no other teardown path could ever find it.
 
         Args:
             client_peer_id: Signaling id of the connecting peer.
@@ -1614,17 +1576,24 @@ class RTCApp:
             display_id: Display this peer attaches to.
 
         Raises:
-            RTCAppError: When no media graph exists for the display (viewer
-                joining without a controller) or the encoder is unsupported.
+            RTCAppError: When a viewer joins a secondary display that has no
+                media graph (its controller defines it) or the encoder is
+                unsupported.
         """
         client_type = ClientType(c_type)
         display_id = display_id or "primary"
 
-        # A display's media graph is created by its controller; audio (and the
-        # mic return path) only exist on the primary display — a secondary
-        # display page renders video and carries input, matching the WS model.
-        if client_type is ClientType.CONTROLLER:
-            graph: Dict[str, Any] = {"relay": MediaRelay()}
+        # A display's media graph is shared by every peer of the display and
+        # lives while any of them consumes it. Its controller creates it; on the
+        # primary display a lone viewer does too — the desktop exists whether or
+        # not anyone controls it (websockets parity). A secondary display exists
+        # only through its controller's layout, so a viewer cannot bring one up.
+        # Audio (and the mic return path) only exist on the primary display — a
+        # secondary display page renders video and carries input, matching the
+        # WS model.
+        graph = self.displays.get(display_id)
+        if graph is None and (client_type is ClientType.CONTROLLER or display_id == "primary"):
+            graph = {"relay": MediaRelay()}
             graph["video_bridge"] = PipelineBridge(on_drop=self._idr_on_video_drop(display_id))
             graph["video_media"] = VideoMedia(graph["video_bridge"])
             if display_id == "primary":
@@ -1633,15 +1602,13 @@ class RTCApp:
                 graph["audio_bridge"] = PipelineBridge(maxsize=8)
                 graph["audio_media"] = AudioMedia(graph["audio_bridge"])
             self.displays[display_id] = graph
-            logger.info(f"Media relay and pipeline bridges created for controller of display '{display_id}'")
-
-        peer_connection =  RTCPeerConnection(self.get_rtc_config())
-
-        graph = self.displays.get(display_id)
+            logger.info(f"Media relay and pipeline bridges created for display '{display_id}' ({client_type.value} peer)")
         if graph is None:
             raise RTCAppError(
                 f"Cannot create peer connection: no media graph for display '{display_id}'. Controller may be disconnected."
             )
+
+        peer_connection =  RTCPeerConnection(self.get_rtc_config())
         media_relay = graph["relay"]
 
         rtp_video_sender = peer_connection.addTrack(media_relay.subscribe(graph["video_media"]))
@@ -1659,6 +1626,14 @@ class RTCApp:
         mic_state = None
         if display_id == "primary" and bool(app_settings.audio_enabled[0]) and (mic_on or not mic_locked):
             mic_state = self._setup_mic_receiver(peer_connection, client_type, client_token)
+
+        # Webcam: the same shape as the mic — one recvonly video transceiver in the
+        # bundled SDP, inactive until the client attaches its camera track, so a
+        # runtime enable never renegotiates. Only the primary display's connection
+        # carries it, and a LOCKED-off webcam setting withholds the m-line entirely.
+        webcam_state = None
+        if display_id == "primary" and not webcam_locked_off():
+            webcam_state = self._setup_webcam_receiver(peer_connection, client_type, client_token)
 
         # Primary data channel, fully reliable + ordered: input, clipboard, and
         # upload control all ride it, and none of them tolerate loss.
@@ -1696,6 +1671,10 @@ class RTCApp:
                 display_fullcolor = bool(self.get_fullcolor_for_display(display_id))
             except Exception:
                 display_fullcolor = bool(app_settings.video_fullcolor[0])
+            try:
+                display_use_cpu = bool(self.get_use_cpu_for_display(display_id))
+            except Exception:
+                display_use_cpu = bool(app_settings.use_cpu[0])
             preferred_codec = self.get_mime_by_encoder(display_encoder)
             if preferred_codec is None:
                 raise RTCAppError(f"Encoder {display_encoder} is not supported")
@@ -1705,7 +1684,7 @@ class RTCApp:
             offer = peer_connection.localDescription
 
             sdp = offer.sdp
-            sdp = self.munge_sdp(sdp, display_encoder, display_fullcolor)
+            sdp = self.munge_sdp(sdp, display_encoder, display_fullcolor, display_use_cpu)
             await self.on_sdp('offer', sdp, client_peer_id)
         except BaseException:
             # Failure before registration: no teardown path could ever reach this
@@ -1739,6 +1718,9 @@ class RTCApp:
             # This peer's OWN mic playback state (None when no mic m-line): mic
             # teardown is per-peer, so one peer closing never silences the others.
             "mic_state": mic_state,
+            # This peer's webcam sink (None when no webcam m-line); retired per
+            # peer while the shared camera keeps serving applications.
+            "webcam_state": webcam_state,
             # Per-peer video pause (tab hide): the sender is the RTP gate — its
             # _enabled flag drops frames post-recv, so the relay proxy keeps
             # draining and nothing accumulates while this peer is hidden.
@@ -1866,6 +1848,75 @@ class RTCApp:
         mic_tx.receiver._encoded_audio_sink = sink
         return state
 
+    def _setup_webcam_receiver(self, peer_connection: RTCPeerConnection,
+                               client_type: Optional[ClientType] = None,
+                               client_token: Optional[str] = None) -> Dict[str, Any]:
+        """Add a recvonly video transceiver and route its encoded frames into the
+        virtual webcam.
+
+        The browser encodes its camera with its own WebRTC encoder (hardware
+        where it has one) and the depacketized frames — Annex-B H.264, VP8 or
+        VP9 — go straight to pixelflux, which decodes them off the GIL; no
+        Python decode and no data-channel chunking. When the decoder asks for a
+        keyframe (after a drop or a late start) the request becomes a PLI.
+
+        Returns:
+            The per-peer webcam state dict that `_close_webcam_state` retires.
+        """
+        cam_tx = peer_connection.addTransceiver("video", direction="recvonly")
+        try:
+            caps = RTCRtpSender.getCapabilities("video")
+            wanted = ("video/h264", "video/vp8", "video/vp9", "video/rtx")
+            preferred = [c for c in caps.codecs if c.mimeType.lower() in wanted]
+            if preferred:
+                cam_tx.setCodecPreferences(preferred)
+        except Exception as e:
+            logger.info(f"webcam codec preference not applied: {e}")
+
+        loop = self.async_event_loop
+        receiver = cam_tx.receiver
+        webcam = get_shared_webcam()
+        state: Dict[str, Any] = {"closed": False, "starting": False, "last_pli": 0.0}
+
+        def request_keyframe() -> None:
+            now = time.monotonic()
+            if now - state["last_pli"] < 0.25:
+                return
+            state["last_pli"] = now
+            loop.call_soon_threadsafe(lambda: asyncio.ensure_future(receiver.request_keyframe()))
+
+        def sink(codec: Any, frame: Any) -> None:
+            if state["closed"]:
+                return
+            is_viewer = client_type is ClientType.VIEWER
+            if not webcam_uplink_allowed(is_viewer, is_viewer and self._viewer_is_collaborator(client_token)):
+                if not state.get("denied_logged"):
+                    state["denied_logged"] = True
+                    logger.info("Dropping webcam video from a peer without webcam authority.")
+                return
+            data = getattr(frame, "data", b"") or b""
+            codec_id = CODEC_BY_NAME.get(str(getattr(codec, "name", "")).lower())
+            if not data or codec_id is None:
+                return
+            if webcam.camera is None:
+                # First frame: bring the camera up off the loop; frames until then
+                # are dropped and the decoder's first request for a keyframe
+                # becomes a PLI, so the stream starts clean.
+                if not state["starting"]:
+                    state["starting"] = True
+                    loop.call_soon_threadsafe(lambda: asyncio.ensure_future(webcam.ensure(codec_id)))
+                return
+            if webcam.keyframe_wanted(webcam.push(data, codec_id)):
+                request_keyframe()
+
+        receiver._encoded_video_sink = sink
+        return state
+
+    def _close_webcam_state(self, state: Optional[Dict[str, Any]]) -> None:
+        """Retire one peer's webcam sink; the shared camera itself outlives peers."""
+        if state:
+            state["closed"] = True
+
     async def _stop_mic_playback_state(self, state: Optional[Dict[str, Any]]) -> None:
         """Stop ONE peer's mic playback.
 
@@ -1897,8 +1948,7 @@ class RTCApp:
         # added together with a real pixelflux encoder; the vendored webrtc stack
         # retains its VP8 RTP support for that future.
         encoder_mime_map = {
-            "h264enc"     : "video/H264",
-            "openh264enc" : "video/H264",
+            "h264enc": "video/H264",
         }
         mime = encoder_mime_map.get(encoder)
         if mime is None:
@@ -1927,48 +1977,79 @@ class RTCApp:
     async def _stop_rtc_pipeline(self, client_peer_id: str) -> None:
         """Close a peer connection and release everything the peer owned.
 
-        The explicit-stop counterpart of the "closed" state branch: it runs
-        the same teardown steps because it deletes the registration before the
-        state event could see it.
+        The explicit-stop counterpart of the "closed" state branch. The peer
+        is deregistered BEFORE its connection closes, so the state event that
+        close raises finds no entry and every teardown step runs exactly once,
+        here — SESSION_END arrives as soon as the client's signaling socket
+        drops, long before ICE gives up on the peer, and nothing may wait for
+        the state machine.
 
         Raises:
             RTCAppError: When teardown itself fails.
         """
         try:
-            if not self.peer_connections:
-                return
-
-            peer_obj = self.peer_connections.get(client_peer_id, None)
+            peer_obj = self.peer_connections.pop(client_peer_id, None)
             if not peer_obj:
-                logger.warning(f"Peer object not found for client peer_id: {client_peer_id}")
+                logger.debug(f"Peer object not found for client peer_id: {client_peer_id}")
                 return
-
             peer_conn = peer_obj.get("peer_conn")
             if peer_conn is not None:
                 await peer_conn.close()
-            await self._cancel_channel_consumers(peer_obj)
-            # Explicit stop deletes the registration before the 'closed' state
-            # event can see it, so this peer's mic must be stopped here too.
-            await self._stop_mic_playback_state(peer_obj.get("mic_state"))
-            self._webcam_reasm.pop(client_peer_id, None)
-            removed = self.peer_connections.pop(client_peer_id, None)
-            if removed is not None and self.on_peer_gone is not None:
-                # For the same reason, the input state this peer owns (gamepad
-                # associations, and the controls they hold non-neutral) is
-                # released here — SESSION_END arrives as soon as the client's
-                # signaling socket drops, long before ICE gives up on the peer.
-                try:
-                    await self.on_peer_gone(client_peer_id, removed)
-                except Exception:
-                    logger.exception("on_peer_gone hook failed")
-
-            if peer_obj.get('client_type') == ClientType.CONTROLLER:
-                display_id = peer_obj.get('display_id') or 'primary'
-                logger.info(f"Controller peer disconnected, cleaning up media graph of display '{display_id}'")
-                await self._teardown_display_graph(display_id)
-            await self._notify_consumers_changed(peer_obj.get('display_id') or 'primary')
+            await self._reap_peer(client_peer_id, peer_obj)
         except Exception as e:
             raise RTCAppError(f"Error stopping pipeline: {e}") from e
+
+    async def _reap_peer(self, client_peer_id: str, peer_obj: Dict[str, Any]) -> None:
+        """Release what a deregistered peer owned; shared by the explicit stop
+        and the "closed" state branch so both run the same steps."""
+        # Never-established channels emit no 'close', so their consumers are
+        # only reachable from here.
+        await self._cancel_channel_consumers(peer_obj)
+        # Per-peer mic teardown: only THIS peer's playback stops; the other
+        # primary peers (controller + co-op viewers) keep their mics.
+        await self._stop_mic_playback_state(peer_obj.get("mic_state"))
+        self._close_webcam_state(peer_obj.get("webcam_state"))
+        if self.on_peer_gone is not None:
+            # The entry rides along: the hook needs the departing peer's type
+            # and token to judge what input authority (and which gamepad
+            # associations) left with it.
+            try:
+                await self.on_peer_gone(client_peer_id, peer_obj)
+            except Exception:
+                logger.exception("on_peer_gone hook failed")
+        display_id = peer_obj.get("display_id") or "primary"
+        await self._release_display_if_unconsumed(
+            display_id, peer_obj.get("client_type") is ClientType.CONTROLLER)
+        await self._notify_consumers_changed(display_id)
+
+    async def _release_display_if_unconsumed(self, display_id: str,
+                                             controller_left: bool) -> None:
+        """Stop a display's media and drop its graph once the display is done.
+
+        A secondary display is its controller's: the controller leaving ends
+        it, viewers included (the graph teardown closes them). The primary's
+        desktop exists on its own, so its media and graph serve the remaining
+        viewers across a controller's departure and are released with the
+        last consumer (the websockets engine likewise keeps a viewer-started
+        capture until nothing decodes it).
+        """
+        display_id = display_id or "primary"
+        remaining = any(
+            (p.get("display_id") or "primary") == display_id
+            for p in self.peer_connections.values()
+        )
+        if remaining and not (controller_left and display_id != "primary"):
+            return
+        if display_id not in self.displays and not controller_left:
+            # Already released (a viewer closed by the graph teardown), or never
+            # built (a viewer refused a graph-less secondary): nothing to do.
+            return
+        logger.info(f"Display '{display_id}' has no consumer left; releasing its media")
+        try:
+            await self.stop_display_media(display_id)
+        except Exception:
+            logger.exception(f"stop_display_media failed for display '{display_id}'")
+        await self._teardown_display_graph(display_id)
 
     async def _notify_consumers_changed(self, display_id: str) -> None:
         """Tell the owning service this display's consumer set changed.
@@ -2004,15 +2085,16 @@ class RTCApp:
                 await relay.stop()
             except Exception as e_relay:
                 logger.warning(f"Media relay teardown error (continuing): {e_relay}")
-        # The relay's tracks are gone, so every viewer (#shared / #player*) of this
-        # display is now bound to a dead source: its sender would block in recv()
-        # forever, frozen on the last frame, while ICE stays "connected" so the
-        # client never self-heals. Close those peer connections so the clients see
-        # the drop and reload — reconnecting to the controller's fresh graph.
+        # The relay's tracks are gone, so a viewer (#shared / #player*) still
+        # attached to this display is bound to a dead source: its sender would
+        # block in recv() forever, frozen on the last frame, while ICE stays
+        # "connected" so the client never self-heals. Close those peer
+        # connections so the clients see the drop and reload.
         await self._close_display_viewers(display_id)
 
     async def _close_display_viewers(self, display_id: str) -> None:
-        """Close every non-controller peer of a display whose graph is gone."""
+        """Close every non-controller peer of a display whose graph is gone
+        (a secondary released by its controller, or a drop)."""
         victims = [
             (pid, obj) for pid, obj in list(self.peer_connections.items())
             if (obj.get('display_id') or 'primary') == display_id
@@ -2023,7 +2105,7 @@ class RTCApp:
             if pc is None:
                 continue
             try:
-                logger.info(f"Closing orphaned viewer '{pid}' of display '{display_id}' after controller loss")
+                logger.info(f"Closing orphaned viewer '{pid}' of display '{display_id}' (its graph is gone)")
                 await pc.close()
             except Exception as e:
                 logger.debug(f"Error closing orphaned viewer '{pid}': {e}")
@@ -2037,24 +2119,36 @@ class RTCApp:
             # The peer's signaling socket died mid-handshake (refresh/eviction race):
             # routine churn, not a server fault — one line, no traceback.
             logger.info(f"Peer went away during RTC setup: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
-            await self._cleanup_failed_start(client_peer_id)
+            await self._cleanup_failed_start(client_peer_id, client_type, display_id)
         except Exception as e:
             logger.error(f"Error starting RTC pipeline: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
-            await self._cleanup_failed_start(client_peer_id)
+            await self._cleanup_failed_start(client_peer_id, client_type, display_id)
         else:
             logger.info("RTC pipeline started successfully", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
 
-    async def _cleanup_failed_start(self, client_peer_id: str) -> None:
-        """Close the half-built peer connection of a failed pipeline start NOW.
+    async def _cleanup_failed_start(self, client_peer_id: str, client_type: str,
+                                    display_id: str = "primary") -> None:
+        """Release what a failed pipeline start leaves behind, NOW.
 
         Waiting for the signaling session-end (which may never come if the
         peer's socket was already gone) leaves live ICE gatherers whose STUN
-        retries fire into torn-down transports.
+        retries fire into torn-down transports. A peer that failed before it
+        was registered closed its own half-built connection; what outlives it
+        is the display it claimed — the graph built for it here and, for a
+        secondary display, the registration the owning service made before
+        the start — which no later event would release.
         """
+        if client_peer_id in self.peer_connections:
+            try:
+                await self._stop_rtc_pipeline(client_peer_id)
+            except Exception as e:
+                logger.debug(f"Failed-start cleanup for {client_peer_id}: {e}")
+            return
         try:
-            await self._stop_rtc_pipeline(client_peer_id)
+            await self._release_display_if_unconsumed(
+                display_id, ClientType(client_type) is ClientType.CONTROLLER)
         except Exception as e:
-            logger.debug(f"Failed-start cleanup for {client_peer_id}: {e}")
+            logger.debug(f"Failed-start display release for {client_peer_id}: {e}")
 
     async def stop_rtc_connection(self, client_peer_id: str, client_type: str) -> None:
         """Stop a specific peer connection by ID."""

@@ -6,8 +6,10 @@
 set -eux
 # build-base/python3-dev/linux-headers: musl has no manylinux wheels, so every
 # extension dependency is compiled here (psutil needs the kernel headers).
+# pipewire-dev gives the V4L2 interposer its PipeWire frame source (headers
+# only; the library is loaded at runtime when an application uses it)
 apk add --no-cache \
-    abuild build-base pkgconf linux-headers \
+    abuild build-base pkgconf linux-headers pipewire-dev \
     python3 python3-dev py3-pip py3-virtualenv \
     ca-certificates
 # The runtime libraries come from the APKBUILD's own depends, keeping one list:

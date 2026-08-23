@@ -72,19 +72,19 @@ The term `client` refers to the [web components](https://github.com/selkies-proj
 
 The web client is a WebCodecs-based HTML5 application (with the core `selkies-core.js`, the WebSocket transport core `selkies-ws-core.js`, the WebRTC transport core `selkies-wr-core.js`, and the input library `lib/input.js`). It is responsible for the web browser interface that you see when you use Selkies.
 
-It decodes the incoming H.264 or JPEG stream using the browser [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) API with a low-latency zero-copy rendering path, plays Opus audio, and detects keyboard, mouse, gamepad, and clipboard input from the user, then sends them to the host server backend. It also handles remote cursors with the Pointer Lock API so that you can correctly control interactive applications and games.
+It decodes the incoming H.264 stream using the browser [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) API with a low-latency zero-copy rendering path (a browser without WebCodecs is served the striped JPEG stream instead, painted through `createImageBitmap`), plays Opus audio, and detects keyboard, mouse, gamepad, and clipboard input from the user, then sends them to the host server backend. It also handles remote cursors with the Pointer Lock API so that you can correctly control interactive applications and games.
 
-The web client source lives at [`addons/selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core) and is built and bundled into the Python wheel automatically (installed at `src/selkies/selkies_web`), so **there is no separate web package to download or install**. To serve your own copy of the web files, point `--web-root=` (or the `SELKIES_WEB_ROOT` environment variable) at a built web directory containing an `index.html`. Rebranding (name, icons, manifest) is done at build time in the `addons/selkies-web-core` source tree, not by editing the shipped artifacts.
+The web client source lives at [`addons/selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core) and is built and bundled into the Python wheel automatically (installed at `src/selkies/selkies_web`), so **there is no separate web package to download or install**. A source checkout builds that bundle with `scripts/ci/build-web.sh` (requires `npm`), the one script the wheel build, the conda recipe, the root `Dockerfile`, and the devcontainer all run, so every channel ships the same files. To serve your own copy of the web files, point `--web-root=` (or the `SELKIES_WEB_ROOT` environment variable) at a built web directory containing an `index.html`. Rebranding (name, icons, manifest) is done at build time in the `addons/selkies-web-core` source tree, not by editing the shipped artifacts.
 
 #### Media Capture and Encoding (`pixelflux` and `pcmflux`)
 
-Screen capture and video encoding are performed by [`pixelflux`](https://pypi.org/project/pixelflux/), a Rust (PyO3) extension. It encodes H.264 with hardware NVENC (NVIDIA) or VA-API (Intel/AMD) when a supported GPU is available, and otherwise falls back to software H.264 (`x264` or the BSD-licensed OpenH264), or encodes Motion JPEG. H.265 and AV1 in the capture path are planned but not yet implemented.
+Screen capture and video encoding are performed by [`pixelflux`](https://pypi.org/project/pixelflux/), a Rust (PyO3) extension. It encodes H.264 with hardware NVENC (NVIDIA) or VA-API (Intel/AMD) when a supported GPU is available, and otherwise falls back to software H.264 — `x264`, or the BSD-licensed OpenH264 in a `pixelflux` built without GPL components — or encodes Motion JPEG. H.265 and AV1 in the capture path are planned but not yet implemented.
 
 Audio capture and encoding are performed by [`pcmflux`](https://pypi.org/project/pcmflux/), a companion Rust (PyO3) extension that captures from PulseAudio (or PipeWire-Pulse) and encodes to Opus.
 
 Both are pulled in automatically as dependencies of the `selkies` wheel, so you normally do not install them separately.
 
-**Licensing note (GPL toggle):** the default software H.264 encoder of `pixelflux` uses GPL-2.0+ `libx264`, enabled by default with an install-time notice. Build `pixelflux` from source with `PIXELFLUX_ENABLE_GPL=0` to exclude every GPL-licensed component (the BSD-licensed OpenH264 encoder then substitutes for software H.264).
+**Licensing note (GPL toggle):** the software H.264 encoder of `pixelflux` is chosen when `pixelflux` is built, never by a Selkies setting: the default build uses GPL-2.0+ `libx264` (with an install-time notice), and a build made with `PIXELFLUX_ENABLE_GPL=0` excludes every GPL-licensed component and uses the BSD-licensed OpenH264 instead, behind the same `h264enc` / `h264enc-striped` encoders. Selkies reads `pixelflux.SOFTWARE_H264_ENCODER` to name the encoder in its logs and to default a session known to run on OpenH264 to CBR rate control (OpenH264 targets a bandwidth rather than a quality level); OpenH264 encodes 4:2:0 only, so `--video-fullcolor` has no effect on its software path. [Licensing](licensing.md) lists every third-party component of an installation with its license and where the GPL pieces come from.
 
 ### Optional Components
 
@@ -105,23 +105,28 @@ make -C addons/js-interposer && PREFIX=/usr make -C addons/js-interposer install
 cd addons/fake-udev && make && cp libudev.so.1.0.0-fake libudev.so.1 libudev.so /usr/lib/$(gcc -print-multiarch)/
 ```
 
-The following paths are required to exist for the Joystick Interposer to pass the joystick/gamepad input to various applications:
+The `/dev/input` directory has to exist for the Joystick Interposer to augment it:
 
 ```bash
 mkdir -pm1777 /dev/input
-touch /dev/input/js0 /dev/input/js1 /dev/input/js2 /dev/input/js3
-chmod 777 /dev/input/js*
 ```
+
+Each of the four gamepad slots is interposed as both a joydev node (`js0`-`js3`) and an evdev node (`event1000`-`event1003`). Opening either path by name is intercepted whether or not the file exists, and an application that scans `/dev/input` sees the evdev node of every bound slot added to the listing, so no placeholder files are needed either way.
 
 The following environment variables are required to be set in the environment each application is being run in to receive the joystick/gamepad input.
 
 ```bash
 export SELKIES_INTERPOSER='/usr/$LIB/selkies_joystick_interposer.so'
 export LD_PRELOAD="${SELKIES_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
-export SDL_JOYSTICK_DEVICE=/dev/input/js0
 ```
 
 You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root path of your choice for the interposer library.
+
+SDL2 applications discover the four pads through [fake-udev](#fake-udev). Where discovery through `libudev` is unavailable — `SDL_JOYSTICK_DISABLE_UDEV=1`, an SDL sandbox build, or an SDL built without udev — name the evdev nodes instead, which needs no placeholder files. Never name the joydev nodes: with fake-udev active, a `/dev/input/js0` hint is a second, different node for the slot SDL already enumerated as `event1000`, so the pad shows up twice.
+
+```bash
+export SDL_JOYSTICK_DEVICE=/dev/input/event1000:/dev/input/event1001:/dev/input/event1002:/dev/input/event1003
+```
 
 Check the [Joystick Interposer README.md](https://github.com/selkies-project/selkies/tree/main/addons/js-interposer/README.md) documentation for usage instruction and compiling information on other platforms.
 
@@ -174,7 +179,7 @@ The [Selkies Dashboard](https://github.com/selkies-project/selkies/tree/main/add
 
 The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal. The container defaults to an X11 (Xvfb) session; set `SELKIES_WAYLAND=true` to switch it to the headless Wayland backend instead. Under the Wayland backend the LXQt session runs natively on the nested compositor, anchoring its panel and desktop through layer-shell and controlling its windows through wlr-foreign-toplevel.
 
-The same LXQt desktop runs on either backend. On Wayland the capture compositor Selkies owns serves Wayland clients and manages no windows, so the container nests [labwc](https://labwc.github.io) inside it. When `SELKIES_WAYLAND_COMPOSITOR` is left unset or empty, the entrypoint first probes `${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}` for a compositor the operator may already have started; the probe connects to the socket, so a stale file from a dead run counts as absent. A live socket is captured directly by exporting it as `SELKIES_WAYLAND_HOST_DISPLAY` (setting that variable yourself selects host capture the same way). Only when nothing answers does the container nest labwc. That compositor supplies window management, the titlebar controls every window carries, and an XWayland server, so X11-only applications keep working; Selkies detects its socket and aims input, clipboard and display scaling at it. `-e SELKIES_WAYLAND_COMPOSITOR=<name>` runs another compositor there instead, and `-e SELKIES_WAYLAND_COMPOSITOR=none` skips the nested compositor entirely: applications then connect to the capture compositor directly, which is leaner for a single Wayland-native application but leaves no window management, no XWayland, and no desktop session.
+The same LXQt desktop runs on either backend. On Wayland the capture compositor Selkies owns serves Wayland clients and manages no windows, so the container nests [labwc](https://labwc.github.io) inside it. When `SELKIES_WAYLAND_COMPOSITOR` is left unset or empty, the entrypoint first probes `${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}` for a compositor the operator may already have started; the probe connects to the socket, so a stale file from a dead run counts as absent. A live socket is captured directly by exporting it as `SELKIES_WAYLAND_HOST_DISPLAY` (setting that variable yourself selects host capture the same way). Only when nothing answers does the container nest labwc. That compositor supplies window management, the titlebar controls every window carries, and an XWayland server, so X11-only applications keep working; Selkies detects its socket and aims input, clipboard and display scaling at it. `-e SELKIES_WAYLAND_COMPOSITOR=<name>` runs another compositor there instead, and `-e SELKIES_WAYLAND_COMPOSITOR=none` skips the nested compositor entirely: applications then connect to the capture compositor directly, which is leaner for a single Wayland-native application but leaves no window management, no XWayland, and no desktop session. An X11 desktop can also run in a rootful `Xwayland` started against the capture compositor (`WAYLAND_DISPLAY=<capture socket> Xwayland -shm -geometry WxH :N`, then the X11 session on `DISPLAY=:N`): Selkies follows that display for the clipboard (rootful Xwayland bridges no selection by itself, so the X11 XFixes monitor runs beside the compositor path), and its cursors arrive through the compositor like any other client's. Commands launched from the apps panel always run in the session the applications use — the nested compositor's socket and its XWayland display, a rootful Xwayland's display, or the capture compositor — with that session's D-Bus address and desktop identity, and the launch terminal published to the dashboards as `app_terminal` is `foot` for a Wayland session and `st` for an X11 one.
 
 A second display needs no configuration. A nested compositor cannot gain or lose a screen while it runs, so the session opens both at startup and Selkies holds the second at a token size until a client connects for it — the desktop stays the shape of what is being shown, and the screen grows to the second display's size the moment it is opened and shrinks back when it closes. `-e SELKIES_WAYLAND_OUTPUTS=N` fixes a different count.
 
@@ -279,17 +284,15 @@ Video is encoded by the `pixelflux` extension.
 
 | Encoder (`--encoder=`) | Codec | Acceleration | Notes |
 |---|---|---|---|
-| `h264enc` (default) | H.264 AVC | NVIDIA NVENC / Intel & AMD VA-API, software `x264` fallback | Uses hardware encoding when a supported GPU is available; add `--use-cpu=true` to force software |
-| `h264enc-striped` | H.264 AVC | Software (`x264`) | Striped/parallel software H.264 |
-| `openh264enc` | H.264 AVC | Software (OpenH264) | BSD-licensed software H.264 |
+| `h264enc` (default) | H.264 AVC | NVIDIA NVENC / Intel & AMD VA-API, software fallback (`x264`, or OpenH264 in a GPL-free `pixelflux`) | Uses hardware encoding when a supported GPU is available; add `--use-cpu=true` to force software |
+| `h264enc-striped` | H.264 AVC | Software (`x264`, or OpenH264 in a GPL-free `pixelflux`) | Striped/parallel software H.264 |
 | `jpeg` | Motion JPEG | Software | Maximum-compatibility fallback |
 
-**WebRTC mode (`--mode=webrtc`)** — the same `SELKIES_ENCODER` / `--encoder=` knob drives both transports. WebRTC can produce only the H.264 encoders, so in this mode the published menu is filtered to the two below and a websockets-only choice (`h264enc-striped`, `jpeg`) falls back to the default with a logged warning; switching back to WebSockets restores the configured menu and value:
+**WebRTC mode (`--mode=webrtc`)** — the same `SELKIES_ENCODER` / `--encoder=` knob drives both transports. WebRTC can produce only full-frame H.264, so in this mode the published menu is filtered to the encoder below and a websockets-only choice (`h264enc-striped`, `jpeg`) falls back to the default with a logged warning; switching back to WebSockets restores the configured menu and value:
 
 | Encoder (`--encoder=`) | Codec | Acceleration | Browsers |
 |---|---|---|---|
-| `h264enc` (default) | H.264 AVC | Hardware-first (NVENC/VA-API), else software x264, via `pixelflux` | All major |
-| `openh264enc` | H.264 AVC | Software (Cisco OpenH264) | All major |
+| `h264enc` (default) | H.264 AVC | Hardware-first (NVENC/VA-API), else the software encoder `pixelflux` was built with (`x264`, or OpenH264 in a GPL-free build) | All major |
 
 Additional codecs (H.265/HEVC, AV1, VP8/VP9) are planned for `pixelflux` in the mid-term
 future; the vendored WebRTC stack already carries the RTP-side code for them.
@@ -319,7 +322,7 @@ Opus is currently the only adequate full-band audio codec supported in web brows
 
 | Transport | Selected with | Ports | Notes |
 |---|---|---|---|
-| WebSockets (default) | `--mode=websockets` | single TCP port (default `8080`) | WebCodecs-based client decode; no STUN/TURN required |
+| WebSockets (default) | `--mode=websockets` | single TCP port (default `8080`) | WebCodecs-based client decode (striped JPEG without WebCodecs); no STUN/TURN required |
 | WebRTC (opt-in) | `--mode=webrtc` | signaling over the same port; media over UDP (or TCP) with ICE | Uses a vendored [`aiortc`](https://github.com/aiortc/aiortc) fork; may need STUN/TURN, see [WebRTC and Firewall Issues](firewall.md) |
 
 Use `--enable-dual-mode=true` to let the client switch between the WebSocket and WebRTC transports from the UI.

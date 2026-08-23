@@ -40,8 +40,7 @@ def make_settings(encoder: str, w: int = 1024, h: int = 640, **kw):
     """Build a CaptureSettings for the encoder, with overrides applied last.
 
     Args:
-        encoder: ``jpeg``, ``h264enc``, ``h264enc-striped``, ``openh264enc``,
-            or ``nvenc``.
+        encoder: ``jpeg``, ``h264enc``, ``h264enc-striped``, or ``nvenc``.
         w: Capture width in pixels.
         h: Capture height in pixels.
         **kw: Extra CaptureSettings attributes set verbatim.
@@ -68,11 +67,9 @@ def make_settings(encoder: str, w: int = 1024, h: int = 640, **kw):
     if encoder == "jpeg":
         cs.output_mode = 0
         cs.video_fullframe = False
-        cs.use_openh264 = False
     else:
         cs.output_mode = 1
-        cs.video_fullframe = encoder in ("h264enc", "openh264enc", "nvenc")
-        cs.use_openh264 = encoder == "openh264enc"
+        cs.video_fullframe = encoder in ("h264enc", "nvenc")
     for k, v in kw.items():
         setattr(cs, k, v)
     return cs
@@ -158,7 +155,7 @@ def main() -> "H.Results":
                    env={"DISPLAY": TEST_DISPLAY, "PATH": os.environ.get("PATH", "")}, capture_output=True)
 
     # ---- X11 encoders + on-demand IDR ----
-    for enc in ["h264enc", "h264enc-striped", "openh264enc", "jpeg"]:
+    for enc in ["h264enc", "h264enc-striped", "jpeg"]:
         try:
             before, after = run_x11(enc)
             res.check(f"x11 {enc}: frames flow", before["n"] >= 6, before["n"])

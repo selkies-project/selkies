@@ -5,16 +5,34 @@
 // dependency re-derivation are all generic. Adding a setting is one more spec.
 
 // Rate-control default per encoder for websockets streams when nothing
-// explicit is chosen: quality-driven (CRF) except openh264enc, which targets
-// a bandwidth (CBR). WebRTC streams default to CBR regardless of encoder
-// (the conditional below): a congestion-controlled transport needs the
-// encoder holding a bandwidth target.
+// explicit is chosen: quality-driven (CRF). WebRTC streams default to CBR
+// regardless of encoder (the conditional below): a congestion-controlled
+// transport needs the encoder holding a bandwidth target. So does OpenH264,
+// the software H.264 encoder of a GPL-free pixelflux build: a session known to
+// encode on the CPU defaults to CBR when the server reports that build
+// (softwareH264RcDefault, the same rule as the server's
+// resolve_rate_control_default).
 export const ENCODER_RC_DEFAULTS = {
     "h264enc": "crf",
-    "openh264enc": "cbr",
     "h264enc-striped": "crf",
     "jpeg": "crf",
 };
+
+// Whether a session with this encoder is known to encode H.264 on the CPU: the
+// striped encoder has no hardware path, and h264enc does when software encoding
+// is forced (h264enc without it may still land on the CPU, which nothing here
+// can know in advance).
+export function softwareH264Path(encoder, useCpu) {
+    return encoder === "h264enc-striped" || (encoder === "h264enc" && !!useCpu);
+}
+
+// The websockets rate-control default for an encoder, given the server's
+// software H.264 encoder ("x264" | "openh264", from the settings payload) and
+// whether software encoding is in effect.
+export function softwareH264RcDefault(encoder, softwareH264Encoder, useCpu) {
+    if (softwareH264Encoder === "openh264" && softwareH264Path(encoder, useCpu)) return "cbr";
+    return ENCODER_RC_DEFAULTS[encoder];
+}
 
 // Resolve one setting to its value in SERVER terms. Precedence, highest first:
 //   1. locked server value       - operator forces it; the client can't override
@@ -91,7 +109,9 @@ export const RATE_CONTROL_SPEC = {
     id: "rate_control_mode",
     serverKey: "rate_control_mode",
     storageKey: "rate_control_mode",
-    conditional: (ctx) => (ctx.streamMode === "webrtc" ? "cbr" : ENCODER_RC_DEFAULTS[ctx.activeEncoder]),
+    conditional: (ctx) => (ctx.streamMode === "webrtc"
+        ? "cbr"
+        : softwareH264RcDefault(ctx.activeEncoder, ctx.softwareH264Encoder, ctx.useCpu)),
     isValid: (v, ctx) => ctx.allowedRateControl.includes(v),
     fallback: "crf",
     propagate: (mode, _ctx, io) => io.postSetting({ rate_control_mode: mode }),

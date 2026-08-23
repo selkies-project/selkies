@@ -34,18 +34,15 @@
 import asyncio
 import datetime
 import logging
-import queue
 import random
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
-from av.frame import Frame
 
 from . import clock
-from .codecs import depayload, get_capabilities, get_decoder, is_rtx
+from .codecs import depayload, get_capabilities, is_rtx
 from .exceptions import InvalidStateError
 from .jitterbuffer import JitterBuffer
 from .mediastreams import MediaStreamError, MediaStreamTrack
@@ -81,32 +78,6 @@ from .stats import (
 from .utils import uint16_add, uint16_gt
 
 logger = logging.getLogger(__name__)
-
-
-def decoder_worker(
-    loop: asyncio.AbstractEventLoop, input_q: queue.Queue, output_q: asyncio.Queue
-) -> None:
-    codec_name = None
-    decoder = None
-
-    while True:
-        task = input_q.get()
-        if task is None:
-            # inform the track that is has ended
-            asyncio.run_coroutine_threadsafe(output_q.put(None), loop)
-            break
-        codec, encoded_frame = task
-
-        if codec.name != codec_name:
-            decoder = get_decoder(codec)
-            codec_name = codec.name
-
-        for frame in decoder.decode(encoded_frame):
-            # pass the decoded frame to the track
-            asyncio.run_coroutine_threadsafe(output_q.put(frame), loop)
-
-    if decoder is not None:
-        del decoder
 
 
 class NackGenerator:
@@ -229,7 +200,7 @@ class RemoteStreamTrack(MediaStreamTrack):
             self._id = id
         self._queue: asyncio.Queue = asyncio.Queue()
 
-    async def recv(self) -> Frame:
+    async def recv(self) -> Any:
         """
         Receive the next frame.
         """
@@ -302,12 +273,11 @@ class RTCRtpReceiver:
         self._enabled = True
         self.__active_ssrc: dict[int, datetime.datetime] = {}
         self.__codecs: dict[int, RTCRtpCodecParameters] = {}
-        self.__decoder_queue: queue.Queue = queue.Queue()
-        # Optional encoded-frame sink (mic uplink): when set, complete encoded audio
-        # frames are handed here instead of the Python decoder, so pcmflux is the only
-        # audio decoder in the system.
+        # Optional encoded-frame sinks (mic and webcam uplinks): when set, complete
+        # encoded frames are handed here instead of the Python decoder, so pcmflux
+        # and pixelflux are the only media decoders in the system.
         self._encoded_audio_sink = None
-        self.__decoder_thread: Optional[threading.Thread] = None
+        self._encoded_video_sink = None
         self.__kind = kind
         if kind == "audio":
             self.__jitter_buffer = JitterBuffer(capacity=16, prefetch=4)
@@ -420,21 +390,24 @@ class RTCRtpReceiver:
                 if encoding.rtx:
                     self.__rtx_ssrc[encoding.rtx.ssrc] = encoding.ssrc
 
-            # start decoder thread
-            self.__decoder_thread = threading.Thread(
-                target=decoder_worker,
-                name=self.__kind + "-decoder",
-                args=(
-                    asyncio.get_running_loop(),
-                    self.__decoder_queue,
-                    self._track._queue,
-                ),
-            )
-            self.__decoder_thread.start()
-
+            # Received media is handed off encoded: audio to pcmflux, video to
+            # pixelflux, both of which decode off the GIL. A receiver with no
+            # encoded-frame sink has nothing to decode it in-process.
             self.__transport._register_rtp_receiver(self, parameters)
             self.__rtcp_task = asyncio.ensure_future(self._run_rtcp())
             self.__started = True
+
+    async def request_keyframe(self) -> None:
+        """
+        Ask the sender for a keyframe (RTCP PLI) on every SSRC currently
+        delivering to this receiver; used by an encoded-frame sink whose
+        decoder lost its reference.
+        """
+        for ssrc in list(self.__active_ssrc.keys()):
+            try:
+                await self._send_rtcp_pli(ssrc)
+            except Exception:
+                pass
 
     def setTransport(self, transport: RTCDtlsTransport) -> None:
         self.__transport = transport
@@ -445,7 +418,6 @@ class RTCRtpReceiver:
         """
         if self.__started:
             self.__transport._unregister_rtp_receiver(self)
-            self.__stop_decoder()
 
             # shutdown RTCP task
             await self.__rtcp_started.wait()
@@ -453,7 +425,9 @@ class RTCRtpReceiver:
             await self.__rtcp_exited.wait()
 
     def _handle_disconnect(self) -> None:
-        self.__stop_decoder()
+        # End the media track (unused on Selkies' encoded-sink path) on disconnect.
+        if self._track is not None:
+            self._track.stop()
 
     async def _handle_rtcp_packet(self, packet: AnyRtcpPacket) -> None:
         self.__log_debug("< %s", packet)
@@ -483,7 +457,9 @@ class RTCRtpReceiver:
             ) & 0xFFFFFFFF
             self.__lsr_time[packet.ssrc] = time.time()
         elif isinstance(packet, RtcpByePacket):
-            self.__stop_decoder()
+            # Sender is done: end the media track (inert on the encoded-sink path).
+            if self._track is not None:
+                self._track.stop()
 
     async def _handle_rtp_packet(self, packet: RtpPacket, arrival_time_ms: int) -> None:
         """
@@ -579,8 +555,10 @@ class RTCRtpReceiver:
                 # Forward the encoded payload (bare Opus, or RED to de-frame downstream)
                 # rather than decoding it in Python.
                 self._encoded_audio_sink(codec, encoded_frame)
-            elif self.__decoder_thread:
-                self.__decoder_queue.put((codec, encoded_frame))
+            elif self._encoded_video_sink is not None:
+                # Same for video: the depacketized frame (Annex-B H.264, VP8/VP9)
+                # goes to the virtual webcam's decoder.
+                self._encoded_video_sink(codec, encoded_frame)
 
     async def _run_rtcp(self) -> None:
         self.__log_debug("- RTCP started")
@@ -656,11 +634,3 @@ class RTCRtpReceiver:
     def _set_rtcp_ssrc(self, ssrc: int) -> None:
         self.__rtcp_ssrc = ssrc
 
-    def __stop_decoder(self) -> None:
-        """
-        Stop the decoder thread, which will in turn stop the track.
-        """
-        if self.__decoder_thread:
-            self.__decoder_queue.put(None)
-            self.__decoder_thread.join()
-            self.__decoder_thread = None

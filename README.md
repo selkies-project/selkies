@@ -16,6 +16,6 @@ Selkies is designed for researchers studying Agentic AI, Graphical AI, Robotics,
 
 While designed for clustered or unprivileged containerized environments, Selkies can also be deployed in desktop computers, and any performance issue that would be problematic in cloud gaming platforms is also considered a bug.
 
-The HTML5 client runs on Chromium, Firefox, and Safari, with two-way clipboard (text and images), low-latency zero-copy video rendering, automatic GPU selection, and resilient keyboard, mouse, and gamepad input.
+The HTML5 client runs on Chromium, Firefox, and Safari, with two-way clipboard (text and images), low-latency zero-copy video rendering, automatic GPU selection, resilient keyboard, mouse, and gamepad input, and microphone and webcam forwarding into the session.
 
-**[Read the Documentation](https://selkies-project.github.io/selkies/) to get started.**
+**[Read the Documentation](https://selkies-project.github.io/selkies/) to get started.** The [Settings Reference](https://selkies-project.github.io/selkies/settings) lists every current setting. [Licensing](docs/licensing.md) inventories the third-party components of an installation, with their licenses and where the GPL pieces come from.

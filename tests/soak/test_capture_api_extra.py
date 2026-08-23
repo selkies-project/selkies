@@ -93,7 +93,6 @@ def make_settings(encoder: str = "h264enc", w: int = 1024, h: int = 640, **kw):
     cs.jpeg_quality = 90
     cs.output_mode = 1
     cs.video_fullframe = True
-    cs.use_openh264 = False
     for k, v in kw.items():
         setattr(cs, k, v)
     return cs

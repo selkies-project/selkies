@@ -69,12 +69,7 @@ from .settings import (settings, AppSettings, SETTING_DEFINITIONS,
 from types import SimpleNamespace
 from .webrtc_utils import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
 from .stream_server import BaseStreamingService, CentralizedStreamServer
-from .selkies import provision_virtual_microphone, PULSEAUDIO_AVAILABLE
-
-try:
-    import pulsectl_asyncio
-except Exception:
-    pulsectl_asyncio = None
+from .audio_control import AudioControl
 
 logger = logging.getLogger("webrtc")
 
@@ -229,14 +224,20 @@ class WebRTCService(BaseStreamingService):
         # Multi-monitor WM swap (websockets parity): heavy DEs tile poorly across the
         # per-display regions, so swap to a minimal Openbox once a secondary joins.
         self._wm_swap = MultiMonitorWindowManager()
+        # Primary-capture reconnect grace (websockets RECONNECT_GRACE_S parity): a
+        # controller tab reload drops and re-adds its peer within a second or two,
+        # so the primary capture stop is deferred by this window and cancelled if a
+        # consumer reclaims it — viewers and display2 stream through the reload.
+        self.RECONNECT_GRACE_S = 3.0
+        self._primary_stop_grace_task: Optional[asyncio.Task] = None
 
-        # Shared SelkiesVirtualMic control plane for the WebRTC mic path: one pulse
-        # connection and one virtual-source module for the service, provisioned once
-        # on the first mic packet (the data plane is per-peer pcmflux playback into
-        # the 'input' sink). Idempotent with the websockets 0x02 path — a source it
-        # already loaded is reused, never double-loaded — and only unloaded here when
-        # this path loaded it.
-        self._mic_pulse: Optional[Any] = None
+        # Shared SelkiesVirtualMic control plane for the WebRTC mic path: one
+        # sound-server control connection and one virtual-source module for the
+        # service, provisioned once on the first mic packet (the data plane is
+        # per-peer pcmflux playback into the 'input' sink). Idempotent with the
+        # websockets 0x02 path — a source it already loaded is reused, never
+        # double-loaded — and only unloaded here when this path loaded it.
+        self._mic_control: Optional[AudioControl] = None
         self._mic_module_index: Optional[int] = None
         self._mic_module_owned = False
         self._mic_provisioned = False
@@ -620,6 +621,7 @@ class WebRTCService(BaseStreamingService):
         # reach the profile every later offer advertises).
         self.rtc_app.get_encoder_for_display = self._encoder_for_display
         self.rtc_app.get_fullcolor_for_display = self._fullcolor_for_display
+        self.rtc_app.get_use_cpu_for_display = self._use_cpu_for_display
         # Per-peer tab-visibility pause (data-channel STOP_VIDEO/START_VIDEO)
         # and the consumer-set re-check on peer departure.
         self.rtc_app.on_video_consumer_active = self.handle_video_consumer_active
@@ -695,6 +697,11 @@ class WebRTCService(BaseStreamingService):
         entry = payload.get("settings", {}).get("second_screen")
         if isinstance(entry, dict) and entry.get("value") and not available:
             payload["settings"]["second_screen"] = dict(entry, value=False)
+        # Terminal the apps panel launches in, chosen by the session's windowing
+        # system (absent when none is installed: the client keeps its default).
+        terminal = self.input_handler.app_terminal() if self.input_handler else None
+        if terminal:
+            payload["settings"]["app_terminal"] = {"value": terminal}
         return payload
 
     def handle_data_channel_open(self, channel: Optional[Any] = None) -> None:
@@ -919,7 +926,12 @@ class WebRTCService(BaseStreamingService):
                 # dimensions, so update them and restart capture (websockets parity).
                 self.media_pipeline.width = target_w
                 self.media_pipeline.height = target_h
-                if self.media_pipeline.is_media_pipeline_running():
+                # A capture already running takes the size through a restart;
+                # the first request of a session can land while the pipeline
+                # is still bringing audio up, so the capture itself is what is
+                # checked, not the whole pipeline. A capture not yet started
+                # reads the new size when it starts.
+                if self.media_pipeline.is_screen_capturing():
                     await self.media_pipeline.restart_screen_capture()
                     # The compositor is the authority on what it realized (it
                     # may even-mask or refuse the mode): reconcile and tell the
@@ -1002,52 +1014,64 @@ class WebRTCService(BaseStreamingService):
         first-packet calls across peers provision exactly once, and the shared
         helper reuses a source the websockets path already loaded rather than
         double-loading it."""
-        if self._mic_provisioned or not PULSEAUDIO_AVAILABLE or pulsectl_asyncio is None:
+        if self._mic_provisioned:
             return
         async with self._mic_provision_lock:
             if self._mic_provisioned:
                 return
-            try:
-                if self._mic_pulse is None:
-                    pulse = pulsectl_asyncio.PulseAsync("selkies-webrtc-mic")
-                    await asyncio.wait_for(pulse.connect(), timeout=2.0)
-                    self._mic_pulse = pulse
-                audio_device_name = getattr(self.media_pipeline, "audio_device_name", None)
-                is_capturing = bool(getattr(self.media_pipeline, "_is_pcmflux_capturing", False))
-                self._mic_module_index, self._mic_module_owned = await provision_virtual_microphone(
-                    self._mic_pulse, audio_device_name, is_capturing
-                )
-                self._mic_provisioned = self._mic_module_index is not None
-            except Exception as e:
-                logger.error(f"WebRTC virtual mic provisioning failed: {e}", exc_info=True)
+            if self._mic_control is None:
+                self._mic_control = AudioControl("selkies-webrtc-mic")
+            audio_device_name = getattr(self.media_pipeline, "audio_device_name", None)
+            is_capturing = bool(getattr(self.media_pipeline, "_is_pcmflux_capturing", False))
+            self._mic_module_index, self._mic_module_owned = (
+                await self._mic_control.ensure_virtual_microphone(audio_device_name, is_capturing)
+            )
+            self._mic_provisioned = self._mic_module_index is not None
 
     async def _teardown_webrtc_virtual_mic(self) -> None:
-        """Unload the virtual-source module (only if this path loaded it) and close
-        the mic pulse connection on shutdown."""
-        pulse = self._mic_pulse
-        self._mic_pulse = None
-        if pulse is None:
+        """Unload the virtual-source module (only if this path loaded it) and
+        release the mic control connection on shutdown."""
+        control = self._mic_control
+        self._mic_control = None
+        if control is None:
             return
         if self._mic_module_index is not None and self._mic_module_owned:
-            try:
-                logger.info(f"Unloading WebRTC virtual mic module {self._mic_module_index}.")
-                await pulse.module_unload(self._mic_module_index)
-            except Exception as e:
-                logger.error(f"Error unloading WebRTC virtual mic module: {e}")
+            logger.info(f"Unloading WebRTC virtual mic module {self._mic_module_index}.")
+            await control.unload_module(self._mic_module_index)
         self._mic_module_index = None
         self._mic_module_owned = False
         self._mic_provisioned = False
-        try:
-            pulse.close()
-        except Exception as e:
-            logger.error(f"Error closing WebRTC mic pulse connection: {e}")
+        await control.aclose()
 
     async def start_display_media(self, display_id: str) -> None:
-        """A display's controller connected: the primary starts its pipeline right
+        """A display's consumer connected: the primary starts its pipeline right
         away; a secondary waits for its dimensions (the client's first resize
         message), which trigger the layout pass that creates its pipeline."""
         if display_id == "primary" and self.media_pipeline:
+            # A consumer reclaimed the primary: cancel a pending grace stop and
+            # (re)start. start_media_pipeline is idempotent, so a controller tab
+            # reload that reconnects inside the grace reuses the still-warm
+            # capture with no black restart.
+            self._cancel_primary_stop_grace()
             await self.media_pipeline.start_media_pipeline()
+            # A Wayland start only enqueues a compositor command, so its real outcome
+            # is read back here (the same barrier the secondaries use). A pipeline that
+            # believes it is running with no live capture would leave the page waiting
+            # on frames that never arrive, so it is stopped and logged truthfully; the
+            # next consumer / reconnect retries. This also surfaces the host-death case
+            # (reap_dead_host flips is_capturing to False).
+            if (IS_WAYLAND and self.media_pipeline.is_media_pipeline_running()
+                    and not await self._wayland_capture_live("primary", self.media_pipeline)):
+                last_error = self._wayland_capture_last_error(self.media_pipeline, "primary")
+                logger.error(
+                    "Primary Wayland capture is not live after start"
+                    + (f": {last_error}." if last_error else "."))
+                await self.media_pipeline.stop_media_pipeline()
+                return
+            caveat = (self._wayland_capture_last_error(self.media_pipeline, "primary")
+                      if IS_WAYLAND else None)
+            if caveat:
+                logger.warning(f"Primary Wayland capture started with a caveat: {caveat}")
             # The pipeline start is what establishes the host session in
             # host-capture mode, so the host's output count (and with it the
             # second-screen availability already announced on channel open) can
@@ -1058,11 +1082,13 @@ class WebRTCService(BaseStreamingService):
                 )
 
     async def stop_display_media(self, display_id: str) -> None:
-        """Stop a display's pipeline: the primary merely stops streaming, while
-        a secondary is fully unregistered and the desktop re-laid-out."""
+        """Release a display's pipeline: the primary's stop is deferred by a
+        reconnect grace (a controller tab reload reconnects within a second or
+        two and reuses the warm capture, and viewers/display2 keep streaming
+        throughout — websockets _teardown_if_unclaimed parity); a secondary is
+        fully unregistered and the desktop re-laid-out at once."""
         if display_id == "primary":
-            if self.media_pipeline:
-                await self.media_pipeline.stop_media_pipeline()
+            self._schedule_primary_stop_grace()
             return
         async with self._display_lock:
             pipeline = self.display_pipelines.pop(display_id, None)
@@ -1071,6 +1097,53 @@ class WebRTCService(BaseStreamingService):
             if pipeline is not None:
                 await pipeline.stop_media_pipeline()
         await self.reconfigure_displays()
+
+    def _cancel_primary_stop_grace(self) -> None:
+        """Drop a pending deferred primary-capture stop: a consumer reclaimed
+        the display before the grace elapsed."""
+        task = self._primary_stop_grace_task
+        self._primary_stop_grace_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _schedule_primary_stop_grace(self) -> None:
+        """Stop the primary capture after RECONNECT_GRACE_S unless a consumer
+        reclaims it first. A page reload drops and re-adds its peer within the
+        window, so tearing the capture down immediately would black out a
+        reconnecting controller (and stall the audio fan-out the viewers share)
+        for no reason; if nobody reclaims the primary, the stop runs after the
+        grace. At most one grace is pending at a time."""
+        if self._primary_stop_grace_task is not None and not self._primary_stop_grace_task.done():
+            return
+        if self.media_pipeline is None or not self.media_pipeline.is_media_pipeline_running():
+            return
+
+        async def _stop_after_grace() -> None:
+            try:
+                await asyncio.sleep(self.RECONNECT_GRACE_S)
+            except asyncio.CancelledError:
+                return
+            self._primary_stop_grace_task = None
+            # A consumer that reconnected during the grace cancelled this task;
+            # re-check under no lock is enough (the same event loop serializes
+            # start/stop with this coroutine's resume).
+            if self._primary_display_has_consumer():
+                logger.info("Primary reclaimed within the grace; capture kept.")
+                return
+            if self.media_pipeline is not None:
+                logger.info("Primary unclaimed after the grace; stopping its capture.")
+                await self.media_pipeline.stop_media_pipeline()
+
+        self._primary_stop_grace_task = asyncio.create_task(_stop_after_grace())
+
+    def _primary_display_has_consumer(self) -> bool:
+        """Whether any peer (controller or viewer) still consumes the primary."""
+        if self.rtc_app is None:
+            return False
+        return any(
+            (p.get("display_id") or "primary") == "primary"
+            for p in self.rtc_app.peer_connections.values()
+        )
 
     def _wayland_capture_handle(self) -> Optional[Any]:
         """A pixelflux handle for compositor output management (any ScreenCapture
@@ -1161,6 +1234,23 @@ class WebRTCService(BaseStreamingService):
         except Exception:
             return False
 
+    def _wayland_capture_last_error(
+        self, pipeline: Optional[MediaPipelinePixel], did: str
+    ) -> Optional[str]:
+        """The reason a display's Wayland capture failed, or a caveat a live one came up
+        with (encoder fell back to CPU, host connect refused), or None. Read straight from
+        ``capture_state`` (no barrier); the caller ensures ordering. None on an older
+        pixelflux without the readback."""
+        module = getattr(pipeline, "capture_module", None) if pipeline is not None else None
+        getter = getattr(module, "capture_state", None) if module is not None else None
+        if getter is None:
+            return None
+        try:
+            _state, last_error = getter(wayland_output_id(did))
+            return last_error
+        except Exception:
+            return None
+
     async def _realized_wayland_dims(self, did: str) -> Optional[Tuple[int, int]]:
         """The ``(width, height)`` the compositor currently has for this
         display's output, or None when it cannot be read."""
@@ -1172,11 +1262,15 @@ class WebRTCService(BaseStreamingService):
         if module is None or not hasattr(module, "get_realized_geometry"):
             return None
         try:
-            w, h, _scale = await asyncio.to_thread(
+            geom = await asyncio.to_thread(
                 module.get_realized_geometry, wayland_output_id(did))
         except Exception as e:
             logger.warning(f"Wayland realized-geometry read failed for '{did}': {e}")
             return None
+        if geom is None:
+            logger.warning(f"Wayland realized-geometry read for '{did}' timed out; size unknown.")
+            return None
+        w, h, _scale = geom
         return (w, h) if w > 0 and h > 0 else None
 
     async def _push_wayland_realized_geometry(
@@ -1198,11 +1292,17 @@ class WebRTCService(BaseStreamingService):
         if module is None or not hasattr(module, "get_realized_geometry"):
             return
         try:
-            w, h, scale = await asyncio.to_thread(
+            geom = await asyncio.to_thread(
                 module.get_realized_geometry, wayland_output_id(did))
         except Exception as e:
             logger.warning(f"Wayland realized-geometry read failed for '{did}': {e}")
             return
+        if geom is None:
+            # A timeout is unknown geometry, not "nothing to reconcile": leave the
+            # prior state and pushed size untouched.
+            logger.warning(f"Wayland realized-geometry read for '{did}' timed out; state left unreconciled.")
+            return
+        w, h, scale = geom
         if w <= 0 or h <= 0:
             return
         pipeline.width, pipeline.height = w, h
@@ -1553,6 +1653,7 @@ class WebRTCService(BaseStreamingService):
                     self.media_pipeline.width, self.media_pipeline.height = p_w, p_h
                     if self.media_pipeline.is_media_pipeline_running():
                         await self.media_pipeline.restart_screen_capture()
+                    self._push_x11_layout_geometry({"primary": {"w": p_w, "h": p_h}})
                 elif self._primary_dims is not None:
                     # No laid-out secondary (one is registered but has no
                     # dimensions yet, or its layout was unrealizable), so there is
@@ -1713,10 +1814,11 @@ class WebRTCService(BaseStreamingService):
                         )
                     return
                 if IS_WAYLAND and not await self._wayland_capture_live(did, pipeline):
+                    last_error = self._wayland_capture_last_error(pipeline, did)
                     await self._drop_wayland_secondary(
                         did,
-                        "The compositor could not start a capture for this display "
-                        "(encoder session or GPU resources exhausted).",
+                        last_error or "The compositor could not start a capture for this "
+                        "display (encoder session or GPU resources exhausted).",
                     )
                     return
                 if IS_WAYLAND:
@@ -1734,7 +1836,24 @@ class WebRTCService(BaseStreamingService):
                     await pipeline.update_capture_region(s["x"], s["y"], s["w"], s["h"])
                     if IS_WAYLAND:
                         await self._push_wayland_realized_geometry(did, pipeline)
+            if not IS_WAYLAND:
+                self._push_x11_layout_geometry(layouts)
         self._broadcast_display_config()
+
+    def _push_x11_layout_geometry(self, layouts: Dict[str, Dict[str, int]]) -> None:
+        """Tell each laid-out display's pages the size the X11 layout pass gave
+        it (websockets parity: the engine broadcasts every display's realized
+        resolution after each pass). The root may not fit the request, and a
+        page whose display the server cut down would otherwise keep its
+        requested size in its manual-mode bookkeeping and re-assert it
+        forever; idempotent on the client for an unchanged size. The Wayland
+        branches push through the compositor's realized geometry instead."""
+        if self.rtc_app is None:
+            return
+        for did, rect in layouts.items():
+            w, h = int(rect.get("w", 0)), int(rect.get("h", 0))
+            if w > 0 and h > 0:
+                self.rtc_app.send_remote_resolution(f"{w}x{h}", did)
 
     def _broadcast_display_config(self) -> None:
         """Tell every connected page which displays are attached (websockets
@@ -1746,6 +1865,32 @@ class WebRTCService(BaseStreamingService):
         self.rtc_app.send_media_data_over_channel(
             "display_config_update", {"displays": displays}
         )
+
+    def _update_cursor_cap(self, dpi_value: float) -> None:
+        """Scale the remote-cursor delivery cap with the DPI and push it to
+        every running capture (pixelflux applies cursor_size_cap live through
+        update_tunables; later (re)starts read it through CaptureSettings)."""
+        ih = self.input_handler
+        if ih is None:
+            return
+        try:
+            ih.system_dpi = float(dpi_value)
+            ih.cursor_size_cap = int(ih.max_cursor_size * float(dpi_value) / 96.0)
+        except Exception as e:
+            logger.debug(f"cursor cap update skipped: {e}")
+            return
+        updated = 0
+        for did, pipeline in list(self.display_pipelines.items()):
+            module = getattr(pipeline, "capture_module", None)
+            if pipeline is None or module is None or not pipeline.is_media_pipeline_running():
+                continue
+            try:
+                module.update_tunables(pipeline.generate_capture_settings())
+                updated += 1
+            except Exception as e:
+                logger.debug(f"Live cursor cap update skipped for '{did}': {e}")
+        logger.info(f"Cursor size cap {ih.cursor_size_cap}px for DPI {dpi_value} "
+                    f"({updated} live capture(s) updated).")
 
     async def handle_scaling(self, dpi_value: float) -> None:
         """Apply a client DPI sync to the desktop (X11 xrdb/cursor themes) or
@@ -1780,6 +1925,12 @@ class WebRTCService(BaseStreamingService):
             else:
                 logger.error(f"Failed to set DPI to {dpi_value}")
 
+        # Remote-cursor delivery cap follows the DPI on both backends (WS
+        # parity): running captures take it live through the tunables path, and
+        # the Wayland restarts below read it through CaptureSettings, so it is
+        # set first — a session compositor that absorbs the scale restarts nothing.
+        self._update_cursor_cap(dpi_value)
+
         # On Wayland a DPI runs the scale ladder per display: the session
         # compositor scales the screen backing it, and only what it leaves
         # becomes that display's capture scale, whose change restarts the
@@ -1799,15 +1950,6 @@ class WebRTCService(BaseStreamingService):
                 if pipeline.is_media_pipeline_running():
                     await pipeline.restart_screen_capture()
                     await self._push_wayland_realized_geometry(did, pipeline)
-            # Remote-cursor delivery cap follows the DPI (WS parity), read by
-            # the next capture (re)start through CaptureSettings.
-            ih = self.input_handler
-            if ih is not None:
-                try:
-                    ih.system_dpi = float(dpi_value)
-                    ih.cursor_size_cap = int(ih.max_cursor_size * float(dpi_value) / 96.0)
-                except Exception as e:
-                    logger.debug(f"cursor cap update skipped: {e}")
             await self._apply_wayland_cursor_size(dpi_value)
             return
 
@@ -1826,7 +1968,8 @@ class WebRTCService(BaseStreamingService):
             logger.error(f"Failed to set cursor size to {new_cursor_size}")
 
     async def handle_system_monitor(self, t: float) -> None:
-        """System-monitor tick: push CPU/memory stats and a ping to clients."""
+        """System-monitor tick: push CPU/memory stats and a ping to clients,
+        and recover the audio capture if its worker died since the last tick."""
         if self.input_handler and self.rtc_app and self.system_monitor:
             self.input_handler.ping_start = t
             self.rtc_app.send_system_stats(
@@ -1835,6 +1978,15 @@ class WebRTCService(BaseStreamingService):
                 self.system_monitor.mem_used,
             )
             self.rtc_app.send_ping(t)
+        # pcmflux reports a clean start while its worker is still coming up, so a
+        # device that dies during bring-up (or later) only shows through
+        # last_error: poll it here and cycle the audio capture (audio lives on
+        # the primary pipeline; the call no-ops on the audio-less secondaries).
+        if self.media_pipeline is not None:
+            try:
+                await self.media_pipeline.recover_audio_if_failed()
+            except Exception as e:
+                logger.debug(f"audio health poll skipped: {e}")
 
     async def handle_gpu_stats(
         self, load: float, memory_total: int, memory_used: int
@@ -1929,6 +2081,9 @@ class WebRTCService(BaseStreamingService):
 
     def _fullcolor_for_display(self, display_id: str) -> bool:
         return bool(self._display_setting(display_id, "video_fullcolor"))
+
+    def _use_cpu_for_display(self, display_id: str) -> bool:
+        return bool(self._display_setting(display_id, "use_cpu"))
 
     async def handle_update_settings(
         self, settings_json: Dict[str, Any], display_id: str = "primary"
@@ -2305,6 +2460,7 @@ class WebRTCService(BaseStreamingService):
         logger.info("Starting shutdown sequence")
 
         # Cancel all running tasks
+        self._cancel_primary_stop_grace()
         for task in list(self.tasks):
             try:
                 if not task.done():

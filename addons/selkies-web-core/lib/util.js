@@ -63,7 +63,6 @@ export const DISPLAY_LABELS = {
     webrtc: "WebRTC",
     h264enc: "H.264 (Full Frame)",
     "h264enc-striped": "H.264 (Striped Frame)",
-    openh264enc: "H.264 (OpenH264)",
     jpeg: "JPEG (Striped Frame)",
     cbr: "CBR (Constant Bitrate)",
     crf: "CRF (Constant Quality)",
@@ -71,6 +70,15 @@ export const DISPLAY_LABELS = {
 
 /** @param {string} value @returns {string} */
 export const displayLabel = (value) => DISPLAY_LABELS[value] ?? value;
+
+// Encoders this engine can play on the WebSocket transport: every H.264 mode
+// decodes through WebCodecs' VideoDecoder, jpeg (striped JPEG painted through
+// createImageBitmap) needs nothing. An engine without WebCodecs therefore still
+// streams: the core's pre-flight pins jpeg instead of failing, and the settings
+// offer nothing it cannot play. The WebRTC transport decodes in the browser's
+// media stack and is not subject to this.
+export const canDecodeEncoder = (encoder) => encoder === "jpeg" || typeof VideoDecoder !== "undefined";
+export const decodableEncoders = (encoders) => encoders.filter(canDecodeEncoder);
 
 /**
  * Directory this document is served from, without a trailing slash ('' at the

@@ -91,10 +91,13 @@ export class WebRTCClient {
 		 * @type {RTCPeerConnection}
 		 */
 		this.peerConnection = null;
-		// Microphone uplink: the sendonly audio transceiver the server reserved for the
-		// mic, and the active getUserMedia stream (null until the user enables the mic).
+		// Uplinks: the sendonly transceivers the server reserved for the microphone
+		// (audio) and the webcam (video), and the active getUserMedia streams (null
+		// until the user enables each device).
 		this._micTransceiver = null;
 		this._micStream = null;
+		this._webcamTransceiver = null;
+		this._webcamStream = null;
 
 		/**
 		 * @type {function}
@@ -297,7 +300,7 @@ export class WebRTCClient {
 		console.log("Received remote SDP", sdp);
 		this.peerConnection.setRemoteDescription(sdp).then(() => {
 			this._setDebug("received SDP offer, creating answer");
-			this._prepareMicTransceiver(sdp.sdp);
+			this._prepareUplinkTransceivers(sdp.sdp);
 			this.peerConnection.createAnswer()
 			.then((local_sdp) => {
 				// Set sps-pps-idr-in-keyframe=1
@@ -352,17 +355,26 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Reserve the mic uplink: find the audio m-line the server offered recvonly (it wants
-	 * our mic) and mark our matching transceiver sendonly, so a track can be attached
-	 * later on user toggle via replaceTrack without renegotiation.
+	 * Reserve the uplinks: the audio m-line the server offered recvonly wants our
+	 * microphone and the video m-line it offered recvonly wants our webcam (its own
+	 * stream is sendonly). The matching transceivers are marked sendonly so a track
+	 * can be attached later on user toggle via replaceTrack without renegotiation.
 	 */
-	_prepareMicTransceiver(remoteSdp) {
+	_prepareUplinkTransceivers(remoteSdp) {
 		this._micTransceiver = null;
+		this._webcamTransceiver = null;
 		if (!remoteSdp || !this.peerConnection) return;
-		let micMid = null, curMid = null, curKind = null, curRecvonly = false;
+		const recvonlyMids = { audio: null, video: null };
+		let curMid = null, curKind = null, curRecvonly = false;
+		const closeSection = () => {
+			if (curKind && curRecvonly && curMid !== null && recvonlyMids[curKind] === null
+				&& Object.prototype.hasOwnProperty.call(recvonlyMids, curKind)) {
+				recvonlyMids[curKind] = curMid;
+			}
+		};
 		for (const line of remoteSdp.split(/\r?\n/)) {
 			if (line.startsWith('m=')) {
-				if (curKind === 'audio' && curRecvonly && curMid !== null) { micMid = curMid; break; }
+				closeSection();
 				curKind = line.slice(2).split(' ')[0];
 				curMid = null; curRecvonly = false;
 			} else if (line.startsWith('a=mid:')) {
@@ -371,13 +383,18 @@ export class WebRTCClient {
 				curRecvonly = true;
 			}
 		}
-		if (micMid === null && curKind === 'audio' && curRecvonly) micMid = curMid;
-		if (micMid === null) return;
-		const tx = this.peerConnection.getTransceivers().find((t) => t.mid === micMid);
-		if (tx) {
-			this._micTransceiver = tx;
-			try { tx.direction = 'sendonly'; } catch (e) {}
-		}
+		closeSection();
+		const transceivers = this.peerConnection.getTransceivers();
+		const reserve = (mid) => {
+			if (mid === null) return null;
+			const tx = transceivers.find((t) => t.mid === mid);
+			if (tx) {
+				try { tx.direction = 'sendonly'; } catch (e) {}
+			}
+			return tx || null;
+		};
+		this._micTransceiver = reserve(recvonlyMids.audio);
+		this._webcamTransceiver = reserve(recvonlyMids.video);
 	}
 
 	/**
@@ -415,6 +432,63 @@ export class WebRTCClient {
 			this._micStream = null;
 		}
 		return true;
+	}
+
+	/**
+	 * Enable/disable the webcam: attach a getUserMedia video track to the reserved
+	 * sendonly transceiver (the browser encodes H.264/VP8 over RTP and the server's
+	 * virtual camera decodes it), or detach and stop it. deviceId (optional)
+	 * selects the camera; width/height/fps are capture hints.
+	 */
+	async setWebcam(enabled, deviceId = null, { width = 1280, height = 720, fps = 30 } = {}) {
+		if (enabled) {
+			// No transceiver means the server withheld the webcam m-line (webcam
+			// locked off): fail before prompting for permission.
+			if (!this._webcamTransceiver) {
+				throw new Error('Webcam is disabled on this server.');
+			}
+			if (this._webcamStream) return true;
+			if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+			const video = { width: { ideal: width }, height: { ideal: height }, frameRate: { ideal: fps } };
+			if (deviceId) video.deviceId = { exact: deviceId };
+			this._webcamStream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+			const track = this._webcamStream.getVideoTracks()[0];
+			if (this._webcamTransceiver && this._webcamTransceiver.sender && track) {
+				await this._setSenderActive(this._webcamTransceiver.sender, true);
+				await this._webcamTransceiver.sender.replaceTrack(track);
+			}
+			return true;
+		}
+		if (this._webcamTransceiver && this._webcamTransceiver.sender) {
+			// A null or ended track alone does not silence every engine (Firefox keeps
+			// the encoder running on it); deactivating the encoding does, without a
+			// renegotiation, and enable re-activates it.
+			await this._setSenderActive(this._webcamTransceiver.sender, false);
+			try { await this._webcamTransceiver.sender.replaceTrack(null); } catch (e) {}
+		}
+		if (this._webcamStream) {
+			this._webcamStream.getTracks().forEach((t) => t.stop());
+			this._webcamStream = null;
+		}
+		return true;
+	}
+
+	/** Pause or resume a sender's encodings in place (RTCRtpSendParameters.active). */
+	async _setSenderActive(sender, active) {
+		try {
+			const params = sender.getParameters();
+			if (!params.encodings || params.encodings.length === 0) return;
+			let changed = false;
+			params.encodings.forEach((e) => { if (e.active !== active) { e.active = active; changed = true; } });
+			if (changed) await sender.setParameters(params);
+		} catch (e) {
+			console.warn('Sender encoding activation not applied:', e);
+		}
+	}
+
+	/** The live camera track sent to the server, or null. */
+	get webcamTrack() {
+		return this._webcamStream ? (this._webcamStream.getVideoTracks()[0] || null) : null;
 	}
 
 	/**

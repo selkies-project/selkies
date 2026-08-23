@@ -8,11 +8,20 @@ Builds the centralized stream server, registers the WebRTC and WebSockets
 services, switches to the configured mode, and runs the asyncio loop until a
 signal or fatal error unwinds it. Signal handling routes SIGTERM/SIGHUP
 through main-task cancellation so a service-manager stop tears down the same
-way Ctrl-C does.
+way Ctrl-C does. `selkies --version` prints the package version and exits.
 """
 
-import os
 import sys
+
+from . import __version__
+
+# Answered before the settings module parses the command line: reporting the
+# version needs neither a configuration nor the native extensions
+if "--version" in sys.argv[1:]:
+    print(f"selkies {__version__}")
+    sys.exit(0)
+
+import os
 import signal
 import asyncio
 import logging
@@ -21,6 +30,7 @@ from .settings import settings
 from .webrtc_mode import WebRTCService
 from .selkies import DataStreamingServer
 from .stream_server import CentralizedStreamServer
+from .webcam import stop_shared_webcam
 
 
 logging.basicConfig(level=logging.INFO)
@@ -107,7 +117,12 @@ async def run() -> None:
     logger.info(f"Initiating server with {settings.mode} mode")
     await server.switch_to_mode(settings.mode)
 
-    await server.run()
+    try:
+        await server.run()
+    finally:
+        # The virtual webcam outlives mode switches (applications hold
+        # /dev/videoN open across them), so it is released only here.
+        await stop_shared_webcam()
 
 
 def main() -> None:

@@ -28,6 +28,7 @@ import inspect
 import base64
 import contextlib
 import gzip
+import hmac
 import json
 import logging
 import os
@@ -36,13 +37,14 @@ from collections import OrderedDict, deque
 from datetime import datetime
 from enum import Enum
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Iterable, Optional, Union
+from typing import Any, Awaitable, Callable, Optional, Tuple, Union
 
 import psutil
 from aiohttp import web, WSMsgType
 
 from . import audio_config
 from . import gpu_stats
+from .audio_control import AudioControl, ensure_capture_sink
 from .display_utils import (
     apply_common_capture_settings,
     parse_gpu_id,
@@ -69,6 +71,7 @@ from .display_utils import (
     align_dims_16,
 )
 from .input_handler import (
+    BULK_DRAIN_TIMEOUT_S,
     WebRTCInput as InputHandler,
     CLIPBOARD_CHUNK_SIZE,
     VIEWER_ALLOWED_PREFIXES,
@@ -78,7 +81,15 @@ from .input_handler import (
 )
 from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, effective_use_cpu, inflate_gz_bounded, sanitize_client_setting
 from .settings import settings as app_settings
-from .webcam import get_shared_webcam_server
+from .webcam import (
+    MSG_WEBCAM_DISABLED,
+    MSG_WEBCAM_KEYFRAME,
+    WS_FLAG_KEYFRAME,
+    WS_HEADER_LEN,
+    WS_OPCODE_WEBCAM,
+    get_shared_webcam,
+    webcam_uplink_allowed,
+)
 from .stream_server import BaseStreamingService
 from .webrtc_utils import Metrics
 
@@ -126,6 +137,11 @@ VIDEO_RELAY_SYNC_FLOOR_SECONDS = 1.0
 RTT_SMOOTHING_SAMPLES = 20
 # RFC 2198 RED redundancy depth (distance=2) for the shared Opus audio stream.
 AUDIO_RED_DISTANCE = 2
+# How long the audio broadcast loop lets the queue stay silent before it asks
+# pcmflux whether the capture worker died, and the floor between the restarts
+# that answer (a backend that keeps dying must not churn).
+PCMFLUX_HEALTH_INTERVAL_SECONDS = 2.0
+PCMFLUX_RESTART_FLOOR_SECONDS = 30.0
 SENT_FRAME_TIMESTAMP_HISTORY_SIZE = 1000
 # A resuming (unpausing) viewer bypasses the 30s START_VIDEO throttle, but not
 # faster than this: each resume forces an IDR resync, so rapid STOP/START must
@@ -142,7 +158,7 @@ AUDIO_CHANNELS_DEFAULT = 2
 # override reaches here as an arbitrary numeric string: parse it as a float
 # before narrowing, or a fractional in-range value aborts module import.
 AUDIO_BITRATE_DEFAULT = int(float(settings.audio_bitrate))
-PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "openh264enc"]
+PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped"]
 
 LOGLEVEL = logging.INFO
 logging.basicConfig(level=LOGLEVEL)
@@ -210,16 +226,6 @@ except (ImportError, RuntimeError) as e:
     data_logger.warning("pcmflux library not found. Audio capture is unavailable. (%s)", e)
 
 try:
-    import pulsectl_asyncio
-
-    PULSEAUDIO_AVAILABLE = True
-except ImportError:
-    PULSEAUDIO_AVAILABLE = False
-    data_logger.warning(
-        "pulsectl_asyncio not found. Microphone forwarding will be disabled."
-    )
-
-try:
     from pixelflux import CaptureSettings, ScreenCapture
 
     X11_CAPTURE_AVAILABLE = True
@@ -277,241 +283,49 @@ def _perms_hold_input_authority(perms: Optional[dict], token: Optional[str] = No
     return perms.get("role", "viewer") == "controller"
 
 
+def _mk_access_verdict(perms: Optional[dict], token: Optional[str] = None) -> bool:
+    """The MK_ACCESS verdict a tokened websockets client is told.
+
+    Input authority under the mk-token rule, with a viewer additionally held
+    to enable_collab: a read-only viewer must not attach an input context
+    whose every message the gate then drops. The same verdict WebRTC pushes
+    at data-channel open.
+
+    Args:
+        perms: The client's permission entry (may be None or empty).
+        token: Covers callers holding a user_tokens entry, which carries no
+            token field of its own.
+    """
+    perms = perms or {}
+    if perms.get("role") != "controller" and not bool(app_settings.enable_collab[0]):
+        return False
+    return _perms_hold_input_authority(perms, token=token)
+
+
+def _lookup_session_token(token: Optional[str]) -> Optional[dict]:
+    """The user_tokens entry for a session token, compared in constant time.
+
+    Every provisioned token is compared (no early exit), so the reply timing
+    does not tell a probing client how far its guess matched or which table
+    entry it resembles.
+
+    Returns:
+        The token's permission entry, or None when it is not provisioned.
+    """
+    if not token:
+        return None
+    candidate = token.encode("utf-8")
+    match = None
+    for known, perms in user_tokens.items():
+        if hmac.compare_digest(candidate, known.encode("utf-8")):
+            match = perms
+    return match
+
+
 # Set by the WebRTC service at init so a token update also reconciles LIVE
 # WebRTC peers (revocation closes them; mk handoffs push over the data
 # channel). reconcile_clients() itself only walks websockets sockets.
 webrtc_reconcile_hook: Optional[Callable[[], Awaitable[None]]] = None
-
-
-async def _poll_pa_object(
-    list_coro: Callable[[], Awaitable[Iterable[Any]]],
-    valid_names: Iterable[str],
-    poll_interval: float = 0.1,
-    timeout: float = 2.0,
-) -> Optional[Any]:
-    """Poll a PulseAudio list coroutine until a named object appears.
-
-    PipeWire creates sinks/sources asynchronously, so a freshly loaded module's
-    object may not be listed immediately.
-
-    Args:
-        list_coro: A pulsectl list coroutine (sink_list/source_list).
-        valid_names: Object names that count as a match.
-        poll_interval: Seconds between polls.
-        timeout: Total seconds to keep polling.
-
-    Returns:
-        The matching PulseAudio object, or None if it never appeared.
-    """
-    for _ in range(int(timeout / poll_interval)):
-        for obj in await list_coro():
-            if obj.name in valid_names:
-                return obj
-        await asyncio.sleep(poll_interval)
-    return None
-
-
-async def ensure_capture_sink(audio_device_name: Optional[str]) -> bool:
-    """Make sure the sink whose monitor the server captures exists.
-
-    A container's PipeWire or PulseAudio comes up with no sink at all when the
-    host exposes no sound card, so the monitor source named by `audio_device`
-    is missing and pcmflux gives up after its retry budget. The microphone
-    control plane creates the same sink, but only once a client sends mic data,
-    which server-to-client audio must not wait for.
-
-    Args:
-        audio_device_name: The configured capture device (a `.monitor` suffix
-            is stripped to derive the sink name); falls back to "output".
-
-    Returns:
-        True when the sink is present afterwards. Best effort: a False only
-        means the capture will fail for the usual reasons, so callers proceed
-        and let pcmflux report.
-    """
-    sink_name = (audio_device_name or "output").strip().split(".monitor")[0]
-    if not PULSEAUDIO_AVAILABLE or not sink_name:
-        return False
-    pulse = pulsectl_asyncio.PulseAsync("selkies-sink-provision")
-    try:
-        await asyncio.wait_for(pulse.connect(), timeout=2.0)
-        if any(s.name == sink_name for s in await pulse.sink_list()):
-            return True
-        data_logger.info(f"Capture sink '{sink_name}' not found. Attempting to create...")
-        await pulse.module_load("module-null-sink", f"sink_name={sink_name}")
-        if await _poll_pa_object(pulse.sink_list, [sink_name]):
-            data_logger.info(f"Created capture sink '{sink_name}'.")
-            return True
-        data_logger.error(
-            f"Loaded module-null-sink for '{sink_name}' but it never appeared."
-        )
-        return False
-    except Exception as e:
-        data_logger.warning(f"Could not provision capture sink '{sink_name}': {e}")
-        return False
-    finally:
-        with contextlib.suppress(Exception):
-            pulse.close()
-
-
-async def provision_virtual_microphone(
-    pulse: Any,
-    audio_device_name: Optional[str],
-    is_pcmflux_capturing: bool,
-) -> tuple[Optional[int], bool]:
-    """Provision the SelkiesVirtualMic control plane shared by both transports.
-
-    Creates the 'input'/'output' null sinks, loads module-virtual-source
-    bridging input.monitor to a recordable source, and forces the system
-    default sink/source so an app recording the default source hears the
-    client's forwarded mic. The PCM data plane (pcmflux AudioPlayback into the
-    'input' sink) belongs to the caller; this is the control plane only.
-
-    Idempotent: an existing SelkiesVirtualMic is reused, so the websockets 0x02
-    mic path and the WebRTC 'input' playback never double-load the module when
-    both are live.
-
-    Args:
-        pulse: A connected pulsectl_asyncio.PulseAsync client.
-        audio_device_name: The capture device name whose sink half becomes the
-            default output sink.
-        is_pcmflux_capturing: When True, verify pcmflux's source-output is
-            attached to a valid capture target and move it if not.
-
-    Returns:
-        `(module_index, owns_module)`. owns_module is True only when THIS call
-        loaded the module, so a caller that merely reused an existing source
-        never unloads it out from under the other transport on teardown.
-        `(None, False)` when the module load could not be verified.
-    """
-    virtual_source_name = "SelkiesVirtualMic"
-    master_monitor = "input.monitor"
-    # PipeWire prepends "output." to virtual sources
-    valid_source_names = [virtual_source_name, f"output.{virtual_source_name}"]
-
-    input_sink = "input"
-    output_sink = audio_device_name.strip().split(".monitor")[0] if audio_device_name else "output"
-    for sink_name in (input_sink, output_sink):
-        sink_exists = any(s.name == sink_name for s in await pulse.sink_list())
-        if not sink_exists:
-            data_logger.info(f"Sink '{sink_name}' not found. Attempting to create...")
-            await pulse.module_load("module-null-sink", f"sink_name={sink_name}")
-            if await _poll_pa_object(pulse.sink_list, [sink_name]):
-                data_logger.info(f"Successfully created and verified sink '{sink_name}'.")
-            else:
-                data_logger.error(f"Loaded module-null-sink for '{sink_name}' but it failed to appear in sink list.")
-        else:
-            data_logger.info(f"Sink '{sink_name}' already exists. Skipping creation.")
-
-    try:
-        await pulse.sink_default_set(output_sink)
-        data_logger.info(f"Set system default sink to '{output_sink}'.")
-    except Exception as e:
-        data_logger.warning(f"Could not set default sink to '{output_sink}': {e}")
-
-    target_device_names = [audio_device_name]
-    if "auto_null.monitor" not in target_device_names:
-        # Pipewire's default virtual sink is auto_null
-        target_device_names.append("auto_null.monitor")
-
-    existing_source_info = None
-    for source_obj in await pulse.source_list():
-        if source_obj.name in valid_source_names:
-            existing_source_info = source_obj
-            break
-
-    module_index = None
-    owns_module = False
-    if existing_source_info:
-        data_logger.info(
-            f"Virtual source '{existing_source_info.name}' (Index: {existing_source_info.index}) already exists."
-        )
-        actual_master = existing_source_info.proplist.get("device.master_device")
-        if actual_master == master_monitor:
-            data_logger.info(f"Existing source correctly linked to '{master_monitor}'.")
-        else:
-            data_logger.warning(
-                f"Existing source '{existing_source_info.name}' linked to '{actual_master}' not '{master_monitor}'. Manual fix may be needed."
-            )
-        module_index = existing_source_info.owner_module
-        try:
-            await pulse.source_default_set(existing_source_info.name)
-        except Exception:
-            pass
-    else:
-        data_logger.info(
-            f"Virtual source '{virtual_source_name}' not found. Attempting to load module..."
-        )
-        load_args = f"source_name={virtual_source_name} master={master_monitor}"
-        module_index = await pulse.module_load("module-virtual-source", load_args)
-        owns_module = True
-        data_logger.info(f"Loaded module-virtual-source with index {module_index} for '{virtual_source_name}'.")
-        new_source_info = await _poll_pa_object(pulse.source_list, valid_source_names)
-        if new_source_info:
-            data_logger.info(
-                f"Successfully verified creation of source '{new_source_info.name}' (Index: {new_source_info.index})."
-            )
-            # Force the system default source to SelkiesVirtualMic so apps record from it
-            try:
-                await pulse.source_default_set(new_source_info.name)
-                data_logger.info(f"Set system default source to '{new_source_info.name}'.")
-            except Exception as e:
-                data_logger.warning(f"Could not set default source via pulsectl_asyncio: {e}")
-        else:
-            data_logger.error(
-                f"Loaded module {module_index} but failed to find source '{virtual_source_name}'."
-            )
-            if module_index is not None:
-                try:
-                    await pulse.module_unload(module_index)
-                except Exception as unload_err:
-                    data_logger.error(f"Failed to unload module {module_index}: {unload_err}")
-            return None, False
-
-    if is_pcmflux_capturing:
-        # pcmflux may attach to the wrong source; move it onto a valid capture target
-        # so the encoded/forwarded audio graph stays intact.
-        try:
-            current_source_list = await pulse.source_list()
-            source_outputs = await pulse.source_output_list()
-            pcmflux_output = None
-            for output in source_outputs:
-                if hasattr(output, 'proplist') and output.proplist.get('application.name') == 'pcmflux':
-                    pcmflux_output = output
-                    break
-            if pcmflux_output:
-                connected_source = None
-                for source in current_source_list:
-                    if source.index == pcmflux_output.source:
-                        connected_source = source
-                        break
-                if connected_source and connected_source.name not in target_device_names:
-                    data_logger.warning(
-                        f"pcmflux connected to wrong source '{connected_source.name}', looking for a valid target in {target_device_names}..."
-                    )
-                    correct_source = None
-                    for source in current_source_list:
-                        if source.name in target_device_names:
-                            correct_source = source
-                            break
-                    if correct_source:
-                        await pulse.source_output_move(pcmflux_output.index, correct_source.index)
-                        data_logger.info(
-                            f"Successfully moved pcmflux from '{connected_source.name}' to '{correct_source.name}'"
-                        )
-                    else:
-                        data_logger.error(
-                            f"Could not find any valid source {target_device_names} to move pcmflux to"
-                        )
-                elif connected_source:
-                    data_logger.info(f"pcmflux correctly connected to '{connected_source.name}'")
-            else:
-                data_logger.debug("Could not find pcmflux in source outputs")
-        except Exception as e:
-            data_logger.error(f"Error checking/fixing pcmflux source: {e}")
-
-    data_logger.info(f"Virtual microphone '{virtual_source_name}' is ready for microphone forwarding.")
-    return module_index, owns_module
 
 
 # Only WS control-text messages at least this large are gzip-wrapped (opcode 0x05)
@@ -985,32 +799,44 @@ class SelkiesStreamingApp:
                     only=conn_id)
             data_bytes = data.encode('utf-8') if not is_binary and isinstance(data, str) else data
             total_size = len(data_bytes)
+            # Payload frames get the bulk tolerance the data channel's drain
+            # allows (a slow link is not a dead client); control frames keep the
+            # liveness bound, since one stalled client must not wedge clipboard
+            # delivery for all.
             if total_size < CLIPBOARD_CHUNK_SIZE:
                 encoded_data = base64.b64encode(data_bytes).decode('ascii')
                 if is_binary:
                     message = f"clipboard_binary,{mime_type},{encoded_data}"
                 else:
                     message = f"clipboard,{encoded_data}"
-                # Bounded: the clipboard monitor task calls this, and one
-                # stalled client must not wedge clipboard delivery for all.
                 await _broadcast_to_clients(self.data_streaming_server.clients, message,
-                                            per_client_timeout=2.0, only=conn_id)
+                                            per_client_timeout=BULK_DRAIN_TIMEOUT_S, only=conn_id)
             else:
                 data_logger.info(f"Sending large clipboard data ({mime_type}, {total_size} bytes) via multipart.")
                 start_message = f"clipboard_start,{mime_type},{total_size}"
-                await _broadcast_to_clients(self.data_streaming_server.clients, start_message,
-                                            per_client_timeout=2.0, only=conn_id)
-                offset = 0
-                while offset < total_size:
-                    chunk = data_bytes[offset:offset + CLIPBOARD_CHUNK_SIZE]
-                    encoded_chunk = base64.b64encode(chunk).decode('ascii')
-                    data_message = f"clipboard_data,{encoded_chunk}"
-                    await _broadcast_to_clients(self.data_streaming_server.clients, data_message,
-                                                per_client_timeout=2.0, only=conn_id)
-                    offset += len(chunk)
-                    await asyncio.sleep(0)
-                await _broadcast_to_clients(self.data_streaming_server.clients, "clipboard_finish",
-                                            per_client_timeout=2.0, only=conn_id)
+                clients = self.data_streaming_server.clients
+
+                async def deliver(cid: int) -> None:
+                    # One pipeline per client, a chunk at a time, so a slow
+                    # link paces only its own transfer and a dead one drops out
+                    # of the set without touching anyone else's.
+                    if await _broadcast_to_clients(clients, start_message,
+                                                   per_client_timeout=2.0, only=cid):
+                        return
+                    offset = 0
+                    while offset < total_size:
+                        chunk = data_bytes[offset:offset + CLIPBOARD_CHUNK_SIZE]
+                        data_message = "clipboard_data," + base64.b64encode(chunk).decode('ascii')
+                        if await _broadcast_to_clients(clients, data_message,
+                                                       per_client_timeout=BULK_DRAIN_TIMEOUT_S, only=cid):
+                            return
+                        offset += len(chunk)
+                        await asyncio.sleep(0)
+                    await _broadcast_to_clients(clients, "clipboard_finish",
+                                                per_client_timeout=2.0, only=cid)
+
+                recipients = [id(c) for c in list(clients) if conn_id is None or id(c) == conn_id]
+                await asyncio.gather(*(deliver(cid) for cid in recipients))
                 data_logger.info("Finished sending multi-part clipboard data.")
         except Exception as e:
             data_logger.error(f"Failed to send clipboard data: {e}", exc_info=True)
@@ -1248,6 +1074,10 @@ class DataStreamingServer(BaseStreamingService):
         self.pcmflux_module = None
         self.is_pcmflux_capturing = False
         self.pcmflux_settings = None
+        # The failed run already reported (module id, reason) and when the
+        # last failure-driven restart ran.
+        self._pcmflux_reported_failure = None
+        self._pcmflux_last_restart = 0.0
         # Opus+RED redundancy gate for the shared audio broadcast: per-connection
         # client capability (advertised via the "audioRedundancy" settings field)
         # and the red_distance currently applied to the running pipeline. RED is
@@ -1299,7 +1129,7 @@ class DataStreamingServer(BaseStreamingService):
 
         initial_encoder = settings.encoder
 
-        if not settings.debug[0] and PULSEAUDIO_AVAILABLE:
+        if not settings.debug[0]:
             logging.getLogger("pulsectl_asyncio").setLevel(logging.WARNING)
 
         logger.info(f"Initializing DataStreamingServer with encoder: {initial_encoder}, Framerate: {TARGET_FRAMERATE}")
@@ -1644,17 +1474,62 @@ class DataStreamingServer(BaseStreamingService):
                     # Loop closed mid-teardown: drop the chunk.
                     pass
     
+    def _check_pcmflux_health(self) -> None:
+        """Restart the audio pipeline when its pcmflux worker died after start.
+
+        pcmflux's start handshake answers while the worker is still starting,
+        so a backend that gives up afterwards (its retry ladder spent, a
+        mid-run reconnect budget exhausted) surfaces only through
+        `last_error`; the broadcast loop asks here whenever its queue stays
+        silent. The failure is logged once per run, and the restart — the same
+        stop/start the audio toggles use — runs as its own task (the stop
+        cancels the broadcast loop) no more often than the restart floor.
+        Older pcmflux builds without the attribute never report one.
+        """
+        module = self.pcmflux_module
+        if module is None or not self.is_pcmflux_capturing:
+            return
+        error = getattr(module, "last_error", None)
+        if not error:
+            return
+        failure = (id(module), str(error))
+        if self._pcmflux_reported_failure != failure:
+            self._pcmflux_reported_failure = failure
+            data_logger.error(f"pcmflux audio capture failed after start: {error}")
+        now = time.monotonic()
+        if now - self._pcmflux_last_restart < PCMFLUX_RESTART_FLOOR_SECONDS:
+            return
+        self._pcmflux_last_restart = now
+        _spawn_background_task(self._restart_failed_pcmflux(module), name="pcmflux-restart")
+
+    async def _restart_failed_pcmflux(self, failed_module: Any) -> None:
+        """Stop and start the audio pipeline under the reconfigure guard, unless
+        the failed capture was already replaced or stopped meanwhile."""
+        async with self._reconfigure_guard():
+            if self.pcmflux_module is not failed_module or not self.is_pcmflux_capturing:
+                return
+            data_logger.info("Restarting the audio pipeline after its capture failed.")
+            await self._stop_pcmflux_pipeline()
+            await self._start_pcmflux_pipeline()
+
     async def _pcmflux_send_audio_chunks(self) -> None:
         """Broadcast queued Opus audio chunks to the primary-viewer sockets.
 
         Runs as a long-lived task. Secondary-display sockets are excluded (they
         render video only; audio rides the primary connection), and sends are
-        bounded so one stalled socket cannot freeze the shared stream.
+        bounded so one stalled socket cannot freeze the shared stream. A queue
+        that stays silent past the health interval is the cue to ask pcmflux
+        whether the capture worker died (_check_pcmflux_health).
         """
         data_logger.info("pcmflux audio chunk broadcasting task started.")
         try:
             while True:
-                item = await self.pcmflux_audio_queue.get()
+                try:
+                    item = await asyncio.wait_for(
+                        self.pcmflux_audio_queue.get(), timeout=PCMFLUX_HEALTH_INTERVAL_SECONDS)
+                except asyncio.TimeoutError:
+                    self._check_pcmflux_health()
+                    continue
 
                 secondary_websockets = {
                     client_info.get('ws')
@@ -1805,11 +1680,17 @@ class DataStreamingServer(BaseStreamingService):
                 None, self.pcmflux_module.start_capture, self.pcmflux_settings, self.pcmflux_callback
             )
 
+            # The start handshake answers while the worker may still be
+            # starting; a run that already died reports through last_error.
+            state = getattr(self.pcmflux_module, "state", "running")
+            error = getattr(self.pcmflux_module, "last_error", None)
+            if state == "failed" or error:
+                raise RuntimeError(f"capture {state}: {error}")
             self.is_pcmflux_capturing = True
             if self.pcmflux_send_task is None or self.pcmflux_send_task.done():
                 self.pcmflux_send_task = asyncio.create_task(self._pcmflux_send_audio_chunks())
-            
-            data_logger.info("pcmflux audio capture started successfully.")
+
+            data_logger.info(f"pcmflux audio capture state: {state}.")
             return True
         except Exception as e:
             data_logger.error(f"Failed to start pcmflux audio pipeline: {e}", exc_info=True)
@@ -2189,6 +2070,11 @@ class DataStreamingServer(BaseStreamingService):
         # Transport capacity, not a user setting: lets the client size multipart
         # chunks (clipboard, uploads) to the whole frame.
         payload['ws_max_message_bytes'] = {"value": WS_MAX_MESSAGE_BYTES}
+        # Terminal the apps panel launches in, chosen by the session's windowing
+        # system (absent when none is installed: the client keeps its default).
+        terminal = self.input_handler.app_terminal() if self.input_handler else None
+        if terminal:
+            payload['app_terminal'] = {"value": terminal}
         # second_screen is published as EFFECTIVE availability — the admin flag
         # AND the backend's real capacity — so dashboards never offer a second
         # display the server would immediately kill.
@@ -2458,11 +2344,18 @@ class DataStreamingServer(BaseStreamingService):
         if module is None or not hasattr(module, 'get_realized_geometry'):
             return
         try:
-            w, h, scale = await asyncio.to_thread(
+            geom = await asyncio.to_thread(
                 module.get_realized_geometry, wayland_output_id(display_id))
         except Exception as e:
             data_logger.warning(f"Wayland realized-geometry read failed for '{display_id}': {e}")
             return
+        if geom is None:
+            # A timeout is unknown geometry, not "nothing to reconcile": leave the
+            # prior state untouched rather than clamping it to a zero sentinel.
+            data_logger.warning(
+                f"Wayland realized-geometry read for '{display_id}' timed out; state left unreconciled.")
+            return
+        w, h, scale = geom
         if w <= 0 or h <= 0:
             return
         client = self.display_clients.get(display_id)
@@ -2480,6 +2373,41 @@ class DataStreamingServer(BaseStreamingService):
             f"Wayland realized geometry for '{display_id}': {w}x{h} @ scale {scale}")
         if broadcast:
             await self.broadcast_stream_resolution()
+
+    async def _current_primary_geometry(self) -> Optional[tuple]:
+        """The primary display's size as the server realizes it right now.
+
+        What a connection that may not resize the desktop streams: the
+        primary's rectangle of an extended layout while a secondary display is
+        connected (the X root then spans every display), else the root window
+        (RandR) on X11 or compositor output 0 on Wayland — read live, so a
+        desktop resized between connections (selkies-resize) is streamed at
+        its new size rather than the last connection's.
+
+        Returns:
+            `(width, height)`, or None when the geometry cannot be read.
+        """
+        layout = getattr(self, 'display_layouts', {}).get('primary')
+        if (layout and layout.get('w', 0) > 0 and layout.get('h', 0) > 0
+                and any(did != 'primary' for did in self.display_clients)):
+            return layout['w'], layout['h']
+        if IS_WAYLAND:
+            module = self._wayland_control_module()
+            if module is None or not hasattr(module, 'get_realized_geometry'):
+                return None
+            try:
+                geom = await asyncio.to_thread(
+                    module.get_realized_geometry, wayland_output_id('primary'))
+            except Exception as e:
+                data_logger.warning(f"Wayland primary geometry read failed: {e}")
+                return None
+            if geom is None:
+                data_logger.warning("Wayland primary geometry read timed out; size unknown.")
+                return None
+            w, h, _scale = geom
+        else:
+            w, h = await read_realized_root((0, 0))
+        return (w, h) if w > 0 and h > 0 else None
 
     async def _apply_wayland_cursor_size(self, dpi: Union[int, float]) -> None:
         """Wayland counterpart of the X11 per-DPI cursor resize: the compositor
@@ -2501,13 +2429,19 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e:
             data_logger.warning(f"Wayland cursor resize failed: {e}")
 
-    def _update_wayland_cursor_cap(self, dpi: Union[int, float]) -> None:
-        """Wayland parity with X11's per-DPI cursor re-derive: track the DPI on
-        the input handler and scale the remote-cursor delivery cap with it, so
-        the next capture (re)start threads the raised cap through
-        CaptureSettings. The compositor's composited cursor follows the output
-        scale on its own (set_cursor_size re-derives its theme pixel size on
-        DPI changes)."""
+    def _update_cursor_cap(self, dpi: Union[int, float]) -> None:
+        """Scale the remote-cursor delivery cap with a new DPI, on both backends.
+
+        Tracks the DPI on the input handler and re-derives its cap from the
+        DPI-scaled maximum sprite size (the python cursor monitor downscales
+        shapes past it; the desktop cursor itself was just resized for the
+        same DPI). Running captures take the cap live through pixelflux's
+        tunables path, so the sprite pixelflux's own cursor monitor delivers
+        follows without a capture restart; later (re)starts thread it through
+        CaptureSettings. On Wayland the compositor's composited cursor follows
+        the output scale on its own (set_cursor_size re-derives its theme
+        pixel size on DPI changes).
+        """
         ih = self.input_handler
         if ih is None:
             return
@@ -2516,6 +2450,21 @@ class DataStreamingServer(BaseStreamingService):
             ih.cursor_size_cap = int(ih.max_cursor_size * float(dpi) / 96.0)
         except Exception as e:
             data_logger.debug(f"cursor cap update skipped: {e}")
+            return
+        updated = 0
+        for display_id, inst in list(self.capture_instances.items()):
+            module, cs = inst.get('module'), inst.get('settings')
+            if module is None or cs is None:
+                continue
+            try:
+                cs.cursor_size_cap = int(ih.cursor_size_cap)
+                module.update_tunables(cs)
+                updated += 1
+            except Exception as e:
+                data_logger.debug(f"Live cursor cap update skipped for '{display_id}': {e}")
+        data_logger.info(
+            f"Cursor size cap {ih.cursor_size_cap}px for DPI {dpi} "
+            f"({updated} live capture(s) updated).")
 
     def _parse_settings_payload(self, payload_str: str) -> dict:
         """Parse a SETTINGS JSON payload into typed values (absent keys become None).
@@ -2603,7 +2552,8 @@ class DataStreamingServer(BaseStreamingService):
 
         Controller-only (a viewer's payload is ignored). Under
         _reconfigure_lock it resolves the target geometry (server-forced
-        manual, client manual, or initial client size), stores sanitized
+        manual, client manual, the initial client size, or — with dynamic
+        resizing disabled — the primary's current size), stores sanitized
         per-display tunables (primary updates also become session seeds for
         later displays), applies DPI/cursor/keyboard-layout side effects, and
         applies video changes live where possible — only structural switches
@@ -2644,6 +2594,7 @@ class DataStreamingServer(BaseStreamingService):
                 new_position = settings.get("displayPosition", "right")
                 target_w = None
                 target_h = None
+                keeps_current_geometry = False
                 server_is_manual, _ = self.cli_args.is_manual_resolution_mode
                 client_wants_manual = sanitize_value("is_manual_resolution_mode", settings.get("is_manual_resolution_mode"))
                 if server_is_manual:
@@ -2662,6 +2613,21 @@ class DataStreamingServer(BaseStreamingService):
                     data_logger.info(f"Client has requested manual resolution mode for display '{display_id}'.")
                     target_w = sanitize_value("manual_width", settings.get("manual_width"))
                     target_h = sanitize_value("manual_height", settings.get("manual_height"))
+                elif is_initial_settings and display_id == 'primary' and not getattr(
+                        self.app, 'server_enable_resize', True):
+                    # The page's window size is a resize like any later r,
+                    # message: with dynamic resizing disabled the primary keeps
+                    # the desktop's current geometry, which the stream_resolution
+                    # broadcast of the reconfigure below tells the client to fit.
+                    keeps_current_geometry = True
+                    current = await self._current_primary_geometry()
+                    if current is not None:
+                        target_w, target_h = current
+                    data_logger.info(
+                        f"Primary initial size {settings.get('initialClientWidth')}x"
+                        f"{settings.get('initialClientHeight')} ignored: dynamic resizing "
+                        f"disabled; keeping the desktop at {current or 'its current size'}."
+                    )
                 elif is_initial_settings:
                     target_w = settings.get("initialClientWidth")
                     target_h = settings.get("initialClientHeight")
@@ -2684,6 +2650,9 @@ class DataStreamingServer(BaseStreamingService):
                     # A server-forced resolution may only be altered by the
                     # server's own setting, never by a client-side toggle.
                     apply_alignment = self.cli_args.force_aligned_resolution[0]
+                elif keeps_current_geometry:
+                    # Aligning the desktop's own size would resize it.
+                    apply_alignment = False
                 else:
                     apply_alignment = display_state["force_aligned_resolution"]
                 if apply_alignment:
@@ -2808,6 +2777,7 @@ class DataStreamingServer(BaseStreamingService):
                         if CURSOR_SIZE is not None:
                             new_cursor_size = cursor_size_for_dpi(new_dpi, CURSOR_SIZE)
                             await set_cursor_size(new_cursor_size)
+                        self._update_cursor_cap(new_dpi)
                     if IS_WAYLAND:
                         # The session compositor takes the scale on its own
                         # output; only what it leaves becomes the capture scale,
@@ -2817,7 +2787,7 @@ class DataStreamingServer(BaseStreamingService):
                                 new_dpi, session_screen_index(display_id),
                                 (display_state.get('width'), display_state.get('height')))
                             if self.input_handler else float(new_dpi) / 96.0)
-                        self._update_wayland_cursor_cap(new_dpi)
+                        self._update_cursor_cap(new_dpi)
                         await self._apply_wayland_cursor_size(new_dpi)
 
                 display_state["scaling_dpi"] = new_dpi
@@ -2960,12 +2930,13 @@ class DataStreamingServer(BaseStreamingService):
 
         The connection's whole lifecycle lives here: auth (token in secure
         mode, query role/slot in legacy mode), reconnect rate-limiting, the
-        handshake pushes (MODE, display roster, cursor, server settings), the
-        message dispatch loop (SETTINGS, ACKs, video/audio start/stop, resize,
-        DPI, mic PCM, and the shared input protocol), and the finally-block
-        teardown: input-state release gated on departing input authority, RED
-        re-gate, deferred display teardown behind the reconnect grace, and
-        last-client pipeline/collector shutdown.
+        handshake pushes (MODE, the secure-mode MK_ACCESS verdict, display
+        roster, cursor, server settings), the message dispatch loop (SETTINGS,
+        ACKs, video/audio start/stop, resize, DPI, mic PCM, and the shared
+        input protocol), and the finally-block teardown: input-state release
+        gated on departing input authority, RED re-gate, deferred display
+        teardown behind the reconnect grace, and last-client
+        pipeline/collector shutdown.
 
         Args:
             websocket: The prepared WebSocket.
@@ -2976,12 +2947,12 @@ class DataStreamingServer(BaseStreamingService):
         """
         if self.is_secure_mode:
             await self.config_gate.wait()
-            if not token or token not in user_tokens:
+            permissions = _lookup_session_token(token)
+            if permissions is None:
                 data_logger.warning(f"Rejecting connection from {remote_address}: Missing or invalid token.")
                 await websocket.close(code=4001, message=b"Invalid authentication token")
                 return
 
-            permissions = user_tokens[token]
             client_permissions[websocket] = {
                 "token": token,
                 "role": permissions.get("role"),
@@ -3066,6 +3037,19 @@ class DataStreamingServer(BaseStreamingService):
                 self.data_ws = None
             return
 
+        if self.is_secure_mode:
+            # The handshake carries the input-authority verdict (WebRTC pushes
+            # the same one at channel open): a viewer holding the mk token
+            # attaches its input context on MK_ACCESS,1, a controller that
+            # another token outranks detaches on MK_ACCESS,0. Sent after MODE,
+            # which is what makes the page build the input context the
+            # verdict applies to; a later token update re-announces it.
+            granted = _mk_access_verdict(client_permissions.get(websocket))
+            try:
+                await websocket.send_str("MK_ACCESS,1" if granted else "MK_ACCESS,0")
+            except (ConnectionResetError, OSError, RuntimeError):
+                pass
+
         # WebRTC parity: a page that joins after a secondary display attached must
         # learn the roster immediately, not only after the next reconfigure.
         try:
@@ -3111,6 +3095,10 @@ class DataStreamingServer(BaseStreamingService):
         start_audio_task_ws = None
 
         mic_setup_done = False
+        # A failed virtual-mic setup is retried no sooner than this (monotonic):
+        # mic chunks arrive tens of times a second, and each retry is a batch
+        # of sound-server operations.
+        mic_setup_retry_at = 0.0
         mic_disabled_sent = False
         mic_error = False
         webcam_disabled_sent = False
@@ -3119,11 +3107,13 @@ class DataStreamingServer(BaseStreamingService):
         # (parity with the WebRTC path): a reused pre-existing source is left for
         # the other transport.
         pa_module_owned = False
-        pulse = None
+        # Sound-server control connection for the mic control plane
+        # (sink/virtual-source setup and routing), per connection so its module
+        # ownership and teardown follow the socket.
+        mic_control: Optional[AudioControl] = None
 
         # Mic PCM data plane is Rust-owned (pcmflux AudioPlayback): a GIL-released,
-        # non-blocking enqueue into a playback stream on its own thread. pulsectl stays
-        # the control plane (sink/virtual-source setup and routing) only.
+        # non-blocking enqueue into a playback stream on its own thread.
         mic_playback = None
 
         if not self.input_handler:
@@ -3135,7 +3125,6 @@ class DataStreamingServer(BaseStreamingService):
         # Stats must describe the GPU the pipeline captures/encodes on.
         dri_node_for_stats = str(getattr(self.cli_args, "encode_dri", "") or "")
 
-        pulse = None
         try:
             # This socket is already in the shared audio fan-out but has not sent
             # SETTINGS, so its RED capability is unknown (absent => not capable):
@@ -3190,31 +3179,24 @@ class DataStreamingServer(BaseStreamingService):
                     _collect_network_stats_ws(self._shared_network_stats, self)
                 )
 
-            if PULSEAUDIO_AVAILABLE:
-                # microphone_enabled only picks the client-side default (off): the sink
-                # handler idles until mic data arrives, and a runtime enable must not
-                # need a reconnect. A LOCKED-off microphone still skips the setup.
-                _mic_on, _mic_locked = settings.microphone_enabled
-                if not settings.audio_enabled[0] or (not _mic_on and _mic_locked):
-                    data_logger.info("Audio/microphone disabled in settings. Skipping PulseAudio setup.")
-                else:
-                    try:
-                        data_logger.info("Attempting to establish PulseAudio connection...")
-                        pulse = pulsectl_asyncio.PulseAsync("selkies-mic-handler")
-                        # Bounded: this runs on the handshake's critical path, and a
-                        # missing PulseAudio otherwise stalls every new connection for
-                        # the library's full retry cycle before the client can even
-                        # claim its display (mic setup degrades the same either way).
-                        await asyncio.wait_for(pulse.connect(), timeout=2.0)
-                        data_logger.info("PulseAudio connection established.")
-                    except Exception as e_pa_conn:
-                        data_logger.error(
-                            f"Initial PulseAudio connection failed: {e_pa_conn}",
-                            exc_info=True,
-                        )
-                        mic_error = True
+            # microphone_enabled only picks the client-side default (off): the sink
+            # handler idles until mic data arrives, and a runtime enable must not
+            # need a reconnect. A LOCKED-off microphone still skips the setup.
+            _mic_on, _mic_locked = settings.microphone_enabled
+            if not settings.audio_enabled[0] or (not _mic_on and _mic_locked):
+                data_logger.info("Audio/microphone disabled in settings. Skipping PulseAudio setup.")
             else:
-                mic_error = True
+                # Opened on the handshake's critical path with the control's
+                # bounded connect, so a missing sound server cannot stall a new
+                # connection before the client can even claim its display (mic
+                # setup degrades the same either way).
+                mic_control = AudioControl("selkies-mic-handler")
+                if await mic_control.open():
+                    data_logger.info(
+                        f"Sound server control ready for the microphone ({mic_control.backend}).")
+                else:
+                    data_logger.error("Sound server control unavailable; microphone forwarding disabled.")
+                    mic_error = True
 
             async for msg in websocket:
                 # Client->server gzip: a 0x05-tagged binary frame carries a gzip'd text
@@ -3236,7 +3218,11 @@ class DataStreamingServer(BaseStreamingService):
                 if msg.type == WSMsgType.BINARY:
                     if not msg.data:
                         continue
-                    msg_type, payload = msg.data[0], msg.data[1:]
+                    data = msg.data
+                    msg_type = data[0]
+                    # Webcam frames are handed over whole (with an offset), so
+                    # the large per-frame payload is never sliced into a copy.
+                    payload = data[1:] if msg_type != WS_OPCODE_WEBCAM else b""
                     # Opcode 0x02 carries mic PCM.
                     if msg_type == 0x02:
                         # Only a controller or a viewer with collab (m/k)
@@ -3273,47 +3259,25 @@ class DataStreamingServer(BaseStreamingService):
                                 except (ConnectionResetError, OSError, RuntimeError):
                                     pass
                             continue
-                        if not PULSEAUDIO_AVAILABLE:
+                        if mic_control is None:
                             if len(payload) > 0:
                                 data_logger.warning(
-                                    "PulseAudio library not available. Skipping microphone data."
-                                )
-                            continue
-                        if pulse is None:
-                            if len(payload) > 0:
-                                data_logger.warning(
-                                    "PulseAudio client not connected. Skipping microphone data."
+                                    "Sound server control not connected. Skipping microphone data."
                                 )
                             continue
 
                         if not mic_setup_done:
+                            if time.monotonic() < mic_setup_retry_at:
+                                continue
                             data_logger.info(
                                 "Performing PulseAudio/PipeWire virtual microphone setup check..."
                             )
-                            try:
-                                pa_module_index, pa_module_owned = await provision_virtual_microphone(
-                                    pulse, self.audio_device_name, self.is_pcmflux_capturing
-                                )
-                                mic_setup_done = pa_module_index is not None
-                            except Exception as e_pa_setup:
-                                data_logger.error(
-                                    f"PulseAudio mic setup error: {e_pa_setup}",
-                                    exc_info=True,
-                                )
-                                mic_setup_done = False
-                                if pa_module_index is not None and pa_module_owned:
-                                    try:
-                                        data_logger.info(
-                                            f"Attempting to unload module {pa_module_index} due to setup error."
-                                        )
-                                        await pulse.module_unload(pa_module_index)
-                                    except Exception as e_unload_err:
-                                        data_logger.error(
-                                            f"Error unloading module {pa_module_index} after setup failure: {e_unload_err}"
-                                        )
-                                pa_module_index = None
-                                pa_module_owned = False
-                                continue
+                            pa_module_index, pa_module_owned = await mic_control.ensure_virtual_microphone(
+                                self.audio_device_name, self.is_pcmflux_capturing
+                            )
+                            mic_setup_done = pa_module_index is not None
+                            if not mic_setup_done:
+                                mic_setup_retry_at = time.monotonic() + 5.0
 
                         if not mic_setup_done or not payload:
                             if not mic_setup_done and len(payload) > 0:
@@ -3361,37 +3325,38 @@ class DataStreamingServer(BaseStreamingService):
                                 except Exception:
                                     pass
 
-                    elif msg_type == 0x06:
-                        # Opcode 0x06 carries one MJPEG webcam frame for the
-                        # virtual V4L2 device. Gate like the microphone: only a
-                        # controller (or a collab-authorized viewer) may feed it,
-                        # and never when the webcam is administratively locked off.
+                    elif msg_type == WS_OPCODE_WEBCAM:
+                        # One encoded webcam frame for the virtual camera:
+                        # [opcode][codec][flags][payload]. Gated like the
+                        # microphone: a controller (or a collab-authorized
+                        # viewer) may feed it, never when locked off. The whole
+                        # message goes to pixelflux with the payload offset, so
+                        # the frame is never copied in Python.
                         cam_perms = client_permissions.get(websocket) or {}
-                        cam_ok = cam_perms.get("role") != "viewer" or (
+                        cam_collab = (
                             settings.enable_collab[0]
                             and active_mk_token is not None
                             and cam_perms.get("token") == active_mk_token
                         )
-                        webcam_locked_off = (
-                            not settings.webcam_enabled[0] and settings.webcam_enabled[1]
-                        )
-                        if not cam_ok or webcam_locked_off:
+                        if not webcam_uplink_allowed(cam_perms.get("role") == "viewer", cam_collab):
                             if not webcam_disabled_sent:
                                 webcam_disabled_sent = True
                                 try:
-                                    await websocket.send_str("WEBCAM_DISABLED")
+                                    await websocket.send_str(MSG_WEBCAM_DISABLED)
                                 except (ConnectionResetError, OSError, RuntimeError):
                                     pass
                             continue
-                        if not payload:
+                        if len(data) <= WS_HEADER_LEN:
                             continue
-                        cam_server = await self.ensure_webcam_server()
-                        if cam_server is not None:
+                        cam = get_shared_webcam()
+                        if cam.camera is None and await cam.ensure(data[1]) is None:
+                            continue
+                        flags = cam.push(data, data[1], bool(data[2] & WS_FLAG_KEYFRAME), WS_HEADER_LEN)
+                        if cam.keyframe_wanted(flags):
                             try:
-                                cam_server.feed(bytes(payload))
-                            except Exception as e_cam:
-                                data_logger.error(
-                                    f"Webcam feed error: {e_cam}", exc_info=False)
+                                await websocket.send_str(MSG_WEBCAM_KEYFRAME)
+                            except (ConnectionResetError, OSError, RuntimeError):
+                                pass
 
                 elif msg.type == WSMsgType.TEXT:
                     message = msg.data
@@ -4036,6 +4001,7 @@ class DataStreamingServer(BaseStreamingService):
                                     data_logger.info(f"Successfully set DPI to {dpi_value}")
                                 else:
                                     data_logger.error(f"Failed to set DPI to {dpi_value}")
+                                self._update_cursor_cap(dpi_value)
 
                             if IS_WAYLAND and client_display_id:
                                 # A nested session scales its own screen and the
@@ -4050,7 +4016,7 @@ class DataStreamingServer(BaseStreamingService):
                                     entry is not None and entry.get('scale') != scale_val)
                                 if entry is not None:
                                     entry['scale'] = scale_val
-                                self._update_wayland_cursor_cap(dpi_value)
+                                self._update_cursor_cap(dpi_value)
                                 # A STOP_VIDEO'd display must stay stopped: only its
                                 # stored scale updates; the restart applies at the
                                 # next START_VIDEO.
@@ -4124,7 +4090,8 @@ class DataStreamingServer(BaseStreamingService):
                                     pass
 
                             await run_client_command(
-                                command_to_run, data_logger, notify=_notify_cmd_error)
+                                command_to_run, data_logger, notify=_notify_cmd_error,
+                                env=self.input_handler.app_launch_env() if self.input_handler else None)
                         else:
                             data_logger.warning("Received 'cmd' message without a command string.")
 
@@ -4351,30 +4318,14 @@ class DataStreamingServer(BaseStreamingService):
                 except Exception as e_mic_pb:
                     data_logger.error(f"Error stopping Rust mic playback for {raddr}: {e_mic_pb}")
 
-            if "pulse" in locals() and locals()["pulse"]:
-                _local_pulse = locals()["pulse"]
-                if (
-                    "pa_module_index" in locals()
-                    and locals()["pa_module_index"] is not None
-                    and locals().get("pa_module_owned")
-                ):
-                    _local_pa_module_index = locals()["pa_module_index"]
-                    try:
-                        data_logger.info(
-                            f"Unloading PulseAudio module {_local_pa_module_index} for virtual mic (client: {raddr})."
-                        )
-                        await _local_pulse.module_unload(_local_pa_module_index)
-                    except Exception as e_unload_final:
-                        data_logger.error(
-                            f"Error unloading PulseAudio module {_local_pa_module_index} for {raddr}: {e_unload_final}"
-                        )
-                try:
-                    _local_pulse.close()
-                    data_logger.debug(f"Closed PulseAudio connection for {raddr}.")
-                except Exception as e_pulse_close:
-                    data_logger.error(
-                        f"Error closing PulseAudio connection for {raddr}: {e_pulse_close}"
+            if mic_control is not None:
+                if pa_module_index is not None and pa_module_owned:
+                    data_logger.info(
+                        f"Unloading PulseAudio module {pa_module_index} for virtual mic (client: {raddr})."
                     )
+                    await mic_control.unload_module(pa_module_index)
+                await mic_control.aclose()
+                data_logger.debug(f"Closed sound server control connection for {raddr}.")
 
 
             # Same authority verdict as the pointer release above. Held keys this
@@ -4528,21 +4479,29 @@ class DataStreamingServer(BaseStreamingService):
             await self._stop_capture_for_display('primary')
 
     async def _apply_wayland_output_layout(self, layouts: dict, keep_ids: set[str]) -> None:
-        """Realize the computed union layout as compositor outputs.
+        """Retire and move compositor outputs for the computed union layout.
 
-        The Wayland counterpart of the X11 monitor/framebuffer apply. The
-        primary (output 0) is sized by its capture start and MOVED here to its
-        layout offset ('left'/'up' place it off-origin; teardown re-anchors it
-        at 0,0); each secondary gets a real output at its layout rectangle,
-        created here BEFORE the capture start loop binds a capture to it.
-        Ordering keeps the output rectangles disjoint: moved/stale secondaries
-        are destroyed first, then the primary repositions, then secondaries are
-        created.
+        The Wayland counterpart of the X11 monitor/framebuffer apply, split
+        around the primary's capture start: pixelflux refuses any placement
+        that overlaps a live output, while a capture start resizes output 0
+        unvalidated, so a secondary moving into room a shrinking primary gives
+        up can only be created once output 0 has shrunk. This pass therefore
+        only removes and moves: stale and moved secondaries are destroyed (a
+        secondary reposition is a destroy + recreate; its capture dies with the
+        output and the start loop rebuilds it) and the primary (output 0) is
+        moved to its layout offset ('left'/'up' place it off-origin; teardown
+        re-anchors it at 0,0). A primary move the compositor refuses is retried
+        with every secondary output destroyed — a secondary that shrinks can
+        leave the primary's new offset inside its old rectangle, and the
+        outputs come back in _create_wayland_outputs anyway — and only then is
+        the arrangement void: primary back at the origin, every secondary
+        dropped. _create_wayland_outputs, run by the start loop right after
+        the primary's capture start, creates the secondary outputs.
 
         Args:
             layouts: display_id to layout rect; mutated when a display has to
-                be dropped (output creation or the primary move refused),
-                killing its client like the X11 path.
+                be dropped (the primary move refused), killing its client like
+                the X11 path.
             keep_ids: The keep-alive capture set; mutated alongside `layouts`.
         """
         module = self._wayland_control_module()
@@ -4558,28 +4517,35 @@ class DataStreamingServer(BaseStreamingService):
             if oid != 0 and oid not in wanted:
                 data_logger.info(f"Destroying stale Wayland output {oid}.")
                 await asyncio.to_thread(module.destroy_output, oid)
+                outputs.pop(oid, None)
+
+        async def recreate_later(oid: int, did: str, why: str) -> None:
+            data_logger.info(f"Wayland output {oid} {why}; recreating it.")
+            await asyncio.to_thread(module.destroy_output, oid)
+            keep_ids.discard(did)
+            await self._stop_capture_for_display(did)
+            outputs.pop(oid, None)
+
         for oid, did in wanted.items():
             layout = layouts[did]
             existing = outputs.get(oid)
             if existing is not None and (existing[1], existing[2]) != (layout['x'], layout['y']):
-                # A secondary reposition is a destroy + recreate (its capture
-                # dies with the output; the start loop rebuilds it). Destroyed
-                # before the primary moves so their rectangles never overlap.
-                data_logger.info(
-                    f"Wayland output {oid} moves to +{layout['x']}+{layout['y']}; recreating it."
-                )
-                await asyncio.to_thread(module.destroy_output, oid)
-                keep_ids.discard(did)
-                await self._stop_capture_for_display(did)
-                outputs.pop(oid, None)
+                await recreate_later(oid, did, f"moves to +{layout['x']}+{layout['y']}")
         primary_layout = layouts.get('primary')
         target = (primary_layout['x'], primary_layout['y']) if primary_layout else (0, 0)
         existing0 = outputs.get(0)
         current = (existing0[1], existing0[2]) if existing0 is not None else (0, 0)
         if target != current:
-            if not await wayland_reposition_primary(module, target[0], target[1]):
+            moved = await wayland_reposition_primary(module, target[0], target[1])
+            if not moved and any(outputs.get(oid) is not None for oid in wanted):
+                for oid, did in wanted.items():
+                    if outputs.get(oid) is not None:
+                        await recreate_later(oid, did, "blocks the primary's move")
+                moved = await wayland_reposition_primary(module, target[0], target[1])
+            if not moved:
                 # The primary must stay usable above all else: keep it at the
                 # origin and drop every secondary — the arrangement is void.
+                await wayland_reposition_primary(module, 0, 0)
                 await self._reanchor_wayland_primary(layouts, keep_ids)
                 for did in [d for d in list(layouts) if d != 'primary']:
                     del layouts[did]
@@ -4587,15 +4553,45 @@ class DataStreamingServer(BaseStreamingService):
                     await self._drop_wayland_secondary(
                         did, "The compositor cannot move the primary output for this arrangement."
                     )
-                return
+        # Which of the session's own screens a capture drives has just changed.
+        if self.input_handler:
+            self.input_handler.resync_session_screens()
+
+    async def _create_wayland_outputs(self, layouts: dict, keep_ids: set[str]) -> None:
+        """Give every laid-out secondary its compositor output, at its layout rectangle.
+
+        The second half of the Wayland layout apply, run once the primary's
+        capture start has sized output 0 (see _apply_wayland_output_layout).
+        A display whose output the compositor cannot create is dropped like the
+        X11 path's unrealizable display, and when the arrangement was built
+        around it the primary returns to the origin — its capture follows the
+        moved output live, so only the layout and the tracked capture offset
+        change.
+
+        Args:
+            layouts: display_id to layout rect; mutated when a display is
+                dropped, killing its client.
+            keep_ids: The keep-alive capture set; mutated alongside `layouts`.
+        """
+        module = self._wayland_control_module()
+        if module is None:
+            return
+        wanted = {wayland_output_id(did): did for did in layouts if did != 'primary'}
+        if not wanted:
+            return
+        try:
+            outputs = {o[0]: o for o in await asyncio.to_thread(module.list_outputs)}
+        except Exception as e:
+            data_logger.error(f"Wayland list_outputs failed: {e}")
+            outputs = {}
+        primary_layout = layouts.get('primary')
+        created_any = False
         for oid, did in wanted.items():
-            if did not in layouts:
+            if did not in layouts or outputs.get(oid) is not None:
                 continue
             layout = layouts[did]
             client = self.display_clients.get(did) or {}
             scale = float(client.get('scale', 1.0) or 1.0)
-            if outputs.get(oid) is not None:
-                continue
             created = False
             try:
                 created = bool(await asyncio.to_thread(
@@ -4604,19 +4600,21 @@ class DataStreamingServer(BaseStreamingService):
                 ))
             except Exception as e:
                 data_logger.error(f"Wayland create_output {oid} failed: {e}")
-            if not created:
-                del layouts[did]
-                keep_ids.discard(did)
-                await self._drop_wayland_secondary(
-                    did, "The compositor cannot create an output for this display."
-                )
-                if target != (0, 0):
-                    # The secondary this arrangement was built around is gone;
-                    # put the primary back at the origin.
-                    await wayland_reposition_primary(module, 0, 0)
-                    await self._reanchor_wayland_primary(layouts, keep_ids)
-        # Which of the session's own screens a capture drives has just changed.
-        if self.input_handler:
+            if created:
+                created_any = True
+                continue
+            del layouts[did]
+            keep_ids.discard(did)
+            await self._drop_wayland_secondary(
+                did, "The compositor cannot create an output for this display."
+            )
+            if primary_layout and (primary_layout['x'], primary_layout['y']) != (0, 0):
+                # The secondary this arrangement was built around is gone;
+                # put the primary back at the origin.
+                if await wayland_reposition_primary(module, 0, 0):
+                    primary_layout['x'], primary_layout['y'] = 0, 0
+                    self._track_capture_settings('primary', capture_x=0, capture_y=0)
+        if created_any and self.input_handler:
             self.input_handler.resync_session_screens()
 
     async def _stop_capture_for_display(self, display_id: str) -> None:
@@ -4726,6 +4724,24 @@ class DataStreamingServer(BaseStreamingService):
                 except (ConnectionResetError, OSError, RuntimeError):
                     pass
 
+    async def _signal_display_stopped(self, display_id: str) -> None:
+        """Tell one display's client the pipeline stopped, keeping video_active so a
+        later successful reconfigure restarts it. The single-display form of
+        _signal_all_displays_stopped, used when a primary capture did not come up (a
+        failed start, or a host compositor that died) so the client sees a truthful
+        verdict instead of a page frozen on "Waiting for stream"."""
+        client_data = self.display_clients.get(display_id)
+        ws = client_data.get('ws') if client_data else None
+        if not ws:
+            return
+        try:
+            await asyncio.wait_for(ws.send_str("VIDEO_STOPPED"), timeout=2.0)
+            client_data['stop_signaled'] = True
+        except asyncio.TimeoutError:
+            _close_abandoned_ws(ws)
+        except (ConnectionResetError, OSError, RuntimeError):
+            pass
+
     async def _reconfigure_displays_locked(self) -> None:
         """One reconfiguration pass. Must only be called by reconfigure_displays()
         with _reconfigure_lock held; early returns here abort just this pass.
@@ -4734,10 +4750,12 @@ class DataStreamingServer(BaseStreamingService):
         the union layout from all display clients, decide per running capture
         whether it can follow the new layout live (structurally identical
         sessions retune in place; the rest are stopped and rebuilt), realize
-        the layout (xrandr monitors + framebuffer on X11, compositor outputs on
-        Wayland), clamp everything to what the server actually realized —
-        dropping displays that cannot exist — then (re)start the active
-        captures and broadcast the resulting resolutions and roster.
+        the layout (xrandr monitors + framebuffer on X11; on Wayland the
+        compositor outputs, whose secondaries are created only after the
+        primary's capture start has sized output 0), clamp everything to what
+        the server actually realized — dropping displays that cannot exist —
+        then (re)start the active captures and broadcast the resulting
+        resolutions and roster.
         """
         current_display_count = len(self.display_clients)
         await self._wm_swap.ensure_for(current_display_count, IS_WAYLAND)
@@ -4824,7 +4842,7 @@ class DataStreamingServer(BaseStreamingService):
                         fresh = self._get_capture_settings(did, layout['w'], layout['h'], layout['x'], layout['y'])
                         structural_ok = old_cs is not None and all(
                             getattr(fresh, k) == getattr(old_cs, k)
-                            for k in ('output_mode', 'use_cpu', 'use_openh264',
+                            for k in ('output_mode', 'use_cpu',
                                       'video_fullframe', 'video_fullcolor', 'video_cbr_mode')
                         )
                         if structural_ok:
@@ -5017,11 +5035,17 @@ class DataStreamingServer(BaseStreamingService):
                 if fit.dropped or fit.reanchored or fit.clamped:
                     await replace_selkies_monitors(layouts, screen_name=screen_name)
         else:
-            # Wayland: realize the layout as compositor outputs before the start
-            # loop binds a capture to each of them.
+            # Wayland: retire and move compositor outputs for the new layout;
+            # the secondary outputs themselves are created inside the start
+            # loop, once the primary's capture start has sized output 0.
             await self._apply_wayland_output_layout(layouts, keep_ids)
         data_logger.info("Starting separate capture instances for each ACTIVE display region...")
-        for display_id, layout in layouts.items():
+        # The primary starts first: on Wayland its capture start is what sizes
+        # output 0, which the secondary outputs are then laid out against.
+        for display_id in sorted(layouts, key=lambda did: did != 'primary'):
+            if display_id not in layouts:
+                continue
+            layout = layouts[display_id]
             client_data = self.display_clients.get(display_id)
             if client_data and client_data.get('video_active', False):
                 try:
@@ -5069,6 +5093,8 @@ class DataStreamingServer(BaseStreamingService):
                     )
             else:
                 data_logger.info(f"Client '{display_id}' is connected but not active. Skipping video start.")
+            if IS_WAYLAND and display_id == 'primary':
+                await self._create_wayland_outputs(layouts, keep_ids)
         for display_id in list(layouts.keys()):
             client_data = self.display_clients.get(display_id)
             if not (client_data and client_data.get('video_active', False)):
@@ -5086,15 +5112,25 @@ class DataStreamingServer(BaseStreamingService):
                     capturing = bool(module.is_capturing)
                 except Exception:
                     capturing = False
-            # A secondary whose capture did not come up must get a fatal verdict,
-            # not a page stuck on "Waiting for stream" (X11 parity with the
-            # Wayland drop; the output-destroy step inside no-ops on X11).
-            if not capturing and display_id != 'primary':
-                await self._drop_wayland_secondary(
-                    display_id,
-                    "The capture pipeline could not start for this display "
-                    "(encoder session or GPU resources exhausted).",
-                )
+            # A capture that did not come up must produce a verdict, not a page stuck on
+            # "Waiting for stream". A secondary gets the fatal drop (X11 parity; the
+            # output-destroy step no-ops on X11). The primary is the whole session, so it
+            # is told the stream stopped (video_active kept, so the next successful
+            # reconfigure auto-restarts it) rather than killed -- this also surfaces the
+            # host-death case, where reap_dead_host flips is_capturing to False.
+            if not capturing:
+                last_error = self._wayland_capture_last_error(module, display_id)
+                if display_id == 'primary':
+                    data_logger.error(
+                        "Primary capture is not live after reconfiguration"
+                        + (f": {last_error}." if last_error else "."))
+                    await self._signal_display_stopped(display_id)
+                else:
+                    await self._drop_wayland_secondary(
+                        display_id,
+                        last_error or "The capture pipeline could not start for this "
+                        "display (encoder session or GPU resources exhausted).",
+                    )
         await self.broadcast_stream_resolution()
         await self.broadcast_display_config()
         data_logger.info("Display reconfiguration finished successfully.")
@@ -5386,6 +5422,22 @@ class DataStreamingServer(BaseStreamingService):
                 'callback': queue_data_for_display,
                 'settings': settings,
             }
+            # The X11 start already raised on failure; a Wayland start only enqueues a
+            # command, so its real outcome is read back here (barrier + capture_state)
+            # before the success is logged or acked. A start that left no live pipeline
+            # is a failure the caller must see; a live capture that came up degraded
+            # (encoder fell back to CPU, host connect refused) is logged as a caveat.
+            live, last_error = await self._wayland_start_verdict(capture_module, display_id)
+            if not live:
+                data_logger.error(
+                    f"Capture did not start for '{display_id}': "
+                    f"{last_error or 'the compositor reported no live pipeline'}.")
+                self._close_video_relays(display_id)
+                self.capture_instances.pop(display_id, None)
+                return False
+            if last_error:
+                data_logger.warning(
+                    f"Capture started for '{display_id}' with a caveat: {last_error}")
             data_logger.info(f"SUCCESS: Capture started for '{display_id}'.")
             return True
 
@@ -5394,6 +5446,59 @@ class DataStreamingServer(BaseStreamingService):
             self._close_video_relays(display_id)
             # Failure is reported so callers do not ack a false VIDEO_STARTED.
             return False
+
+    async def _wayland_start_verdict(self, module: Any, display_id: str) -> Tuple[bool, Optional[str]]:
+        """Read the truthful outcome of a Wayland capture start.
+
+        The compositor processes StartCapture asynchronously, so a fresh start's
+        real result is not known when ``start_capture`` returns. ``get_realized_geometry``
+        is answered only once the queued start ran, so it doubles as a barrier that
+        makes ``is_capturing`` and ``capture_state`` authoritative; ``capture_state``
+        then reports whether a live pipeline exists and, if it degraded or failed, why.
+
+        Non-Wayland or an older pixelflux without the readback returns ``(True, None)``
+        -- the X11 path already surfaces its failures by raising.
+
+        Returns:
+            ``(is_live, last_error)``: whether a live capture exists, and the reason a
+            start failed or a caveat a degraded-but-live start came up with.
+        """
+        if not IS_WAYLAND or not hasattr(module, 'get_realized_geometry'):
+            return True, None
+        try:
+            await asyncio.to_thread(module.get_realized_geometry, wayland_output_id(display_id))
+        except Exception as e:
+            data_logger.warning(f"Wayland start barrier failed for '{display_id}': {e}")
+        last_error = None
+        state_getter = getattr(module, 'capture_state', None)
+        if state_getter is not None:
+            try:
+                _state, last_error = await asyncio.to_thread(
+                    state_getter, wayland_output_id(display_id))
+            except Exception:
+                last_error = None
+        live = False
+        try:
+            live = bool(module.is_capturing)
+        except Exception:
+            live = False
+        return live, last_error
+
+    def _wayland_capture_last_error(self, module: Any, display_id: str) -> Optional[str]:
+        """The reason a Wayland capture failed, or a caveat a live one came up with, or None.
+
+        Read straight from ``capture_state`` (no command round-trip); the caller is
+        responsible for any ordering barrier. Returns None on an older pixelflux that
+        does not expose the outcome.
+        """
+        getter = getattr(module, 'capture_state', None) if module is not None else None
+        if getter is None:
+            return None
+        try:
+            _state, last_error = getter(wayland_output_id(display_id))
+            return last_error
+        except Exception:
+            return None
 
     def _get_capture_settings(self, display_id: str, width: int, height: int,
                               x: int, y: int) -> Any:
@@ -5513,19 +5618,6 @@ class DataStreamingServer(BaseStreamingService):
         finally:
             logger.info("Main loop ending or interrupted. Performing cleanup...")
             await self.shutdown()
-
-    async def ensure_webcam_server(self) -> Optional[Any]:
-        """Lazily starts and returns the process-wide virtual webcam server.
-
-        Started only when a client first forwards a webcam frame, so sessions
-        that never enable the camera pay nothing. Returns None if the server
-        cannot be started.
-        """
-        try:
-            return await get_shared_webcam_server(app_settings.webcam_socket_path)
-        except Exception as exc:
-            data_logger.error(f"Failed to start webcam server: {exc}", exc_info=False)
-            return None
 
     async def shutdown(self) -> None:
         """Shut down all components and release resources; idempotent.
@@ -6059,7 +6151,7 @@ async def reconcile_clients() -> None:
             # new_perms is None when the token was revoked; nothing below
             # applies to a client being disconnected.
             continue
-        has_mk_access = _perms_hold_input_authority(new_perms, token=token)
+        has_mk_access = _mk_access_verdict(new_perms, token=token)
         mk_msg = "MK_ACCESS,1" if has_mk_access else "MK_ACCESS,0"
         try:
             await ws.send_str(mk_msg)

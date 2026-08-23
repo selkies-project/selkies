@@ -7,7 +7,9 @@ set -eux
 # base-devel: dependencies without a wheel for this distribution's Python are
 # compiled from their sdist. libxkbcommon is loaded with ctypes at runtime and
 # lets mkvenv.sh's smoke test exercise that path
-pacman -Syu --noconfirm --needed python python-pip base-devel libxkbcommon sudo
+# pipewire carries the headers the V4L2 interposer's PipeWire frame source is
+# built against (the library is loaded at runtime when an application uses it)
+pacman -Syu --noconfirm --needed python python-pip base-devel libxkbcommon sudo pipewire
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
 /repo/infra/packaging/v4l2-interposer.sh /pkg-root

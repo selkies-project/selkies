@@ -8,11 +8,13 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     Selkies V4L2 Interposer
 
     An LD_PRELOAD library that presents a virtual V4L2 capture device
-    (/dev/videoN) backed by a Unix domain socket to the Selkies backend. It
-    emulates the observable half of a fixed-function MJPEG webcam: the
-    VIDIOC_* ioctl surface, MMAP streaming buffers, and poll readiness, so
-    that unmodified consumers capture frames pushed from the browser without
-    any kernel module or elevated privilege in the container.
+    (/dev/videoN) fed by the pixelflux virtual camera, over its Unix domain
+    socket or from its PipeWire node (SELKIES_WEBCAM_SOURCE). It emulates the
+    observable half of a fixed-function webcam — one pixel format (raw
+    I420/NV12/YUYV, or MJPEG) at one size, as configured by the backend: the
+    VIDIOC_* ioctl surface, MMAP streaming buffers, read() I/O and poll
+    readiness, so that unmodified consumers capture frames pushed from the
+    browser without any kernel module or elevated privilege in the container.
 
     Design mirrors the sibling joystick interposer: the application-facing fd
     is the connected socket itself, so poll/select/epoll/dup/fork work with no
@@ -37,6 +39,16 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     the originating handle so ioctls on any duplicate resolve to the same
     emulated device, and fcntl(F_SETFL) keeps the handle's O_NONBLOCK
     semantics in sync after open.
+
+    The device's sysfs view (/sys/class/video4linux/videoN/{name,dev,index,
+    uevent}, /sys/dev/char/81:N/uevent) is served from memory through
+    open()/fopen()/stat(), and stat/lstat/fstatat/statx report the device as a
+    character device, for tools that identify a node before opening it.
+
+    With the PipeWire source, PipeWire's own loop threads run inside the
+    application and pass through these same hooks: no hook holds the handle
+    table lock across a wait or a source release, and "not our fd" is decided
+    from a lock-free bitmap before any lock is taken.
 */
 
 #define _GNU_SOURCE
@@ -98,10 +110,11 @@ typedef int ioctl_request_t;
 #define WC_DEFAULT_DEVICE_PATH "/dev/video0"
 #define WC_DEFAULT_SOCKET_PATH "/tmp/selkies_webcam0.sock"
 #define WC_VIDEO_MAJOR 81
+#define WC_CARD_NAME "Selkies Virtual Camera"
 
-/* Shared-memory staging layout constants, identical in the Python backend.
- * Page 0 holds the header and the per-slot control blocks; frame bytes start
- * at WC_SHM_DATA_OFFSET. */
+/* Shared-memory staging layout constants, identical in the pixelflux writer
+ * (pixelflux/src/webcam/ring.rs). Page 0 holds the header and the per-slot
+ * control blocks; frame bytes start at WC_SHM_DATA_OFFSET. */
 #define WC_SHM_MAGIC 0x434B5753u /* 'SKWC' */
 #define WC_SHM_VERSION 1u
 #define WC_SHM_CTRL_OFFSET 128u
@@ -215,23 +228,25 @@ static int load_real_func(void (**target)(void), const char *name) {
     return 0;
 }
 
-/* --- Wire configuration, identical layout in the Python backend --- */
+/* --- Wire configuration, identical layout in the pixelflux writer --- */
 /* Sent once by the backend on accept, ahead of the doorbell stream, with the
  * staging memfd attached as SCM_RIGHTS ancillary data. */
 typedef struct {
-    uint32_t magic;       /* WC_SHM_MAGIC */
-    uint32_t version;     /* WC_SHM_VERSION */
+    uint32_t magic;        /* WC_SHM_MAGIC */
+    uint32_t version;      /* WC_SHM_VERSION */
     uint32_t width;
     uint32_t height;
-    uint32_t fourcc;      /* V4L2_PIX_FMT_MJPEG */
+    uint32_t fourcc;       /* V4L2 pixel format: YU12, NV12, YUYV or MJPG */
     uint32_t fps_num;
     uint32_t fps_den;
     uint32_t n_slots;
-    uint32_t slot_size;   /* max bytes of one staged frame */
-    uint32_t data_offset; /* WC_SHM_DATA_OFFSET */
-    uint32_t ctrl_offset; /* WC_SHM_CTRL_OFFSET */
-    uint32_t ctrl_stride; /* WC_SHM_CTRL_STRIDE */
-    uint8_t  reserved[16];
+    uint32_t slot_size;    /* page-aligned capacity of one staged frame */
+    uint32_t data_offset;  /* WC_SHM_DATA_OFFSET */
+    uint32_t ctrl_offset;  /* WC_SHM_CTRL_OFFSET */
+    uint32_t ctrl_stride;  /* WC_SHM_CTRL_STRIDE */
+    uint32_t bytesperline; /* first-plane stride; 0 for compressed */
+    uint32_t sizeimage;    /* bytes of one frame (raw) or its maximum (MJPEG) */
+    uint8_t  reserved[8];
 } webcam_config_t;
 
 /* Header at offset 0 of the staging memfd. Writer publishes latest_slot and
@@ -247,6 +262,8 @@ typedef struct {
     uint32_t n_slots;
     uint32_t slot_size;
     uint32_t data_offset;
+    uint32_t bytesperline;
+    uint32_t sizeimage;
     uint32_t latest_slot;
     uint32_t _pad;
     uint64_t latest_frame_seq;
@@ -267,15 +284,19 @@ typedef enum {
     WC_BUF_DONE = 2      /* filled, awaiting DQBUF (transient) */
 } wc_buf_state_t;
 
-/* One application open() handle: its own socket, staging mapping and buffers. */
+/* One application open() handle: its own frame source, staging and buffers. The frame source is
+ * either the backend's staging ring (fd = the connected control socket, staging_map set) or a
+ * PipeWire stream (fd = our end of a doorbell socketpair, pw set); everything above the source
+ * is shared. */
 typedef struct {
-    int fd;                 /* connected socket, returned to the application */
+    int fd;                 /* socket returned to the application: poll/select readiness */
     int open_flags;
     uint32_t priority;      /* VIDIOC_G/S_PRIORITY state */
     webcam_config_t cfg;
 
-    void *staging_map;      /* read-only mapping of the staging memfd */
+    void *staging_map;      /* read-only mapping of the staging memfd (ring source) */
     size_t staging_size;
+    void *pw;               /* PipeWire source state (wc_pw_t), NULL for the ring source */
 
     int buf_fd;             /* memfd backing the MMAP buffers (-1 until REQBUFS) */
     void *buf_map;          /* our writable mapping of buf_fd, for the copy */
@@ -296,6 +317,7 @@ static wc_handle_t handles[WC_MAX_HANDLES];
 static int handle_count = 0;
 static char g_device_path[256] = WC_DEFAULT_DEVICE_PATH;
 static char g_socket_path[256] = WC_DEFAULT_SOCKET_PATH;
+static int g_device_minor = 0;
 
 /* Duplicated fds referring to a handle's file description. Guarded by
  * handles_mutex like the handle table itself. */
@@ -308,9 +330,41 @@ static wc_fd_alias_t fd_aliases[WC_MAX_ALIASES];
 static int alias_count = 0;
 
 /* Guards the handles[] table lookups and state transitions. Never held across
- * the blocking connect/config-read on the open path nor the blocking doorbell
- * wait in DQBUF; those run on a private fd or after the entry is published. */
+ * the blocking connect/config-read on the open path, the blocking doorbell
+ * wait in DQBUF/read(), or a source release: those run on a private fd or
+ * after the entry is published or retired. The threads of an in-process frame
+ * source (PipeWire's loops) run through these same hooks, so anything held
+ * while waiting on them would deadlock. */
 static pthread_mutex_t handles_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Lock-free "may this fd be ours" test for the hooks every thread of the
+ * application runs (read, close, mmap, ioctl, fstat, fcntl). A set bit is
+ * confirmed under handles_mutex; a clear bit forwards straight to libc. fds
+ * beyond the map take the locked path. */
+#define WC_FD_BITMAP_WORDS 1024
+static uint64_t fd_bitmap[WC_FD_BITMAP_WORDS];
+
+static void fd_bitmap_set(int fd) {
+    if (fd >= 0 && fd < WC_FD_BITMAP_WORDS * 64) {
+        __atomic_fetch_or(&fd_bitmap[fd >> 6], 1ull << (fd & 63), __ATOMIC_RELEASE);
+    }
+}
+
+static void fd_bitmap_clear(int fd) {
+    if (fd >= 0 && fd < WC_FD_BITMAP_WORDS * 64) {
+        __atomic_fetch_and(&fd_bitmap[fd >> 6], ~(1ull << (fd & 63)), __ATOMIC_RELEASE);
+    }
+}
+
+static int fd_maybe_ours(int fd) {
+    if (fd < 0) {
+        return 0;
+    }
+    if (fd >= WC_FD_BITMAP_WORDS * 64) {
+        return 1;
+    }
+    return (int)((__atomic_load_n(&fd_bitmap[fd >> 6], __ATOMIC_ACQUIRE) >> (fd & 63)) & 1u);
+}
 
 static wc_handle_t *find_handle_for_fd_locked(int fd) {
     if (fd < 0) {
@@ -338,6 +392,113 @@ static int is_our_device_path(const char *pathname) {
     return pathname && strcmp(pathname, g_device_path) == 0;
 }
 
+/* The sysfs view of the device. Tools identify a node by its major:minor
+ * through /sys/dev/char and read the class entry's attributes (v4l2-ctl reads
+ * the uevent to tell a video device from a media controller, others read
+ * name/dev/index), so those few files exist as read-only data served from
+ * memory: open() and fopen() hand out a memfd holding the content, stat() a
+ * regular file. Built once the device index is known. */
+#define WC_SYSFS_FILES 5
+#define WC_SYSFS_DIRS 2
+typedef struct {
+    char path[128];
+    char content[96];
+    size_t len;
+} wc_sysfs_file_t;
+static wc_sysfs_file_t g_sysfs_files[WC_SYSFS_FILES];
+static char g_sysfs_dirs[WC_SYSFS_DIRS][128];
+
+static void sysfs_view_init(const char *base) {
+    snprintf(g_sysfs_dirs[0], sizeof(g_sysfs_dirs[0]), "/sys/class/video4linux/%.64s", base);
+    snprintf(g_sysfs_dirs[1], sizeof(g_sysfs_dirs[1]), "/sys/dev/char/%d:%d", WC_VIDEO_MAJOR, g_device_minor);
+    struct { const char *dir; const char *name; } where[WC_SYSFS_FILES] = {
+        { g_sysfs_dirs[0], "name" }, { g_sysfs_dirs[0], "dev" }, { g_sysfs_dirs[0], "index" },
+        { g_sysfs_dirs[0], "uevent" }, { g_sysfs_dirs[1], "uevent" },
+    };
+    for (int i = 0; i < WC_SYSFS_FILES; i++) {
+        wc_sysfs_file_t *f = &g_sysfs_files[i];
+        snprintf(f->path, sizeof(f->path), "%s/%s", where[i].dir, where[i].name);
+        int n;
+        if (strcmp(where[i].name, "name") == 0) {
+            n = snprintf(f->content, sizeof(f->content), "%s\n", WC_CARD_NAME);
+        } else if (strcmp(where[i].name, "dev") == 0) {
+            n = snprintf(f->content, sizeof(f->content), "%d:%d\n", WC_VIDEO_MAJOR, g_device_minor);
+        } else if (strcmp(where[i].name, "index") == 0) {
+            n = snprintf(f->content, sizeof(f->content), "0\n");
+        } else {
+            n = snprintf(f->content, sizeof(f->content), "MAJOR=%d\nMINOR=%d\nDEVNAME=%.64s\n",
+                         WC_VIDEO_MAJOR, g_device_minor, base);
+        }
+        f->len = (n > 0 && (size_t)n < sizeof(f->content)) ? (size_t)n : 0;
+    }
+}
+
+static const wc_sysfs_file_t *sysfs_virtual_file(const char *pathname) {
+    if (pathname == NULL || strncmp(pathname, "/sys/", 5) != 0) {
+        return NULL;
+    }
+    for (int i = 0; i < WC_SYSFS_FILES; i++) {
+        if (g_sysfs_files[i].len != 0 && strcmp(pathname, g_sysfs_files[i].path) == 0) {
+            return &g_sysfs_files[i];
+        }
+    }
+    return NULL;
+}
+
+static int sysfs_virtual_dir(const char *pathname) {
+    if (pathname == NULL || strncmp(pathname, "/sys/", 5) != 0) {
+        return 0;
+    }
+    size_t len = strlen(pathname);
+    while (len > 1 && pathname[len - 1] == '/') {
+        len--;
+    }
+    for (int i = 0; i < WC_SYSFS_DIRS; i++) {
+        if (g_sysfs_dirs[i][0] != '\0' && strlen(g_sysfs_dirs[i]) == len && strncmp(pathname, g_sysfs_dirs[i], len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* stat() answer for a virtual sysfs path: 1 when filled, 0 when not ours. */
+#define FILL_SYSFS_STAT(pathname, buf) ({                                  \
+    const wc_sysfs_file_t *vf_ = sysfs_virtual_file(pathname);              \
+    int hit_ = 0;                                                           \
+    if (vf_ != NULL) {                                                      \
+        memset((buf), 0, sizeof(*(buf)));                                   \
+        (buf)->st_mode = S_IFREG | 0444;                                    \
+        (buf)->st_size = (off_t)vf_->len;                                   \
+        (buf)->st_nlink = 1;                                                \
+        (buf)->st_blksize = 4096;                                           \
+        hit_ = 1;                                                           \
+    } else if (sysfs_virtual_dir(pathname)) {                               \
+        memset((buf), 0, sizeof(*(buf)));                                   \
+        (buf)->st_mode = S_IFDIR | 0555;                                    \
+        (buf)->st_nlink = 2;                                                \
+        (buf)->st_blksize = 4096;                                           \
+        hit_ = 1;                                                           \
+    }                                                                       \
+    hit_; })
+
+/* A memfd holding the file's content, positioned at the start; -1 on error. */
+static int sysfs_virtual_open(const wc_sysfs_file_t *f, int flags) {
+    if ((flags & O_ACCMODE) != O_RDONLY) {
+        errno = EACCES;
+        return -1;
+    }
+    int mfd = (int)syscall(SYS_memfd_create, "selkies-sysfs", (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0);
+    if (mfd < 0) {
+        return -1;
+    }
+    if (real_write(mfd, f->content, f->len) != (ssize_t)f->len || lseek(mfd, 0, SEEK_SET) != 0) {
+        real_close(mfd);
+        errno = EIO;
+        return -1;
+    }
+    return mfd;
+}
+
 static const char *device_basename(void) {
     const char *slash = strrchr(g_device_path, '/');
     return slash ? slash + 1 : g_device_path;
@@ -356,6 +517,7 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
         if (idx >= 0 && idx < 256) {
             snprintf(g_device_path, sizeof(g_device_path), "/dev/video%ld", idx);
             snprintf(g_socket_path, sizeof(g_socket_path), "/tmp/selkies_webcam%ld.sock", idx);
+            g_device_minor = (int)idx;
         }
     }
     const char *sock_dir = getenv("SELKIES_WEBCAM_SOCKET_PATH");
@@ -370,6 +532,7 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
         }
     }
 
+    sysfs_view_init(device_basename());
     if (load_real_func((void *)&real_open, "open") < 0) swc_log_error("CRITICAL: no real 'open'.");
     if (load_real_func((void *)&real_ioctl, "ioctl") < 0) swc_log_error("CRITICAL: no real 'ioctl'.");
     if (load_real_func((void *)&real_close, "close") < 0) swc_log_error("CRITICAL: no real 'close'.");
@@ -415,7 +578,7 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
 /* --- Forged device metadata so directory scans and stat() see a char device --- */
 #define FILL_FAKE_STAT_FIELDS(buf) do {                 \
     (buf)->st_mode = S_IFCHR | 0666;                    \
-    (buf)->st_rdev = makedev(WC_VIDEO_MAJOR, 0);        \
+    (buf)->st_rdev = makedev(WC_VIDEO_MAJOR, g_device_minor); \
     (buf)->st_uid = 0;                                  \
     (buf)->st_gid = 0;                                  \
     (buf)->st_size = 0;                                 \
@@ -433,6 +596,13 @@ int access(const char *pathname, int mode) {
         errno = 0;
         return 0;
     }
+    if (sysfs_virtual_file(pathname) != NULL || sysfs_virtual_dir(pathname)) {
+        if (mode & W_OK) {
+            errno = EACCES;
+            return -1;
+        }
+        return 0;
+    }
     return real_access(pathname, mode);
 }
 
@@ -441,6 +611,9 @@ int stat(const char *pathname, struct stat *buf) {
     if (is_our_device_path(pathname)) {
         memset(buf, 0, sizeof(*buf));
         FILL_FAKE_STAT_FIELDS(buf);
+        return 0;
+    }
+    if (FILL_SYSFS_STAT(pathname, buf)) {
         return 0;
     }
     return real_stat(pathname, buf);
@@ -453,14 +626,20 @@ int lstat(const char *pathname, struct stat *buf) {
         FILL_FAKE_STAT_FIELDS(buf);
         return 0;
     }
+    if (FILL_SYSFS_STAT(pathname, buf)) {
+        return 0;
+    }
     return real_lstat(pathname, buf);
 }
 
 int fstat(int fd, struct stat *buf) {
     if (!real_fstat && load_real_func((void *)&real_fstat, "fstat") < 0) { errno = EFAULT; return -1; }
-    pthread_mutex_lock(&handles_mutex);
-    int ours = find_handle_for_fd_locked(fd) != NULL;
-    pthread_mutex_unlock(&handles_mutex);
+    int ours = 0;
+    if (fd_maybe_ours(fd)) {
+        pthread_mutex_lock(&handles_mutex);
+        ours = find_handle_for_fd_locked(fd) != NULL;
+        pthread_mutex_unlock(&handles_mutex);
+    }
     if (ours) {
         memset(buf, 0, sizeof(*buf));
         FILL_FAKE_STAT_FIELDS(buf);
@@ -473,18 +652,23 @@ int fstat(int fd, struct stat *buf) {
 int stat64(const char *pathname, struct stat64 *buf) {
     if (!real_stat64 && load_real_func((void *)&real_stat64, "stat64") < 0) { errno = EFAULT; return -1; }
     if (is_our_device_path(pathname)) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
+    if (FILL_SYSFS_STAT(pathname, buf)) { return 0; }
     return real_stat64(pathname, buf);
 }
 int lstat64(const char *pathname, struct stat64 *buf) {
     if (!real_lstat64 && load_real_func((void *)&real_lstat64, "lstat64") < 0) { errno = EFAULT; return -1; }
     if (is_our_device_path(pathname)) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
+    if (FILL_SYSFS_STAT(pathname, buf)) { return 0; }
     return real_lstat64(pathname, buf);
 }
 int fstat64(int fd, struct stat64 *buf) {
     if (!real_fstat64 && load_real_func((void *)&real_fstat64, "fstat64") < 0) { errno = EFAULT; return -1; }
-    pthread_mutex_lock(&handles_mutex);
-    int ours = find_handle_for_fd_locked(fd) != NULL;
-    pthread_mutex_unlock(&handles_mutex);
+    int ours = 0;
+    if (fd_maybe_ours(fd)) {
+        pthread_mutex_lock(&handles_mutex);
+        ours = find_handle_for_fd_locked(fd) != NULL;
+        pthread_mutex_unlock(&handles_mutex);
+    }
     if (ours) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
     return real_fstat64(fd, buf);
 }
@@ -494,38 +678,131 @@ int fstat64(int fd, struct stat64 *buf) {
 int __xstat(int ver, const char *pathname, struct stat *buf) {
     if (!real___xstat && load_real_func((void *)&real___xstat, "__xstat") < 0) { errno = EFAULT; return -1; }
     if (is_our_device_path(pathname)) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
+    if (FILL_SYSFS_STAT(pathname, buf)) { return 0; }
     return real___xstat(ver, pathname, buf);
 }
 int __lxstat(int ver, const char *pathname, struct stat *buf) {
     if (!real___lxstat && load_real_func((void *)&real___lxstat, "__lxstat") < 0) { errno = EFAULT; return -1; }
     if (is_our_device_path(pathname)) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
+    if (FILL_SYSFS_STAT(pathname, buf)) { return 0; }
     return real___lxstat(ver, pathname, buf);
 }
 int __fxstat(int ver, int fd, struct stat *buf) {
     if (!real___fxstat && load_real_func((void *)&real___fxstat, "__fxstat") < 0) { errno = EFAULT; return -1; }
-    pthread_mutex_lock(&handles_mutex);
-    int ours = find_handle_for_fd_locked(fd) != NULL;
-    pthread_mutex_unlock(&handles_mutex);
+    int ours = 0;
+    if (fd_maybe_ours(fd)) {
+        pthread_mutex_lock(&handles_mutex);
+        ours = find_handle_for_fd_locked(fd) != NULL;
+        pthread_mutex_unlock(&handles_mutex);
+    }
     if (ours) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
     return real___fxstat(ver, fd, buf);
 }
 int __xstat64(int ver, const char *pathname, struct stat64 *buf) {
     if (!real___xstat64 && load_real_func((void *)&real___xstat64, "__xstat64") < 0) { errno = EFAULT; return -1; }
     if (is_our_device_path(pathname)) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
+    if (FILL_SYSFS_STAT(pathname, buf)) { return 0; }
     return real___xstat64(ver, pathname, buf);
 }
 int __lxstat64(int ver, const char *pathname, struct stat64 *buf) {
     if (!real___lxstat64 && load_real_func((void *)&real___lxstat64, "__lxstat64") < 0) { errno = EFAULT; return -1; }
     if (is_our_device_path(pathname)) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
+    if (FILL_SYSFS_STAT(pathname, buf)) { return 0; }
     return real___lxstat64(ver, pathname, buf);
 }
 int __fxstat64(int ver, int fd, struct stat64 *buf) {
     if (!real___fxstat64 && load_real_func((void *)&real___fxstat64, "__fxstat64") < 0) { errno = EFAULT; return -1; }
-    pthread_mutex_lock(&handles_mutex);
-    int ours = find_handle_for_fd_locked(fd) != NULL;
-    pthread_mutex_unlock(&handles_mutex);
+    int ours = 0;
+    if (fd_maybe_ours(fd)) {
+        pthread_mutex_lock(&handles_mutex);
+        ours = find_handle_for_fd_locked(fd) != NULL;
+        pthread_mutex_unlock(&handles_mutex);
+    }
     if (ours) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
     return real___fxstat64(ver, fd, buf);
+}
+#endif
+
+/* Path-relative stat entry points modern tools use (ls, stat, coreutils, Rust
+ * std use statx; others fstatat): only absolute or cwd-relative paths name
+ * the device or its sysfs view. */
+static int at_path_is_virtual(int dirfd, const char *pathname, int flags) {
+    (void)flags;
+    if (pathname == NULL || pathname[0] == '\0') {
+        return 0;
+    }
+    if (pathname[0] != '/' && dirfd != AT_FDCWD) {
+        return 0;
+    }
+    return is_our_device_path(pathname) || sysfs_virtual_file(pathname) != NULL || sysfs_virtual_dir(pathname);
+}
+
+static int (*real_fstatat)(int, const char *, struct stat *, int) = NULL;
+int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags) {
+    if (!real_fstatat && load_real_func((void *)&real_fstatat, "fstatat") < 0) { errno = EFAULT; return -1; }
+    if (at_path_is_virtual(dirfd, pathname, flags)) {
+        if (is_our_device_path(pathname)) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
+        if (FILL_SYSFS_STAT(pathname, buf)) { return 0; }
+    }
+    return real_fstatat(dirfd, pathname, buf, flags);
+}
+
+#ifdef SWC_LFS64
+static int (*real_fstatat64)(int, const char *, struct stat64 *, int) = NULL;
+int fstatat64(int dirfd, const char *pathname, struct stat64 *buf, int flags) {
+    if (!real_fstatat64 && load_real_func((void *)&real_fstatat64, "fstatat64") < 0) { errno = EFAULT; return -1; }
+    if (at_path_is_virtual(dirfd, pathname, flags)) {
+        if (is_our_device_path(pathname)) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
+        if (FILL_SYSFS_STAT(pathname, buf)) { return 0; }
+    }
+    return real_fstatat64(dirfd, pathname, buf, flags);
+}
+#endif
+
+#ifdef __GLIBC__
+static int (*real___fxstatat)(int, int, const char *, struct stat *, int) = NULL;
+int __fxstatat(int ver, int dirfd, const char *pathname, struct stat *buf, int flags) {
+    if (!real___fxstatat && load_real_func((void *)&real___fxstatat, "__fxstatat") < 0) { errno = EFAULT; return -1; }
+    if (at_path_is_virtual(dirfd, pathname, flags)) {
+        if (is_our_device_path(pathname)) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
+        if (FILL_SYSFS_STAT(pathname, buf)) { return 0; }
+    }
+    return real___fxstatat(ver, dirfd, pathname, buf, flags);
+}
+static int (*real___fxstatat64)(int, int, const char *, struct stat64 *, int) = NULL;
+int __fxstatat64(int ver, int dirfd, const char *pathname, struct stat64 *buf, int flags) {
+    if (!real___fxstatat64 && load_real_func((void *)&real___fxstatat64, "__fxstatat64") < 0) { errno = EFAULT; return -1; }
+    if (at_path_is_virtual(dirfd, pathname, flags)) {
+        if (is_our_device_path(pathname)) { memset(buf, 0, sizeof(*buf)); FILL_FAKE_STAT_FIELDS(buf); return 0; }
+        if (FILL_SYSFS_STAT(pathname, buf)) { return 0; }
+    }
+    return real___fxstatat64(ver, dirfd, pathname, buf, flags);
+}
+#endif
+
+#ifdef STATX_TYPE
+static int (*real_statx)(int, const char *, int, unsigned int, struct statx *) = NULL;
+int statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *buf) {
+    if (!real_statx && load_real_func((void *)&real_statx, "statx") < 0) { errno = EFAULT; return -1; }
+    if (at_path_is_virtual(dirfd, pathname, flags)) {
+        struct stat st;
+        if (is_our_device_path(pathname)) {
+            memset(&st, 0, sizeof(st));
+            FILL_FAKE_STAT_FIELDS(&st);
+        } else if (!FILL_SYSFS_STAT(pathname, &st)) {
+            return real_statx(dirfd, pathname, flags, mask, buf);
+        }
+        memset(buf, 0, sizeof(*buf));
+        buf->stx_mask = STATX_BASIC_STATS;
+        buf->stx_blksize = (uint32_t)st.st_blksize;
+        buf->stx_nlink = (uint32_t)st.st_nlink;
+        buf->stx_mode = (uint16_t)st.st_mode;
+        buf->stx_size = (uint64_t)st.st_size;
+        buf->stx_rdev_major = major(st.st_rdev);
+        buf->stx_rdev_minor = minor(st.st_rdev);
+        return 0;
+    }
+    return real_statx(dirfd, pathname, flags, mask, buf);
 }
 #endif
 
@@ -822,8 +1099,10 @@ static int recv_config_and_fd(int sockfd, webcam_config_t *cfg) {
         swc_log_error("config magic/version mismatch: 0x%08x v%u", cfg->magic, cfg->version);
         return -1;
     }
-    if (cfg->n_slots == 0 || cfg->n_slots > WC_MAX_SLOTS || cfg->slot_size == 0) {
-        swc_log_error("config slots/size out of range: n_slots=%u slot_size=%u", cfg->n_slots, cfg->slot_size);
+    if (cfg->n_slots == 0 || cfg->n_slots > WC_MAX_SLOTS || cfg->slot_size == 0 ||
+        cfg->sizeimage > cfg->slot_size || cfg->width == 0 || cfg->height == 0) {
+        swc_log_error("config geometry out of range: n_slots=%u slot_size=%u sizeimage=%u %ux%u",
+                      cfg->n_slots, cfg->slot_size, cfg->sizeimage, cfg->width, cfg->height);
         return -1;
     }
 
@@ -843,7 +1122,7 @@ static int recv_config_and_fd(int sockfd, webcam_config_t *cfg) {
  * success returns the socket fd and fills *out; the staging fd is consumed.
  * O_CLOEXEC from the application's open() carries onto the socket so exec'd
  * children can't hold a dead connection open and keep the backend feeding. */
-static int connect_and_configure(wc_handle_t *out, int open_flags) {
+static int connect_socket(wc_handle_t *out, int open_flags) {
     int sock_type = SOCK_STREAM | ((open_flags & O_CLOEXEC) ? SOCK_CLOEXEC : 0);
     int sockfd = socket(AF_UNIX, sock_type, 0);
     if (sockfd == -1) {
@@ -903,10 +1182,533 @@ static int connect_and_configure(wc_handle_t *out, int open_flags) {
     return sockfd;
 }
 
+static size_t round_up_page(size_t n);
+
+/* --- Frame source: PipeWire --- */
+/* A PipeWire Video/Source node (the pixelflux virtual camera publishes one; any
+ * other producer works too) can stand in for the backend's staging ring. The
+ * application fd is our end of a socketpair: the PipeWire data thread copies each
+ * frame into the handle's latest-frame buffer and writes one byte, so poll(),
+ * DQBUF and read() behave exactly as with the ring. libpipewire is loaded at run
+ * time on the first device open, never at library load: this library is preloaded
+ * into every process of an application, and initializing PipeWire during early
+ * process startup is what hangs some of them. Built only when the PipeWire
+ * headers are present (HAVE_PIPEWIRE); the SPA headers are header-only, so
+ * nothing is linked. */
+#ifdef HAVE_PIPEWIRE
+#include <pipewire/pipewire.h>
+#include <spa/param/format-utils.h>
+#include <spa/param/video/format-utils.h>
+#include <spa/param/buffers.h>
+#include <spa/pod/builder.h>
+
+#define WC_PW_DEFAULT_NODE "selkies-webcam"
+#define WC_PW_CONNECT_TIMEOUT_MS 2000
+
+typedef struct {
+    struct pw_thread_loop *loop;
+    struct pw_context *context;
+    struct pw_core *core;
+    struct pw_stream *stream;
+    struct spa_hook listener;
+    int bell_fd;                 /* our end of the doorbell socketpair, non-blocking */
+    pthread_mutex_t lock;        /* guards the latest-frame fields */
+    uint8_t *latest;
+    uint32_t latest_cap;
+    uint32_t latest_len;
+    uint64_t seq;
+    uint64_t ts_ns;
+    uint32_t width;
+    uint32_t height;
+    uint32_t fourcc;
+    struct spa_fraction framerate;
+    uint32_t sizeimage;
+    uint32_t stride;
+    volatile int have_format;
+    volatile int state;          /* enum pw_stream_state, written by the loop thread */
+} wc_pw_t;
+
+static struct {
+    void *lib;
+    int loaded;
+    void (*init)(int *, char ***);
+    struct pw_thread_loop *(*thread_loop_new)(const char *, const struct spa_dict *);
+    struct pw_loop *(*thread_loop_get_loop)(struct pw_thread_loop *);
+    int (*thread_loop_start)(struct pw_thread_loop *);
+    void (*thread_loop_stop)(struct pw_thread_loop *);
+    void (*thread_loop_lock)(struct pw_thread_loop *);
+    void (*thread_loop_unlock)(struct pw_thread_loop *);
+    void (*thread_loop_destroy)(struct pw_thread_loop *);
+    struct pw_context *(*context_new)(struct pw_loop *, struct pw_properties *, size_t);
+    struct pw_core *(*context_connect)(struct pw_context *, struct pw_properties *, size_t);
+    void (*context_destroy)(struct pw_context *);
+    int (*core_disconnect)(struct pw_core *);
+    struct pw_properties *(*properties_new)(const char *, ...);
+    struct pw_stream *(*stream_new)(struct pw_core *, const char *, struct pw_properties *);
+    void (*stream_add_listener)(struct pw_stream *, struct spa_hook *, const struct pw_stream_events *, void *);
+    int (*stream_connect)(struct pw_stream *, enum pw_direction, uint32_t, enum pw_stream_flags, const struct spa_pod **, uint32_t);
+    int (*stream_update_params)(struct pw_stream *, const struct spa_pod **, uint32_t);
+    struct pw_buffer *(*stream_dequeue_buffer)(struct pw_stream *);
+    int (*stream_queue_buffer)(struct pw_stream *, struct pw_buffer *);
+    int (*stream_disconnect)(struct pw_stream *);
+    void (*stream_destroy)(struct pw_stream *);
+} g_pw;
+static pthread_mutex_t g_pw_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int wc_pw_load(void) {
+    pthread_mutex_lock(&g_pw_mutex);
+    if (g_pw.loaded) {
+        pthread_mutex_unlock(&g_pw_mutex);
+        return 0;
+    }
+    if (g_pw.lib == NULL) {
+        g_pw.lib = dlopen("libpipewire-0.3.so.0", RTLD_NOW | RTLD_LOCAL);
+        if (g_pw.lib == NULL) {
+            swc_log_info("PipeWire source unavailable: %s", dlerror());
+            pthread_mutex_unlock(&g_pw_mutex);
+            return -1;
+        }
+    }
+#define WC_PW_SYM(field, name) do {                                         \
+        *(void **)&g_pw.field = dlsym(g_pw.lib, name);                     \
+        if (g_pw.field == NULL) {                                          \
+            swc_log_error("PipeWire symbol %s missing", name);             \
+            pthread_mutex_unlock(&g_pw_mutex);                             \
+            return -1;                                                     \
+        }                                                                  \
+    } while (0)
+    WC_PW_SYM(init, "pw_init");
+    WC_PW_SYM(thread_loop_new, "pw_thread_loop_new");
+    WC_PW_SYM(thread_loop_get_loop, "pw_thread_loop_get_loop");
+    WC_PW_SYM(thread_loop_start, "pw_thread_loop_start");
+    WC_PW_SYM(thread_loop_stop, "pw_thread_loop_stop");
+    WC_PW_SYM(thread_loop_lock, "pw_thread_loop_lock");
+    WC_PW_SYM(thread_loop_unlock, "pw_thread_loop_unlock");
+    WC_PW_SYM(thread_loop_destroy, "pw_thread_loop_destroy");
+    WC_PW_SYM(context_new, "pw_context_new");
+    WC_PW_SYM(context_connect, "pw_context_connect");
+    WC_PW_SYM(context_destroy, "pw_context_destroy");
+    WC_PW_SYM(core_disconnect, "pw_core_disconnect");
+    WC_PW_SYM(properties_new, "pw_properties_new");
+    WC_PW_SYM(stream_new, "pw_stream_new");
+    WC_PW_SYM(stream_add_listener, "pw_stream_add_listener");
+    WC_PW_SYM(stream_connect, "pw_stream_connect");
+    WC_PW_SYM(stream_update_params, "pw_stream_update_params");
+    WC_PW_SYM(stream_dequeue_buffer, "pw_stream_dequeue_buffer");
+    WC_PW_SYM(stream_queue_buffer, "pw_stream_queue_buffer");
+    WC_PW_SYM(stream_disconnect, "pw_stream_disconnect");
+    WC_PW_SYM(stream_destroy, "pw_stream_destroy");
+#undef WC_PW_SYM
+    g_pw.init(NULL, NULL);
+    g_pw.loaded = 1;
+    pthread_mutex_unlock(&g_pw_mutex);
+    return 0;
+}
+
+static uint32_t wc_pw_fourcc(enum spa_video_format f) {
+    switch (f) {
+    case SPA_VIDEO_FORMAT_I420: return V4L2_PIX_FMT_YUV420;
+    case SPA_VIDEO_FORMAT_NV12: return V4L2_PIX_FMT_NV12;
+    case SPA_VIDEO_FORMAT_YUY2: return V4L2_PIX_FMT_YUYV;
+    default: return 0;
+    }
+}
+
+static void wc_pw_on_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error) {
+    wc_pw_t *pw = data;
+    (void)old;
+    pw->state = state;
+    if (state == PW_STREAM_STATE_ERROR) {
+        swc_log_error("PipeWire stream error: %s", error ? error : "");
+    }
+    /* Ended: closing our end of the doorbell pair gives a blocked DQBUF/read()
+     * the end-of-stream the socket path delivers when the backend goes away. */
+    if ((state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED) && pw->have_format && pw->bell_fd >= 0) {
+        real_close(pw->bell_fd);
+        pw->bell_fd = -1;
+    }
+}
+
+/* The negotiated format fixes the device geometry; the answer asks for one frame
+ * per buffer in memfd or plain memory. */
+static void wc_pw_on_param_changed(void *data, uint32_t id, const struct spa_pod *param) {
+    wc_pw_t *pw = data;
+    uint32_t media_type, media_subtype;
+    struct spa_video_info_raw info;
+    struct spa_video_info_mjpg mjpg;
+    uint32_t w, h, stride, size, fourcc;
+    struct spa_fraction framerate;
+    if (param == NULL || id != SPA_PARAM_Format) {
+        return;
+    }
+    if (spa_format_parse(param, &media_type, &media_subtype) < 0 || media_type != SPA_MEDIA_TYPE_video) {
+        return;
+    }
+    if (media_subtype == SPA_MEDIA_SUBTYPE_raw) {
+        memset(&info, 0, sizeof(info));
+        if (spa_format_video_raw_parse(param, &info) < 0 || wc_pw_fourcc(info.format) == 0 ||
+            info.size.width == 0 || info.size.height == 0) {
+            return;
+        }
+        w = info.size.width;
+        h = info.size.height;
+        fourcc = wc_pw_fourcc(info.format);
+        framerate = info.framerate;
+        stride = (info.format == SPA_VIDEO_FORMAT_YUY2) ? w * 2 : w;
+        size = (info.format == SPA_VIDEO_FORMAT_YUY2) ? w * 2 * h : w * h + 2 * (((w + 1) / 2) * ((h + 1) / 2));
+    } else if (media_subtype == SPA_MEDIA_SUBTYPE_mjpg) {
+        /* The compressed device: no stride, and the node's own frame budget
+         * of two bytes per pixel. */
+        memset(&mjpg, 0, sizeof(mjpg));
+        if (spa_format_video_mjpg_parse(param, &mjpg) < 0 || mjpg.size.width == 0 || mjpg.size.height == 0) {
+            return;
+        }
+        w = mjpg.size.width;
+        h = mjpg.size.height;
+        fourcc = V4L2_PIX_FMT_MJPEG;
+        framerate = mjpg.framerate;
+        stride = 0;
+        size = w * h * 2;
+    } else {
+        return;
+    }
+    /* Allocation happens outside pw->lock: malloc may mmap, which is hooked,
+     * and the hooks take handles_mutex while its holder may be waiting on
+     * pw->lock. latest_cap is only written by this loop thread. */
+    uint8_t *grown = NULL;
+    if (pw->latest_cap < size) {
+        grown = malloc(size);
+    }
+    pthread_mutex_lock(&pw->lock);
+    pw->width = w;
+    pw->height = h;
+    pw->fourcc = fourcc;
+    pw->framerate = framerate;
+    pw->stride = stride;
+    pw->sizeimage = size;
+    uint8_t *old = NULL;
+    if (grown != NULL) {
+        old = pw->latest;
+        pw->latest = grown;
+        pw->latest_cap = size;
+    }
+    pw->latest_len = 0;
+    pthread_mutex_unlock(&pw->lock);
+    free(old);
+
+    uint8_t buf[512];
+    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+    const struct spa_pod *params[1];
+    params[0] = spa_pod_builder_add_object(&b,
+        SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+        SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
+        SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1),
+        SPA_PARAM_BUFFERS_size, SPA_POD_Int((int32_t)size),
+        SPA_PARAM_BUFFERS_stride, SPA_POD_Int((int32_t)stride),
+        SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
+    g_pw.stream_update_params(pw->stream, params, 1);
+    pw->have_format = 1;
+}
+
+static void wc_pw_on_process(void *data) {
+    wc_pw_t *pw = data;
+    struct pw_buffer *b = g_pw.stream_dequeue_buffer(pw->stream);
+    if (b == NULL) {
+        return;
+    }
+    struct spa_data *d = &b->buffer->datas[0];
+    if (b->buffer->n_datas > 0 && d->data != NULL && d->chunk != NULL && d->chunk->size > 0) {
+        uint32_t n = d->chunk->size;
+        uint32_t off = d->chunk->offset;
+        if (off >= d->maxsize) {
+            n = 0;
+        } else if (n > d->maxsize - off) {
+            n = d->maxsize - off;
+        }
+        pthread_mutex_lock(&pw->lock);
+        if (n > pw->latest_cap) {
+            n = pw->latest_cap;
+        }
+        if (n > 0 && pw->latest != NULL) {
+            struct timespec ts;
+            memcpy(pw->latest, (const uint8_t *)d->data + off, n);
+            pw->latest_len = n;
+            pw->seq++;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            pw->ts_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+        }
+        pthread_mutex_unlock(&pw->lock);
+        if (n > 0 && pw->bell_fd >= 0) {
+            unsigned char one = 1;
+            (void)real_write(pw->bell_fd, &one, 1);
+        }
+    }
+    g_pw.stream_queue_buffer(pw->stream, b);
+}
+
+static const struct pw_stream_events wc_pw_stream_events = {
+    .version = PW_VERSION_STREAM_EVENTS,
+    .state_changed = wc_pw_on_state_changed,
+    .param_changed = wc_pw_on_param_changed,
+    .process = wc_pw_on_process,
+};
+
+static void wc_pw_release(wc_pw_t *pw) {
+    if (pw == NULL) {
+        return;
+    }
+    if (pw->loop != NULL) {
+        g_pw.thread_loop_lock(pw->loop);
+        if (pw->stream != NULL) {
+            g_pw.stream_disconnect(pw->stream);
+            g_pw.stream_destroy(pw->stream);
+            pw->stream = NULL;
+        }
+        if (pw->core != NULL) {
+            g_pw.core_disconnect(pw->core);
+            pw->core = NULL;
+        }
+        g_pw.thread_loop_unlock(pw->loop);
+        g_pw.thread_loop_stop(pw->loop);
+        if (pw->context != NULL) {
+            g_pw.context_destroy(pw->context);
+            pw->context = NULL;
+        }
+        g_pw.thread_loop_destroy(pw->loop);
+        pw->loop = NULL;
+    } else if (pw->context != NULL) {
+        g_pw.context_destroy(pw->context);
+    }
+    if (pw->bell_fd >= 0) {
+        real_close(pw->bell_fd);
+    }
+    pthread_mutex_destroy(&pw->lock);
+    free(pw->latest);
+    free(pw);
+}
+
+/* Connect to the node named by SELKIES_WEBCAM_PIPEWIRE_NODE (default
+ * WC_PW_DEFAULT_NODE), negotiate a raw format or video/mjpg, wait for it, and
+ * fill the handle the way the ring path does. Returns the application fd (our
+ * socketpair end) or -1. */
+static int wc_pw_connect(wc_handle_t *out, int open_flags) {
+    if (wc_pw_load() < 0) {
+        return -1;
+    }
+    const char *node = getenv("SELKIES_WEBCAM_PIPEWIRE_NODE");
+    if (node == NULL || node[0] == '\0') {
+        node = WC_PW_DEFAULT_NODE;
+    }
+    int sv[2];
+    int sock_type = SOCK_STREAM | ((open_flags & O_CLOEXEC) ? SOCK_CLOEXEC : 0);
+    if (socketpair(AF_UNIX, sock_type, 0, sv) != 0) {
+        swc_log_error("socketpair failed: %s", strerror(errno));
+        return -1;
+    }
+    int fl = fcntl(sv[1], F_GETFL, 0);
+    fcntl(sv[1], F_SETFL, (fl < 0 ? 0 : fl) | O_NONBLOCK);
+    fcntl(sv[1], F_SETFD, FD_CLOEXEC);
+
+    wc_pw_t *pw = calloc(1, sizeof(*pw));
+    if (pw == NULL) {
+        real_close(sv[0]);
+        real_close(sv[1]);
+        return -1;
+    }
+    pthread_mutex_init(&pw->lock, NULL);
+    pw->bell_fd = sv[1];
+    pw->loop = g_pw.thread_loop_new("selkies-webcam", NULL);
+    if (pw->loop == NULL) {
+        goto fail;
+    }
+    pw->context = g_pw.context_new(g_pw.thread_loop_get_loop(pw->loop), NULL, 0);
+    if (pw->context == NULL) {
+        goto fail;
+    }
+    if (g_pw.thread_loop_start(pw->loop) < 0) {
+        goto fail;
+    }
+    g_pw.thread_loop_lock(pw->loop);
+    pw->core = g_pw.context_connect(pw->context, NULL, 0);
+    if (pw->core == NULL) {
+        g_pw.thread_loop_unlock(pw->loop);
+        swc_log_info("PipeWire: no daemon reachable");
+        goto fail;
+    }
+    /* Only the named node: no session-manager fallback onto some other camera
+     * when it is absent (the property under both its WirePlumber 0.5 and 0.4
+     * names), and no reconnect when it goes away: the stream ends, which
+     * readers see as ENODEV like a closed backend socket. */
+    struct pw_properties *props = g_pw.properties_new(
+        PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+        PW_KEY_MEDIA_ROLE, "Camera", PW_KEY_TARGET_OBJECT, node,
+        PW_KEY_NODE_DONT_RECONNECT, "true", "node.dont-fallback", "true",
+        "target.dont-fallback", "true", NULL);
+    pw->stream = g_pw.stream_new(pw->core, "Selkies V4L2 Interposer", props);
+    if (pw->stream == NULL) {
+        g_pw.thread_loop_unlock(pw->loop);
+        goto fail;
+    }
+    g_pw.stream_add_listener(pw->stream, &pw->listener, &wc_pw_stream_events, pw);
+    uint8_t buf[1024];
+    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+    const struct spa_pod *params[2];
+    params[0] = spa_pod_builder_add_object(&b,
+        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(4, SPA_VIDEO_FORMAT_I420,
+            SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_YUY2),
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(
+            &SPA_RECTANGLE(1280, 720), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 8192)),
+        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
+            &SPA_FRACTION(30, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(1000, 1)));
+    params[1] = spa_pod_builder_add_object(&b,
+        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_mjpg),
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(
+            &SPA_RECTANGLE(1280, 720), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 8192)),
+        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
+            &SPA_FRACTION(30, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(1000, 1)));
+    int rc = g_pw.stream_connect(pw->stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+                                 PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, params, 2);
+    g_pw.thread_loop_unlock(pw->loop);
+    if (rc < 0) {
+        swc_log_error("PipeWire stream connect failed (%d)", rc);
+        goto fail;
+    }
+    for (int waited = 0; waited < WC_PW_CONNECT_TIMEOUT_MS; waited += 10) {
+        if (pw->state == PW_STREAM_STATE_ERROR) {
+            break;
+        }
+        if (pw->have_format && (pw->state == PW_STREAM_STATE_STREAMING || pw->state == PW_STREAM_STATE_PAUSED)) {
+            break;
+        }
+        usleep(10000);
+    }
+    if (!pw->have_format || pw->state == PW_STREAM_STATE_ERROR) {
+        swc_log_info("PipeWire: node '%s' not negotiated in time (state %d)", node, pw->state);
+        goto fail;
+    }
+    memset(out, 0, sizeof(*out));
+    out->fd = sv[0];
+    out->open_flags = open_flags;
+    out->pw = pw;
+    out->buf_fd = -1;
+    out->priority = V4L2_PRIORITY_DEFAULT;
+    webcam_config_t *cfg = &out->cfg;
+    cfg->magic = WC_SHM_MAGIC;
+    cfg->version = WC_SHM_VERSION;
+    cfg->width = pw->width;
+    cfg->height = pw->height;
+    cfg->fourcc = pw->fourcc;
+    cfg->fps_num = pw->framerate.num ? pw->framerate.num : 30;
+    cfg->fps_den = pw->framerate.denom ? pw->framerate.denom : 1;
+    cfg->n_slots = 1;
+    cfg->sizeimage = pw->sizeimage;
+    cfg->bytesperline = pw->stride;
+    cfg->slot_size = (uint32_t)round_up_page(pw->sizeimage);
+    cfg->data_offset = WC_SHM_DATA_OFFSET;
+    cfg->ctrl_offset = WC_SHM_CTRL_OFFSET;
+    cfg->ctrl_stride = WC_SHM_CTRL_STRIDE;
+    swc_log_info("PipeWire source '%s': %ux%u @ %u/%u", node, cfg->width, cfg->height, cfg->fps_num, cfg->fps_den);
+    return sv[0];
+fail:
+    real_close(sv[0]);
+    wc_pw_release(pw);
+    return -1;
+}
+
+/* Newest PipeWire frame into dest if newer than h->last_frame_seq: 1 copied, 0 none. */
+static int wc_pw_read_latest(wc_handle_t *h, void *dest, uint32_t dest_cap, uint32_t *bytesused, uint64_t *ts_ns) {
+    wc_pw_t *pw = h->pw;
+    pthread_mutex_lock(&pw->lock);
+    if (pw->seq == 0 || pw->seq == h->last_frame_seq || pw->latest_len == 0) {
+        pthread_mutex_unlock(&pw->lock);
+        return 0;
+    }
+    uint32_t n = pw->latest_len < dest_cap ? pw->latest_len : dest_cap;
+    memcpy(dest, pw->latest, n);
+    *bytesused = n;
+    *ts_ns = pw->ts_ns;
+    h->last_frame_seq = pw->seq;
+    pthread_mutex_unlock(&pw->lock);
+    return 1;
+}
+
+static uint64_t wc_pw_current_seq(wc_handle_t *h) {
+    wc_pw_t *pw = h->pw;
+    pthread_mutex_lock(&pw->lock);
+    uint64_t seq = pw->seq;
+    pthread_mutex_unlock(&pw->lock);
+    return seq;
+}
+#endif /* HAVE_PIPEWIRE */
+
+/* Sequence number of the newest frame the handle's source holds; STREAMON and
+ * the first read() start from it rather than from a backlog. */
+static uint64_t source_current_seq(wc_handle_t *h) {
+#ifdef HAVE_PIPEWIRE
+    if (h->pw != NULL) {
+        return wc_pw_current_seq(h);
+    }
+#endif
+    volatile wc_shm_header_t *hdr = (volatile wc_shm_header_t *)h->staging_map;
+    return __atomic_load_n(&hdr->latest_frame_seq, __ATOMIC_ACQUIRE);
+}
+
+static void source_release(wc_handle_t *h) {
+#ifdef HAVE_PIPEWIRE
+    if (h->pw != NULL) {
+        wc_pw_release((wc_pw_t *)h->pw);
+        h->pw = NULL;
+    }
+#endif
+    if (h->staging_map != NULL) {
+        munmap(h->staging_map, h->staging_size);
+        h->staging_map = NULL;
+    }
+}
+
+/* Source selection, SELKIES_WEBCAM_SOURCE: "socket" (the backend's control socket
+ * only), "pipewire" (a PipeWire node only), or "auto" (the default: the socket,
+ * then PipeWire). */
+static int connect_and_configure(wc_handle_t *out, int open_flags) {
+    const char *mode = getenv("SELKIES_WEBCAM_SOURCE");
+    int want_socket = 1, want_pw = 1;
+    if (mode != NULL && strcmp(mode, "socket") == 0) {
+        want_pw = 0;
+    } else if (mode != NULL && strcmp(mode, "pipewire") == 0) {
+        want_socket = 0;
+    }
+    if (want_socket) {
+        int fd = connect_socket(out, open_flags);
+        if (fd >= 0) {
+            return fd;
+        }
+    }
+    if (want_pw) {
+#ifdef HAVE_PIPEWIRE
+        return wc_pw_connect(out, open_flags);
+#else
+        swc_log_info("built without PipeWire support; no PipeWire source");
+#endif
+    }
+    return -1;
+}
+
 /* -2 not our device (caller falls back to real open); -1 error (errno set);
  * >=0 the socket fd handed to the application. */
 static int common_open_logic(const char *pathname, int flags) {
-    if (pathname == NULL || !is_our_device_path(pathname)) {
+    if (pathname == NULL) {
+        return -2;
+    }
+    const wc_sysfs_file_t *vf = sysfs_virtual_file(pathname);
+    if (vf != NULL) {
+        return sysfs_virtual_open(vf, flags);
+    }
+    if (!is_our_device_path(pathname)) {
         return -2;
     }
     wc_handle_t pending;
@@ -920,13 +1722,14 @@ static int common_open_logic(const char *pathname, int flags) {
     pthread_mutex_lock(&handles_mutex);
     if (handle_count >= WC_MAX_HANDLES) {
         pthread_mutex_unlock(&handles_mutex);
-        munmap(pending.staging_map, pending.staging_size);
+        source_release(&pending);
         real_close(new_fd);
         errno = EMFILE;
         return -1;
     }
     handles[handle_count] = pending;
     handle_count++;
+    fd_bitmap_set(new_fd);
     pthread_mutex_unlock(&handles_mutex);
     swc_log_info("opened %s -> fd %d (%d handle(s))", pathname, new_fd, handle_count);
     return new_fd;
@@ -961,6 +1764,53 @@ int open64(const char *pathname, int flags, ...) {
         return real_open64 ? real_open64(pathname, flags, mode) : real_open(pathname, flags, mode);
     }
     return real_open64 ? real_open64(pathname, flags) : real_open(pathname, flags);
+}
+
+/* Stream readers of the sysfs view (C++ ifstream, Python) go through fopen. */
+static FILE *(*real_fopen)(const char *, const char *) = NULL;
+static FILE *(*real_fopen64)(const char *, const char *) = NULL;
+
+/* Backed by the same memfd as open(): C++ streams read through fileno(). */
+static FILE *sysfs_virtual_fopen(const char *pathname, const char *mode) {
+    const wc_sysfs_file_t *vf = sysfs_virtual_file(pathname);
+    if (vf == NULL) {
+        return NULL;
+    }
+    if (mode == NULL || mode[0] != 'r' || strchr(mode, '+') != NULL) {
+        errno = EACCES;
+        return NULL;
+    }
+    int fd = sysfs_virtual_open(vf, O_RDONLY | (strchr(mode, 'e') ? O_CLOEXEC : 0));
+    if (fd < 0) {
+        return NULL;
+    }
+    FILE *fp = fdopen(fd, "r");
+    if (fp == NULL) {
+        real_close(fd);
+    }
+    return fp;
+}
+
+FILE *fopen(const char *pathname, const char *mode) {
+    if (!real_fopen && load_real_func((void *)&real_fopen, "fopen") < 0) {
+        errno = EFAULT;
+        return NULL;
+    }
+    if (sysfs_virtual_file(pathname) != NULL) {
+        return sysfs_virtual_fopen(pathname, mode);
+    }
+    return real_fopen(pathname, mode);
+}
+
+FILE *fopen64(const char *pathname, const char *mode) {
+    if (!real_fopen64 && load_real_func((void *)&real_fopen64, "fopen64") < 0) {
+        errno = EFAULT;
+        return NULL;
+    }
+    if (sysfs_virtual_file(pathname) != NULL) {
+        return sysfs_virtual_fopen(pathname, mode);
+    }
+    return real_fopen64(pathname, mode);
 }
 
 /* Resolve a possibly-relative openat() path against dirfd for the match. */
@@ -1051,7 +1901,9 @@ static size_t round_up_page(size_t n) {
     return (n + page - 1) & ~(page - 1);
 }
 
-static void release_buffers_locked(wc_handle_t *h) {
+/* Callers either hold handles_mutex or own a handle already retired from the
+ * table (close releases outside the lock). */
+static void release_buffers(wc_handle_t *h) {
     if (h->buf_map) {
         munmap(h->buf_map, (size_t)h->n_buffers * h->buf_stride);
         h->buf_map = NULL;
@@ -1068,7 +1920,7 @@ static void release_buffers_locked(wc_handle_t *h) {
 }
 
 static int allocate_buffers_locked(wc_handle_t *h, uint32_t count) {
-    release_buffers_locked(h);
+    release_buffers(h);
     size_t stride = round_up_page(h->cfg.slot_size);
     int mfd = (int)syscall(SYS_memfd_create, "selkies-webcam-buffers", MFD_CLOEXEC);
     if (mfd < 0) {
@@ -1103,6 +1955,11 @@ static int allocate_buffers_locked(wc_handle_t *h, uint32_t count) {
  * 0 if no new frame, -1 on inconsistency after retries. */
 static int read_latest_frame(wc_handle_t *h, void *dest, uint32_t dest_cap,
                              uint32_t *bytesused, uint64_t *ts_ns) {
+#ifdef HAVE_PIPEWIRE
+    if (h->pw != NULL) {
+        return wc_pw_read_latest(h, dest, dest_cap, bytesused, ts_ns);
+    }
+#endif
     volatile wc_shm_header_t *hdr = (volatile wc_shm_header_t *)h->staging_map;
     uint64_t fseq = __atomic_load_n(&hdr->latest_frame_seq, __ATOMIC_ACQUIRE);
     if (fseq == 0 || fseq == h->last_frame_seq) {
@@ -1146,24 +2003,51 @@ static int read_latest_frame(wc_handle_t *h, void *dest, uint32_t dest_cap,
 }
 
 /* Drain any pending doorbell bytes without blocking. */
-static void drain_doorbell(int fd) {
+/* Discards pending wakeups. Returns 1 once the source has hung up, which is
+ * how a frame source ends (the backend closed its socket, the PipeWire stream
+ * closed its doorbell): readers then get ENODEV instead of EAGAIN, so a
+ * non-blocking consumer polling a hung-up fd does not spin. */
+static int drain_doorbell(int fd) {
     unsigned char tmp[64];
-    while (recv(fd, tmp, sizeof(tmp), MSG_DONTWAIT) > 0) {
-        /* discard */
+    for (;;) {
+        ssize_t n = recv(fd, tmp, sizeof(tmp), MSG_DONTWAIT);
+        if (n > 0) {
+            continue;
+        }
+        return n == 0;
     }
 }
 
 /* --- ioctl emulation --- */
 
+static int is_compressed_fourcc(uint32_t fourcc) {
+    return fourcc == V4L2_PIX_FMT_MJPEG || fourcc == V4L2_PIX_FMT_JPEG;
+}
+
+static const char *fourcc_description(uint32_t fourcc) {
+    switch (fourcc) {
+    case V4L2_PIX_FMT_MJPEG: return "Motion-JPEG";
+    case V4L2_PIX_FMT_JPEG: return "JFIF JPEG";
+    case V4L2_PIX_FMT_YUV420: return "Planar YUV 4:2:0";
+    case V4L2_PIX_FMT_NV12: return "Y/UV 4:2:0";
+    case V4L2_PIX_FMT_YUYV: return "YUYV 4:2:2";
+    default: return "Video";
+    }
+}
+
+/* The backend fixes every field of the format: raw formats carry their exact
+ * stride and frame size, MJPEG its maximum frame size. Raw frames are
+ * limited-range BT.601 like a classic webcam; JPEG carries its own
+ * full-range sRGB signalling. */
 static void fill_pix_format(wc_handle_t *h, struct v4l2_pix_format *pix) {
     memset(pix, 0, sizeof(*pix));
     pix->width = h->cfg.width;
     pix->height = h->cfg.height;
     pix->pixelformat = h->cfg.fourcc;
     pix->field = V4L2_FIELD_NONE;
-    pix->bytesperline = 0; /* compressed */
-    pix->sizeimage = h->cfg.slot_size;
-    pix->colorspace = V4L2_COLORSPACE_SRGB;
+    pix->bytesperline = h->cfg.bytesperline;
+    pix->sizeimage = h->cfg.sizeimage ? h->cfg.sizeimage : h->cfg.slot_size;
+    pix->colorspace = is_compressed_fourcc(h->cfg.fourcc) ? V4L2_COLORSPACE_SRGB : V4L2_COLORSPACE_SMPTE170M;
 }
 
 /* Self-locking: the blocking doorbell wait must not hold handles_mutex, or a
@@ -1193,7 +2077,7 @@ static int handle_dqbuf(int fd, struct v4l2_buffer *b) {
         /* Doorbells are only wakeups; the shm sequence is the source of truth.
          * Draining stale wakeups here keeps poll() from spinning when frames
          * were coalesced or already consumed. */
-        drain_doorbell(h->fd);
+        int ended = drain_doorbell(h->fd);
         uint32_t idx = h->queue_fifo[h->queue_head];
         void *dest = (char *)h->buf_map + (size_t)idx * h->buf_stride;
         uint32_t bytesused = 0;
@@ -1230,6 +2114,10 @@ static int handle_dqbuf(int fd, struct v4l2_buffer *b) {
         int nonblock = h->open_flags & O_NONBLOCK;
         int sockfd = h->fd;
         pthread_mutex_unlock(&handles_mutex);
+        if (ended) {
+            errno = ENODEV;
+            return -1;
+        }
         if (nonblock) {
             errno = EAGAIN;
             return -1;
@@ -1260,7 +2148,7 @@ static int intercept_ioctl_locked(wc_handle_t *h, ioctl_request_t request, void 
         if (!cap) { errno = EFAULT; return -1; }
         memset(cap, 0, sizeof(*cap));
         strncpy((char *)cap->driver, "selkies", sizeof(cap->driver) - 1);
-        strncpy((char *)cap->card, "Selkies Virtual Camera", sizeof(cap->card) - 1);
+        strncpy((char *)cap->card, WC_CARD_NAME, sizeof(cap->card) - 1);
         strncpy((char *)cap->bus_info, "platform:selkies-webcam", sizeof(cap->bus_info) - 1);
         cap->version = KERNEL_VERSION(6, 1, 0);
         cap->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING | V4L2_CAP_READWRITE;
@@ -1271,8 +2159,8 @@ static int intercept_ioctl_locked(wc_handle_t *h, ioctl_request_t request, void 
         struct v4l2_fmtdesc *f = arg;
         if (!f) { errno = EFAULT; return -1; }
         if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE || f->index != 0) { errno = EINVAL; return -1; }
-        f->flags = V4L2_FMT_FLAG_COMPRESSED;
-        strncpy((char *)f->description, "Motion-JPEG", sizeof(f->description) - 1);
+        f->flags = is_compressed_fourcc(h->cfg.fourcc) ? V4L2_FMT_FLAG_COMPRESSED : 0;
+        strncpy((char *)f->description, fourcc_description(h->cfg.fourcc), sizeof(f->description) - 1);
         f->pixelformat = h->cfg.fourcc;
         return 0;
     }
@@ -1311,7 +2199,7 @@ static int intercept_ioctl_locked(wc_handle_t *h, ioctl_request_t request, void 
             errno = EINVAL; return -1;
         }
         if (rb->count == 0) {
-            release_buffers_locked(h);
+            release_buffers(h);
             rb->count = 0;
         } else {
             uint32_t count = rb->count;
@@ -1359,8 +2247,7 @@ static int intercept_ioctl_locked(wc_handle_t *h, ioctl_request_t request, void 
         if (h->buf_fd < 0) { errno = EINVAL; return -1; }
         h->streaming = 1;
         /* Start from the current live frame, not a backlog. */
-        volatile wc_shm_header_t *hdr = (volatile wc_shm_header_t *)h->staging_map;
-        h->last_frame_seq = __atomic_load_n(&hdr->latest_frame_seq, __ATOMIC_ACQUIRE);
+        h->last_frame_seq = source_current_seq(h);
         drain_doorbell(h->fd);
         return 0;
     }
@@ -1453,6 +2340,10 @@ static int intercept_ioctl_locked(wc_handle_t *h, ioctl_request_t request, void 
  * real entry point. DQBUF may block waiting for a frame; it manages the lock
  * itself so the wait never stalls a concurrent STREAMOFF/close. */
 static int wc_ioctl_common(int fd, ioctl_request_t request, void *arg, int *handled) {
+    if (!fd_maybe_ours(fd)) {
+        *handled = 0;
+        return -1;
+    }
     pthread_mutex_lock(&handles_mutex);
     wc_handle_t *h = find_handle_for_fd_locked(fd);
     if (h == NULL) {
@@ -1491,6 +2382,9 @@ int ioctl(int fd, ioctl_request_t request, ...) {
 /* mmap of the device fd is redirected onto that handle's buffer memfd, so the
  * application maps the real shared buffer at the QUERYBUF offset. */
 static int wc_buf_fd_for_fd(int fd) {
+    if (!fd_maybe_ours(fd)) {
+        return -1;
+    }
     pthread_mutex_lock(&handles_mutex);
     wc_handle_t *h = find_handle_for_fd_locked(fd);
     int buf_fd = (h != NULL && h->buf_fd >= 0) ? h->buf_fd : -1;
@@ -1529,6 +2423,10 @@ void *mmap64(void *addr, size_t length, int prot, int flags, int fd, off64_t off
  * Shared by the libc read() wrapper and the syscall() route; sets *handled
  * when fd is an interposer handle. */
 static ssize_t wc_read_common(int fd, void *buf, size_t count, int *handled) {
+    if (!fd_maybe_ours(fd)) {
+        *handled = 0;
+        return -1;
+    }
     pthread_mutex_lock(&handles_mutex);
     wc_handle_t *h = find_handle_for_fd_locked(fd);
     if (h == NULL) {
@@ -1538,8 +2436,7 @@ static ssize_t wc_read_common(int fd, void *buf, size_t count, int *handled) {
     }
     *handled = 1;
     if (!h->streaming) {
-        volatile wc_shm_header_t *hdr = (volatile wc_shm_header_t *)h->staging_map;
-        h->last_frame_seq = __atomic_load_n(&hdr->latest_frame_seq, __ATOMIC_ACQUIRE);
+        h->last_frame_seq = source_current_seq(h);
         h->streaming = 1;
     }
     int nonblock = h->open_flags & O_NONBLOCK;
@@ -1547,6 +2444,7 @@ static ssize_t wc_read_common(int fd, void *buf, size_t count, int *handled) {
     for (;;) {
         uint32_t bytesused = 0;
         uint64_t ts_ns = 0;
+        int ended = drain_doorbell(sockfd);
         int r = read_latest_frame(h, buf, (uint32_t)count, &bytesused, &ts_ns);
         if (r == 1) {
             pthread_mutex_unlock(&handles_mutex);
@@ -1555,6 +2453,11 @@ static ssize_t wc_read_common(int fd, void *buf, size_t count, int *handled) {
         if (r < 0) {
             pthread_mutex_unlock(&handles_mutex);
             errno = EIO;
+            return -1;
+        }
+        if (ended) {
+            pthread_mutex_unlock(&handles_mutex);
+            errno = ENODEV;
             return -1;
         }
         if (nonblock) {
@@ -1595,11 +2498,17 @@ ssize_t read(int fd, void *buf, size_t count) {
  * handle's resources are released only with the last referencing fd.
  * Returns 1 when fd was tracked. */
 static int wc_close_untrack(int fd) {
+    if (!fd_maybe_ours(fd)) {
+        return 0;
+    }
+    wc_handle_t retired;
+    int release = 0;
     pthread_mutex_lock(&handles_mutex);
     for (int i = 0; i < alias_count; i++) {
         if (fd_aliases[i].fd == fd) {
             fd_aliases[i] = fd_aliases[alias_count - 1];
             alias_count--;
+            fd_bitmap_clear(fd);
             pthread_mutex_unlock(&handles_mutex);
             return 1;
         }
@@ -1629,16 +2538,18 @@ static int wc_close_untrack(int fd) {
             }
         }
         if (!promoted) {
-            wc_handle_t *h = &handles[found];
-            release_buffers_locked(h);
-            if (h->staging_map) {
-                munmap(h->staging_map, h->staging_size);
-            }
+            retired = handles[found];
+            release = 1;
             handles[found] = handles[handle_count - 1];
             handle_count--;
         }
+        fd_bitmap_clear(fd);
     }
     pthread_mutex_unlock(&handles_mutex);
+    if (release) {
+        release_buffers(&retired);
+        source_release(&retired);
+    }
     return found >= 0;
 }
 
@@ -1655,7 +2566,7 @@ int close(int fd) {
  * duplication. A full alias table only degrades the duplicate to poll-only
  * (same socket description), so the drop is logged rather than failed. */
 static void wc_register_dup(int oldfd, int newfd) {
-    if (handle_count == 0) {
+    if (!fd_maybe_ours(oldfd)) {
         return;
     }
     pthread_mutex_lock(&handles_mutex);
@@ -1665,6 +2576,7 @@ static void wc_register_dup(int oldfd, int newfd) {
             fd_aliases[alias_count].fd = newfd;
             fd_aliases[alias_count].primary_fd = h->fd;
             alias_count++;
+            fd_bitmap_set(newfd);
             swc_log_info("dup fd %d -> %d aliases handle fd %d", oldfd, newfd, h->fd);
         } else {
             swc_log_warn("alias table full; fd %d not tracked", newfd);
@@ -1724,7 +2636,7 @@ static int wc_fcntl_bookkeep(int fd, int cmd, long arg, int ret) {
 #endif
         ) {
             wc_register_dup(fd, ret);
-        } else if (cmd == F_SETFL && handle_count > 0) {
+        } else if (cmd == F_SETFL && fd_maybe_ours(fd)) {
             pthread_mutex_lock(&handles_mutex);
             wc_handle_t *h = find_handle_for_fd_locked(fd);
             if (h != NULL) {

@@ -78,6 +78,21 @@ jobs:
           /tmp/selkies-venv/bin/pip install --only-binary=:all: dist/selkies-*.whl
           /tmp/selkies-venv/bin/selkies --help >/dev/null && echo "selkies --help OK"
           /tmp/selkies-venv/bin/python -c "import importlib.resources as r; c = r.files('selkies.selkies_web'); assert (c / 'index.html').is_file(), 'web client missing from wheel'; print('bundled web client OK')"
+      - name: Set up the oldest supported Python
+        id: oldest-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.9"
+          update-environment: false
+      - name: Install smoke test (oldest supported Python)
+        # The same checks on the oldest interpreter the wheel claims: its
+        # importlib.resources cannot read a namespace package, so a bundle that
+        # lost its __init__.py fails here and on no newer interpreter
+        run: |
+          "${{ steps.oldest-python.outputs.python-path }}" -m venv /tmp/selkies-venv-oldest
+          /tmp/selkies-venv-oldest/bin/pip install --only-binary=:all: dist/selkies-*.whl
+          /tmp/selkies-venv-oldest/bin/selkies --help >/dev/null && echo "selkies --help OK"
+          /tmp/selkies-venv-oldest/bin/python -c "import importlib.resources as r; c = r.files('selkies.selkies_web'); assert (c / 'index.html').is_file(), 'web client missing from wheel'; print('bundled web client OK')"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact_name || 'selkies-wheel' }}

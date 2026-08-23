@@ -92,7 +92,7 @@ def main() -> bool:
             # Assert the resolution directly: an end-to-end read cannot tell a
             # working Shift from a level-0 overlay, so it cannot fail when the
             # dependency on Shift comes back.
-            kc, mods = keyboard._resolve(ord("B"))
+            kc, mods, _group = keyboard._resolve(ord("B"))
             res.check("capital resolves without needing a modifier", mods == (),
                       "keycode={} mods={}".format(kc, mods))
             syms = d.get_keyboard_mapping(kc, 1)[0]

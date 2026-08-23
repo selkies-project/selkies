@@ -7,13 +7,18 @@ with hardwareAcceleration 'prefer-software' before the ladder closes the socket,
 degrades the encoder and reloads. These blocks inject exactly that failure into
 a real browser and check each arm of the decision.
 
-Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|ladder|healthy|all]
+The ``nowebcodecs`` block is the rung below the ladder: an engine with no WebCodecs
+at all is not refused but pinned to the striped-JPEG encoder at pre-flight, and
+the dashboard offers it nothing else.
+
+Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|ladder|healthy|striped|nowebcodecs|all]
 """
 import os
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers as H
 import core_lib as C
 
@@ -75,6 +80,15 @@ def shim_js(fail_mode: str) -> str:
     })();
     """ % fail_mode
 
+
+# Every WebCodecs global removed, the way an engine without the API presents.
+NO_WEBCODECS_JS = """
+  (() => {
+    for (const name of ['VideoDecoder', 'VideoEncoder', 'VideoFrame', 'EncodedVideoChunk', 'ImageDecoder']) {
+      try { Object.defineProperty(window, name, { value: undefined, configurable: true, writable: true }); } catch (e) {}
+    }
+  })();
+"""
 
 NAV_JS = """
   (() => {
@@ -293,9 +307,48 @@ def block_striped(r: "H.Results") -> None:
         H.server_stop()
 
 
+def block_nowebcodecs(r: "H.Results") -> None:
+    """No WebCodecs at all: the stream comes up as striped JPEG without a reload,
+    the encoder is pinned to jpeg for the session, and the classic dashboard's
+    encoder menu offers only what this engine can play."""
+    from playwright.sync_api import sync_playwright
+    import test_dashboards as TD
+    H.server_start(mode="websockets", web_root=H.CLASSIC_DIST)
+    try:
+        with sync_playwright() as pw:
+            browser = C.chromium_launch(pw)
+            ctx = browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
+            ctx.add_init_script(NAV_JS)
+            ctx.add_init_script(NO_WEBCODECS_JS)
+            page = ctx.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(H.BASE_URL + "/", wait_until="load")
+            try:
+                video = C.wait_ws_video(page, timeout=30)
+                r.check("stream comes up without WebCodecs", bool(video), str(video))
+                r.check("VideoDecoder really is absent", page.evaluate("typeof window.VideoDecoder") == "undefined")
+                stored = page.evaluate("localStorage.getItem((location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_') + '_encoder')")
+                r.check("encoder pinned to jpeg", stored == "jpeg", stored)
+                fps = C.page_fps(page, timeout=15)
+                r.check("striped JPEG frames are painted", fps > 0, fps)
+                status = page.evaluate("(() => { const el = document.querySelector('#status-display, .status-display, #status'); return el ? (el.classList.contains('hidden') ? '' : el.textContent) : ''; })()")
+                r.check("no fatal WebCodecs message", "WebCodecs" not in (status or ""), status)
+                navs = page.evaluate("Number(sessionStorage.getItem('__navs') || 0)")
+                r.check("page never reloaded", navs == 1, navs)
+                opened = TD.classic_open_video(page)
+                options = page.evaluate("Array.from(document.querySelectorAll('#encoderSelect option')).map(o => o.value)") if opened else []
+                r.check("dashboard offers only the jpeg encoder", opened and options == ["jpeg"], str(options))
+                r.check("no page errors", not errors, "; ".join(errors)[:200])
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+
+
 BLOCKS = {"retry": block_retry, "persisted": block_persisted,
           "ladder": block_ladder, "healthy": block_healthy,
-          "striped": block_striped}
+          "striped": block_striped, "nowebcodecs": block_nowebcodecs}
 
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
