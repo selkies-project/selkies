@@ -814,6 +814,9 @@ const supportsWindowMSTG = (typeof MediaStreamTrackGenerator !== 'undefined');
 let USE_OFFSCREEN_WORKER = false;
 let videoWorker = null;
 let videoWorkerCanvas = null;
+// Composite striped-codec stripes in a worker (off the main thread); shares the
+// offscreen_worker enablement below. Capability-gated at first use.
+let stripeCompositeEnabled = true;
 let videoWorkerActive = false;
 let videoWorkerReady = false;
 // Sink the worker reported from its self-probe: 'vtg', 'canvas', or null while
@@ -1946,6 +1949,7 @@ const initializeUI = () => {
     ? (offscreenWorkerUrlParam.toLowerCase() === 'true')
     : getBoolParam('offscreen_worker', true);
   USE_OFFSCREEN_WORKER = !supportsWindowMSTG && offscreenWorkerEnabled;
+  stripeCompositeEnabled = offscreenWorkerEnabled;
   // Which sink the page settled on, said once at startup: a generator feeding a <video>
   // presents decoded frames without a per-frame draw, so knowing a session fell back to a
   // canvas is the difference between explaining its CPU cost and guessing at it. The
@@ -2163,6 +2167,111 @@ function ensureStripeBackBuffer() {
     stripePendingDirty = false;
   }
   return stripeBackCtx;
+}
+
+// Striped codecs (h264enc-striped, jpeg) composite many partial-height stripes per frame.
+// A worker draws each decoded stripe onto an OffscreenCanvas back-buffer and hands back the
+// finished frame as one ImageBitmap to blit, so the per-stripe GPU compositing leaves the main
+// thread; the page keeps the decode and the reorder/damage/boundary logic. Falls back to the
+// main-thread back-buffer above when a worker, OffscreenCanvas or createImageBitmap is
+// unavailable, or offscreen_worker=false.
+const STRIPE_WORKER_SRC = `
+let back = null, bctx = null;
+function ensureBack(w, h) {
+  if (!back || back.width !== w || back.height !== h) {
+    back = new OffscreenCanvas(w, h);
+    bctx = back.getContext('2d', { desynchronized: true, alpha: false });
+  }
+}
+self.onmessage = (e) => {
+  const m = e.data;
+  if (m.type === 'resize') { ensureBack(m.width, m.height); return; }
+  if (m.type === 'stripe') {
+    if (bctx) { try { bctx.drawImage(m.frame, 0, m.yPos); } catch (err) {} }
+    try { m.frame.close(); } catch (err) {}
+    return;
+  }
+  if (m.type === 'commit') {
+    if (!back) return;
+    createImageBitmap(back).then((bitmap) => { self.postMessage({ type: 'frame', bitmap: bitmap }, [bitmap]); }).catch(() => {});
+    return;
+  }
+};
+`;
+let stripeWorker = null, stripeWorkerActive = false, stripeWorkerW = 0, stripeWorkerH = 0;
+
+function deactivateStripeWorker() {
+  if (stripeWorker) { try { stripeWorker.terminate(); } catch (e) { /* ignore */ } stripeWorker = null; }
+  stripeWorkerActive = false; stripeWorkerW = 0; stripeWorkerH = 0;
+}
+
+// Create the stripe compositor worker (idempotent). Returns false when it cannot run, so the
+// caller composites on the main-thread back-buffer instead.
+function ensureStripeWorker() {
+  if (stripeWorker) return true;
+  if (!stripeCompositeEnabled || typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined'
+      || typeof createImageBitmap !== 'function') {
+    return false;
+  }
+  try {
+    const url = URL.createObjectURL(new Blob([STRIPE_WORKER_SRC], { type: 'text/javascript' }));
+    stripeWorker = new Worker(url);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    stripeWorker = null;
+    return false;
+  }
+  console.info('[Selkies] striped codecs: compositing on an OffscreenCanvas in a worker.');
+  stripeWorker.onerror = () => deactivateStripeWorker();
+  stripeWorker.onmessage = (ev) => {
+    const m = ev.data;
+    if (!m || m.type !== 'frame') return;
+    if (canvasContext && canvas && canvas.width > 0 && canvas.height > 0) {
+      try { canvasContext.drawImage(m.bitmap, 0, 0); } catch (err) { /* ignore */ }
+    }
+    try { m.bitmap.close(); } catch (err) { /* ignore */ }
+  };
+  stripeWorkerW = 0; stripeWorkerH = 0;
+  return true;
+}
+
+// Start a stripe compositing cycle: use the worker when available (resizing its back-buffer to
+// the canvas), else the main-thread back-buffer. Returns false if the canvas has no size yet.
+function stripeCompositeBegin() {
+  if (ensureStripeWorker()) {
+    stripeWorkerActive = true;
+    if (canvas.width > 0 && canvas.height > 0 && (stripeWorkerW !== canvas.width || stripeWorkerH !== canvas.height)) {
+      stripeWorker.postMessage({ type: 'resize', width: canvas.width, height: canvas.height });
+      stripeWorkerW = canvas.width; stripeWorkerH = canvas.height;
+      stripePendingFrameId = null; stripePendingDirty = false;
+    }
+  } else {
+    stripeWorkerActive = false;
+    ensureStripeBackBuffer();
+  }
+  return !!(canvas && canvas.width > 0 && canvas.height > 0);
+}
+
+// Composite one decoded stripe (a VideoFrame or ImageBitmap) at its row offset. Always
+// consumes/closes the stripe.
+function stripeCompositeDraw(stripe, yPos) {
+  if (stripeWorkerActive && stripeWorker) {
+    try { stripeWorker.postMessage({ type: 'stripe', frame: stripe, yPos: yPos }, [stripe]); return; }
+    catch (e) { /* transfer failed; close below */ }
+  } else if (stripeBackCtx) {
+    try { stripeBackCtx.drawImage(stripe, 0, yPos); } catch (e) { /* ignore */ }
+  }
+  try { stripe.close(); } catch (e) { /* ignore */ }
+}
+
+// Present the whole composited frame (worker: blit its back-buffer via an ImageBitmap; main:
+// blit the back-buffer canvas).
+function stripeCompositePresent() {
+  if (stripeWorkerActive && stripeWorker) {
+    try { stripeWorker.postMessage({ type: 'commit' }); } catch (e) { /* ignore */ }
+  } else if (canvasContext && canvas.width > 0 && canvas.height > 0) {
+    canvasContext.drawImage(stripeBackCanvas, 0, 0);
+  }
 }
 // Newest JPEG-stripe frame id drawn per startY, so out-of-order older stripes are skipped.
 let lastDrawnJpegStripeFrameId = {};
@@ -3820,24 +3929,24 @@ function initWebsockets() {
         startStream();
       }
     } else if (currentEncoderMode === 'h264enc-striped') {
-      // Striped H.264 (controller and shared viewers alike): composite stripes onto
-      // the 2D canvas (a track-generator <video> can't composite partial-height stripes).
+      // Striped H.264 (controller and shared viewers alike): composite stripes onto the 2D
+      // canvas (a track-generator <video> can't composite partial-height stripes), off the
+      // main thread through the stripe worker when it is available.
       let paintedSomethingThisCycle = false;
-      const backCtx = ensureStripeBackBuffer();
+      const ready = stripeCompositeBegin();
       const hadStripes = decodedStripesQueue.length > 0;
-      if (backCtx && canvas.width > 0 && canvas.height > 0) {
+      if (ready) {
         for (const stripeData of decodedStripesQueue) {
           const fid = stripeData.frameId;
           if (stripePendingFrameId !== null && fid !== stripePendingFrameId && stripePendingDirty) {
             // A newer frame_id started: the buffered frame is complete -> present it whole.
-            canvasContext.drawImage(stripeBackCanvas, 0, 0);
+            stripeCompositePresent();
             stripePendingDirty = false;
             paintedSomethingThisCycle = true;
           }
           stripePendingFrameId = fid;
-          backCtx.drawImage(stripeData.frame, 0, stripeData.yPos);
+          stripeCompositeDraw(stripeData.frame, stripeData.yPos);
           stripePendingDirty = true;
-          stripeData.frame.close();
         }
       } else {
         for (const stripeData of decodedStripesQueue) { try { stripeData.frame.close(); } catch (e) {} }
@@ -3845,7 +3954,7 @@ function initWebsockets() {
       decodedStripesQueue = [];
       // Idle flush: nothing arrived this tick but a whole frame is still held -> present it.
       if (!hadStripes && stripePendingDirty && canvas.width > 0 && canvas.height > 0) {
-        canvasContext.drawImage(stripeBackCanvas, 0, 0);
+        stripeCompositePresent();
         stripePendingDirty = false;
         paintedSomethingThisCycle = true;
       }
@@ -3860,7 +3969,7 @@ function initWebsockets() {
             console.warn(`[paintVideoFrame] Canvas dimensions (${canvas.width}x${canvas.height}) may be too small for JPEG stripes.`);
           }
         }
-        const backCtx = ensureStripeBackBuffer();
+        const ready = stripeCompositeBegin();
         while (jpegStripeRenderQueue.length > 0) {
           const segment = jpegStripeRenderQueue.shift();
           if (segment && segment.image) {
@@ -3878,21 +3987,22 @@ function initWebsockets() {
               }
             }
             try {
-              if (backCtx && canvas.width > 0 && canvas.height > 0) {
+              if (ready) {
                 if (segFrameId !== undefined && stripePendingFrameId !== null &&
                     segFrameId !== stripePendingFrameId && stripePendingDirty) {
                   // A newer frame_id started: present the completed frame whole.
-                  canvasContext.drawImage(stripeBackCanvas, 0, 0);
+                  stripeCompositePresent();
                   stripePendingDirty = false;
                 }
                 if (segFrameId !== undefined) stripePendingFrameId = segFrameId;
-                backCtx.drawImage(segment.image, 0, segment.startY);
+                stripeCompositeDraw(segment.image, segment.startY);
                 stripePendingDirty = true;
+              } else {
+                try { segment.image.close(); } catch (closeError) { /* ignore */ }
               }
               if (segFrameId !== undefined) {
                 lastDrawnJpegStripeFrameId[segment.startY] = segFrameId;
               }
-              segment.image.close();
               jpegPaintedThisFrame = true;
             } catch (e) {
               console.error("[paintVideoFrame] Error drawing JPEG segment:", e, segment);
@@ -3911,7 +4021,7 @@ function initWebsockets() {
         }
       } else if (stripePendingDirty && canvasContext && canvas.width > 0 && canvas.height > 0) {
         // Idle flush: queue empty but a whole frame is still buffered -> present it.
-        canvasContext.drawImage(stripeBackCanvas, 0, 0);
+        stripeCompositePresent();
         stripePendingDirty = false;
       }
     } else if (isSharedMode) {
@@ -5656,6 +5766,7 @@ function initWebsockets() {
     cleanupJpegStripeQueue();
     if (decoder && decoder.state !== "closed") decoder.close();
     clearAllVncStripeDecoders();
+    deactivateStripeWorker();
     decoder = null;
     if (audioDecoderWorker) {
       audioDecoderWorker.postMessage({
