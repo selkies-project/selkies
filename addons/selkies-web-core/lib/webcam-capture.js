@@ -1,67 +1,95 @@
-// Webcam capture for the WebSocket transport: getUserMedia video frames are
-// encoded in the page with WebCodecs (H.264 first, VP8 second) and handed to a
-// transport-supplied sender one encoded frame at a time; the server's virtual
-// camera decodes them. Engines without WebCodecs, and engines whose only
-// frame source is a <video> element (no MediaStreamTrackProcessor on the page
-// or in a worker — Firefox), fall back to JPEG frames drawn from a canvas,
-// which the server passes on as an MJPEG device or decodes just the same. The WebRTC
-// transport does not use this class: it attaches the camera track to a
-// sendonly transceiver (lib/webrtc.js setWebcam) and the browser's own encoder
-// takes over.
-//
-// Frame orientation: the upright transform is relayed with every encoded
-// frame instead of being drawn into the pixels. It is read from VideoFrame
-// rotation/flip where the engine exposes them, and derived from the window
-// orientation where it does not (Safari, whose camera frames keep the sensor's
-// fixed orientation). VideoEncoder rejects a mid-stream orientation change, so
-// the encoder is rebuilt whenever the value moves. The JPEG rung relays
-// nothing: drawImage bakes the orientation the engine knows.
-//
-// Frames are read off the track through the first of these that the engine
-// offers: MediaStreamTrackProcessor on the page (Chromium), the standard
-// worker-only MediaStreamTrackProcessor with the track transferred into a
-// DedicatedWorker (Safari 18+), and a <video> element sampled with
-// requestVideoFrameCallback (Firefox and anything else). The last rung pins
-// the JPEG path: with no track reader, every sample must be materialized on
-// the page thread, and pushing those through a (software) VideoEncoder loads
-// the page while the encoder drifts ever further behind real time.
+/**
+ * Webcam capture for the WebSocket transport.
+ *
+ * getUserMedia video frames are encoded in the page with WebCodecs (H.264
+ * first, VP8 second) and handed to a transport-supplied sender one encoded
+ * frame at a time; the server's virtual camera decodes them. Engines without
+ * WebCodecs, and engines whose only frame source is a `<video>` element (no
+ * MediaStreamTrackProcessor on the page or in a worker: Firefox), fall back
+ * to JPEG frames drawn from a canvas, which the server passes on as an MJPEG
+ * device or decodes just the same. The WebRTC transport does not use this
+ * class: it attaches the camera track to a sendonly transceiver
+ * (lib/webrtc.js `setWebcam`) and the browser's own encoder takes over.
+ *
+ * Frame orientation: the upright transform is relayed with every encoded
+ * frame instead of being drawn into the pixels. It is read from VideoFrame
+ * rotation/flip where the engine exposes them, and derived from the window
+ * orientation where it does not (Safari, whose camera frames keep the
+ * sensor's fixed orientation). VideoEncoder rejects a mid-stream orientation
+ * change, so the encoder is rebuilt whenever the value moves. The JPEG rung
+ * relays nothing: drawImage bakes the orientation the engine knows.
+ *
+ * Frames are read off the track through the first of these that the engine
+ * offers: MediaStreamTrackProcessor on the page (Chromium), the standard
+ * worker-only MediaStreamTrackProcessor with the track transferred into a
+ * DedicatedWorker (Safari 18+), and a `<video>` element sampled with
+ * requestVideoFrameCallback (Firefox and anything else). The last rung pins
+ * the JPEG path: with no track reader, every sample must be materialized on
+ * the page thread, and pushing those through a (software) VideoEncoder loads
+ * the page while the encoder drifts ever further behind real time.
+ *
+ * Encoding runs off the page thread when the engine allows: the encode
+ * worker is opened first, and an engine that transfers the camera track into
+ * it (Safari, and Firefox as it ships transferable tracks) reads and encodes
+ * there so frames never touch the page; otherwise the page reads frames its
+ * own way and transfers each to the worker, and without a worker at all it
+ * feeds a page-thread encoder through the same source paths.
+ * @module
+ */
 
+/** Codec id of independent JPEG frames, as the server's webcam module numbers them. */
 export const WEBCAM_CODEC_MJPEG = 0;
+/** Codec id of H.264 Annex B frames. */
 export const WEBCAM_CODEC_H264 = 1;
+/** Codec id of VP8 frames. */
 export const WEBCAM_CODEC_VP8 = 2;
+/** Codec id of VP9 frames; never produced here, reserved on the wire. */
 export const WEBCAM_CODEC_VP9 = 3;
 
-// Encoder candidates in preference order; the first one the engine reports as
-// supported (and that actually encodes) wins, the rest are tried on failure.
+/**
+ * Encoder candidates in preference order; the first one the engine reports
+ * as supported (and that actually encodes) wins, the rest are tried on
+ * failure.
+ */
 const ENCODER_CANDIDATES = [
   { id: WEBCAM_CODEC_H264, name: "h264", codec: "avc1.42E01F", extra: { avc: { format: "annexb" } } },
   { id: WEBCAM_CODEC_VP8, name: "vp8", codec: "vp8", extra: {} },
 ];
 
-// A keyframe at least this often bounds recovery after a lost frame even when
-// no request arrives from the server.
+/**
+ * A keyframe at least this often bounds recovery after a lost frame even
+ * when no request arrives from the server.
+ */
 const KEYFRAME_INTERVAL_MS = 4000;
 
-// A VideoFrame must be closed; the <video> element the no-WebCodecs path hands
-// over has nothing to close.
+/**
+ * Closes a VideoFrame; the `<video>` element the no-WebCodecs path hands
+ * over has nothing to close.
+ * @param {VideoFrame|HTMLVideoElement} frame
+ */
 const closeFrame = (frame) => {
   if (frame && typeof frame.close === "function") frame.close();
 };
-// Frames the worker source may have in flight to the page before it drops.
+/** Frames the worker source may have in flight to the page before it drops. */
 const WORKER_MAX_IN_FLIGHT = 2;
 
-// Whether VideoFrames carry their upright transform as readable metadata.
+/** Whether VideoFrames carry their upright transform as readable metadata. */
 const HAS_FRAME_ORIENTATION =
   typeof VideoFrame !== "undefined" && typeof VideoFrame.prototype === "object" &&
   "rotation" in VideoFrame.prototype;
 
-// The window orientation at which the camera sensor delivers upright frames:
-// -90 (landscape, camera edge at the bottom) on Apple tablets.
+/**
+ * The window orientation at which the camera sensor delivers upright frames:
+ * -90 (landscape, camera edge at the bottom) on Apple tablets.
+ */
 const SENSOR_UPRIGHT_ORIENTATION = -90;
 
-// Clockwise rotation that makes a sensor-orientation frame upright, from the
-// current window orientation (screen.orientation.angle where the legacy
-// property is missing; 270 is that API's spelling of -90).
+/**
+ * Clockwise rotation that makes a sensor-orientation frame upright, from the
+ * current window orientation (`screen.orientation.angle` where the legacy
+ * property is missing; 270 is that API's spelling of -90).
+ * @returns {number} Degrees, a multiple of 90.
+ */
 const deriveRotation = () => {
   let o = typeof window.orientation === "number"
     ? window.orientation
@@ -70,6 +98,12 @@ const deriveRotation = () => {
   return ((o - SENSOR_UPRIGHT_ORIENTATION) % 360 + 360) % 360;
 };
 
+/**
+ * Source of the frame-reader worker for engines whose
+ * MediaStreamTrackProcessor exists only in workers: the transferred track is
+ * read there and each VideoFrame transferred to the page, at most
+ * `WORKER_MAX_IN_FLIGHT` unacknowledged at a time.
+ */
 const MEDIA_WORKER_SRC = `
 let reader = null, track = null, inFlight = 0;
 self.onmessage = async (e) => {
@@ -93,15 +127,18 @@ self.onmessage = async (e) => {
 };
 `;
 
-// A worker that runs the WebCodecs encoder off the page thread. The page reads
-// the camera on its own source (transferable VideoFrames, unlike a whole track)
-// and hands each one here; the worker encodes and posts only the encoded chunk
-// back for the page to send. The heavy encode never touches the UI thread, and a
-// backgrounded tab throttles the page's event loop but not a worker's, so the
-// encoder keeps pace instead of falling behind and breaking its reference chain
-// (the permanent-desync failure). `probe` confirms a codec is encodable here
-// before the page commits; anything without WebCodecs in workers reports
-// 'unsupported' and the page encodes on its own thread instead.
+/**
+ * Source of the worker that runs the WebCodecs encoder off the page thread.
+ * The page hands it VideoFrames (transferable, unlike a whole track), or an
+ * engine that allows it transfers the camera track itself, and the worker
+ * posts back only the encoded chunks for the page to send. The heavy encode
+ * never touches the UI thread, and a backgrounded tab throttles the page's
+ * event loop but not a worker's, so the encoder keeps pace instead of
+ * falling behind and breaking its reference chain into a permanent desync.
+ * `probe` confirms a codec encodes here before the page commits; an engine
+ * without WebCodecs in workers reports `unsupported` and the page encodes on
+ * its own thread instead.
+ */
 const ENCODE_WORKER_SRC = `
 const CANDIDATES = ${JSON.stringify(ENCODER_CANDIDATES)};
 const KEYFRAME_INTERVAL_MS = ${KEYFRAME_INTERVAL_MS};
@@ -213,16 +250,28 @@ self.onmessage = async (e) => {
 };
 `;
 
+/**
+ * @typedef {Object} WebcamCaptureOptions
+ * @property {(codecId: number, keyframe: boolean, bytes: Uint8Array, rotation?: number, flip?: boolean) => void} sendFrame
+ *     Delivers one encoded frame. `rotation` (clockwise degrees) and `flip`
+ *     (horizontal, applied after the rotation) make its pixels upright and
+ *     are 0 and false when they already are.
+ * @property {(active: boolean) => void} [onStateChange] Called when capture starts and stops.
+ * @property {(error: Error) => void} [onError] Called with getUserMedia and encoder failures.
+ * @property {() => boolean} [canSend] Returning false skips a frame (backpressure).
+ * @property {number} [width] Capture width hint, 1280 by default.
+ * @property {number} [height] Capture height hint, 720 by default.
+ * @property {number} [fps] Frame rate hint and send cadence cap, 30 by default.
+ * @property {number} [bitrate] Encoder bitrate in bits per second, 2500000 by default.
+ * @property {number} [quality] JPEG quality on the fallback rung, 0.8 by default.
+ */
+
+/**
+ * Camera uplink for the WebSocket transport: opens the camera, settles on a
+ * frame source and an encoder, and hands encoded frames to `sendFrame`.
+ */
 export class WebcamCapture {
-  // opts:
-  //   sendFrame(codecId, keyframe, Uint8Array, rotation, flip)
-  //     required, delivers one encoded frame; rotation (clockwise degrees) and
-  //     flip (horizontal, after the rotation) make its pixels upright and are
-  //     0/false when the pixels already are
-  //   onStateChange(active)                     optional, called when capture starts/stops
-  //   onError(error)                            optional, getUserMedia/encoder failures
-  //   canSend()                                 optional, false skips a frame (backpressure)
-  //   width, height, fps, bitrate, quality      capture hints; quality is the JPEG fallback quality
+  /** @param {WebcamCaptureOptions} opts */
   constructor(opts) {
     this._sendFrame = opts.sendFrame;
     this._onStateChange = opts.onStateChange || (() => {});
@@ -256,18 +305,22 @@ export class WebcamCapture {
     this._encoderCodecName = null;
   }
 
+  /** Whether a capture is running. @type {boolean} */
   get active() {
     return this._active;
   }
 
-  // Name of the codec frames are sent as ("h264", "vp8", "mjpeg") or null.
+  /** Name of the codec frames are sent as (`h264`, `vp8`, `mjpeg`), or null. @type {?string} */
   get codec() {
     if (this._encoderCodecName) return this._encoderCodecName;
     return this._encoderCodec ? this._encoderCodec.name : (this._active ? "mjpeg" : null);
   }
 
-  // Which source and encoder a session settled on, said once: the difference
-  // between explaining a client's CPU cost and guessing at it.
+  /**
+   * Logs which source and encoder the session settled on, once per message:
+   * the difference between explaining a client's CPU cost and guessing at it.
+   * @param {string} message
+   */
   _logPath(message) {
     if (!this._loggedPaths) {
       this._loggedPaths = new Set();
@@ -279,6 +332,12 @@ export class WebcamCapture {
     console.info(`[Webcam] ${message}`);
   }
 
+  /**
+   * Opens the camera and starts sending. Failures are reported through
+   * `onError` rather than thrown, and a track that ends (device unplugged,
+   * permission revoked) stops the capture.
+   * @param {string=} deviceId Camera to open; the default device otherwise.
+   */
   async start(deviceId) {
     if (this._active) {
       return;
@@ -333,7 +392,7 @@ export class WebcamCapture {
     }
   }
 
-  // The server lost its decoder reference (or just started): the next frame is a keyframe.
+  /** Makes the next frame a keyframe: the server lost its decoder reference or just started. */
   requestKeyframe() {
     this._forceKeyframe = true;
     if (this._encodeWorker) {
@@ -345,6 +404,7 @@ export class WebcamCapture {
     }
   }
 
+  /** Stops the capture and releases the camera, encoder and workers; idempotent. */
   stop() {
     if (!this._active && !this._stream) {
       return;
@@ -387,14 +447,14 @@ export class WebcamCapture {
     this._onStateChange(false);
   }
 
-  // --- capture ------------------------------------------------------------
-
-  // Encode off the page thread when the engine can. The encode worker is opened
-  // first; then, if the engine will transfer the camera track into it (Safari, and
-  // Firefox as it ships transferable tracks), the worker reads and encodes the track
-  // itself and frames never touch the page. Otherwise the page reads frames its own
-  // way and hands each to the worker, and without a worker at all it feeds the
-  // page-thread encoder — same source paths either way.
+  /**
+   * Opens the encode worker, then the frame source: the combined
+   * read-and-encode worker when the engine transfers the track, else a page
+   * source that feeds the worker or the page-thread encoder.
+   * @param {MediaStreamTrack} track
+   * @param {number} generation Capture generation; a later one cancels this.
+   * @returns {Promise<?{close: function(): void}>} Source handle, or null with no source.
+   */
   async _openCapture(track, generation) {
     await this._openEncodeWorker(generation);
     if (this._generation !== generation) return null;
@@ -409,11 +469,18 @@ export class WebcamCapture {
     return this._openSource(track, generation);
   }
 
-  // Try to hand the whole camera track to the encode worker for combined read+encode.
-  // Resolves to a source handle when the worker takes it (engine transfers tracks and
-  // the worker has a MediaStreamTrackProcessor), else null so the page reads frames
-  // and feeds the worker one at a time. A clone is transferred, so a refusal
-  // (DataCloneError on Chromium) leaves the original track intact for that fallback.
+  /**
+   * Tries to hand the whole camera track to the encode worker for combined
+   * read-and-encode. Resolves to a source handle when the worker takes it
+   * (the engine transfers tracks and the worker has a
+   * MediaStreamTrackProcessor), else null so the page reads frames and feeds
+   * the worker one at a time. A clone is transferred, so a refusal
+   * (DataCloneError on Chromium) leaves the original track intact for that
+   * fallback.
+   * @param {MediaStreamTrack} track
+   * @param {number} generation
+   * @returns {Promise<?{close: function(): void}>}
+   */
   _tryCombinedWorker(track, generation) {
     const worker = this._encodeWorker;
     if (!worker) return Promise.resolve(null);
@@ -456,10 +523,18 @@ export class WebcamCapture {
     });
   }
 
-  // Stand up a worker that encodes the VideoFrames the page hands it (transferred,
-  // zero-copy) and posts back encoded chunks. Resolves once `probe` confirms a
-  // codec encodes in the worker (then `_handleFrame` routes frames to it), or
-  // leaves `_encodeWorker` null so the page encodes on its own thread.
+  /**
+   * Stands up the worker that encodes the VideoFrames the page hands it
+   * (transferred, zero-copy) and posts back encoded chunks. Resolves once
+   * `probe` confirms a codec encodes in the worker (`_handleFrame` then
+   * routes frames to it), or leaves `_encodeWorker` null so the page encodes
+   * on its own thread. A worker that reports `unsupported` or an error
+   * before the page commits is dropped for page encoding, and one that does
+   * so mid-stream (a codec dropped out) is dropped the same way, the next
+   * frame re-routing to the page.
+   * @param {number} generation
+   * @returns {Promise<void>}
+   */
   _openEncodeWorker(generation) {
     if (typeof VideoEncoder === "undefined" || typeof Worker === "undefined") {
       return Promise.resolve();
@@ -499,8 +574,6 @@ export class WebcamCapture {
         }
         if (m.type === "unsupported" || m.type === "error") {
           clearTimeout(timer);
-          // Before the page commits, fall back to page encoding; after (a codec
-          // dropped out mid-stream), the next frame re-routes to the page too.
           drop(m.type);
         }
       };
@@ -515,7 +588,7 @@ export class WebcamCapture {
     });
   }
 
-  // Tear down the encode worker (idempotent); the page-thread encoder takes over.
+  /** Tears down the encode worker (idempotent); the page-thread encoder takes over. */
   _stopEncodeWorker() {
     const worker = this._encodeWorker;
     this._encodeWorker = null;
@@ -525,8 +598,16 @@ export class WebcamCapture {
     }
   }
 
-  // --- frame sources ------------------------------------------------------
-
+  /**
+   * Opens the first page frame source the engine offers, in the order the
+   * module docblock gives. The worker-only MediaStreamTrackProcessor means
+   * Safari, whose raw sensor frames carry no readable orientation, so their
+   * rotation is derived per frame. The `<video>` element pins the JPEG rung:
+   * the encode worker is dropped and every encoder candidate skipped.
+   * @param {MediaStreamTrack} track
+   * @param {number} generation
+   * @returns {Promise<?{close: function(): void}>}
+   */
   async _openSource(track, generation) {
     if (typeof MediaStreamTrackProcessor !== "undefined") {
       try {
@@ -539,8 +620,6 @@ export class WebcamCapture {
     }
     const worker = await this._workerSource(track, generation);
     if (worker) {
-      // Worker-only MediaStreamTrackProcessor means Safari: raw sensor frames
-      // with no readable metadata, so their rotation is derived per frame.
       this._deriveOrientation = !HAS_FRAME_ORIENTATION;
       this._logPath("capture: MediaStreamTrackProcessor in a worker");
       return worker;
@@ -551,7 +630,13 @@ export class WebcamCapture {
     return this._videoSource(track, generation);
   }
 
-  // MediaStreamTrackProcessor on the page: drain at camera cadence, never queue.
+  /**
+   * MediaStreamTrackProcessor on the page: drains at camera cadence, never
+   * queues.
+   * @param {ReadableStreamDefaultReader<VideoFrame>} reader
+   * @param {number} generation
+   * @returns {{close: function(): void}}
+   */
   _readerSource(reader, generation) {
     const loop = async () => {
       for (;;) {
@@ -580,8 +665,14 @@ export class WebcamCapture {
     };
   }
 
-  // Standard mediacapture-transform: the processor only exists in workers, so a
-  // clone of the track is transferred in and VideoFrames are transferred back.
+  /**
+   * Standard mediacapture-transform: the processor only exists in workers,
+   * so a clone of the track is transferred in and VideoFrames are
+   * transferred back. Resolves null when the worker cannot read the track.
+   * @param {MediaStreamTrack} track
+   * @param {number} generation
+   * @returns {Promise<?{close: function(): void}>}
+   */
   _workerSource(track, generation) {
     return new Promise((resolve) => {
       let clone;
@@ -658,10 +749,16 @@ export class WebcamCapture {
     });
   }
 
-  // <video> sampled with requestVideoFrameCallback; the element must stay in the
-  // DOM (visually inert) or engines stop decoding for it. The element itself is
-  // handed over: this source only runs with the JPEG rung pinned, and drawImage
-  // both reads it and bakes any orientation the engine knows.
+  /**
+   * A `<video>` element sampled with requestVideoFrameCallback (or a timer
+   * without it); the element must stay in the DOM, visually inert, or engines
+   * stop decoding for it. The element itself is handed over as the frame:
+   * this source only runs with the JPEG rung pinned, and drawImage both reads
+   * it and bakes any orientation the engine knows.
+   * @param {MediaStreamTrack} track
+   * @param {number} generation
+   * @returns {{close: function(): void}}
+   */
   _videoSource(track, generation) {
     const video = document.createElement("video");
     video.muted = true;
@@ -702,10 +799,19 @@ export class WebcamCapture {
     };
   }
 
-  // --- encoding -----------------------------------------------------------
-
-  // Every source lands here with one VideoFrame the receiver owns (or, on the
-  // pinned JPEG rung, the <video> element); a frame is always closed.
+  /**
+   * Receives one frame from whichever source is open: a VideoFrame this
+   * method now owns, or the `<video>` element on the pinned JPEG rung. A
+   * frame is always closed. Frames arriving faster than `fps` or while
+   * `canSend` refuses are dropped. With an encode worker the frame is
+   * transferred to it, zero-copy; the worker only takes VideoFrames, so a
+   * `<video>`-element frame or a dead worker throws and encoding drops back
+   * to this thread from then on. On the page-thread encoder a changed size
+   * or orientation rebuilds the encoder, since a VideoEncoder latches the
+   * orientation of its first frame and rejects any other; one rebuild runs
+   * at a time and frames racing it are dropped, never queued.
+   * @param {VideoFrame|HTMLVideoElement} frame
+   */
   _handleFrame(frame) {
     if (!this._active || !this._canSend()) {
       closeFrame(frame);
@@ -717,9 +823,6 @@ export class WebcamCapture {
       return;
     }
     if (this._encodeWorker) {
-      // Hand the frame to the encode worker (transferred, zero-copy). It only
-      // takes VideoFrames; a <video>-element frame (non-transferable) or a dead
-      // worker throws, so drop back to encoding on this thread from here.
       try {
         this._encodeWorker.postMessage({ type: "frame", frame }, [frame]);
         this._logPath("encode: VideoEncoder in a worker (frames from the page)");
@@ -741,9 +844,6 @@ export class WebcamCapture {
     const flip = this._deriveOrientation ? false : !!frame.flip;
     const s = this._encodedSize;
     if (!this._encoder || !s || s.w !== w || s.h !== h || s.rotation !== rotation || s.flip !== flip) {
-      // Size or orientation changed: a VideoEncoder latches the orientation of
-      // its first frame and rejects any other, so it is rebuilt for both. One
-      // rebuild runs at a time; frames racing it are dropped, never queued.
       if (this._configuring) {
         frame.close();
         return;
@@ -759,6 +859,15 @@ export class WebcamCapture {
     this._encodeWith(frame, w, h, now);
   }
 
+  /**
+   * Encodes one frame on the page-thread encoder. An encoder that is behind
+   * (more than one frame queued) drops the frame rather than queueing
+   * latency; one that throws moves on to the next candidate.
+   * @param {VideoFrame} frame
+   * @param {number} w
+   * @param {number} h
+   * @param {number} now `performance.now()` at receipt.
+   */
   _encodeWith(frame, w, h, now) {
     const encoder = this._encoder;
     if (!encoder || encoder.state !== "configured" || !this._active) {
@@ -766,7 +875,6 @@ export class WebcamCapture {
       return;
     }
     if (encoder.encodeQueueSize > 1) {
-      // The encoder is behind: drop rather than queue latency.
       frame.close();
       return;
     }
@@ -784,10 +892,17 @@ export class WebcamCapture {
     frame.close();
   }
 
-  // Builds the encoder for the first candidate the engine supports at w x h,
-  // stamping the orientation its frames carry onto every chunk it emits.
-  // Resolves when an encoder is configured or every candidate was rejected (then
-  // frames take the JPEG path).
+  /**
+   * Builds the encoder for the first candidate the engine supports at the
+   * given size, stamping the orientation its frames carry onto every chunk it
+   * emits. Resolves when an encoder is configured or every candidate was
+   * rejected, after which frames take the JPEG path.
+   * @param {number} w
+   * @param {number} h
+   * @param {number} rotation Clockwise degrees.
+   * @param {boolean} flip Horizontal flip after the rotation.
+   * @returns {Promise<void>}
+   */
   async _configureEncoder(w, h, rotation = 0, flip = false) {
     const generation = this._generation;
     if (this._encoder) {
@@ -838,10 +953,16 @@ export class WebcamCapture {
     this._encodedSize = null;
   }
 
-  // One encoded frame out to the transport. When the socket is backed up the frame
-  // is dropped and the next one forced to a keyframe: the server's decoder must never
-  // get a delta built on a frame it never received. Independent JPEG frames, which
-  // carry no such dependency, do not go through here.
+  /**
+   * Sends one worker-encoded frame to the transport. When the socket is
+   * backed up the frame is dropped and the next one forced to a keyframe:
+   * the server's decoder must never get a delta built on a frame it never
+   * received. Independent JPEG frames, which carry no such dependency, do
+   * not go through here.
+   * @param {number} codecId
+   * @param {boolean} keyframe
+   * @param {Uint8Array} bytes
+   */
   _deliverEncoded(codecId, keyframe, bytes) {
     if (!this._canSend()) {
       if (!this._chainBroken) {
@@ -860,6 +981,15 @@ export class WebcamCapture {
     }
   }
 
+  /**
+   * Output of the page-thread encoder: copies the chunk out and sends it
+   * with the orientation the encoder was built for.
+   * @param {{id: number}} cand Encoder candidate that produced the chunk.
+   * @param {EncodedVideoChunk} chunk
+   * @param {number} generation
+   * @param {number} rotation
+   * @param {boolean} flip
+   */
   _onChunk(cand, chunk, generation, rotation, flip) {
     if (this._generation !== generation || !this._active) {
       return;
@@ -869,8 +999,12 @@ export class WebcamCapture {
     this._sendFrame(cand.id, chunk.type === "key", buf, rotation, flip);
   }
 
-  // An encoder that fails after reporting support (Firefox does this for H.264)
-  // is abandoned for the next candidate; the JPEG path is the final fallback.
+  /**
+   * Abandons an encoder that failed after reporting support (Firefox does
+   * this for H.264) for the next candidate; the JPEG path is the final
+   * fallback.
+   * @param {Error} error
+   */
   _onEncoderFailure(error) {
     console.warn("Webcam encoder failed, trying the next codec:", error);
     if (this._encoder) {
@@ -882,15 +1016,19 @@ export class WebcamCapture {
     this._encodedSize = null;
   }
 
-  // JPEG through OffscreenCanvas.convertToBlob: one encode in flight at a time.
+  /**
+   * Encodes a frame as JPEG through `OffscreenCanvas.convertToBlob`, one
+   * encode in flight at a time. drawImage applies the frame's orientation
+   * metadata, so the JPEG leaves upright (the canvas swaps its dimensions for
+   * sideways frames) and carries no orientation on the wire.
+   * @param {VideoFrame|HTMLVideoElement} frame
+   * @param {number} now `performance.now()` at receipt.
+   */
   _encodeJpeg(frame, now) {
     if (this._jpegBusy) {
       closeFrame(frame);
       return;
     }
-    // drawImage applies the frame's orientation metadata, so the JPEG leaves
-    // upright (the canvas swaps dimensions for sideways frames) and carries no
-    // orientation on the wire.
     const sideways = ((frame.rotation || 0) % 180) === 90;
     const dw = frame.displayWidth || frame.codedWidth || frame.videoWidth;
     const dh = frame.displayHeight || frame.codedHeight || frame.videoHeight;

@@ -156,9 +156,13 @@ npm run dev          # http://localhost:3000
 
 ### Developer Reference
 
-The Developer Reference is generated from the Google-style docstrings and type hints in `src/selkies` by [fumadocs-python](https://www.fumadocs.dev/docs/integrations/python). The pages are build output, never committed: `docs/reference` is gitignored, and `npm run dev` and `npm run build` generate it fresh from the code, so the published site always matches the source that built it. The only extra requirement over the site itself is `python3` — the generator bootstraps a private venv in `website/.venv-docs` on first use (delete that directory to rebuild it, e.g. after upgrading the `fumadocs-python` npm package).
+The Developer Reference is generated from the docblocks in the code, never written by hand and never committed: `docs/reference` is gitignored, and `npm run dev` and `npm run build` generate it fresh, so the published site always matches the source that built it. `npm run generate:api` regenerates it on its own, which is also how a docblock or signature change is picked up while the dev server is running.
 
-While the dev server is running, re-run `npm run generate:api` from `website` to pick up docstring or signature changes; the extractor reads the source statically (griffe), so the package's native dependencies are never needed. The vendored `Xlib`, `webrtc`, and `ice` forks keep upstream documentation style and are excluded from the reference. Docstrings are rendered as MDX: keep anything shaped like `<name>` or containing braces inside backticks.
+The Python modules of `src/selkies` come from their Google-style docstrings and type hints through [fumadocs-python](https://www.fumadocs.dev/docs/integrations/python). That half needs `python3`: the generator bootstraps a private venv in `website/.venv-docs` on first use (delete that directory to rebuild it, e.g. after upgrading the `fumadocs-python` npm package).
+
+The web client core and the two dashboards come from their JSDoc blocks and type annotations through [TypeDoc](https://typedoc.org), which reads the plain JavaScript of `addons/selkies-web-core` and `addons/selkies-dashboard` through the TypeScript compiler's JSDoc support and the TypeScript of `addons/selkies-dashboard-wish` natively, one section per addon. That half needs nothing beyond the site's own `npm install`: the addons' third-party types are not installed and render as `any`, and type errors never fail the build. Every function that carries a docblock appears, exported or not — the streaming cores keep their machinery as closures inside one exported function, and the dashboards keep their handlers inside their components — so the reference covers what the docblocks cover, as it does for Python. `website/scripts/generate-web-docs.mjs` lists what is excluded (translation tables, the wish dashboard's vendored shadcn/ui primitives, the built core copied into the dashboard at build time), and `_`-prefixed members are private and left out.
+
+The comment conventions each language follows are in [`AGENTS.md`](https://github.com/selkies-project/selkies/tree/main/AGENTS.md).
 
 ### Settings Reference
 

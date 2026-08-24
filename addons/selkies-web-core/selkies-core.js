@@ -4,6 +4,27 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+/**
+ * Entry point of the web client: picks the streaming transport and starts it.
+ *
+ * The transport is `window.__SELKIES_STREAMING_MODE__` when the page injects
+ * one, else the `stream_mode` the last session persisted, else WebSockets. A
+ * dashboard switches it by posting a `{type: "mode", mode}` window message; the
+ * choice is persisted and the page reloads two seconds later, since the two
+ * cores are not built for an in-place hand-off. A host page that sets
+ * `window.__SELKIES_DEFER_INITIALIZATION` starts the client itself through
+ * `window.selkiesCoreInitialize()`; otherwise the client starts on load.
+ *
+ * Persisted settings live in localStorage under the `getStorageAppName()`
+ * namespace (origin plus pathname, never the query: a per-session `?token=`
+ * must not mint a namespace per connect and exhaust the origin's quota). This
+ * module also owns the one-time migration from the two legacy key schemes: a
+ * sanitizer that kept `?`, `=` and `:` literal, and a full-href derivation
+ * whose token-scoped keys are pruned on every load to recover stores the leak
+ * already filled.
+ * @module
+ */
+
 import { getStorageAppName } from "./lib/util.js";
 import webrtc from "./selkies-wr-core";
 import websockets from "./selkies-ws-core";
@@ -11,15 +32,11 @@ import websockets from "./selkies-ws-core";
 const STREAM_MODE_WEBRTC = "webrtc";
 const STREAM_MODE_WEBSOCKETS = "websockets";
 
-// The shared namespace (lib/util.js) is origin + pathname only, NOT the full URL:
-// a per-session ?token=... must not mint a new localStorage namespace on every
-// connect (that leak eventually exhausts the origin quota and blanks the iframe).
-// The raw URL stays here because the legacy-prefix migration below walks it.
+/** Origin plus pathname, the string the legacy key prefix was derived from. */
 const urlForKey = window.location.origin + window.location.pathname;
 const storageAppName = getStorageAppName();
 const getPrefixedKey = (key) => {return `${storageAppName}_${key}`}
-// Guarded write: a full or unavailable store degrades to a warning instead of
-// throwing QuotaExceededError into startup.
+/** Writes a key, degrading a full or unavailable store to a warning. */
 const safeSetItem = (key, value) => {
     try {
         localStorage.setItem(key, value);
@@ -28,23 +45,24 @@ const safeSetItem = (key, value) => {
     }
 };
 
-// One-time migration/cleanup covering both legacy key schemes:
-//   (a) keys from the old sanitizer (a `.-_` char range bug kept ?/=/: literal) AND the
-//       old full-href derivation — query-less ones migrate to the new prefix, while
-//       token-scoped ones (stable base + literal '?') are PRUNED, which also recovers
-//       browsers whose store the token leak already filled (removeItem never hits quota);
-//   (b) fixed-regex keys derived from a query-less href already equal the new prefix.
+/**
+ * Migrates settings from the legacy key prefix and prunes token-scoped keys.
+ *
+ * Query-less legacy keys are copied to the current prefix once, and only when
+ * no key under the current prefix exists yet, so settings saved since are
+ * never clobbered; a flag key makes the copy run at most once. Token-scoped
+ * keys (legacy prefix plus a literal `?`) are removed on every load, which is
+ * cheap and frees quota before any write (`removeItem` never hits the quota).
+ */
 (function migrateStorageKeys() {
     try {
         if (typeof localStorage === 'undefined') return;
-        // Legacy prefix: old sanitizer kept a-z and 0x2E-0x5F; char codes avoid a regex range.
+        // The legacy sanitizer kept a-z and 0x2E-0x5F literal.
         let oldAppName = '';
         for (let i = 0; i < urlForKey.length; i++) {
             const c = urlForKey.charCodeAt(i);
             oldAppName += ((c >= 0x2E && c <= 0x5F) || (c >= 0x61 && c <= 0x7A)) ? urlForKey[i] : '_';
         }
-        // Prune token-scoped legacy keys every load (cheap, idempotent, frees quota
-        // before any writes below).
         const tokenPrefix = oldAppName + '?';
         const staleKeys = [];
         for (let i = 0; i < localStorage.length; i++) {
@@ -55,23 +73,19 @@ const safeSetItem = (key, value) => {
         if (staleKeys.length) {
             console.log(`Selkies: removed ${staleKeys.length} stale token-scoped localStorage keys.`);
         }
-        // Nothing to migrate when both prefixes resolve to the same string.
         if (oldAppName === storageAppName) return;
         const migratedFlagKey = `${storageAppName}_storage_key_migrated`;
-        // Already migrated.
         if (localStorage.getItem(migratedFlagKey) !== null) return;
 
         const oldPrefix = `${oldAppName}_`;
         const newPrefix = `${storageAppName}_`;
 
-        // Snapshot keys first; we mutate localStorage inside the loop.
+        // Snapshot first: the loop below mutates localStorage.
         const allKeys = [];
         for (let i = 0; i < localStorage.length; i++) {
             const k = localStorage.key(i);
             if (k !== null) allKeys.push(k);
         }
-        // Only migrate if NEW-prefixed keys are absent but OLD-prefixed keys exist,
-        // so we never clobber settings the user already saved under the new prefix.
         const hasNew = allKeys.some((k) => k.startsWith(newPrefix));
         const oldKeys = allKeys.filter((k) => k.startsWith(oldPrefix));
         if (!hasNew && oldKeys.length > 0) {
@@ -85,7 +99,6 @@ const safeSetItem = (key, value) => {
             }
             console.log(`Migrated ${oldKeys.length} setting(s) from old storage prefix "${oldPrefix}" to "${newPrefix}".`);
         }
-        // Guard so this runs at most once, regardless of whether anything was copied.
         safeSetItem(migratedFlagKey, '1');
     } catch (e) {
         console.warn('Storage key migration skipped due to error:', e);
@@ -94,35 +107,46 @@ const safeSetItem = (key, value) => {
 
 let mode = null;
 
+/**
+ * Resolves the transport to start: the injected runtime mode, else the last
+ * session's persisted mode, else WebSockets.
+ * @returns {string} `"webrtc"` or `"websockets"`.
+ */
 function determineStreamingMode() {
-    // Check for runtime injected mode
     const runtimeMode = (typeof window !== 'undefined' && window.__SELKIES_STREAMING_MODE__) ? window.__SELKIES_STREAMING_MODE__ : undefined;
     let lastSessionMode = localStorage.getItem(getPrefixedKey('stream_mode'));
-    // Precedence: runtime mode > last session mode > default mode
     const finalMode = runtimeMode ? runtimeMode : (lastSessionMode ? lastSessionMode : STREAM_MODE_WEBSOCKETS);
     console.log(`Streaming mode determined to be: ${finalMode}`);
     return finalMode;
 }
 
+/**
+ * Persists a dashboard's `{type: "mode", mode}` request and reloads the page.
+ *
+ * Only the two real transports are persisted: anything else would make every
+ * following load throw until localStorage was repaired by hand.
+ * @param {MessageEvent} event Same-origin window message.
+ */
 function handleMessage(event) {
     if (event.origin !== window.location.origin) return;
     let message = event.data;
     if (message.mode !== undefined && message.type === "mode") {
-        // An invalid mode would poison the next load ('Invalid client mode' throw
-        // until localStorage is repaired); only the two real transports persist.
         if (![STREAM_MODE_WEBRTC, STREAM_MODE_WEBSOCKETS].includes(message.mode)) return;
         console.log(`Switching streaming mode to: ${message.mode}`);
         safeSetItem(getPrefixedKey('stream_mode'), message.mode);
 
-        // wait for a few seconds to let the server switch modes
+        // Gives the server time to switch modes before the reload.
         setTimeout(() => {
-            // A full reload swaps the transport stacks; the cores are not built
-            // for an in-place mode hand-off.
             window.location.reload();
         }, 2000)
     }
 }
 
+/**
+ * Persists the mode and starts the matching core.
+ * @param {string} newMode `"webrtc"` or `"websockets"`.
+ * @throws {Error} On any other mode.
+ */
 function switchStreamingMode(newMode) {
     safeSetItem(getPrefixedKey('stream_mode'), newMode);
     switch (newMode) {
@@ -146,8 +170,6 @@ if (typeof window !== 'undefined') {
     };
 }
 
-// Auto-initialize for backward compatibility when script is loaded directly
-// This preserves existing behavior for non-dashboard usage
 if (typeof window !== 'undefined' && !window.__SELKIES_DEFER_INITIALIZATION) {
     window.selkiesCoreInitialize();
 }

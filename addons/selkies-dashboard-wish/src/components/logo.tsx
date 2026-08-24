@@ -8,9 +8,16 @@ import { useId } from "react";
 
 import { t } from "@/i18n";
 
-// The mark from docs/assets/logo/selkies.svg. The gradient identifier is
-// per-instance: two logos sharing one identifier would leave the second
-// unpainted as soon as the instance that owns the definition unmounts.
+/**
+ * The Selkies mark as an inline SVG.
+ * @module
+ */
+
+/**
+ * The mark from docs/assets/logo/selkies.svg. The gradient identifier is
+ * per-instance: two logos sharing one identifier would leave the second
+ * unpainted as soon as the instance that owns the definition unmounts.
+ */
 export const SelkiesLogo = ({ width = 30, height = 30, className = "", ...props }: { width?: number; height?: number; className?: string;[key: string]: any }) => {
   const id = useId();
   return (

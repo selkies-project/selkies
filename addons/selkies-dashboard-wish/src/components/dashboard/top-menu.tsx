@@ -4,6 +4,22 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+/**
+ * The wish dashboard's menu bar and the overlays it owns: the draggable top
+ * menu (apps, files, clipboard, sharing, settings, monitoring, second-screen
+ * placement, keyboard assistance), the gaming control bar, the ellipsis menu,
+ * the mobile soft keys, and the draggable System Monitoring panel.
+ *
+ * Reads the `serverSettings` and `trackpadModeUpdate` messages the core posts
+ * on `window` and posts `sidebarVisibilityChanged`, `touchinput:trackpad`,
+ * `touchinput:touch` and `setSynth` back; held modifier keys are delivered as
+ * synthetic KeyboardEvents on `window`, which the core's input handler consumes
+ * like real ones. A secondary display opens as a new window on the
+ * `#display2-<direction>` fragment, placed with the Window Management API
+ * where the browser offers it.
+ * @module
+ */
+
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
@@ -53,22 +69,44 @@ import { SelkiesLogo } from "@/components/logo";
 import { computeRenderableSettings, getLastServerSettings, isMobileClient, isSecondaryDisplay } from "@/utils";
 import { t } from "@/i18n";
 
+/**
+ * Stream toggles owned by DashboardOverlay, which keeps the Ctrl+Shift
+ * shortcuts working while this menu is unmounted.
+ */
 interface TopMenuProps {
+  /** The video stream is running. */
   isVideoActive: boolean;
+  /** Audio playback is running. */
   isAudioActive: boolean;
+  /** The microphone uplink is running. */
   isMicrophoneActive: boolean;
+  /** The webcam uplink is running. */
   isWebcamActive: boolean;
+  /** Physical gamepad forwarding is enabled. */
   isGamepadEnabled: boolean;
+  /** The on-screen touch gamepad is shown. */
   isTouchGamepadActive: boolean;
+  /** Toggles the video stream. */
   onVideoToggle: () => void;
+  /** Toggles audio playback. */
   onAudioToggle: () => void;
+  /** Toggles the microphone uplink. */
   onMicrophoneToggle: () => void;
+  /** Toggles the webcam uplink. */
   onWebcamToggle: () => void;
+  /** Toggles physical gamepad forwarding. */
   onGamepadToggle: () => void;
+  /** Toggles the on-screen touch gamepad. */
   onToggleTouchGamepad: () => void;
+  /** Toggles the stats overlay. */
   toggleStats: () => void;
 }
 
+/**
+ * The menu bar, its panels and the overlays around it. Server settings are
+ * seeded from the cached broadcast because the menu mounts after the core
+ * connects; the server's UI customization decides which entries render.
+ */
 export function TopMenu({
   isVideoActive,
   isAudioActive,
@@ -91,31 +129,26 @@ export function TopMenu({
   const [isDragging, setIsDragging] = React.useState(false);
   const [isSystemMonitoringDragging, setIsSystemMonitoringDragging] = React.useState(false);
   const [position, setPosition] = React.useState(() => {
-    // Rough centering off an assumed ~400px menu; the measured width recentres
+    // Rough centering off an assumed 400px menu; the measured width recentres
     // it after mount.
     const x = window.innerWidth / 2 - 200;
     return { x, y: 0 };
   });
   const [systemMonitoringPosition, setSystemMonitoringPosition] = React.useState(() => {
-    // Top-left, below the menu bar.
     return { x: 16, y: 64 };
   });
 
-  // --- Server Settings & UI Customization ---
   const [serverSettings, setServerSettings] = React.useState<any>(() => getLastServerSettings());
   const [renderableSettings, setRenderableSettings] = React.useState<any>(() => computeRenderableSettings(getLastServerSettings()));
   const uiTitle: string = serverSettings?.ui_title?.value ?? 'Selkies';
   const uiShowLogo: boolean = serverSettings?.ui_show_logo?.value ?? true;
 
-  // --- Mobile/Touch Detection ---
   const isMobile = isMobileClient;
   const [hasDetectedTouch, setHasDetectedTouch] = React.useState(false);
   const [isTrackpadModeActive, setIsTrackpadModeActive] = React.useState(false);
 
-  // --- Second Screen Support ---
   const [availablePlacements, setAvailablePlacements] = React.useState<any>(null);
 
-  // --- Keyboard Assistance ---
   const [heldKeys, setHeldKeys] = React.useState({
     Control: false,
     Alt: false,
@@ -131,7 +164,6 @@ export function TopMenu({
   const startPosRef = React.useRef({ x: 0, y: 0 });
   const systemMonitoringStartPosRef = React.useRef({ x: 0, y: 0 });
 
-  // --- Server Settings Message Listener ---
   React.useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
@@ -152,7 +184,7 @@ export function TopMenu({
     };
   }, []);
 
-  // Let the core react to panels opening/closing (e.g. input focus handling).
+  // The core reacts to panels opening and closing (input focus handling).
   // System Monitoring counts as open UI: the websockets core only recomputes
   // window.fps while it believes the sidebar is visible, and the monitoring
   // overlay is not an activePanel.
@@ -163,8 +195,8 @@ export function TopMenu({
     );
   }, [activePanel, showSystemMonitoring]);
 
-  // Entering fullscreen (button, gaming mode, Ctrl+Shift+F, or browser UI) folds the
-  // dashboard so the user lands in the session.
+  // Entering fullscreen (button, gaming mode, Ctrl+Shift+F, or browser UI)
+  // folds the dashboard so the user lands in the session.
   React.useEffect(() => {
     const foldOnFullscreen = () => {
       if (document.fullscreenElement) {
@@ -175,12 +207,11 @@ export function TopMenu({
     return () => document.removeEventListener("fullscreenchange", foldOnFullscreen);
   }, []);
 
-  // --- Touch Detection ---
+  // The first touch enables the touch-specific entries for the session.
   React.useEffect(() => {
     const detectTouch = () => {
       console.log("Dashboard: First touch detected. Enabling touch-specific features.");
       setHasDetectedTouch(true);
-      // Remove the listener after first touch
       window.removeEventListener('touchstart', detectTouch);
     };
     window.addEventListener('touchstart', detectTouch, { passive: true } as AddEventListenerOptions);
@@ -189,7 +220,7 @@ export function TopMenu({
     };
   }, []);
 
-  // Center the menu properly after mount
+  // Recentres the menu on its measured width.
   React.useEffect(() => {
     if (dragRef.current) {
       const menuWidth = dragRef.current.offsetWidth;
@@ -198,7 +229,7 @@ export function TopMenu({
     }
   }, []);
 
-  // Dragging functionality
+  /** Starts dragging the menu bar. */
   const handleMouseDown = (e: React.MouseEvent) => {
     setIsDragging(true);
     startPosRef.current = {
@@ -214,7 +245,7 @@ export function TopMenu({
       const newX = e.clientX - startPosRef.current.x;
       const newY = e.clientY - startPosRef.current.y;
 
-      // Measured menu dimensions bound the drag; the constants stand in until
+      // The measured dimensions bound the drag; the constants stand in until
       // the element is available.
       const menuElement = dragRef.current;
       const menuWidth = menuElement ? menuElement.offsetWidth : 600;
@@ -244,7 +275,7 @@ export function TopMenu({
     };
   }, [isDragging]);
 
-  // System monitoring dragging functionality
+  /** Starts dragging the System Monitoring panel. */
   const handleSystemMonitoringMouseDown = (e: React.MouseEvent) => {
     setIsSystemMonitoringDragging(true);
     systemMonitoringStartPosRef.current = {
@@ -260,7 +291,6 @@ export function TopMenu({
       const newX = e.clientX - systemMonitoringStartPosRef.current.x;
       const newY = e.clientY - systemMonitoringStartPosRef.current.y;
 
-      // Get the actual dimensions of the system monitoring element
       const systemMonitoringElement = systemMonitoringRef.current;
       const panelWidth = systemMonitoringElement ? systemMonitoringElement.offsetWidth : 300;
       const panelHeight = systemMonitoringElement ? systemMonitoringElement.offsetHeight : 200;
@@ -289,12 +319,12 @@ export function TopMenu({
     };
   }, [isSystemMonitoringDragging]);
 
-  // Click outside to close panels and dropdown
+  // An outside click closes the dropdown and the active panel; the System
+  // Monitoring overlay is not a panel and stays.
   React.useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Node;
 
-      // Close dropdown if clicking outside dropdown and ellipsis button
       if (showDropdown) {
         const isOutsideEllipsisMenu = ellipsisRef.current && !ellipsisRef.current.contains(target);
         const isOutsideDropdown = dropdownRef.current && !dropdownRef.current.contains(target);
@@ -304,12 +334,11 @@ export function TopMenu({
         }
       }
 
-      // Close panels if clicking outside panel and main menu (excluding system monitoring)
       if (activePanel) {
         const isOutsideMainMenu = dragRef.current && !dragRef.current.contains(target);
         const isOutsidePanel = panelRef.current && !panelRef.current.contains(target);
 
-        // Also check if the click is on a dropdown portal (which might be rendered outside the panel)
+        // Radix portals render outside the panel element.
         const isOnDropdownPortal = (target as Element).closest('[data-radix-popper-content-wrapper]') !== null;
         const isOnDropdownTrigger = (target as Element).closest('[data-radix-dropdown-menu-trigger]') !== null;
         const isOnSelectTrigger = (target as Element).closest('[data-radix-select-trigger]') !== null;
@@ -321,7 +350,6 @@ export function TopMenu({
       }
     };
 
-    // Only add listener if there's something to close
     if (activePanel || showDropdown) {
       document.addEventListener('mousedown', handleClickOutside);
     }
@@ -331,9 +359,11 @@ export function TopMenu({
     };
   }, [activePanel, showDropdown]);
 
-  // --- Handler Functions ---
+  /**
+   * Opens or closes a panel. Apps is a modal, monitoring is an overlay that
+   * closes the active panel, and the remaining panels are mutually exclusive.
+   */
   const handlePanelToggle = (panelName: string) => {
-    // Close dropdown when opening any panel or modal
     setShowDropdown(false);
 
     if (panelName === 'apps') {
@@ -347,7 +377,6 @@ export function TopMenu({
       return;
     }
 
-    // Implement mutual exclusion - close other panels when opening a new one
     const newPanel = activePanel === panelName ? null : panelName;
     setActivePanel(newPanel);
     if (newPanel) {
@@ -355,9 +384,7 @@ export function TopMenu({
     }
   };
 
-  // Touch-gamepad toggle lives in DashboardOverlay (Ctrl+Shift+G must work
-  // while this menu is unmounted); the menu only invokes onToggleTouchGamepad.
-
+  /** Switches touch input between trackpad and direct-touch mode on the core. */
   const handleToggleTrackpadMode = React.useCallback(() => {
     const newActiveState = !isTrackpadModeActive;
     setIsTrackpadModeActive(newActiveState);
@@ -366,6 +393,12 @@ export function TopMenu({
     window.postMessage({ type: message }, window.location.origin);
   }, [isTrackpadModeActive]);
 
+  /**
+   * Opens the secondary display in a new window, sized to `screen` when the
+   * Window Management API supplied one.
+   * @param direction Side of the primary the new display attaches to.
+   * @param screen A ScreenDetailed to place the window on, or null.
+   */
   const launchWindow = (direction: string, screen: any = null) => {
     const url = `${window.location.href.split('#')[0]}#display2-${direction}`;
     let features = 'resizable=yes,scrollbars=yes,noopener,noreferrer';
@@ -376,6 +409,11 @@ export function TopMenu({
     setAvailablePlacements(null);
   };
 
+  /**
+   * Adds a secondary display. With the Window Management API, a single
+   * adjacent screen is used directly and several show placement arrows;
+   * without it, or on denial, the display opens to the right.
+   */
   const handleAddScreenClick = async () => {
     if (!('getScreenDetails' in window)) {
       console.warn("Window Management API not supported. Opening default second screen.");
@@ -430,6 +468,10 @@ export function TopMenu({
     }
   };
 
+  /**
+   * Pops the on-screen keyboard by focusing the core's keyboard-assist input,
+   * releasing it again on the next touch of the interaction overlay.
+   */
   const handleShowVirtualKeyboard = React.useCallback(() => {
     console.log("Dashboard: Directly handling virtual keyboard pop.");
     const kbdAssistInput = document.getElementById('keyboard-input-assist');
@@ -461,6 +503,7 @@ export function TopMenu({
     }
   }, []);
 
+  /** Dispatches a synthetic KeyboardEvent on `window` for the core's input handler. */
   const sendKeyEvent = (type: string, key: string, code: string, modifierState: any) => {
     const event = new KeyboardEvent(type, {
       key: key,
@@ -474,6 +517,10 @@ export function TopMenu({
     window.dispatchEvent(event);
   };
 
+  /**
+   * Toggles a held modifier soft key; the core's synthetic-key mode is raised
+   * while any modifier is held.
+   */
   const handleHoldKeyClick = (key: string, code: string) => {
     const isCurrentlyHeld = heldKeys[key as keyof typeof heldKeys];
     const currentHeldCount = Object.values(heldKeys).filter(Boolean).length;
@@ -496,6 +543,7 @@ export function TopMenu({
     }
   };
 
+  /** Presses a soft key once, with the held modifiers applied. */
   const handleOnceKeyClick = (key: string, code: string) => {
     console.log(`Dashboard: Dispatching key press for ${key} with modifiers:`, heldKeys);
     sendKeyEvent('keydown', key, code, heldKeys);
@@ -504,6 +552,7 @@ export function TopMenu({
     }, 50);
   };
 
+  /** The panel body for the active panel. */
   const renderPanel = () => {
     switch (activePanel) {
       case 'settings':
@@ -928,7 +977,7 @@ export function TopMenu({
 
 
 
-      {/* System Monitoring Panel - Draggable */}
+      {/* Draggable System Monitoring panel */}
       <AnimatePresence>
         {showSystemMonitoring && (
           <motion.div
@@ -1081,7 +1130,7 @@ export function TopMenu({
         </div>
       )}
 
-      {/* Apps Modal - Separate from panels */}
+      {/* The Apps modal is separate from the panels. */}
       {showAppsModal && (
         <Apps isOpen={showAppsModal} onClose={() => setShowAppsModal(false)} />
       )}

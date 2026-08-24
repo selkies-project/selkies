@@ -24,56 +24,66 @@
 
 /*eslint no-unused-vars: ["error", { "vars": "local" }]*/
 
-import { Input } from "./input";
 /**
- * @typedef {Object} WebRTCClient
- * @property {function} ondebug - Callback fired when new debug message is set.
- * @property {function} onstatus - Callback fired when new status message is set.
- * @property {function} onerror - Callback fired when new error message is set.
- * @property {function} onconnectionstatechange - Callback fired when peer connection state changes.
- * @property {function} ondatachannelclose - Callback fired when data channel is closed.
- * @property {function} ondatachannelopen - Callback fired when data channel is opened.
- * @property {function} onplaystreamrequired - Callback fired when user interaction is required before playing the stream.
- * @property {function} onclipboardcontent - Callback fired when clipboard content from the remote host is received.
- * @property {function} getConnectionStats - Returns promise that resolves with connection stats.
- * @property {Object} rtcPeerConfig - RTC configuration containing ICE servers and other connection properties.
- * @property {boolean} forceTurn - Force use of TURN server.
- * @property {function} sendDataChannelMessage - Send a message to the peer through the data channel.
+ * Peer-connection side of the WebRTC transport.
+ *
+ * The server offers and the client answers. The offer arrives through
+ * lib/signaling.js; the answer is munged before it becomes the local
+ * description (`sps-pps-idr-in-keyframe=1` on the H.264 line, and on the
+ * Opus line `stereo=1` plus a `minptime` matching the server's `a=ptime`,
+ * which is how audio frames shorter than 10 ms get through) and ICE
+ * candidates are exchanged the same way, non-relay ones dropped when
+ * `forceTurn` is set. The server's video and audio arrive as media tracks
+ * on the given element; the audio and video m-lines it offers recvonly are
+ * reserved as sendonly transceivers for the microphone and the webcam, which
+ * are attached later with `replaceTrack` and no renegotiation.
+ *
+ * Everything else rides the one data channel the server creates: input and
+ * control upstream through `sendDataChannelMessage`, JSON messages
+ * downstream, routed by `type` to the `on*` callbacks (`pipeline`,
+ * `gpu_stats`, `system_stats`, `cursor`, `system`, `ping`,
+ * `latency_measurement`, `server_settings`, `display_config_update` and
+ * `clipboard-msg*`). Either side may gzip a message once the `_gz,1`
+ * handshake has been exchanged; the multipart clipboard and
+ * `server_settings` kinds keep their arrival order across asynchronous
+ * inflation, the rest route as soon as they are readable.
+ * @module
+ */
+
+import { Input } from "./input";
+
+/**
+ * WebRTC client: one peer connection plus its data channel.
+ *
+ * Callbacks are assigned as properties: `onstatus`, `ondebug` and `onerror`
+ * receive messages, `onconnectionstatechange` the peer connection state,
+ * `ondatachannelopen` and `ondatachannelclose` nothing, `onplaystreamrequired`
+ * fires when autoplay was refused and a user gesture is needed, and
+ * `onclipboardcontent`, `oncursorchange`, `onsystemaction`, `ongpustats`,
+ * `onsystemstats`, `onlatencymeasurement`, `onserversettings` and
+ * `ondisplayconfig` receive the payload of the data channel message of the
+ * same kind.
  */
 export class WebRTCClient {
 	/**
-	 * Interface to the WebRTC client.
-	 *
-	 * @constructor
-	 * @param {WebRTCSignaling} [signaling]
-	 *    Instance of WebRTCSignaling used to communicate with the signaling server.
-	 * @param {Element} [element]
-	 *    Element to attach stream to.
+	 * @param {WebRTCSignaling} signaling Signaling connection; its `onsdp` and `onice` are taken over.
+	 * @param {HTMLVideoElement} element Element the server's stream plays in.
+	 * @param {number} peer_id Local peer id registered with the signaling server.
 	 */
 	constructor(signaling, element, peer_id) {
-		/**
-		 * @type {WebRTCSignaling}
-		 */
+		/** @type {WebRTCSignaling} */
 		this.signaling = signaling;
 
-		/**
-		 * @type {Element}
-		 */
+		/** @type {HTMLVideoElement} */
 		this.element = element;
 
-		/**
-		 * @type {Element}
-		 */
+		/** @type {number} */
 		this.peer_id = peer_id;
 
-		/**
-		 * @type {boolean}
-		 */
+		/** Accept only relay ICE candidates and force `iceTransportPolicy` to `relay`. @type {boolean} */
 		this.forceTurn = false;
 
-		/**
-		 * @type {Object}
-		 */
+		/** Configuration handed to `RTCPeerConnection`. @type {Object} */
 		this.rtcPeerConfig = {
 			"lifetimeDuration": "86400s",
 			"iceServers": [
@@ -87,168 +97,109 @@ export class WebRTCClient {
 			"iceTransportPolicy": "all"
 		};
 
-		/**
-		 * @type {RTCPeerConnection}
-		 */
+		/** @type {RTCPeerConnection} */
 		this.peerConnection = null;
-		// Uplinks: the sendonly transceivers the server reserved for the microphone
-		// (audio) and the webcam (video), and the active getUserMedia streams (null
-		// until the user enables each device).
+		/** Sendonly transceiver the server reserved for the microphone, or null. @type {?RTCRtpTransceiver} */
 		this._micTransceiver = null;
+		/** Active microphone capture, null until the user enables it. @type {?MediaStream} */
 		this._micStream = null;
+		/** Sendonly transceiver the server reserved for the webcam, or null. @type {?RTCRtpTransceiver} */
 		this._webcamTransceiver = null;
+		/** Active camera capture, null until the user enables it. @type {?MediaStream} */
 		this._webcamStream = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(string): void} */
 		this.onstatus = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(string): void} */
 		this.ondebug = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(string): void} */
 		this.onerror = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(string): void} */
 		this.onconnectionstatechange = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(): void} */
 		this.ondatachannelopen = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(): void} */
 		this.ondatachannelclose = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(Object): void} */
 		this.ongpustats = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(number): void} */
 		this.onlatencymeasurement = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(): void} */
 		this.onplaystreamrequired = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** May return a promise, which the ordered receive queue awaits. @type {?function(Object): (void|Promise<void>)} */
 		this.onclipboardcontent = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(string): void} */
 		this.onsystemaction = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(Object): void} */
 		this.oncursorchange = null;
 
-			/**
-			* @type {Map}
-			*/
+		/** @type {Map} */
 		this.cursor_cache = new Map();
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(Object): void} */
 		this.onsystemstats = null;
 
-		// Bind signaling server callbacks.
 		this.signaling.onsdp = this._onSDP.bind(this);
 		this.signaling.onice = this._onSignalingICE.bind(this);
 
-		/**
-		 * @type {boolean}
-		 */
+		/** @type {boolean} */
 		this._connected = false;
 
-		/**
-		 * @type {RTCDataChannel}
-		 */
+		/** @type {RTCDataChannel} */
 		this._send_channel = null;
-		// Gzip on the input channel: enabled per-direction after a "_gz,1" handshake.
-		// Queues keep message ORDER intact around async (de)compression.
+		/** Whether the server accepted gzip for the upstream direction. @type {boolean} */
 		this._gzTx = false;
+		/** Order-preserving chain of pending sends around asynchronous compression. @type {Promise<void>} */
 		this._sendQueue = Promise.resolve();
+		/** Order-preserving chain of pending order-sensitive receives. @type {Promise<void>} */
 		this._recvQueue = Promise.resolve();
 
-		/**
-		 * @type {Input}
-		 */
+		/** @type {Input} */
 		this.input = null;
 
-		/**
-		 * @type {Array}
-		 */
+		/** @type {Array} */
 		this.clipboardcontent = [];
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(Object): void} */
 		this.onserversettings = null;
 
-		/**
-		 * @type {function}
-		 */
+		/** @type {?function(Object): void} */
 		this.ondisplayconfig = null;
 	}
 
-	/**
-	 * Sets status message.
-	 *
-	 * @private
-	 * @param {String} message
-	 */
+	/** Forwards a status message to `onstatus`. */
 	_setStatus(message) {
 		if (this.onstatus !== null) {
 			this.onstatus(message);
 		}
 	}
 
-	/**
-	 * Sets debug message.
-	 *
-	 * @private
-	 * @param {String} message
-	 */
+	/** Forwards a debug message to `ondebug`. */
 	_setDebug(message) {
 		if (this.ondebug !== null) {
 			this.ondebug(message);
 		}
 	}
 
-	/**
-	 * Sets error message.
-	 *
-	 * @private
-	 * @param {String} message
-	 */
+	/** Forwards an error message to `onerror`. */
 	_setError(message) {
 		if (this.onerror !== null) {
 			this.onerror(message);
 		}
 	}
 
-	/**
-	 * Sets connection state
-	 * @param {String} state
-	 */
+	/** Forwards the peer connection state to `onconnectionstatechange`. */
 	_setConnectionState(state) {
 		if (this.onconnectionstatechange !== null) {
 			this.onconnectionstatechange(state);
@@ -256,13 +207,12 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Handles incoming ICE candidate from signaling server.
-	 *
+	 * Adds a remote ICE candidate; with `forceTurn` a candidate without a
+	 * relay address (one that went around the TURN server) is rejected.
 	 * @param {RTCIceCandidate} icecandidate
 	 */
 	_onSignalingICE(icecandidate) {
 		this._setDebug("received ice candidate from signaling server: " + JSON.stringify(icecandidate));
-		// No relay address in the candidate means no TURN server was used.
 		if (this.forceTurn && JSON.stringify(icecandidate).indexOf("relay") < 0) {
 			this._setDebug("Rejecting non-relay ICE candidate: " + JSON.stringify(icecandidate));
 			return;
@@ -271,11 +221,9 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Handler for ICE candidate received from peer connection.
-	 * If ice is null, then all candidates have been received.
-	 *
-	 * @event
-	 * @param {RTCPeerConnectionIceEvent} event - The event: https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnectionIceEvent
+	 * Sends a local ICE candidate to the server; a null candidate marks the
+	 * end of gathering.
+	 * @param {RTCPeerConnectionIceEvent} event
 	 */
 	_onPeerICE(event) {
 		if (event.candidate === null) {
@@ -286,10 +234,12 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Handles incoming SDP from signaling server.
-	 * Sets the remote description on the peer connection,
-	 * creates an answer with a local description and sends that to the peer.
-	 *
+	 * Answers the server's offer: sets the remote description, reserves the
+	 * uplink transceivers, creates the answer, munges it as described in the
+	 * module docblock (the munging has to happen before it becomes the local
+	 * description) and sends it. A rejected `setLocalDescription` is surfaced
+	 * as an error, since swallowing it would stall the session with no answer
+	 * ever sent.
 	 * @param {RTCSessionDescription} sdp
 	 */
 	_onSDP(sdp) {
@@ -303,7 +253,6 @@ export class WebRTCClient {
 			this._prepareUplinkTransceivers(sdp.sdp);
 			this.peerConnection.createAnswer()
 			.then((local_sdp) => {
-				// Set sps-pps-idr-in-keyframe=1
 				if (!(/[^-]sps-pps-idr-in-keyframe=1[^\d]/gm.test(local_sdp.sdp)) && (/[^-]packetization-mode=/gm.test(local_sdp.sdp))) {
 					console.log("Overriding WebRTC SDP to include sps-pps-idr-in-keyframe=1");
 					if (/[^-]sps-pps-idr-in-keyframe=\d+/gm.test(local_sdp.sdp)) {
@@ -313,7 +262,6 @@ export class WebRTCClient {
 					}
 				}
 				if (local_sdp.sdp.indexOf('multiopus') === -1) {
-					// Override SDP to enable stereo on WebRTC Opus with Chromium, must be munged before the Local Description
 					if (!(/[^-]stereo=1[^\d]/gm.test(local_sdp.sdp)) && (/[^-]useinbandfec=/gm.test(local_sdp.sdp))) {
 						console.log("Overriding WebRTC SDP to allow stereo audio");
 						if (/[^-]stereo=\d+/gm.test(local_sdp.sdp)) {
@@ -322,9 +270,6 @@ export class WebRTCClient {
 							local_sdp.sdp = local_sdp.sdp.replace('useinbandfec=', 'stereo=1;useinbandfec=');
 						}
 					}
-					// OPUS_FRAME: Accept the server's actual Opus frame duration. The offer
-					// carries it as a=ptime (from the audio_frame_duration_ms setting);
-					// minptime below 10 must be munged in or browsers stick to >=10 ms.
 					const ptimeMatch = sdp.sdp.match(/^a=ptime:(\d+)/m);
 					const minptime = Math.max(3, Math.min(10, ptimeMatch ? parseInt(ptimeMatch[1], 10) : 10));
 					if (!(new RegExp('[^-]minptime=' + minptime + '[^\\d]', 'gm').test(local_sdp.sdp)) && (/[^-]useinbandfec=/gm.test(local_sdp.sdp))) {
@@ -341,9 +286,6 @@ export class WebRTCClient {
 					this._setDebug("Sending SDP answer");
 					this.signaling.sendSDP(this.peerConnection.localDescription);
 				}).catch((e) => {
-					// A rejected setLocalDescription (e.g. munged-answer rules)
-					// must surface — swallowing it stalls the whole session with
-					// no answer ever sent.
 					this._setError("Error setting local description: " + e);
 				});
 			}).catch(() => {
@@ -355,10 +297,12 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Reserve the uplinks: the audio m-line the server offered recvonly wants our
-	 * microphone and the video m-line it offered recvonly wants our webcam (its own
-	 * stream is sendonly). The matching transceivers are marked sendonly so a track
-	 * can be attached later on user toggle via replaceTrack without renegotiation.
+	 * Reserves the uplinks: the audio m-line the server offered recvonly wants
+	 * the microphone and the video m-line it offered recvonly wants the webcam
+	 * (its own stream is sendonly). The matching transceivers are marked
+	 * sendonly so a track can be attached later with `replaceTrack` and no
+	 * renegotiation; a withheld m-line leaves the transceiver null.
+	 * @param {string} remoteSdp The offer's SDP text.
 	 */
 	_prepareUplinkTransceivers(remoteSdp) {
 		this._micTransceiver = null;
@@ -398,15 +342,18 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Enable/disable the microphone: attach a getUserMedia track to the reserved sendonly
-	 * transceiver (the browser encodes Opus over RTP), or detach and stop it.
-	 * deviceId (optional) selects the capture device.
+	 * Enables or disables the microphone: attaches a getUserMedia track to the
+	 * reserved sendonly transceiver (the browser encodes Opus over RTP), or
+	 * detaches and stops it.
+	 * @param {boolean} enabled
+	 * @param {?string} deviceId Capture device, the default one when null.
+	 * @returns {Promise<boolean>} False when getUserMedia is unavailable.
+	 * @throws {Error} When the server withheld the microphone m-line (the
+	 *     microphone is disabled server-side); raised before prompting for
+	 *     permission so the UI never claims an active mic that streams nothing.
 	 */
 	async setMicrophone(enabled, deviceId = null) {
 		if (enabled) {
-			// No transceiver means the server withheld the mic m-line (microphone
-			// administratively disabled): fail before prompting for permission so
-			// the UI never claims an active mic that streams nothing.
 			if (!this._micTransceiver) {
 				throw new Error('Microphone is disabled on this server.');
 			}
@@ -435,15 +382,22 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Enable/disable the webcam: attach a getUserMedia video track to the reserved
-	 * sendonly transceiver (the browser encodes H.264/VP8 over RTP and the server's
-	 * virtual camera decodes it), or detach and stop it. deviceId (optional)
-	 * selects the camera; width/height/fps are capture hints.
+	 * Enables or disables the webcam: attaches a getUserMedia video track to
+	 * the reserved sendonly transceiver (the browser encodes H.264 or VP8 over
+	 * RTP and the server's virtual camera decodes it), or detaches and stops
+	 * it. Disabling also deactivates the sender's encodings, because a null or
+	 * ended track alone does not silence every engine (Firefox keeps the
+	 * encoder running on it); enabling re-activates them, all without
+	 * renegotiation.
+	 * @param {boolean} enabled
+	 * @param {?string} deviceId Camera, the default one when null.
+	 * @param {{width?: number, height?: number, fps?: number}} hints Capture hints.
+	 * @returns {Promise<boolean>} False when getUserMedia is unavailable.
+	 * @throws {Error} When the server withheld the webcam m-line (the webcam
+	 *     is locked off); raised before prompting for permission.
 	 */
 	async setWebcam(enabled, deviceId = null, { width = 1280, height = 720, fps = 30 } = {}) {
 		if (enabled) {
-			// No transceiver means the server withheld the webcam m-line (webcam
-			// locked off): fail before prompting for permission.
 			if (!this._webcamTransceiver) {
 				throw new Error('Webcam is disabled on this server.');
 			}
@@ -460,9 +414,6 @@ export class WebRTCClient {
 			return true;
 		}
 		if (this._webcamTransceiver && this._webcamTransceiver.sender) {
-			// A null or ended track alone does not silence every engine (Firefox keeps
-			// the encoder running on it); deactivating the encoding does, without a
-			// renegotiation, and enable re-activates it.
 			await this._setSenderActive(this._webcamTransceiver.sender, false);
 			try { await this._webcamTransceiver.sender.replaceTrack(null); } catch (e) {}
 		}
@@ -473,7 +424,11 @@ export class WebRTCClient {
 		return true;
 	}
 
-	/** Pause or resume a sender's encodings in place (RTCRtpSendParameters.active). */
+	/**
+	 * Pauses or resumes a sender's encodings in place (`RTCRtpSendParameters.active`).
+	 * @param {RTCRtpSender} sender
+	 * @param {boolean} active
+	 */
 	async _setSenderActive(sender, active) {
 		try {
 			const params = sender.getParameters();
@@ -486,24 +441,20 @@ export class WebRTCClient {
 		}
 	}
 
-	/** The live camera track sent to the server, or null. */
+	/** The live camera track sent to the server, or null. @type {?MediaStreamTrack} */
 	get webcamTrack() {
 		return this._webcamStream ? (this._webcamStream.getVideoTracks()[0] || null) : null;
 	}
 
-	/**
-	 * Handles local description creation from createAnswer.
-	 *
-	 * @param {RTCSessionDescription} local_sdp
-	 */
+	/** Logs a created local description. */
 	_onLocalSDP(local_sdp) {
 		this._setDebug("Created local SDP: " + JSON.stringify(local_sdp));
 	}
 
 	/**
-	 * Handles incoming track event from peer connection.
-	 *
-	 * @param {Event} event - Track event: https://developer.mozilla.org/en-US/docs/Web/API/RTCTrackEvent
+	 * Records an incoming track; a video track's stream becomes the element's
+	 * source and playback starts.
+	 * @param {RTCTrackEvent} event
 	 */
 	_ontrack(event) {
 		this._setStatus("Received incoming " + event.track.kind + " stream from peer");
@@ -516,14 +467,13 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Handles incoming data channel events from the peer connection.
-	 *
-	 * @param {RTCdataChannelEvent} event
+	 * Adopts the data channel the server created; once it opens, gzip is
+	 * offered with `_gz,1` when the engine has `CompressionStream`.
+	 * @param {RTCDataChannelEvent} event
 	 */
 	_onPeerdDataChannel(event) {
 		this._setStatus("Peer data channel created: " + event.channel.label);
 
-		// Bind the data channel event handlers.
 		this._send_channel = event.channel;
 		this._send_channel.binaryType = 'arraybuffer';
 		this._send_channel.onmessage = this._onPeerDataChannelMessage.bind(this);
@@ -544,19 +494,20 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Handles messages from the peer data channel.
-	 *
+	 * Receives a data channel message. A binary message with the gzip magic
+	 * inflates concurrently while a slot in the ordered queue reserves its
+	 * arrival position, in case it inflates into an order-sensitive kind; a
+	 * kind that needs no ordering routes as soon as it is readable rather than
+	 * waiting behind the queue. `_gz,1` enables gzip upstream. Each queued
+	 * handler is caught on its own link, so one throwing handler (or a
+	 * rejected asynchronous clipboard handler) fails alone instead of leaving
+	 * the chain rejected and every later message dropped.
 	 * @param {MessageEvent} event
 	 */
 	_onPeerDataChannelMessage(event) {
 		if (event.data instanceof ArrayBuffer) {
 			const head = new Uint8Array(event.data, 0, Math.min(2, event.data.byteLength));
 			if (head[0] === 0x1f && head[1] === 0x8b) {
-				// Gzip'd payload: decompress concurrently, then route by kind.
-				// A slot in the ordered queue reserves this message's arrival
-				// position in case it inflates into an order-sensitive kind; a
-				// kind that doesn't need ordering routes as soon as it inflates
-				// instead of waiting behind the queue.
 				const routed = (async () => {
 					const text = await new Response(new Blob([event.data]).stream()
 						.pipeThrough(new DecompressionStream('gzip'))).text();
@@ -572,9 +523,6 @@ export class WebRTCClient {
 				});
 				this._recvQueue = this._recvQueue.then(async () => {
 					const msg = await routed;
-					// Returned so the queue also awaits an async clipboard
-					// handler on gzipped traffic (the fat payloads are exactly
-					// what gets compressed).
 					if (msg !== null) return this._routeDataChannelMessage(msg);
 				}).catch((e) => this._setError("failed to handle data channel message: " + e));
 				return;
@@ -598,26 +546,30 @@ export class WebRTCClient {
 			}
 			return;
 		}
-		// Caught per link: one throwing handler (or a rejected async clipboard
-		// handler) must fail alone, not leave the queue chain rejected and
-		// every later message dropped.
 		this._recvQueue = this._recvQueue.then(() => this._routeDataChannelMessage(msg))
 			.catch((e) => this._setError("failed to handle data channel message: " + e));
 	}
 
 	/**
-	 * Only kinds where cross-message order matters ride the ordered queue:
-	 * multipart clipboard sequences must reassemble in sequence, and
-	 * server_settings snapshots are last-wins, so a slow-inflating one must
-	 * not be overtaken by a newer plain one. Everything else (cursor, ping,
-	 * stats, system actions) routes on arrival so a long clipboard decode
-	 * cannot delay it.
+	 * Whether a message rides the ordered queue: multipart clipboard sequences
+	 * must reassemble in sequence, and `server_settings` snapshots are
+	 * last-wins, so a slow-inflating one must not be overtaken by a newer
+	 * plain one. Everything else (cursor, ping, stats, system actions) routes
+	 * on arrival so a long clipboard decode cannot delay it.
+	 * @param {Object} msg
+	 * @returns {boolean}
 	 */
 	_requiresOrderedDelivery(msg) {
 		return typeof msg.type === 'string' &&
 			(msg.type.startsWith('clipboard-msg') || msg.type === 'server_settings');
 	}
 
+	/**
+	 * Parses a JSON message, reporting the failure and returning null when it
+	 * is not one.
+	 * @param {string} data
+	 * @returns {?Object}
+	 */
 	_parseDataChannelMessage(data) {
 		var msg;
 		try {
@@ -634,6 +586,12 @@ export class WebRTCClient {
 		return msg;
 	}
 
+	/**
+	 * Dispatches a parsed message to its callback by `type`. The clipboard
+	 * handler's return value is passed back so the ordered receive queue
+	 * awaits it and clipboard messages complete in arrival order.
+	 * @param {Object} msg
+	 */
 	_routeDataChannelMessage(msg) {
 		if (msg.type === 'pipeline') {
 			this._setStatus(msg.data.status);
@@ -643,8 +601,6 @@ export class WebRTCClient {
 			}
 		} else if (typeof msg.type === 'string' && msg.type.startsWith('clipboard-msg')) {
 			if (typeof this.onclipboardcontent === 'function') {
-				// Returned so the receive queue awaits the async handler:
-				// clipboard messages complete in arrival order.
 				return this.onclipboardcontent(msg);
 			}
 		} else if (msg.type === 'cursor') {
@@ -694,13 +650,10 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Handler for peer connection state change.
-	 * Possible values for state:
-	 *   connected
-	 *   disconnected
-	 *   failed
-	 *   closed
-	 * @param {String} state
+	 * Reacts to the peer connection state: `connected` marks the client up,
+	 * `disconnected` closes the data channel and unloads the element, `failed`
+	 * unloads it.
+	 * @param {string} state
 	 */
 	_handleConnectionStateChange(state) {
 		switch (state) {
@@ -726,13 +679,10 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Sends message to peer data channel.
-	 *
-	 * @param {String} message
-	 */
-	/**
-	 * Outbound queue depth of the data channel; bulk senders (clipboard, uploads)
-	 * throttle on this so they can't starve input/stats on the same channel.
+	 * Outbound queue depth of the data channel; bulk senders (clipboard,
+	 * uploads) throttle on this so they cannot starve input and stats on the
+	 * same channel.
+	 * @returns {number}
 	 */
 	dataChannelBufferedAmount() {
 		return (this._send_channel && this._send_channel.readyState === 'open')
@@ -741,18 +691,24 @@ export class WebRTCClient {
 
 	/**
 	 * Whether the data channel can carry a send right now. Bulk senders check
-	 * this to report "not connected" instead of silently dropping into
-	 * sendDataChannelMessage's quiet no-op.
+	 * this to report "not connected" instead of dropping into
+	 * `sendDataChannelMessage`'s quiet no-op.
+	 * @returns {boolean}
 	 */
 	dataChannelOpen() {
 		return this._send_channel !== null && this._send_channel.readyState === 'open';
 	}
 
 	/**
-	 * Await until queued sends (including the async gzip queue) have reached the
-	 * channel AND its buffered amount is below `threshold`. Bulk senders call this
-	 * between chunks; without it a burst overflows the SCTP send buffer and
-	 * Chromium closes the channel with OperationError, killing the session.
+	 * Resolves once queued sends (including the asynchronous gzip queue) have
+	 * reached the channel and its buffered amount is below `threshold`. Bulk
+	 * senders call this between chunks; without it a burst overflows the SCTP
+	 * send buffer and Chromium closes the channel with OperationError, killing
+	 * the session. It resumes on the `bufferedamountlow` event rather than a
+	 * poll: polling lets the buffer drain to empty between chunks, which
+	 * collapses throughput, while keeping about `threshold` bytes queued keeps
+	 * the pipe full and still yields the channel to input and stats.
+	 * @param {number} threshold Bytes.
 	 */
 	async waitForDataChannelDrain(threshold = 1024 * 1024) {
 		if (this._sendQueue) {
@@ -760,11 +716,6 @@ export class WebRTCClient {
 		}
 		const ch = this._send_channel;
 		if (!ch || ch.readyState !== 'open' || ch.bufferedAmount <= threshold) return;
-		// Resume the instant the buffer crosses below the threshold via the
-		// bufferedamountlow event rather than a fixed poll interval: polling lets
-		// the SCTP send buffer drain to empty between chunks, which collapses
-		// throughput. Keeping ~threshold bytes queued keeps the pipe full while
-		// still yielding the channel to input/stats.
 		ch.bufferedAmountLowThreshold = threshold;
 		await new Promise((resolve) => {
 			const done = () => { ch.removeEventListener('bufferedamountlow', done); resolve(); };
@@ -773,20 +724,24 @@ export class WebRTCClient {
 		});
 	}
 
+	/**
+	 * Sends a message on the data channel. Nothing is sent while the channel
+	 * is not open: periodic senders fire before it opens while connecting, and
+	 * reporting that would mask real failures. Without negotiated gzip the
+	 * send is synchronous, so the input hot path pays no latency; with it,
+	 * strings of 512 bytes or more gzip asynchronously and every send passes
+	 * through an order-preserving queue so a later small message cannot
+	 * overtake a large one still compressing.
+	 * @param {string|ArrayBuffer} message
+	 */
 	sendDataChannelMessage(message) {
 		if (this._send_channel === null || this._send_channel.readyState !== 'open') {
-			// Expected while (re)connecting: periodic senders fire before the channel
-			// opens. Drop quietly; error spam here masks real failures.
 			return;
 		}
-		// No compression negotiated: send synchronously, byte-identical to the
-		// pre-gzip path (zero added latency on the input hot path).
 		if (!this._gzTx) {
 			this._send_channel.send(message);
 			return;
 		}
-		// Order-preserving queue: large strings gzip asynchronously and later small
-		// (uncompressed) sends must not overtake them.
 		if (typeof message === 'string' && message.length >= 512) {
 			this._sendQueue = this._sendQueue.then(async () => {
 				const buf = await new Response(new Blob([message]).stream()
@@ -806,24 +761,28 @@ export class WebRTCClient {
 
 
 	/**
-	 * Handler for gamepad disconnect message.
-	 *
-	 * @param {number} gp_num - the gamepad number
+	 * Reports a gamepad disconnect as a status message.
+	 * @param {number} gp_num Gamepad slot.
 	 */
 	onGamepadDisconnect(gp_num) {
 		this._setStatus("gamepad: " + gp_num + ", disconnected");
 	}
 
 	/**
-	 * Gets connection stats. returns new promise.
+	 * Collects connection statistics from `getStats()`.
+	 *
+	 * `general` comes from the transport and candidate-pair reports (its
+	 * `connectionType` through the selected pair's remote candidate), `video`
+	 * and `audio` from the inbound-rtp reports (their `codecName` through the
+	 * linked codec report), and `data` from the data-channel report; the raw
+	 * reports are attached as `reports` and `allReports`. The audio section's
+	 * NetEQ concealment counters are the RED acceptance metric; Chrome reports
+	 * opus+red under the codec name `opus`, so RED presence is confirmed from
+	 * the SDP or the packet size, never from `codecName`.
+	 * @returns {Promise<Object>}
 	 */
 	getConnectionStats() {
 		var pc = this.peerConnection;
-		// Shape of the report filled in below from getStats(): 'general' comes from
-		// the transport and candidate-pair reports (connectionType resolves through
-		// the pair's remote-candidate), 'video' and 'audio' from inbound-rtp (their
-		// codecName through the linked codec report), and 'data' from the
-		// data-channel report.
 		var connectionDetails = {
 			general: {
 				bytesReceived: 0,
@@ -853,9 +812,6 @@ export class WebRTCClient {
 				codecName: "NA",
 				jitterBufferDelay: 0,
 				jitterBufferEmittedCount: 0,
-				// NetEQ concealment counters — the RED before/after acceptance metric. Chrome
-				// reports opus+red under codecName 'opus', so RED presence is confirmed via
-				// SDP/packet size, not codecName.
 				concealedSamples: 0,
 				concealmentEvents: 0,
 				totalSamplesReceived: 0,
@@ -871,8 +827,6 @@ export class WebRTCClient {
 		};
 
 		return new Promise(function (resolve, reject) {
-			// Statistics API:
-			// https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_Statistics_API
 			pc.getStats().then((stats) => {
 				var reports = {
 					transports: {},
@@ -899,16 +853,12 @@ export class WebRTCClient {
 							reports.selectedCandidatePairId = report.id;
 						}
 					} else if (report.type === "inbound-rtp") {
-						// Audio or video stat
-						// https://w3c.github.io/webrtc-stats/#streamstats-dict*
 						if (report.kind === "video") {
 							reports.videoRTP = report;
 						} else if (report.kind === "audio") {
 							reports.audioRTP = report;
 						}
 					} else if (report.type === "track") {
-						// Audio or video track
-						// https://w3c.github.io/webrtc-stats/#dom-rtcinboundrtpstreamstats-slicount
 						if (report.kind === "video") {
 							reports.videoTrack = report;
 						} else if (report.kind === "audio") {
@@ -923,11 +873,10 @@ export class WebRTCClient {
 					}
 				});
 
-				// Extract video related stats.
 				var videoRTP = reports.videoRTP;
 				if (videoRTP !== null) {
 					connectionDetails.video.bytesReceived = videoRTP.bytesReceived;
-					// Recent WebRTC specs only expose decoderImplementation with media context capturing state
+					// decoderImplementation is only exposed while the media context is in a capturing state.
 					connectionDetails.video.decoder = videoRTP.decoderImplementation || "unknown";
 					connectionDetails.video.frameHeight = videoRTP.frameHeight;
 					connectionDetails.video.frameWidth = videoRTP.frameWidth;
@@ -935,26 +884,22 @@ export class WebRTCClient {
 					connectionDetails.video.packetsReceived = videoRTP.packetsReceived;
 					connectionDetails.video.packetsLost = videoRTP.packetsLost;
 
-					// Extract video codec from found codecs.
 					var codec = reports.codecs[videoRTP.codecId];
 					if (codec !== undefined) {
 						connectionDetails.video.codecName = codec.mimeType.split("/")[1].toUpperCase();
 					}
 				}
 
-				// Extract audio related stats.
 				var audioRTP = reports.audioRTP;
 				if (audioRTP !== null) {
 					connectionDetails.audio.bytesReceived = audioRTP.bytesReceived;
 					connectionDetails.audio.packetsReceived = audioRTP.packetsReceived;
 					connectionDetails.audio.packetsLost = audioRTP.packetsLost;
-					// NetEQ concealment counters (undefined on browsers that don't expose them).
 					if (audioRTP.concealedSamples !== undefined) connectionDetails.audio.concealedSamples = audioRTP.concealedSamples;
 					if (audioRTP.concealmentEvents !== undefined) connectionDetails.audio.concealmentEvents = audioRTP.concealmentEvents;
 					if (audioRTP.totalSamplesReceived !== undefined) connectionDetails.audio.totalSamplesReceived = audioRTP.totalSamplesReceived;
 					if (audioRTP.packetsDiscarded !== undefined) connectionDetails.audio.packetsDiscarded = audioRTP.packetsDiscarded;
 
-					// Extract audio codec from found codecs.
 					var codec = reports.codecs[audioRTP.codecId];
 					if (codec !== undefined) {
 						connectionDetails.audio.codecName = codec.mimeType.split("/")[1].toUpperCase();
@@ -969,7 +914,6 @@ export class WebRTCClient {
 					connectionDetails.data.messagesSent =  dataChannel.messagesSent;
 				}
 
-				// Extract transport stats (RTCTransportStats.selectedCandidatePairId or RTCIceCandidatePairStats.selected)
 				if (Object.keys(reports.transports).length > 0) {
 					var transport = reports.transports[Object.keys(reports.transports)[0]];
 					connectionDetails.general.bytesReceived = transport.bytesReceived;
@@ -980,7 +924,6 @@ export class WebRTCClient {
 					connectionDetails.general.bytesSent = reports.candidatePairs[reports.selectedCandidatePairId].bytesSent;
 				}
 
-				// Get the connection-pair
 				if (reports.selectedCandidatePairId !== null) {
 					var candidatePair = reports.candidatePairs[reports.selectedCandidatePairId];
 					if (candidatePair !== undefined) {
@@ -997,23 +940,19 @@ export class WebRTCClient {
 					}
 				}
 
-				// Compute total packets received and lost
 				connectionDetails.general.packetsReceived = connectionDetails.video.packetsReceived + connectionDetails.audio.packetsReceived;
 				connectionDetails.general.packetsLost = connectionDetails.video.packetsLost + connectionDetails.audio.packetsLost;
 
-				// Compute jitter buffer delay for video
 				if (reports.videoRTP !== null) {
 					connectionDetails.video.jitterBufferDelay = reports.videoRTP.jitterBufferDelay;
 					connectionDetails.video.jitterBufferEmittedCount = reports.videoRTP.jitterBufferEmittedCount;
 				}
 
-				// Compute jitter buffer delay for audio
 				if (reports.audioRTP !== null) {
 					connectionDetails.audio.jitterBufferDelay = reports.audioRTP.jitterBufferDelay;
 					connectionDetails.audio.jitterBufferEmittedCount = reports.audioRTP.jitterBufferEmittedCount;
 				}
 
-				// DEBUG
 				connectionDetails.reports = reports;
 				connectionDetails.allReports = allReports;
 
@@ -1023,11 +962,9 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Starts playing the stream.
-	 * Note that this must be called after some DOM interaction has already occurred.
-	 * Chrome does not allow auto playing of videos without first having a DOM interaction.
+	 * Starts playback of the element. Engines refuse autoplay before a user
+	 * gesture; that refusal is reported through `onplaystreamrequired`.
 	 */
-	// [START playStream]
 	playStream() {
 		this.element.load();
 
@@ -1044,23 +981,19 @@ export class WebRTCClient {
 			});
 		}
 	}
-	// [END playStream]
 
 	/**
-	 * Initiate connection to signaling server.
+	 * Creates the peer connection (relay-only when `forceTurn` is set) and
+	 * connects the signaling client, which starts the offer/answer exchange.
 	 */
 	connect() {
-		// Create the peer connection object and bind callbacks.
 		this.peerConnection = new RTCPeerConnection(this.rtcPeerConfig);
 		this.peerConnection.ontrack = this._ontrack.bind(this);
 		this.peerConnection.onicecandidate = this._onPeerICE.bind(this);
 		this.peerConnection.ondatachannel = this._onPeerdDataChannel.bind(this);
 
 		this.peerConnection.onconnectionstatechange = () => {
-			// Local event handling.
 			this._handleConnectionStateChange(this.peerConnection.connectionState);
-
-			// Pass state to event listeners.
 			this._setConnectionState(this.peerConnection.connectionState);
 		};
 
@@ -1076,13 +1009,11 @@ export class WebRTCClient {
 	}
 
 	/**
-	 * Attempts to reset the webrtc connection by:
-	 *   1. Closing the data channel gracefully.
-	 *   2. Closing the RTC Peer Connection gracefully.
-	 *   3. Reconnecting to the signaling server.
+	 * Resets the connection: forgets the cursor cache, closes the data channel
+	 * and the peer connection, and reconnects, after a three-second pause when
+	 * signaling was not stable.
 	 */
 	reset() {
-		// Clear cursor cache.
 		this.cursor_cache = new Map();
 
 		var signalState = this.peerConnection.signalingState;

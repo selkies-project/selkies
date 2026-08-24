@@ -11,20 +11,37 @@ import { Keyboard } from "lucide-react";
 import { t } from "@/i18n";
 import { isMobileClient } from "@/utils";
 
+/**
+ * The floating gamepad card: one visualizer per pad the core reports, and on
+ * mobile a button that asks the core to show the virtual keyboard.
+ *
+ * Pad state comes from the core's `gamepadButtonUpdate` and
+ * `gamepadAxisUpdate` messages; `showVirtualKeyboard` is posted back. Touch
+ * input on the touch-gamepad host div belongs to universalTouchGamepad's own
+ * overlay, which it attaches on `TOUCH_GAMEPAD_SETUP`; DashboardOverlay drives
+ * that setup and visibility messaging.
+ * @module
+ */
+
 interface GamepadProps {
     isGamepadEnabled: boolean;
-    // Owned by DashboardOverlay (one source for the menu entry, the hotkey
-    // and this card): while the touch overlay is up the physical visualizer
-    // would only mirror it, so it is hidden.
+    /**
+     * Owned by DashboardOverlay, one source for the menu entry, the hotkey
+     * and this card: while the touch overlay is up the physical visualizer
+     * would only mirror it, so it is hidden.
+     */
     isTouchGamepadActive: boolean;
 }
 
+/**
+ * Renders the visualizers, or nothing while gamepad input is off and no pad
+ * has ever reported on a non-mobile client.
+ */
 export function Gamepad({ isGamepadEnabled, isTouchGamepadActive }: GamepadProps) {
     const isMobile = isMobileClient;
     const [gamepadStates, setGamepadStates] = React.useState<{ [key: string]: any }>({});
     const [hasReceivedGamepadData, setHasReceivedGamepadData] = React.useState(false);
 
-    // Add message event listener for status updates
     React.useEffect(() => {
         const handleWindowMessage = (event: MessageEvent) => {
             if (event.origin !== window.location.origin) return;
@@ -50,16 +67,11 @@ export function Gamepad({ isGamepadEnabled, isTouchGamepadActive }: GamepadProps
         return () => window.removeEventListener('message', handleWindowMessage);
     }, [hasReceivedGamepadData]);
 
-    // Touch input on the host div belongs to universalTouchGamepad's own overlay,
-    // which it attaches on TOUCH_GAMEPAD_SETUP; DashboardOverlay drives the
-    // setup/visibility messaging.
-
     const handleShowVirtualKeyboard = () => {
         window.postMessage({ type: 'showVirtualKeyboard' }, window.location.origin);
         console.log("Dashboard: Sending postMessage: { type: 'showVirtualKeyboard' }");
     };
 
-    // Show UI when gamepad is enabled, regardless of other conditions
     if (!isGamepadEnabled && !isMobile && !isTouchGamepadActive && !hasReceivedGamepadData) return null;
 
     return (

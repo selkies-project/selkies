@@ -4,27 +4,38 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// src/components/PlayerGamepadButton.jsx
+/**
+ * Floating touch-gamepad toggle for the player clients.
+ * @module
+ */
 import React from "react";
 import { getTranslator } from "../translations";
 
+/** Id of the element the touch gamepad overlay is mounted in. */
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
+/** Pointer travel in pixels beyond which a press is a drag rather than a click. */
 const DRAG_THRESHOLD = 10;
 
-// Browser language is fixed for the life of the document (same policy as the
-// sidebar), so the translator is resolved once.
+/** Resolved once: the browser language is fixed for the life of the document. */
 const { t } = getTranslator(typeof navigator !== "undefined" ? navigator.language : "en");
 
+/** Four-way arrow glyph drawn on the toggle. */
 const GamepadIcon = () => (
     <svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28">
       <path d="M15 7.5V2H9v5.5l3 3 3-3zM7.5 9H2v6h5.5l3-3-3-3zM9 16.5V22h6v-5.5l-3-3-3 3zM16.5 9l-3 3 3 3H22V9h-5.5z" />
     </svg>
 );
 
-// Floating, draggable touch-gamepad toggle for the #player2..#player4
-// clients, which render no dashboard. Always visible: these slots exist to
-// contribute gamepad input, so the toggle must be reachable on any device
-// without depending on touch detection.
+/**
+ * Draggable button that shows and hides the touch gamepad for the `#player2`
+ * to `#player4` clients, which render no dashboard.
+ *
+ * Always visible rather than gated on touch detection: these slots exist to
+ * contribute gamepad input, so the toggle must be reachable on any device.
+ * The first activation posts `TOUCH_GAMEPAD_SETUP` to the window, later
+ * toggles post `TOUCH_GAMEPAD_VISIBILITY`; a press that travels further than
+ * `DRAG_THRESHOLD` moves the button instead of toggling.
+ */
 function PlayerGamepadButton() {
     const [isTouchGamepadActive, setIsTouchGamepadActive] = React.useState(false);
     const [isTouchGamepadSetup, setIsTouchGamepadSetup] = React.useState(false);
@@ -107,8 +118,6 @@ function PlayerGamepadButton() {
         handleToggleTouchGamepad();
     };
 
-    // Same wording as the sidebar's touch-gamepad button: the title names the
-    // action the click performs.
     const title = t(isTouchGamepadActive
         ? "sections.gamepads.touchDisableTitle"
         : "sections.gamepads.touchEnableTitle");

@@ -14,22 +14,46 @@ subsystem changes; update the docstring at the site instead.
 
 ## Comments and documentation
 
-Keep comments terse and current: no comments that read like a PR summary, no inline comments, no issue or task
-numbers, no narration of what the code used to do. A comment describes the present state of the code for a
-developer or an LLM.
+Keep comments terse and current: no comments that read like a PR summary, no issue or task numbers, no narration
+of what the code used to do, and an inline comment only for a line-level invariant a docblock cannot carry. A
+comment describes the present state of the code for a developer or an LLM.
 
-Python follows a fixed standard: Google-style docstrings plus type hints on signatures, kept as you touch code.
-Modules, classes, and any function that is not trivially self-describing carry a docstring (summary line, then
-`Args:`/`Returns:`/`Raises:` only where non-obvious; never pad trivial helpers). Rationale that explains a whole
-function belongs in its docstring, not in a block comment above it; contrasting with a rejected design alternative
-is good rationale, narrating past revisions is forbidden. Type hints must stay Python-3.9-safe: `Optional`/`Union`
-from `typing`, no `X | Y`, no new `from __future__ import annotations`, and conditionally imported types (pixelflux,
-pcmflux, Xlib) never appear in runtime-evaluated annotations — use `Any` rather than guess; a wrong hint is worse
-than none. The website's Developer Reference is generated from these docstrings (fumadocs-python/griffe via
-`website/scripts/generate-python-docs.mjs`; output is gitignored, never committed) and rendered as MDX, so keep
-anything shaped like `<name>` or containing braces inside backticks. The vendored forks `src/selkies/Xlib`,
-`src/selkies/webrtc`, and `src/selkies/ice` keep upstream documentation style for diffability and are excluded
-from the reference; only Selkies-added comments there follow these rules.
+Every language follows one shape: a Google-style docblock on the module, on every class, and on every function
+that is not trivially self-describing, with the types on the signature. A docblock opens with a summary line, then
+parameters, return value and exceptions only where non-obvious; never pad trivial helpers. Rationale that explains
+a whole function belongs in its docblock, not in a block comment above it; contrasting with a rejected design
+alternative is good rationale, narrating past revisions is forbidden. A module's docblock carries the mechanism
+and rationale the module implements — a fallback ladder, a wire framing, the `window` contract a streaming core
+publishes for the dashboards. The website's Developer Reference is generated from these docblocks on every site
+build and never committed (`docs/reference` is gitignored; `website/scripts/generate-python-docs.mjs` and
+`website/scripts/generate-web-docs.mjs`), rendered from Markdown, so keep anything shaped like `<name>` or
+containing braces inside backticks.
+
+- Python: Google-style docstrings (`Args:`/`Returns:`/`Raises:`) plus type hints on signatures, kept as you touch
+  code. Hints must stay Python-3.9-safe: `Optional`/`Union` from `typing`, no `X | Y`, no new
+  `from __future__ import annotations`, and conditionally imported types (pixelflux, pcmflux, Xlib) never appear in
+  runtime-evaluated annotations — use `Any` rather than guess; a wrong hint is worse than none. Extracted by
+  fumadocs-python (griffe).
+- TypeScript (`.ts`/`.tsx`): JSDoc blocks with `@param name description`, `@returns`, `@throws`, and no types in
+  the tags — the signature is the type hint, and a type repeated in a tag is a second copy to drift. Props are an
+  `interface` or `type` with a line per field.
+- JavaScript (`.js`/`.jsx`): the same JSDoc blocks, but the tags carry the types (`@param {Type} name`,
+  `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks) because nothing else does. The wish
+  dashboard's `tsc` compiles `selkies-web-core/lib` through `allowJs`, so these types are checked contracts, not
+  prose: a `@type` on an exported constant replaces its inferred type for every TypeScript consumer.
+- Both: a `/** ... @module */` block after the license header is the module docstring; `_`-prefixed members are
+  private and hidden from the reference; a React component documents what it renders and which core messages or
+  `window` state it consumes. Extracted by TypeDoc, which reads JavaScript through the TypeScript compiler's JSDoc
+  support, so a tag it does not know (`@constructor`) is a warning at build time. Every function with a docblock
+  is documented, exported or not (`website/scripts/web-reference-plugin.mjs`), so a closure's docblock is
+  reference material, not a private note.
+
+Vendored code keeps upstream documentation style for diffability and is excluded from the reference: the Python
+forks `src/selkies/Xlib`, `src/selkies/webrtc` and `src/selkies/ice`, and the shadcn/ui primitives under
+`addons/selkies-dashboard-wish/src/components/ui`; only Selkies-added comments there follow these rules. The
+translation tables and the build helpers (`copy-*.js`, `gendb.js`, the vite and eslint configs) are excluded too.
+The remaining addons (interposers, fake-udev, universal-touch-gamepad, the containers) are covered by their
+READMEs and `docs/component.md` rather than the reference.
 
 Update the translations whenever user-facing strings change, adding entries where necessary.
 

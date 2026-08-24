@@ -15,7 +15,21 @@ import {
 import { getLastServerSettings, getPrefixedKey } from "@/utils";
 import { t } from "@/i18n";
 
-// Declare global window properties
+/**
+ * The stats panel: radial gauges for CPU, GPU, memory, FPS, audio level,
+ * bandwidth and latency, in a compact strip or a detailed view.
+ *
+ * Every figure is polled from the `window` state the streaming cores
+ * publish (`system_stats`, `gpu_stats`, `network_stats`, `fps`,
+ * `currentAudioLevel`, `currentAudioBufferSize`). Gauges scale to what the
+ * session is configured for rather than arbitrary ceilings: the FPS gauge to
+ * the configured framerate and the bandwidth gauge to the configured video
+ * plus audio bitrate, an explicit client choice in localStorage winning over
+ * the server's value.
+ * @module
+ */
+
+/** The stats the streaming cores publish on `window`. */
 declare global {
 	interface Window {
 		system_stats?: {
@@ -39,8 +53,10 @@ declare global {
 			bandwidth_mbps?: number;
 			latency_ms?: number;
 		};
-		// Set by the dashboard around a transport switch so the active core
-		// suppresses the expected "Server disconnected" alert from the old peer.
+		/**
+		 * Set by the dashboard around a transport switch so the active core
+		 * suppresses the expected "Server disconnected" alert from the old peer.
+		 */
 		__selkiesModeSwitching?: boolean;
 	}
 }
@@ -55,6 +71,7 @@ interface RadialGaugeProps {
 	size: number;
 }
 
+/** One gauge: a recharts radial bar with the value in its center. */
 function RadialGauge({ metric, size }: RadialGaugeProps) {
 	const percentage = (metric.current / metric.max) * 100;
 	const scaleFactor = size / 100;
@@ -120,10 +137,16 @@ function RadialGauge({ metric, size }: RadialGaugeProps) {
 }
 
 const STATS_READ_INTERVAL_MS = 500;
-// Audio level (RMS, 0..1) for the WebRTC stream's audio track via a dashboard-owned
-// AnalyserNode (never routed to a destination, so playback is unaffected). The
-// websockets worklet path exposes window.currentAudioLevel instead.
+/** A dashboard-owned analyser on the stream's audio track. */
 type AudioMeter = { ctx: AudioContext; analyser: AnalyserNode; data: Uint8Array<ArrayBuffer>; stream: MediaStream };
+/**
+ * Audio level (RMS, 0 to 1) of the WebRTC stream's audio track via a
+ * dashboard-owned AnalyserNode, never routed to a destination so playback is
+ * unaffected. The websockets worklet path exposes `window.currentAudioLevel`
+ * instead.
+ * @param meterRef Holds the analyser across calls; rebuilt when the stream changes.
+ * @returns The level, or null when the stream has no audio track or no analyser could be built.
+ */
 function readStreamAudioLevel(meterRef: { current: AudioMeter | null }): number | null {
 	const el = document.getElementById("stream") as HTMLVideoElement | null;
 	const ms = el && (el.srcObject as MediaStream | null);
@@ -157,11 +180,12 @@ const MAX_LATENCY_MS = 1000;
 const DEFAULT_VIDEO_BITRATE_KBPS = 8000;
 const DEFAULT_AUDIO_BITRATE_BPS = 128000;
 
-// The bandwidth gauge reads full at the traffic the session is CONFIGURED to
-// use (video target + audio), not an arbitrary link speed — at 8 Mbps
-// configured, 8 Mbps of traffic is a full circle. Explicit client choice
-// (localStorage) wins over the server's configured value. video_bitrate is
-// kbps on the wire and in storage.
+/**
+ * The traffic the session is configured to use, video target plus audio, in
+ * Mbps: at 8 Mbps configured, 8 Mbps of traffic is a full bandwidth gauge.
+ * An explicit client choice in localStorage wins over the server's value;
+ * `video_bitrate` is kbps on the wire and in storage.
+ */
 function configuredMaxBandwidthMbps(): number {
 	const settings = getLastServerSettings();
 	const storedVideo = parseFloat(localStorage.getItem(getPrefixedKey('video_bitrate')) ?? '');
@@ -175,8 +199,11 @@ function configuredMaxBandwidthMbps(): number {
 	return Math.max(0.1, videoKbps / 1000 + audioBps / 1_000_000);
 }
 
-// The FPS gauge reads full at the framerate the session is configured to push.
-// Explicit client choice (localStorage) wins over the server's configured value.
+/**
+ * The framerate the session is configured to push, the full reading of the
+ * FPS gauge. An explicit client choice in localStorage wins over the server's
+ * value.
+ */
 function configuredFramerateMax(): number {
 	const settings = getLastServerSettings();
 	const stored = parseFloat(localStorage.getItem(getPrefixedKey('framerate')) ?? '');
@@ -185,6 +212,15 @@ function configuredFramerateMax(): number {
 	return fps > 0 ? fps : 60;
 }
 
+/**
+ * Renders the gauges, polling the core's `window` stats twice a second.
+ *
+ * The audio level is read on one scale for both transports: the websockets
+ * worklet exports a final 0 to 100 level (RMS times 141, a full-scale sine
+ * reading 100), and the WebRTC analyser fallback's raw RMS gets the same
+ * mapping. Only metrics with data are shown; video bitrate is omitted since
+ * it duplicates the bandwidth stat.
+ */
 export function SystemMonitoring() {
 	const [isDetailedView, setIsDetailedView] = useState(false);
 	const [clientFps, setClientFps] = useState(0);
@@ -203,7 +239,6 @@ export function SystemMonitoring() {
 	const [maxBandwidthMbps, setMaxBandwidthMbps] = useState(configuredMaxBandwidthMbps);
 	const [latencyMs, setLatencyMs] = useState(0);
 
-	// Read stats periodically
 	useEffect(() => {
 		const readStats = () => {
 			const currentSystemStats = window.system_stats;
@@ -224,9 +259,6 @@ export function SystemMonitoring() {
 			setGpuMemPercent((gpuMemUsed !== null && gpuMemTotal !== null && gpuMemTotal > 0) ? (gpuMemUsed / gpuMemTotal) * 100 : 0);
 
 			setClientFps(window.fps ?? 0);
-			// The websockets worklet exports a FINAL 0-100 level (RMS ×141, full-scale
-			// sine = 100); the analyser fallback (WebRTC) returns raw RMS 0..1 — apply
-			// the same ×141 mapping so both transports read on one scale.
 			const coreLevel = (window as unknown as { currentAudioLevel?: number }).currentAudioLevel;
 			const level = typeof coreLevel === "number"
 				? coreLevel
@@ -249,10 +281,9 @@ export function SystemMonitoring() {
 		return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 	};
 
-	// Performance status helper functions
+	/** Status label and colors for a reading; the audio level is an activity indicator, not a pressure gauge. */
 	const getPerformanceStatus = (value: number, type: 'percentage' | 'fps' | 'latency' | 'audio' | 'bandwidth') => {
 		switch (type) {
-			// CPU, GPU, and memory usage
 			case 'percentage':
 				if (value <= 60) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
 				if (value <= 80) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
@@ -263,18 +294,15 @@ export function SystemMonitoring() {
 				if (value >= 30) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
 				return { status: 'low', color: 'text-red-500', bg: 'bg-red-500/10' };
 
-			// Network latency in ms
 			case 'latency':
 				if (value <= 50) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
 				if (value <= 100) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
 				return { status: 'high', color: 'text-red-500', bg: 'bg-red-500/10' };
 
-			// Output level (0-100%): activity indicator, not a pressure gauge
 			case 'audio':
 				if (value >= 95) return { status: 'clipping', color: 'text-red-500', bg: 'bg-red-500/10' };
 				return { status: 'ok', color: 'text-green-500', bg: 'bg-green-500/10' };
 
-			// Bandwidth in Mbps
 			case 'bandwidth':
 				if (value >= 50) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
 				if (value >= 25) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
@@ -285,20 +313,15 @@ export function SystemMonitoring() {
 		}
 	};
 
-	// Check which metrics have data available (same logic as detailed view)
 	const hasCpuData = true;
 	const hasGpuData = window.gpu_stats?.gpu_percent !== undefined || window.gpu_stats?.utilization_gpu !== undefined || gpuPercent > 0;
 	const hasSysMemData = window.system_stats?.mem_used !== undefined && window.system_stats?.mem_total !== undefined && sysMemUsed !== null && sysMemTotal !== null;
 	const hasGpuMemData = window.gpu_stats?.mem_used !== undefined || window.gpu_stats?.memory_used !== undefined || window.gpu_stats?.used_gpu_memory_bytes !== undefined || gpuMemUsed !== null;
 	const hasFpsData = true;
-	// Audio buffer: the websockets worklet frame count, or in WebRTC a proxy from the
-	// RTCInboundRtpStreamStats de-jitter depth. Video bitrate is omitted — it duplicates
-	// the Bandwidth stat.
 	const hasAudioData = true;
 	const hasBandwidthData = true;
 	const hasLatencyData = true;
 
-	// Create metrics array for recharts - only include metrics that have data
 	const allMetrics = [
 		{
 			name: t('sections.stats.cpuLabel'),
@@ -331,8 +354,6 @@ export function SystemMonitoring() {
 		{
 			name: t('sections.stats.fpsLabel'),
 			current: Math.round(clientFps),
-			// Scale the gauge to the configured framerate (classic-dashboard parity):
-			// a 240 fps stream must not peg a gauge built for 60.
 			max: framerateMax,
 			fill: "hsl(220, 100%, 50%)",
 			hasData: hasFpsData
@@ -360,17 +381,14 @@ export function SystemMonitoring() {
 		}
 	];
 
-	// Filter to only show metrics that have data available
 	const metrics = allMetrics.filter(metric => metric.hasData);
 
-	// Detailed view as separate draggable panel
 	if (isDetailedView) {
 		return (
 			<div className="p-3 rounded-lg bg-card backdrop-blur-sm border shadow-sm w-auto cursor-grab hover:cursor-grab active:cursor-grabbing border bg-background/95 backdrop-blur-sm shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300">
 				<div className="flex items-center justify-between mb-4">
 					<h3 className="text-sm font-semibold text-card-foreground pointer-events-none">{t('stats.monitorTitle')}</h3>
 					<div className="flex items-center gap-2 pointer-events-auto">
-						{/* Toggle View Button */}
 						<Tooltip>
 							<TooltipTrigger asChild>
 								<Button
@@ -514,7 +532,6 @@ export function SystemMonitoring() {
 		);
 	}
 
-	// Compact view with recharts
 	return (
 		<div className="w-full bg-card backdrop-blur-sm border shadow-sm rounded-lg px-2 py-1 cursor-grab hover:cursor-grab active:cursor-grabbing">
 			<div className="flex items-center justify-between">
@@ -528,7 +545,6 @@ export function SystemMonitoring() {
 					))}
 				</div>
 				<div className="flex items-center gap-1 ml-2 pointer-events-auto">
-					{/* Toggle to Detailed View Button */}
 					<Tooltip>
 						<TooltipTrigger asChild>
 							<Button

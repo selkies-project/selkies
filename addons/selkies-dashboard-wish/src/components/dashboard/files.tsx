@@ -12,16 +12,29 @@ import { computeRenderableSettings, getLastServerSettings } from "@/utils";
 import { t } from "@/i18n";
 import { withSessionToken } from "../../../../selkies-web-core/lib/session-token.js";
 
+/**
+ * The files panel (upload and download buttons) and the Download Files
+ * dialog.
+ *
+ * The dialog is not rendered by the panel: the panel lives inside a menubar
+ * submenu, and Radix closes every open menu when the window blurs, which a
+ * click inside the file-manager iframe causes. A dialog mounted in the submenu
+ * would be torn down by that click, so TopMenu hosts `FilesDialog` beside the
+ * menubar, as it does the Apps modal, and only the request to open it comes
+ * from the panel. Uploads are requested with the `requestFileUpload` window
+ * event; `serverSettings` messages gate which buttons show.
+ * @module
+ */
+
 interface FilesProps {
-    // Opens the Download Files dialog. The dialog is NOT rendered here: this
-    // component lives inside a menubar submenu, and Radix closes every open
-    // menu when the window blurs, which a click inside the file-manager iframe
-    // causes. A dialog mounted in the submenu would be torn down by that
-    // click, so TopMenu hosts FilesDialog beside the menubar (as it does the
-    // Apps modal) and only the request to open it comes from here.
+    /** Opens the Download Files dialog hosted by TopMenu. */
     onOpenDownloads?: () => void;
 }
 
+/**
+ * Renders the upload and download buttons the server settings allow, or
+ * nothing when both are disabled.
+ */
 export function Files({ onOpenDownloads }: FilesProps) {
     const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
 
@@ -29,8 +42,6 @@ export function Files({ onOpenDownloads }: FilesProps) {
         window.dispatchEvent(new CustomEvent('requestFileUpload'));
     };
 
-    // The upload and command notices are raised by UploadNotifications, which
-    // stays mounted while this panel is closed.
     useEffect(() => {
         const handleWindowMessage = (event: MessageEvent) => {
             if (event.origin !== window.location.origin) return;
@@ -81,9 +92,12 @@ interface FilesDialogProps {
     onOpenChange: (open: boolean) => void;
 }
 
-// The Download Files dialog: the server's file index in an iframe, whose file
-// links are attachments. Mounted by TopMenu outside the menubar so a click in
-// the iframe (which blurs the window and closes the menus) leaves it open.
+/**
+ * The Download Files dialog: the server's file index in an iframe, whose
+ * file links are attachments. Mounted by TopMenu outside the menubar so a
+ * click in the iframe, which blurs the window and closes the menus, leaves
+ * it open.
+ */
 export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>

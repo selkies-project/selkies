@@ -11,24 +11,27 @@
  * carry it themselves; in secure mode every other `/api/` route wants it too,
  * so every caller presents it the same way:
  *  - scripts put `Authorization: Bearer <token>` on their fetch/XHR calls
- *    (sessionAuthHeaders); the server accepts it beside Basic auth too, since
- *    a script's header replaces the browser's cached Basic credentials;
- *  - URLs the browser navigates to rather than fetches — the file-manager
- *    listing the dashboards open in an iframe — carry it as `?token=`
- *    (withSessionToken); the listing keeps it on its own links;
- *  - a same-site cookie scoped to the API prefix (installSessionCookie) covers
- *    anything the browser requests on its own, such as a download link or a
- *    listing opened by hand. It is a session cookie, so closing the browser
- *    clears it, and the next page load with a token overwrites it.
+ *    (`sessionAuthHeaders`); the server accepts it beside Basic auth too,
+ *    since a script's header replaces the browser's cached Basic credentials;
+ *  - URLs the browser navigates to rather than fetches, such as the
+ *    file-manager listing the dashboards open in an iframe, carry it as
+ *    `?token=` (`withSessionToken`); the listing keeps it on its own links;
+ *  - a same-site cookie scoped to the API prefix (`installSessionCookie`)
+ *    covers anything the browser requests on its own, such as a download link
+ *    or a listing opened by hand. It is a session cookie, so closing the
+ *    browser clears it, and the next page load with a token overwrites it.
  * A server outside secure mode ignores all three.
+ * @module
  */
 import { getRoutePrefix } from './util.js';
 
+/** Name of the API-scoped session cookie. */
 export const SESSION_TOKEN_COOKIE = 'selkies_token';
 
 /**
- * @returns {string} The page's session token, or '' when the page has none
- *     (legacy mode, or a context without a location).
+ * Reads the session token from the page URL.
+ * @returns {string} The token, or `''` when the page has none (legacy mode,
+ *     or a context without a location).
  */
 export function getSessionToken() {
     if (typeof window === 'undefined' || !window.location) return '';
@@ -41,8 +44,7 @@ export function getSessionToken() {
 
 /**
  * Request headers with the Bearer token added when the page holds one.
- *
- * @param {object} [headers] Headers to extend; returned untouched without a token.
+ * @param {object} [headers] Headers to extend; copied untouched without a token.
  * @returns {object} A plain header object.
  */
 export function sessionAuthHeaders(headers) {
@@ -57,7 +59,6 @@ export function sessionAuthHeaders(headers) {
 /**
  * A same-origin URL with the page's token appended as `?token=`, for URLs the
  * browser navigates to (an iframe src, a link) rather than fetches.
- *
  * @param {string} url Absolute or page-relative URL.
  * @returns {string} The URL as given without a token, else resolved and tokened.
  */
@@ -74,10 +75,12 @@ export function withSessionToken(url) {
 }
 
 /**
- * Mirror the page's token into the API-scoped session cookie. Called once by
- * each core at load; a page without a token leaves any existing cookie alone
- * (another tab may still be using it). Cookie writes a browser blocks leave
- * the header and query carriers, which is why this is best-effort.
+ * Mirrors the page's token into the API-scoped session cookie.
+ *
+ * Called once by each core at load. A page without a token leaves any
+ * existing cookie alone, since another tab may still be using it; a cookie
+ * write the browser blocks leaves the header and query carriers, which is
+ * why this is best-effort.
  */
 export function installSessionCookie() {
     const token = getSessionToken();

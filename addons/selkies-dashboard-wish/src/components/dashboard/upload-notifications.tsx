@@ -10,14 +10,23 @@ import { t } from "@/i18n";
 import { resolveFailedAppCommand } from "../../../../selkies-web-core/lib/app-commands.js";
 
 /**
- * Progress and failure notices the core sends on the file-upload channel:
- * uploads, clipboard-image refusals, and app commands that did not run.
+ * Toasts for the notices the core sends on the `fileUpload` message channel:
+ * upload progress and failures, clipboard-image refusals, and app commands
+ * that did not run.
+ * @module
+ */
+
+/**
+ * Renders nothing; it only listens.
  *
- * Rendered next to the toaster rather than inside the panel that triggers
- * them. A listener that lives in a menu is unmounted whenever that menu is
- * closed, and these arrive while the user is somewhere else in the interface
- * — an app install that failed has to settle its optimistic badge wherever
- * the notice lands.
+ * Mounted next to the toaster rather than inside the panel that triggers the
+ * notices. A listener that lives in a menu is unmounted whenever that menu is
+ * closed, and these arrive while the user is somewhere else in the
+ * interface: an app install that failed has to settle its optimistic badge
+ * wherever the notice lands. A warning carries an optional translation code
+ * (`clipboardSkip*`, `commandFailed`); the translator returns the key itself
+ * for an unknown code, since a future core may ship new ones, so the raw
+ * message is the fallback, as in the classic dashboard.
  */
 export function UploadNotifications() {
     useEffect(() => {
@@ -51,11 +60,6 @@ export function UploadNotifications() {
                 // update first; a stale launch match is lifecycle noise,
                 // not a notice.
                 if (code === 'commandFailed' && !resolveFailedAppCommand(errMsg)) return;
-                // e.g. a second upload started while one is in flight, or a
-                // clipboard-image skip from the core with a translation code.
-                // The translator returns the key itself for an unknown code
-                // (a future core may ship new ones), so the raw message is
-                // the fallback, as in the classic dashboard.
                 const codeKey = (typeof code === 'string' &&
                     (code.startsWith('clipboardSkip') || code === 'commandFailed'))
                     ? `notifications.${code}` : null;

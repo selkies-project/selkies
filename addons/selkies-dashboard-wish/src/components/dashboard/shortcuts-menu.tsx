@@ -9,6 +9,11 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { t } from "@/i18n";
 
+/**
+ * The keyboard-shortcuts card: the core-owned chords and the citation notice.
+ * @module
+ */
+
 const shortcuts = [
 	{ label: t('sections.shortcuts.fullscreen'), combo: "Ctrl + Shift + F" },
 	{ label: t('sections.shortcuts.openMenu'), combo: "Ctrl + Shift + M" },
@@ -16,6 +21,7 @@ const shortcuts = [
 	{ label: t('sections.shortcuts.pointerLock'), combo: "Ctrl + Shift + Left Click" },
 ];
 
+/** Renders the shortcut list. */
 export function ShortcutsMenu() {
 	return (
 		<Card className="w-[320px] bg-background/95 backdrop-blur-sm border shadow-sm">

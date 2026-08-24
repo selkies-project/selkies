@@ -4,12 +4,26 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// clipboard-worker.js
+/**
+ * Base64 codec for clipboard payloads, run off the main thread.
+ *
+ * `lib/clipboard-worker-bridge.js` posts `{id, action, payload, mimeType}`
+ * and receives `{id, success, result, mimeType, byteLength}` or
+ * `{id, success: false, error}`. `ENCODE_BINARY_TO_B64` takes an
+ * ArrayBuffer, `ENCODE_TEXT_TO_B64` a string, both answering with the base64
+ * text; `DECODE_FROM_B64` takes base64 and answers with a string for
+ * `text/plain`, else with a transferred ArrayBuffer. `byteLength` is the
+ * decoded size, which the bridge reports and compares against limits.
+ * @module
+ */
 
-// 32KB chunk size
+/** Bytes per `String.fromCharCode.apply` call, keeping its argument list bounded. */
 const CHUNK_SIZE = 0x8000;
 
-// Converts given string to base64 encoded string with UTF-8 format
+/**
+ * @param {string} text
+ * @returns {string} Base64 of the UTF-8 encoding of `text`.
+ */
 function stringToBase64(text) {
     const bytes = new TextEncoder().encode(text);
     let binString = "";
@@ -20,7 +34,10 @@ function stringToBase64(text) {
     return btoa(binString);
 }
 
-// Converts given base64 UTF-8 format encoded string to its original form
+/**
+ * @param {string} base64
+ * @returns {{text: string, byteLength: number}} The decoded UTF-8 text and its byte size.
+ */
 function base64ToString(base64) {
     const binString = atob(base64);
     const len = binString.length;
@@ -31,7 +48,10 @@ function base64ToString(base64) {
     return { text: new TextDecoder().decode(bytes), byteLength: len };
 }
 
-// Converts base64 encoded string to bytes
+/**
+ * @param {string} base64
+ * @returns {Uint8Array}
+ */
 function base64ToBytes(base64) {
     const binString = atob(base64);
     const len = binString.length;
@@ -42,7 +62,10 @@ function base64ToBytes(base64) {
     return bytes;
 }
 
-// Converts bytes to base64 encoded string
+/**
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
 function bytesToBase64(bytes) {
     let binString = "";
     for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
@@ -52,8 +75,7 @@ function bytesToBase64(bytes) {
     return btoa(binString);
 }
 
-
-// Worker Message Handler
+/** Dispatches one bridge request and posts its reply. */
 self.onmessage = function(e) {
     const { id, action, payload, mimeType } = e.data;
 
@@ -64,7 +86,6 @@ self.onmessage = function(e) {
             self.postMessage({ id, success: true, result: base64 });
         } 
         else if (action === 'ENCODE_TEXT_TO_B64') {
-            // payload is a standard string
             const base64 = stringToBase64(payload);
             self.postMessage({ id, success: true, result: base64 });
         }

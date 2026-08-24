@@ -8,19 +8,30 @@ import React from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { t } from "@/i18n";
 
+/**
+ * An SVG picture of one standard-layout pad with pressed buttons, trigger
+ * pressure and stick deflection drawn from the state the card keeps.
+ * @module
+ */
+
+/** Button value above which it is drawn as pressed. */
 const GAMEPAD_VIS_THRESHOLD = 0.1;
+/** Pixels of stick travel per unit of axis deflection. */
 const STICK_VIS_MULTIPLIER = 10;
 
+/** Button values and axis positions keyed by standard-layout index. */
 interface GamepadState {
   buttons: { [key: number]: number };
   axes: { [key: number]: number };
 }
 
 interface GamepadVisualizerProps {
+  /** Null renders a loading card. */
   gamepadState: GamepadState | null;
   gamepadIndex: number;
 }
 
+/** Draws the pad; the SVG ids carry the pad index so several can coexist. */
 export function GamepadVisualizer({ gamepadState, gamepadIndex }: GamepadVisualizerProps) {
   if (!gamepadState) {
     return (
@@ -35,28 +46,24 @@ export function GamepadVisualizer({ gamepadState, gamepadIndex }: GamepadVisuali
   const buttons = gamepadState.buttons || {};
   const axes = gamepadState.axes || {};
 
-  // Button Pressed Status (0-15)
+  /** Pressed-state class for a button: D-pad 12 to 15, bumpers 4 and 5, everything else. */
   const getButtonClass = (index: number): string => {
     const value = buttons[index] || 0;
     const pressed = value > GAMEPAD_VIS_THRESHOLD;
     if (!pressed) return '';
 
-    // D-Pad (12-15)
     if (index >= 12 && index <= 15) return 'gp-vis-dpad-pressed';
-    // Bumpers (4, 5)
     if (index === 4 || index === 5) return 'gp-vis-bumper-pressed';
-    // Face Buttons (0-3), Stick Clicks (10, 11), Special (8, 9)
     return 'gp-vis-button-pressed';
   };
 
-  // Trigger Opacity (6, 7)
+  /** Opacity for the triggers 6 and 7, half to full with pressure. */
   const getTriggerStyle = (index: number): React.CSSProperties => {
     if (index !== 6 && index !== 7) return {};
     const value = buttons[index] || 0;
     return { opacity: 0.5 + (value * 0.5) };
   };
 
-  // Stick Translation
   const getStickTransform = (xAxisIndex: number, yAxisIndex: number): string => {
     const x = axes[xAxisIndex] || 0;
     const y = axes[yAxisIndex] || 0;

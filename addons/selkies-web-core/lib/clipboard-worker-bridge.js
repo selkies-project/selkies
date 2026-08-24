@@ -1,9 +1,26 @@
+/**
+ * Off-main-thread base64 for clipboard payloads and the clipboard send path,
+ * shared by both transports.
+ *
+ * A per-byte `String.fromCharCode` + `btoa` build of a multi-MB clipboard
+ * blocks the main thread for seconds, freezing the video presentation and
+ * input dispatch that share it, so encode and decode run in
+ * clipboard-worker.js. Both transports emit the identical wire protocol to
+ * the same server handler: `cw` / `cb` as a single message, or the multipart
+ * `cws`+`cwd`+`cwe` / `cbs`+`cbd`+`cbe` sequence for large payloads. The
+ * server decodes each data chunk independently, so each raw chunk is
+ * base64-encoded on its own, never the whole payload encoded and then sliced
+ * as a string.
+ * @module
+ */
 import ClipboardWorker from '../clipboard-worker.js?worker&inline';
 
-// Off-main-thread base64 for clipboard payloads, shared by both transports. The
-// per-byte String.fromCharCode + btoa build of a multi-MB clipboard blocks the
-// main thread for seconds (freezing video presentation and input dispatch that
-// share it); this offloads encode/decode to clipboard-worker.js.
+/**
+ * Request/response bridge to the clipboard worker.
+ *
+ * The worker is created lazily on the first request and every call resolves
+ * with `{ result, mimeType, byteLength }` from the worker's reply.
+ */
 export class ClipboardWorkerBridge {
     constructor() {
         this.worker = null;
@@ -11,6 +28,7 @@ export class ClipboardWorkerBridge {
         this.msgId = 0;
     }
 
+    /** Creates the worker when it does not exist yet. */
     init() {
         if (!this.worker) {
             this.worker = new ClipboardWorker();
@@ -30,6 +48,7 @@ export class ClipboardWorkerBridge {
         }
     }
 
+    /** Stops the worker and rejects every pending request with an `AbortError`. */
     terminate() {
         if (!this.worker) return;
         this.worker.terminate();
@@ -44,6 +63,10 @@ export class ClipboardWorkerBridge {
         console.log("Clipboard Web Worker terminated and pending operations aborted.");
     }
 
+    /**
+     * @param {string} text UTF-8 text to encode.
+     * @returns {Promise<{result: string, mimeType: string, byteLength: number}>}
+     */
     async encodeText(text) {
         this.init();
         return new Promise((resolve, reject) => {
@@ -53,8 +76,13 @@ export class ClipboardWorkerBridge {
         });
     }
 
-    // Zero-copy transfer: the passed ArrayBuffer is neutered, so callers pass a
-    // buffer they own exclusively (a fresh/sliced copy, never a shared view).
+    /**
+     * Encodes a buffer with a zero-copy transfer: the buffer is neutered, so
+     * callers pass one they own exclusively (a fresh or sliced copy, never a
+     * shared view).
+     * @param {ArrayBuffer} arrayBuffer Bytes to encode; unusable afterwards.
+     * @returns {Promise<{result: string, mimeType: string, byteLength: number}>}
+     */
     async encodeBinary(arrayBuffer) {
         this.init();
         return new Promise((resolve, reject) => {
@@ -67,6 +95,11 @@ export class ClipboardWorkerBridge {
         });
     }
 
+    /**
+     * @param {string} base64String Payload to decode.
+     * @param {string} mimeType Type reported back with the decoded bytes.
+     * @returns {Promise<{result: *, mimeType: string, byteLength: number}>}
+     */
     async decode(base64String, mimeType) {
         this.init();
         return new Promise((resolve, reject) => {
@@ -77,10 +110,16 @@ export class ClipboardWorkerBridge {
     }
 }
 
-// Base64 one clipboard byte-run off the main thread. A fresh slice gives the
-// worker a buffer it can neuter via zero-copy transfer; on worker failure it
-// degrades to a chunked main-thread encode (still far cheaper than a per-byte
-// String.fromCharCode build).
+/**
+ * Base64-encodes one clipboard byte run off the main thread.
+ *
+ * A fresh slice gives the worker a buffer it can neuter through zero-copy
+ * transfer; on worker failure it degrades to a chunked main-thread encode,
+ * still far cheaper than a per-byte `String.fromCharCode` build.
+ * @param {ClipboardWorkerBridge} worker The bridge to encode through.
+ * @param {Uint8Array} bytes The run to encode; left untouched.
+ * @returns {Promise<string>} The base64 text.
+ */
 export async function encodeClipboardChunk(worker, bytes) {
     try {
         const copy = bytes.slice();
@@ -96,14 +135,25 @@ export async function encodeClipboardChunk(worker, bytes) {
     }
 }
 
-// Shared WS/WebRTC clipboard SEND. Both transports emit the identical wire
-// protocol (cw / cb single message; cws+cwd+cwe / cbs+cbd+cbe multipart) to the
-// same server handler, which decodes each data chunk INDEPENDENTLY — so each raw
-// chunk is base64'd on its own (never base64-whole-then-slice-the-string). Base64
-// runs off the main thread per chunk with a yield between, so a multi-MB clipboard
-// never blocks video presentation or input dispatch. Transport differences are
-// only the injected send() and waitDrain() (backpressure); returning false from
-// waitDrain aborts the transfer (channel closed).
+/**
+ * Sends a clipboard payload, as one message when it fits a chunk and as a
+ * multipart sequence otherwise.
+ *
+ * Each chunk is encoded off the main thread with a yield between chunks, so
+ * a multi-MB clipboard never blocks video presentation or input dispatch.
+ * The transports differ only in the injected `send` and `waitDrain`.
+ * @param {Uint8Array} bytes The payload.
+ * @param {string} mimeType `text/plain` selects the text messages, anything
+ *     else the binary ones.
+ * @param {object} io Transport hooks.
+ * @param {ClipboardWorkerBridge} io.worker The bridge to encode through.
+ * @param {(message: string) => void} io.send Sends one wire message.
+ * @param {(() => Promise<boolean|void>)=} io.waitDrain Awaited before every
+ *     chunk for backpressure; resolving `false` aborts the transfer (the
+ *     channel closed).
+ * @param {number} io.chunkRawBytes Raw bytes per chunk.
+ * @param {() => number|string} io.nextTid Allocates the multipart transfer id.
+ */
 export async function sendClipboardChunked(bytes, mimeType, { worker, send, waitDrain, chunkRawBytes, nextTid }) {
     const isText = mimeType === 'text/plain';
     const total = bytes.byteLength;

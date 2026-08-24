@@ -7,6 +7,12 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
 
+/**
+ * The shadcn/ui class-name helper the vendored primitives import.
+ * @module
+ */
+
+/** Joins class names and resolves conflicting Tailwind utilities. */
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }

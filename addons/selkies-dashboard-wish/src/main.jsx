@@ -4,7 +4,18 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// src/main.jsx
+/**
+ * Entry point of the wish dashboard.
+ *
+ * Probes `/api/status` for the server's streaming mode and dual-mode flag,
+ * publishes them as `window.__SELKIES_STREAMING_MODE__` and
+ * `window.__SELKIES_DUAL_MODE__`, waits for the runtime-served core script to
+ * expose `window.selkiesCoreInitialize` and starts it, then mounts the
+ * dashboard: the full `App` under `#root` for the primary display, only the
+ * floating gamepad button for the `#player2`..`#player4` hashes, and nothing
+ * for `#shared`.
+ * @module
+ */
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.tsx';
@@ -15,9 +26,16 @@ import { getRoutePrefix } from './utils.ts';
 // without a vendored copy in src/.
 import "../../universal-touch-gamepad/universalTouchGamepad.js";
 
-// Probe the server for the active streaming mode so the runtime-served core
-// (deferred via the inline flag in index.html) initializes into the right
-// transport even when localStorage disagrees with the server.
+/**
+ * Asks the server for the active streaming mode so the core (deferred via the
+ * inline flag in index.html) initializes into the right transport even when
+ * localStorage disagrees with the server. Also publishes whether the server
+ * permits switching transports, so the dashboard can show the
+ * WebSocket/WebRTC toggle before `serverSettings` arrive over the stream;
+ * otherwise a WebRTC session that never connects would leave no visible way
+ * back to WebSockets.
+ * @returns {Promise<void>}
+ */
 async function detectInitialMode() {
   try {
     const resp = await fetch(`${getRoutePrefix()}/api/status`, {
@@ -30,10 +48,6 @@ async function detectInitialMode() {
     if (data && data.current_mode) {
       window.__SELKIES_STREAMING_MODE__ = data.current_mode;
     }
-    // Expose whether the server permits switching transports, so the dashboard
-    // can show the WebSocket/WebRTC toggle even before serverSettings arrive
-    // over the stream — otherwise a WebRTC session that never connects would
-    // leave the user with no visible way back to WebSockets.
     if (data && typeof data.enable_dual_mode !== 'undefined') {
       window.__SELKIES_DUAL_MODE__ = !!data.enable_dual_mode;
     }
@@ -42,8 +56,13 @@ async function detectInitialMode() {
   }
 }
 
-// The core arrives as a separate runtime script (never bundled here); wait
-// for its loader to expose the deferred entry point.
+/**
+ * Waits for the core, which arrives as a separate runtime script and is never
+ * bundled here, to expose its deferred entry point.
+ * @param {number} [timeoutMs] Give-up deadline in milliseconds.
+ * @returns {Promise<void>}
+ * @throws {Error} When the core has not loaded by the deadline.
+ */
 async function waitForCore(timeoutMs = 10000) {
   const deadline = performance.now() + timeoutMs;
   while (typeof window.selkiesCoreInitialize !== 'function') {

@@ -4,16 +4,29 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// src/components/GamepadVisualizer.jsx
+/**
+ * SVG picture of one gamepad's live state for the sidebar's gamepads section.
+ * @module
+ */
 import { getTranslator } from "../translations";
 
+/** Button value above which a button is drawn as pressed. */
 const GAMEPAD_VIS_THRESHOLD = 0.1;
+/** Pixels a stick top moves per unit of axis deflection. */
 const STICK_VIS_MULTIPLIER = 10;
 
-// Browser language is fixed for the life of the document (same policy as the
-// sidebar), so the translator is resolved once.
+/** Resolved once: the browser language is fixed for the life of the document. */
 const { t } = getTranslator(typeof navigator !== "undefined" ? navigator.language : "en");
 
+/**
+ * Draws a standard-layout pad (Xbox naming) with pressed buttons, trigger
+ * pressure and stick deflection taken from the core's gamepad state.
+ * @param {object} props
+ * @param {{buttons?: Object<number, number>, axes?: Object<number, number>}|null} props.gamepadState
+ *     Standard-layout button values and axis positions; `null` until the pad
+ *     has reported.
+ * @param {number} props.gamepadIndex Pad slot, used in the title and element ids.
+ */
 function GamepadVisualizer({ gamepadState, gamepadIndex }) {
   if (!gamepadState) {
     return <div>{t("sections.gamepads.loadingGamepad", { index: gamepadIndex })}</div>;
@@ -22,30 +35,25 @@ function GamepadVisualizer({ gamepadState, gamepadIndex }) {
   const buttons = gamepadState.buttons || {};
   const axes = gamepadState.axes || {};
 
-  // --- Calculate Styles/Classes based on state ---
-
-  // Button Pressed Status (0-15)
+  /** Pressed-state class for a button: D-pad (12 to 15), bumpers (4, 5), or any other. */
   const getButtonClass = (index) => {
     const value = buttons[index] || 0;
     const pressed = value > GAMEPAD_VIS_THRESHOLD;
     if (!pressed) return '';
 
-    // D-Pad (12-15)
     if (index >= 12 && index <= 15) return 'gp-vis-dpad-pressed';
-    // Bumpers (4, 5)
     if (index === 4 || index === 5) return 'gp-vis-bumper-pressed';
-    // Face Buttons (0-3), Stick Clicks (10, 11), Special (8, 9)
     return 'gp-vis-button-pressed';
   };
 
-  // Trigger Opacity (6, 7)
+  /** Opacity of a trigger (6, 7) rising with its pressure. */
   const getTriggerStyle = (index) => {
     if (index !== 6 && index !== 7) return {};
     const value = buttons[index] || 0;
     return { opacity: 0.5 + (value * 0.5) };
   };
 
-  // Stick Translation
+  /** CSS transform moving a stick top by its two axes. */
   const getStickTransform = (xAxisIndex, yAxisIndex) => {
     const x = axes[xAxisIndex] || 0;
     const y = axes[yAxisIndex] || 0;
@@ -61,7 +69,6 @@ function GamepadVisualizer({ gamepadState, gamepadIndex }) {
     <div className="gamepad-visualizer-instance">
       <h4>{t("sections.gamepads.gamepadTitle", { index: gamepadIndex })}</h4>
       <svg viewBox="0 0 260 100" width="100%" height="100" className="gamepad-svg-vis">
-        {/* Base Rectangle */}
         <rect className="gp-vis-base" x="30" y="10" width="200" height="80" rx="10" ry="10" />
 
         {/* Bumpers (L1: 4, R1: 5) */}
@@ -88,13 +95,13 @@ function GamepadVisualizer({ gamepadState, gamepadIndex }) {
         <rect id={`gp-${gamepadIndex}-btn-14`} className={`gp-vis-dpad ${getButtonClass(14)}`} x="60" y="60" width="10" height="10" /> {/* Left */}
         <rect id={`gp-${gamepadIndex}-btn-15`} className={`gp-vis-dpad ${getButtonClass(15)}`} x="80" y="60" width="10" height="10" /> {/* Right */}
 
-        {/* Sticks */}
-        <g> {/* Left Stick Group */}
+        {/* Sticks (left: axes 0, 1 and L3: 10; right: axes 2, 3 and R3: 11) */}
+        <g> {/* Left */}
           <circle className="gp-vis-stick-base" cx="75" cy="30" r="12" />
           <circle id={`gp-${gamepadIndex}-stick-left`} className="gp-vis-stick-top" cx="75" cy="30" r="8" style={{ transform: leftStickTransform }} />
           <circle id={`gp-${gamepadIndex}-btn-10`} className={`gp-vis-button ${getButtonClass(10)}`} cx="75" cy="30" r="3" /> {/* L3 */}
         </g>
-        <g> {/* Right Stick Group */}
+        <g> {/* Right */}
           <circle className="gp-vis-stick-base" cx="155" cy="65" r="12" />
           <circle id={`gp-${gamepadIndex}-stick-right`} className="gp-vis-stick-top" cx="155" cy="65" r="8" style={{ transform: rightStickTransform }}/>
           <circle id={`gp-${gamepadIndex}-btn-11`} className={`gp-vis-button ${getButtonClass(11)}`} cx="155" cy="65" r="3" /> {/* R3 */}
