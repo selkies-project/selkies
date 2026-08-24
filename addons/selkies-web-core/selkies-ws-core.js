@@ -1930,6 +1930,7 @@ const initializeUI = () => {
   overlayInput.type = 'search';
   overlayInput.readOnly = false;
   overlayInput.autocomplete = 'off';
+  overlayInput.inputMode = 'none';
   overlayInput.id = 'overlayInput';
   videoContainer.appendChild(overlayInput);
 

@@ -1991,6 +1991,7 @@ export default function webrtc() {
 			overlayInput.type = 'search';
 			overlayInput.readOnly = false;
 			overlayInput.autocomplete = 'off';
+			overlayInput.inputMode = 'none';
 			overlayInput.id = 'overlayInput';
 
 			// prepare the video and audio elements
