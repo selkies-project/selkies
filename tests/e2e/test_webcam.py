@@ -5,7 +5,8 @@ server — over the WebSocket (WebCodecs frames) and over WebRTC (the camera
 track on the reserved sendonly transceiver) — and switch off again. Chromium
 captures a known-colour y4m file as its fake camera, so the device's pixels
 are checked, not just their presence; Firefox's synthetic fake camera proves
-the VP8/H.264 WebCodecs path and the Firefox WebRTC path deliver frames.
+the pinned JPEG rung (its WebSocket uplink is MJPEG by design, since it has
+no ``MediaStreamTrackProcessor``) and the Firefox WebRTC path deliver frames.
 The operator lock (``webcam_enabled=false|locked``) must withhold the uplink
 on both transports.
 
@@ -242,6 +243,9 @@ def transport_block(mode: str) -> "H.Results":
                 r = probe(30, samples=[(640, 360), (20, 20)])
                 res.check(f"{engine}: 30 frames reach /dev/video0", r.get("rc") == 0 and r.get("frames") == "30",
                           f"rc={r.get('rc')} frames={r.get('frames')} err={r.get('error', '')}")
+                # The process-wide camera came up I420 on chromium's encoded uplink and
+                # outlives it; firefox's WebSocket leg (the pinned JPEG rung, since it
+                # has no MediaStreamTrackProcessor) is decoded into that same device.
                 res.check(f"{engine}: device is the configured 1280x720 I420",
                           (r.get("format"), r.get("width"), r.get("height")) == ("YU12", "1280", "720"),
                           f"{r.get('format')} {r.get('width')}x{r.get('height')}")

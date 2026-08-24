@@ -1,10 +1,10 @@
 // Webcam capture for the WebSocket transport: getUserMedia video frames are
 // encoded in the page with WebCodecs (H.264 first, VP8 second) and handed to a
 // transport-supplied sender one encoded frame at a time; the server's virtual
-// camera decodes them. Engines without WebCodecs (no VideoEncoder, or no
-// VideoFrame at all) fall back to JPEG frames drawn from a canvas — the <video>
-// element itself when VideoFrame is missing — which the server passes on as an
-// MJPEG device or decodes just the same. The WebRTC
+// camera decodes them. Engines without WebCodecs, and engines whose only
+// frame source is a <video> element (no MediaStreamTrackProcessor on the page
+// or in a worker — Firefox), fall back to JPEG frames drawn from a canvas,
+// which the server passes on as an MJPEG device or decodes just the same. The WebRTC
 // transport does not use this class: it attaches the camera track to a
 // sendonly transceiver (lib/webrtc.js setWebcam) and the browser's own encoder
 // takes over.
@@ -21,7 +21,10 @@
 // offers: MediaStreamTrackProcessor on the page (Chromium), the standard
 // worker-only MediaStreamTrackProcessor with the track transferred into a
 // DedicatedWorker (Safari 18+), and a <video> element sampled with
-// requestVideoFrameCallback into VideoFrames (Firefox and anything else).
+// requestVideoFrameCallback (Firefox and anything else). The last rung pins
+// the JPEG path: with no track reader, every sample must be materialized on
+// the page thread, and pushing those through a (software) VideoEncoder loads
+// the page while the encoder drifts ever further behind real time.
 
 export const WEBCAM_CODEC_MJPEG = 0;
 export const WEBCAM_CODEC_H264 = 1;
@@ -484,7 +487,6 @@ export class WebcamCapture {
         if (m.type === "probed") {
           clearTimeout(timer);
           this._encodeWorker = worker;
-          this._logPath("encode: VideoEncoder in a worker (frames from the page)");
           done();
           return;
         }
@@ -543,7 +545,9 @@ export class WebcamCapture {
       this._logPath("capture: MediaStreamTrackProcessor in a worker");
       return worker;
     }
-    this._logPath("capture: <video> element sampled with requestVideoFrameCallback");
+    this._stopEncodeWorker();
+    this._candidateIndex = ENCODER_CANDIDATES.length;
+    this._logPath("capture: <video> element sampled with requestVideoFrameCallback (JPEG)");
     return this._videoSource(track, generation);
   }
 
@@ -655,7 +659,9 @@ export class WebcamCapture {
   }
 
   // <video> sampled with requestVideoFrameCallback; the element must stay in the
-  // DOM (visually inert) or engines stop decoding for it.
+  // DOM (visually inert) or engines stop decoding for it. The element itself is
+  // handed over: this source only runs with the JPEG rung pinned, and drawImage
+  // both reads it and bakes any orientation the engine knows.
   _videoSource(track, generation) {
     const video = document.createElement("video");
     video.muted = true;
@@ -666,40 +672,12 @@ export class WebcamCapture {
     video.srcObject = new MediaStream([track]);
     let handle = null;
     let timer = null;
-    let canvas = null;
-    let ctx = null;
     const sample = () => {
       if (this._generation !== generation) {
         return;
       }
-      if (video.readyState >= 2 && video.videoWidth > 0 && typeof VideoFrame === "undefined") {
-        // No WebCodecs at all: the JPEG rung draws the element itself.
+      if (video.readyState >= 2 && video.videoWidth > 0) {
         this._handleFrame(video);
-      } else if (video.readyState >= 2 && video.videoWidth > 0) {
-        let frame = null;
-        const timestamp = Math.round(performance.now() * 1000);
-        try {
-          frame = new VideoFrame(video, { timestamp });
-        } catch (error) {
-          // Engines that reject <video> as a VideoFrame source go through a canvas.
-          if (!canvas) {
-            canvas = document.createElement("canvas");
-            ctx = canvas.getContext("2d", { desynchronized: true, willReadFrequently: true });
-          }
-          if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-          }
-          try {
-            ctx.drawImage(video, 0, 0);
-            frame = new VideoFrame(canvas, { timestamp });
-          } catch (e) {
-            frame = null;
-          }
-        }
-        if (frame) {
-          this._handleFrame(frame);
-        }
       }
       if (video.requestVideoFrameCallback) {
         handle = video.requestVideoFrameCallback(sample);
@@ -726,8 +704,8 @@ export class WebcamCapture {
 
   // --- encoding -----------------------------------------------------------
 
-  // Every source lands here with one VideoFrame the receiver owns (or, without
-  // WebCodecs, the <video> element); a frame is always closed.
+  // Every source lands here with one VideoFrame the receiver owns (or, on the
+  // pinned JPEG rung, the <video> element); a frame is always closed.
   _handleFrame(frame) {
     if (!this._active || !this._canSend()) {
       closeFrame(frame);
@@ -744,6 +722,7 @@ export class WebcamCapture {
       // worker throws, so drop back to encoding on this thread from here.
       try {
         this._encodeWorker.postMessage({ type: "frame", frame }, [frame]);
+        this._logPath("encode: VideoEncoder in a worker (frames from the page)");
         this._lastSendMs = now;
         return;
       } catch (error) {
@@ -918,7 +897,7 @@ export class WebcamCapture {
     const w = sideways ? dh : dw;
     const h = sideways ? dw : dh;
     if (!this._canvas) {
-      this._logPath("encoder: JPEG through OffscreenCanvas (no usable VideoEncoder)");
+      this._logPath("encoder: JPEG through OffscreenCanvas");
       this._canvas = new OffscreenCanvas(w, h);
       this._ctx = this._canvas.getContext("2d", { alpha: false, desynchronized: true });
     } else if (this._canvas.width !== w || this._canvas.height !== h) {
