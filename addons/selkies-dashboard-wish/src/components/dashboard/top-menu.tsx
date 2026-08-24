@@ -163,8 +163,8 @@ export function TopMenu({
     );
   }, [activePanel, showSystemMonitoring]);
 
-  // Entering fullscreen (button, Ctrl+Shift+F, or browser UI) folds the dashboard so
-  // pointer lock isn't fighting an open panel.
+  // Entering fullscreen (button, gaming mode, Ctrl+Shift+F, or browser UI) folds the
+  // dashboard so the user lands in the session.
   React.useEffect(() => {
     const foldOnFullscreen = () => {
       if (document.fullscreenElement) {
@@ -881,8 +881,8 @@ export function TopMenu({
                       if (document.fullscreenElement) {
                         document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
                       } else {
-                        // The core fullscreens the stream container (pointer-lock aware).
-                        window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
+                        document.documentElement.requestFullscreen()
+                          .catch(err => console.error("Fullscreen request failed:", err));
                       }
                     }}
                   >

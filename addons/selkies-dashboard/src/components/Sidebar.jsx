@@ -728,8 +728,8 @@ const clampToggleHandleTopPct = (pct) => {
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
   const [isToggleVisible, setIsToggleVisible] = useState(true);
-  const [isBrowserFullscreen, setIsBrowserFullscreen] = useState(
-    () => typeof document !== "undefined" && !!document.fullscreenElement
+  const [isGamingMode, setIsGamingMode] = useState(
+    () => typeof document !== "undefined" && !!document.fullscreenElement && !!window.webrtcInput?.gamingMode
   );
   // Viewer-designated clients (shared/player URL modes, or a server-assigned
   // viewer role) must not see server-wide controls like the transport switch.
@@ -746,11 +746,12 @@ function Sidebar() {
     window.postMessage({ type: 'sidebarVisibilityChanged', isOpen: isOpen }, window.location.origin);
   }, [isOpen]);
   // Entering fullscreen (button, Ctrl+Shift+F, or browser UI) folds the dashboard so
-  // pointer lock isn't fighting an open sidebar.
+  // the user lands in the session; gaming mode also hides the toggle so pointer
+  // lock isn't fighting it.
   useEffect(() => {
     const foldOnFullscreen = () => {
       const fullscreen = !!document.fullscreenElement;
-      setIsBrowserFullscreen(fullscreen);
+      setIsGamingMode(fullscreen && !!window.webrtcInput?.gamingMode);
       if (fullscreen) setIsOpen(false);
     };
     document.addEventListener("fullscreenchange", foldOnFullscreen);
@@ -2678,7 +2679,7 @@ function Sidebar() {
 
   return (
     <>
-      {isToggleVisible && !isBrowserFullscreen && (
+      {isToggleVisible && !isGamingMode && (
         <div
           className='toggle-handle'
           onClick={onToggleHandleClick}

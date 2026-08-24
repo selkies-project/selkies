@@ -1421,8 +1421,8 @@ export default function webrtc() {
 				}
 				break;
 			case 'requestFullscreen':
-				// Parity with the websockets core: fullscreen the stream container
-				// (pointer-lock aware) rather than the whole document.
+				// Gaming mode (fullscreen plus pointer and keyboard lock), parity
+				// with the websockets core.
 				if (input) {
 					input.enterFullscreen();
 				} else if (document.fullscreenElement === null) {

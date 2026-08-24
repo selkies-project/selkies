@@ -1207,6 +1207,7 @@ export class Input {
         this._pendingMove = null;
         this._moveFlushScheduled = false;
         this.onmenuhotkey = null;
+        this.gamingMode = false;
         this.onfullscreenhotkey = this.enterFullscreen;
         this.ongamepadhotkey = null;
         this.ongamepadconnected = null;
@@ -2162,10 +2163,10 @@ export class Input {
             event.preventDefault();
             return;
         }
-        // Fullscreen must hold pointer lock: re-arm it when a click lands on
+        // Gaming mode must hold pointer lock: re-arm it when a click lands on
         // the stream after an in-fullscreen Escape unlock. The click itself
         // still goes to the server.
-        if (down && event.button === 0) {
+        if (down && event.button === 0 && this.gamingMode) {
             this._armPointerLock();
         }
         if (this._isStreamLocked()) {
@@ -3337,7 +3338,7 @@ export class Input {
      * (WrongDocumentError), so retry over a few short intervals.
      */
     _armPointerLock(attempt = 0) {
-        if (this.isSharedMode || !this._isStreamFullscreen()) return;
+        if (this.isSharedMode || !this.gamingMode || !this._isStreamFullscreen()) return;
         if (this._isStreamLocked()) return;
         this._requestPointerLock(this.element, () => this._armPointerLock(attempt), (err) => {
             if (attempt < 5) {
@@ -3350,12 +3351,13 @@ export class Input {
 
     _onFullscreenChange() {
         if (this._isStreamFullscreen()) {
-            if (!this.isSharedMode) {
+            if (!this.isSharedMode && this.gamingMode) {
                 this._armPointerLock();
                 this.requestKeyboardLock();
             }
-        } else if (this._isStreamLocked()) {
-            document.exitPointerLock();
+        } else {
+            this.gamingMode = false;
+            if (this._isStreamLocked()) document.exitPointerLock();
         }
         // A fullscreen transition can eat keyups (held Escape on exit, the
         // Ctrl-Shift-F chord on entry): release everything on both sides.
@@ -3477,7 +3479,7 @@ export class Input {
         this.listeners_context.push(addListener(window, 'mousemove', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(window, 'mouseup', this._mouseButtonMovement, this));
 
-        if (this._isStreamFullscreen()) {
+        if (this._isStreamFullscreen() && this.gamingMode) {
              this._armPointerLock();
              this.requestKeyboardLock();
         } else if (this._isStreamLocked()) {
@@ -3555,20 +3557,22 @@ export class Input {
     }
 
     enterFullscreen() {
+        // Gaming mode: fullscreen plus pointer and keyboard lock. gamingMode
+        // is what distinguishes it from a plain fullscreen of the same
+        // document, which arms nothing; it clears when fullscreen exits.
         // Fullscreen the whole document, not just the stream container: the
         // dashboard overlay is a body-level sibling of the container, so
         // container fullscreen would hide the menu/settings/toggle entirely.
-        // Whole-document keeps them reachable and doesn't change pointer lock
-        // or keyboard-lock (long-press-Escape) behavior, which are independent
-        // of the fullscreened element.
         // A lock requested before the transition would be cancelled by it; the
         // fullscreenchange handler arms it once fullscreen lands (still inside
         // the gesture's transient-activation window).
+        this.gamingMode = true;
         if (document.fullscreenElement === null) {
             document.documentElement.requestFullscreen()
                 .catch(err => console.error("Fullscreen request failed:", err));
         } else {
             this._armPointerLock();
+            this.requestKeyboardLock();
         }
     }
 
