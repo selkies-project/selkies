@@ -38,7 +38,7 @@ try:
     import pulsectl_asyncio
 
     PULSE_AVAILABLE = True
-except ImportError:
+except (ImportError, OSError):
     pulsectl_asyncio = None
     PULSE_AVAILABLE = False
 
