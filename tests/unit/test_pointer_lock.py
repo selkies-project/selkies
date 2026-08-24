@@ -7,9 +7,9 @@ between how far a hand moved and how far the remote pointer went. The client
 asks for the raw deltas instead, and every engine on Linux and Android refuses
 that with NotSupportedError -- which
 must still end in a lock, must not be mistaken for a real failure, and must not
-slip past the guards the fullscreen caller checked before it asked. The checks
-live in tests/tools/pointer_lock_audit.mjs, because the path under test is
-JavaScript.
+slip past the guards the gaming-mode fullscreen caller checked before it
+asked. The checks live in tests/tools/pointer_lock_audit.mjs, because the path
+under test is JavaScript.
 """
 import os
 import shutil

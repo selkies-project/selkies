@@ -79,7 +79,7 @@ jobs:
           # selkies.stream_server, so their module-level imports have to
           # resolve; everything below that is lazy, which is what keeps this
           # tier off the capture and WebRTC stacks
-          python -m pip install pytest aiofiles msgpack Pillow aiohttp prometheus_client psutil
+          python -m pip install pytest aiofiles msgpack Pillow aiohttp prometheus_client psutil watchdog
           python -m pytest tests -m unit -v --junitxml=unit-report.xml
       - name: Fail if any suite skipped
         if: ${{ !cancelled() }}

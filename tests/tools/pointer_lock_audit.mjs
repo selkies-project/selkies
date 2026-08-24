@@ -8,10 +8,10 @@
 // (unadjustedMovement), which every engine on Linux and Android refuses with
 // NotSupportedError, so the refusal has to end in a plain lock rather than in
 // no lock at all -- and it has to be remembered, or every lock pays for a
-// refused request. The fullscreen caller guards its request (stream fullscreen,
-// not already locked, not a shared viewer); the request it re-runs after a
-// refusal must pass those guards again, since the page can leave fullscreen
-// while the first one is still pending.
+// refused request. The fullscreen caller guards its request (gaming mode, stream
+// fullscreen, not already locked, not a shared viewer); the request it re-runs
+// after a refusal must pass those guards again, since the page can leave
+// fullscreen while the first one is still pending.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -60,6 +60,7 @@ function makeInput(element) {
     const input = Object.create(Input.prototype);
     input.element = element;
     input.isSharedMode = false;
+    input.gamingMode = true;
     return input;
 }
 
@@ -171,8 +172,12 @@ function reset(element) {
     document.pointerLockElement = null;
     input.isSharedMode = true;
     input._armPointerLock();
+    input.isSharedMode = false;
+    // A plain fullscreen of the same document is not gaming mode
+    input.gamingMode = false;
+    input._armPointerLock();
     await sleep(10);
-    check('no fullscreen lock outside fullscreen, when locked, or when shared',
+    check('no fullscreen lock outside fullscreen or gaming mode, when locked, or when shared',
           element.calls.length === 0, element.calls.join(','));
 }
 
