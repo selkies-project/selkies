@@ -110,14 +110,19 @@ def main() -> int:
 
     try:
         import pixelflux
-        layout = dict(pixelflux.VirtualCamera.shm_layout())
+        cam = getattr(pixelflux, "VirtualCamera", None)
+    except ImportError:
+        cam = None
+    if cam is None:
+        print("SKIP  no importable pixelflux with a virtual camera; "
+              "checking the C side against the pinned layout only")
+    else:
+        layout = dict(cam.shm_layout())
         layout["ctrl_fields"] = [tuple(x) for x in layout["ctrl_fields"]]
         check("pixelflux layout matches the pinned expectation", layout == EXPECTED,
               "" if layout == EXPECTED else f"pixelflux reports {layout}")
-        codecs = {n: getattr(pixelflux.VirtualCamera, "CODEC_" + n.upper()) for n in EXPECTED_CODECS}
+        codecs = {n: getattr(cam, "CODEC_" + n.upper()) for n in EXPECTED_CODECS}
         check("pixelflux codec ids match the pinned expectation", codecs == EXPECTED_CODECS, str(codecs))
-    except ImportError:
-        print("SKIP  pixelflux not importable; checking the C side against the pinned layout only")
 
     from selkies import webcam as wc
     ids = {"mjpeg": wc.CODEC_MJPEG, "h264": wc.CODEC_H264, "vp8": wc.CODEC_VP8, "vp9": wc.CODEC_VP9,

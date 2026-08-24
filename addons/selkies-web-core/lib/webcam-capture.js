@@ -9,6 +9,14 @@
 // sendonly transceiver (lib/webrtc.js setWebcam) and the browser's own encoder
 // takes over.
 //
+// Frame orientation: the upright transform is relayed with every encoded
+// frame instead of being drawn into the pixels. It is read from VideoFrame
+// rotation/flip where the engine exposes them, and derived from the window
+// orientation where it does not (Safari, whose camera frames keep the sensor's
+// fixed orientation). VideoEncoder rejects a mid-stream orientation change, so
+// the encoder is rebuilt whenever the value moves. The JPEG rung relays
+// nothing: drawImage bakes the orientation the engine knows.
+//
 // Frames are read off the track through the first of these that the engine
 // offers: MediaStreamTrackProcessor on the page (Chromium), the standard
 // worker-only MediaStreamTrackProcessor with the track transferred into a
@@ -38,6 +46,26 @@ const closeFrame = (frame) => {
 };
 // Frames the worker source may have in flight to the page before it drops.
 const WORKER_MAX_IN_FLIGHT = 2;
+
+// Whether VideoFrames carry their upright transform as readable metadata.
+const HAS_FRAME_ORIENTATION =
+  typeof VideoFrame !== "undefined" && typeof VideoFrame.prototype === "object" &&
+  "rotation" in VideoFrame.prototype;
+
+// The window orientation at which the camera sensor delivers upright frames:
+// -90 (landscape, camera edge at the bottom) on Apple tablets.
+const SENSOR_UPRIGHT_ORIENTATION = -90;
+
+// Clockwise rotation that makes a sensor-orientation frame upright, from the
+// current window orientation (screen.orientation.angle where the legacy
+// property is missing; 270 is that API's spelling of -90).
+const deriveRotation = () => {
+  let o = typeof window.orientation === "number"
+    ? window.orientation
+    : (screen.orientation && typeof screen.orientation.angle === "number" ? screen.orientation.angle : 0);
+  if (o === 270) o = -90;
+  return ((o - SENSOR_UPRIGHT_ORIENTATION) % 360 + 360) % 360;
+};
 
 const MEDIA_WORKER_SRC = `
 let reader = null, track = null, inFlight = 0;
@@ -184,7 +212,10 @@ self.onmessage = async (e) => {
 
 export class WebcamCapture {
   // opts:
-  //   sendFrame(codecId, keyframe, Uint8Array)  required, delivers one encoded frame
+  //   sendFrame(codecId, keyframe, Uint8Array, rotation, flip)
+  //     required, delivers one encoded frame; rotation (clockwise degrees) and
+  //     flip (horizontal, after the rotation) make its pixels upright and are
+  //     0/false when the pixels already are
   //   onStateChange(active)                     optional, called when capture starts/stops
   //   onError(error)                            optional, getUserMedia/encoder failures
   //   canSend()                                 optional, false skips a frame (backpressure)
@@ -214,6 +245,8 @@ export class WebcamCapture {
     this._canvas = null;
     this._ctx = null;
     this._jpegBusy = false;
+    this._configuring = false;
+    this._deriveOrientation = false;
     this._active = false;
     this._generation = 0;
     this._encodeWorker = null;
@@ -329,6 +362,8 @@ export class WebcamCapture {
       this._encoder = null;
       this._encoderCodec = null;
     }
+    this._configuring = false;
+    this._deriveOrientation = false;
     if (this._stream) {
       this._stream.getTracks().forEach((t) => {
         try {
@@ -502,6 +537,9 @@ export class WebcamCapture {
     }
     const worker = await this._workerSource(track, generation);
     if (worker) {
+      // Worker-only MediaStreamTrackProcessor means Safari: raw sensor frames
+      // with no readable metadata, so their rotation is derived per frame.
+      this._deriveOrientation = !HAS_FRAME_ORIENTATION;
       this._logPath("capture: MediaStreamTrackProcessor in a worker");
       return worker;
     }
@@ -720,12 +758,23 @@ export class WebcamCapture {
     }
     const w = frame.displayWidth || frame.codedWidth;
     const h = frame.displayHeight || frame.codedHeight;
-    if (!this._encoder) {
-      this._configureEncoder(w, h).then(() => this._encodeWith(frame, w, h, now));
-      return;
-    }
-    if (this._encodedSize && (this._encodedSize.w !== w || this._encodedSize.h !== h)) {
-      this._configureEncoder(w, h).then(() => this._encodeWith(frame, w, h, now));
+    const rotation = this._deriveOrientation ? deriveRotation() : (frame.rotation || 0);
+    const flip = this._deriveOrientation ? false : !!frame.flip;
+    const s = this._encodedSize;
+    if (!this._encoder || !s || s.w !== w || s.h !== h || s.rotation !== rotation || s.flip !== flip) {
+      // Size or orientation changed: a VideoEncoder latches the orientation of
+      // its first frame and rejects any other, so it is rebuilt for both. One
+      // rebuild runs at a time; frames racing it are dropped, never queued.
+      if (this._configuring) {
+        frame.close();
+        return;
+      }
+      this._configuring = true;
+      this._configureEncoder(w, h, rotation, flip)
+        .then(() => this._encodeWith(frame, w, h, now))
+        .finally(() => {
+          this._configuring = false;
+        });
       return;
     }
     this._encodeWith(frame, w, h, now);
@@ -756,10 +805,11 @@ export class WebcamCapture {
     frame.close();
   }
 
-  // Builds the encoder for the first candidate the engine supports at w x h.
+  // Builds the encoder for the first candidate the engine supports at w x h,
+  // stamping the orientation its frames carry onto every chunk it emits.
   // Resolves when an encoder is configured or every candidate was rejected (then
   // frames take the JPEG path).
-  async _configureEncoder(w, h) {
+  async _configureEncoder(w, h, rotation = 0, flip = false) {
     const generation = this._generation;
     if (this._encoder) {
       try { this._encoder.close(); } catch (e) { /* ignore */ }
@@ -792,13 +842,13 @@ export class WebcamCapture {
       }
       try {
         const encoder = new VideoEncoder({
-          output: (chunk) => this._onChunk(cand, chunk, generation),
+          output: (chunk) => this._onChunk(cand, chunk, generation, rotation, flip),
           error: (error) => this._onEncoderFailure(error),
         });
         encoder.configure(support.config || config);
         this._encoder = encoder;
         this._encoderCodec = cand;
-        this._encodedSize = { w, h };
+        this._encodedSize = { w, h, rotation, flip };
         this._forceKeyframe = true;
         this._logPath(`encoder: ${cand.name} (${cand.codec}) at ${w}x${h}`);
         return;
@@ -809,6 +859,7 @@ export class WebcamCapture {
     this._encodedSize = null;
   }
 
+<<<<<<< HEAD
   // One encoded frame out to the transport. When the socket is backed up the frame
   // is dropped and the next one forced to a keyframe: the server's decoder must never
   // get a delta built on a frame it never received. Independent JPEG frames, which
@@ -831,13 +882,13 @@ export class WebcamCapture {
     }
   }
 
-  _onChunk(cand, chunk, generation) {
+  _onChunk(cand, chunk, generation, rotation, flip) {
     if (this._generation !== generation || !this._active) {
       return;
     }
     const buf = new Uint8Array(chunk.byteLength);
     chunk.copyTo(buf);
-    this._deliverEncoded(cand.id, chunk.type === "key", buf);
+    this._sendFrame(cand.id, chunk.type === "key", buf, rotation, flip);
   }
 
   // An encoder that fails after reporting support (Firefox does this for H.264)
@@ -859,8 +910,14 @@ export class WebcamCapture {
       closeFrame(frame);
       return;
     }
-    const w = frame.displayWidth || frame.codedWidth || frame.videoWidth;
-    const h = frame.displayHeight || frame.codedHeight || frame.videoHeight;
+    // drawImage applies the frame's orientation metadata, so the JPEG leaves
+    // upright (the canvas swaps dimensions for sideways frames) and carries no
+    // orientation on the wire.
+    const sideways = ((frame.rotation || 0) % 180) === 90;
+    const dw = frame.displayWidth || frame.codedWidth || frame.videoWidth;
+    const dh = frame.displayHeight || frame.codedHeight || frame.videoHeight;
+    const w = sideways ? dh : dw;
+    const h = sideways ? dw : dh;
     if (!this._canvas) {
       this._logPath("encoder: JPEG through OffscreenCanvas (no usable VideoEncoder)");
       this._canvas = new OffscreenCanvas(w, h);

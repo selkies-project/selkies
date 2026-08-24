@@ -88,6 +88,7 @@ from .webcam import (
     WS_HEADER_LEN,
     WS_OPCODE_WEBCAM,
     get_shared_webcam,
+    orientation_from_flags,
     webcam_uplink_allowed,
 )
 from .stream_server import BaseStreamingService
@@ -3327,11 +3328,14 @@ class DataStreamingServer(BaseStreamingService):
 
                     elif msg_type == WS_OPCODE_WEBCAM:
                         # One encoded webcam frame for the virtual camera:
-                        # [opcode][codec][flags][payload]. Gated like the
-                        # microphone: a controller (or a collab-authorized
-                        # viewer) may feed it, never when locked off. The whole
-                        # message goes to pixelflux with the payload offset, so
-                        # the frame is never copied in Python.
+                        # [opcode][codec][flags][payload], the flags carrying
+                        # the keyframe bit and the frame's upright transform
+                        # (rotation quarter turns and flip; see webcam.py).
+                        # Gated like the microphone: a controller (or a
+                        # collab-authorized viewer) may feed it, never when
+                        # locked off. The whole message goes to pixelflux with
+                        # the payload offset, so the frame is never copied in
+                        # Python.
                         cam_perms = client_permissions.get(websocket) or {}
                         cam_collab = (
                             settings.enable_collab[0]
@@ -3351,7 +3355,9 @@ class DataStreamingServer(BaseStreamingService):
                         cam = get_shared_webcam()
                         if cam.camera is None and await cam.ensure(data[1]) is None:
                             continue
-                        flags = cam.push(data, data[1], bool(data[2] & WS_FLAG_KEYFRAME), WS_HEADER_LEN)
+                        cam_rotation, cam_flip = orientation_from_flags(data[2])
+                        flags = cam.push(data, data[1], bool(data[2] & WS_FLAG_KEYFRAME),
+                                         WS_HEADER_LEN, cam_rotation, cam_flip)
                         if cam.keyframe_wanted(flags):
                             try:
                                 await websocket.send_str(MSG_WEBCAM_KEYFRAME)

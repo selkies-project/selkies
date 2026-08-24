@@ -3,7 +3,8 @@ the virtual pads, so apps that enumerate the directory instead of asking
 libudev (SDL with udev disabled or built without it, GLFW, evtest) see them
 without placeholder files. The interposer adds one evdev node per bound slot to
 opendir/readdir and scandir; an unbound slot is never advertised, and the
-directory read itself never fails because of the probe.
+directory read itself never fails because of the probe. Real host nodes pass
+through untouched, so every check diffs against the directory's own baseline.
 """
 import os
 import subprocess
@@ -126,7 +127,11 @@ def main() -> bool:
             return res.summary()
         res.check("build", os.path.exists(preload))
 
-        # Two of four slots bound: only those two evdev nodes may be advertised.
+        # The host's own nodes (a desktop's real devices, a CI runner's) are
+        # passed through by design; the interposer's contribution is the diff.
+        baseline = sorted(n for n in os.listdir("/dev/input") if n.startswith("event"))
+
+        # Two of four slots bound: exactly those two evdev nodes join the listing.
         sockdir = os.path.join(work, "sock")
         os.makedirs(sockdir)
         server = serve_slots(sockdir, 2)
@@ -140,17 +145,22 @@ def main() -> bool:
                 server.kill()
 
         listdir = data["listdir"]
-        res.check("readdir-bound-nodes", listdir == ["event1000", "event1001"],
-                  f"listdir events={listdir}")
+        added = sorted(set(listdir) - set(baseline))
+        res.check("readdir-bound-nodes",
+                  added == ["event1000", "event1001"] and set(baseline) <= set(listdir),
+                  f"listdir events={listdir} baseline={baseline}")
         res.check("readdir-hides-unbound", "event1002" not in listdir and "event1003" not in listdir,
                   f"unbound absent from {listdir}")
         scan_names = [n for n, _ in data["scandir"]]
-        res.check("scandir-bound-nodes", scan_names == ["event1000", "event1001"],
-                  f"scandir events={scan_names}")
+        scan_added = sorted(set(scan_names) - set(baseline))
+        res.check("scandir-bound-nodes",
+                  scan_added == ["event1000", "event1001"] and set(baseline) <= set(scan_names),
+                  f"scandir events={scan_names} baseline={baseline}")
         DT_CHR = 2
-        res.check("scandir-d-type-chr", all(t == DT_CHR for _, t in data["scandir"]),
-                  f"d_type values={[t for _, t in data['scandir']]}")
-        modes = data["modes"]
+        added_types = [t for n, t in data["scandir"] if n not in baseline]
+        res.check("scandir-d-type-chr", all(t == DT_CHR for t in added_types),
+                  f"d_type values={added_types}")
+        modes = {n: v for n, v in data["modes"].items() if n not in baseline}
         res.check("stat-char-device",
                   all(chr_ok and major == 13 for chr_ok, major in modes.values()),
                   f"modes={modes}")
@@ -160,8 +170,8 @@ def main() -> bool:
         os.makedirs(empty)
         try:
             none = scan_dev_input(preload, empty)
-            res.check("no-nodes-without-sockets", none["listdir"] == [],
-                      f"listdir events={none['listdir']}")
+            res.check("no-nodes-without-sockets", none["listdir"] == baseline,
+                      f"listdir events={none['listdir']} baseline={baseline}")
             res.check("readdir-errno-clean", True, "os.listdir did not raise on an empty slot set")
         except RuntimeError as e:
             res.check("readdir-errno-clean", False, str(e)[:150])

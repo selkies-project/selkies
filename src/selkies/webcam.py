@@ -23,7 +23,7 @@ frames pass through untouched and a WebCodecs/WebRTC browser an I420 device.
 import asyncio
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 try:
     from pixelflux import VirtualCamera, VirtualCameraSettings
@@ -50,9 +50,22 @@ CODEC_BY_NAME: Dict[str, int] = {
 }
 
 # WebSocket framing of one encoded frame: opcode, codec id, flags, payload.
+# Besides the keyframe bit, the flags byte carries the frame's upright
+# transform, which the client's encoder leaves out of the bitstream: bits 1-2
+# are the clockwise rotation in quarter turns, bit 3 a horizontal flip applied
+# after the rotation. Servers that predate the bits ignore them.
 WS_OPCODE_WEBCAM = 0x06
 WS_HEADER_LEN = 3
 WS_FLAG_KEYFRAME = 0x01
+WS_FLAG_ROTATION_SHIFT = 1
+WS_FLAG_ROTATION_MASK = 0x06
+WS_FLAG_HFLIP = 0x08
+
+
+def orientation_from_flags(flags: int) -> Tuple[int, bool]:
+    """Clockwise rotation degrees and horizontal flip carried by a ``0x06`` flags byte."""
+    rotation = ((flags & WS_FLAG_ROTATION_MASK) >> WS_FLAG_ROTATION_SHIFT) * 90
+    return rotation, bool(flags & WS_FLAG_HFLIP)
 
 # Text control messages the server sends back on the WebSocket.
 MSG_WEBCAM_DISABLED = "WEBCAM_DISABLED"
@@ -108,6 +121,7 @@ class VirtualWebcam:
         self._cam: Optional[Any] = None
         self._lock = asyncio.Lock()
         self._start_failed_logged = False
+        self._push_orientation = True
 
     @property
     def camera(self) -> Optional[Any]:
@@ -159,15 +173,30 @@ class VirtualWebcam:
                         cam.device_path or "none", "yes" if stats.get("pipewire") else "no")
             return cam
 
-    def push(self, data: Any, codec: int, keyframe: bool = False, offset: int = 0) -> int:
+    def push(self, data: Any, codec: int, keyframe: bool = False, offset: int = 0,
+             rotation: int = 0, flip: bool = False) -> int:
         """Hands one encoded frame to the camera; returns its flags (``KEYFRAME_WANTED`` bit).
 
-        A camera that is not running yet (``ensure`` pending) drops the frame silently.
+        Args:
+            rotation: Clockwise degrees (0/90/180/270) that make the decoded frame upright.
+            flip: Horizontal mirror, applied after the rotation.
+
+        The orientation is forwarded only when the frame carries one, so an installed
+        pixelflux whose ``push`` predates the arguments keeps working (announced once;
+        such frames are published as sent). A camera that is not running yet
+        (``ensure`` pending) drops the frame silently.
         """
         cam = self._cam
         if cam is None:
             return 0
         try:
+            if (rotation or flip) and self._push_orientation:
+                try:
+                    return int(cam.push(data, codec, keyframe, offset, rotation, flip))
+                except TypeError:
+                    self._push_orientation = False
+                    logger.warning(
+                        "Installed pixelflux takes no webcam orientation; rotated uplinks are published as sent.")
             return int(cam.push(data, codec, keyframe, offset))
         except Exception as exc:
             logger.error("Virtual webcam push failed: %s", exc)

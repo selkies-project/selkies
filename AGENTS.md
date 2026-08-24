@@ -101,7 +101,13 @@ a frame is decoded or copied in Python. The device format follows the first upli
 (`webcam_pixel_format=auto`): a browser without WebCodecs sends JPEG and gets an MJPEG device its frames pass
 through untouched, every other uplink an I420 device. Without WebCodecs the screen stream likewise degrades to the
 striped-JPEG encoder (the WS pre-flight pins `encoder=jpeg` instead of failing; both dashboards offer only
-decodable encoders) — the one case the client's JPEG rungs exist for, in both directions. `tests/unit/test_webcam_abi.py` pins the ring ABI the interposer shares with pixelflux;
+decodable encoders) — the one case the client's JPEG rungs exist for, in both directions. The `0x06` flags byte
+also carries each frame's upright transform (bits 1-2 clockwise quarter turns, bit 3 a horizontal flip applied
+after) into optional `VirtualCamera.push` arguments pixelflux bakes right after decode: the client reads it from
+VideoFrame rotation/flip where the engine exposes them and derives it from the window orientation on Safari (whose
+camera frames keep the sensor's fixed orientation, upright at -90), rebuilding its encoder whenever the value
+changes. The JPEG rungs relay none (drawImage bakes what the engine knows), and WebRTC needs none: the offer
+carries no CVO extension, so senders pre-rotate. `tests/unit/test_webcam_abi.py` pins the ring ABI the interposer shares with pixelflux;
 `tests/integration/test_webcam_device.py` and `tests/e2e/test_webcam.py` cover the device and the browsers.
 
 The sound-server control plane both transports share -- the capture null sink, capture-source resolution, the

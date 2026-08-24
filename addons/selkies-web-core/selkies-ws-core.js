@@ -6230,14 +6230,17 @@ function stopMicrophoneCapture() {
 // Webcam uplink: the local camera is encoded in the page (WebCodecs H.264/VP8,
 // JPEG as the last resort) and each frame is sent as one binary opcode 0x06
 // message [0x06][codec][flags][payload]; the server's virtual camera decodes
-// it for the virtual V4L2 device. Binary frames bypass the gzip wrapper by
-// design (see the patched websocket.send).
+// it for the virtual V4L2 device. Flags bit 0 marks a keyframe; bits 1-2 carry
+// the frame's clockwise rotation in quarter turns and bit 3 a horizontal flip
+// (applied after the rotation) — the WebCodecs orientation metadata the
+// encoder never bakes into the bitstream, baked server-side instead. Binary
+// frames bypass the gzip wrapper by design (see the patched websocket.send).
 function startWebcamCapture() {
   if (isSharedMode || webcamCapture) {
     return;
   }
   webcamCapture = new WebcamCapture({
-    sendFrame: (codec, keyframe, payload) => {
+    sendFrame: (codec, keyframe, payload, rotation, flip) => {
       if (!(websocket && websocket.readyState === WebSocket.OPEN && isWebcamActive)) {
         return;
       }
@@ -6245,7 +6248,7 @@ function startWebcamCapture() {
       const bytes = new Uint8Array(messageBuffer);
       bytes[0] = 0x06;
       bytes[1] = codec;
-      bytes[2] = keyframe ? 0x01 : 0x00;
+      bytes[2] = (keyframe ? 0x01 : 0x00) | ((((rotation || 0) / 90) & 0x03) << 1) | (flip ? 0x08 : 0x00);
       bytes.set(payload, 3);
       try {
         websocket.send(messageBuffer);
