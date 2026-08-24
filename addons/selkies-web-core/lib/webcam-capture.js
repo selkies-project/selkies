@@ -859,7 +859,6 @@ export class WebcamCapture {
     this._encodedSize = null;
   }
 
-<<<<<<< HEAD
   // One encoded frame out to the transport. When the socket is backed up the frame
   // is dropped and the next one forced to a keyframe: the server's decoder must never
   // get a delta built on a frame it never received. Independent JPEG frames, which
