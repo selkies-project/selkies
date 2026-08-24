@@ -75,11 +75,11 @@ jobs:
         run: scripts/ci/install-shellcheck.sh
       - name: Run the unit tier
         run: |
-          # The suites reach into selkies.input_handler and
-          # selkies.stream_server, so their module-level imports have to
-          # resolve; everything below that is lazy, which is what keeps this
-          # tier off the capture and WebRTC stacks
-          python -m pip install pytest aiofiles msgpack Pillow aiohttp prometheus_client psutil watchdog
+          # The suites import the source tree, so every module-level import
+          # under selkies has to resolve: the runtime dependencies from
+          # pyproject.toml minus the capture stack, which the suites stub.
+          python scripts/ci/unit-deps.py > "${RUNNER_TEMP}/unit-requirements.txt"
+          python -m pip install pytest -r "${RUNNER_TEMP}/unit-requirements.txt"
           python -m pytest tests -m unit -v --junitxml=unit-report.xml
       - name: Fail if any suite skipped
         if: ${{ !cancelled() }}

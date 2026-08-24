@@ -130,7 +130,10 @@ class _App:
         headers = dict(headers or {})
         if host_origin:
             headers["Origin"] = f"http://{self.client.host}:{self.client.port}"
-        response = await self.client.request(method, path, headers=headers, data=b"x")
+        # No body on an Upgrade request: the server parser stops at the
+        # headers there, and an unread body is re-fed as the next request.
+        data = None if "Upgrade" in headers else b"x"
+        response = await self.client.request(method, path, headers=headers, data=data)
         body = await response.text()
         return response.status, body, response.headers.get("WWW-Authenticate")
 

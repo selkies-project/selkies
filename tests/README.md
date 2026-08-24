@@ -23,7 +23,10 @@ both.
 The suites' extra dependencies are the `test` optional-dependency group in
 `pyproject.toml`: `pip install .[test]` (or `selkies[test]`) on top of an
 installed `selkies`; the browsers themselves come from `playwright install
-chromium firefox webkit`.
+chromium firefox webkit`. The unit tier alone runs without the capture stack:
+`pip install pytest -r <(python scripts/ci/unit-deps.py)` installs the
+runtime dependencies minus pixelflux and pcmflux, which is what CI does on
+every interpreter the package supports.
 
 ## Tiers
 

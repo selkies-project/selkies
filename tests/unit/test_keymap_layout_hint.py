@@ -125,7 +125,9 @@ async def main() -> None:
           and h._client_kb_layout is None)
 
     # --- a session compositor turning up after a client layout took the seat ---
-    saved = os.environ.get("XKB_DEFAULT_LAYOUT")
+    # The whole XKB_DEFAULT_* set is scrubbed, not just the layout: a model or
+    # rules exported by the developer's shell would otherwise reach the seat.
+    saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("XKB_DEFAULT_")}
     try:
         os.environ["XKB_DEFAULT_LAYOUT"] = "fr"
         h = make_handler()
@@ -163,10 +165,8 @@ async def main() -> None:
         check("session start without an env layout pushes nothing",
               h.wayland_input.layouts == [])
     finally:
-        if saved is None:
-            os.environ.pop("XKB_DEFAULT_LAYOUT", None)
-        else:
-            os.environ["XKB_DEFAULT_LAYOUT"] = saved
+        os.environ.pop("XKB_DEFAULT_LAYOUT", None)
+        os.environ.update(saved)
 
 
 asyncio.run(main())
