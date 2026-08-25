@@ -80,7 +80,7 @@ jobs:
           - name: ubuntu26.04
             image: ubuntu
             release: "26.04"
-          - name: trixie
+          - name: debiantrixie
             image: debian
             release: trixie
         arch:
@@ -196,7 +196,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [ubuntu26.04, trixie]
+        flavor: [ubuntu26.04, debiantrixie]
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4

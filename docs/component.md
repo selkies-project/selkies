@@ -9,13 +9,13 @@ Selkies is composed of a small number of core components plus several optional a
 
 **Refer to [Getting Started](start.md) on how you can get on board.**
 
-Retrieve the latest `SELKIES_VERSION` release, and pick the `DISTRIB_RELEASE` flavor of the
-container images below (`ubuntu26.04` or `trixie`). The flavor names the distribution
+Retrieve the latest `SELKIES_VERSION` release, and pick the `DISTRIB_FLAVOR` of the
+container images below (`ubuntu26.04` or `debiantrixie`). The flavor names the distribution
 inside the image, so it is a free choice and not a property of the host:
 
 ```bash
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/^v//')"
-export DISTRIB_RELEASE="ubuntu26.04"
+export DISTRIB_FLAVOR="ubuntu26.04"
 ```
 
 When instructed to install [binfmt](https://github.com/tonistiigi/binfmt), use the following command with Docker/Podman:
@@ -28,7 +28,7 @@ docker run --rm --privileged tonistiigi/binfmt:latest --install all
 
 At runtime, Selkies is a **single Python application** — the `selkies` wheel. The HTML5 web client is bundled into it, and screen/audio capture and encoding are provided by the `pixelflux` and `pcmflux` extensions, which are installed automatically as dependencies of the wheel.
 
-Every release carries the same build in each medium below. The [Releases](https://github.com/selkies-project/selkies/releases) page holds the architecture-independent wheel, a `.deb` for Ubuntu 24.04 and 26.04 and for Debian bookworm and trixie, an `.rpm` for Fedora and Enterprise Linux 9, an Alpine `.apk`, an Arch `.pkg.tar.zst`, a self-contained AppImage, and the `noarch` conda package the AppImage environment is built from (`pixelflux`, `pcmflux`, `pulsectl-asyncio`, and `aitop` have no conda-forge builds, so a conda install of it still needs those from pip). Each of those is built for both `x86_64` and `aarch64`, except the Arch package, which Arch Linux publishes for `x86_64` alone. The container images below are published to `ghcr.io` instead: the example image as `v${SELKIES_VERSION}-${DISTRIB_RELEASE}`, the coTURN and TURN-REST addons as `v${SELKIES_VERSION}`, each beside its floating `latest` tag.
+Every release carries the same build in each medium below. The [Releases](https://github.com/selkies-project/selkies/releases) page holds the architecture-independent wheel, a `.deb` for Ubuntu 24.04 and 26.04 and for Debian bookworm and trixie, an `.rpm` for Fedora and Enterprise Linux 9, an Alpine `.apk`, an Arch `.pkg.tar.zst`, a self-contained AppImage, and the `noarch` conda package the AppImage environment is built from (`pixelflux`, `pcmflux`, `pulsectl-asyncio`, and `aitop` have no conda-forge builds, so a conda install of it still needs those from pip). Each of those is built for both `x86_64` and `aarch64`, except the Arch package, which Arch Linux publishes for `x86_64` alone. The container images below are published to `ghcr.io` instead: the example image as `v${SELKIES_VERSION}-${DISTRIB_FLAVOR}`, the coTURN and TURN-REST addons as `v${SELKIES_VERSION}`, each beside its floating `latest` tag.
 
 A pre-release ships the same media under a tag such as `2.0.0rc0` and is marked as a pre-release: the floating `latest` image tags stay on the last full release by default, the `releases/latest` API keeps pointing at it, and `pip` resolves the pre-release only when asked with `--pre` or an exact version.
 
@@ -191,10 +191,10 @@ A Wayland session asked for on a GPU it cannot reach starts as X11 instead. The 
 
 Read the [Development](development.md) section for customizing this container for your own usage.
 
-Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8080** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **set `DISTRIB_RELEASE` to `ubuntu26.04` or `trixie`, and replace `main` to `latest` for the latest stable release**):
+Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8080** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **set `DISTRIB_FLAVOR` to `ubuntu26.04` or `debiantrixie`, and replace `main` to `latest` for the latest stable release**):
 
 ```bash
-docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8080:8080 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/example:main-${DISTRIB_RELEASE}
+docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8080:8080 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/example:main-${DISTRIB_FLAVOR}
 ```
 
 Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs, or `--device /dev/dri` for Intel and AMD.

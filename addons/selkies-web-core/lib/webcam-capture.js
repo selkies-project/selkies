@@ -174,10 +174,12 @@ const PACE_MIN_SAMPLES = ${PACE_MIN_SAMPLES};
 const PACE_BEHIND_RATIO = ${PACE_BEHIND_RATIO};
 const KEYFRAME_INTERVAL_MS = ${KEYFRAME_INTERVAL_MS};
 const HAS_FRAME_ORIENTATION = ${HAS_FRAME_ORIENTATION};
-// Frames one candidate is measured with, and the time that measurement may
-// take: enough to leave the first keyframe behind, little enough that a slow
-// encoder is ranked from what it did finish rather than delaying the camera.
-const PROBE_FRAMES = 8;
+// Frames taken from the camera to measure the candidates with, how long to wait
+// for the camera to produce them, and the time one candidate may spend on them.
+// Synthetic content cannot stand in here: what a codec costs is what the lens is
+// showing, and the resolution it is shown at.
+const PROBE_SOURCE_FRAMES = 8;
+const PROBE_WAIT_MS = 2500;
 const PROBE_BUDGET_MS = 400;
 // Share of the asked rate a candidate must reach for the uplink to start on it.
 // Short of this the JPEG rung is the better opening bid, but only clearly short:
@@ -186,6 +188,9 @@ const PROBE_BUDGET_MS = 400;
 // the encoder is the watchdog's to judge, on real frames.
 const PROBE_RATE_MARGIN = 0.9;
 let encoder = null, candIndex = 0, cand = null, configuring = false, active = true;
+// While probing, camera frames are held here rather than encoded, and the
+// candidates are measured on them once there are enough.
+let probing = false, probeFrames = [], probeTimer = null;
 let fps = 30, bitrate = 2500000, encodedSize = null, forceKeyframe = true, lastKeyframeMs = 0;
 let trackReader = null, trackRef = null;
 // Frames offered to the encoder in this window and those it was too busy to
@@ -276,6 +281,12 @@ function handleFrame(frame, label) {
   const h = frame.displayHeight || frame.codedHeight;
   const latched = orientationOf(frame);
   orientation = label || (HAS_FRAME_ORIENTATION ? latched : (derived || orientation));
+  if (probing) {
+    if (probeFrames.length >= PROBE_SOURCE_FRAMES) { frame.close(); return; }
+    probeFrames.push(frame);
+    if (probeFrames.length >= PROBE_SOURCE_FRAMES) runProbe(w, h);
+    return;
+  }
   if (configuring) { frame.close(); return; }
   if (!encoder || !encodedSize || encodedSize.w !== w || encodedSize.h !== h ||
       encodedSize.rotation !== latched.rotation || encodedSize.flip !== latched.flip) {
@@ -285,40 +296,20 @@ function handleFrame(frame, label) {
   encodeWith(frame, w, h);
 }
 
-// Frames per second one candidate sustains at w x h, or 0 if it cannot encode.
-async function measure(c, w, h) {
+// Frames per second one candidate sustains on the camera's own frames, or 0 if
+// it cannot encode them.
+async function measure(c, w, h, frames) {
   let support = null;
   try { support = await VideoEncoder.isConfigSupported(encoderConfig(c, w, h)); } catch (err) { return 0; }
   if (!support || !support.supported) return 0;
-  const canvas = new OffscreenCanvas(w, h);
-  const ctx = canvas.getContext('2d', { alpha: false });
   let encoded = 0, failed = false;
   const enc = new VideoEncoder({ output: () => { encoded++; }, error: () => { failed = true; } });
   try { enc.configure(support.config || encoderConfig(c, w, h)); } catch (err) { return 0; }
   const started = performance.now();
-  // Detail that moves, rather than a flat fill: a frame with nothing in it
-  // costs every codec nothing and ranks them by which handles emptiness best.
-  // It is still only a starting rung -- what the camera is showing decides the
-  // rest, through the pace watchdog in encodeWith.
-  const tile = new OffscreenCanvas(w >> 2, h >> 2);
-  const tctx = tile.getContext('2d', { alpha: false });
-  const noise = tctx.createImageData(tile.width, tile.height);
-  for (let px = 0, n = noise.data.length; px < n; px += 4) {
-    const v = (px * 1103515245) >>> 8 & 255;
-    noise.data[px] = v;
-    noise.data[px + 1] = (v * 3) & 255;
-    noise.data[px + 2] = (v * 5) & 255;
-    noise.data[px + 3] = 255;
-  }
-  tctx.putImageData(noise, 0, 0);
-  for (let i = 0; i <= PROBE_FRAMES && !failed; i++) {
-    ctx.drawImage(tile, -(i * 7) % w, -(i * 5) % h, w * 1.3, h * 1.3);
-    let frame = null;
-    try {
-      frame = new VideoFrame(canvas, { timestamp: Math.round(i * 1e6 / fps) });
-      enc.encode(frame, { keyFrame: i === 0 });
-    } catch (err) { failed = true; }
-    if (frame) frame.close();
+  // The frames stay open: each candidate encodes the same ones, and the probe
+  // closes them once the last candidate has had its turn.
+  for (let i = 0; i < frames.length && !failed; i++) {
+    try { enc.encode(frames[i], { keyFrame: i === 0 }); } catch (err) { failed = true; }
   }
   await Promise.race([
     enc.flush().catch(() => { failed = true; }),
@@ -365,27 +356,50 @@ self.onmessage = async (e) => {
   if (m.type === 'probe') {
     fps = m.fps || 30; bitrate = m.bitrate || 2500000;
     if (typeof VideoEncoder === 'undefined') { self.postMessage({ type: 'unsupported' }); return; }
-    const w = m.width || 1280, h = m.height || 720;
-    let best = -1, bestRate = 0;
-    for (let i = 0; i < CANDIDATES.length; i++) {
-      const rate = await measure(CANDIDATES[i], w, h);
-      if (rate > bestRate) { best = i; bestRate = rate; }
-      if (rate >= fps) break;
-    }
-    if (best < 0) { self.postMessage({ type: 'unsupported' }); return; }
-    // Nothing came close to the rate the camera is being asked for. Starting on
-    // the fastest of them anyway spends a core to send a fraction of the
-    // camera, which is what the JPEG rung exists to avoid; a candidate that is
-    // merely near the rate is taken, and the watchdog in encodeWith answers for
-    // it on the frames the camera actually sends.
-    if (bestRate < fps * PROBE_RATE_MARGIN) {
-      self.postMessage({ type: 'exhausted', codec: CANDIDATES[best].name, rate: bestRate.toFixed(1) });
-      return;
-    }
-    candIndex = best;
-    self.postMessage({ type: 'probed', codec: CANDIDATES[best].name, rate: Math.round(bestRate) });
+    probing = true; probeFrames = [];
+    // A camera that never delivers must not hold the uplink: rank on whatever
+    // arrived, and if nothing did, open on the first candidate and leave the
+    // watchdog to answer for it.
+    probeTimer = setTimeout(() => {
+      if (probing) runProbe(m.width || 1280, m.height || 720);
+    }, PROBE_WAIT_MS);
   }
 };
+
+// Ranks the candidates on the held camera frames and commits to one, or hands
+// the page the JPEG rung when none of them keeps up with what the lens is
+// showing at the size it is showing it.
+async function runProbe(w, h) {
+  if (!probing) return;
+  probing = false;
+  if (probeTimer !== null) { clearTimeout(probeTimer); probeTimer = null; }
+  const frames = probeFrames;
+  probeFrames = [];
+  let best = -1, bestRate = 0;
+  for (let i = 0; i < CANDIDATES.length && frames.length; i++) {
+    const rate = await measure(CANDIDATES[i], w, h, frames);
+    if (rate > bestRate) { best = i; bestRate = rate; }
+    if (rate >= fps) break;
+  }
+  for (let i = 0; i < frames.length; i++) { try { frames[i].close(); } catch (err) {} }
+  if (!active) return;
+  if (!frames.length) {
+    self.postMessage({ type: 'probed', codec: CANDIDATES[0].name });
+    return;
+  }
+  if (best < 0) { self.postMessage({ type: 'unsupported' }); return; }
+  // Nothing came close to the rate the camera is being asked for. Starting on
+  // the fastest of them anyway spends a core to send a fraction of the camera,
+  // which is what the JPEG rung exists to avoid; a candidate that is merely
+  // near the rate is taken, and the watchdog in encodeWith answers for it on
+  // the frames that follow.
+  if (bestRate < fps * PROBE_RATE_MARGIN) {
+    self.postMessage({ type: 'exhausted', codec: CANDIDATES[best].name, rate: bestRate.toFixed(1) });
+    return;
+  }
+  candIndex = best;
+  self.postMessage({ type: 'probed', codec: CANDIDATES[best].name, rate: Math.round(bestRate) });
+}
 `;
 
 /**
@@ -424,6 +438,7 @@ export class WebcamCapture {
     this._stream = null;
     this._track = null;
     this._source = null;
+    this._establishing = false;
     this._encoder = null;
     this._encoderCodec = null;
     this._candidateIndex = 0;
@@ -605,17 +620,44 @@ export class WebcamCapture {
    * @returns {Promise<?{close: function(): void}>} Source handle, or null with no source.
    */
   async _openCapture(track, generation) {
-    await this._openEncodeWorker(generation);
-    if (this._generation !== generation) return null;
-    if (this._encodeWorker) {
-      const combined = await this._tryCombinedWorker(track, generation);
+    // The worker ranks the candidates on the camera's own frames, so a source
+    // has to be feeding it while it decides; its verdict is awaited after.
+    this._establishing = true;
+    const decided = this._openEncodeWorker(generation);
+    try {
+      let source = null;
+      let combined = false;
+      if (this._encodeWorker) {
+        source = await this._tryCombinedWorker(track, generation);
+        combined = !!source;
+        if (this._generation !== generation) {
+          if (source) source.close();
+          return null;
+        }
+      }
+      if (!source) source = await this._openSource(track, generation);
       if (this._generation !== generation) {
-        if (combined) combined.close();
+        if (source) source.close();
         return null;
       }
-      if (combined) return combined;
+      await decided;
+      if (this._generation !== generation) {
+        if (source) source.close();
+        return null;
+      }
+      // The worker was reading the camera itself and then dropped out, taking
+      // its clone of the track with it: the page reads the track instead.
+      if (combined && !this._encodeWorker) {
+        source = await this._openSource(track, generation);
+        if (this._generation !== generation) {
+          if (source) source.close();
+          return null;
+        }
+      }
+      return source;
+    } finally {
+      this._establishing = false;
     }
-    return this._openSource(track, generation);
   }
 
   /**
@@ -711,7 +753,7 @@ export class WebcamCapture {
         done();
         // A worker that was reading the camera itself takes the capture with it:
         // re-open the page's own source so the frames keep coming.
-        if (wasSource && this._active && this._generation === generation) {
+        if (wasSource && !this._establishing && this._active && this._generation === generation) {
           this._source = null;
           this._openSource(this._track, generation).then((source) => {
             if (this._generation !== generation) {
@@ -723,14 +765,16 @@ export class WebcamCapture {
           });
         }
       };
-      const timer = setTimeout(() => drop("probe timeout"), 3000);
+      const timer = setTimeout(() => drop("probe timeout"), 8000);
       worker.onmessage = (e) => {
         const m = e.data;
         if (m.type === "probed") {
           clearTimeout(timer);
           this._encodeWorker = worker;
           this._encoderCodecName = m.codec;
-          this._logPath(`encode: ${m.codec} in a worker, ${m.rate} fps measured against ${this.fps} asked for`);
+          this._logPath(m.rate !== undefined
+            ? `encode: ${m.codec} in a worker, ${m.rate} fps measured against ${this.fps} asked for`
+            : `encode: ${m.codec} in a worker, unmeasured (no camera frames to rank on)`);
           done();
           return;
         }

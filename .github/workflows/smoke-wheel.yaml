@@ -105,7 +105,7 @@ jobs:
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
-          pattern: "*-wheels-x86_64-manylinux-*"
+          pattern: "*-wheels-x86_64-manylinux"
           path: sibling-wheels
           merge-multiple: true
       - name: Fetch the capture-stack wheels (main-HEAD pre-release)

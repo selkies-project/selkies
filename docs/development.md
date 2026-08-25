@@ -174,12 +174,12 @@ The reference container images (the [Example Container](https://github.com/selki
 
 **If you want to change the image behavior, use the original container as a base image and only replace the entrypoint script(s) and/or the s6 service files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu26.04` for the [Example Container](component.md#example-container)) to preserve a specific container build.**
 
-Start with the below sample `Dockerfile` example and place your modified `container-entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/example:main-${DISTRIB_RELEASE}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
+Start with the below sample `Dockerfile` example and place your modified `container-entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/example:main-${DISTRIB_FLAVOR}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
 
 ```dockerfile
-ARG DISTRIB_RELEASE=ubuntu26.04
-FROM ghcr.io/selkies-project/selkies/example:main-${DISTRIB_RELEASE}
-ARG DISTRIB_RELEASE
+ARG DISTRIB_FLAVOR=ubuntu26.04
+FROM ghcr.io/selkies-project/selkies/example:main-${DISTRIB_FLAVOR}
+ARG DISTRIB_FLAVOR
 
 USER 0
 SHELL ["/bin/sh", "-c"]

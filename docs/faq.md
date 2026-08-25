@@ -172,10 +172,10 @@ Try the [TURN-REST Container](component.md#turn-rest) or its underlying turn-res
 
 The below steps can be used when you want to test your TURN server configured with a shared secret instead of the legacy username/password authentication:
 
-**1. Run the [Example Container](component.md#example-container) (set `DISTRIB_RELEASE` to an image flavor, `ubuntu26.04` or `trixie`):**
+**1. Run the [Example Container](component.md#example-container) (set `DISTRIB_FLAVOR` to an image flavor, `ubuntu26.04` or `debiantrixie`):**
 
 ```bash
-docker run --name selkies -it -d --rm -p 8080:8080 -p 3478:3478 ghcr.io/selkies-project/selkies/example:main-${DISTRIB_RELEASE}
+docker run --name selkies -it -d --rm -p 8080:8080 -p 3478:3478 ghcr.io/selkies-project/selkies/example:main-${DISTRIB_FLAVOR}
 docker exec -it selkies bash
 ```
 
