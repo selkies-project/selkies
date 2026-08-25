@@ -21,6 +21,10 @@ on:
         description: The pixelflux/pcmflux wheels for this run are available as artifacts
         type: boolean
         default: false
+      capture_stack_published:
+        description: The pinned pixelflux/pcmflux are released on PyPI, so the smoke test resolves them there
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -30,15 +34,17 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
-  # The pinned pixelflux/pcmflux are a coordinated pre-release, published per
-  # commit rather than to PyPI, so the smoke test can only install them from a
-  # wheel this run has in hand. A caller that already built them says so with
-  # wheels_ready; otherwise they come from the sibling's pre-release for its
-  # current main HEAD, and when that has not been published yet they are built
-  # here. The test suites run under the same contract.
+  # Away from a release the pinned pixelflux/pcmflux are a coordinated
+  # pre-release, published per commit rather than to PyPI, so the smoke test can
+  # only install them from a wheel this run has in hand: the caller's, when it
+  # says so with wheels_ready; else the sibling's pre-release for its current
+  # main HEAD; else built here. Cutting a release is the other way round -- the
+  # versions the wheel pins are on PyPI by then, and resolving them there is
+  # what proves the artifact users will install. The test suites run under the
+  # same contract.
   capture-stack:
     name: Capture stack (locate)
-    if: ${{ !inputs.wheels_ready }}
+    if: ${{ !inputs.wheels_ready && !inputs.capture_stack_published }}
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.probe.outputs.build }}
@@ -68,7 +74,7 @@ jobs:
   wheels:
     name: Capture stack (main HEAD)
     needs: [capture-stack]
-    if: ${{ !inputs.wheels_ready && needs.capture-stack.outputs.build == 'true' }}
+    if: ${{ !inputs.wheels_ready && !inputs.capture_stack_published && needs.capture-stack.outputs.build == 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
@@ -146,21 +152,34 @@ jobs:
             echo "${project}: ${sha}"
           done
       - name: Check the capture-stack wheels
+        env:
+          PUBLISHED: ${{ inputs.capture_stack_published }}
         run: |
           mkdir -p sibling-wheels && ls -la sibling-wheels
+          if [ "${PUBLISHED}" = "true" ]; then
+            echo "capture stack: resolving the pinned releases from PyPI"
+            exit 0
+          fi
           for project in pixelflux pcmflux; do
-            # Fatal rather than a note: without a local wheel the install below
-            # resolves the pinned pre-release from PyPI, where that version does
-            # not exist, and the run then fails inside pip's resolver instead of
-            # naming the wheel that never arrived.
+            # Fatal rather than a note: away from a release the pinned version
+            # exists only as this run's wheel, so without one the install below
+            # fails inside pip's resolver instead of naming what never arrived.
             if ! ls "sibling-wheels/${project}"-*.whl > /dev/null 2>&1; then
-              echo "::error::No ${project} wheel for the smoke test; the pinned pre-release cannot resolve from PyPI"
+              echo "::error::No main-HEAD ${project} wheel for the smoke test"
               exit 1
             fi
           done
       - name: Install smoke test
+        env:
+          PUBLISHED: ${{ inputs.capture_stack_published }}
         run: |
           python3 -m venv /tmp/selkies-venv
+          # Away from a release the capture stack goes in from this run's wheels
+          # first, so the pin is already satisfied when the index is consulted
+          # and no build can quietly take a different one from PyPI.
+          if [ "${PUBLISHED}" != "true" ]; then
+            /tmp/selkies-venv/bin/pip install --no-index --find-links "$PWD/sibling-wheels" pixelflux pcmflux
+          fi
           # Every dependency must resolve to a wheel: the images and packages
           # install this same set without a compiler
           /tmp/selkies-venv/bin/pip install --find-links "$PWD/sibling-wheels" --only-binary=:all: dist/selkies-*.whl
@@ -176,8 +195,13 @@ jobs:
         # The same checks on the oldest interpreter the wheel claims: its
         # importlib.resources cannot read a namespace package, so a bundle that
         # lost its __init__.py fails here and on no newer interpreter
+        env:
+          PUBLISHED: ${{ inputs.capture_stack_published }}
         run: |
           "${{ steps.oldest-python.outputs.python-path }}" -m venv /tmp/selkies-venv-oldest
+          if [ "${PUBLISHED}" != "true" ]; then
+            /tmp/selkies-venv-oldest/bin/pip install --no-index --find-links "$PWD/sibling-wheels" pixelflux pcmflux
+          fi
           /tmp/selkies-venv-oldest/bin/pip install --find-links "$PWD/sibling-wheels" --only-binary=:all: dist/selkies-*.whl
           /tmp/selkies-venv-oldest/bin/selkies --help >/dev/null && echo "selkies --help OK"
           /tmp/selkies-venv-oldest/bin/python -c "import importlib.resources as r; c = r.files('selkies.selkies_web'); assert (c / 'index.html').is_file(), 'web client missing from wheel'; print('bundled web client OK')"

@@ -69,10 +69,13 @@ for project in pixelflux pcmflux; do
     wheel="$(find "${PIXELFLUX_PCMFLUX_WHEELS_DIR}" -maxdepth 1 \
         -name "${project}-*cp312*manylinux*${ARCH}*.whl" | head -n1)"
   fi
-  # Said out loud rather than left to the build log: falling back to PyPI ships
-  # whatever is released there, which is not the build the suites ran against,
-  # and while the pin names a pre-release it is not resolvable at all.
-  [ -n "${wheel}" ] || echo "::warning::No ${project} wheel supplied; the AppImage resolves it from PyPI"
+  # A wheels directory that yielded nothing is worth saying out loud: the
+  # AppImage then carries whatever PyPI resolves rather than the build that was
+  # meant to ride along. No directory at all is the release path, where the
+  # pinned version is published and PyPI is the right answer.
+  if [ -z "${wheel}" ] && [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then
+    echo "::warning::No ${project} wheel in ${PIXELFLUX_PCMFLUX_WHEELS_DIR}; the AppImage resolves it from PyPI"
+  fi
   PIP_REQUIREMENTS="${PIP_REQUIREMENTS} ${wheel:-${project}}"
 done
 
