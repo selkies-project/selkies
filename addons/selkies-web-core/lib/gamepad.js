@@ -192,10 +192,8 @@ export class GamepadManager {
                     const pressed = currentGp.buttons[x].pressed;
                     let buttonIndex = x;
 
-                    // Firefox reports X/Y swapped only for pads it could not map
-                    // to the standard layout; a pad that declares standard mapping
-                    // (including the synthetic touch gamepad) is already in
-                    // standard order and must not be re-swapped.
+                    // Firefox swaps X/Y only on pads it could not map to the standard
+                    // layout; a standard-mapped pad (the touch gamepad too) must not be re-swapped.
                     if (currentGp.mapping !== "standard" && navigator.userAgent.includes("Firefox")) {
                         if (x === 2) buttonIndex = 3;
                         else if (x === 3) buttonIndex = 2;
@@ -238,8 +236,6 @@ export class GamepadManager {
 
                 if (currentGp.mapping !== 'standard' && currentGp.axes.length >= 6) {
                     const axisThreshold = 0.5;
-                    // Axes 4/5 carry the D-pad on these pads; the flags map to the
-                    // standard buttons 12 (up), 13 (down), 14 (left) and 15 (right).
                     const dpad = {
                         up: currentGp.axes[5] < -axisThreshold,
                         down: currentGp.axes[5] > axisThreshold,

@@ -102,7 +102,6 @@ async def stop_worker(h: WebRTCInput) -> None:
 async def main() -> None:
     loop_thread = threading.get_ident()
 
-    # --- a server-side reset queues behind the key work in flight ---
     h = make_handler()
     start_worker(h)
     h.pressed_keys[0x77] = 0.0
@@ -120,21 +119,18 @@ async def main() -> None:
           h.wayland_input.state_threads
           and all(t != loop_thread for t in h.wayland_input.state_threads))
 
-    # --- a client 'kr' still carries no future ---
     h.events.clear()
     h._keyboard_enqueue(("kr", None))
     await asyncio.sleep(0.15)
     check("client kr resets on the worker", ("reset", True) in h.events, str(h.events))
     await stop_worker(h)
 
-    # --- no worker: the reset runs in place ---
     h = make_handler()
     h.events.clear()
     await h.reset_keyboard()
     check("without a worker the reset runs in place",
           h.events == [("reset", False)], str(h.events))
 
-    # --- a worker cancelled mid-wait does not strand the caller ---
     h = make_handler()
     start_worker(h)
     for _ in range(40):
@@ -151,7 +147,6 @@ async def main() -> None:
     check("reset completes once the worker is gone", finished)
     check("and then runs in place", ("reset", False) in h.events, str([e for e in h.events if e[0] == "reset"]))
 
-    # --- a flood that evicts the queued reset settles its waiter ---
     h = make_handler(queue_size=2)
     evicted = asyncio.get_running_loop().create_future()
     h._keyboard_enqueue(("kr", evicted))
@@ -159,9 +154,8 @@ async def main() -> None:
     h._keyboard_enqueue(("kd", 0x62))
     check("evicted reset future is settled", evicted.done())
 
-    # --- a reset issued from the worker task itself runs in place ---
-    # (wrapped in its own task so current_task() is a real task identity — not
-    # via wait_for, which on some versions wraps the coroutine in a fresh task).
+    # Wrapped in its own task so current_task() is a real task identity; wait_for
+    # on some Python versions wraps the coroutine in a fresh task instead.
     h = make_handler()
 
     async def reset_as_worker():

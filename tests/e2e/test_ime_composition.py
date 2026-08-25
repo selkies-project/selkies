@@ -98,10 +98,9 @@ window.__decodeWire = () => {
 };
 </script></body></html>"""
 
-# Trace 1: real IBus Chrome anatomy (captured on Linux Chrome 2026-08 with a
-# live ibus-hangul engine): per syllable the preedit rolls forward, cancels to
-# an empty update, compositionend arrives data-less and the commit text rides
-# the textInput right after.
+# Captured on Linux Chrome with a live ibus-hangul engine: the preedit rolls
+# forward, cancels to an empty update, compositionend arrives data-less and the
+# commit rides the textInput after it.
 IBUS_SYLLABLE = [
     ["compositionupdate", "PRE1"],
     ["compositionupdate", "FULL"],
@@ -110,8 +109,7 @@ IBUS_SYLLABLE = [
     ["compositionend", ""],
     ["textInput", "FULL"],
 ]
-# Trace 2: CDP-driven anatomy: the commit text appears in textInput first and
-# in the compositionend data right after.
+# CDP-driven anatomy: the commit is in textInput and in the compositionend data.
 CDP_SYLLABLE = [
     ["compositionupdate", "PRE1"],
     ["compositionupdate", "FULL"],
@@ -227,22 +225,16 @@ try:
                     ("two cdp syllables stay single", CDP_GROUPS, CDP_EXPECT)])
         run_branch(pw, "win-cdp", "Windows", WIN_UA,
                    [("cdp anatomy", CDP_GROUPS, CDP_EXPECT)])
-        # WebKit is the Safari stand-in. Its Editor commits a composition by
-        # dispatching textInput before compositionend (Editor.cpp
-        # setComposition -> insertTextForConfirmedComposition ->
-        # EventHandler::handleTextInputEvent), which is the cdp anatomy; the
-        # ibus anatomy replays the opposite order so the handler stays
-        # correct in WebKit's DOM even if a platform IME delivers it
-        # reversed. Real macOS/iOS Safari stays uncovered here.
+        # WebKit (the Safari stand-in) commits a composition as textInput before
+        # compositionend, the cdp anatomy; the ibus anatomy is the reversed order a
+        # platform IME may deliver. Real macOS/iOS Safari stays uncovered.
         run_branch(pw, "webkit-textinput-first", None, None,
                    [("cdp anatomy", CDP_GROUPS, CDP_EXPECT)], engine="webkit")
         run_branch(pw, "webkit-textinput-after", None, None,
                    [("ibus anatomy", IBUS_GROUPS, IBUS_EXPECT, IBUS_PROBES)],
                    engine="webkit")
-        # Gecko is the engine the report contrasts against, and the one whose
-        # older builds dispatch no textInput at all: the handler decides which
-        # event carries the commit by asking the engine, so both anatomies have
-        # to land the same text here as everywhere else.
+        # Older Gecko builds dispatch no textInput at all; the handler asks the
+        # engine which event carries the commit, so both anatomies must land here.
         run_branch(pw, "firefox-ibus", None, None,
                    [("ibus anatomy", IBUS_GROUPS, IBUS_EXPECT, IBUS_PROBES)],
                    engine="firefox")

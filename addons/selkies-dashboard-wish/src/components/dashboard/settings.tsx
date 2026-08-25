@@ -76,9 +76,12 @@ const dpiScalingOptions = [
 /**
  * The default `scaling_dpi`: the local display scaling (devicePixelRatio) put
  * through the core's autoDeriveDpi formula, so the remote desktop's fonts and
- * UI match the local environment; an explicit slider value wins over it. The
- * density is snapped to the nearest option and clamped at both ends, and it is
- * independent of the resolution.
+ * UI match the local environment. The density is snapped to the nearest option
+ * and clamped at both ends, and it is independent of the resolution.
+ *
+ * The ladder that governs the desktop is an operator override (which the
+ * server refuses to let clients clobber), then the stored pick, then this
+ * derived default; the cores send stored-else-derived on every connect.
  */
 const deriveDpiFromDpr = (): number => {
     const dpr = window.devicePixelRatio || 1;
@@ -215,6 +218,10 @@ function setModeSwitching(active: boolean) {
  * server's UI customization disables it. Server settings are seeded from the
  * cached broadcast because the panel mounts after the core connects, and every
  * value stays editable afterwards with localStorage taking precedence.
+ *
+ * Each conditional setting is one `useConditionalSetting` call over a shared
+ * spec: the hook owns init and server sync, and client-driven changes go
+ * through `writeConditional`.
  */
 export function Settings() {
     const [serverSettings, setServerSettings] = useState<any>(() => getLastServerSettings());
@@ -229,8 +236,10 @@ export function Settings() {
     });
     const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
 
-    // On the WebSocket transport only encoders this engine can decode are
-    // offered (jpeg alone without WebCodecs).
+    /**
+     * On the WebSocket transport only encoders this engine can decode are
+     * offered (jpeg alone without WebCodecs).
+     */
     const offeredEncoders = useCallback(
         (list: string[]): string[] => (isWebrtc ? list : decodableEncoders(list)), [isWebrtc]);
     const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState(
@@ -250,7 +259,6 @@ export function Settings() {
     });
 
     const [selectedDpi, setSelectedDpi] = useState(() => {
-        // An explicit stored value wins over the local display scaling.
         return parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")) ?? "", 10) || deriveDpiFromDpr();
     });
 
@@ -271,16 +279,18 @@ export function Settings() {
         const saved = localStorage.getItem(getPrefixedKey("video_crf"));
         return saved !== null ? parseInt(saved, 10) : 25;
     });
-    // State the conditional settings read; rebuilt each render so the hooks
-    // below re-resolve against current values when their deps change.
+    /**
+     * State the conditional settings read; rebuilt each render so the hooks
+     * below re-resolve against current values when their deps change.
+     * `activeEncoder` is the one knob for both transports and reads storage
+     * first: an out-of-set stored value falls to the server's own fallback and
+     * the serverSettings sync re-seats it. `softwareH264Encoder` and `useCpu`
+     * (client choice, else the server's) feed the rate-control default.
+     */
     const conditionalCtx = {
         manualActive: !!readStored("manual_width") || serverSettings?.is_manual_resolution_mode?.value === true,
         streamMode,
-        // One knob for both transports: an out-of-set stored value is ignored
-        // by the server's own fallback, and the serverSettings sync re-seats it.
         activeEncoder: readStored("encoder") || encoder,
-        // The server's software H.264 encoder and whether software encoding is
-        // in effect (client choice, else the server's), for the rate-control default.
         softwareH264Encoder: serverSettings?.software_h264_encoder?.value,
         useCpu: readStored("use_cpu") !== null
             ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
@@ -314,31 +324,27 @@ export function Settings() {
         spec.propagate(spec.toServer ? spec.toServer(uiValue) : uiValue, conditionalCtx, conditionalIo);
     };
 
-    // Each conditional setting is one hook call over a shared spec: the hook
-    // owns init and server sync, client-driven changes go through
-    // writeConditional.
     const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
         HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
     const [rateControlMode, setRateControlMode] = useConditionalSetting(
         RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings, streamMode], readRateControlStored);
-    // With rate control disabled the server ignores rate_control_mode entirely
-    // and keeps the encoder on its built-in default, so the dashboard neither
-    // pushes a mode nor lets its own pick decide which quality slider is shown.
+    /**
+     * With rate control disabled the server ignores rate_control_mode and
+     * keeps the encoder's built-in default, so the dashboard neither pushes a
+     * mode nor lets its own pick decide which quality slider is shown.
+     */
     const rateControlEnabled = renderableSettings.enableRateControl ?? true;
-    // The hook only sets local UI state: when the resolved default diverges
-    // from what the server is applying (a transport switch seeds the session
-    // with the previous mode's value), push it so the encoder follows. Pinned,
-    // locked and operator-overridden values resolve to the server's value and
-    // post nothing.
+    // The hook only sets UI state; when the resolved default diverges from
+    // what the server applies (a transport switch seeds the previous mode's
+    // value), push it so the encoder follows. Pinned values post nothing.
     useEffect(() => {
         if (!serverSettings) return;
         if (serverSettings.enable_rate_control?.value === false) return;
         const rcKey = RATE_CONTROL_SPEC.storageKey;
         const resolved = resolveSpec(
             RATE_CONTROL_SPEC, serverSettings, conditionalCtx, readRateControlStored);
-        // An unmarked stored echo is not a choice: drop it once it stops
-        // matching what the ladder resolves, or it would outlive the
-        // derivation, and an operator override with it.
+        // Stale-echo rule (module docblock): an unmarked stored value that no
+        // longer matches the ladder is dropped, or it outlives the derivation.
         if (!isExplicitChoice(RATE_CONTROL_SPEC)
             && readStored(rcKey) !== null && readStored(rcKey) !== resolved) {
             localStorage.removeItem(getPrefixedKey(rcKey));
@@ -350,8 +356,7 @@ export function Settings() {
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [serverSettings]);
-    // HiDPI's stored value is dropped on the same stale-echo rule as rate
-    // control, or a derived pick outlives the resolution mode that produced it.
+    // Same stale-echo rule for HiDPI, or a derived pick outlives its resolution mode.
     useEffect(() => {
         if (!serverSettings) return;
         const key = HIDPI_SPEC.storageKey;
@@ -416,19 +421,18 @@ export function Settings() {
     });
     const [useBrowserCursors, setUseBrowserCursors] = useConditionalSetting(
         USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-    // The value the core reports as actually in effect (multi-monitor forces
-    // browser cursors on); null until the core reports. The toggle displays this
-    // over the stored preference so it never lies about the live state. Seeded
-    // from the cached report: the core emits it at connect / display-config
-    // time, before this panel mounts.
+    /**
+     * The cursor mode the core reports as actually in effect (multi-monitor
+     * forces browser cursors on), null until reported; the toggle shows it
+     * over the stored preference so it never lies about the live state. Seeded
+     * from the cached report because the core emits it before this panel mounts.
+     */
     const [effectiveCursor, setEffectiveCursor] = useState<boolean | null>(getLastEffectiveCursorState);
     const [forceAlignedResolution, setForceAlignedResolution] = useConditionalSetting(
         FORCE_ALIGNED_RESOLUTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
 
     const [audioInputDevices, setAudioInputDevices] = useState<any[]>([]);
     const [audioOutputDevices, setAudioOutputDevices] = useState<any[]>([]);
-    // The core keeps the devices this dashboard picked for the life of the
-    // page; a remounted panel shows them rather than defaulting.
     const [selectedInputDeviceId, setSelectedInputDeviceId] = useState(() => getLastAudioDevices().input ?? 'default');
     const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState(() => getLastAudioDevices().output ?? 'default');
     const [isOutputSelectionSupported, setIsOutputSelectionSupported] = useState(false);
@@ -443,13 +447,10 @@ export function Settings() {
                 setServerSettings(event.data.payload);
                 setRenderableSettings(computeRenderableSettings(event.data.payload));
             }
-            // The core reports the cursor value actually in effect (multi-monitor
-            // forces browser cursors on); reflect it so the toggle can't lie.
             if (event.data?.type === "effectiveCursorState" && typeof event.data.value === "boolean") {
                 setEffectiveCursor(event.data.value);
             }
-            // Mirror the dashboard's own selection back into the dropdowns, so
-            // the displayed device always matches what the core was told.
+            // Echo of this dashboard's own pick: the dropdown shows what the core was told.
             if (event.data?.type === "audioDeviceSelected" && event.data.deviceId) {
                 if (event.data.context === "input") {
                     setSelectedInputDeviceId(event.data.deviceId);
@@ -464,18 +465,14 @@ export function Settings() {
         };
     }, []);
 
-    // Seeding and re-clamping from the server's settings writes state instead
-    // of deriving during render because every value below stays editable
-    // afterwards, with localStorage taking precedence: recomputing each render
-    // would discard the user's edits.
+    // Seeding and re-clamping write state rather than deriving in render:
+    // every value stays editable afterwards, so recomputing would discard edits.
     /* eslint-disable react-hooks/set-state-in-effect */
     useEffect(() => {
         if (!serverSettings) return;
 
         const getStoredInt = (key: string) => parseInt(localStorage.getItem(getPrefixedKey(key)) ?? "", 10);
 
-        // One encoder knob on both transports; the server payload's allowed
-        // list is already filtered for the active transport.
         const s_encoder = serverSettings.encoder;
         if (s_encoder) {
             const allowed = offeredEncoders(s_encoder.allowed);
@@ -568,11 +565,6 @@ export function Settings() {
             const storedAllowed = s_scaling_dpi.allowed.includes(String(stored));
             const serverVal = parseInt(s_scaling_dpi.value, 10);
             const derived = deriveDpiFromDpr();
-            // The ladder is what governs the desktop: an operator override
-            // (which the server refuses to let clients clobber), then the
-            // stored pick, then the derived local-display default (the cores
-            // send stored-else-derived on every connect, independent of the
-            // resolution mode).
             const willPostDerived = !storedAllowed && !s_scaling_dpi.overridden
                 && derived !== serverVal;
             const final = s_scaling_dpi.overridden ? serverVal
@@ -592,6 +584,11 @@ export function Settings() {
      * needs a getUserMedia grant, so this runs only when the Audio tab is
      * actually shown: merely opening Settings must not raise a microphone
      * permission prompt.
+     *
+     * Output selection is probed on the sink the active core plays through,
+     * `HTMLMediaElement.setSinkId` for the WebRTC core's video element and
+     * `AudioContext.setSinkId` (which Firefox lacks) for the WebSocket core;
+     * probing the wrong one would render a picker that does nothing.
      */
     const ensureAudioDevices = useCallback(() => {
         if (audioDevicesRequested.current) return;
@@ -602,11 +599,6 @@ export function Settings() {
             setAudioInputDevices([]);
             setAudioOutputDevices([]);
 
-            // Output routing goes through whatever the active core plays on:
-            // the WebRTC core's <video> element (HTMLMediaElement.setSinkId),
-            // the WebSocket core's AudioContext (AudioContext.setSinkId, which
-            // Firefox lacks). Probe the one in use, or the picker would render
-            // and do nothing.
             const supportsSinkId = isWebrtc
                 ? 'setSinkId' in HTMLMediaElement.prototype
                 : typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
@@ -636,8 +628,6 @@ export function Settings() {
             } catch (err) {
                 const error = err instanceof Error ? err : new Error(String(err));
                 console.error('Error getting media devices:', error);
-                // The user-facing message names the remedy (permission) or
-                // the condition (no devices).
                 const messageKey = error.name === 'NotAllowedError' ? 'sections.audio.deviceErrorPermission'
                     : error.name === 'NotFoundError' ? 'sections.audio.deviceErrorNotFound'
                     : 'sections.audio.deviceErrorDefault';
@@ -650,9 +640,11 @@ export function Settings() {
         populateAudioDevices();
     }, [isWebrtc]);
 
-    // A half-typed size stays in component state: the stored manual_width and
-    // manual_height mean "a manual resolution is applied", which the HiDPI and
-    // UI-scaling derivations read, so only Set, a preset and Reset write them.
+    /**
+     * A half-typed size stays in component state: the stored `manual_width` and
+     * `manual_height` mean "a manual resolution is applied", which the HiDPI
+     * and UI-scaling derivations read, so only Set, a preset and Reset write them.
+     */
     const handleManualWidthChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         setManualWidth(event.target.value);
         setPresetValue("");
@@ -663,10 +655,10 @@ export function Settings() {
         setPresetValue("");
     };
 
+    /** The core persists scaleLocallyManual itself when it applies the message. */
     const handleScaleLocallyToggle = () => {
         const newState = !scaleLocally;
         setScaleLocally(newState);
-        // Core persists scaleLocallyManual itself when handling the message.
         window.postMessage({ type: 'setScaleLocally', value: newState }, window.location.origin);
     };
 
@@ -693,9 +685,8 @@ export function Settings() {
      */
     const handleStreamModeChange = async (mode: string) => {
         if (mode === streamMode) return;
-        // /api/switch tears down the old peer (WS close code 4000) before it
-        // responds, so the flag must be set first or the active core surfaces
-        // a spurious "Server disconnected" alert.
+        // /api/switch tears down the old peer (WS close 4000) before responding, so
+        // the flag must precede the request or the core alerts "Server disconnected".
         setModeSwitching(true);
         try {
             const MASTER_TOKEN_KEY = "selkies_master_token";
@@ -974,23 +965,25 @@ export function Settings() {
     })();
     const formatBitrate = (v: number) => `${v / 1000} Mbps`;
 
-    // Audio and UI scaling stops come from the server enums when connected;
-    // the static lists cover the window before server settings arrive.
     const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v: string) => parseInt(v, 10))) || audioBitrateOptions;
     const dpiScalingChoices: { label: string; value: number }[] = (serverSettings?.scaling_dpi?.allowed?.map((v: string) => {
         const value = parseInt(v, 10);
         return { label: `${Math.round((value / 96) * 100)}%`, value };
     })) || dpiScalingOptions;
-    // A single allowed stop, or an operator-set DPI (the server drops client DPI
-    // syncs while scaling_dpi is overridden), leaves nothing the picker can change.
+    /**
+     * A single allowed stop, or an operator-set DPI (the server drops client
+     * DPI syncs while scaling_dpi is overridden), leaves nothing to change.
+     */
     const dpiScalingDisabled = !serverSettings || serverSettings.scaling_dpi?.allowed?.length <= 1
         || serverSettings.scaling_dpi?.overridden === true;
     const activeEncoder = encoder;
     const isH264 = H264_ENCODERS.includes(activeEncoder);
     const showJpegOptions = !isWebrtc && activeEncoder === 'jpeg';
     const showRateControl = rateControlEnabled && isH264;
-    // The quality slider must belong to the mode the encoder is actually using:
-    // with rate control disabled that is the server's mode, not the dashboard's.
+    /**
+     * The mode the encoder is actually using, which the quality slider must
+     * belong to: with rate control disabled that is the server's mode.
+     */
     const appliedRateControlMode = rateControlEnabled
         ? rateControlMode
         : (serverSettings?.rate_control_mode?.value ?? rateControlMode);
@@ -1396,8 +1389,7 @@ export function Settings() {
                             </div>
                         )}
 
-                        {/* Server honors paint-over quality for every H.264 encoder and jpeg.
-                            The toggle precedes the settings it gates. */}
+                        {/* Server honors paint-over quality for every H.264 encoder and jpeg. */}
                         {(isH264 || activeEncoder === 'jpeg') && (renderableSettings.usePaintOverQuality ?? true) && (
                             <div className="flex items-center justify-between">
                                 <div className="space-y-0.5">

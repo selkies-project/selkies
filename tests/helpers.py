@@ -23,17 +23,13 @@ TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
 # The interpreter that runs the server under test. Defaults to the one running
 # the tests, so a venv with selkies installed needs no further configuration.
 PYTHON = os.environ.get("SELKIES_TEST_PYTHON", sys.executable)
-# Tools installed beside that interpreter -- ffmpeg/ffplay in a conda
-# environment, for instance -- are findable without the caller having activated
-# it. Appended rather than prepended: a system tool of the same name stays the
-# one that runs, so this cannot change what any other suite exercises.
+# Tools beside that interpreter (ffmpeg/ffplay in a conda env) are findable
+# without activation; appended, so a system tool of the same name still wins.
 _PY_BIN = os.path.dirname(os.path.abspath(PYTHON))
 if _PY_BIN not in os.environ.get("PATH", "").split(os.pathsep):
     os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + _PY_BIN
-# Deliberately not defaulted, and never inherited from DISPLAY: the suites
-# resize the root window and inject input, which must not land on a session
-# someone is using. Suites that only need a throwaway server of their own call
-# private_x_server() instead and need nothing set.
+# Never inherited from DISPLAY: the suites resize the root and inject input,
+# which must not land on a session in use. private_x_server() needs nothing set.
 TEST_DISPLAY = os.environ.get("E2E_DISPLAY", "")
 
 
@@ -149,10 +145,8 @@ def pulse_setup() -> None:
             [pactl, "load-module", "module-null-sink",
              "sink_name=output", "rate=48000", "channels=2"],
             capture_output=True, timeout=10)
-    # Anything played without naming a sink has to land where the capture
-    # checks listen. A suite that points the default elsewhere and dies before
-    # putting it back would otherwise leave every later audio check reading
-    # silence, on this run and on every one after it.
+    # Reset on every setup: a suite that pointed the default elsewhere and died
+    # would otherwise leave every later audio check reading silence.
     subprocess.run([pactl, "set-default-sink", "output"],
                    capture_output=True, timeout=10)
 
@@ -353,8 +347,6 @@ def server_log(log: str = LOG, tail: Optional[int] = None) -> str:
         return ""
 
 
-# ---------------- kernel gamepad (uinput) ----------------
-
 UINPUT_SHIM = os.path.join(TOOLS, "uinput_shim.so")
 PAD_INIT_JS = os.path.join(TOOLS, "pad_init.js")
 
@@ -445,8 +437,6 @@ class Results:
         print(f"[{self.block}] {len(self.items) - len(f)}/{len(self.items)} passed{tail}", flush=True)
         return not f
 
-
-# ---------------- X11 helpers ----------------
 
 def require_display() -> str:
     """The X display the suites drive, or a failure that says what to set."""
@@ -585,10 +575,9 @@ def x_own_clipboard(payload: bytes) -> tuple:
     stop = {"flag": False}
 
     def serve():
-        # Close ext when finished serving: a leaked X11 connection keeps this
-        # harness window the CLIPBOARD owner with nobody answering selection
-        # requests, which wedges the NEXT block's server-side clipboard read
-        # (and with it that server's whole X event queue, starving XTEST too).
+        # ext must be closed when done: a leaked connection leaves this window
+        # the CLIPBOARD owner with nobody answering, wedging the next block's
+        # server-side clipboard read and with it that server's X event queue.
         try:
             deadline = time.monotonic() + 25.0
             while not stop["flag"] and time.monotonic() < deadline:
@@ -720,8 +709,6 @@ def x_root_size() -> tuple:
     finally:
         d.close()
 
-
-# ------------- Wayland helpers -------------
 
 def _wl_env(socket_name: str) -> dict:
     """Environment for a wl-clipboard call against `socket_name`.

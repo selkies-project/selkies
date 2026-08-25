@@ -115,7 +115,7 @@ def lines_with(text: str) -> list:
 
 
 async def main() -> None:
-    # --- a compositor without data-control: no watch, said once ---
+    # A compositor without data-control: no watch, said once.
     h = make_handler()
     h.wayland_input.dc_error = NO_DC
     q1 = await h._arm_app_compositor_watch()
@@ -127,7 +127,7 @@ async def main() -> None:
           len(warned) == 1 and warned[0][0] == logging.WARNING and "polling" in warned[0][1],
           str(warned))
 
-    # --- the read path reports the same failure once, not per call ---
+    # The read path reports the same failure once, not per call.
     r1 = await h._app_clipboard_read(False)
     r2 = await h._app_clipboard_read(False)
     read_fail = lines_with("data-control clipboard read failed")
@@ -142,7 +142,7 @@ async def main() -> None:
     check("a failure returning after a success warns again",
           [lvl for lvl, _ in read_fail][-1] == logging.WARNING, str(read_fail))
 
-    # --- data-control present: the watch arms and delivers ---
+    # Data-control present: the watch arms and delivers.
     h = make_handler()
     q = await h._arm_app_compositor_watch()
     check("data-control present: watch armed", q is not None and len(h.wayland_input.watches) == 1)
@@ -154,7 +154,7 @@ async def main() -> None:
         got = None
     check("watch callback from a foreign thread reaches the loop queue", got == ["text/plain"])
 
-    # --- arming itself failing: no watch, said once ---
+    # Arming itself failing: no watch, said once.
     h = make_handler()
     h.wayland_input.watch_error = "spawn: resource temporarily unavailable"
     q = await h._arm_app_compositor_watch()
@@ -162,7 +162,7 @@ async def main() -> None:
     check("a failed arm returns no watch", q is None)
     check("and is reported once", len(lines_with("resource temporarily unavailable")) == 1)
 
-    # --- the monitor loop polls while no watch holds, then hands over ---
+    # The monitor loop polls while no watch holds, then hands over.
     h = make_handler()
     h.wayland_input.watch_error = "spawn: resource temporarily unavailable"
     task = asyncio.create_task(h.start_clipboard())

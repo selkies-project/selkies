@@ -100,15 +100,21 @@ def _close_quietly(pulse: Any) -> None:
 
 
 class _PulsectlBackend:
-    """One pulsectl_asyncio connection driven under the never-cancel discipline."""
+    """One pulsectl_asyncio connection driven under the never-cancel discipline.
+
+    Attributes:
+        _finalizer: Closes a connected client an owner dropped without
+            `aclose`, so libpulse never keeps the state callback of a
+            collected object.
+        _inflight: Tasks of operations still running; `aclose` waits for
+            them before closing.
+    """
 
     def __init__(self, client_name: str, connect_timeout: float, op_timeout: float) -> None:
         self._name = client_name
         self._connect_timeout = connect_timeout
         self._op_timeout = op_timeout
         self._pulse: Any = None
-        # Closes a connected client an owner dropped without aclose(), so
-        # libpulse never keeps the state callback of a collected object.
         self._finalizer: Optional[weakref.finalize] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._inflight: set = set()

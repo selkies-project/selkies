@@ -1,3 +1,6 @@
+"""Serve one synthetic gamepad on `$SELKIES_JS_SOCKET_PATH` and drive events into
+it, as the peer of the C enumeration/read tools alongside: prints `SERVER_UP` once
+the sockets accept, then alternates button 0 and axis 1 for about thirty seconds."""
 import asyncio
 import os
 import sys

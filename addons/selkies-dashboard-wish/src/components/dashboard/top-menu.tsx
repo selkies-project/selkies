@@ -184,10 +184,9 @@ export function TopMenu({
     };
   }, []);
 
-  // The core reacts to panels opening and closing (input focus handling).
-  // System Monitoring counts as open UI: the websockets core only recomputes
-  // window.fps while it believes the sidebar is visible, and the monitoring
-  // overlay is not an activePanel.
+  // The core reacts to panels opening and closing (input focus). Monitoring
+  // counts as open: the websockets core only recomputes window.fps while it
+  // believes the sidebar is visible, and the overlay is not an activePanel.
   React.useEffect(() => {
     window.postMessage(
       { type: 'sidebarVisibilityChanged', isOpen: !!activePanel || showSystemMonitoring },
@@ -245,8 +244,7 @@ export function TopMenu({
       const newX = e.clientX - startPosRef.current.x;
       const newY = e.clientY - startPosRef.current.y;
 
-      // The measured dimensions bound the drag; the constants stand in until
-      // the element is available.
+      // Measured size bounds the drag; the constants stand in until the ref is set.
       const menuElement = dragRef.current;
       const menuWidth = menuElement ? menuElement.offsetWidth : 600;
       const menuHeight = menuElement ? menuElement.offsetHeight : 100;
@@ -568,7 +566,6 @@ export function TopMenu({
 
   return (
     <>
-      {/* Gaming Control Bar */}
       {((renderableSettings.gamingMode ?? true) || (!isSecondaryDisplay && (renderableSettings.gamepadToggle ?? true))) && (
         <motion.div
           className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background/95 backdrop-blur-sm shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
@@ -632,7 +629,6 @@ export function TopMenu({
         </motion.div>
       )}
 
-      {/* Ellipsis Control Bar */}
       <motion.div
         ref={ellipsisRef}
         className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background/95 backdrop-blur-sm shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
@@ -794,7 +790,6 @@ export function TopMenu({
 
                 <MenubarSeparator />
 
-                {/* Mobile/Touch Controls */}
                 {(isMobile || hasDetectedTouch) && (
                   <>
                     <MenubarLabel>{t('topMenu.touchControls')}</MenubarLabel>
@@ -830,11 +825,9 @@ export function TopMenu({
                   </>
                 )}
 
-                {/* Second Screen Support (both transports run one pipeline per display).
-                    The server publishes second_screen as effective availability (the
-                    admin flag AND the backend's capacity to add an output) and rejects
-                    secondaries it cannot back, so the entry follows that value rather
-                    than offering a window the server would immediately kill. */}
+                {/* second_screen is effective availability (admin flag AND backend
+                    capacity) and the server rejects secondaries it cannot back, so the
+                    entry follows it rather than offering a window that would be killed. */}
                 {!isSecondaryDisplay && serverSettings?.second_screen?.value && (
                   <>
                     <MenubarItem
@@ -868,7 +861,6 @@ export function TopMenu({
         </div>
       </motion.div>
 
-      {/* Main Top Menu Bar */}
       <motion.div
         ref={dragRef}
         className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background/95 backdrop-blur-sm shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
@@ -877,7 +869,6 @@ export function TopMenu({
         }}
       >
         <div className="flex items-center space-x-4 px-2 py-2">
-          {/* Control Buttons */}
           <div className="flex items-center space-x-1">
             {(renderableSettings.apps ?? true) && !isSecondaryDisplay && (
               <Tooltip>
@@ -984,7 +975,6 @@ export function TopMenu({
 
 
 
-      {/* Draggable System Monitoring panel */}
       <AnimatePresence>
         {showSystemMonitoring && (
           <motion.div
@@ -1006,7 +996,6 @@ export function TopMenu({
         )}
       </AnimatePresence>
 
-      {/* Active Panel */}
       <AnimatePresence>
         {activePanel && (
           <motion.div
@@ -1025,7 +1014,6 @@ export function TopMenu({
         )}
       </AnimatePresence>
 
-      {/* Mobile Key Buttons */}
       {(isMobile || hasDetectedTouch) && (renderableSettings.softButtons ?? true) && (
         <motion.div
           className="fixed bottom-4 left-4 z-40 flex flex-wrap gap-2 p-2 rounded-lg border bg-card/95 backdrop-blur-sm shadow-lg"
@@ -1084,7 +1072,6 @@ export function TopMenu({
         </motion.div>
       )}
 
-      {/* Second Screen Placement Arrows */}
       {availablePlacements && (
         <div
           className="fixed inset-0 z-50 pointer-events-auto"
@@ -1137,7 +1124,6 @@ export function TopMenu({
         </div>
       )}
 
-      {/* The Apps modal is separate from the panels. */}
       {showAppsModal && (
         <Apps isOpen={showAppsModal} onClose={() => setShowAppsModal(false)} />
       )}

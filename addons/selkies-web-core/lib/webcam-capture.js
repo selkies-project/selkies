@@ -661,14 +661,16 @@ export class WebcamCapture {
   /**
    * Opens the encode worker, then the frame source: the combined
    * read-and-encode worker when the engine transfers the track, else a page
-   * source that feeds the worker or the page-thread encoder.
+   * source that feeds the worker or the page-thread encoder. The worker ranks
+   * the candidates on the camera's own frames, so a source has to be feeding
+   * it while it decides and its verdict is awaited after; a worker that was
+   * reading the camera itself and then dropped out took its clone of the
+   * track with it, so the page reads the track instead.
    * @param {MediaStreamTrack} track
    * @param {number} generation Capture generation; a later one cancels this.
    * @returns {Promise<?{close: function(): void}>} Source handle, or null with no source.
    */
   async _openCapture(track, generation) {
-    // The worker ranks the candidates on the camera's own frames, so a source
-    // has to be feeding it while it decides; its verdict is awaited after.
     this._establishing = true;
     const decided = this._openEncodeWorker(generation);
     try {
@@ -692,8 +694,6 @@ export class WebcamCapture {
         if (source) source.close();
         return null;
       }
-      // The worker was reading the camera itself and then dropped out, taking
-      // its clone of the track with it: the page reads the track instead.
       if (combined && !this._encodeWorker) {
         source = await this._openSource(track, generation);
         if (this._generation !== generation) {
@@ -772,7 +772,8 @@ export class WebcamCapture {
    * on its own thread. A worker that reports `unsupported` or an error
    * before the page commits is dropped for page encoding, and one that does
    * so mid-stream (a codec dropped out) is dropped the same way, the next
-   * frame re-routing to the page.
+   * frame re-routing to the page; one that was reading the camera itself
+   * takes the capture with it, so the page's own source is re-opened.
    * @param {number} generation
    * @returns {Promise<void>}
    */
@@ -805,8 +806,6 @@ export class WebcamCapture {
         this._workerIsSource = false;
         try { worker.terminate(); } catch (e) { /* ignore */ }
         done();
-        // A worker that was reading the camera itself takes the capture with it:
-        // re-open the page's own source so the frames keep coming.
         if (wasSource && !this._establishing && this._active && this._generation === generation) {
           this._source = null;
           this._openSource(this._track, generation).then((source) => {
@@ -844,10 +843,6 @@ export class WebcamCapture {
           return;
         }
         if (m.type === "exhausted") {
-          // No codec this engine offers keeps up with what the camera is
-          // showing. The JPEG rung encodes natively and the server carries its
-          // frames as received, so the uplink holds the camera's rate at the
-          // cost of bytes rather than spending a core to send a fraction of it.
           clearTimeout(timer);
           this._logPath(m.rate !== undefined
             ? `encode: no codec kept up with the camera (${m.codec} reached ${m.rate} fps against ${this.fps} asked for); encoding JPEG instead`

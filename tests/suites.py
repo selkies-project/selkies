@@ -19,7 +19,7 @@ selects tiers from it. Tiers describe what a suite needs:
 from typing import Iterator, Optional, Sequence
 
 SUITES: list = [
-    # --- unit -------------------------------------------------------------
+    # unit
     {"path": "unit/test_uinput_abi.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_uinput_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_i18n_keys.py", "tier": "unit", "timeout": 120},
@@ -65,7 +65,7 @@ SUITES: list = [
     {"path": "unit/test_clipboard_rearm.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_audio_control.py", "tier": "unit", "timeout": 120},
 
-    # --- integration ------------------------------------------------------
+    # integration
     {"path": "integration/test_uinput_backend.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_gamepad_release.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_gamepad_switch.py", "tier": "integration", "timeout": 900},
@@ -91,7 +91,7 @@ SUITES: list = [
     {"path": "integration/test_webcam_device.py", "tier": "integration", "timeout": 600},
     {"path": "packaging/test_packaging.py", "tier": "integration", "timeout": 1800},
 
-    # --- e2e --------------------------------------------------------------
+    # e2e
     {"path": "e2e/test_ime_composition.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_matrix.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
@@ -148,7 +148,7 @@ SUITES: list = [
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/test_ws_unix_socket.py", "tier": "e2e", "timeout": 600},
 
-    # --- on request -------------------------------------------------------
+    # on request
     {"path": "perf/test_pacer.py", "tier": "perf", "timeout": 3600},
     {"path": "perf/test_transfer_saturation.py", "tier": "perf", "timeout": 1800},
     {"path": "soak/test_capture_api.py", "tier": "soak", "timeout": 2400},

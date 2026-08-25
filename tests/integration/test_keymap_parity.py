@@ -100,7 +100,6 @@ def main() -> "H.Results":
         res.summary()
         return res
 
-    # --- base resolutions agree with xkbcommon on the delivered keymap ---
     handle = Recorder(capture)
     owner = _WaylandKeymapOwner(handle, base)
     keymap = lib.xkb_keymap_new_from_string(
@@ -122,7 +121,6 @@ def main() -> "H.Results":
     res.check(f"base keysyms resolve as the keymap says ({checked} checked)",
               checked > 40 and mismatched == 0, f"mismatched={mismatched} {examples}")
 
-    # --- a burst of unmappable keysyms costs ONE swap and all of them resolve ---
     handle2 = Recorder(capture)
     owner2 = _WaylandKeymapOwner(handle2, base)
     burst = [0x01000000 | (0x1F600 + i) for i in range(32)]
@@ -139,13 +137,12 @@ def main() -> "H.Results":
     res.check("every overlay keysym resolves at its assigned keycode",
               not unresolved, f"unresolved={unresolved[:4]}")
 
-    # --- re-binding what is already bound must not swap again ---
     before = handle2.swaps
     owner2._overlay_bind_many(burst)
     res.check("re-binding bound keysyms does not swap",
               handle2.swaps == before, f"swaps={handle2.swaps - before}")
 
-    # --- a held keycode is never recycled under slot pressure ---
+    # Fill every overlay slot first, so the held keycode is under pressure.
     handle3 = Recorder(capture)
     owner3 = _WaylandKeymapOwner(handle3, base)
     slots = len(owner3._overlay_codes)
@@ -153,7 +150,7 @@ def main() -> "H.Results":
     assigned = owner3._overlay_bind_many(first)
     held_sym = first[0]
     held_kc = assigned[held_sym]
-    # Mark the keysym as held so the owner treats its keycode as in use.
+    # Held by hand so the owner treats the keycode as in use.
     owner3._pressed[held_sym] = (held_kc, ())
     later = owner3._overlay_bind_many([0x01000000 | (0x3000 + i) for i in range(8)])
     res.check("held keycode is not handed to a new keysym",
@@ -162,7 +159,7 @@ def main() -> "H.Results":
               owner3._overlay.get(held_sym) == held_kc,
               f"{owner3._overlay.get(held_sym)} vs {held_kc}")
 
-    # --- typing text needs no compositor-side batch API ---
+    # Typing text needs no compositor-side batch API.
     handle4 = Recorder(capture)
     owner4 = _WaylandKeymapOwner(handle4, base)
     typed = owner4.type_text("hi \U0001F600\U0001F601")
@@ -170,7 +167,6 @@ def main() -> "H.Results":
     res.check("type_text swaps at most once", handle4.swaps <= 1,
               f"swaps={handle4.swaps}")
 
-    # --- the same must hold for every layout, not just the default ---
     # Each entry names an X11 keysym block the layout must actually deliver, so a
     # keymap that silently lost its script fails instead of passing vacuously.
     SCRIPTS = {
@@ -212,7 +208,7 @@ def main() -> "H.Results":
     capture.set_xkb_layout("us", "")
     time.sleep(0.15)
 
-    # --- CJK and emoji arrive as Unicode codepoints, so they take the overlay ---
+    # CJK and emoji arrive as Unicode codepoints, so they take the overlay.
     handle5 = Recorder(capture)
     owner5 = _WaylandKeymapOwner(handle5, capture.get_xkb_keymap_string())
     cjk = "漢字テスト한글ひらがな\U0001F600"
@@ -227,7 +223,6 @@ def main() -> "H.Results":
     res.check("CJK batch costs one keymap swap", handle5.swaps == 1,
               f"swaps={handle5.swaps}")
 
-    # --- dead keys: an accented character must be reachable in ONE keystroke ---
     # Layouts like fr/de put accents behind dead keys, but the browser sends the
     # composed character, not the sequence. Selkies must therefore reach it directly
     # — from the base when the layout has it, else through the overlay — and never
@@ -264,7 +259,6 @@ def main() -> "H.Results":
     capture.set_xkb_layout("us", "")
     time.sleep(0.15)
 
-    # --- xkb options: compose, group toggles, level3 switches ---
     # Compose sequences are a client-side input method; Selkies bypasses them by
     # sending the composed character straight through, so what matters is that an
     # option-carrying keymap still resolves AND that _overlay_text's string surgery
@@ -299,7 +293,6 @@ def main() -> "H.Results":
     capture.set_xkb_layout("us", "")
     time.sleep(0.15)
 
-    # --- overlay keycodes must stay reachable by XWayland clients ---
     # An X11 keycode is a byte, so anything above 255 reaches Wayland apps only.
     # Emoji and CJK have to land below that ceiling, and the keycodes borrowed to
     # get them there must not be ones the session still needs.
@@ -347,7 +340,6 @@ def main() -> "H.Results":
     capture.set_xkb_layout("us", "")
     time.sleep(0.15)
 
-    # --- the fallback assembly must not shrink the keymap ---
     # A pc105 keymap declares a maximum well above 255 and binds a couple of hundred
     # keycodes up there. The locally-assembled keymap (used when the compositor has
     # no splice API) rewrites the maximum line, and lowering it would silently drop
@@ -378,7 +370,7 @@ def main() -> "H.Results":
     res.check("assembled keymap keeps the keys above 255",
               kept >= had > 0, f"base had {had}, assembled has {kept}")
 
-    # --- performance parity: the per-keystroke path must stay far below a swap ---
+    # The per-keystroke path must stay far below the cost of a swap.
     keycode, _ = owner5._map[ord("a")]
     started = time.perf_counter()
     for _ in range(20000):

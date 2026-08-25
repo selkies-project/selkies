@@ -83,7 +83,6 @@ export function GamepadVisualizer({ gamepadState, gamepadIndex }: GamepadVisuali
       <CardContent>
         <div className="gamepad-visualizer-instance">
           <svg viewBox="0 0 260 100" width="100%" height="100" className="gamepad-svg-vis">
-            {/* Base Rectangle */}
             <rect className="gp-vis-base" x="30" y="10" width="200" height="80" rx="10" ry="10" />
 
             {/* Bumpers (L1: 4, R1: 5) */}
@@ -110,7 +109,6 @@ export function GamepadVisualizer({ gamepadState, gamepadIndex }: GamepadVisuali
             <rect id={`gp-${gamepadIndex}-btn-14`} className={`gp-vis-dpad ${getButtonClass(14)}`} x="60" y="60" width="10" height="10" /> {/* Left */}
             <rect id={`gp-${gamepadIndex}-btn-15`} className={`gp-vis-dpad ${getButtonClass(15)}`} x="80" y="60" width="10" height="10" /> {/* Right */}
 
-            {/* Sticks */}
             <g> {/* Left Stick Group */}
               <circle className="gp-vis-stick-base" cx="75" cy="30" r="12" />
               <circle id={`gp-${gamepadIndex}-stick-left`} className="gp-vis-stick-top" cx="75" cy="30" r="8" style={{ transform: leftStickTransform }} />

@@ -125,7 +125,6 @@ def classic_viewer_check(page, res: "H.Results") -> None:
     time.sleep(0.8)
     chord_opens = page.evaluate(is_open)
     res.check("Ctrl+Shift+M opens the sidebar for a controller", chord_opens, chord_opens)
-    # Demotion with the sidebar open (via the handle when the chord did not).
     if not chord_opens:
         try:
             page.locator('.toggle-handle').first.click()
@@ -183,7 +182,6 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         page.goto(H.BASE_URL, wait_until="load")
         time.sleep(9.0)
 
-        # Core UI chrome must be visible before anything else is driven.
         chrome = page.evaluate("""(() => ({
             body: document.body.innerText.length,
             sidebar: !!document.querySelector('.sidebar, [role="menubar"], .top-menu, .sidebar-container'),
@@ -193,8 +191,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         info = wait_canvas(page)
         res.check("video streams", info is not None, info)
 
-        # Positive control for the gates block: with ui_sidebar_show_gamepads
-        # on (default), the gamepads section (classic) / card (Wish) exists.
+        # Positive control for the gates block below.
         if dashboard == "classic":
             section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
         else:
@@ -204,7 +201,6 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         if dashboard == "wish":
             wish_clipboard_seed_check(page, res)
 
-        # A UI-driven framerate change must apply server-side.
         st = len(H.server_log())
         changed = False
         if dashboard == "classic":
@@ -225,9 +221,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
             except Exception as e:
                 print("classic slider err:", e)
         else:
-            # Wish: the Settings panel opens via the Settings2 icon in the
-            # control strip; Radix sliders are driven by click-to-focus plus
-            # arrow keys.
+            # Radix sliders are driven by click-to-focus plus arrow keys.
             try:
                 opened = False
                 trig = page.locator('button:has(svg.lucide-settings-2)').first
@@ -236,7 +230,6 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
                     time.sleep(1.2)
                     opened = page.locator('[role="slider"]').count() > 0
                 if not opened:
-                    # Fall back to locating the button by its aria tooltip text.
                     page.get_by_role("button", name=lambda n: "settings" in (n or "").lower()).first.click(force=True, timeout=2500)
                     time.sleep(1.2)
                     opened = page.locator('[role="slider"]').count() > 0
@@ -258,8 +251,6 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
                    or "framerate" in newlog.lower())
         res.check("UI framerate change applied server-side", changed and applied, newlog[-160:])
 
-        # Mode switch via the dashboard's own dropdown, then the parity loop
-        # back: websockets to webrtc and back to websockets.
         if dashboard == "classic":
             sel = page.locator('select').first
             if sel.count():
@@ -284,7 +275,6 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
             s, body = H.curl("/api/switch", method="POST", data={"mode": "webrtc"})
             res.check("mode switch api", s == 200, body[:60])
         time.sleep(6.0)
-        # A fresh page pinned to webrtc must stream after the flip.
         ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'webrtc';")
         page2 = ctx.new_page()
         page2.goto(H.BASE_URL, wait_until="load")
@@ -292,7 +282,6 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         res.check("video flows in webrtc after dashboard switch", info2 is not None, info2)
         page2.close()
 
-        # Switch back to websockets; a fresh page must stream again.
         s, body = H.curl("/api/switch", method="POST", data={"mode": "websockets"})
         res.check("mode switch back to websocket api", s == 200, body[:60])
         time.sleep(4.0)
@@ -302,7 +291,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         info3 = wait_canvas(page3)
         res.check("video flows back in websockets", info3 is not None, info3)
         # On the fresh page (its input context is attached, so the chord is
-        # live); the demotion leaves it without a sidebar, so it goes last.
+        # live), and last: the demotion leaves the page without a sidebar.
         if dashboard == "classic":
             classic_viewer_check(page3, res)
         page3.close()
@@ -335,7 +324,6 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
         page = ctx.new_page()
         page.goto(H.BASE_URL, wait_until="load")
         time.sleep(8.0)
-        # ui_show_sidebar=false must hide the chrome entirely.
         chrome = page.evaluate("""(() => !!document.querySelector('.sidebar, [role="menubar"], .top-menu, .sidebar-container'))()""")
         res.check("ui_show_sidebar=false hides chrome", not chrome, chrome)
         # The shortcuts gate needs the sidebar enabled, so it gets its own boot.
@@ -375,8 +363,6 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
               !!document.querySelector('button[title$="Gamepad Input"]')])()""")
             section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
         else:
-            # The stream controls live in one of several menubar menus; open each
-            # in turn and collect what they render.
             menu = ""
             triggers = page.locator('[role="menubar"] button')
             for i in range(triggers.count()):

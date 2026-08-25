@@ -4,19 +4,55 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+/*
+ * Selkies fake libudev
+ *
+ * A drop-in libudev replacement (LD_PRELOAD or library substitution) that
+ * fabricates NUM_VIRTUAL_GAMEPADS Xbox 360 pads whose /dev/input/jsN and
+ * /dev/input/eventN nodes are served by the sibling joystick interposer. No
+ * sysfs or netlink is consulted; every object is built from the static
+ * definitions in initialize_virtual_gamepads_data_if_needed().
+ *
+ * Each pad is a four-node tree: a usb_device parent (idVendor/idProduct,
+ * serial), an input parent under it (id/*, name, phys, uniq, capabilities),
+ * and the js and event children that carry the devnode and the ID_INPUT_*
+ * properties applications key on. The identity values (0x045e:0x028e,
+ * "Microsoft X-Box 360 pad", the uniq "SGVP%04d") must agree with the ones the
+ * joystick interposer reports through its ioctls.
+ *
+ * Enumeration scans only the "input" subsystem, the one subsystem the nodes
+ * live in: a generic scan yields the js and event nodes, a sysname pattern
+ * may also select the input parent, and property filters apply to each. The
+ * remaining match_* calls (sysattr, tag, parent, sysnum, devicenode,
+ * is_initialized, add_syspath, nomatch_subsystem) and scan_children /
+ * scan_subsystems are accepted and ignored.
+ *
+ * A udev_monitor reports hotplug by watching the interposer's socket directory
+ * with inotify: creation or deletion of "selkies_<sysname>.sock" becomes an
+ * "add" or "remove" for that node. The directory is js_socket_path
+ * (SELKIES_JS_SOCKET_PATH, default /tmp) and must match the interposer's. The
+ * fd handed to consumers is an epoll set over the inotify fd and an eventfd
+ * that stays armed while buffered records remain undispensed, so it polls
+ * readable exactly while udev_monitor_receive_device() has something to yield,
+ * the contract poll()-gated consumers such as SDL2 rely on.
+ *
+ * hwdb, queue and the logging/userdata accessors are stubs. JS_LOG in the
+ * environment enables stderr diagnostics.
+ */
+
 #include "libudev.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <errno.h>
-#include <sys/epoll.h>     // aggregate monitor fd handed to poll()-driven consumers
+#include <sys/epoll.h>
 #include <sys/eventfd.h>
-#include <sys/inotify.h>   // inotify-backed udev_monitor hotplug
-#include <fnmatch.h>       // For fnmatch if used (like for "js*")
-#include <sys/types.h>     // For dev_t
-#include <sys/sysmacros.h> // For major() and minor()
-#include <unistd.h>        // For STDIN_FILENO
+#include <sys/inotify.h>
+#include <fnmatch.h>
+#include <sys/types.h>
+#include <sys/sysmacros.h>
+#include <unistd.h>
 static bool g_fake_udev_log_enabled = false;
 static bool g_fake_udev_logging_initialized = false;
 #define FAKE_UDEV_LOG_DEBUG(fmt, ...) do { if (g_fake_udev_log_enabled) fprintf(stderr, "[fake_udev_dbg:%s:%d] " fmt "\n", __func__, __LINE__, ##__VA_ARGS__); } while (0)
@@ -24,13 +60,10 @@ static bool g_fake_udev_logging_initialized = false;
 #define FAKE_UDEV_LOG_WARN(fmt, ...)  do { if (g_fake_udev_log_enabled) fprintf(stderr, "[fake_udev_warn:%s:%d] " fmt "\n", __func__, __LINE__, ##__VA_ARGS__); } while (0)
 #define FAKE_UDEV_LOG_ERROR(fmt, ...) do { if (g_fake_udev_log_enabled) fprintf(stderr, "[fake_udev_err:%s:%d] " fmt "\n", __func__, __LINE__, ##__VA_ARGS__); } while (0)
 
-// --- Virtual Device Definitions ---
 #define NUM_VIRTUAL_GAMEPADS 4
 
-// Directory watched for the interposer's device sockets, and the read buffer for
-// inotify records (>= one max-length record, so read() never returns EINVAL).
-// selkies writes the sockets to js_socket_path (SELKIES_JS_SOCKET_PATH, default
-// /tmp); the interposer and this watch must agree on that directory.
+/* The inotify read buffer must hold at least one max-length record or read()
+ * fails with EINVAL. */
 #define FAKE_UDEV_SOCKET_DIR_DEFAULT "/tmp"
 #define FAKE_UDEV_INOTIFY_EVBUF_SIZE 4096
 
@@ -55,14 +88,12 @@ typedef struct {
 typedef struct {
     int id; // 0 to NUM_VIRTUAL_GAMEPADS-1
 
-    // JS Device
     char js_syspath[256];
     char js_devnode[64];
     char js_sysname[64];
     const char *js_subsystem;
     key_value_pair_t js_properties[4]; // DEVNAME, ID_INPUT_JOYSTICK, ID_INPUT, NULL
 
-    // Event Device
     char event_syspath[256];
     char event_devnode[64];
     char event_sysname[64];
@@ -70,7 +101,6 @@ typedef struct {
     key_value_pair_t event_properties[6]; // DEVNAME, ID_INPUT_EVENT_JOYSTICK, ID_INPUT_JOYSTICK, ID_INPUT_GAMEPAD, ID_INPUT, NULL
 
 
-    // Input Parent Device
     char input_parent_syspath[256];
     char input_parent_sysname[64];
     const char *input_parent_subsystem;
@@ -78,7 +108,6 @@ typedef struct {
     key_value_pair_t input_parent_properties[4]; // ID_INPUT, ID_INPUT_JOYSTICK, DEVPATH, NULL
 
 
-    // USB Parent Device
     char usb_parent_syspath[256];
     char usb_parent_sysname[64];
     const char *usb_parent_subsystem;
@@ -89,7 +118,7 @@ typedef struct {
 virtual_gamepad_definition_t virtual_gamepads[NUM_VIRTUAL_GAMEPADS];
 bool virtual_gamepads_initialized = false;
 
-// Buffers for strings that need to live as long as the lib
+/* Backing storage for the formatted sysattr/property values the definitions point at. */
 static char input_phys[NUM_VIRTUAL_GAMEPADS][64];
 static char input_uniq[NUM_VIRTUAL_GAMEPADS][64];
 static char input_devpaths[NUM_VIRTUAL_GAMEPADS][256];
@@ -120,25 +149,22 @@ void initialize_virtual_gamepads_data_if_needed() {
         virtual_gamepad_definition_t *def = &virtual_gamepads[i];
         def->id = i;
 
-        // --- Input Parent Device ---
-        // This sysname is for the unique "physical" device part of the path.
         snprintf(def->input_parent_sysname, sizeof(def->input_parent_sysname), "selkies_pad%d", i);
 
         snprintf(def->input_parent_syspath, sizeof(def->input_parent_syspath),
                  "/sys/devices/virtual/%s/input/input%d", def->input_parent_sysname, i + 10);
-        def->input_parent_subsystem = "input"; // The subsystem of this node is still "input"
+        def->input_parent_subsystem = "input";
         FAKE_UDEV_LOG_DEBUG("  Gamepad %d Input Parent: sysname='%s', syspath='%s', subsystem='%s'",
                            i, def->input_parent_sysname, def->input_parent_syspath, def->input_parent_subsystem);
 
-        // Sysattrs for the input parent node (e.g., /sys/devices/virtual/selkies_pad0/input/input10)
         def->input_parent_sysattrs[0] = (key_value_pair_t){"id/vendor", "0x045e"};
         def->input_parent_sysattrs[1] = (key_value_pair_t){"id/product", "0x028e"};
         def->input_parent_sysattrs[2] = (key_value_pair_t){"id/version", "0x0114"};
-        def->input_parent_sysattrs[3] = (key_value_pair_t){"name", "Microsoft X-Box 360 pad"}; // Name of the input event interface
+        def->input_parent_sysattrs[3] = (key_value_pair_t){"name", "Microsoft X-Box 360 pad"};
 
-        snprintf(input_phys[i], sizeof(input_phys[i]), "selkies/virtpad%d/input0", i); // Physical path
+        snprintf(input_phys[i], sizeof(input_phys[i]), "selkies/virtpad%d/input0", i);
         def->input_parent_sysattrs[4] = (key_value_pair_t){"phys", input_phys[i]};
-        snprintf(input_uniq[i], sizeof(input_uniq[i]), "SGVP%04d", i); // Unique ID
+        snprintf(input_uniq[i], sizeof(input_uniq[i]), "SGVP%04d", i);
         def->input_parent_sysattrs[5] = (key_value_pair_t){"uniq", input_uniq[i]};
         def->input_parent_sysattrs[6] = (key_value_pair_t){"capabilities/ev", "1b"};
         def->input_parent_sysattrs[7] = (key_value_pair_t){"capabilities/key", "ffff000000000000 0 0 0 0 0 7fdb000000000000 0 0 0 0"};
@@ -147,9 +173,8 @@ void initialize_virtual_gamepads_data_if_needed() {
         def->input_parent_sysattrs[10] = (key_value_pair_t){"event_count", "123"}; // Dummy value
         def->input_parent_sysattrs[11] = (key_value_pair_t){NULL, NULL};
 
-        // Properties for the input parent node
         def->input_parent_properties[0] = (key_value_pair_t){"ID_INPUT", "1"};
-        def->input_parent_properties[1] = (key_value_pair_t){"ID_INPUT_JOYSTICK", "1"}; // The input parent itself is a joystick source
+        def->input_parent_properties[1] = (key_value_pair_t){"ID_INPUT_JOYSTICK", "1"};
         // DEVPATH is the syspath relative to /sys
         snprintf(input_devpaths[i], sizeof(input_devpaths[i]), "%s", def->input_parent_syspath + strlen("/sys"));
         def->input_parent_properties[2] = (key_value_pair_t){"DEVPATH", input_devpaths[i]};
@@ -157,12 +182,10 @@ void initialize_virtual_gamepads_data_if_needed() {
         FAKE_UDEV_LOG_DEBUG("  Gamepad %d Input Parent: DEVPATH='%s'", i, input_devpaths[i]);
 
 
-        // --- JS Device ---
-        // JS device node is a child of the input parent node.
         snprintf(def->js_sysname, sizeof(def->js_sysname), "js%d", i);
         snprintf(def->js_syspath, sizeof(def->js_syspath), "%s/%s", def->input_parent_syspath, def->js_sysname);
         snprintf(def->js_devnode, sizeof(def->js_devnode), "/dev/input/js%d", i);
-        def->js_subsystem = "input"; // The js node itself is also in the "input" subsystem in terms of udev classification
+        def->js_subsystem = "input";
         FAKE_UDEV_LOG_DEBUG("  Gamepad %d JS: sysname='%s', syspath='%s', devnode='%s', subsystem='%s'",
                            i, def->js_sysname, def->js_syspath, def->js_devnode, def->js_subsystem);
         def->js_properties[0] = (key_value_pair_t){"DEVNAME", def->js_devnode};
@@ -170,12 +193,10 @@ void initialize_virtual_gamepads_data_if_needed() {
         def->js_properties[2] = (key_value_pair_t){"ID_INPUT", "1"};
         def->js_properties[3] = (key_value_pair_t){NULL, NULL};
 
-        // --- Event Device ---
-        // Event device node is also a child of the input parent node.
         snprintf(def->event_sysname, sizeof(def->event_sysname), "event%d", event_dev_id_base + i);
         snprintf(def->event_syspath, sizeof(def->event_syspath), "%s/%s", def->input_parent_syspath, def->event_sysname);
         snprintf(def->event_devnode, sizeof(def->event_devnode), "/dev/input/event%d", event_dev_id_base + i);
-        def->event_subsystem = "input"; // The event node is also in the "input" subsystem
+        def->event_subsystem = "input";
         FAKE_UDEV_LOG_DEBUG("  Gamepad %d Event: sysname='%s', syspath='%s', devnode='%s', subsystem='%s'",
                            i, def->event_sysname, def->event_syspath, def->event_devnode, def->event_subsystem);
         def->event_properties[0] = (key_value_pair_t){"DEVNAME", def->event_devnode};
@@ -185,9 +206,7 @@ void initialize_virtual_gamepads_data_if_needed() {
         def->event_properties[4] = (key_value_pair_t){"ID_INPUT", "1"};
         def->event_properties[5] = (key_value_pair_t){NULL, NULL};
 
-        // --- USB Parent Device ---
         snprintf(def->usb_parent_sysname, sizeof(def->usb_parent_sysname), "selkies_usb_ctrl%d_dev", i);
-        // Path for the USB device itself (parent of the USB interface that leads to the input device)
         snprintf(def->usb_parent_syspath, sizeof(def->usb_parent_syspath), "/sys/devices/virtual/usb/%s", def->usb_parent_sysname);
         def->usb_parent_subsystem = "usb";
         def->usb_parent_devtype = "usb_device";
@@ -263,12 +282,8 @@ struct udev_monitor {
     struct udev *udev_ctx;
     int n_ref;
     char name[64];
-    // Consumer-visible fd (returned by udev_monitor_get_fd): an epoll set over
-    // inotify_fd and evbuf_efd, so it polls readable exactly while
-    // receive_device has an event to yield (real-libudev contract). -1 => hand
-    // out inotify_fd directly.
-    int fd;
-    int inotify_fd;            // internal inotify fd, -1 if unavailable
+    int fd;                    // epoll set over inotify_fd + evbuf_efd; -1 => hand out inotify_fd
+    int inotify_fd;            // -1 if unavailable
     int evbuf_efd;             // eventfd armed while evbuf holds an undispensed matching record
     bool evbuf_efd_armed;      // current arm state of evbuf_efd
     int watch_wd;              // watch descriptor for FAKE_UDEV_SOCKET_DIR, -1 if none
@@ -833,7 +848,7 @@ struct udev_enumerate *udev_enumerate_unref(struct udev_enumerate *udev_enumerat
         }
         if (udev_enumerate->property_filters) {
             FAKE_UDEV_LOG_DEBUG("  Freeing property filters for enumerate %p", (void*)udev_enumerate);
-            free_udev_list(udev_enumerate->property_filters); // free_udev_list is suitable
+            free_udev_list(udev_enumerate->property_filters);
         }
         free(udev_enumerate);
         return NULL;
@@ -869,6 +884,9 @@ int udev_enumerate_add_match_sysname(struct udev_enumerate *udev_enumerate, cons
 }
 
 
+/* Prepends a property filter. A NULL value matches on the property's presence
+ * alone; a NULL property is a no-op returning 0, as in libudev. Results are
+ * rebuilt by the next scan_devices. */
 int udev_enumerate_add_match_property(struct udev_enumerate *udev_enumerate, const char *property, const char *value) {
     FAKE_UDEV_LOG_INFO("called for enumerate %p, property: '%s', value: '%s'",
                   (void*)udev_enumerate, property ? property : "NULL", value ? value : "NULL");
@@ -879,7 +897,6 @@ int udev_enumerate_add_match_property(struct udev_enumerate *udev_enumerate, con
     }
 
     if (!property) {
-        // The real libudev-enumerate.c returns 0 if property is NULL.
         FAKE_UDEV_LOG_WARN("  Property parameter is NULL. Doing nothing, returning 0.");
         return 0;
     }
@@ -890,40 +907,36 @@ int udev_enumerate_add_match_property(struct udev_enumerate *udev_enumerate, con
         return -ENOMEM;
     }
     new_filter->name = strdup(property);
-    if (value) { // Value can be NULL, which might mean "property exists"
+    if (value) {
         new_filter->value = strdup(value);
     } else {
-        new_filter->value = NULL; // Explicitly NULL if value arg is NULL
+        new_filter->value = NULL;
     }
 
     if (!new_filter->name || (value && !new_filter->value)) {
         FAKE_UDEV_LOG_ERROR("  strdup failed for property filter name/value");
-        free(new_filter->name); // handles if name was strdup'd but value failed
+        free(new_filter->name);
         free(new_filter->value);
         free(new_filter);
         return -ENOMEM;
     }
 
-    // Prepend to the list of filters
     new_filter->next = udev_enumerate->property_filters;
     udev_enumerate->property_filters = new_filter;
 
     FAKE_UDEV_LOG_INFO("  Filter by property '%s'='%s' ADDED to enumerate %p.",
                       property, value ? value : "(exists check)", (void*)udev_enumerate);
 
-    // Any existing scan results are now potentially stale.
-    // udev_enumerate_scan_devices already frees and rebuilds, so this is implicitly handled.
     if (udev_enumerate->current_scan_results) {
         FAKE_UDEV_LOG_DEBUG("  A property match filter was added. Any previous scan results in %p are now considered stale.", (void*)udev_enumerate);
     }
-    return 0; // Success
+    return 0;
 }
 
 int udev_enumerate_add_match_sysattr(struct udev_enumerate *udev_enumerate, const char *sysattr, const char *value) {
     if (!udev_enumerate) {
-        return -EINVAL; // Standard error for invalid argument
+        return -EINVAL;
     }
-    // No-op, always succeed for now.
     return 0;
 }
 
@@ -931,7 +944,6 @@ int udev_enumerate_add_nomatch_sysattr(struct udev_enumerate *udev_enumerate, co
     if (!udev_enumerate) {
         return -EINVAL;
     }
-    // No-op, always succeed for now.
     return 0;
 }
 
@@ -939,34 +951,31 @@ int udev_enumerate_add_match_tag(struct udev_enumerate *udev_enumerate, const ch
     if (!udev_enumerate) {
         return -EINVAL;
     }
-    // No-op, always succeed for now.
     return 0;
 }
 
 int udev_enumerate_add_match_parent(struct udev_enumerate *udev_enumerate, struct udev_device *parent) {
     if (!udev_enumerate) return -EINVAL;
-    return 0; // No-op
+    return 0;
 }
 int udev_enumerate_add_match_is_initialized(struct udev_enumerate *udev_enumerate) {
     if (!udev_enumerate) return -EINVAL;
-    return 0; // No-op
+    return 0;
 }
 int udev_enumerate_add_match_sysnum(struct udev_enumerate *udev_enumerate, const char *sysnum) {
    if (!udev_enumerate) return -EINVAL;
-   return 0; // No-op
+   return 0;
 }
 int udev_enumerate_add_match_devicenode(struct udev_enumerate *udev_enumerate, const char *devnode) {
    if (!udev_enumerate) return -EINVAL;
-   return 0; // No-op
+   return 0;
 }
 int udev_enumerate_add_syspath(struct udev_enumerate *udev_enumerate, const char *syspath) {
    if (!udev_enumerate) return -EINVAL;
-   return 0; // No-op
+   return 0;
 }
 int udev_enumerate_scan_children(struct udev_enumerate *udev_enumerate, struct udev_device *parent) {
    if (!udev_enumerate || !parent) return -EINVAL;
-   // For scanning children, we would typically not find any for our virtual devices.
-   // Clear any existing scan results.
    if (udev_enumerate->current_scan_results) {
        free_udev_list(udev_enumerate->current_scan_results);
        udev_enumerate->current_scan_results = NULL;
@@ -974,7 +983,6 @@ int udev_enumerate_scan_children(struct udev_enumerate *udev_enumerate, struct u
    return 0;
 }
 
-// C-compatible helper function for adding to scan results
 static void add_syspath_to_results_list(
     struct udev_list_entry **head_ptr,
     struct udev_list_entry **tail_ptr,
@@ -989,7 +997,6 @@ static void add_syspath_to_results_list(
     struct udev_list_entry *entry = (struct udev_list_entry *)calloc(1, sizeof(struct udev_list_entry));
     if (!entry) {
         FAKE_UDEV_LOG_ERROR("    calloc failed for list entry for %s", syspath_to_add);
-        // Note: Caller might need to free partially built list if this is critical.
         return;
     }
     entry->name = strdup(syspath_to_add);
@@ -1001,20 +1008,23 @@ static void add_syspath_to_results_list(
     entry->value = NULL;
     entry->next = NULL;
 
-    if (!*head_ptr) { // If list is empty
+    if (!*head_ptr) {
         *head_ptr = entry;
-    } else { // Append to existing list
+    } else {
         (*tail_ptr)->next = entry;
     }
-    *tail_ptr = entry; // Update tail to the new entry
+    *tail_ptr = entry;
     (*count_ptr)++;
 }
 
 
+/* True when every filter matches a property of the node; a filter with a NULL
+ * value matches on the property's presence. Nodes without properties (the USB
+ * parent) match only an empty filter list. */
 static bool device_matches_all_property_filters(const virtual_gamepad_definition_t *def,
                                                 virtual_device_node_type_t node_type,
                                                 struct udev_list_entry *filters) {
-    if (!filters) { // No filters means the device always matches this criteria
+    if (!filters) {
         return true;
     }
 
@@ -1026,10 +1036,10 @@ static bool device_matches_all_property_filters(const virtual_gamepad_definition
         case VIRTUAL_TYPE_INPUT_PARENT: device_properties = def->input_parent_properties; node_type_str = "INPUT_PARENT"; break;
         default:
             FAKE_UDEV_LOG_DEBUG("    Device node type %d has no properties defined for filtering.", node_type);
-            return false; // Or true, depending on how you want to treat types without properties
+            return false;
     }
 
-    if (!device_properties) { // Should not happen if cases above are comprehensive for prop-having types
+    if (!device_properties) {
         FAKE_UDEV_LOG_DEBUG("    Device (type %s, def %d) has no properties array.", node_type_str, def->id);
         return false;
     }
@@ -1038,12 +1048,9 @@ static bool device_matches_all_property_filters(const virtual_gamepad_definition
         bool current_filter_matched = false;
         for (int i = 0; device_properties[i].name != NULL; ++i) {
             if (strcmp(device_properties[i].name, filter->name) == 0) {
-                // Property name matches. Now check value.
-                // If filter->value is NULL, it means "property exists, value doesn't matter".
-                // If filter->value is not NULL, property value must also match.
                 if (filter->value == NULL || (device_properties[i].value && strcmp(device_properties[i].value, filter->value) == 0)) {
                     current_filter_matched = true;
-                    break; // Found match for this filter, move to next device property
+                    break;
                 }
             }
         }
@@ -1053,21 +1060,25 @@ static bool device_matches_all_property_filters(const virtual_gamepad_definition
                                (node_type == VIRTUAL_TYPE_JS) ? def->js_syspath :
                                (node_type == VIRTUAL_TYPE_EVENT) ? def->event_syspath : def->input_parent_syspath,
                                filter->name, filter->value ? filter->value : "(exists)");
-            return false; // This specific filter was not matched by any device property.
+            return false;
         }
         FAKE_UDEV_LOG_DEBUG("    Device (type %s, def %d) matched filter: %s=%s", node_type_str, def->id, filter->name, filter->value ? filter->value : "(exists)");
     }
-    return true; // All filters were matched
+    return true;
 }
 
 
+/* Rebuilds the result list. Only the "input" subsystem is scanned: a generic
+ * scan yields every js and event node, a sysname pattern additionally selects
+ * an input parent it names, and each candidate must pass the property filters.
+ * Property filters without an input subsystem match yield nothing. */
 int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
-    FAKE_UDEV_LOG_INFO("called for enumerate %p (filters: subsystem_input=%d, sysname_pattern='%s')",
-                  (void*)udev_enumerate, udev_enumerate->filter_subsystem_input, udev_enumerate->filter_sysname_pattern);
     if (!udev_enumerate) {
         FAKE_UDEV_LOG_WARN("  udev_enumerate is NULL");
         return -EINVAL;
     }
+    FAKE_UDEV_LOG_INFO("called for enumerate %p (filters: subsystem_input=%d, sysname_pattern='%s')",
+                  (void*)udev_enumerate, udev_enumerate->filter_subsystem_input, udev_enumerate->filter_sysname_pattern);
 
     if (udev_enumerate->current_scan_results) {
         FAKE_UDEV_LOG_DEBUG("  Freeing previous scan results for enumerate %p", (void*)udev_enumerate);
@@ -1079,10 +1090,7 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
     struct udev_list_entry *tail = NULL;
     int count = 0;
 
-    // We only proceed if subsystem_input is true OR if there are property filters.
-    // The original libudev might behave differently if no subsystem filter is set but property filters are.
-
-    if (udev_enumerate->filter_subsystem_input) { // Primary condition for scanning input devices
+    if (udev_enumerate->filter_subsystem_input) {
         FAKE_UDEV_LOG_DEBUG("  filter_subsystem_input is true, proceeding with scan.");
         initialize_virtual_gamepads_data_if_needed();
 
@@ -1093,7 +1101,6 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
 
             bool is_generic_sysname_scan = (udev_enumerate->filter_sysname_pattern[0] == '\0');
 
-            // Check JS device
             if (is_generic_sysname_scan || fnmatch(udev_enumerate->filter_sysname_pattern, def->js_sysname, 0) == 0) {
                 if (device_matches_all_property_filters(def, VIRTUAL_TYPE_JS, udev_enumerate->property_filters)) {
                     add_syspath_to_results_list(&head, &tail, &count, def->js_syspath, "JS", i);
@@ -1102,7 +1109,6 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
                 }
             }
 
-            // Check EVENT device
             if (is_generic_sysname_scan || fnmatch(udev_enumerate->filter_sysname_pattern, def->event_sysname, 0) == 0) {
                 if (device_matches_all_property_filters(def, VIRTUAL_TYPE_EVENT, udev_enumerate->property_filters)) {
                     add_syspath_to_results_list(&head, &tail, &count, def->event_syspath, "EVENT", i);
@@ -1111,8 +1117,6 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
                 }
             }
 
-            // Check INPUT_PARENT device (only if pattern specifically matches it, not for generic scan)
-            // And if it matches property filters (though joystick properties are usually not on the input parent directly)
             if (!is_generic_sysname_scan && fnmatch(udev_enumerate->filter_sysname_pattern, def->input_parent_sysname, 0) == 0) {
                  if (device_matches_all_property_filters(def, VIRTUAL_TYPE_INPUT_PARENT, udev_enumerate->property_filters)) {
                     add_syspath_to_results_list(&head, &tail, &count, def->input_parent_syspath, "INPUT_PARENT (by pattern)", i);
@@ -1122,7 +1126,6 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
             }
         }
     } else if (udev_enumerate->property_filters) {
-         // If subsystem is NOT "input", but there ARE property filters, we might still need to scan.
          FAKE_UDEV_LOG_DEBUG("  filter_subsystem_input is false, but property filters exist. This scenario is not fully implemented for non-input subsystems.");
     }
     else {
@@ -1142,9 +1145,8 @@ struct udev_list_entry *udev_enumerate_get_list_entry(struct udev_enumerate *ude
     return udev_enumerate->current_scan_results;
 }
 
-// Maps an interposer socket basename (e.g. "selkies_js0.sock" or
-// "selkies_event1000.sock") back to the virtual gamepad node it represents.
-// Socket basenames are "selkies_<sysname>.sock" for the js and event nodes.
+/* Maps an interposer socket basename ("selkies_<sysname>.sock", e.g.
+ * "selkies_js0.sock" or "selkies_event1000.sock") back to its js or event node. */
 static bool find_node_by_socket_name(const char *name,
                                      const virtual_gamepad_definition_t **def_out,
                                      virtual_device_node_type_t *type_out) {
@@ -1163,6 +1165,13 @@ static bool find_node_by_socket_name(const char *name,
     return false;
 }
 
+/* Backs the monitor with an inotify watch on the socket directory so the
+ * interposer's socket create/delete surface as add/remove hotplug events. The
+ * consumer-visible fd is an epoll set over the inotify fd plus an eventfd kept
+ * armed while undispensed matching records sit in evbuf: one inotify read()
+ * can drain several coalesced records while receive_device dispenses one per
+ * call, so raw inotify readability would understate pending events and a
+ * poll()-gated consumer (SDL2) would stop calling receive_device early. */
 struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev, const char *name) {
     if (!udev) {
         return NULL;
@@ -1181,8 +1190,6 @@ struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev, const char
     mon->filter_subsystem[0] = '\0';
     mon->evbuf_len = 0;
     mon->evbuf_off = 0;
-    // Back the monitor with an inotify watch on the socket dir so the interposer's
-    // device-socket create/delete surface as udev add/remove hotplug events.
     mon->inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (mon->inotify_fd >= 0) {
         const char *sock_dir = fake_udev_socket_dir();
@@ -1193,12 +1200,6 @@ struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev, const char
     } else {
         FAKE_UDEV_LOG_WARN("inotify_init1 failed: %s; hotplug disabled", strerror(errno));
     }
-    // One inotify read() can drain several coalesced records into evbuf while
-    // receive_device dispenses only one per call, so raw inotify readability
-    // understates pending events. Hand out an epoll fd over the inotify fd plus
-    // an eventfd that is kept armed while undispensed matching records sit in
-    // evbuf; poll()-gated consumers (SDL2) then keep calling receive_device
-    // until the buffer is truly empty.
     mon->evbuf_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     mon->evbuf_efd_armed = false;
     mon->fd = epoll_create1(EPOLL_CLOEXEC);
@@ -1215,8 +1216,7 @@ struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev, const char
             epoll_ctl(mon->fd, EPOLL_CTL_ADD, mon->evbuf_efd, &epev);
         }
     } else {
-        // Degraded fallback: hand out the raw inotify fd (buffered-record
-        // readability is then best-effort, as before).
+        // No epoll set: udev_monitor_get_fd hands out the raw inotify fd.
         FAKE_UDEV_LOG_WARN("epoll_create1 failed: %s", strerror(errno));
     }
     if (name) {
@@ -1352,7 +1352,7 @@ static struct udev_device *monitor_dispense_device(struct udev_monitor *udev_mon
         const virtual_gamepad_definition_t *def = NULL;
         virtual_device_node_type_t type = VIRTUAL_TYPE_NONE;
         if (!find_node_by_socket_name(ev->name, &def, &type)) {
-            continue; // not one of the interposer's device sockets
+            continue;
         }
 
         const char *syspath = (type == VIRTUAL_TYPE_JS) ? def->js_syspath : def->event_syspath;
@@ -1360,7 +1360,7 @@ static struct udev_device *monitor_dispense_device(struct udev_monitor *udev_mon
         if (!dev) {
             continue;
         }
-        // Honor a subsystem filter if one was set (our nodes are always "input").
+        // Our nodes are always "input", so a subsystem filter can only exclude.
         if (udev_monitor->filter_subsystem[0] != '\0') {
             const char *subsys = udev_device_get_subsystem(dev);
             if (!subsys || strcmp(subsys, udev_monitor->filter_subsystem) != 0) {
@@ -1396,7 +1396,6 @@ int udev_monitor_filter_add_match_subsystem_devtype(
     return 0;
 }
 
-// --- HWDB Stubs ---
 struct udev_hwdb *udev_hwdb_new(struct udev *udev) {
     FAKE_UDEV_LOG_INFO("STUB: udev_hwdb_new called for udev_ctx %p, returning NULL", (void*)udev);
     return NULL;
@@ -1416,7 +1415,6 @@ struct udev_list_entry *udev_hwdb_get_properties_list_entry(
     return NULL;
 }
 
-// --- Other udev_device Stubs/Placeholders ---
 const char *udev_device_get_action(struct udev_device *udev_device) {
     const char* syspath = udev_device ? udev_device_get_syspath(udev_device) : "NULL_DEVICE";
     // Monitor-delivered devices carry their real action; enumerated devices default to "add".
@@ -1553,14 +1551,12 @@ struct udev_list_entry *udev_device_get_tags_list_entry(struct udev_device *udev
     return NULL;
 }
 
-// --- udev context ---
 void udev_set_log_fn(struct udev *udev,
                             void (*log_fn)(struct udev *udev,
                                            int priority, const char *file, int line, const char *fn,
                                            const char *format, va_list args)) {
-    (void)udev; (void)log_fn; // Suppress unused parameter warnings
+    (void)udev; (void)log_fn;
     FAKE_UDEV_LOG_INFO("STUB: udev_set_log_fn called.");
-    // No-op
 }
 
 int udev_get_log_priority(struct udev *udev) {
@@ -1572,7 +1568,6 @@ int udev_get_log_priority(struct udev *udev) {
 void udev_set_log_priority(struct udev *udev, int priority) {
     (void)udev; (void)priority;
     FAKE_UDEV_LOG_INFO("STUB: udev_set_log_priority called with priority %d.", priority);
-    // No-op
 }
 
 void *udev_get_userdata(struct udev *udev) {
@@ -1584,15 +1579,11 @@ void *udev_get_userdata(struct udev *udev) {
 void udev_set_userdata(struct udev *udev, void *userdata) {
     (void)udev; (void)userdata;
     FAKE_UDEV_LOG_INFO("STUB: udev_set_userdata called.");
-    // No-op
 }
 
-// --- udev_list_entry ---
 struct udev_list_entry *udev_list_entry_get_by_name(struct udev_list_entry *list_entry, const char *name) {
     (void)list_entry; (void)name;
     FAKE_UDEV_LOG_INFO("STUB: udev_list_entry_get_by_name called for name '%s', returning NULL.", name ? name : "NULL");
-    // A real implementation would iterate through the list.
-    // For a simple stub, just return NULL.
     struct udev_list_entry *current = list_entry;
     while (current) {
         if (current->name && name && strcmp(current->name, name) == 0) {
@@ -1605,7 +1596,6 @@ struct udev_list_entry *udev_list_entry_get_by_name(struct udev_list_entry *list
     return NULL;
 }
 
-// --- udev_device ---
 struct udev_device *udev_device_new_from_device_id(struct udev *udev, const char *id) {
     (void)udev; (void)id;
     FAKE_UDEV_LOG_INFO("STUB: udev_device_new_from_device_id called for id '%s', returning NULL.", id ? id : "NULL");
@@ -1632,11 +1622,9 @@ struct udev_list_entry *udev_device_get_current_tags_list_entry(struct udev_devi
 
 const char *udev_device_get_driver(struct udev_device *udev_device) {
     const char* syspath = udev_device ? udev_device_get_syspath(udev_device) : "NULL_DEVICE";
-    /* A real wired Xbox 360 pad binds the "xpad" driver on its USB interface,
-     * and Firefox keys its X/Y (BTN_WEST/BTN_NORTH) correction on that driver
-     * name; report it on the USB parent or Firefox leaves the kernel's xpad
-     * naming quirk uncorrected and shows X/Y swapped. No button codes change,
-     * so the js and evdev consumers (Chrome, SDL) are unaffected. */
+    /* Firefox keys its X/Y (BTN_WEST/BTN_NORTH) swap correction on the "xpad"
+     * driver a real wired Xbox 360 pad binds; without it on the USB parent the
+     * pad shows X/Y swapped. Button codes are unchanged for js/evdev consumers. */
     if (udev_device && udev_device->node_type == VIRTUAL_TYPE_USB_PARENT) {
         FAKE_UDEV_LOG_DEBUG("udev_device_get_driver: reporting 'xpad' for USB parent %s", syspath);
         return "xpad";
@@ -1661,7 +1649,7 @@ int udev_device_set_sysattr_value(struct udev_device *udev_device, const char *s
     const char* dev_syspath = udev_device ? udev_device_get_syspath(udev_device) : "NULL_DEVICE";
     FAKE_UDEV_LOG_INFO("STUB: udev_device_set_sysattr_value called for device %p (%s), sysattr '%s', value '%s'. Returning 0 (success).",
                   (void*)udev_device, dev_syspath, sysattr ? sysattr : "NULL", value ? value : "NULL");
-    return 0; // Indicate success, though it's a no-op
+    return 0;
 }
 
 int udev_device_has_tag(struct udev_device *udev_device, const char *tag) {
@@ -1678,11 +1666,10 @@ int udev_device_has_current_tag(struct udev_device *udev_device, const char *tag
     return 0;
 }
 
-// --- udev_monitor ---
 struct udev *udev_monitor_get_udev(struct udev_monitor *udev_monitor) {
     FAKE_UDEV_LOG_INFO("STUB: udev_monitor_get_udev called for monitor %p.", (void*)udev_monitor);
     if (!udev_monitor) return NULL;
-    return udev_monitor->udev_ctx; // Assuming udev_monitor struct has udev_ctx
+    return udev_monitor->udev_ctx;
 }
 
 int udev_monitor_set_receive_buffer_size(struct udev_monitor *udev_monitor, int size) {
@@ -1710,27 +1697,22 @@ int udev_monitor_filter_remove(struct udev_monitor *udev_monitor) {
     return 0;
 }
 
-// --- udev_enumerate ---
 struct udev *udev_enumerate_get_udev(struct udev_enumerate *udev_enumerate) {
     FAKE_UDEV_LOG_INFO("STUB: udev_enumerate_get_udev called for enumerate %p.", (void*)udev_enumerate);
     if (!udev_enumerate) return NULL;
-    return udev_enumerate->udev_ctx; // Assuming udev_enumerate struct has udev_ctx
+    return udev_enumerate->udev_ctx;
 }
 
 int udev_enumerate_add_nomatch_subsystem(struct udev_enumerate *udev_enumerate, const char *subsystem) {
     (void)udev_enumerate; (void)subsystem;
     FAKE_UDEV_LOG_INFO("STUB: udev_enumerate_add_nomatch_subsystem called for enumerate %p, subsystem '%s'. Returning 0.",
                   (void*)udev_enumerate, subsystem ? subsystem : "NULL");
-    // This would typically invert the logic of add_match_subsystem or add to a separate list.
-    // For a simple stub, just return 0.
     return 0;
 }
 
 int udev_enumerate_scan_subsystems(struct udev_enumerate *udev_enumerate) {
     (void)udev_enumerate;
     FAKE_UDEV_LOG_INFO("STUB: udev_enumerate_scan_subsystems called for enumerate %p. Returning 0.", (void*)udev_enumerate);
-    // This would scan for subsystems and populate current_scan_results with subsystem names.
-    // For a simple stub, clear existing results and return 0.
     if (udev_enumerate && udev_enumerate->current_scan_results) {
         free_udev_list(udev_enumerate->current_scan_results);
         udev_enumerate->current_scan_results = NULL;
@@ -1738,13 +1720,9 @@ int udev_enumerate_scan_subsystems(struct udev_enumerate *udev_enumerate) {
     return 0;
 }
 
-// --- udev_queue ---
-// (Need to define struct udev_queue if not already done, e.g., in libudev.h or locally if opaque)
-// Assuming struct udev_queue is defined similarly to udev_monitor or udev_enumerate for ref counting
 struct udev_queue {
     struct udev *udev_ctx;
     int n_ref;
-    // Add other necessary fields if any specific logic is ever implemented
 };
 
 
@@ -1816,13 +1794,13 @@ int udev_queue_get_udev_is_active(struct udev_queue *udev_queue) {
 int udev_queue_get_queue_is_empty(struct udev_queue *udev_queue) {
     (void)udev_queue;
     FAKE_UDEV_LOG_INFO("STUB: udev_queue_get_queue_is_empty called for queue %p, returning 1 (true).", (void*)udev_queue);
-    return 1; // Typically means empty
+    return 1;
 }
 
 int udev_queue_get_seqnum_is_finished(struct udev_queue *udev_queue, unsigned long long int seqnum) {
     (void)udev_queue; (void)seqnum;
     FAKE_UDEV_LOG_INFO("STUB: udev_queue_get_seqnum_is_finished called for queue %p, seqnum %llu, returning 1 (true).", (void*)udev_queue, seqnum);
-    return 1; // Typically means finished
+    return 1;
 }
 
 int udev_queue_get_seqnum_sequence_is_finished(struct udev_queue *udev_queue,
@@ -1830,13 +1808,13 @@ int udev_queue_get_seqnum_sequence_is_finished(struct udev_queue *udev_queue,
     (void)udev_queue; (void)start; (void)end;
     FAKE_UDEV_LOG_INFO("STUB: udev_queue_get_seqnum_sequence_is_finished called for queue %p, start %llu, end %llu, returning 1 (true).",
                   (void*)udev_queue, start, end);
-    return 1; // Typically means finished
+    return 1;
 }
 
 int udev_queue_get_fd(struct udev_queue *udev_queue) {
     (void)udev_queue;
     FAKE_UDEV_LOG_INFO("STUB: udev_queue_get_fd called for queue %p, returning -1.", (void*)udev_queue);
-    return -1; // No valid fd for a stub
+    return -1;
 }
 
 int udev_queue_flush(struct udev_queue *udev_queue) {
@@ -1851,11 +1829,11 @@ struct udev_list_entry *udev_queue_get_queued_list_entry(struct udev_queue *udev
     return NULL;
 }
 
-// --- udev_util ---
+/* Copies str verbatim (no udev escaping), NUL-terminated within len; returns
+ * the bytes copied. */
 int udev_util_encode_string(const char *str, char *str_enc, size_t len) {
     FAKE_UDEV_LOG_INFO("STUB: udev_util_encode_string called for str '%s', len %zu.", str ? str : "NULL", len);
-    if (!str || !str_enc || len == 0) return 0; // Or -EINVAL
-    // Simple passthrough, not actual encoding. Ensure null termination if space.
+    if (!str || !str_enc || len == 0) return 0;
     size_t copy_len = strlen(str);
     if (copy_len >= len) {
         copy_len = len - 1;
@@ -1863,5 +1841,5 @@ int udev_util_encode_string(const char *str, char *str_enc, size_t len) {
     memcpy(str_enc, str, copy_len);
     str_enc[copy_len] = '\0';
     FAKE_UDEV_LOG_DEBUG("  Copied '%s' to encoded string.", str_enc);
-    return (int)copy_len; // Return number of bytes written (excluding null)
+    return (int)copy_len;
 }

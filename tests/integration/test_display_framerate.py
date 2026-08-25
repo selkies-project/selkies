@@ -76,7 +76,6 @@ def main() -> "H.Results":
 
     async def drive():
         uri = f"ws://localhost:{H.PORT}/api/websockets"
-        # The primary declares framerate 33 and bitrate 2200 explicitly.
         async with websockets.connect(uri, max_size=None) as p1:
             await asyncio.wait_for(p1.recv(), timeout=10)
             await p1.send("SETTINGS," + json.dumps(_settings("primary", framerate=33, video_bitrate=2200)))

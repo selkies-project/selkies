@@ -90,7 +90,7 @@ export function installAuthGuard() {
         writeStamp({ at: Date.now(), n: chain + 1 });
         window.location.reload();
     };
-    // A third-party API's 401 must not reload the page.
+    /** Whether a request targets this origin; a third-party API's 401 must not reload the page. */
     const sameOrigin = (input) => {
         try {
             const url = (typeof input === 'string' || input instanceof URL)
@@ -113,8 +113,10 @@ export function installAuthGuard() {
         if (res.status === 401 && sameOrigin(args[0]) && !isTokenVerdict(res)) reloadOnce();
         return res;
     };
-    // The probe's fetch goes through the guard above: it either proves a 401
-    // and reloads, or quietly does nothing.
+    /**
+     * Probe socket close handlers call: the HEAD goes through the wrapped
+     * fetch, so it either proves a 401 and reloads, or quietly does nothing.
+     */
     window.__selkiesAuthProbe = () => {
         try {
             window.fetch(new Request(window.location.href, {

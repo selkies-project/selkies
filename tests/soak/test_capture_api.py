@@ -154,7 +154,6 @@ def main() -> "H.Results":
     subprocess.run(["xsetroot", "-solid", "#3366cc"],
                    env={"DISPLAY": TEST_DISPLAY, "PATH": os.environ.get("PATH", "")}, capture_output=True)
 
-    # ---- X11 encoders + on-demand IDR ----
     for enc in ["h264enc", "h264enc-striped", "jpeg"]:
         try:
             before, after = run_x11(enc)
@@ -168,7 +167,6 @@ def main() -> "H.Results":
         except Exception as e:
             res.check(f"x11 {enc}: no exception", False, repr(e)[:140])
 
-    # ---- NVENC hardware encoder ----
     try:
         import pixelflux
         cap = pixelflux.ScreenCapture()
@@ -184,7 +182,6 @@ def main() -> "H.Results":
     except Exception as e:
         res.check("nvenc: hardware H.264 flows", False, repr(e)[:140])
 
-    # ---- watermark ----
     try:
         png = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
@@ -196,14 +193,12 @@ def main() -> "H.Results":
     except Exception as e:
         res.check("x11 watermark", False, repr(e)[:140])
 
-    # ---- omit_stripe_headers (raw payload wire mode) ----
     try:
         before, _ = run_x11("h264enc", duration=2.0, omit_stripe_headers=True)
         res.check("x11 omit_stripe_headers: frames flow", before["n"] >= 4, before["n"])
     except Exception as e:
         res.check("x11 omit_stripe_headers", False, repr(e)[:140])
 
-    # ---- live tunables ----
     try:
         cap = pixelflux.ScreenCapture()
         fc = FrameCounter()
@@ -220,7 +215,6 @@ def main() -> "H.Results":
     except Exception as e:
         res.check("x11 live tunables", False, repr(e)[:140])
 
-    # ---- X11 cursor callback (XFixes monitor) ----
     try:
         import pixelflux
         cap = pixelflux.ScreenCapture()
@@ -234,7 +228,6 @@ def main() -> "H.Results":
     except Exception as e:
         res.check("x11 cursor callback", False, repr(e)[:140])
 
-    # ---- Wayland backend: compositor capture + outputs + input + clipboard ----
     try:
         import pixelflux
         wc = pixelflux.ScreenCapture()
@@ -255,7 +248,6 @@ def main() -> "H.Results":
                   isinstance(outs, list) and len(outs) >= 1, outs)
         res.check("wayland list_windows", isinstance(wins, list), str(wins)[:80])
         res.check("wayland get_realized_geometry", isinstance(geo, (tuple, list)), geo)
-        # output management
         try:
             oid = wc.create_output(1, 200, 200, 800, 0, 1.0)
             outs2 = wc.list_outputs()
@@ -265,7 +257,6 @@ def main() -> "H.Results":
             res.check("wayland create/reposition/destroy output", found, (oid, outs2))
         except Exception as e:
             res.check("wayland output mgmt", False, repr(e)[:140])
-        # input injection (virtual-keyboard + pointer)
         try:
             # A real round trip: the API takes an XKB keymap, not a layout
             # name, and a name simply fails to compile and leaves the current
@@ -299,7 +290,6 @@ def main() -> "H.Results":
             res.check("wayland type_text_wayland", True, "")
         except Exception as e:
             res.check("wayland type_text_wayland", False, repr(e)[:140])
-        # clipboard data-control
         try:
             wc.set_clipboard("text/plain;charset=utf-8", b"cap-clip-probe")
             time.sleep(0.3)
@@ -310,7 +300,6 @@ def main() -> "H.Results":
             res.check("wayland clipboard set/read/clear", got == "cap-clip-probe", repr(got))
         except Exception as e:
             res.check("wayland clipboard data-control", False, repr(e)[:160])
-        # cursor control
         try:
             wc.set_cursor_size(24)
             wc.set_cursor_rendering(True)
@@ -322,7 +311,6 @@ def main() -> "H.Results":
     except Exception as e:
         res.check("wayland standalone", False, repr(e)[:200])
 
-    # ---- computer-use HTTP server (all actions) ----
     try:
         pixelflux.start_computer_use(f"127.0.0.1:{CU_PORT}")
         time.sleep(1.0)
@@ -352,7 +340,6 @@ def main() -> "H.Results":
     except Exception as e:
         res.check("computer-use server", False, repr(e)[:200])
 
-    # ---- recording socket tap (raw H.264 ES) ----
     try:
         cap = pixelflux.ScreenCapture()
         fc = FrameCounter()
@@ -386,7 +373,6 @@ def main() -> "H.Results":
     except Exception as e:
         res.check("recording socket tap", False, repr(e)[:200])
 
-    # ---- module helpers ----
     try:
         name = pixelflux.get_wayland_display_name()
         res.check("get_wayland_display_name", isinstance(name, str), name)
@@ -402,19 +388,14 @@ def main() -> "H.Results":
     except Exception as e:
         res.check("ensure_wayland_display", False, repr(e)[:140])
 
-    # ---- pcmflux capture: stereo, VBR, header prefix, silence gate, latency ----
     H.pulse_setup()
-    # Every audio check below listens for this tone, so its absence is reported
-    # once here rather than left to raise out of the suite: spawning a missing
-    # binary outside a check's own try block takes the whole run down and
-    # reports nothing at all.
+    # Every audio check below listens for this tone; spawning a missing binary
+    # outside a check's own try block would take the whole run down unreported.
     tone = None
     if shutil.which("ffplay"):
         tone = H.spawn(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
-                        # Long enough to outlast every audio check that listens
-                        # for it; the process is terminated explicitly below, so
-                        # the duration only has to be an upper bound. At 30 s the
-                        # later checks in this section were reading silence.
+                        # An upper bound only (terminated explicitly below); a
+                        # shorter tone leaves the later checks reading silence.
                         "-f", "lavfi", "-i", "sine=frequency=440:duration=600",
                         "-af", "volume=0.5"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -451,7 +432,6 @@ def main() -> "H.Results":
     except Exception as e:
         res.check("pcmflux capture", False, repr(e)[:200])
 
-    # ---- pcmflux multichannel (6 ch) capture ----
     surround = None
     try:
         surround = H.pulse_null_sink("surround51", rate=48000)
@@ -475,7 +455,6 @@ def main() -> "H.Results":
     finally:
         H.pulse_unload(surround)
 
-    # ---- pcmflux RED redundancy + raw opus (omit header) ----
     try:
         ps = pcmflux.AudioCaptureSettings()
         ps.device_name = "output.monitor"
@@ -495,7 +474,6 @@ def main() -> "H.Results":
     except Exception as e:
         res.check("pcmflux raw opus", False, repr(e)[:200])
 
-    # ---- pcmflux AudioPlayback (mic uplink) into the 'output' sink ----
     try:
         pb = pcmflux.AudioPlayback()
         pbs = pcmflux.AudioPlaybackSettings()
@@ -503,7 +481,6 @@ def main() -> "H.Results":
         pbs.sample_rate = 48000
         pbs.channels = 2
         pb.start(pbs)
-        # Encode a short opus stream from the monitor and feed it back.
         ps = pcmflux.AudioCaptureSettings()
         ps.device_name = "output.monitor"
         ps.sample_rate = 48000

@@ -355,7 +355,10 @@ export function createLocalClipboardSender({
  * paste-ordering hold awaits the in-flight attempt so a server-to-client
  * write lands before a paste reads the local clipboard; otherwise the stash
  * flushes on the paste's own keydown and lands just after the read, and the
- * first paste is one behind.
+ * first paste is one behind. The flush rides keydown and pointerdown, which
+ * carry a user activation, and focus and visibilitychange, which land the
+ * write the instant Chromium accepts it again (it rejects writes from an
+ * unfocused document), well before the user's next paste.
  * @returns {DeferredClipboardWriter}
  */
 export function createDeferredClipboardWriter() {
@@ -372,12 +375,15 @@ export function createDeferredClipboardWriter() {
         promise.finally(() => { if (inFlight === promise) inFlight = null; });
     }
 
+    /**
+     * Runs one write. An activation rejection (a synthetic event, or a
+     * blurred tab) stashes it for the next gesture unless something newer
+     * replaced it; any other error reaches `onFailure`.
+     */
     function attemptOnce(w) {
         return w.attempt().then(
             () => { if (w.onSuccess) w.onSuccess(); return true; },
             (err) => {
-                // Still no activation (a synthetic event, or a blurred tab):
-                // keep it for the next gesture unless something newer replaced it.
                 if (isActivationError(err)) {
                     if (!pending || pending.seq < w.seq) pending = w;
                     return false;
@@ -394,9 +400,6 @@ export function createDeferredClipboardWriter() {
         track(attemptOnce(w));
     }
 
-    // keydown/pointerdown carry a user activation; focus/visibilitychange land
-    // the write the instant Chromium accepts it again (it rejects writes from
-    // an unfocused document), well before the user's next paste.
     for (const type of ['pointerdown', 'keydown', 'focus']) {
         window.addEventListener(type, flush, true);
     }
@@ -593,7 +596,6 @@ export function createClipboardSync({ sendRequest }) {
                 const m = it.types.find((t) => t !== 'text/plain');
                 if (!m) continue;
                 const b = await it.getType(m);
-                // The anchor is re-checked after the last await.
                 const reencoded = sig(new Uint8Array(await b.arrayBuffer()), m);
                 if (lastSyncedSig === anchor) {
                     lastReencodeSig = reencoded;
@@ -749,9 +751,8 @@ export function createClipboardGestures({
 
     const heldPasteEvents = [];
     let heldPasteReplayPending = false;
-    // Long enough to survive Chromium's first-use clipboard-read prompt, which
-    // keeps the read pending well past 2s; bounded so an abandoned prompt
-    // cannot hold V forever.
+    // Outlasts Chromium's first-use clipboard-read prompt, which keeps the read
+    // pending well past 2s, yet bounds how long an abandoned prompt can hold V.
     const PASTE_HOLD_MAX_MS = 10000;
     function replayHeldPasteEvents() {
         heldPasteReplayPending = false;

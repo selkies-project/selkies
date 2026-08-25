@@ -36,7 +36,14 @@ Structural notes:
   a single consumer task so input events keep strict arrival order.
 - Behavior deliberately mirrors the websockets transport (broadcast semantics,
   viewer/collaborator input gates, MK_ACCESS/AUTH_SUCCESS verdicts); parity
-  between the two transports is a project invariant.
+  between the two transports is a project invariant. The input gates share
+  their prefix allow-lists with the websockets gate (`input_handler`), and
+  secure-mode checks read the live `/api/tokens` table
+  (`current_session_tokens`) per message so re-provisioning is honored.
+- Data-channel compression is negotiated per channel by the `_gz,1`
+  handshake: a peer that sends it can gunzip, is echoed the capability, and
+  may from then on receive gzip'd payloads; every display page and viewer
+  handshakes independently.
 """
 
 import logging
@@ -81,16 +88,12 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 from .webrtc.contrib.relay import MediaRelay
 from enum import Enum
 from .media_pipeline import MediaPipeline
-# The viewer/collaborator input-authority lists live with the input protocol
-# (input_handler) and are shared verbatim with the websockets gate.
 from .input_handler import (
     BULK_DRAIN_TIMEOUT_S,
     VIEWER_ALLOWED_PREFIXES,
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
-# Live control-plane token view (provisioned via /api/tokens on the websockets
-# control plane), read per message so re-provisioning is honored.
 from .selkies import current_session_tokens
 
 logger = logging.getLogger("rtc")
@@ -134,17 +137,13 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
-# Raw bytes per data-channel message when no limit was negotiated: the 256 KiB
-# standard message size less envelope margin, times 3/4 for the base64 expansion.
-# Deliberately NOT the WebSocket chunk size (8 MiB frames), which no browser's
-# SCTP stack accepts.
+# 256 KiB standard SCTP message less envelope margin, times 3/4 for base64; not
+# the 8 MiB WebSocket chunk size, which no browser's SCTP stack accepts.
 DATA_CHANNEL_FALLBACK_CHUNK_SIZE = ((262144 - 512) * 3) // 4
 
 
-# Pacing for bulk (clipboard) sends: never let more than this sit in a
-# channel's SCTP queue. Bounds server memory and, since input/cursor/stats
-# share the one ordered stream, bounds how long they queue behind a bulk
-# payload on a slow link.
+# Per-channel SCTP queue cap for bulk (clipboard) sends: bounds server memory
+# and how long input/cursor/stats wait behind a bulk payload on the one stream.
 DATA_CHANNEL_BULK_HIGH_WATER = 1024 * 1024
 
 
@@ -300,12 +299,59 @@ class RTCApp:
     gates, and tears peers down symmetrically with the websockets engine.
 
     Attributes:
-        peer_connections: Peer id to peer entry (`peer_conn`, `data_channel`,
-            `client_type`, `display_id`, `client_token`, ...). One entry per
-            connected browser page.
+        peer_connections: Peer id to peer entry, one per connected browser
+            page: `peer_conn`, `data_channel`, `client_type`, `display_id`;
+            `client_token` and `client_slot` as held at connect, so a
+            revocation or handoff on `/api/tokens` can find the affected peers
+            (per-message checks read the live store); `channel_consumers`,
+            cancellable from teardown because a channel that never reached
+            SCTP-established emits no close; `mic_state` and `webcam_state`,
+            this peer's own uplink sinks (None without the m-line), retired
+            per peer; `video_sender` and `video_paused` for the per-peer tab
+            pause — the sender's enabled flag drops frames after recv, so the
+            relay keeps draining while the peer is hidden.
         displays: Display id to media graph (`relay`, `video_bridge`,
             `video_media`, and on the primary display `audio_bridge` /
-            `audio_media`).
+            `audio_media`). Built by the display's first peer (a secondary's
+            must be its controller) and released with its last consumer, or
+            for a secondary with its controller.
+        media_pipeline: The primary display's pipeline, driven by the default
+            start/stop hooks.
+        start_display_media: Per-display capture start, overridable by the
+            owning service so a secondary display drives its own pipeline; the
+            default starts only the primary.
+        stop_display_media: Counterpart of `start_display_media`.
+        get_encoder_for_display: Encoder a display runs, resolved at offer
+            time; the default is the single global encoder.
+        get_fullcolor_for_display: Whether a display emits 4:4:4, resolved at
+            offer time because the advertised profile must describe the
+            bitstream the display produces now, not the startup setting.
+        get_use_cpu_for_display: Whether a display forces software encoding,
+            resolved at offer time like the encoder; with it decides whether a
+            4:4:4 profile may be advertised.
+        on_data_open: Receives the channel that opened so per-connection
+            greetings (settings, current cursor) reach the joining peer.
+        on_data_close: Data channel closed.
+        on_data_error: Data channel error.
+        on_data_message: Input dispatcher, called with the message, display id
+            and the peer id as `conn_id`.
+        on_peer_gone: Async hook called as `(peer_id, peer_entry)` when a peer
+            reaches closed: the id releases per-connection input state
+            (gamepad associations) after an ungraceful disconnect, the entry
+            says what input authority left with it.
+        on_ice: ICE candidate to send over signaling.
+        on_sdp: SDP offer to send over signaling.
+        request_idr_frame: Async keyframe request for a display.
+        on_video_consumer_active: Per-peer video pause (tab-hide STOP_VIDEO /
+            START_VIDEO), display-scoped; left None the verbs fall through to
+            the input dispatcher, which ignores them.
+        on_consumers_changed: A display's consumer set changed (join, close).
+        provision_virtual_mic: Brings up the shared SelkiesVirtualMic (null
+            sinks, module-virtual-source, default source) before a mic
+            playback opens its `input` stream, so an app recording the default
+            source hears the client's mic (websockets 0x02 parity); None
+            leaves the mic playing into `input` without the recordable source.
+        last_cursor_sent: Last cursor payload, replayed to late joiners.
     """
 
     def __init__(
@@ -322,66 +368,28 @@ class RTCApp:
         self.encoder = encoder
         self.last_cursor_sent = None
 
-        # Per-display media graphs: display_id -> {relay, video_bridge, video_media,
-        # audio_bridge?, audio_media?}. A graph is built by the display's first
-        # peer (a secondary's must be its controller) and released with its last
-        # consumer — or, for a secondary, with its controller; only the primary
-        # display carries audio.
         self.displays: Dict[str, Dict[str, Any]] = {}
         self.media_pipeline: Optional[MediaPipeline] = None
-        # Per-display capture start/stop, overridable by the owning service so a
-        # secondary display can drive its own pipeline; the defaults preserve the
-        # single-display behavior (the primary pipeline follows its consumers).
         self.start_display_media = self._default_start_display_media
         self.stop_display_media = self._default_stop_display_media
-        # Per-display encoder resolution for offer building (codec preference and
-        # SDP munging): the owning service overrides this when displays can run
-        # different encoders; the default is the single global encoder.
         self.get_encoder_for_display = lambda display_id: self.encoder
-        # Per-display full-colour (4:4:4) state, resolved at offer time like the
-        # encoder: the profile advertised in the SDP has to describe the bitstream
-        # the display is producing NOW, not the startup setting. The owning service
-        # overrides this when the value is client-tunable.
         self.get_fullcolor_for_display = lambda display_id: bool(app_settings.video_fullcolor[0])
-        # Per-display software-encoding flag, resolved at offer time for the same
-        # reason: together with the encoder it says whether the display is known to
-        # encode on the CPU, which decides whether a 4:4:4 profile may be advertised.
         self.get_use_cpu_for_display = lambda display_id: bool(app_settings.use_cpu[0])
 
-        # Data channel events. on_data_open receives the channel that opened so
-        # per-connection greetings (server settings, current cursor) reach the
-        # joining peer, not just the controller.
         self.on_data_open = lambda channel=None: logger.warning('unhandled on_data_open')
         self.on_data_close = lambda: logger.warning('unhandled on_data_close')
         self.on_data_error = lambda e=None: logger.warning('unhandled on_data_error')
         self.on_data_message = lambda msg, display_id='primary', conn_id=None: logger.warning('unhandled on_data_message')
-        # Late-bound async hook fired when a peer reaches 'closed', called as
-        # (peer_id, peer_entry): the id releases per-connection input state
-        # (gamepad associations) when the client never sent a graceful
-        # disconnect, the entry says what input authority left with it.
         self.on_peer_gone = None
 
-        # WebRTC ICE and SDP events
         self.on_ice = lambda ice, client_peer_id: logger.warning('unhandled ice event')
         self.on_sdp = lambda sdp_type, sdp, client_peer_id: logger.warning('unhandled sdp event')
 
         self.request_idr_frame = lambda display_id='primary': logger.warning('unhandled request_idr_frame')
 
-        # Per-peer video pause (tab-hide STOP_VIDEO / START_VIDEO over the data
-        # channel) and consumer-set changes (peer close), both display-scoped.
-        # Late-bound by the owning service; left None the messages fall through
-        # to the input dispatcher (which ignores them) — the websockets engine
-        # never binds these.
         self.on_video_consumer_active = None
         self.on_consumers_changed = None
 
-        # Provision the shared SelkiesVirtualMic control plane (null sinks +
-        # module-virtual-source + default source) before this transport's mic
-        # playback opens its 'input' stream, so an app recording the default
-        # pulse source hears the client's mic (websockets 0x02 parity). Late-bound
-        # by the owning service, which owns the pulse connection and module
-        # lifetime; None leaves the WebRTC mic playing into 'input' without the
-        # recordable source (pre-parity behavior).
         self.provision_virtual_mic = None
 
     async def set_sdp(self, sdp_type: str, sdp: str, client_peer_id: str) -> None:
@@ -478,6 +486,15 @@ class RTCApp:
         `drain_data_channel`) so a multi-MB clipboard neither buffers
         unboundedly in memory nor starves input/cursor/stats behind it on the
         one ordered stream, and the per-chunk gzip runs off the event loop.
+        Each channel runs its own pipeline a chunk at a time, so a slow peer
+        paces only its own transfer; one that cannot drain a chunk within the
+        bulk timeout is left out of the rest of this payload (it keeps its
+        stream, and the client discards the partial transfer at the next
+        start) instead of wedging the others. Chunk payloads are built once
+        and shared by every channel; an entry is dropped once the slowest
+        channel has passed it, so the cache holds what is in flight, not the
+        whole payload. An empty payload is sent only as a tagged reply,
+        settling a client fetch against an empty server clipboard.
 
         Args:
             data: Clipboard payload; str is UTF-8 encoded before sending.
@@ -495,8 +512,6 @@ class RTCApp:
                 read as their own fetch and cached rather than pasted. A
                 requester whose channel has closed receives nothing.
         """
-        # An empty payload is only meaningful as a tagged reply (settling a
-        # client fetch against an empty server clipboard).
         if not data and not reply_to:
             return
 
@@ -539,9 +554,6 @@ class RTCApp:
             channels = ([requester] if requester is not None
                         else list(self._iter_open_data_channels()))
             offsets = list(range(0, len(data_bytes), clipboard_chunk_size))
-            # Chunk payloads are built once and shared by every channel; an
-            # entry is dropped once the slowest channel has passed it, so the
-            # cache holds what is in flight, not the whole payload.
             prepared: dict = {}
             prepare_lock = asyncio.Lock()
             progress = {id(c): 0 for c in channels}
@@ -568,11 +580,6 @@ class RTCApp:
                     prepared.pop(done, None)
 
             async def deliver(channel: Any) -> None:
-                # One pipeline per channel, a chunk at a time: a slow peer paces
-                # only its own transfer, and one that cannot drain a chunk within
-                # the bulk timeout is left out of the rest of this payload (it
-                # keeps its stream; the partial transfer is discarded client-side
-                # at the next start) instead of wedging the monitor or the others.
                 want_gz = bool(getattr(channel, "_selkies_gz_tx", False))
                 self.send_message_to_channel(channel, "clipboard-msg-start", start_payload)
                 for offset in offsets:
@@ -742,11 +749,13 @@ class RTCApp:
 
     def send_message_to_channel(self, channel: RTCDataChannel, msg_type: str,
                                 data: Any) -> None:
-        """Send one typed message to one specific peer's data channel."""
+        """Send one typed message to one specific peer's data channel.
+
+        Payloads of 512 bytes or more (cursor PNGs, settings, clipboard, stats)
+        are gzipped for a channel that completed the `_gz` handshake; smaller
+        ones are not worth the CPU or the risk to input latency.
+        """
         payload = json.dumps({"type": msg_type, "data": data})
-        # Large payloads (cursor PNGs, settings, clipboard, stats) compress well;
-        # small ones aren't worth the CPU or the risk to input latency. Only
-        # channels that completed the _gz handshake may receive gzip.
         gz_payload = None
         if getattr(channel, "_selkies_gz_tx", False) and len(payload) >= 512:
             gz_payload = gzip.compress(payload.encode("utf-8"), 6)
@@ -757,19 +766,22 @@ class RTCApp:
                                   gz_payload: Optional[bytes]) -> None:
         """Guarded raw send of an already-serialized (and possibly
         pre-compressed) message; bulk senders reuse one compression across
-        channels instead of re-gzipping per peer."""
+        channels instead of re-gzipping per peer.
+
+        A message oversized for the peer's negotiated max-message-size
+        (`ValueError`) is dropped and logged, which beats the peer
+        hard-closing the channel; one that finds the channel no longer open
+        (`InvalidStateError`, a close racing the sender) is dropped like any
+        not-ready channel's.
+        """
         try:
             if gz_payload is not None and getattr(channel, "_selkies_gz_tx", False):
                 channel.send(gz_payload)
             else:
                 channel.send(payload)
         except ValueError as e:
-            # Oversized for the peer's negotiated max-message-size: dropping one
-            # message and logging beats the peer hard-closing the channel.
             logger.error("dropping oversized data channel message '%s': %s", msg_type, e)
         except InvalidStateError:
-            # The channel left 'open' between the readiness check and the send
-            # (close racing a sender): drop the message like any not-ready channel.
             logger.info("skipping message because data channel closed mid-send: %s" % msg_type)
 
     def __send_data_channel_message(self, msg_type: str, data: Any) -> None:
@@ -832,12 +844,25 @@ class RTCApp:
                   use_cpu: Optional[bool] = None) -> str:
         """Rewrite the local offer SDP for optimal streaming behavior.
 
-        Injects rtx-time, keyframe parameter-set repetition, the 4:4:4 H.264
-        profile when full colour is active and the encoder carries it, the real
-        Opus ptime, and generous bandwidth ceilings. Displays can run different
-        encoders, chroma formats and software-encoding flags; the caller passes
-        the ones this offer's display is using (defaults: the primary/global
-        encoder and the configured full-colour and software-encoding settings).
+        Injects a 125 ms rtx-time, `sps-pps-idr-in-keyframe=1` for H.264/H.265,
+        the Opus ptime, and generous video bandwidth ceilings
+        (`_munge_video_bandwidth`). Displays can run different encoders,
+        chroma formats and software-encoding flags; the caller passes the ones
+        this offer's display is using (defaults: the primary/global encoder and
+        the configured full-colour and software-encoding settings).
+
+        Full colour is a 4:4:4 bitstream, so the H.264 profile-level-id is
+        rewritten to High 4:4:4 (`f4001f`) rather than handing the decoder a
+        4:2:0 baseline profile that cannot match what it receives; 4:2:0 keeps
+        `42e01f`, the profile Firefox negotiates. A session known to encode on
+        OpenH264 (the software encoder of a GPL-free pixelflux build, forced
+        onto the CPU) is excluded: it always emits limited-range 4:2:0, and a
+        4:4:4 profile makes decoders misread its color range (visibly darker
+        output).
+
+        The Opus ptime advertises the real frame duration pcmflux emits
+        (`audio_frame_duration_ms`) so the client keys its minptime munge off
+        it, rounded to whole milliseconds for browser SDP parsers.
 
         Args:
             sdp: The local offer SDP text.
@@ -858,14 +883,12 @@ class RTCApp:
         software_path = software_h264_path(
             encoder, use_cpu or str(getattr(app_settings, "gpu_id", "")).strip() == "-1")
         sdp_text = sdp
-        # rtx-time needs to be set to 125 milliseconds for optimal performance
         if 'rtx-time' not in sdp_text:
             logger.warning("injecting rtx-time to SDP")
             sdp_text = re.sub(r'(apt=\d+)', r'\1;rtx-time=125', sdp_text)
         elif 'rtx-time=125' not in sdp_text:
             logger.warning("injecting modified rtx-time to SDP")
             sdp_text = re.sub(r'rtx-time=\d+', r'rtx-time=125', sdp_text)
-        # Enable sps-pps-idr-in-keyframe=1 in H.264 and H.265
         if "h264" in encoder or "x264" in encoder or "h265" in encoder or "x265" in encoder:
             if 'sps-pps-idr-in-keyframe' not in sdp_text:
                 logger.warning("injecting sps-pps-idr-in-keyframe to SDP")
@@ -875,27 +898,14 @@ class RTCApp:
                 sdp_text = re.sub(r'sps-pps-idr-in-keyframe=\d+', r'sps-pps-idr-in-keyframe=1', sdp_text)
             if ("h264" in encoder or "x264" in encoder) and fullcolor \
                     and not (software_path and software_h264_encoder() == "openh264"):
-                # Full-colour is a 4:4:4 bitstream: advertise the High 4:4:4 profile so a
-                # decoder isn't handed a 4:2:0 baseline profile-level-id that can't match
-                # what it receives. 4:2:0 keeps 42e01f (the Firefox negotiation trick).
-                # A session known to encode on OpenH264 (the software encoder of a
-                # GPL-free pixelflux build, forced onto the CPU) is excluded: it always
-                # emits limited-range 4:2:0, and a 4:4:4 profile makes decoders misread
-                # its color range (visibly darker output).
                 sdp_text = re.sub(r'profile-level-id=[0-9A-Fa-f]{6}',
                                   'profile-level-id=f4001f', sdp_text)
         if "opus/" in sdp_text.lower():
-            # OPUS_FRAME: Advertise the REAL Opus frame duration as ptime in the offer
-            # (pcmflux emits audio_frame_duration_ms frames; the client's answer keys
-            # its minptime munge off this value).
             frame_ms = float(getattr(app_settings, 'audio_frame_duration_ms', '10') or 10)
-            # Advertise ptime in whole milliseconds (a 2.5 ms Opus frame rounds to 3) for
-            # browser SDP parsers; the client derives minptime from it and pcmflux keeps
-            # the real 2.5 ms frame.
+            # A 2.5 ms frame advertises 3; pcmflux keeps the real frame.
             ptime = int(frame_ms + 0.5)
-            # a=ptime is a media-level attribute: it must land inside the audio
-            # m-section — injecting after sprop lines would place it in the video
-            # section (invalid-but-ignored), and audio-less offers must skip it.
+            # a=ptime is media-level: it must sit in the audio m-section, not after
+            # the video sprop lines, and audio-less offers must skip it.
             if f"a=ptime:{ptime}" not in sdp_text:
                 sections = re.split(r'(?m)(?=^m=)', sdp_text)
                 for i, section in enumerate(sections):
@@ -906,10 +916,6 @@ class RTCApp:
                         break
                 sdp_text = ''.join(sections)
 
-        # Raise the SDP bandwidth ceiling so the browser's REMB doesn't throttle a
-        # high-bitrate desktop stream (b=AS is a cap hint, not a target; generous is
-        # safe). x-google-max-bitrate mirrors it on the Chrome receive side. Both are
-        # scoped to the m=video section so they survive future codec/aiortc changes.
         sdp_text = self._munge_video_bandwidth(sdp_text)
 
         return sdp_text
@@ -917,9 +923,16 @@ class RTCApp:
     def _munge_video_bandwidth(self, sdp_text: str) -> str:
         """Raise the bandwidth ceiling of every video m-section in the SDP.
 
-        Inserts a `b=AS` line and per-codec x-google bitrate hints, both
-        scoped to the video section (see `munge_sdp` for why the ceiling is
-        generous).
+        A generous `b=AS` keeps the browser's REMB from throttling a
+        high-bitrate desktop stream (it is a cap hint, not a target), and
+        `x-google-max-bitrate` mirrors it on the Chrome receive side. Both are
+        scoped to each video m-section: the `b=AS` presence check looks only
+        inside that section (a `b=AS` elsewhere says nothing about this
+        section's ceiling), and the line goes after the section's own `c=`,
+        or right after the `m=video` line when the section inherits the
+        session-level `c=` (RFC 4566). The x-google hints go on the fmtp of
+        every video rtpmap payload type except RTX, so VP8/VP9 get them too;
+        a codec without an fmtp gets one carrying just the hints.
         """
         XGOOGLE = "x-google-max-bitrate=300000;x-google-min-bitrate=0"
         lines = sdp_text.split("\r\n")
@@ -933,18 +946,12 @@ class RTCApp:
                 i += 1
                 continue
 
-            # Gather this video m-section (up to the next m= line or EOF).
             section = [line]
             i += 1
             while i < n and not lines[i].startswith("m="):
                 section.append(lines[i])
                 i += 1
 
-            # Per-section b=AS: the presence check must be scoped to THIS video
-            # block — a b=AS elsewhere in the offer says nothing about this
-            # section's ceiling. RFC4566 allows the media section to omit its
-            # own c= (inheriting the session-level c=); fall back to right
-            # after the m=video line when no per-media c= is present.
             if not any(s.startswith("b=AS:") for s in section):
                 c_idx = next(
                     (idx for idx, s in enumerate(section) if s.startswith("c=")),
@@ -953,9 +960,6 @@ class RTCApp:
                 insert_at = (c_idx + 1) if c_idx is not None else 1
                 section.insert(insert_at, "b=AS:300000")
 
-            # Inject the x-google ceiling per video codec fmtp, keyed on the
-            # video rtpmap payload types (not just packetization-mode), so
-            # VP8/VP9 get it too. RTX is excluded.
             video_pts = []
             for s in section:
                 m = re.match(r'a=rtpmap:(\d+)\s+(\S+)', s)
@@ -976,8 +980,6 @@ class RTCApp:
                             section[fmtp_idx],
                         )
                 else:
-                    # No fmtp for this codec (e.g. VP8/VP9 with no parameters):
-                    # add one carrying just the x-google hints.
                     rtpmap_idx = next(
                         (idx for idx, s in enumerate(section)
                          if s.startswith("a=rtpmap:{} ".format(pt))),
@@ -996,6 +998,9 @@ class RTCApp:
 
         Synchronous: scheduled via `loop.call_soon_threadsafe` from the capture
         thread, since `set_data` does not await — no per-frame Future/Task.
+        `EncodedPacket` references the encoder buffer without copying and the
+        packers walk it as a memoryview, so no per-frame FFmpeg object is
+        allocated and no whole-frame copy is taken.
 
         Args:
             buf: Buffer-protocol object holding the encoded sample.
@@ -1009,9 +1014,6 @@ class RTCApp:
         if kind == "video":
             if buf:
                 try:
-                    # EncodedPacket references the encoder buffer with no copy; the
-                    # packers walk it as a memoryview, so no per-frame FFmpeg object
-                    # is allocated and no whole-frame copy is taken.
                     RTP_VIDEO_CLOCK_RATE = 90000
                     packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE))
                     bridge = graph.get("video_bridge")
@@ -1022,7 +1024,6 @@ class RTCApp:
         elif kind == "audio":
             if buf:
                 try:
-                    # Zero-copy: EncodedPacket owns the buffer ref, no copy.
                     packet = EncodedPacket(buf, pts, Fraction(1, 48000))
                     bridge = graph.get("audio_bridge")
                     if bridge is not None:
@@ -1102,7 +1103,13 @@ class RTCApp:
         return formatted_servers
 
     def get_rtc_config(self) -> RTCConfiguration:
-        """Build the RTCConfiguration for a new peer from the current servers."""
+        """Build the RTCConfiguration for a new peer from the current servers.
+
+        Operator-configured public addresses (`webrtc_public_ip`, comma- or
+        space-separated IPv4/IPv6) are advertised in host ICE candidates for
+        hosts behind static 1:1 NAT; each family maps to its own host
+        candidates.
+        """
         formatted_turn_servers = self.format_turn_servers(self.turn_servers)
         formatted_stun_servers = self.format_stun_servers(self.stun_servers)
         logger.debug(f"stun servers: {formatted_stun_servers}")
@@ -1120,9 +1127,6 @@ class RTCApp:
             if turn.get('credential') is not None:
                 turn_kwargs['credential'] = turn.get('credential')
             ice_servers.append(RTCIceServer(**turn_kwargs))
-        # NAT1TO1: advertise operator-configured public IPv4/IPv6 addresses in
-        # host ICE candidates for hosts behind static 1:1 NAT (comma- or
-        # space-separated; each family maps to its own host candidates).
         public_ips = (
             getattr(app_settings, "webrtc_public_ip", "") or ""
         ).replace(",", " ").split()
@@ -1137,6 +1141,11 @@ class RTCApp:
                     forced_codec_mime: str) -> None:
         """Restrict a sender's codec preferences to one MIME type plus RTX.
 
+        Every codec matching the MIME type stays eligible — H.264 appears once
+        per advertised profile. FlexFEC rides along when the receiver supports
+        it (Chrome family); a receiver without it answers without the codec and
+        the sender emits no repair stream.
+
         Args:
             pc: Peer connection owning the sender's transceiver.
             sender: RTP sender whose transceiver is being restricted.
@@ -1150,8 +1159,6 @@ class RTCApp:
         capabilities = RTCRtpSender.getCapabilities(kind)
         logger.debug(f"Current capabilities for {kind}: {capabilities}")
 
-        # Collect every codec matching the MIME type: H.264 appears once per
-        # advertised profile and all of them must stay eligible.
         chosen_codec = []
         for codec in capabilities.codecs:
             if codec.mimeType == forced_codec_mime:
@@ -1160,7 +1167,6 @@ class RTCApp:
         if not chosen_codec:
             raise ValueError(f"Codec {forced_codec_mime} not found in capabilities")
 
-        # Find the RTX codec associated with the chosen codec's payload type
         rtx_codec = None
         for codec in capabilities.codecs:
             if codec.mimeType.lower() == f"{kind}/rtx":
@@ -1170,9 +1176,6 @@ class RTCApp:
         if not rtx_codec:
             raise ValueError(f"RTX codec for {forced_codec_mime} not found")
 
-        # FlexFEC rides along when the receiver supports it (Chrome family); a
-        # receiver without it simply answers without the codec and the sender
-        # emits no repair stream.
         flexfec_codec = next(
             (
                 codec
@@ -1329,18 +1332,18 @@ class RTCApp:
         gate: cmd and the keyboard/mouse/clipboard set are admitted only from the
         active mk-token holder, or from a controller-role token when no mk-token is
         provisioned. client_type is self-asserted over signaling, so a peer that
-        merely claims 'controller' is still held to the token here.
+        merely claims 'controller' is still held to the token here. `co`
+        (composed-text typing, `co,end,<text>`) is keyboard input like kd/ku.
+        The bare `cr` clipboard read-back is exempt like every clipboard read
+        on the websockets transport: the handler itself direction-gates it
+        (enable_clipboard "out") and it is sent at connect, before the peer
+        can hold input authority.
 
         Returns:
             True when the message must be dropped.
         """
         if not app_settings.master_token:
             return False
-        # "co" is composed-text typing (co,end,<text>) — keyboard input like kd/ku.
-        # The bare "cr" clipboard read-back is exempt like every other clipboard
-        # read on the websockets transport: it is direction-gated by the handler
-        # itself (enable_clipboard "out") and is sent at connect, before the peer
-        # can hold input authority.
         if msg.split(",", 1)[0] in ("cr",):
             return False
         if msg.split(",", 1)[0] not in ("cmd", "co") and not msg.startswith(VIEWER_COLLAB_EXTRA_PREFIXES):
@@ -1380,10 +1383,26 @@ class RTCApp:
                                   peer_id: Optional[str] = None) -> Any:
         """Pre-filter one data-channel message before the input dispatcher.
 
-        Decompresses gzip'd payloads, intercepts the compression handshake,
-        applies the viewer/collaborator and secure-mode gates, and handles the
-        per-peer video pause verbs before the late-bound on_data_message sees
-        the message.
+        In order: a gzip'd payload is inflated with a bound (the channel's
+        negotiated max-message-size caps only the compressed size, websockets
+        0x05 parity); the `_gz,1` handshake marks this channel for gzip'd
+        sends and is echoed; a viewer's SETTINGS snapshot is connection sync
+        only, never applied (the websockets transport likewise ignores viewer
+        payloads); a viewer may send only the allow-listed messages, and a
+        read-write collaborator (mk token plus enable_collab) additionally the
+        keyboard/mouse/clipboard set — the same two tiers as the websockets
+        gate, so a collaborator still cannot send cmd — with blur/visibility
+        noise dropped silently and the collaborator check reached only for
+        otherwise-disallowed input so normal viewer traffic pays nothing; the
+        secure-mode input and gamepad gates apply; STOP_VIDEO / START_VIDEO
+        pause this peer only (viewer-allowed, so a hidden viewer pauses its
+        own feed); STOP_AUDIO / START_AUDIO are ignored because audio is
+        negotiated per peer over SDP here, so the websockets global toggle
+        would be a no-op for late joiners or cut audio for peers that never
+        asked — each page mutes its `<video>` locally, which stops Opus
+        playback without stopping RTP. Everything else reaches the late-bound
+        `on_data_message` with the peer id as the connection id, so
+        per-connection input state (gamepad associations) traces to the peer.
 
         Returns:
             Whatever the dispatched handler returns (possibly an awaitable,
@@ -1392,17 +1411,11 @@ class RTCApp:
         """
         if isinstance(msg, (bytes, bytearray)) and bytes(msg[:2]) == b"\x1f\x8b":
             try:
-                # Bounded inflate, mirroring the WebSocket 0x05 path: the channel's
-                # negotiated max-message-size caps the compressed size only.
                 msg = inflate_gz_bounded(msg)
             except Exception:
                 logger.warning("Dropping undecodable compressed data channel message")
                 return
         if msg == "_gz,1":
-            # The peer can gunzip: echo the capability so it compresses its own large
-            # sends, and mark THIS channel so outbound payloads to it may be gzipped.
-            # Compression is negotiated per channel — every display page and viewer
-            # handshakes (or not) independently.
             if channel is not None:
                 channel._selkies_gz_tx = True
                 try:
@@ -1411,22 +1424,13 @@ class RTCApp:
                     logger.warning("Failed to ack compression handshake: %s", e)
             return
         if client_type == ClientType.VIEWER and isinstance(msg, str) and msg.startswith("SETTINGS,"):
-            # A viewer's settings snapshot is connection sync only, never applied —
-            # the websockets transport likewise ignores viewer payloads server-side.
             logger.debug("Ignoring SETTINGS payload from a viewer (display '%s')", display_id)
             return
         if client_type == ClientType.VIEWER and isinstance(msg, str):
-            # A viewer may only send the allow-listed messages; an authenticated
-            # read-write collaborator (mk token + enable_collab) additionally gets
-            # the keyboard/mouse/clipboard set — the same two tiers as the WS gate
-            # (a collaborator still can't send cmd or other controller-only
-            # messages). The collaborator check is only reached for otherwise-
-            # disallowed input, so normal viewer traffic pays nothing.
             if not msg.startswith(VIEWER_ALLOWED_PREFIXES) and not (
                 msg.startswith(VIEWER_COLLAB_EXTRA_PREFIXES)
                 and self._viewer_is_collaborator(client_token)
             ):
-                # Blur/visibility lifecycle noise is dropped silently (WS parity).
                 if not msg.startswith(VIEWER_SILENT_DROP_PREFIXES):
                     logger.warning("Dropping unauthorized viewer input: %s", msg[:32])
                 return
@@ -1436,22 +1440,11 @@ class RTCApp:
             logger.warning("Dropping gamepad input for unassigned slot: %s", msg[:32])
             return
         if msg in ("STOP_VIDEO", "START_VIDEO") and self.on_video_consumer_active is not None:
-            # Tab-visibility pause for THIS peer only (websockets STOP_VIDEO /
-            # START_VIDEO parity); viewer-allowed, so a hidden viewer can pause
-            # its own feed too.
             return self.on_video_consumer_active(
                 peer_id, display_id or "primary", msg == "START_VIDEO")
         if msg in ("STOP_AUDIO", "START_AUDIO"):
-            # WS toggles the one shared pcmflux capture for every client; in WebRTC
-            # mode audio is negotiated per peer over SDP (recvonly/sendonly), so a
-            # global toggle would either be a no-op for late joiners or cut audio
-            # for peers that never asked. Each page mutes its <video> locally,
-            # which stops Opus playback without stopping RTP — the parity is
-            # intentional, the verb is just inapplicable here.
             logger.debug("Ignoring %s over WebRTC: audio is per-peer (SDP), not global.", msg)
             return
-        # peer_id doubles as the connection id so per-connection input state
-        # (gamepad associations) can be traced to this peer.
         return self.on_data_message(msg, display_id or "primary", conn_id=peer_id)
 
     async def on_peer_connection_established(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary") -> None:
@@ -1478,9 +1471,12 @@ class RTCApp:
         """React to a peer connection's state changes.
 
         The "closed" branch is the teardown point for a peer whose client
-        vanished without a session end: it deregisters the peer and reaps
-        what the peer owned (consumer tasks, mic playback, the display's
-        media while nothing else consumes it, the on_peer_gone hook).
+        vanished without a session end (ICE failure, the browser going away):
+        it deregisters the peer and reaps what the peer owned (consumer tasks,
+        mic playback, the display's media while nothing else consumes it, the
+        on_peer_gone hook). An explicit stop deregisters the peer before
+        closing it, so for that peer this handler finds no entry and the stop
+        reaps it itself.
         """
         peer_conn = None
         peer_obj = None
@@ -1504,10 +1500,6 @@ class RTCApp:
             await self.on_peer_connection_established(client_peer_id, client_type, display_id)
             logger.info("Peer connection established", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "closed":
-            # Reaches here only for a peer that closed on its own (ICE failure,
-            # the browser going away): an explicit stop deregisters the peer
-            # before closing it, so this handler then finds no entry above and
-            # the stop reaps the peer itself.
             self.peer_connections.pop(client_peer_id, None)
             await self._reap_peer(client_peer_id, peer_obj)
             logger.info("Peer connection closed", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
@@ -1564,10 +1556,33 @@ class RTCApp:
         """Create a peer connection and send its offer over signaling.
 
         Builds the display's media graph when none exists yet, attaches the
-        media tracks, the mic receiver, and the serialized input channel, and
-        registers the peer entry only after the offer was sent — a failure
-        before registration tears the half-built connection down here because
-        no other teardown path could ever find it.
+        media tracks, the mic and webcam receivers, and the serialized input
+        channel, and registers the peer entry only after the offer was sent —
+        a failure before registration tears the half-built connection down
+        here (consumer task and connection) because no other teardown path
+        could ever find it. Registration ends with a consumers-changed
+        notification so a capture stopped by the all-consumers-paused rule
+        restarts for the joiner (websockets parity: a joining shared viewer
+        always restarts a stopped capture).
+
+        A display's media graph is shared by every peer of the display and
+        lives while any of them consumes it. Its controller creates it; on the
+        primary display a lone viewer does too, since the desktop exists
+        whether or not anyone controls it (websockets parity), while a
+        secondary display exists only through its controller's layout, so a
+        viewer cannot bring one up. Audio and the mic and webcam return paths
+        exist only on the primary display: a secondary display page renders
+        video and carries input, matching the websockets model.
+
+        The mic is one recvonly audio transceiver inside the same bundled SDP
+        (no second negotiation), inactive until the client attaches a track,
+        so it is negotiated whenever audio is on: `microphone_enabled` only
+        picks the client-side default, and a runtime enable must not need a
+        renegotiation the stack does not do. A locked-off microphone withholds
+        the m-line entirely. The webcam has the same shape as one recvonly
+        video transceiver. The input data channel is reliable and ordered:
+        input, clipboard and upload control all ride it and none tolerates
+        loss.
 
         Args:
             client_peer_id: Signaling id of the connecting peer.
@@ -1583,22 +1598,12 @@ class RTCApp:
         client_type = ClientType(c_type)
         display_id = display_id or "primary"
 
-        # A display's media graph is shared by every peer of the display and
-        # lives while any of them consumes it. Its controller creates it; on the
-        # primary display a lone viewer does too — the desktop exists whether or
-        # not anyone controls it (websockets parity). A secondary display exists
-        # only through its controller's layout, so a viewer cannot bring one up.
-        # Audio (and the mic return path) only exist on the primary display — a
-        # secondary display page renders video and carries input, matching the
-        # WS model.
         graph = self.displays.get(display_id)
         if graph is None and (client_type is ClientType.CONTROLLER or display_id == "primary"):
             graph = {"relay": MediaRelay()}
             graph["video_bridge"] = PipelineBridge(on_drop=self._idr_on_video_drop(display_id))
             graph["video_media"] = VideoMedia(graph["video_bridge"])
             if display_id == "primary":
-                # Audio uses a small drop-oldest FIFO so a brief sender stall keeps
-                # continuity instead of dropping a packet on every overtake.
                 graph["audio_bridge"] = PipelineBridge(maxsize=8)
                 graph["audio_media"] = AudioMedia(graph["audio_bridge"])
             self.displays[display_id] = graph
@@ -1616,39 +1621,18 @@ class RTCApp:
         if graph.get("audio_media") is not None:
             peer_connection.addTrack(media_relay.subscribe(graph["audio_media"]))
 
-        # Microphone: one recvonly audio transceiver inside the SAME bundled SDP (no second
-        # negotiation) so the browser can send its mic on demand. The m-line sits inactive
-        # until the client attaches a mic track, so it is negotiated whenever audio is on:
-        # microphone_enabled only picks the client-side default (off), and a runtime enable
-        # must not require a renegotiation the stack doesn't do. A LOCKED-off microphone
-        # setting still withholds the m-line entirely. Only the primary display carries audio.
         mic_on, mic_locked = app_settings.microphone_enabled
         mic_state = None
         if display_id == "primary" and bool(app_settings.audio_enabled[0]) and (mic_on or not mic_locked):
             mic_state = self._setup_mic_receiver(peer_connection, client_type, client_token)
 
-        # Webcam: the same shape as the mic — one recvonly video transceiver in the
-        # bundled SDP, inactive until the client attaches its camera track, so a
-        # runtime enable never renegotiates. Only the primary display's connection
-        # carries it, and a LOCKED-off webcam setting withholds the m-line entirely.
         webcam_state = None
         if display_id == "primary" and not webcam_locked_off():
             webcam_state = self._setup_webcam_receiver(peer_connection, client_type, client_token)
 
-        # Primary data channel, fully reliable + ordered: input, clipboard, and
-        # upload control all ride it, and none of them tolerate loss.
-        # (Compression is negotiated per channel via the _gz handshake.)
         data_channel = peer_connection.createDataChannel("input", ordered=True)
 
-        # Assign event handlers for the input data channel. Messages are
-        # serialized through a single per-channel consumer so input events
-        # (e.g. key down/up) are dispatched strictly in arrival order.
-        # close/error are late-bound (setup_callbacks reassigns the handlers).
-        # open passes the channel so the greeting goes to the peer that joined.
         data_channel.on("open", lambda ch=data_channel: self.on_data_open(ch))
-        # Secure-mode viewers learn their input authority at channel-open the way
-        # websockets clients do (MK_ACCESS on connect), and every client learns
-        # its effective role/slot the way websockets clients do (AUTH_SUCCESS).
         data_channel.on("open", lambda ch=data_channel, ct=client_type, tok=client_token:
                         self._send_collab_state(ch, ct, tok))
         data_channel.on("open", lambda ch=data_channel, ct=client_type, tok=client_token:
@@ -1687,11 +1671,6 @@ class RTCApp:
             sdp = self.munge_sdp(sdp, display_encoder, display_fullcolor, display_use_cpu)
             await self.on_sdp('offer', sdp, client_peer_id)
         except BaseException:
-            # Failure before registration: no teardown path could ever reach this
-            # consumer or this connection (_stop_rtc_pipeline only finds registered
-            # peers), so both must be torn down here — otherwise the fully-built
-            # RTCPeerConnection (ICE gatherers, channel, tracks, mic receiver) is
-            # orphaned alive on every offer/SDP-send failure.
             input_consumer.cancel()
             try:
                 await peer_connection.close()
@@ -1699,7 +1678,6 @@ class RTCApp:
                 logger.warning("Failed to close peer connection after failed start", exc_info=True)
             raise
 
-        # The slot the token held at connect, for later reconcile deltas.
         peer_slot = None
         if client_token:
             _perms = current_session_tokens()[0].get(client_token)
@@ -1712,28 +1690,13 @@ class RTCApp:
             "client_type": client_type,
             "client_slot": peer_slot,
             "display_id": display_id,
-            # A channel that never reaches SCTP-established never emits 'close',
-            # so its consumer must also be cancellable from teardown paths.
             "channel_consumers": [input_consumer],
-            # This peer's OWN mic playback state (None when no mic m-line): mic
-            # teardown is per-peer, so one peer closing never silences the others.
             "mic_state": mic_state,
-            # This peer's webcam sink (None when no webcam m-line); retired per
-            # peer while the shared camera keeps serving applications.
             "webcam_state": webcam_state,
-            # Per-peer video pause (tab hide): the sender is the RTP gate — its
-            # _enabled flag drops frames post-recv, so the relay proxy keeps
-            # draining and nothing accumulates while this peer is hidden.
             "video_sender": rtp_video_sender,
             "video_paused": False,
-            # Authority reconciliation on /api/tokens updates needs the token a
-            # peer connected with (per-message checks read the live store, but
-            # revocation/handoff must find the affected peers).
             "client_token": client_token,
         }
-        # A joining consumer must re-open a capture stopped by the all-consumers-
-        # paused rule (websockets parity: a joining shared viewer always restarts
-        # a stopped capture) — the owning service re-evaluates the consumer set.
         await self._notify_consumers_changed(display_id)
 
     def _setup_mic_receiver(self, peer_connection: RTCPeerConnection,
@@ -1744,8 +1707,23 @@ class RTCApp:
         The encoded payload goes straight into pcmflux — no aiortc/Python Opus
         decode. RED (UDP loss resilience) is gated by audio_redundancy: when
         on, the shared caps offer it and pcmflux de-frames + loss-recovers
-        each RED payload off the GIL before decoding; when off, the m-line is
-        restricted to plain Opus.
+        each RED payload off the GIL before decoding (the RTP timestamp
+        anchors the redundant blocks' offsets); when off, the m-line is
+        restricted to plain Opus and packets are decoded directly.
+
+        Only a controller or a live collab (m/k) holder speaks into the
+        desktop mixer — the websockets transport's mic gate verdict — and the
+        collab state is read per packet so an m/k handoff takes effect without
+        renegotiation. The first packet opens the pcmflux playback off the
+        loop, dropping packets until it is ready; the shared SelkiesVirtualMic
+        is provisioned first (`provision_virtual_mic`, idempotent, shared with
+        the websockets path) so apps recording the default source hear this
+        mic, and a provisioning failure does not block playback. A start that
+        completes after the peer was torn down stops its playback instead of
+        publishing it. pcmflux raises once its playback worker dies (e.g.
+        PulseAudio restarted mid-run), so a failed write drops the chunk and
+        tears the stream down for the next packet to reopen — swallowing it
+        would leave this peer's mic silent forever (websockets parity).
 
         Returns:
             The per-peer mic state dict (`pb`, `starting`, `closed`) that
@@ -1767,10 +1745,6 @@ class RTCApp:
         def sink(codec: Any, frame: Any) -> None:
             if state["closed"]:
                 return
-            # Only a controller or a live collab (m/k) holder speaks into the
-            # desktop mixer — the websockets transport's mic gate verdict. The
-            # collab state is read per packet so an m/k handoff takes effect
-            # without renegotiation.
             if client_type is ClientType.VIEWER and not self._viewer_is_collaborator(client_token):
                 if not state.get("role_denied_logged"):
                     state["role_denied_logged"] = True
@@ -1781,7 +1755,6 @@ class RTCApp:
                 return
             pb = state["pb"]
             if pb is None:
-                # First packet: open the pcmflux playback off the loop, dropping until ready.
                 if not state["starting"]:
                     state["starting"] = True
 
@@ -1789,11 +1762,6 @@ class RTCApp:
                         try:
                             if pcmflux is None:
                                 raise RuntimeError("pcmflux is not installed")
-                            # Bring up the recordable SelkiesVirtualMic (idempotent,
-                            # shared with the websockets path) before opening the
-                            # 'input' playback stream, so apps recording the default
-                            # source hear this mic. A provisioning failure must not
-                            # block playback into 'input'.
                             if self.provision_virtual_mic is not None:
                                 try:
                                     await self.provision_virtual_mic()
@@ -1807,8 +1775,6 @@ class RTCApp:
                             ps.latency_ms = 40
                             await asyncio.to_thread(pb2.start, ps)
                             if state["closed"]:
-                                # Peer torn down while the start was in flight:
-                                # discard rather than publish into a dead state.
                                 await asyncio.to_thread(pb2.stop)
                                 return
                             state["pb"] = pb2
@@ -1820,17 +1786,10 @@ class RTCApp:
                 return
             try:
                 if getattr(codec, "name", "").lower() == "red":
-                    # RED (audio_redundancy on): pcmflux de-frames + loss-recovers + decodes,
-                    # all off the GIL. The RTP timestamp anchors the redundant blocks' offsets.
                     pb.write_red(data, int(getattr(frame, "timestamp", 0) or 0))
                 else:
-                    # Plain Opus (RED off): decode directly -- no de-framing, dedup, or alloc.
                     pb.write(data)
             except Exception as e:
-                # Websockets-path parity: pcmflux raises once its playback worker
-                # dies (e.g. PulseAudio restarted mid-run). Drop this chunk and tear
-                # the stream down so the next packet reopens a fresh one -- swallowing
-                # the error here would leave this peer's mic silent forever.
                 logger.error(f"WebRTC mic playback write failed: {e}")
                 state["pb"] = None
                 state["starting"] = False
@@ -1859,6 +1818,14 @@ class RTCApp:
         VP9 — go straight to pixelflux, which decodes them off the GIL; no
         Python decode and no data-channel chunking. When the decoder asks for a
         keyframe (after a drop or a late start) the request becomes a PLI.
+
+        The first frame brings the camera up off the loop; frames until then
+        are dropped and the decoder's first keyframe request becomes a PLI, so
+        the stream starts clean. A running camera that an uplink of the other
+        kind finds is re-created there too, when nothing is reading it. The
+        start latch is released only on success, so a camera that cannot
+        start is not retried per frame while one that did leaves the next
+        uplink free to ask for its own format.
 
         Returns:
             The per-peer webcam state dict that `_close_webcam_state` retires.
@@ -1899,18 +1866,11 @@ class RTCApp:
             if not data or codec_id is None:
                 return
             if webcam.needs_ensure(codec_id):
-                # First frame: bring the camera up off the loop; frames until then
-                # are dropped and the decoder's first request for a keyframe
-                # becomes a PLI, so the stream starts clean. A running camera an
-                # uplink of the other kind found is re-created there too, when
-                # nothing is reading it.
                 if not state["starting"]:
                     state["starting"] = True
 
                     async def start_camera() -> None:
-                        # Latched again only on success: a camera that cannot start must not be
-                        # retried per frame, while one that did leaves the next uplink free to
-                        # ask for its own format.
+                        # Released only on success: a failed camera is not retried per frame.
                         if await webcam.ensure(codec_id) is not None:
                             state["starting"] = False
 
@@ -1950,22 +1910,21 @@ class RTCApp:
     def get_mime_by_encoder(self, encoder: str) -> Optional[str]:
         """Return the RTP MIME type for an encoder name.
 
+        Every pipeline encoder emits H.264; offering another MIME would
+        negotiate a codec the stream cannot honor, so a new entry may only be
+        added together with a real pixelflux encoder (the vendored webrtc
+        stack keeps its VP8 RTP support for that). An unmapped encoder, e.g. a
+        stale persisted client setting, must never take the transport down.
+
         Returns:
             The MIME type; unmapped encoders fall back to "video/H264".
         """
 
-        # Every pipeline encoder emits H.264. Offering another MIME here would
-        # negotiate a codec the stream cannot honor, so new entries may only be
-        # added together with a real pixelflux encoder; the vendored webrtc stack
-        # retains its VP8 RTP support for that future.
         encoder_mime_map = {
             "h264enc": "video/H264",
         }
         mime = encoder_mime_map.get(encoder)
         if mime is None:
-            # An unmapped encoder (e.g. a stale persisted client setting) must never
-            # take the transport down; fall back to the always-vendored H.264 path
-            # and flag it.
             logger.error(
                 f"No MIME mapping for encoder {encoder}; falling back to video/H264"
             )
@@ -2012,18 +1971,14 @@ class RTCApp:
 
     async def _reap_peer(self, client_peer_id: str, peer_obj: Dict[str, Any]) -> None:
         """Release what a deregistered peer owned; shared by the explicit stop
-        and the "closed" state branch so both run the same steps."""
-        # Never-established channels emit no 'close', so their consumers are
-        # only reachable from here.
+        and the "closed" state branch so both run the same steps: channel
+        consumers, this peer's own mic playback and webcam sink, the
+        `on_peer_gone` hook with the entry, then the display's media when
+        nothing consumes it any more."""
         await self._cancel_channel_consumers(peer_obj)
-        # Per-peer mic teardown: only THIS peer's playback stops; the other
-        # primary peers (controller + co-op viewers) keep their mics.
         await self._stop_mic_playback_state(peer_obj.get("mic_state"))
         self._close_webcam_state(peer_obj.get("webcam_state"))
         if self.on_peer_gone is not None:
-            # The entry rides along: the hook needs the departing peer's type
-            # and token to judge what input authority (and which gamepad
-            # associations) left with it.
             try:
                 await self.on_peer_gone(client_peer_id, peer_obj)
             except Exception:
@@ -2042,7 +1997,10 @@ class RTCApp:
         desktop exists on its own, so its media and graph serve the remaining
         viewers across a controller's departure and are released with the
         last consumer (the websockets engine likewise keeps a viewer-started
-        capture until nothing decodes it).
+        capture until nothing decodes it). A display with no graph and no
+        departing controller was already released (a viewer closed by the
+        graph teardown) or never built (a viewer refused a graph-less
+        secondary).
         """
         display_id = display_id or "primary"
         remaining = any(
@@ -2052,8 +2010,6 @@ class RTCApp:
         if remaining and not (controller_left and display_id != "primary"):
             return
         if display_id not in self.displays and not controller_left:
-            # Already released (a viewer closed by the graph teardown), or never
-            # built (a viewer refused a graph-less secondary): nothing to do.
             return
         logger.info(f"Display '{display_id}' has no consumer left; releasing its media")
         try:
@@ -2096,16 +2052,17 @@ class RTCApp:
                 await relay.stop()
             except Exception as e_relay:
                 logger.warning(f"Media relay teardown error (continuing): {e_relay}")
-        # The relay's tracks are gone, so a viewer (#shared / #player*) still
-        # attached to this display is bound to a dead source: its sender would
-        # block in recv() forever, frozen on the last frame, while ICE stays
-        # "connected" so the client never self-heals. Close those peer
-        # connections so the clients see the drop and reload.
         await self._close_display_viewers(display_id)
 
     async def _close_display_viewers(self, display_id: str) -> None:
         """Close every non-controller peer of a display whose graph is gone
-        (a secondary released by its controller, or a drop)."""
+        (a secondary released by its controller, or a drop).
+
+        Such a viewer (`#shared` / `#player*`) is bound to a dead source: its
+        sender would block in recv() forever, frozen on the last frame, while
+        ICE stays connected so the client never self-heals. Closing the
+        connection lets the client see the drop and reload.
+        """
         victims = [
             (pid, obj) for pid, obj in list(self.peer_connections.items())
             if (obj.get('display_id') or 'primary') == display_id
@@ -2122,13 +2079,15 @@ class RTCApp:
                 logger.debug(f"Error closing orphaned viewer '{pid}': {e}")
 
     async def start_rtc_connection(self, client_peer_id: str, client_type: str, client_token: Optional[str] = None, display_id: str = "primary") -> None:
-        """Start a peer connection, cleaning up the half-built state on failure."""
+        """Start a peer connection, cleaning up the half-built state on failure.
+
+        A signaling socket that dies mid-handshake (refresh/eviction race) is
+        routine churn, not a server fault, and is logged without a traceback.
+        """
         try:
             logger.info("Starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._start_rtc_pipeline(client_peer_id, client_type, client_token, display_id)
         except (aiohttp.ClientConnectionResetError, ConnectionResetError) as e:
-            # The peer's signaling socket died mid-handshake (refresh/eviction race):
-            # routine churn, not a server fault — one line, no traceback.
             logger.info(f"Peer went away during RTC setup: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._cleanup_failed_start(client_peer_id, client_type, display_id)
         except Exception as e:

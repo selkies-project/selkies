@@ -1127,7 +1127,11 @@ const KeyboardUtil = {
 
     /**
      * Keysym of an event: named keys through `DOMKeyTable` by location, single
-     * characters through `Keysyms`.
+     * characters through `Keysyms`. The location is corrected where engines
+     * misreport it: Safari on Mojave and Chrome on Linux report MetaRight at
+     * location 0, and Numpad Clear with NumLock on is the standard-location
+     * Clear. Option reports `Meta` on macOS and maps to Meta_L/R there only;
+     * on Linux that remap would break xkb Ctrl/Alt swaps.
      * @param {KeyboardEvent} evt
      * @returns {number|null}
      */
@@ -1139,15 +1143,11 @@ const KeyboardUtil = {
 
         if (key in DOMKeyTable) {
             let location = evt.location;
-            // Safari on Mojave and Chrome on Linux both report MetaRight with
-            // location 0; force DOM_KEY_LOCATION_RIGHT for them.
             if ((browser.isSafari() && key === 'Meta' && location === 0) ||
                 (browser.isChrome() && key === 'Meta' && location === 0 && KeyboardUtil.getKeyCode(evt) === 'MetaRight')) {
                 location = 2;
             }
 
-            // Numpad Clear: with NumLock on the key is the standard-location
-            // Clear, so report DOM_KEY_LOCATION_STANDARD.
             if ((key === 'Clear') && (location === 3)) {
                 let code = KeyboardUtil.getKeyCode(evt);
                 if (code === 'NumLock') {
@@ -1158,8 +1158,6 @@ const KeyboardUtil = {
                 location = 0;
             }
             if (key === 'Meta' && (browser.isMac() || browser.isIOS())) {
-                // macOS-only: Option reports key='Meta'. On Linux this remap
-                // breaks xkb Ctrl/Alt swaps (AltLeft must not force Meta).
                 let code = KeyboardUtil.getKeyCode(evt);
                 if (code === 'AltLeft') { return KeyTable.XK_Meta_L; }
                 if (code === 'AltRight') { return KeyTable.XK_Meta_R; }
@@ -1199,7 +1197,6 @@ const KeyboardUtil = {
     getKeysymFromCode: function(code) {
         if (!code) return null;
         if (/^Key[A-Z]$/.test(code)) {
-            // 'KeyA' -> 'a'.
             return Keysyms.lookup(code.charCodeAt(3) + 32);
         }
         if (/^Digit[0-9]$/.test(code)) {
@@ -1690,10 +1687,39 @@ export class Input {
      * the stuck-modifier heal, keysym resolution with the Windows AltGr and
      * macOS remaps, and the send, wrapped in any chord modifiers the server
      * is not holding.
+     *
+     * Hotkeys come before the native-input class, which exempts plain typing,
+     * not the chords. CapsLock is swallowed: case is already resolved into
+     * `event.key`, and forwarding it would toggle the server's Lock modifier
+     * and invert every letter (an OS-level remap reports a different key and
+     * passes through).
+     *
+     * With an IME active (composing, or keyCode 229) a modifier chord is a
+     * shortcut the IME will not compose, resolved from the physical code.
+     * Idle IME: sent momentarily, the modifier is already held server-side;
+     * an armed Windows AltGr Control is disarmed without being held, since
+     * the IME may swallow the keyup a held Control would depend on. Mid-
+     * composition: the keypress makes the IME commit, so the whole chord is
+     * held until the composition settles and applied after the text; no
+     * prompt commit means the IME consumed it. The armed Control counts as an
+     * intended Ctrl either way, as the Korean IME can deliver the Process
+     * keydown with ctrlKey unset.
+     *
+     * The stuck-modifier heal skips `Process` events, whose modifier flags
+     * can be stale, and matches on the stored keysym rather than the physical
+     * code: an xkb remap can leave an Alt code holding Control_L, and the
+     * macOS Option remap leaves AltLeft/AltRight holding Meta_L/R while
+     * Option drives altKey and AltGraph, not metaKey.
+     *
+     * A shortcut chord on a non-Latin layout resolves from the physical
+     * position (the OS convention), since `event.key` is a localized
+     * character the server layout cannot map with the modifier; ASCII keys
+     * stay layout-resolved (QWERTZ Ctrl+Z is `z`) and AltGr chords are text.
+     * Outside Chromium, Ctrl/Cmd+V keeps its default action because clipboard
+     * sync rides the trusted `paste` event (lib/clipboard-sync.js); the key
+     * still streams to the remote desktop.
      */
     _handleKeyDown(event) {
-        // Hotkeys are resolved before the native-input class below: that class
-        // exempts plain typing, not the chords.
         if (event.ctrlKey && event.shiftKey) {
             let hotkey = null;
             if (event.code === 'KeyM' && !this.gamingMode) hotkey = this.onmenuhotkey;
@@ -1711,9 +1737,6 @@ export class Input {
         this._releaseDesyncedModifiers(event);
         const keycode = KeyboardUtil.getKeyCode(event);
         if (keycode === 'CapsLock' && KeyboardUtil.getKey(event) === 'CapsLock') {
-            // Case is already resolved into event.key; forwarding CapsLock would
-            // toggle the server's Lock modifier and invert every letter. An
-            // OS-level remap reports a different event.key and passes through.
             _stopEvent(event);
             return;
         }
@@ -1722,15 +1745,6 @@ export class Input {
             return;
         }
         if (this.isComposing || event.isComposing || event.keyCode === 229) {
-            // A modifier chord while an IME is active is a shortcut the IME will
-            // not compose, resolved from the physical code. Idle IME: sent
-            // momentarily, the modifier is already held server-side. Mid-
-            // composition: the keypress makes the IME commit, so the full chord
-            // is held until the composition settles and applied after the text;
-            // no prompt commit means the IME consumed it. Windows defers a fresh
-            // ControlLeft keydown for AltGr detection and the Korean IME can
-            // deliver the Process chord keydown with ctrlKey unset, so the armed
-            // state counts as an intended Ctrl.
             const armedCtrl = this._altGrArmed;
             if ((event.ctrlKey || event.altKey || event.metaKey || armedCtrl) &&
                 !(event.getModifierState && event.getModifierState('AltGraph'))) {
@@ -1744,15 +1758,10 @@ export class Input {
                             at: performance.now(),
                         };
                     } else {
-                        // Disarmed without holding Control: the chord is sent
-                        // self-contained, and the IME may swallow the keyup a held
-                        // Control would depend on, leaving it stuck.
                         if (this._altGrArmed) {
                             this._altGrArmed = false;
                             clearTimeout(this._altGrTimeout);
                         }
-                        // Wrapped in the missing chord modifiers or it lands as a
-                        // bare keypress; the deferred Control counts as missing.
                         const missingMods = this._missingChordModifiers({
                             ctrl: event.ctrlKey || armedCtrl, alt: event.altKey,
                             meta: event.metaKey, shift: event.shiftKey,
@@ -1768,13 +1777,9 @@ export class Input {
             return;
         }
 
-        // 'Process' marks an IME-touched event whose modifier flags can be
-        // stale; healing from it would release a held modifier.
         if (!this._isSynth && event.key !== 'Process') {
             for (const code in this._keyDownList) {
                 const keysym = this._keyDownList[code];
-                // Healed by the stored keysym, not the physical code: an xkb
-                // remap can leave a physical Alt code holding Control_L.
                 if ((keysym === KeyTable.XK_Control_L || keysym === KeyTable.XK_Control_R) && !event.ctrlKey) {
                     this._sendKeyEvent(keysym, code, false);
                 } else if ((keysym === KeyTable.XK_Alt_L || keysym === KeyTable.XK_Alt_R) && !event.altKey) {
@@ -1785,8 +1790,6 @@ export class Input {
                     this._sendKeyEvent(keysym, code, false);
                 } else if (keysym === KeyTable.XK_Super_L || keysym === KeyTable.XK_Super_R ||
                             keysym === KeyTable.XK_Meta_L || keysym === KeyTable.XK_Meta_R) {
-                    // The macOS Option remap stores AltLeft/AltRight as Meta_L/R,
-                    // but Option drives altKey/AltGraph, not metaKey.
                     if ((keysym === KeyTable.XK_Meta_L || keysym === KeyTable.XK_Meta_R) &&
                         (code === 'AltLeft' || code === 'AltRight')) {
                         if (!event.altKey && !event.getModifierState('AltGraph')) {
@@ -1812,10 +1815,6 @@ export class Input {
             }
         }
 
-        // A shortcut chord on a non-Latin layout resolves from the physical
-        // position (the OS convention): event.key is a localized character the
-        // server layout cannot map with the modifier. ASCII keys stay
-        // layout-resolved (QWERTZ Ctrl+Z is 'z'), and AltGr chords are text.
         if (keysym !== null &&
             (event.ctrlKey || event.metaKey ||
              (event.altKey && !event.getModifierState('AltGraph')))) {
@@ -1867,7 +1866,6 @@ export class Input {
             return;
         }
 
-        // The key is already pressed; reuse the keysym it went down with.
         if (code in this._keyDownList) {
             keysym = this._keyDownList[code];
         }
@@ -1882,9 +1880,6 @@ export class Input {
             return;
         }
 
-        // Non-Chromium clipboard sync rides the trusted 'paste' event of
-        // Ctrl/Cmd+V (lib/clipboard-sync.js), so that chord keeps its default
-        // action; the key still streams to the remote desktop.
         const allowNativePaste = !browser.isChrome() && code === 'KeyV' &&
             (event.ctrlKey || event.metaKey) && !event.altKey &&
             !this.isComposing;
@@ -1899,9 +1894,6 @@ export class Input {
             }, 100);
             return;
         }
-        // A chord whose modifier keydown never reached the server (swallowed
-        // without a 229 marker, or healed away) is wrapped in the missing
-        // modifiers, mirroring the IME chord path, or the letter types bare.
         // Meta is exempt while the macOS Cmd-to-Ctrl swap carries the chord.
         if (keysym !== null && !MODIFIER_STATE_BY_CODE[code] &&
             (event.ctrlKey || event.altKey || event.metaKey) &&
@@ -2130,7 +2122,10 @@ export class Input {
     /**
      * Types a textInput commit, unless a chord is held (the keydown path sent
      * it, and the text echo must not also type the letter), and stamps it so
-     * the compositionend Blink chains after it only clears the preedit.
+     * the compositionend Blink chains after it only clears the preedit. Only
+     * an IME commit reaches this: plain keydowns are stopped before the
+     * browser action, and Blink can deliver a commit as textInput with an
+     * empty compositionend.
      */
     _handleTextInput(event) {
         if (!event.data) return;
@@ -2214,10 +2209,13 @@ export class Input {
      * position where the engine offers one), maps the position through the
      * sink or the window math, keeps the button mask, and sends motion
      * coalesced to one message per animation frame, button events flushing
-     * what is pending first. Under pointer lock the payload is the movement
-     * delta instead. Ctrl+Shift+Click takes pointer lock, and in gaming mode
-     * a click re-arms it after an Escape unlock while the click still goes to
-     * the server.
+     * what is pending first. Button events map their own coordinates too: a
+     * non-hovering stylus emits no pointermove before contact, and a press
+     * right after a pointer lock ends has only seen deltas. Under pointer
+     * lock the payload is the movement delta instead, in CSS pixels, scaled
+     * and quantized where the motion is sent so a frame's worth rounds once.
+     * Ctrl+Shift+Click takes pointer lock, and in gaming mode a click re-arms
+     * it after an Escape unlock while the click still goes to the server.
      */
     _mouseButtonMovement(event) {
         if (this.buttonMask === 0 && event.target !== this.element) {
@@ -2280,20 +2278,14 @@ export class Input {
         }
         if (this._isStreamLocked()) {
             mtype = "m2";
-            // CSS pixels, scaled and quantized where the motion is sent so that
-            // a frame's worth of it is rounded once.
             relX = event.movementX || 0;
             relY = event.movementY || 0;
         } else if (event.type === 'mousemove' || event.type === 'pointermove' ||
                    event.type === 'mousedown' || event.type === 'mouseup' ||
                    event.type === 'pointerdown' || event.type === 'pointerup') {
-            // A button event maps its own coordinates: a non-hovering stylus
-            // emits no pointermove before contact, and a press right after a
-            // pointer lock ends has only seen deltas.
             if (this._applySinkCoordinates(event.clientX, event.clientY, canvas, videoEle)) {
                 // Mapped through the sink; this.x/this.y are set.
             } else {
-                // Auto resolution: the window math.
                 if (!this.m) {
                     this._windowMath();
                 }
@@ -2325,11 +2317,8 @@ export class Input {
         const outX = (mtype === "m2") ? relX : this.x;
         const outY = (mtype === "m2") ? relY : this.y;
         if (event.type === 'mousemove' || event.type === 'pointermove') {
-            // At most one motion send per animation frame; a 1000 Hz mouse
-            // would otherwise congest the uplink and the server's input loop.
             this._queueCoalescedMouseMove(mtype, outX, outY, this.buttonMask);
         } else {
-            // Pending motion goes first so move-then-click ordering holds.
             this._flushCoalescedMouseMove();
             if (mtype === "m2") {
                 const moved = this._relativeToServer(outX, outY);
@@ -2341,7 +2330,8 @@ export class Input {
     }
 
     /**
-     * Queues motion for the next animation frame: relative deltas sum,
+     * Queues motion for the next animation frame, so a 1000 Hz mouse cannot
+     * congest the uplink and the server's input loop: relative deltas sum,
      * absolute positions keep only the latest, and a mode change flushes
      * first.
      * @param {'m'|'m2'} mtype
@@ -2572,6 +2562,17 @@ export class Input {
      * pixels) is broken and coordinates map through the stream box like
      * manual mode: the canvas buffer on the WebSocket core, the `<video>`
      * intrinsic size on the WebRTC core.
+     *
+     * ws-core hides `#videoCanvas` while frames are presented on the video or
+     * worker sink, which mirrors the canvas box, so a zero-size box means
+     * hidden, not resized: the visible mirror (`videoStream`,
+     * `videoWorkerCanvas`) is measured instead, else the last valid rect. The
+     * mirror lookups are cached since this runs per pointer event; a node
+     * that left the DOM (`deactivateVideoWorker`) is re-queried. A `<video>`
+     * reports its realized stream size in `videoWidth`/`videoHeight` (the
+     * attributes may be unset) and `object-fit: contain` letterboxes the
+     * frame inside the element box, so the mapping uses the fitted content
+     * box; a canvas reports its buffer.
      * @param {HTMLCanvasElement|null} canvas
      * @param {HTMLVideoElement|null} videoEle
      * @returns {{boxLeft: number, boxTop: number, boxW: number, boxH: number, sinkW: number, sinkH: number}|null}
@@ -2583,14 +2584,8 @@ export class Input {
         if (!sink) {
             return null;
         }
-        // ws-core hides #videoCanvas while frames are presented on the video
-        // or worker sink, which mirrors the canvas box, so a zero-size box
-        // means hidden, not resized: the visible mirror is measured instead,
-        // else the last valid rect.
         let rect = sink.getBoundingClientRect();
         if (!(rect.width > 0 && rect.height > 0)) {
-            // Mirror lookups are cached, this runs per pointer event; a node
-            // that left the DOM (deactivateVideoWorker) is re-queried.
             if (!this._sinkMirrors) {
                 this._sinkMirrors = {};
             }
@@ -2611,16 +2606,12 @@ export class Input {
         if (!(rect.width > 0 && rect.height > 0) && this._lastSinkRect) {
             rect = this._lastSinkRect;
         }
-        // A <video> reports its realized stream size in videoWidth/Height (the
-        // width/height attributes may be unset); a canvas reports its buffer.
         const sinkW = sink.videoWidth || sink.width;
         const sinkH = sink.videoHeight || sink.height;
         if (rect.width > 0 && rect.height > 0 && sinkW > 0 && sinkH > 0) {
             this._lastSinkRect = rect;
             let boxLeft = rect.left, boxTop = rect.top, boxW = rect.width, boxH = rect.height;
             if (sink.tagName === 'VIDEO' && (sink.style.objectFit || 'contain') !== 'fill') {
-                // object-fit: contain letterboxes the frame inside the element
-                // box; map against the fitted content box, not the element box.
                 const fit = Math.min(rect.width / sinkW, rect.height / sinkH);
                 boxW = sinkW * fit;
                 boxH = sinkH * fit;
@@ -2629,7 +2620,6 @@ export class Input {
             }
             return { boxLeft, boxTop, boxW, boxH, sinkW, sinkH };
         }
-        // Never measured: the window math path, not a (0, 0) success.
         return null;
     }
 
@@ -2741,7 +2731,6 @@ export class Input {
         if (this._applySinkCoordinates(touchPoint.clientX, touchPoint.clientY, canvas, videoEle)) {
             // Mapped through the sink; this.x/this.y are set.
         } else {
-            // Auto resolution: the window math.
             if (!this.m) this._windowMath();
             if (this.m) {
                 let logicalX_on_element = this._clientToServerX(touchPoint.clientX);
@@ -3153,7 +3142,12 @@ export class Input {
     /**
      * Wheel handler: ends the scroll session after an idle second, samples
      * pixel deltas for the device classifier, and routes a trackpad through
-     * the smoothing throttle and a discrete wheel straight to emission.
+     * the smoothing throttle and a discrete wheel straight to emission. Line
+     * and page mode bypass the classifier, being always a discrete wheel
+     * (trackpads report pixels). The throttle rate-limits emission but drops
+     * no delta: throttled ticks accumulate and flush at the window end. A
+     * discrete wheel emits per event, so a fast spin never collapses to the
+     * throttle rate.
      */
     _mouseWheelWrapper(event) {
         // One idle second is longer than any intra-gesture gap (momentum
@@ -3163,8 +3157,6 @@ export class Input {
             this._resetWheelLearning();
         }
         this._lastWheelEventTs = nowTs;
-        // Line and page mode are always a discrete wheel (trackpads report
-        // pixels), so they bypass the classifier.
         if (event.deltaMode !== 0) {
             this._mouseWheel(event);
             event.preventDefault();
@@ -3176,8 +3168,6 @@ export class Input {
             this._allowThreshold = !this._isDiscreteWheel();
         }
         if (this._allowThreshold) {
-            // Emission is rate-limited but no delta is dropped: throttled ticks
-            // accumulate and flush at the window end.
             if (this._allowTrackpadScrolling) {
                 this._allowTrackpadScrolling = false;
                 this._mouseWheel(event);
@@ -3191,7 +3181,6 @@ export class Input {
                 this._accumulateWheelX(event);
             }
         } else {
-            // Every event emits, so a fast spin never collapses to the throttle rate.
             this._mouseWheel(event);
         }
         event.preventDefault();
@@ -3201,7 +3190,11 @@ export class Input {
      * Normalizes a vertical wheel delta to a fractional count of notches,
      * learning the per-notch quantum per delta mode (the smallest observed
      * jump) so mice, high-resolution mice and line-mode wheels all resolve to
-     * about one notch per detent.
+     * about one notch per detent. Trackpad pixel deltas measure pan distance,
+     * not notches, so they take a fixed 100px notch like the horizontal axis
+     * (the learned quantum would be the gesture's tiniest ramp-up sample);
+     * the quantum keeps learning meanwhile for a wheel classified later in
+     * the session.
      * @param {number} deltaY
      * @param {number} deltaMode
      * @returns {number}
@@ -3221,10 +3214,6 @@ export class Input {
         // DOM_DELTA_PIXEL
         if (magnitude < this._smallestDeltaY) { this._smallestDeltaY = magnitude; }
         if (this._allowThreshold) {
-            // Trackpad deltas measure pan distance, not notches: a fixed 100px
-            // notch, like the horizontal axis, since the learned quantum would
-            // be the gesture's tiniest ramp-up sample. The quantum keeps
-            // learning above for a wheel classified later in the session.
             return magnitude / 100;
         }
         return magnitude / this._smallestDeltaY;
@@ -3638,9 +3627,6 @@ export class Input {
         this.listeners_context.push(addListener(compositionTarget, 'compositionstart', this._compositionStart, this));
         this.listeners_context.push(addListener(compositionTarget, 'compositionupdate', this._compositionUpdate, this));
         this.listeners_context.push(addListener(compositionTarget, 'compositionend', this._compositionEnd, this));
-        // Blink can deliver an IME commit as textInput with an empty
-        // compositionend; plain typing never reaches this listener since plain
-        // keydowns are stopped before the browser action.
         this.listeners_context.push(addListener(this.element, 'textInput', this._handleTextInput, this));
         this.listeners_context.push(addListener(this.element, 'pointerdown', this._handlePointerDown, this));
         this.listeners_context.push(addListener(this.element, 'pointermove', this._handlePointerMove, this));

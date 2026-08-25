@@ -60,7 +60,6 @@ async def _no_ice(mlineindex, candidate, peer_id):
 async def scenario(res: H.Results) -> None:
     loop = asyncio.get_running_loop()
 
-    # --- a lone viewer of the primary is served -------------------------
     app, svc = make_app(loop)
     await app.start_rtc_connection("v1", "viewer", None, "primary")
     res.check("lone viewer: peer registered", "v1" in app.peer_connections,
@@ -71,27 +70,23 @@ async def scenario(res: H.Results) -> None:
     res.check("lone viewer: connected viewer starts the display media",
               svc.started == ["primary"], svc.started)
 
-    # --- a controller joining reuses the viewer's graph -----------------
     graph_before = app.displays.get("primary")
     await app.start_rtc_connection("c1", "controller", None, "primary")
     res.check("controller joins: the shared graph is reused",
               app.displays.get("primary") is graph_before and "c1" in app.peer_connections,
               sorted(app.peer_connections))
 
-    # --- the controller leaves: the viewer keeps the primary ------------
     await app.stop_rtc_connection("c1", "controller")
     res.check("controller leaves: explicit stop deregisters it",
               "c1" not in app.peer_connections, sorted(app.peer_connections))
     res.check("controller leaves: the remaining viewer keeps graph and capture",
               "primary" in app.displays and svc.stopped == [], (sorted(app.displays), svc.stopped))
 
-    # --- the last consumer releases the primary explicitly --------------
     await app.stop_rtc_connection("v1", "viewer")
     res.check("last viewer leaves: stop_display_media called from the explicit stop",
               svc.stopped == ["primary"], svc.stopped)
     res.check("last viewer leaves: graph released", app.displays == {}, sorted(app.displays))
 
-    # --- a secondary display goes with its controller ------------------
     app, svc = make_app(loop)
     await app.start_rtc_connection("c1", "controller", None, "primary")
     svc.display_clients["display2"] = {"width": 0, "height": 0}
@@ -111,7 +106,6 @@ async def scenario(res: H.Results) -> None:
     res.check("secondary: the primary is untouched",
               "c1" in app.peer_connections and "primary" in app.displays, sorted(app.displays))
 
-    # --- a viewer of a secondary without its controller is refused ------
     await app.start_rtc_connection("v3", "viewer", None, "display2")
     res.check("secondary viewer without controller: refused, nothing built",
               "v3" not in app.peer_connections and "display2" not in app.displays,
@@ -119,7 +113,6 @@ async def scenario(res: H.Results) -> None:
     res.check("secondary viewer without controller: no release churn",
               svc.stopped == ["display2"], svc.stopped)
 
-    # --- a failed secondary start leaves no phantom registration --------
     svc.display_clients["display2"] = {"width": 0, "height": 0}
 
     async def failing_sdp(sdp_type, sdp, peer_id):
@@ -137,7 +130,6 @@ async def scenario(res: H.Results) -> None:
     res.check("failed secondary start: the primary is untouched",
               "primary" in app.displays and "c1" in app.peer_connections, sorted(app.displays))
 
-    # --- a failed primary controller start beside a viewer keeps the viewer
     app.on_sdp = _no_sdp
     await app.start_rtc_connection("v4", "viewer", None, "primary")
     app.on_sdp = failing_sdp
@@ -155,7 +147,6 @@ async def scenario(res: H.Results) -> None:
     res.check("stop_all: the primary media stopped exactly once",
               svc.stopped.count("primary") == 1, svc.stopped)
 
-    # --- the state-machine path still reaps a peer that closed on its own
     app, svc = make_app(loop)
     await app.start_rtc_connection("c1", "controller", None, "primary")
     pc = app.peer_connections["c1"]["peer_conn"]

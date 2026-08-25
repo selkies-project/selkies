@@ -24,8 +24,8 @@ SOURCES = {
 }
 
 # Keys that belong to one transport only: the jpeg-stock controls ride the
-# websockets framing jpeg consumes. One encoder knob now drives both
-# transports, so neither core may drop it.
+# websockets framing jpeg consumes. One encoder knob drives both transports,
+# so neither core may drop it.
 WS_ONLY = {"jpeg_quality", "paint_over_jpeg_quality"}
 WR_ONLY = set()
 

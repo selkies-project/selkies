@@ -203,7 +203,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
     AC.pulsectl_asyncio = SimpleNamespace(PulseAsync=StubPulse)
     AC.PULSE_AVAILABLE = True
 
-    # --- capture sink provisioning ---------------------------------------
     server = fresh_server()
     ctl = AC.AudioControl("t-sink")
     ok = await ctl.ensure_capture_sink("output.monitor")
@@ -221,7 +220,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
     await ctl.aclose()
     res.check("aclose closes the client", StubPulse.instances[-1].closed, "")
 
-    # --- capture source resolution ---------------------------------------
     server = fresh_server()
     server.add_sink("output")
     server.default_sink = "output"
@@ -238,7 +236,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
         res.check("resolve: None when nothing can be enumerated",
                   await ctl.resolve_capture_source("gone.monitor") is None, "")
 
-    # --- pcmflux routing -------------------------------------------------
     server = fresh_server()
     out = server.add_sink("output")
     inp = server.add_sink("input")
@@ -257,7 +254,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
         res.check("route: no pcmflux stream -> None", await ctl.route_pcmflux(["output.monitor"]) is None, "")
     del out, inp
 
-    # --- virtual microphone ----------------------------------------------
     server = fresh_server()
     async with AC.AudioControl("t-mic") as ctl:
         idx, owned = await ctl.ensure_virtual_microphone("output.monitor", False)
@@ -289,7 +285,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
                   and not any(v.startswith("module-virtual-source") for v in server.modules.values()),
                   (idx3, owned3, server.modules))
 
-    # --- never-cancel discipline -----------------------------------------
     server = fresh_server()
     server.add_sink("output")
     log.records.clear()
@@ -331,7 +326,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
     res.check("timeout: next operation reconnects with a fresh client",
               [s.name for s in got] == ["output.monitor"] and StubPulse.instances[-1] is not client
               and StubPulse.instances[-1].connected, "")
-    # aclose with an operation in flight waits for it rather than cancelling it.
     server.hang = True
     live = StubPulse.instances[-1]
     op = asyncio.ensure_future(ctl.sources())
@@ -347,7 +341,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
     res.check("cancel/timeout: no errors logged by the control", not log.lines(logging.ERROR),
               log.lines(logging.ERROR))
 
-    # --- foreign loop guard ----------------------------------------------
     server = fresh_server()
     ctl = AC.AudioControl("t-loop")
     await ctl.open()
@@ -365,7 +358,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
     res.check("a client refuses use from another loop", "foreign event loop" in verdict, verdict)
     await ctl.aclose()
 
-    # --- fallback: connection failure ------------------------------------
     server = fresh_server(refuse_connect=True)
     log.records.clear()
     pactl_calls: List[List[str]] = []
@@ -407,7 +399,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
                   ["set-default-sink", "output"] in pactl_calls and ["set-default-source", "output.SelkiesVirtualMic"] in pactl_calls, "")
         res.check("fallback: load-module index parsed", await ctl.load_module("module-null-sink", "sink_name=x") == 77, "")
         await ctl.aclose()
-        # A second control in the same process does not repeat the warning.
         log.records.clear()
         ctl2 = AC.AudioControl("t-fallback-2")
         await ctl2.open()
@@ -416,7 +407,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
                   and any("pactl" in line for line in log.lines()), log.lines(logging.WARNING))
         await ctl2.aclose()
 
-        # Bindings missing entirely.
         AC.PULSE_AVAILABLE = False
         AC._fallback_announced = False
         log.records.clear()
@@ -430,7 +420,6 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
         AC._PactlBackend._exec = real_exec
         AC.PULSE_AVAILABLE = True
 
-    # --- pactl listing parser --------------------------------------------
     sample = (
         "Source #149\n\tState: IDLE\n\tName: output.monitor\n\tDescription: Monitor of output\n"
         "\tOwner Module: 536870913\n\tMonitor of Sink: output\n\tProperties:\n"

@@ -103,10 +103,8 @@ for path in PY_HELPERS:
                        capture_output=True, text=True)
     check(f"compile {rel}", r.returncode == 0, r.stderr.strip()[:200])
 
-# Two values whose absence is invisible until a desktop is in front of someone:
-# a session with no menu prefix shows an empty application menu, and a latency
-# an operator raised has to reach the daemons that honour it, not just the
-# server process.
+# Two absences invisible until a desktop is in front of someone: no menu prefix
+# is an empty application menu, and a raised latency must reach the daemons.
 entrypoint = open(os.path.join(EXAMPLE, "container-entrypoint.sh")).read()
 check("the shared environment carries the menu prefix",
       "XDG_MENU_PREFIX" in entrypoint,
@@ -117,10 +115,8 @@ for service in ("pipewire", "pipewire-pulse", "wireplumber"):
     check(f"{service} takes the audio latency an operator set",
           "${PIPEWIRE_LATENCY:-" in body, os.path.relpath(path, REPO))
 
-# Xft resources reach a toolkit only when it starts, so on X11 the DPI ladder's
-# reload signal is what makes a change live. It has to have something to signal:
-# a session with no XSETTINGS manager leaves every running application at the
-# density it launched with, and the failure is silent on both sides.
+# Xft resources reach a toolkit only at start, so on X11 the DPI ladder's reload
+# signal needs an XSETTINGS manager to signal, or running apps keep their density.
 ladder = open(os.path.join(REPO, "src", "selkies", "display_utils.py")).read()
 xsettingsd_service = os.path.join(EXAMPLE, "services", "xsettingsd", "run")
 check("the DPI ladder's XSETTINGS manager is a service",
@@ -164,9 +160,8 @@ def shell_scripts(root: str) -> list:
     return sorted(found)
 
 
-# Every shell script the repository ships, not just the example container's:
-# the packaging, CI and tooling scripts run unattended, where a quoting slip is
-# the same class of failure and nobody is watching the output.
+# Every shell script the repository ships: packaging, CI and tooling scripts run
+# unattended, where a quoting slip is the same failure with nobody watching.
 ALL_SHELL = shell_scripts(REPO)
 
 shellcheck = shutil.which("shellcheck")
@@ -174,11 +169,8 @@ if shellcheck:
     check("shell scripts found to lint", len(ALL_SHELL) >= len(SCRIPTS), str(len(ALL_SHELL)))
     for path in ALL_SHELL:
         rel = os.path.relpath(path, REPO)
-        # Gated at the lowest severity: the tree passes it, so anything new is
-        # something this run introduced rather than debt it inherited. The
-        # source path is named because the scripts' own `shellcheck source=`
-        # directives are repo-relative, and shellcheck would otherwise resolve
-        # them against whatever directory the suite happened to be run from.
+        # The tree passes the lowest severity, so anything new is this run's. The
+        # scripts' `shellcheck source=` directives are repo-relative, hence the path.
         r = subprocess.run([shellcheck, "-x", f"--source-path={REPO}",
                             "--severity=style", path],
                            capture_output=True, text=True)

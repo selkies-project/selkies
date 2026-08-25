@@ -18,9 +18,11 @@
  * Messages it consumes from the core: `serverSettings` (the settings payload
  * that gates which controls render and seeds their values),
  * `pipelineStatusUpdate` and `sidebarButtonStatusUpdate`,
- * `effectiveCursorState`, `clientRoleUpdate`, `toggleDashboard` and
- * `toggleTouchGamepad` (the core-owned chords), `gamepadControl`,
- * `clipboardContentUpdate`, `audioDeviceSelected`, `gamepadButtonUpdate` and
+ * `effectiveCursorState`, `clientRoleUpdate`, `gamingModeUpdate`,
+ * `toggleDashboard` and `toggleTouchGamepad` (the core-owned Ctrl+Shift+M and
+ * Ctrl+Shift+G chords), `gamepadControl`, `clipboardContentUpdate`,
+ * `audioDeviceSelected` (its own selection mirrored back, so the dropdowns
+ * show what the core was told), `gamepadButtonUpdate` and
  * `gamepadAxisUpdate`, `fileUpload` (upload progress and every notification
  * the core raises), and `trackpadModeUpdate`.
  *
@@ -28,7 +30,7 @@
  * `gamepadControl`, `setManualResolution`, `resetResolutionToWindow`,
  * `setScaleLocally`, `setAntiAliasing`, `audioDeviceSelected`,
  * `clipboardUpdateFromUI`, `clipboardImageUpdate`, `requestFullscreen`,
- * `mode`, `setSynth`, `sidebarVisibilityChanged`, `TOUCH_GAMEPAD_SETUP`,
+ * `requestGamingMode`, `mode`, `setSynth`, `sidebarVisibilityChanged`, `TOUCH_GAMEPAD_SETUP`,
  * `TOUCH_GAMEPAD_VISIBILITY`, `touchinput:trackpad` and `touchinput:touch`,
  * plus whatever channel a conditional-settings spec propagates through. The
  * soft keys dispatch synthetic `KeyboardEvent`s on `window`, and the files
@@ -280,8 +282,10 @@ const CopyIcon = () => (
     <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
   </svg>
 );
-// The crosshair the Wish dashboard marks gaming mode with: one icon names the
-// control in both front ends, and it reads as a target rather than a plus sign.
+/**
+ * Crosshair marking gaming mode, the wish dashboard's icon for it: one glyph
+ * names the control in both front ends and reads as a target, not a plus sign.
+ */
 const GamingModeIcon = () => (
   <svg className="stroke-icon" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none"
     width="18" height="18" strokeLinecap="round" strokeLinejoin="round">
@@ -519,7 +523,9 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown }) {
    * Catalog fetch: one attempt per modal open plus explicit Retry bumps of
    * `fetchAttempt`; a failure settles into the error view rather than
    * refetching. The fetch is aborted after a timeout and on close or unmount,
-   * and the cleanup's `active` flag suppresses any late setState.
+   * and the cleanup's `active` flag suppresses any late setState. The loading
+   * flag is state set here rather than derived during render: it marks the
+   * transition into a fetch, which a Retry has to re-enter.
    */
   useEffect(() => {
     if (!isOpen || appData) return;
@@ -529,8 +535,6 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown }) {
       METADATA_FETCH_TIMEOUT_MS
     );
     let active = true;
-    // Not derivable during render: this is the transition into a fetch, and a
-    // Retry has to re-enter it.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsLoading(true);
     setError(null);
@@ -808,7 +812,8 @@ const readPaintOverStored = readExplicitStored(USE_PAINT_OVER_QUALITY_SPEC);
  * server settings or any dependency in `deps` changes, which covers the
  * server sync and the encoder or manual-resolution re-derivation uniformly.
  * The resolver honors explicit choices, so a re-resolve never clobbers a
- * pinned value.
+ * pinned value. A re-resolve writes state rather than deriving during render
+ * because the caller edits the value afterwards; deriving would discard that.
  * @param {object} spec A spec from conditional-settings.js.
  * @param {object|null} serverSettings The last `serverSettings` payload.
  * @param {object} ctx Resolution context the spec reads.
@@ -819,8 +824,6 @@ const readPaintOverStored = readExplicitStored(USE_PAINT_OVER_QUALITY_SPEC);
 function useConditionalSetting(spec, serverSettings, ctx, deps, read = readStored) {
   const compute = () => resolveSpec(spec, serverSettings, ctx, read);
   const [value, setValue] = useState(compute);
-  // Re-resolving writes state rather than deriving during render because the
-  // caller edits this value afterwards; deriving would discard their choice.
   // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   useEffect(() => { setValue(compute()); }, deps);
   return [value, setValue];
@@ -832,21 +835,18 @@ const TOGGLE_HANDLE_HEIGHT_PX = 60;
  * Clamps the toggle handle's vertical position, a percentage of the viewport
  * height, so the handle stays fully inside the viewport. The handle's inline
  * `top` positions its center (Overlay.css keeps the `translateY(-50%)`), so
- * the clamp is by half the handle height.
+ * the clamp is by half the handle height. Without a finite viewport height
+ * (headless, pre-layout) that half would be Infinity, so the clamp is a plain
+ * 0 to 100 until a real height is known; a handle at least as tall as the
+ * viewport inverts the bounds, so it is centered instead of pinned to an edge.
  * @param {number} pct
  * @returns {number}
  */
 const clampToggleHandleTopPct = (pct) => {
   const safePct = Number.isFinite(pct) ? pct : 50;
-  // A zero/undefined viewport height (headless, pre-layout, test env) would make
-  // halfHandlePct Infinity and clamp everything to a broken edge, so fall back
-  // to a plain 0..100 clamp until a real height is known.
   const vh = window.innerHeight;
   if (!vh || !Number.isFinite(vh)) return Math.min(100, Math.max(0, safePct));
   const halfHandlePct = (TOGGLE_HANDLE_HEIGHT_PX / 2 / vh) * 100;
-  // When the handle is at least as tall as the viewport the min/max bounds
-  // invert (min < max is violated) and would pin the handle to a constant
-  // edge; centering is the only position that keeps it maximally visible.
   if (halfHandlePct >= 50) return 50;
   return Math.min(100 - halfHandlePct, Math.max(halfHandlePct, safePct));
 };
@@ -859,12 +859,16 @@ const clampToggleHandleTopPct = (pct) => {
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
   const [isToggleVisible, setIsToggleVisible] = useState(true);
-  // Gaming mode is the fullscreen that holds the pointer and the keyboard, and
-  // the core announces it however it was entered. Plain fullscreen keeps the
-  // dashboard reachable, so only this one hides the toggle.
+  /**
+   * Gaming mode: the fullscreen that holds the pointer and keyboard, announced
+   * by the core however it was entered. Plain fullscreen keeps the dashboard
+   * reachable, so only this one hides the toggle.
+   */
   const [isGamingMode, setIsGamingMode] = useState(false);
-  // Viewer-designated clients (shared/player URL modes, or a server-assigned
-  // viewer role) must not see server-wide controls like the transport switch.
+  /**
+   * Viewer-designated clients (shared/player URL modes, or a server-assigned
+   * viewer role) get no server-wide controls such as the transport switch.
+   */
   const [isViewerRole, setIsViewerRole] = useState(() => {
     const h = (typeof window !== "undefined" ? window.location.hash : "").toLowerCase();
     return h.startsWith("#shared") || /^#player[234]$/.test(h);
@@ -935,7 +939,9 @@ function Sidebar() {
   /**
    * Which sidebar controls the server's settings allow: a pure projection of
    * `serverSettings`. A setting that is locked, has at most one allowed value,
-   * or a collapsed min/max range hides its control.
+   * or a collapsed min/max range hides its control. The clipboard section and
+   * the binary-clipboard toggle are also gated on `clipboard_enabled` (wish
+   * parity): with it off the core drops writes and the textarea would be dead.
    */
   const renderableSettings = useMemo(() => {
     if (!serverSettings) return {};
@@ -956,8 +962,6 @@ function Sidebar() {
     newRenderable.screenSettings = s.ui_sidebar_show_screen_settings?.value ?? true;
     newRenderable.audioSettings = s.ui_sidebar_show_audio_settings?.value ?? true;
     newRenderable.stats = s.ui_sidebar_show_stats?.value ?? true;
-    // Couple with the server clipboard enable (wish parity): with clipboard off
-    // the core drops writes, so the section would render as a dead textarea.
     newRenderable.clipboard = (s.ui_sidebar_show_clipboard?.value ?? true)
       && (s.clipboard_enabled?.value ?? true);
     newRenderable.files = s.ui_sidebar_show_files?.value ?? true;
@@ -990,8 +994,7 @@ function Sidebar() {
     newRenderable.video_bitrate = isRenderable('video_bitrate');
     newRenderable.audio_bitrate = isRenderable('audio_bitrate');
 
-    // The server setting behind the HiDPI toggle is use_css_scaling (HiDPI on
-    // = CSS scaling off).
+    // HiDPI on is use_css_scaling off.
     newRenderable.hidpi = isRenderable('use_css_scaling');
     newRenderable.forceAlignedResolution = isRenderable('force_aligned_resolution');
 
@@ -1002,8 +1005,7 @@ function Sidebar() {
     newRenderable.enablePlayer4 = s.enable_player4?.value ?? true;
     newRenderable.enableDualMode = s.enable_dual_mode?.value ?? false;
 
-    // There is no server-side video on/off setting, so the video toggle
-    // always renders.
+    // No server-side video enable setting exists.
     newRenderable.videoToggle = true;
     newRenderable.audioToggle = isRenderable('audio_enabled');
     newRenderable.microphoneToggle = isRenderable('microphone_enabled');
@@ -1011,8 +1013,7 @@ function Sidebar() {
       && (s.ui_sidebar_show_webcam?.value ?? true);
     newRenderable.gamepadToggle = isRenderable('gamepad_enabled');
 
-    // Rate control is on by default server-side, so a payload without the key
-    // (older server build) must still offer the dropdown.
+    // Absent from the payload means the server default, which is on.
     newRenderable.enableRateControl = s.enable_rate_control?.value ?? true;
     const ftSetting = s.file_transfers;
     newRenderable.fileUpload = ftSetting ? ftSetting.value.includes('upload') : true;
@@ -1188,7 +1189,6 @@ function Sidebar() {
     parseInt(localStorage.getItem(getPrefixedKey("audio_bitrate")), 10) || DEFAULT_AUDIO_BITRATE
   );
   const [videoBitrate, setVideoBitrate] = useState(
-    // kbps on the wire and in storage.
     parseInt(localStorage.getItem(getPrefixedKey("video_bitrate")), 10) || DEFAULT_VIDEO_BITRATE
   );
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
@@ -1219,7 +1219,6 @@ function Sidebar() {
       DEFAULT_PAINT_OVER_JPEG_QUALITY
   );
   const [selectedDpi, setSelectedDpi] = useState(
-    // Explicit stored value diverges (wins); otherwise default to the local display scaling.
     parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")), 10) || deriveDpiFromDpr()
   );
   const [manual_width, setManualWidth] = useState(localStorage.getItem(getPrefixedKey("manual_width")) || "");
@@ -1231,15 +1230,16 @@ function Sidebar() {
   /**
    * State the conditional settings read; rebuilt each render so the hooks
    * below re-resolve against current values when their deps change.
+   * `activeEncoder` is the one encoder knob for both transports, read from
+   * storage first: an out-of-set stored value is ignored by the server's own
+   * fallback and re-seated by the `serverSettings` sync. `softwareH264Encoder`
+   * and `useCpu` (the client's choice, else the server's) feed the
+   * rate-control default.
    */
   const conditionalCtx = {
     manualActive: !!readStored("manual_width") || serverSettings?.is_manual_resolution_mode?.value === true,
     streamMode,
-    // One knob for both transports: an out-of-set stored value is ignored by
-    // the server's own fallback, and the serverSettings sync below re-seats it.
     activeEncoder: readStored("encoder") || encoder,
-    // The server's software H.264 encoder and whether software encoding is in
-    // effect (client choice, else the server's), for the rate-control default.
     softwareH264Encoder: serverSettings?.software_h264_encoder?.value,
     useCpu: readStored("use_cpu") !== null
       ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
@@ -1330,8 +1330,7 @@ function Sidebar() {
     screenSettings: false,
     stats: false,
     clipboard: false,
-    // A phone opens on the gamepads section: it is the reason to reach for the
-    // dashboard on a touch device at all.
+    // A phone lands on gamepads: the reason to open the dashboard on touch at all.
     gamepads: IS_MOBILE_CLIENT,
     files: false,
     apps: false,
@@ -1422,9 +1421,15 @@ function Sidebar() {
 
   /**
    * Seeds every plain setting from the server's payload, with a stored value
-   * taking precedence when the server allows it. This writes state instead of
-   * deriving during render because every value stays editable afterwards;
-   * recomputing each render would discard the user's edits.
+   * taking precedence when the server allows it; the conditional settings
+   * sync through their `useConditionalSetting` hooks instead. This writes
+   * state instead of deriving during render because every value stays
+   * editable afterwards; recomputing each render would discard the user's
+   * edits. `scaling_dpi` resolves an operator override (which the server
+   * refuses to let clients clobber), then the stored pick, then the derived
+   * local-display default, the order the cores send on every connect
+   * independent of the resolution mode; a derived value that differs from the
+   * server's is posted.
    */
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -1512,18 +1517,12 @@ function Sidebar() {
         : s_video_paintover_burst.default;
       setVideoPaintoverBurstFrames(final);
     }
-    // HiDPI, rate control and the boolean conditional settings sync through
-    // their useConditionalSetting hooks, not here.
     const s_scaling_dpi = serverSettings.scaling_dpi;
     if (s_scaling_dpi) {
       const stored = getStoredInt("scaling_dpi");
       const storedAllowed = s_scaling_dpi.allowed.includes(String(stored));
       const serverVal = parseInt(s_scaling_dpi.value, 10);
       const derived = deriveDpiFromDpr();
-      // Ladder matches what actually governs the desktop: an operator override
-      // (which the server refuses to let clients clobber) > the stored pick >
-      // the derived local-display default (the cores send stored-else-derived
-      // on every connect, independent of the resolution mode).
       const willPostDerived = !storedAllowed && !s_scaling_dpi.overridden
         && derived !== serverVal;
       const final = s_scaling_dpi.overridden ? serverVal
@@ -1555,7 +1554,11 @@ function Sidebar() {
    * default diverges from what the server is applying (a transport switch
    * seeds the session with the previous mode's value) this pushes it so the
    * encoder follows. Pinned, locked or operator-overridden values resolve to
-   * the server's value and post nothing.
+   * the server's value and post nothing. The core persists every mode it is
+   * told to apply and resends it on the next connect, so without an explicit
+   * pick the stored value is an echo, not a choice: it is dropped once it
+   * stops matching what the ladder resolves, or it would outlive the
+   * derivation, and an operator override with it.
    */
   useEffect(() => {
     if (!serverSettings) return;
@@ -1563,10 +1566,6 @@ function Sidebar() {
     const rcKey = RATE_CONTROL_SPEC.storageKey;
     const resolved = resolveSpec(
       RATE_CONTROL_SPEC, serverSettings, conditionalCtx, readRateControlStored);
-    // The core persists every mode it is told to apply and resends it on the next
-    // connect. Without an explicit pick that stored echo is not a choice: drop it
-    // once it stops matching what the ladder resolves, or it would outlive the
-    // derivation — and an operator override with it.
     if (!isExplicitChoice(RATE_CONTROL_SPEC)
       && readStored(rcKey) !== null && readStored(rcKey) !== resolved) {
       localStorage.removeItem(getPrefixedKey(rcKey));
@@ -1708,10 +1707,13 @@ function Sidebar() {
     }
   };
 
+  /**
+   * Ends a handle drag and persists its position. `pointerId` is null when
+   * the pointerup had no matching pointerdown (capture lost), and
+   * `hasPointerCapture(null)` coerces to id 0 and could release a foreign
+   * capture, so capture is only released for the tracked pointer.
+   */
   const handleTogglePointerUp = (e) => {
-    // pointerId is null when a pointerup arrives without our pointerdown (capture
-    // lost); hasPointerCapture(null) would coerce to id 0 and could release a
-    // foreign capture, so only touch capture for our own pointer.
     const pid = toggleDragInfo.current.pointerId;
     if (pid !== null && e.currentTarget.hasPointerCapture(pid)) {
       e.currentTarget.releasePointerCapture(pid);
@@ -1969,7 +1971,6 @@ function Sidebar() {
     debouncedPostSetting({ video_bitrate: selectedVideoBitrate})
   };
   const handleAudioBitrateChange = (selectedAudioBitrate) => {
-    // Never push NaN.
     if (Number.isNaN(selectedAudioBitrate)) selectedAudioBitrate = DEFAULT_AUDIO_BITRATE;
     setAudioBitrate(selectedAudioBitrate)
     debouncedPostSetting({ audio_bitrate: selectedAudioBitrate})
@@ -2221,8 +2222,11 @@ function Sidebar() {
       { type: "gamepadControl", enabled: !isGamepadEnabled },
       window.location.origin
     );
-  // Both buttons hand the request to the core, which owns what each mode locks;
-  // exiting is the browser's own call either way.
+  /**
+   * Leaves fullscreen through whichever prefixed API exists. Entering is
+   * handed to the core, which owns what each mode locks; exiting is the
+   * browser's own call either way.
+   */
   const exitFullscreen = () => {
     const exit = document.exitFullscreen || document.mozCancelFullScreen
       || document.webkitExitFullscreen || document.msExitFullscreen;
@@ -2282,8 +2286,6 @@ function Sidebar() {
   const toggleTheme = () => {
     const newTheme = theme === "dark" ? "light" : "dark";
     setTheme(newTheme);
-    // Not session-prefixed: the theme is a per-browser preference shared by
-    // every session of this dashboard.
     localStorage.setItem("theme", newTheme);
   };
   /**
@@ -2294,7 +2296,10 @@ function Sidebar() {
    * surface a spurious "Server disconnected" alert. The endpoint is gated on
    * the master token (Bearer) when set, or Basic credentials via same-origin;
    * with Basic Auth off the dashboard is not given the token, so a 401 prompts
-   * for it once, keeps it in sessionStorage, and retries.
+   * for it once, keeps it in sessionStorage, and retries; a token the server
+   * rejects is dropped so the next attempt re-prompts. A failed switch clears
+   * the flag again, since no reload follows and a kept flag would hide a real
+   * disconnect.
    */
   const handleStreamModeChange = async (event) => {
     const newMode = event.target.value;
@@ -2326,7 +2331,6 @@ function Sidebar() {
       }
 
       if (!response.ok) {
-        // A stale token is dropped so the next attempt re-prompts.
         if (response.status === 401) { try { sessionStorage.removeItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ } }
         throw new Error(`Request failed with status ${response.status}`);
       }
@@ -2337,7 +2341,6 @@ function Sidebar() {
         window.location.origin
       );
     } catch (error) {
-        // No reload follows a failed switch; a kept flag would suppress a real disconnect.
         window.__selkiesModeSwitching = false;
         console.error("Error switching stream mode:", error);
     }
@@ -2518,9 +2521,8 @@ function Sidebar() {
         gu !== null && gt !== null && gt > 0 ? (gu / gt) * 100 : 0
       );
       setClientFps(window.fps ?? 0);
-      // The websockets worklet exports a final 0 to 100 level (RMS x141, a
-      // full-scale sine is 100); the WebRTC analyser returns raw RMS 0 to 1
-      // and gets the same x141 so both transports read on one scale.
+      // x141 is the websockets worklet's own scale (RMS x141, a full-scale sine
+      // reads 100), applied to the WebRTC analyser's raw RMS so both match.
       const coreLevel = window.currentAudioLevel;
       const level = typeof coreLevel === "number"
         ? coreLevel
@@ -2558,10 +2560,8 @@ function Sidebar() {
             setIsOpen(false);
           }
         } else if (message.type === "toggleDashboard") {
-          // Core-owned Ctrl+Shift+M chord; viewers have no sidebar to open.
           if (!isViewerRole) setIsOpen((prev) => !prev);
         } else if (message.type === "toggleTouchGamepad") {
-          // Core-owned Ctrl+Shift+G chord.
           handleToggleTouchGamepad();
         } else if (message.type === "gamepadControl") {
           if (message.enabled !== undefined)
@@ -2581,7 +2581,6 @@ function Sidebar() {
             setDashboardClipboardTruncated(message.truncated === true);
           }
         } else if (message.type === "audioDeviceSelected") {
-          // The dashboard's own selection, mirrored back so the dropdowns show what the core was told.
           if (message.deviceId) {
             if (message.context === "input")
               setSelectedInputDeviceId(message.deviceId);
@@ -2621,12 +2620,11 @@ function Sidebar() {
             message: errMsg,
             code,
           } = message.payload;
-          // A failed apps command settles its pending optimistic update
-          // first; a stale launch match is lifecycle noise, not a notice.
+          // Settles the pending optimistic apps update first; a stale launch
+          // match is lifecycle noise, not a notice.
           if (code === "commandFailed" && !resolveFailedAppCommand(errMsg))
             return;
-          // Core-emitted skip reasons carry a translation code; an unknown or
-          // absent code falls back to the raw message for third-party consumers.
+          // An unknown or absent code keeps the raw message for third-party consumers.
           const localizedMsg =
             typeof code === "string" && code.startsWith("clipboardSkip")
               ? t(`notifications.${code}`, errMsg)
@@ -2795,8 +2793,10 @@ function Sidebar() {
     gaugeRadius,
     gaugeCircumference
   );
-  // The bandwidth gauge reads full at the traffic the session is configured
-  // to use (video target plus audio), not an arbitrary link speed. videoBitrate is kbps.
+  /**
+   * Full scale of the bandwidth gauge: the traffic the session is configured
+   * for (video target in kbps plus audio in bps), not an arbitrary link speed.
+   */
   const maxBandwidthMbps = Math.max(0.1, videoBitrate / 1000 + audioBitrate / 1_000_000);
   const MAX_LATENCY_MS = 1000;
   const bandwidthPercent = Math.min(100, (bandwidthMbps / maxBandwidthMbps) * 100);
@@ -2821,7 +2821,7 @@ function Sidebar() {
     })
   );
 
-  // One encoder knob serves both transports; CBR/CRF applies to every H.264 encoder on both.
+  /** One encoder knob serves both transports; CBR/CRF applies to every H.264 encoder on both. */
   const activeEncoder = encoder;
   const H264_ENCODERS = ["h264enc", "h264enc-striped", "nvh264enc"];
   const showFPS = [
@@ -2833,8 +2833,10 @@ function Sidebar() {
   const showH264Options = H264_ENCODERS.includes(activeEncoder);
   const showJpegOptions = encoder === 'jpeg';
   const showPaintOverQualityToggle = showH264Options || showJpegOptions;
-  // The quality slider must belong to the mode the encoder is actually using:
-  // with rate control disabled that is the server's mode, not the dashboard's.
+  /**
+   * The mode the encoder is actually using, which picks the quality slider:
+   * the server's when rate control is disabled.
+   */
   const appliedRateControlMode = rateControlEnabled
     ? rateControlMode
     : (serverSettings?.rate_control_mode?.value ?? rateControlMode);
@@ -3286,7 +3288,6 @@ function Sidebar() {
                     />
                   </div>
                 )}
-                {/* The toggle precedes the paint-over settings it gates. */}
                 {showPaintOverQualityToggle && (renderableSettings.usePaintOverQuality ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="usePaintOverQualityToggle">
@@ -3395,8 +3396,8 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {/* use_cpu only changes behavior for full-frame h264enc (HW vs the server's
-                    software encoder); the server forces it true for jpeg/striped in both transports. */}
+                {/* use_cpu only matters for full-frame h264enc; the server forces it true
+                    for jpeg and striped on both transports. */}
                 {activeEncoder === 'h264enc' && (renderableSettings.use_cpu ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="useCpuToggle">

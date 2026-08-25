@@ -69,9 +69,8 @@ const playerClientModes = ['#player2', '#player3', '#player4'];
   if (!noDashboardModes.includes(currentHash)) {
     const dashboardRootElement = document.createElement('div');
     dashboardRootElement.id = 'dashboard-root';
-    // Keystrokes on dashboard controls (slider arrows, dropdown nav) drive the
-    // UI, not the game: the input core skips events whose target sits under an
-    // allow-native-input ancestor.
+    // Keystrokes on dashboard controls drive the UI, not the game: the input
+    // core skips events whose target sits under an allow-native-input ancestor.
     dashboardRootElement.classList.add('allow-native-input');
     document.body.appendChild(dashboardRootElement);
     const appMountPoint = document.getElementById('root');

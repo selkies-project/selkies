@@ -43,7 +43,6 @@ def main():
         os.environ["DISPLAY"] = disp
         ih.x_display_live = lambda name: name == disp
 
-        # A live server that is NOT an Xwayland (leftover Xvfb): not adopted.
         ih.x_display_is_xwayland = lambda name: False
         h = make_handler()
         check("non-Xwayland server is not the session's X display",
@@ -52,7 +51,6 @@ def main():
         check("app_session ignores a non-Xwayland server, apps stay Wayland",
               s == {"x11_display": None, "wayland_display": "wayland-1", "type": "wayland"}, str(s))
 
-        # A real rootful Xwayland on that display: adopted, both agree.
         ih.x_display_is_xwayland = lambda name: name == disp
         h = make_handler()
         check("rootful Xwayland is the session's X display",
@@ -61,7 +59,6 @@ def main():
         check("app_session adopts the rootful Xwayland as an X session",
               s == {"x11_display": disp, "wayland_display": None, "type": "x11"}, str(s))
 
-        # No live server: never consulted, never adopted.
         ih.x_display_live = lambda name: False
         h = make_handler()
         check("no live server: no X session display", h._x11_session_display() is None)
@@ -73,11 +70,8 @@ def main():
         h = make_handler(separate=True)
         check("nested session: no unbridged X monitor", h._x11_session_display() is None)
 
-        # The real /proc helpers: this process is not an Xwayland, and an empty
-        # display name is rejected without scanning.
         check("this process is not an Xwayland", ih._proc_is_xwayland(os.getpid(), disp) is False)
         check("empty display name is rejected", ih.x_display_is_xwayland("") is False)
-        # A pid that does not exist is not an Xwayland.
         check("a dead pid is not an Xwayland", ih._proc_is_xwayland(2 ** 31 - 1, disp) is False)
     finally:
         ih.x_display_live = saved_live

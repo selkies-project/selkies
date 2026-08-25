@@ -87,7 +87,6 @@ DUAL = {"primary": {"x": 0, "y": 0, "w": 1920, "h": 1080},
 
 
 def main() -> None:
-    # --- the extent the bound comes from ---------------------------------
     check("one display spans its own size", layout_extent(SINGLE) == (1920, 1080),
           f"{layout_extent(SINGLE)}")
     check("two displays span their union", layout_extent(DUAL) == (3200, 1080),
@@ -97,7 +96,7 @@ def main() -> None:
           layout_extent({"primary": {"x": 0, "y": 0, "w": 1920, "h": None}}) == (1920, 0),
           f"{layout_extent({'primary': {'x': 0, 'y': 0, 'w': 1920, 'h': None}})}")
 
-    # --- a backend with no relative injection reads the tracked position --
+    # A backend with no relative injection reads the tracked position.
     wl = WaylandStub(relative=False)
     h = make_handler(SINGLE, wl)
     send(h, 900, 500)
@@ -108,7 +107,7 @@ def main() -> None:
     check("the fallback injected positions, not deltas",
           all(m[0] == "absolute" for m in wl.moves), f"{wl.moves}")
 
-    # --- the same drag with relative injection available ------------------
+    # The same drag with relative injection available.
     wl = WaylandStub(relative=True)
     h = make_handler(SINGLE, wl)
     send(h, 900, 500)
@@ -118,7 +117,7 @@ def main() -> None:
     check("the tracked position still stops at the edge",
           h.last_x == 1919, f"{h.last_x}")
 
-    # --- a button change carries no motion --------------------------------
+    # A button change carries no motion.
     wl = WaylandStub(relative=True)
     h = make_handler(SINGLE, wl)
     send(h, 900, 500)
@@ -136,7 +135,7 @@ def main() -> None:
           all(action != MOUSE_MOVE for action, _ in h.sent[before:]),
           f"{h.sent[before:]}")
 
-    # --- the first absolute after a delta warps ---------------------------
+    # The first absolute after a delta warps.
     h = make_handler(SINGLE)
     send(h, 900, 500)
     send(h, 300, 0, relative=True)
@@ -152,7 +151,7 @@ def main() -> None:
           not [1 for action, _ in h.sent[before:] if action == MOUSE_POSITION],
           f"{h.sent[before:]}")
 
-    # --- the wire's own limits --------------------------------------------
+    # The wire's own limits.
     h = make_handler(SINGLE)
     send(h, 900, 500)
     before = len(h.sent)

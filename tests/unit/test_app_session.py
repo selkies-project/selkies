@@ -48,11 +48,9 @@ def main():
         # On the Wayland backend a live X server on $DISPLAY is only the session's
         # rootful Xwayland when it really is an Xwayland process serving it.
         ih.x_display_is_xwayland = lambda name: name == disp
-        # X11 backend: the server's display, no Wayland socket.
         s = make_handler(False).app_session()
         check("x11 backend: apps on the server's DISPLAY", s == {"x11_display": disp, "wayland_display": None, "type": "x11"}, str(s))
 
-        # Wayland backend, rootful Xwayland on the capture compositor (DISPLAY live, no nested compositor).
         ih.x_display_live = lambda name: name == disp
         s = make_handler(True).app_session()
         check("rootful Xwayland desktop: X session, no WAYLAND_DISPLAY offered", s == {"x11_display": disp, "wayland_display": None, "type": "x11"}, str(s))
@@ -65,18 +63,15 @@ def main():
               s == {"x11_display": None, "wayland_display": "wayland-1", "type": "wayland"}, str(s))
         ih.x_display_is_xwayland = lambda name: name == disp
 
-        # Wayland backend, nested compositor: its socket and its Xwayland.
         ih.x_display_live = lambda name: False
         ih.live_x_displays = lambda: [":0"]
         s = make_handler(True, "wayland-0", separate=True).app_session()
         check("nested compositor: its socket and its Xwayland", s == {"x11_display": ":0", "wayland_display": "wayland-0", "type": "wayland"}, str(s))
 
-        # Wayland backend, nothing X: Wayland clients of the capture compositor.
         ih.live_x_displays = lambda: []
         s = make_handler(True).app_session()
         check("plain Wayland session: capture compositor socket", s == {"x11_display": None, "wayland_display": "wayland-1", "type": "wayland"}, str(s))
 
-        # Terminal choice follows the windowing system and what is installed.
         ih.shutil.which = lambda n: "/usr/bin/" + n if n in ("foot", "st") else None
         ih.x_display_live = lambda name: name == disp
         check("X11 session launches in st", make_handler(True).app_terminal() == "st")
@@ -87,9 +82,8 @@ def main():
         ih.shutil.which = lambda n: None
         check("no terminal installed: nothing published", make_handler(True).app_terminal() is None)
 
-        # Launch env: display variables by topology, session bus adopted from the
-        # session's own processes (a real dbus-daemon; our launched children are ignored).
-        # Restore the real which() the terminal checks stubbed, so the probe below sees it.
+        # The session bus is adopted from a real dbus-daemon, never from our own launched
+        # children; the real which() must be back for the dbus-run-session probe below.
         ih.shutil.which = saved_which
         ih.x_display_live = lambda name: name == disp
         if not shutil.which("dbus-run-session"):

@@ -774,7 +774,9 @@ export class WebRTCClient {
 	 * `general` comes from the transport and candidate-pair reports (its
 	 * `connectionType` through the selected pair's remote candidate), `video`
 	 * and `audio` from the inbound-rtp reports (their `codecName` through the
-	 * linked codec report), and `data` from the data-channel report; the raw
+	 * linked codec report; `video.decoder` reads `unknown` outside a capturing
+	 * media context, the only state that exposes `decoderImplementation`), and
+	 * `data` from the data-channel report; the raw
 	 * reports are attached as `reports` and `allReports`. The audio section's
 	 * NetEQ concealment counters are the RED acceptance metric; Chrome reports
 	 * opus+red under the codec name `opus`, so RED presence is confirmed from
@@ -876,7 +878,6 @@ export class WebRTCClient {
 				var videoRTP = reports.videoRTP;
 				if (videoRTP !== null) {
 					connectionDetails.video.bytesReceived = videoRTP.bytesReceived;
-					// decoderImplementation is only exposed while the media context is in a capturing state.
 					connectionDetails.video.decoder = videoRTP.decoderImplementation || "unknown";
 					connectionDetails.video.frameHeight = videoRTP.frameHeight;
 					connectionDetails.video.frameWidth = videoRTP.frameWidth;

@@ -10,9 +10,9 @@ websockets / webrtc:
     page: the Files UI's upload button feeds the browser's file chooser, the
     upload lands in the directory, the Download Files modal lists it inside
     its iframe, and both the link it renders and a real click on it hand the
-    browser the same bytes. The
-    websockets block also drives one file above the client's slicing threshold
-    through the page so the client's chunked path is exercised end to end.
+    browser the same bytes. The websockets block also drives one file above the
+    client's slicing threshold through the page so the client's chunked path is
+    exercised end to end.
 policy:
     `file_transfers=upload`, `download` and `none` each refuse the other
     direction on the wire and hide its button in both dashboards; with Basic
@@ -44,7 +44,7 @@ FILES_DIR = os.path.join(H.WORKDIR, "file-manager")
 CHUNKED_BYTES = 64 * 1024 * 1024 + 1
 BASIC_USER, BASIC_PASSWORD, VIEWONLY_PASSWORD = "user", "secret", "look"
 
-# Records the core's upload progress messages so a check can wait for the end
+# Records the core's upload progress messages, so a check can wait for the end
 # of a transfer the page started.
 UPLOAD_JS = """
   window.__uploads = [];
@@ -296,8 +296,6 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
     res.check(f"{dashboard}: the upload landed in file_manager_path byte for byte",
               wait_file(on_disk(name), 5) and file_sha(on_disk(name)) == sha(payload))
 
-    # The download modal: an iframe on the file index; the link inside hands
-    # the browser an attachment.
     if dashboard == "wish":
         # The submenu may have closed with the chooser; reopen it for the
         # second button.
@@ -319,8 +317,6 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
         time.sleep(0.5)
     res.check(f"{dashboard}: the Download Files modal lists the upload", listing is not None,
               [f.url for f in page.frames])
-    # The link as the listing renders it, fetched from the page's own context:
-    # the route the modal points the browser at serves the bytes.
     fetched = None
     href = None
     if listing is not None:
@@ -330,9 +326,8 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
             response = page.request.get(urllib.parse.urljoin(listing.url, href))
             fetched = sha(response.body()) if response.status == 200 else f"status {response.status}"
     res.check(f"{dashboard}: the listing's link serves the same bytes", fetched == sha(payload), f"{href} -> {fetched}")
-    # A real click on that link: it focuses the iframe, which blurs the window
-    # (Radix closes every open menu on that), so a modal mounted inside a
-    # menubar submenu is torn down and the download never arrives.
+    # A real click focuses the iframe, which blurs the window; Radix closes every
+    # menu on that, tearing down a modal mounted inside a menubar submenu.
     downloaded = None
     detail = ""
     if listing is not None and href:
@@ -456,8 +451,8 @@ def policy_block() -> "H.Results":
     status, _, body = request("GET", "/api/files/", headers=basic(VIEWONLY_PASSWORD))
     res.check("Basic auth: the view-only password lists files", status == 200 and b"controller.bin" in body, status)
 
-    # The client side of the ceiling: a shared/viewer page has the upload gate
-    # closed in the core, so its file input starts no request at all.
+    # The client side of the ceiling: the core closes the upload gate on a
+    # shared/viewer page, so its file input starts no request at all.
     with sync_playwright() as pw:
         browser, page = dashboard_page(pw, "websockets", url_hash="#shared", http_credentials={
             "username": BASIC_USER, "password": BASIC_PASSWORD})

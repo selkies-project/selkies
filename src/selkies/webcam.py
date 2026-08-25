@@ -22,6 +22,13 @@ otherwise be converted for the life of the process, so an ``auto`` device is
 re-created for it — but only while no sink reports a consumer, since an
 application holding the device is exactly what the process-wide lifetime is for
 (``VirtualWebcam.ensure``).
+
+The WebSocket carries one encoded frame per ``0x06`` message: opcode, codec
+id, flags, payload. Besides the keyframe bit the flags byte carries the
+frame's upright transform, which the client's encoder leaves out of the
+bitstream: bits 1-2 are the clockwise rotation in quarter turns, bit 3 a
+horizontal flip applied after the rotation. Servers that predate the bits
+ignore them.
 """
 
 import asyncio
@@ -55,11 +62,6 @@ CODEC_BY_NAME: Dict[str, int] = {
     "vp9": CODEC_VP9, "av1": CODEC_AV1, "hevc": CODEC_HEVC, "h265": CODEC_HEVC,
 }
 
-# WebSocket framing of one encoded frame: opcode, codec id, flags, payload.
-# Besides the keyframe bit, the flags byte carries the frame's upright
-# transform, which the client's encoder leaves out of the bitstream: bits 1-2
-# are the clockwise rotation in quarter turns, bit 3 a horizontal flip applied
-# after the rotation. Servers that predate the bits ignore them.
 WS_OPCODE_WEBCAM = 0x06
 WS_HEADER_LEN = 3
 WS_FLAG_KEYFRAME = 0x01
@@ -195,7 +197,9 @@ class VirtualWebcam:
 
         Each sink answers for its own: the interposer counts the clients on its socket,
         PipeWire reports whether a consumer is linked to its node, and a kernel device's
-        openers are found the only way a process can, through /proc.
+        openers are found the only way a process can, through /proc. A pixelflux
+        that cannot report the node's consumers is taken to have one: a re-created
+        device would take the picture away from whoever is watching.
         """
         cam = self._cam
         if cam is None:
@@ -210,8 +214,6 @@ class VirtualWebcam:
             if stats.get("pipewire_streaming"):
                 return "PipeWire consumer"
         elif stats.get("pipewire"):
-            # A pixelflux that does not report the node's consumers cannot say there are none,
-            # and a re-created device would take the picture away from one that is watching.
             return "a PipeWire node whose consumers this pixelflux does not report"
         device = str(stats.get("device_path") or "")
         if device and _device_has_openers(device):
@@ -253,8 +255,6 @@ class VirtualWebcam:
                     return self._cam
                 reader = await asyncio.to_thread(self._consumers)
                 if reader is not None:
-                    # Rechecked on a floor rather than per frame: the answer only changes when
-                    # an application comes or goes, and the uplink asks on every frame.
                     self._reformat_next_check = time.monotonic() + REFORMAT_RECHECK_SECONDS
                     if not self._reformat_blocked_logged:
                         self._reformat_blocked_logged = True

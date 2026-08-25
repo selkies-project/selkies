@@ -158,7 +158,6 @@ def wish_block(cell: str) -> "H.Results":
             res.check("dashboard chrome renders", page.locator('[role="menubar"]').count() > 0)
             res.check("gamepad card shown by default", card)
 
-            # --- clipboard: server -> panel, panel -> server -------------
             push = f"e2e-{cell}-s2c-{int(time.time())}"
             stop = server_push_clipboard(push, wayland)
             got = []
@@ -203,7 +202,6 @@ def wish_block(cell: str) -> "H.Results":
                 page.keyboard.press("Escape")
                 time.sleep(0.2)
 
-            # --- settings: framerate slider, then the encoder menu ---------
             res.check("settings panel opens", open_settings(page))
             mark = len(H.server_log())
             slider = page.locator('[role="slider"]').first
@@ -251,7 +249,6 @@ def wish_block(cell: str) -> "H.Results":
             page.keyboard.press("Escape")
             time.sleep(0.3)
 
-            # --- apps panel -------------------------------------------------
             apps = page.locator('button:has(svg.lucide-layout-grid)').first
             opened = False
             notice = False

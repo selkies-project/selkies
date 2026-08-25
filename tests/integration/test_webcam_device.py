@@ -182,7 +182,6 @@ def main() -> int:
     build()
     sock_dir = tempfile.mkdtemp(prefix="selkies-webcam-", dir="/tmp")
     try:
-        # --- I420 device, MMAP and read(), geometry and colours ---------------
         cam = start_camera(sock_dir, 640, 480)
         with Feeder(cam, 640, 480):
             r = probe(sock_dir, 15, samples=[(320, 240), (10, 10), (630, 470)])
@@ -200,7 +199,7 @@ def main() -> int:
             r = probe(sock_dir, 10, mode="read", samples=[(320, 240)])
             res.check("read(): 10 frames delivered", r.get("rc") == 0 and r.get("frames") == "10", str(r))
             res.check("read(): centre colour", red_or_blue(r["samples"].get((320, 240))), str(r["samples"]))
-            # Two consumers at once: the second opens its own handle on the same ring.
+            # The second consumer opens its own handle on the same ring.
             t = threading.Thread(target=lambda: probe(sock_dir, 20), daemon=True)
             t.start()
             r = probe(sock_dir, 20)
@@ -221,8 +220,7 @@ def main() -> int:
                 pw_cli = shutil.which("pw-cli")
                 nodes = subprocess.run([pw_cli, "ls", "Node"], capture_output=True, text=True, timeout=20).stdout if pw_cli else ""
                 res.check("PipeWire node is published while the daemon is reachable", "selkies-webcam" in nodes, nodes[-200:])
-                # The interposer's PipeWire frame source: the same device, the same
-                # frames, taken from the node instead of the backend socket.
+                # The same frames, taken from the node instead of the backend socket.
                 nowhere = os.path.join(sock_dir, "no-socket-here")
                 r = probe(nowhere, 15, samples=[(320, 240)], source="pipewire")
                 res.check("PipeWire source: mmap delivers 15 frames", r.get("rc") == 0 and r.get("frames") == "15", str(r))
@@ -264,7 +262,6 @@ def main() -> int:
                   not t.is_alive() and time.monotonic() - t0 < 5 and "No such device" in ended.get("error", ""), str(ended)[:200])
         res.check("stop removes the socket", not os.path.exists(os.path.join(sock_dir, "selkies_webcam0.sock")))
 
-        # --- NV12 and YUYV devices ---------------------------------------------
         for fmt, fourcc, bpl, size in (("NV12", "NV12", 640, 640 * 480 * 3 // 2), ("YUYV", "YUYV", 1280, 640 * 480 * 2)):
             cam = start_camera(sock_dir, 640, 480, fmt)
             with Feeder(cam, 640, 480):
@@ -275,7 +272,6 @@ def main() -> int:
                           str(r.get("samples")))
             cam.stop()
 
-        # --- MJPEG device: the uplink's JPEG frames pass through, the rest is re-encoded ---
         cam = start_camera(sock_dir, 640, 480, "MJPEG")
         dump = os.path.join(sock_dir, "frame.jpg")
         with Feeder(cam, 640, 480):
@@ -329,7 +325,6 @@ def main() -> int:
                       and px[1][1] > 150 and px[1][0] < 90 and px[1][2] < 90, f"{r.get('format')} {px}")
             cam.stop()
 
-        # --- Letterbox: a 16:9 camera into a 4:3 device ------------------------
         cam = start_camera(sock_dir, 640, 480)
         with Feeder(cam, 640, 360):
             r = probe(sock_dir, 10, samples=[(320, 240), (320, 20), (320, 460), (5, 240)])
@@ -339,7 +334,6 @@ def main() -> int:
             res.check("letterbox: left edge is picture (not pillarboxed)", red_or_blue(s.get((5, 240))), str(s))
         cam.stop()
 
-        # --- Portrait camera: pillarboxed ---------------------------------------
         cam = start_camera(sock_dir, 640, 480)
         with Feeder(cam, 240, 320):
             r = probe(sock_dir, 10, samples=[(320, 240), (20, 240), (620, 240)])
@@ -348,7 +342,6 @@ def main() -> int:
             res.check("pillarbox: side bars are black", near(s.get((20, 240)), BLACK) and near(s.get((620, 240)), BLACK), str(s))
         cam.stop()
 
-        # --- Real inter-coded streams: H.264 and VP8 through avcodec ------------
         for codec_name, enc_name, codec_id in (("h264", "libx264", pixelflux.VirtualCamera.CODEC_H264),
                                                ("vp8", "libvpx", pixelflux.VirtualCamera.CODEC_VP8)):
             packets = encode_stream(enc_name, 320, 240, 45)
@@ -379,7 +372,6 @@ def main() -> int:
             res.check(f"{codec_name}: no decode errors", st["errors"] == 0, str(st))
             cam.stop()
 
-        # --- Keyframe handshake for inter-coded input ---------------------------
         cam = start_camera(sock_dir, 320, 240)
         p_frame = bytes([0, 0, 0, 1, 0x41, 0x9A, 0x00, 0x10])
         wanted = 0

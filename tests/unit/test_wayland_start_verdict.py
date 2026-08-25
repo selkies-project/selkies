@@ -65,7 +65,6 @@ def main() -> bool:
     try:
         srv = server()
 
-        # A clean start: live, no caveat.
         live, err = asyncio.run(srv._wayland_start_verdict(
             FakeModule((800, 480, 1.0), "running", None, True), "primary"))
         res.check("a clean start is live with no error", live is True and err is None,
@@ -86,7 +85,6 @@ def main() -> bool:
                   live is False and "host compositor connection lost" in (err or ""),
                   f"{live} {err}")
 
-        # A degraded-but-live start: streams, but the caveat is carried.
         live, err = asyncio.run(srv._wayland_start_verdict(
             FakeModule((800, 480, 1.0), "running", "NVENC init failed (x); using CPU encode",
                        True), "primary"))
@@ -109,14 +107,11 @@ def main() -> bool:
         res.check("an older pixelflux without the readback is trusted",
                   live is True and err is None, f"{live} {err}")
 
-        # capture_state present but is_capturing false with no recorded error still
-        # fails: the pipeline is not live.
         live, err = asyncio.run(srv._wayland_start_verdict(
             FakeModule((0, 0, 0.0), "idle", None, False), "primary"))
         res.check("no live pipeline and no error still fails",
                   live is False and err is None, f"{live} {err}")
 
-        # _wayland_capture_last_error reads the reason directly (no barrier).
         err = srv._wayland_capture_last_error(
             FakeModule((0, 0, 0.0), "failed", "encoder session exhausted", False), "display2")
         res.check("last-error reads the recorded reason",

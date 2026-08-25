@@ -117,6 +117,14 @@ class XkbLink:
     Opened through `open_xkb_link`; every method talks to the server on the
     connection the link was opened on, so a group lock and the XTEST key that
     follows it are processed in order without a round trip between them.
+
+    Attributes:
+        event_base: First event code of the extension on this connection.
+        core_device: XKB device id of the core keyboard, which the
+            replacement notify (sent once per device) is filtered on.
+        _placement: Keysym to `(keycode, group, level)` at the lowest group,
+            then level, then keycode carrying it; None until a lookup needs
+            it.
     """
 
     def __init__(self, xdisplay: Any, major_opcode: int, event_base: int,
@@ -125,8 +133,6 @@ class XkbLink:
         self._opcode = major_opcode
         self.event_base = event_base
         self.core_device = core_device
-        # keysym -> (keycode, group, level) at the lowest group, then level,
-        # then keycode carrying it; None until a lookup needs it.
         self._placement = None
 
     def invalidate(self) -> None:
@@ -234,8 +240,6 @@ def open_xkb_link(xdisplay: Any) -> Optional[XkbLink]:
                                  wanted_major=1, wanted_minor=0)
         if not hello.supported:
             return None
-        # The core keyboard's device id, which the replacement notify (sent
-        # once per device) is filtered on.
         state = _XkbGetState(display=xdisplay.display, opcode=opcode,
                              device_spec=XKB_USE_CORE_KBD)
         _XkbSelectEvents(

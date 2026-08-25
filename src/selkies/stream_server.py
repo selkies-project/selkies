@@ -61,15 +61,12 @@ from abc import ABCMeta, abstractmethod
 logger = logging.getLogger("stream_server")
 
 
-# A chunked upload whose transfer sits idle longer than this is expired: its
-# tracking entry and on-disk .part file are removed the next time any chunked
-# upload request arrives. Generous relative to chunk cadence (one ≤64 MiB
-# slice completes well within this on any usable link), so only transfers
-# whose client is truly gone are reaped.
+# Idle chunked transfers older than this are reaped; generous relative to one
+# ≤64 MiB slice, so only a transfer whose client is truly gone expires.
 UPLOAD_PART_TTL_SECONDS: int = 3600
 
-# Uploads are written to a hidden staging sibling of their destination and
-# renamed onto it, so a destination is only ever replaced by a complete file.
+# Hidden staging sibling an upload is renamed from, so a destination is only
+# ever replaced by a complete file.
 UPLOAD_STAGING_PREFIX: str = ".selkies-upload-"
 
 
@@ -158,7 +155,6 @@ def _scan_directory(path: str, include_parent: bool) -> List[Dict[str, Any]]:
                 )
                 is_dir = entry.is_dir()
             except OSError as e:
-                # Entries can vanish or be unstat-able (broken symlinks, races).
                 logger.warning(f"Skipping unreadable directory entry {entry.name!r}: {e}")
                 continue
             items.append({
@@ -194,30 +190,32 @@ class UplinkAllowance:
     Reads are what apply the rate, since a paused read closes the receive
     window and the data waits in the client's kernel, so no client
     cooperation is needed.
+
+    Attributes:
+        SHARE: Settled share of the client's link, half. On a modeled 6 Mbit/s
+            uplink behind a 1 MiB first-hop buffer with a session streaming
+            beside the transfer, a small request took 1421 ms unpaced, 1116 ms
+            at a three-quarter share and 2 ms (its unloaded time) at a half,
+            for 60% of the unpaced transfer rate.
+        STARVED_FRACTION: Share of a window spent waiting for the client before
+            the backlog counts as gone and the window's rate as the link's own.
+        DRAIN_SHARE: Share held for `DRAIN_SECONDS` after the measurement to
+            empty the queue the ramp left standing, before settling at `SHARE`.
+        MIN_PACED_BYTES: Below this a transfer is over before a queue could
+            matter, and pacing it would only make a small file feel slow.
+        READ_BYTES: One read's worth of receive window, and so the burst the
+            client answers with: small enough that it cannot itself become the queue.
     """
 
-    # Half the client's link. Measured on a modeled 6 Mbit/s uplink behind a
-    # 1 MiB first-hop buffer, with a session streaming beside the transfer: a
-    # small request took 1421 ms while an unpaced upload ran, 1116 ms at a
-    # three-quarter share, and 2 ms — its unloaded time — at a half, for 60%
-    # of the unpaced transfer rate.
     SHARE: float = 0.5
     WINDOW_SECONDS: float = 0.5
     GROWTH: float = 1.5
     START_BPS: int = 256 * 1024
-    # How much of a window may be spent waiting for the client before the
-    # backlog counts as gone and the window's rate as the link's own.
     STARVED_FRACTION: float = 0.15
-    # Finding the rate leaves the link's queue full; this is the share and the
-    # time given to emptying it before the transfer settles at SHARE.
     DRAIN_SHARE: float = 0.45
     DRAIN_SECONDS: float = 2.5
     FLOOR_BPS: int = 64 * 1024
-    # Below this a transfer is over before a queue could matter, and pacing it
-    # would only make a small file feel slow.
     MIN_PACED_BYTES: int = 4 * 1024 * 1024
-    # One read's worth of receive window, and so the burst the client answers
-    # with: small enough that the burst cannot itself become the queue.
     READ_BYTES: int = 64 * 1024
 
     def transfer(self) -> Dict[str, Any]:
@@ -227,7 +225,13 @@ class UplinkAllowance:
                 "drain_until": 0.0, "capacity_bps": 0.0}
 
     def _step(self, state: Dict[str, Any], now: float) -> None:
-        """Close one window: step up while data is banked, settle when it runs out."""
+        """Close one window: step up while data is banked, settle when it runs out.
+
+        A ramp window that starved still counted buffered bytes, so the next
+        window is the measurement. Measuring leaves the link's queue standing,
+        and at the steady share it would take most of a transfer to come back
+        out, so a wider drain share clears it first.
+        """
         elapsed = now - state["window_start"]
         observed = state["seen"] / elapsed if elapsed > 0 else 0.0
         starved = state["starved"]
@@ -238,16 +242,11 @@ class UplinkAllowance:
             if starved < elapsed * self.STARVED_FRACTION:
                 state["rate_bps"] *= self.GROWTH
                 return
-            # The backlog ran out during this window, so part of it still
-            # counted buffered bytes. The next one is all link.
             state["phase"] = "measure"
             return
         if state["phase"] == "measure":
             state["capacity_bps"] = observed
             state["phase"] = "drain"
-            # Reaching the client's rate left the link's queue standing, and at
-            # the steady share it would take most of a transfer to come back
-            # out. A wider share first clears it.
             state["drain_until"] = now + self.DRAIN_SECONDS
             state["rate_bps"] = max(self.FLOOR_BPS, observed * self.DRAIN_SHARE)
             return
@@ -258,7 +257,11 @@ class UplinkAllowance:
 
     async def pace(self, nbytes: int, state: Dict[str, Any],
                    waited: float = 0.0) -> None:
-        """Account one read of `nbytes` that spent `waited` seconds arriving."""
+        """Account one read of `nbytes` that spent `waited` seconds arriving.
+
+        The deficit is slept off here and repaid by the next call's
+        elapsed-time refill, as in `TransferPacer`.
+        """
         now = time.monotonic()
         if state["window_start"] is None:
             state["window_start"] = now
@@ -273,8 +276,6 @@ class UplinkAllowance:
         state["ts"] = now
         state["tokens"] -= nbytes
         if state["tokens"] < 0:
-            # The deficit is slept off here and repaid by the next call's
-            # elapsed-time refill, as in TransferPacer.
             await asyncio.sleep(-state["tokens"] / rate)
 
 
@@ -318,7 +319,7 @@ class TransferPacer:
 
     @property
     def _ceiling(self) -> int:
-        # Effectively unbounded when purely adaptive.
+        """The static cap, or effectively unbounded when purely adaptive."""
         return self.static_bps or 64 * 1024 * 1024 * 1024
 
     def connection_state(self, gauged: bool = True) -> Dict[str, Any]:
@@ -331,6 +332,16 @@ class TransferPacer:
         return {"rtt_floor_us": None, "gauged": gauged}
 
     async def pace(self, sock: Any, nbytes: int, conn: Dict[str, Any]) -> None:
+        """Sample the gauge and sleep off what `nbytes` overdraws.
+
+        After a long idle gap the remembered rate is stale, so the
+        multiplicative ramp is re-entered (TCP's restart after idle): a link
+        that got faster meanwhile is rediscovered in chunks, not minutes, and
+        one that got slower is cut by the first gauge sample. The deficit is
+        slept off here and paid back by the next call's elapsed-time refill;
+        zeroing the balance after the sleep would credit the slept interval
+        twice and double the delivered rate.
+        """
         if not self.active:
             return
         if self.adaptive and conn["gauged"]:
@@ -352,10 +363,6 @@ class TransferPacer:
         if self.adaptive and not conn["gauged"] and not self.static_bps:
             return
         now = time.monotonic()
-        # A long gap since the last paced write means the remembered rate is
-        # stale: re-enter the multiplicative ramp so a link that got faster
-        # meanwhile is rediscovered in chunks, not minutes (TCP's restart
-        # after idle); one that got slower is cut by the first gauge sample.
         if self.adaptive and now - self._ts > 10:
             self._slow_start = True
         limit = min(self.rate_bps, self._ceiling)
@@ -363,9 +370,6 @@ class TransferPacer:
         self._ts = now
         self._tokens -= nbytes
         if self._tokens < 0:
-            # The deficit is slept off here and paid back by the next call's
-            # elapsed-time refill; zeroing the balance after the sleep would
-            # credit the slept interval twice and double the delivered rate.
             await asyncio.sleep(-self._tokens / limit)
 
     def _gauge_backoff(self, congested: bool, clear: bool, cut: float) -> None:
@@ -383,20 +387,19 @@ class TransferPacer:
         probing past the last congested rate; that sawtooth is what keeps a
         link that gets faster later reachable.
 
-        The epoch closes only on a clear sample past the drain window: a
-        clear inside the hold still reflects the pre-cut queue draining, and
-        ending the epoch there would let an oscillating gauge re-arm the
-        ceiling from each freshly cut rate — the same ratchet, one flap at a
-        time."""
+        A cut also pauses growth for a drain window: resuming on the first
+        clear sample keeps the bottleneck queue standing, and the cut never
+        relieves the stream sharing the link. The epoch closes only on a
+        clear sample past that window: a clear inside the hold still reflects
+        the pre-cut queue draining, and ending the epoch there would let an
+        oscillating gauge re-arm the ceiling from each freshly cut rate — the
+        same ratchet, one flap at a time."""
         if congested:
             self._slow_start = False
             if not self._congested:
                 self._congested = True
                 self._probe_ceiling = max(self.rate_bps, 2 * self._RATE_FLOOR)
             self.rate_bps = max(self.rate_bps * cut, self._RATE_FLOOR)
-            # Growth pauses for a drain window: resuming on the first clear
-            # sample keeps the bottleneck queue standing, and the cut then
-            # never actually relieves the stream sharing the link.
             self._hold_until = time.monotonic() + 1.5
             return
         if not clear:
@@ -425,13 +428,6 @@ def _upload_staging_path(dest: str, token: str) -> str:
     being appended to the destination basename, so a filename that is legal but
     sits close to the filesystem's NAME_MAX still uploads; staying in the same
     directory keeps the finalizing ``os.replace`` atomic and intra-filesystem.
-
-    Args:
-        dest: Absolute destination path of the upload.
-        token: Opaque token that names the staging file.
-
-    Returns:
-        Path of the hidden ``.part`` staging sibling.
     """
     return os.path.join(os.path.dirname(dest), f"{UPLOAD_STAGING_PREFIX}{token}.part")
 
@@ -476,20 +472,16 @@ def _unix_socket_is_live(path: str) -> bool:
     return True
 
 
-# Realm both auth challenges name; the web client's 401 guard recognizes the
+# Realm both 401 challenges name; the web client's 401 guard keys on the
 # Bearer one as this server's own token verdict.
 AUTH_REALM: str = "Selkies Restricted"
-# The WebSocket routes the services register (data transport, WebRTC
-# signaling and its alias), whose handshakes carry their own token gate in the
-# ws handlers; the auth middleware exempts exactly these paths, never a
-# request that merely claims an Upgrade.
+# Handshakes carrying their own token gate in the ws handlers; the auth
+# middleware exempts exactly these paths, never a mere Upgrade claim.
 WEBSOCKET_ROUTES: Tuple[str, ...] = ("/api/websockets", "/api/webrtc/signaling", "/api/ws")
-# Cookie the web client mirrors its secure-mode session token into, for the
-# requests it cannot put a header on (the file-manager iframe and its download
-# links); the client scopes it to the API prefix with SameSite=Strict.
+# Mirror of the secure-mode session token for requests the client cannot put
+# a header on (the file-manager iframe and its download links).
 SESSION_TOKEN_COOKIE: str = "selkies_token"
 
-# Inlined header/footer HTML for the /api/files directory index.
 FILE_INDEX_HEADER: str = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -860,6 +852,22 @@ class CentralizedStreamServer:
     owned twice. The supervisor also serves the control-plane API, the static
     frontend, file uploads/downloads, and — when HTTPS is enabled — hot-reloads
     certificates by rebuilding the listening site without restarting the app.
+
+    On Wayland the constructor brings the pixelflux compositor up before any
+    capture or session app starts and mirrors its socket name (the external
+    compositor's, in host-capture mode) into `WAYLAND_DISPLAY`, so every child
+    spawned with a copied environment reaches it.
+
+    Attributes:
+        transfer_pacer: Download pacing, congestion-controlled by default; a
+            static cap only when the operator knows the link rate. A zero limit
+            with adaptive off leaves downloads on the unthrottled FileResponse path.
+        uplink_allowance: Holds uploads, which have no congestion gauge on this
+            side, below the rate the client demonstrates; None when congestion
+            control is off or a static cap already answers the question.
+        _chunked_uploads: In-flight chunked uploads by destination path: transfer
+            id, next expected offset, `.part` path, last-activity stamp, and a
+            busy flag that refuses interleaved writes to the same destination.
     """
 
     def __init__(
@@ -879,9 +887,6 @@ class CentralizedStreamServer:
         self.cert_watcher: Optional[asyncio.Task] = None
         self.ssl_context: Optional[ssl.SSLContext] = None
         self.static_fs_path: str = ""
-        # Download pacing: congestion-controlled by default; a static cap only
-        # when the operator knows the link rate. A zero limit with adaptive off
-        # means downloads take the unthrottled FileResponse path.
         limit_mbps = float(self.settings.file_transfer_limit_mbps or 0.0)
         if not math.isfinite(limit_mbps) or limit_mbps < 0:
             logger.warning(
@@ -892,31 +897,18 @@ class CentralizedStreamServer:
             static_bps=int(limit_mbps * 125000),
             adaptive=bool(self.settings.file_transfer_cc[0]),
         )
-        # Uploads have no congestion gauge on this side, so they are held below
-        # the rate the client itself demonstrates. Same switch as download
-        # pacing: an operator who turns congestion control off gets the raw
-        # link in both directions. A static cap is the operator's own answer to
-        # the same question, and measuring a rate this side is already holding
-        # down would only ratchet it further.
         self.uplink_allowance = (
             UplinkAllowance()
             if self.settings.file_transfer_cc[0] and not limit_mbps else None)
         self.upload_dir = pathlib.Path(
             os.path.expanduser(self.settings.file_manager_path)
         ).resolve()
-        # In-flight chunked HTTP uploads, keyed by destination path. Each entry
-        # tracks the client-chosen transfer id, the next expected byte offset,
-        # the .part file path, a last-activity stamp for expiry, and a busy
-        # flag that rejects interleaved writes to the same destination.
         self._chunked_uploads: Dict[str, Dict[str, Any]] = {}
         self.web_files_ctx: Optional[tempfile.TemporaryDirectory] = None
 
         self._clients_present: bool = False
         self._client_hook_tasks: Set[asyncio.Task] = set()
 
-        # Wayland deployments: bring the compositor socket up now, before any capture
-        # or session app starts, so early-launched apps find WAYLAND_DISPLAY. All
-        # configuration flows from settings; pixelflux reads no Selkies env.
         if bool(self.settings.wayland[0]):
             try:
                 from pixelflux import ensure_wayland_display
@@ -928,12 +920,6 @@ class CentralizedStreamServer:
                     cursor_size=int(self.settings.cursor_size),
                 )
                 if socket_name:
-                    # The compositor auto-picks the first free wayland-N socket;
-                    # mirror its REAL name into os.environ so every child spawned
-                    # with a copied env (app launches, session hooks) reaches this
-                    # compositor. --wayland-socket-index remains only a legacy
-                    # hint for consumers without the pixelflux API. In host-capture
-                    # mode the apps live on the EXTERNAL compositor instead.
                     host_display = str(
                         getattr(self.settings, "wayland_host_display", "") or "")
                     os.environ["WAYLAND_DISPLAY"] = host_display or socket_name
@@ -946,7 +932,6 @@ class CentralizedStreamServer:
             except ImportError:
                 logger.warning("pixelflux unavailable; Wayland display not initialized.")
 
-        # Constants
         self.STREAMING_MODE_WEBRTC = "webrtc"
         self.STREAMING_MODE_WEBSOCKETS = "websockets"
         self.STATIC_CONTENT_PATH = "selkies.selkies_web"
@@ -990,7 +975,6 @@ class CentralizedStreamServer:
             try:
                 returncode = await asyncio.wait_for(proc.wait(), timeout=300)
             except asyncio.TimeoutError:
-                # A wedged hook must not pin its task (and the process) forever.
                 logger.warning(f"{name} command timed out after 300s; killing: {cmd}")
                 try:
                     proc.kill()
@@ -1260,11 +1244,14 @@ class CentralizedStreamServer:
         Applied to WebSocket upgrades and to the mode-switch POST. Empty
         ``allowed_origins`` means same-origin only (plus non-browser clients
         that send no Origin); ``*`` allows any; otherwise the Origin must be
-        listed or match the Host header.
+        listed or match the Host header. A forwarded Host without a port
+        (nginx's ``proxy_set_header Host $host``, as the bundled config does)
+        is matched by hostname: a browser Origin carries any non-default port,
+        so a strict netloc comparison would reject every same-origin
+        connection reached via an explicit port such as the :6080 mapping.
         """
         origin = request.headers.get("Origin")
         if not origin:
-            # Native/non-browser clients omit Origin.
             return True
         allowed = {
             o.strip()
@@ -1279,13 +1266,6 @@ class CentralizedStreamServer:
                 origin_parts = urllib.parse.urlsplit(origin)
                 if origin_parts.netloc == host:
                     return True
-                # Reverse proxies routinely forward Host without the port (e.g.
-                # nginx's 'proxy_set_header Host $host' — this project's own
-                # bundled nginx config does), while a browser Origin carries any
-                # non-default port. A strict netloc comparison therefore rejects
-                # every same-origin connection reached via an explicit port
-                # (like the standard :6080 mapping). When the forwarded Host has
-                # no port to compare, fall back to comparing hostnames.
                 host_parts = urllib.parse.urlsplit("//" + host)
                 if (
                     host_parts.port is None
@@ -1331,10 +1311,14 @@ class CentralizedStreamServer:
         cross-site POST); in secure mode every other API route accepts a
         session token (Bearer header, ``?token=`` query, or the client's
         cookie), which is the only credential when Basic auth is off; and
-        everything else falls through to Basic Auth when enabled. A request
-        that authenticates with the view-only password or a viewer-role token
-        is tagged with ``auth_role_ceiling = "viewer"`` for downstream handlers
-        to enforce.
+        everything else falls through to Basic Auth when enabled. A cookie-
+        carried token on a state-changing request is held to the Origin rule
+        too, since the browser attaches it; and with a master token set, the
+        WebSocket handshakes skip Basic (a browser cannot attach fresh Basic
+        credentials to a handshake, so it would add only an undebuggable
+        401). A request that authenticates with the view-only password or a
+        viewer-role token is tagged with ``auth_role_ceiling = "viewer"`` for
+        downstream handlers to enforce.
         """
         settings = request.app["settings"]
         auth_header = request.headers.get("Authorization")
@@ -1344,9 +1328,6 @@ class CentralizedStreamServer:
         api_prefix = settings.subfolder
         is_ws_handshake = is_ws_upgrade and path.rstrip("/") in {
             f"{api_prefix}{route}" for route in WEBSOCKET_ROUTES}
-        # Reject cross-site WebSocket upgrades: a page from another origin can open our
-        # WS even where CORS blocks reading XHR responses. Non-browser clients send no
-        # Origin and pass.
         if is_ws_upgrade:
             if not self._is_origin_allowed(request, settings):
                 logger.warning(
@@ -1354,18 +1335,14 @@ class CentralizedStreamServer:
                     request.headers.get("Origin", ""),
                 )
                 return web.Response(status=403, text="Forbidden origin")
-        # Health/liveness endpoints stay open so k8s/LB probes reach them without credentials.
         if path in (f"{api_prefix}/api/status", f"{api_prefix}/api/health"):
             return await handler(request)
         token_path = path == f"{api_prefix}/api/tokens"
-        # Gate /tokens on the master token whenever set, independent of streaming mode.
         if settings.master_token and token_path:
             if not self._check_master_token(auth_header, settings.master_token):
                 return self._bearer_challenge()
             return await handler(request)
 
-        # /api/switch (when master_token set): accept a Bearer master token, else fall
-        # through to the Basic check if Basic Auth is on, else 401.
         is_control_path = path == f"{api_prefix}/api/switch"
         if settings.master_token and is_control_path:
             if self._check_master_token(auth_header, settings.master_token):
@@ -1373,32 +1350,17 @@ class CentralizedStreamServer:
             if not settings.enable_basic_auth[0]:
                 return self._bearer_challenge()
         if is_control_path and not self._is_origin_allowed(request, settings):
-            # Without the Bearer token the switch rides the browser's cached
-            # Basic credentials (or an open server), which a page on another
-            # origin can POST with: a JSON body in a text/plain form needs no
-            # preflight. Same Origin rule as the upgrades; curl sends none.
             logger.warning(
                 "Rejected mode switch from disallowed Origin: %r",
                 request.headers.get("Origin", ""),
             )
             return web.Response(status=403, text="Forbidden origin")
 
-        # Secure mode: the session token is the credential for the remaining
-        # API routes (uploads, the file listing and downloads, TURN, metrics,
-        # and the plain GETs the client probes the transport routes with), the
-        # way it is for the WebSocket handshakes, whose own handlers check it
-        # (a browser cannot attach headers to an upgrade). The static client
-        # stays public, since it is what presents the token. A request without
-        # a valid token is refused when Basic auth is off and falls through to
-        # the Basic check otherwise.
         if (settings.master_token and not is_ws_handshake and not token_path
                 and not is_control_path and path.startswith(f"{api_prefix}/api/")):
             verdict = self._session_token_verdict(request, settings)
             if verdict is not None:
                 ceiling, source = verdict
-                # The cookie is attached by the browser, so a request that
-                # changes state on it is held to the same Origin rule as the
-                # mode switch on cached Basic credentials.
                 if (source == "cookie" and request.method not in ("GET", "HEAD")
                         and not self._is_origin_allowed(request, settings)):
                     logger.warning(
@@ -1411,21 +1373,15 @@ class CentralizedStreamServer:
             if not settings.enable_basic_auth[0]:
                 return self._bearer_challenge()
 
-        # Authentication flow for regular Selkies deployment
         if not settings.enable_basic_auth[0]:
             logger.debug("Basic auth not enabled, forwarding to routers")
             return await handler(request)
         if is_ws_handshake and settings.master_token:
-            # A browser cannot attach fresh Basic credentials to a WebSocket
-            # handshake, and these paths carry their own token gate (enforced in
-            # the ws handlers) whenever a master token is configured -- Basic
-            # adds no protection there, only an undebuggable 401.
             return await handler(request)
         if not auth_header or not auth_header.startswith("Basic "):
             if is_ws_upgrade:
-                # No challenge/retry exists for a WS handshake: without this log the
-                # rejection is invisible on both ends (the browser only reports a
-                # generic connection failure).
+                # A WS handshake gets no challenge/retry: without this log the
+                # rejection is invisible on both ends.
                 logger.warning(
                     "Rejected WebSocket upgrade from %s: basic auth is enabled and the "
                     "handshake carried no Authorization header (browsers only attach "
@@ -1447,10 +1403,7 @@ class CentralizedStreamServer:
             main_ok = hmac.compare_digest(
                 pw, str(settings.basic_auth_password).encode("utf-8")
             )
-            # A separate view-only password authenticates the same user but caps the
-            # connection at the viewer role; the ws handlers coerce a self-asserted
-            # controller down to it (see auth_role_ceiling). Both comparisons run so
-            # the reply timing never reveals which password was presented.
+            # Both comparisons run so reply timing never reveals which password was sent.
             viewonly_secret = str(getattr(settings, "basic_auth_viewonly_password", "") or "")
             viewonly_ok = bool(viewonly_secret) and hmac.compare_digest(
                 pw, viewonly_secret.encode("utf-8")
@@ -1494,7 +1447,13 @@ class CentralizedStreamServer:
         """Stop the active streaming service and start ``mode_name`` in its place.
 
         Serialized under the supervisor lock so two switches can never overlap;
-        switching to the already-active mode is a no-op.
+        switching to the already-active mode is a no-op. The service reads
+        the settings at start, so the encoder knob is brought in line with the
+        transport first (a websockets-only encoder such as jpeg or striped
+        h264enc cannot ride the WebRTC pipeline, and a switch back restores
+        the operator's menu and value) and only then does an unpinned
+        rate-control mode resolve, since its websockets default depends on
+        the resolved encoder, the same order as `_post_process_settings`.
 
         Args:
             mode_name: Registered service name ("websockets" or "webrtc").
@@ -1512,13 +1471,6 @@ class CentralizedStreamServer:
 
             await self._stop_service()
             logger.info(f"Starting service: {mode_name}")
-            # The service reads the settings at start. The encoder knob is
-            # brought in line with the transport first — a websockets-only
-            # encoder (jpeg, h264enc-striped) cannot ride the WebRTC pipeline,
-            # and a switch back restores the operator's menu and value — and
-            # only then does an unpinned rate_control_mode resolve, since its
-            # websockets default depends on the resolved encoder (same order
-            # as _post_process_settings).
             self.settings.mode = mode_name
             self.settings.apply_webrtc_encoder_filter()
             self.settings.resolve_rate_control_default()
@@ -1527,9 +1479,9 @@ class CentralizedStreamServer:
             self.active_task = task
             self.current_mode = mode_name
 
-            # Clear the stale mode if the service dies unexpectedly, and retrieve
-            # the exception so asyncio doesn't log it as never-retrieved.
             def _on_service_done(finished: asyncio.Task, mode: str = mode_name) -> None:
+                """Clear the stale mode when the service dies unexpectedly; the
+                exception is retrieved so asyncio never logs it as unretrieved."""
                 if finished.cancelled():
                     return
                 exc = finished.exception()
@@ -1542,7 +1494,11 @@ class CentralizedStreamServer:
             task.add_done_callback(_on_service_done)
 
     async def _stop_service(self) -> None:
-        """Stop the active service, escalating to a forced cancel on timeout."""
+        """Stop the active service, escalating to a forced cancel on timeout.
+
+        The grace period lets a teardown that includes ~2 s gamepad-close
+        waits finish before a forced cancel that would leak resources.
+        """
         if not self.current_mode:
             return
         logger.info(f"Stopping service: {self.current_mode}")
@@ -1550,8 +1506,6 @@ class CentralizedStreamServer:
         await self.services[self.current_mode].stop()
         if self.active_task:
             try:
-                # Let the service teardown finish (can include ~2s gamepad-close waits)
-                # before a forced cancel that would leak resources.
                 await asyncio.wait_for(self.active_task, timeout=15)
             except asyncio.TimeoutError:
                 logger.warning(
@@ -1566,19 +1520,21 @@ class CentralizedStreamServer:
                     )
                 except Exception as e:
                     logger.warning(f"Service task raised during forced stop: {e!r}")
-        # Clear stale references so a stopped/dead mode is never reported active.
         self.current_mode = None
         self.active_task = None
 
     def _get_status(self) -> Dict[str, Any]:
+        """The /api/status body.
+
+        `enable_dual_mode` is surfaced here so the dashboard can render the
+        WebSocket/WebRTC toggle from this early, transport-independent probe:
+        serverSettings only arrives once a stream connects, so a WebRTC
+        session that never comes up would otherwise strand the user with no
+        way back to WebSockets.
+        """
         return {
             "current_mode": self.current_mode,
             "available_modes": list(self.services.keys()),
-            # Surfaced so the dashboard can render the WebSocket/WebRTC toggle
-            # from this early, transport-independent probe. serverSettings (which
-            # also carries enable_dual_mode) only arrives once a stream connects,
-            # so without this a WebRTC session that never comes up would strand
-            # the user with no way back to WebSockets.
             "enable_dual_mode": bool(
                 getattr(self.settings, "enable_dual_mode", (False,))[0]
             ),
@@ -1631,6 +1587,18 @@ class CentralizedStreamServer:
         O_NOFOLLOW blocks a planted symlink either way. Enforces the declared
         Content-Length.
 
+        Reads pace against the shared transfer allowance: a paused read fills
+        aiohttp's flow-control buffer, the TCP window closes, and the client's
+        uplink is freed for the input/feedback traffic the stream depends on.
+        That allowance has no gauge in this direction, so the operator's
+        static cap is all of it; the uplink allowance beside it holds an
+        unconfigured session below the client's own rate, skipped for a
+        transfer too small to stand a queue. Read granularity is what the
+        client is handed back as receive window, and it sends every byte of
+        it at once, so a paced transfer is read in small steps: a megabyte at
+        a time would refill the link's queue in one burst however slowly the
+        average is paced.
+
         Returns:
             The byte count written.
 
@@ -1640,16 +1608,9 @@ class CentralizedStreamServer:
         """
         declared = request.content_length
         loop = asyncio.get_running_loop()
-        # Reads pace against the shared transfer allowance: a paused read
-        # fills aiohttp's flow-control buffer, the TCP window closes, and the
-        # client's uplink is freed for the input/feedback traffic the stream
-        # depends on. That allowance has no gauge in this direction, so the
-        # operator's static cap is all of it; the uplink allowance beside it
-        # is what holds an unconfigured session below the client's own rate.
         pacer = self.transfer_pacer
         pace_conn = pacer.connection_state(gauged=False) if pacer.active else None
         uplink = self.uplink_allowance
-        # A transfer too small to stand a queue is not worth slowing down.
         uplink_state = (
             uplink.transfer()
             if uplink is not None and (declared or 0) >= uplink.MIN_PACED_BYTES
@@ -1659,10 +1620,6 @@ class CentralizedStreamServer:
         fh = os.fdopen(fd, "wb")
         written = 0
         try:
-            # Read granularity is what the client is handed back as receive
-            # window, and it sends every byte of it at once: a megabyte at a
-            # time refills the link's queue in one burst however slowly the
-            # average is paced, so a paced transfer is read in small steps.
             read_size = (uplink.READ_BYTES if uplink_state is not None else 1 << 20)
             while True:
                 waited = time.monotonic()
@@ -1785,9 +1742,6 @@ class CentralizedStreamServer:
             )
 
         if upload_id is None:
-            # Plain single-POST upload: staged next to the destination and renamed
-            # onto it once the whole body landed, so an aborted transfer leaves any
-            # file already at that path intact.
             staging = _upload_staging_path(dest, os.urandom(8).hex())
             try:
                 written = await self._stream_upload_body(request, staging, append=False)
@@ -1809,7 +1763,6 @@ class CentralizedStreamServer:
             logger.info(f"HTTP upload finished: {dest} ({written} bytes)")
             return web.json_response({"status": "success", "bytes": written})
 
-        # Chunked upload.
         try:
             offset = int(offset_header or "")
             total = int(request.headers["X-Upload-Total"]) if "X-Upload-Total" in request.headers else -1
@@ -1829,8 +1782,6 @@ class CentralizedStreamServer:
                     {"status": "error", "message": "another chunk for this path is in flight"},
                     status=409,
                 )
-            # New transfer: any tracked or leftover .part for this path is stale
-            # and gets replaced (the write below truncates it).
             state = {"id": upload_id, "offset": 0, "ts": time.monotonic(),
                      "part": part_path, "busy": False}
             self._chunked_uploads[dest] = state
@@ -1942,9 +1893,7 @@ class CentralizedStreamServer:
                 self.web_files_ctx.cleanup()
         except Exception as e:
             logger.error(f"Failed to extract packaged web files: {e}")
-            # Guard cleanup: web_files_ctx may be unset if extraction failed before
-            # it was assigned. An unguarded cleanup() would raise and mask the real
-            # error logged above.
+            # Unset when extraction failed before its assignment.
             if self.web_files_ctx is not None:
                 try:
                     self.web_files_ctx.cleanup()
@@ -1966,29 +1915,36 @@ class CentralizedStreamServer:
     async def fancy_index_handler(self, request: web.Request) -> web.StreamResponse:
         """GET /api/files/...: serve the file-manager tree for download.
 
-        Files are served with an attachment disposition; directories render a
-        styled HTML listing. The index exists solely to download files, so the
-        listing itself is gated behind the same "download" transfer permission
-        as the bytes. Path validation rejects any traversal before touching the
-        filesystem and re-checks the symlink-resolved path against the root.
+        Files are served with an attachment disposition, since inline types
+        (text, images, PDF) would otherwise render inside the dashboard's
+        file-browser iframe instead of downloading; directories render a
+        styled HTML listing, redirected to their slash-terminated URL so the
+        relative links resolve one level down. The index exists solely to
+        download files, so the listing itself is gated behind the same
+        "download" transfer permission as the bytes. Path validation rejects
+        any traversal before touching the filesystem and re-checks the
+        symlink-resolved path against the root.
+
+        Pacing applies to plain GETs only: HEAD must answer instantly
+        (StreamResponse.write is not empty-body-aware, so it would read and
+        pace the whole file), a Range request is a resume or a seek that
+        pacing a partial stream buys nothing for while FileResponse
+        negotiates the 206, and a conditional request exists to be answered
+        with 304/412 from validators only FileResponse computes. Those fall
+        through to FileResponse's sendfile path; the paced write loop is what
+        keeps a large download from queueing ahead of the video stream on a
+        bottleneck link.
         """
         if "download" not in self.settings.file_transfers:
             return web.Response(status=403, text="Forbidden: downloads disabled")
         rel_path = request.match_info.get("path", "").lstrip("/")
         base = str(self.upload_dir)
-        # Reject any ".." segment before touching the filesystem, then rebuild the
-        # path from validated components so it can only descend from upload_dir
-        # (the same validated-components policy the upload handler applies). Real
-        # browsers resolve ../ client-side, so a literal ".." here is only ever an
-        # escape attempt.
         parts = [c for c in os.path.normpath(rel_path).split(os.sep) if c and c != "."]
         if ".." in parts:
             return web.Response(
                 status=403, text="Forbidden: Directory Traversal detected"
             )
         full_path = pathlib.Path(os.path.realpath(os.path.join(base, *parts)))
-        # Defense in depth: after symlinks are followed the resolved path must still
-        # be the root itself or sit beneath it.
         try:
             within = os.path.commonpath([base, str(full_path)]) == base
         except ValueError:
@@ -2002,19 +1958,8 @@ class CentralizedStreamServer:
             return web.Response(status=404, text="Not Found")
 
         if full_path.is_file():
-            # Attachment disposition so a click in the dashboard's file-browser
-            # iframe always saves the file; inline types (text, images, PDF)
-            # would otherwise render inside the modal instead of downloading.
             filename = full_path.name.encode("ascii", "replace").decode().replace('"', "_")
             quoted = urllib.parse.quote(full_path.name)
-            # Pacing applies to plain GETs only: HEAD must answer instantly
-            # (StreamResponse.write is not empty-body-aware, so it would read
-            # and pace the whole file), a Range request is a resume or a seek
-            # — pacing a partial stream buys nothing while FileResponse
-            # negotiates the 206 properly — and a conditional request exists
-            # to be answered with 304/412 from the validators only
-            # FileResponse computes. All of those fall through to
-            # FileResponse's sendfile path.
             conditional = any(
                 name in request.headers
                 for name in ("If-Modified-Since", "If-None-Match",
@@ -2022,17 +1967,12 @@ class CentralizedStreamServer:
             )
             if (self.transfer_pacer.active and request.method == "GET"
                     and "Range" not in request.headers and not conditional):
-                # Paced write loop: on a bottleneck link this is what keeps a
-                # large download from queueing ahead of the video stream.
                 sock = request.transport.get_extra_info("socket") if request.transport else None
                 conn = self.transfer_pacer.connection_state()
                 logger.info(
                     f"Download '{full_path.name}': pacing active "
                     f"(limit={self.transfer_pacer.rate_bps/125000:.1f} Mbit/s, "
                     f"adaptive={self.transfer_pacer.adaptive})")
-                # Filesystem calls run off the event loop: a cold cache or
-                # slow mount must not stall the video pipeline this pacing
-                # exists to protect.
                 size = (await asyncio.to_thread(full_path.stat)).st_size
                 content_type = (
                     mimetypes.guess_type(full_path.name)[0]
@@ -2069,25 +2009,19 @@ class CentralizedStreamServer:
                 },
             )
 
-        # A directory URL must end in "/" so its relative links (../, name/) resolve
-        # one level down instead of against the parent.
         if not request.path.endswith("/"):
-            # Same-origin redirect: force exactly one leading slash so the location
-            # can never be read as a protocol-relative URL (//host).
+            # Exactly one leading slash, so the location is never protocol-relative.
             location = "/" + request.path.lstrip("/") + "/"
             if request.query_string:
                 location += "?" + request.query_string
             raise web.HTTPMovedPermanently(location)
 
-        # Off the loop: one stat per entry is a syscall per file, and this
-        # handler shares its thread with the stream.
         try:
             items = await asyncio.to_thread(
                 _scan_directory, full_path, full_path != self.upload_dir)
         except PermissionError:
             return web.Response(status=403, text="Permission Denied")
 
-        # Directories first, then case-insensitive alphabetical.
         items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
 
         rows = ""
@@ -2135,6 +2069,14 @@ class CentralizedStreamServer:
         """Build the aiohttp application: auth middleware, API routes, service
         routes, and the static frontend.
 
+        Every control-plane endpoint lives under `/api` so a fronting proxy
+        routes them, present and future, with one rule. The file-browser API
+        serves the file-manager directory independently of the static content,
+        so a deployment whose frontend is served elsewhere (nginx, `web_root`
+        unset) still gets downloads instead of a 404; and the Prometheus
+        registry is process-global, so one mode-agnostic endpoint serves both
+        streaming modes.
+
         Returns:
             The configured application (also stored on ``self.app``).
         """
@@ -2148,21 +2090,13 @@ class CentralizedStreamServer:
         if api_prefix:
             logger.info(f"Prepending api prefix: {api_prefix!r} to router handlers")
 
-        # All control-plane endpoints live under /api so a fronting proxy can
-        # route them — present and future — with a single rule.
         routes = [
             web.get(f"{api_prefix}/api/status", self.handle_status),
             web.get(f"{api_prefix}/api/health", self.handle_health),
             web.post(f"{api_prefix}/api/switch", self.handle_switch),
             web.post(f"{api_prefix}/api/upload", self.handle_upload),
-            # The file-browser/download API serves the file-manager directory and
-            # has no dependency on the static web content; registered here so a
-            # deployment whose frontend is served elsewhere (nginx, web_root
-            # unset) still gets downloads instead of a 404.
             web.get(f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler),
         ]
-        # The Prometheus registry is process-global, so one mode-agnostic
-        # endpoint serves both streaming modes.
         if self.settings.enable_metrics_http[0]:
             routes.append(web.get(f"{api_prefix}/api/metrics", self.handle_metrics))
         self.app.add_routes(routes)

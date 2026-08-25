@@ -82,7 +82,6 @@ def noted_lines(text: str) -> list:
 
 
 async def main() -> None:
-    # --- nested session: the hint is noted, the seat is left alone ---
     h = make_handler(separate=True)
     await h.apply_client_keyboard_layout("de")
     await h.apply_client_keyboard_layout("de")
@@ -94,7 +93,6 @@ async def main() -> None:
           str(noted_lines("session compositor owns the keymap")))
     check("nested session: seat records no client layout", h._wl_seat_client_layout is None)
 
-    # --- the same hint applies once the apps are back on the capture compositor ---
     h.topology["separate"] = False
     await h.apply_client_keyboard_layout("de")
     check("direct topology later: the noted hint is applied",
@@ -102,7 +100,6 @@ async def main() -> None:
     check("seat records the client layout", h._wl_seat_client_layout == "de")
     check("keymap owner marked stale for the new base", h._wl_keymap_stale is True)
 
-    # --- direct topology: once per value, variant carried ---
     h = make_handler()
     await h.apply_client_keyboard_layout("ch(fr)")
     await h.apply_client_keyboard_layout("ch(fr)")
@@ -112,19 +109,16 @@ async def main() -> None:
     check("direct: a new value is pushed", h.wayland_input.layouts[-1][0] == "us"
           and len(h.wayland_input.layouts) == 2)
 
-    # --- X11: informational ---
     hx = make_handler(is_wayland=False)
     await hx.apply_client_keyboard_layout("de")
     check("x11: hint noted, nothing pushed", hx.wayland_input.layouts == []
           and hx._client_kb_layout == "de")
 
-    # --- malformed hints never reach the seat ---
     h = make_handler()
     await h.apply_client_keyboard_layout("de;rm -rf")
     check("malformed hint rejected", h.wayland_input.layouts == []
           and h._client_kb_layout is None)
 
-    # --- a session compositor turning up after a client layout took the seat ---
     # The whole XKB_DEFAULT_* set is scrubbed, not just the layout: a model or
     # rules exported by the developer's shell would otherwise reach the seat.
     saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("XKB_DEFAULT_")}
@@ -159,7 +153,6 @@ async def main() -> None:
         check("nothing to restore when the seat never took a client layout",
               h.wayland_input.layouts == [])
 
-        # Session start with no env layout leaves the seat default alone.
         h = make_handler()
         await h._push_wayland_base_layout()
         check("session start without an env layout pushes nothing",

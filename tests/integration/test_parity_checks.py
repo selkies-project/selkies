@@ -60,7 +60,7 @@ def main() -> "H.Results":
             await ws.send("SETTINGS," + json.dumps(_settings_payload(framerate=60, video_bitrate=6000)))
             await asyncio.sleep(3.0)
 
-            # D3: the 's,120' scaling opcode must be handled, not warned away.
+            # The 's,120' scaling opcode must be handled, not warned away.
             st = loglen()
             await ws.send("s,120")
             await asyncio.sleep(1.5)
@@ -73,14 +73,11 @@ def main() -> "H.Results":
             await ws.send("START_VIDEO")
             await asyncio.sleep(1.0)
 
-            # D4: SETTINGS framerate=33 should seed app.framerate so a future
-            # display starts at 33fps, not the CLI default 60.
+            # SETTINGS framerate=33 seeds app.framerate, so a display registering
+            # afterwards starts at 33fps rather than the CLI default 60.
             st = loglen()
             await ws.send("SETTINGS," + json.dumps(_settings_payload(framerate=33, video_bitrate=2200)))
             await asyncio.sleep(2.0)
-            # A new display (display2) registering afterwards should start its
-            # capture at 33fps (the per-display framerate is seeded from the
-            # client-declared value, independent of the CLI 60 default).
             st = loglen()
             await ws.send("SETTINGS," + json.dumps(_settings_payload(framerate=33, video_bitrate=2200, displayId="display2")))
             await asyncio.sleep(2.0)

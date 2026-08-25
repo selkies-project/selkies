@@ -452,10 +452,9 @@ def run_dashboards() -> "H.Results":
                     res.check(f"{dashboard}: the listing's links keep the token",
                               hrefs and all(f"token={CTRL_TOKEN}" in h for h in hrefs), hrefs)
                 if dashboard == "classic":
-                    # The mode switch is the master token's: the dashboard's
-                    # first POST is refused with the Bearer challenge, which
-                    # must not reload the page, so its prompt for the master
-                    # token comes up and the retry switches the transport.
+                    # The mode switch is the master token's: the dashboard's first POST
+                    # meets the Bearer challenge, which must not reload the page, so its
+                    # master-token prompt comes up and the retry switches the transport.
                     page.locator('.files-modal-close').first.click()
                     time.sleep(0.5)
                     page.locator('.sidebar-section-header:has-text("Video")').first.click()

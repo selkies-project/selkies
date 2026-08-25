@@ -60,6 +60,19 @@ class WebRTCSignalingClient:
 
     Uses aiohttp for WebSocket communication with the signaling server.
     Supports automatic reconnection on connection failures.
+
+    Attributes:
+        on_ice: Async callback `(ice, client_peer_id)` for a peer's ICE
+            candidate; assigned by the consumer.
+        on_sdp: Async callback `(sdp_type, sdp, client_peer_id)` for a
+            peer's SDP; assigned by the consumer.
+        on_disconnect: Async callback fired when the socket closes.
+        on_session_start: Async callback `(client_peer_id, client_type,
+            client_token, display_id, display_position)` for SESSION_START.
+        on_session_end: Async callback `(client_peer_id, client_type)` for
+            SESSION_END.
+        on_error: Async callback receiving a `WebRTCSignalingError` for a
+            server ERROR line.
     """
 
     def __init__(
@@ -75,10 +88,6 @@ class WebRTCSignalingClient:
 
         Args:
             server: WebSocket server URL (e.g., 'ws://localhost:8080/ws').
-            enable_https: Whether to use WSS (secure WebSocket).
-            enable_basic_auth: Whether to use HTTP Basic Authentication.
-            basic_auth_user: Username for basic auth.
-            basic_auth_password: Password for basic auth.
             server_token: Master token proving this peer may claim the server
                 role; required by the signaling server in secure mode.
         """
@@ -95,7 +104,6 @@ class WebRTCSignalingClient:
         self._stop_event = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
 
-        # Callbacks - to be overridden by the consumer
         self.on_ice: Callable[[Dict[str, Any], str], Awaitable[None]] = (
             lambda ice, client_peer_id: logger.warning("unhandled ice event")
         )
@@ -150,9 +158,8 @@ class WebRTCSignalingClient:
 
         headers: Optional[Dict[str, str]] = None
         if self.enable_basic_auth and self.basic_auth_user and self.basic_auth_password:
-            # UTF-8 credentials, matching the server's Basic-auth comparison and
-            # its advertised charset: an ASCII encode would raise here, outside
-            # the retry loop, and kill the connect task for a non-ASCII password.
+            # UTF-8 (the server's advertised charset): an ASCII encode of a
+            # non-ASCII password would raise here, outside the retry loop.
             auth64 = base64.b64encode(
                 f"{self.basic_auth_user}:{self.basic_auth_password}".encode("utf-8")
             ).decode("ascii")
@@ -205,11 +212,6 @@ class WebRTCSignalingClient:
     ) -> None:
         """Send ICE candidate to peer via signaling server.
 
-        Args:
-            mlineindex: The media line index for the ICE candidate.
-            candidate: The ICE candidate string.
-            client_peer_id: The peer ID to send the candidate to.
-
         Raises:
             WebRTCSignalingError: If the WebSocket connection is not open.
         """
@@ -221,11 +223,6 @@ class WebRTCSignalingClient:
 
     async def send_sdp(self, sdp_type: str, sdp: str, client_peer_id: str) -> None:
         """Send SDP to peer via signaling server.
-
-        Args:
-            sdp_type: SDP type ('offer' or 'answer').
-            sdp: The SDP content.
-            client_peer_id: The peer ID to send the SDP to.
 
         Raises:
             WebRTCSignalingError: If the WebSocket connection is not open.
@@ -255,15 +252,8 @@ class WebRTCSignalingClient:
         logger.info("Signaling client stopped")
 
     async def _listen(self) -> None:
-        """Listen for and process incoming signaling messages.
-
-        Message types handled:
-            HELLO: Server acknowledgment of registration.
-            SESSION_START: New session started with a client.
-            SESSION_END: Session with a client ended.
-            ERROR: Error messages from server.
-            JSON SDP/ICE: WebRTC negotiation messages.
-        """
+        """Pump text frames into `_process_message` until the socket closes
+        or errors, then fire `on_disconnect`."""
         if self._ws is None:
             raise WebRTCSignalingError("WebSocket connection not available")
 
@@ -289,10 +279,17 @@ class WebRTCSignalingClient:
             await self.on_disconnect()
 
     async def _process_message(self, message: str) -> None:
-        """Process a single signaling message.
+        """Dispatch one signaling line to its callback.
 
-        Args:
-            message: The raw message string from the WebSocket.
+        Lines: `HELLO` (registration ack); `SESSION_START <peer_id>
+        <client_type> [<display_id> <display_position> [<client_token>]]`,
+        where the 3-token form maps to the primary display and the sixth
+        token is the secure-mode collaboration token; `SESSION_END <peer_id>
+        <client_type>`; `ERROR ...`; otherwise `<peer_id> <json>` carrying an
+        `sdp` or `ice` object. A client's text is relayed here verbatim, so a
+        malformed, non-object or unrecognized payload — and a callback that
+        raises on a stale SDP/ICE — is logged and dropped rather than treated
+        as a transport failure, which would tear down every peer's session.
         """
         if message == "HELLO":
             logger.info("WebSocket connection established with signaling server")
@@ -300,10 +297,6 @@ class WebRTCSignalingClient:
         elif message.startswith("SESSION_START"):
             toks = message.strip().split(" ")
             if len(toks) in (3, 5, 6):
-                # peer_id is of format client-<UUID>. The full form carries the
-                # display this client drives and its layout position; an optional
-                # final field is the secure-mode collaboration token. The 3-token
-                # form (no display fields) maps to the primary display.
                 client_peer_id = toks[1]
                 client_type = toks[2]
                 display_id = toks[3] if len(toks) >= 5 else "primary"
@@ -329,7 +322,6 @@ class WebRTCSignalingClient:
             )
 
         else:
-            # Attempt to parse JSON SDP or ICE message
             client_peer_id: Optional[str] = None
             data: Optional[Dict[str, Any]] = None
 
@@ -337,17 +329,11 @@ class WebRTCSignalingClient:
                 client_peer_id, message = message.split(" ", maxsplit=1)
                 data = json.loads(message)
             except ValueError:
-                # Neither a peer-prefixed payload nor valid JSON (JSONDecodeError
-                # subclasses ValueError). Any client's text is relayed here
-                # verbatim, so a malformed one is ignored like the non-object and
-                # unrecognized cases below rather than reported as a transport
-                # failure, which would tear down every peer's session.
+                # Covers both a missing peer prefix and JSONDecodeError.
                 logger.warning(f"ignoring unparsable signaling message: {message}")
                 return
 
             if not isinstance(data, dict):
-                # Malformed message, not a transport failure: ignore it rather than
-                # tear down the signaling connection shared by all peers.
                 logger.warning(
                     f"ignoring non-object JSON signaling message from "
                     f"{client_peer_id}: {message}"
@@ -368,16 +354,12 @@ class WebRTCSignalingClient:
                     logger.debug(f"ICE:\n{data.get('ice')}")
                     await self.on_ice(data["ice"], client_peer_id)
                 else:
-                    # Unrecognized message, not a transport failure: ignore it rather
-                    # than tear down the signaling connection shared by all peers.
                     logger.warning(
                         f"ignoring unrecognized JSON signaling message from "
                         f"{client_peer_id}: {json.dumps(data)}"
                     )
                     return
             except Exception as e:
-                # A malformed/stale SDP or ICE must not tear down the shared
-                # signaling connection for all peers.
                 logger.error(
                     f"Error dispatching signaling message from {client_peer_id}: {e}",
                     exc_info=True,

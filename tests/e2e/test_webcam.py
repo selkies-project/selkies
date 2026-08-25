@@ -2,7 +2,8 @@
 """The webcam uplink end to end: a browser's camera, switched on through the
 dashboard's pipeline control, must come out of the virtual V4L2 device on the
 server — over the WebSocket (WebCodecs frames) and over WebRTC (the camera
-track on the reserved sendonly transceiver) — and switch off again. Chromium
+track on the reserved sendonly transceiver) — and switch off again.
+
 Both engines capture the same camera: pixelflux's ``VirtualCamera`` published
 through the interposer, so the device's pixels are checked rather than just
 their presence and neither engine is measured on content the other never sees.
@@ -292,8 +293,14 @@ NO_WEBCODECS_JS = """
 
 
 def launch(p, engine: str, cam_sock: str, mode: str, init_js: Optional[str] = None):
-    # Both engines capture the published camera through the interposer rather
-    # than an engine-specific fake, so what they are asked to encode is the same.
+    """Open the dashboard in `engine` with the published camera as its only device.
+
+    Both engines capture that camera through the interposer rather than an
+    engine-specific fake, so what they are asked to encode is the same.
+
+    Returns:
+        `(browser, page, errors)`, where `errors` collects page errors as they occur.
+    """
     env = dict(os.environ, LD_PRELOAD=INTERPOSER, SELKIES_WEBCAM_SOCKET_PATH=cam_sock)
     if engine == "firefox":
         prefs = {
@@ -309,8 +316,7 @@ def launch(p, engine: str, cam_sock: str, mode: str, init_js: Optional[str] = No
             **TB.openh264_prefs(),
         }
         if TB.openh264_version():
-            # The side-loaded OpenH264 lives in the persistent e2e profile; with it
-            # Firefox plays the session's H.264 and the WebRTC uplink can be driven.
+            # The side-loaded OpenH264 lives in the persistent e2e profile.
             ctx = p.firefox.launch_persistent_context(user_data_dir=TB.FF_E2E_PROFILE, headless=True,
                                                       viewport={"width": 1280, "height": 720},
                                                       firefox_user_prefs=prefs, env=env)
@@ -399,12 +405,17 @@ def nowebcodecs_block() -> "H.Results":
 
 
 def transport_block(mode: str) -> "H.Results":
+    """The camera comes out of /dev/video0 over `mode` from both engines and stops
+    with the uplink.
+
+    The device is pinned to I420 whatever the client sends: by default its format
+    follows the uplink, which would make the picture readable only on some rungs,
+    and which rung an engine takes is not this block's to fix -- the reformat
+    selector exercises that default. The process-wide camera outlives whichever
+    uplink brought it up and is decoded into the same device on either transport.
+    """
     res = H.Results(f"webcam-{mode}")
     cam = PublishedCamera(flat_frames()).start()
-    # I420 whatever the client sends: the device's format follows the uplink by
-    # default, which would make the picture readable only on some rungs, and
-    # which rung an engine takes is not this suite's to fix. The reformat
-    # selector is where that default is exercised.
     H.server_start(mode=mode, wayland=False,
                    extra_env={"SELKIES_WEBCAM_ENABLED": "false",
                               "SELKIES_WEBCAM_PIXEL_FORMAT": "I420"})
@@ -422,27 +433,17 @@ def transport_block(mode: str) -> "H.Results":
                 res.check(f"{engine}: stream up", bool(video), str(video)[:100])
                 toggle(page, True)
                 res.check(f"{engine}: webcam reports active", wait_status(page, True), str(page.evaluate("window.__camStatus")))
-                # The server brings the camera up on the first frame; give it a moment
-                # to appear before the measured capture.
                 r = wait_for_picture([((640, 360), GREEN), ((20, 20), BLACK)])
                 res.check(f"{engine}: 30 frames reach /dev/video0", r.get("rc") == 0 and r.get("frames") == "30",
                           f"rc={r.get('rc')} frames={r.get('frames')} err={r.get('error', '')}")
-                # The process-wide camera outlives whichever uplink brought it up and
-                # is decoded into the same device on either transport, whatever rung
-                # the client's encoder ladder settled on.
                 res.check(f"{engine}: device is the configured 1280x720 I420",
                           (r.get("format"), r.get("width"), r.get("height")) == ("YU12", "1280", "720"),
                           f"{r.get('format')} {r.get('width')}x{r.get('height')}")
-                # Deliberately not a check on which codec was chosen: that follows
-                # what the engine measured it could sustain and moves with the
-                # browser. What has to hold either way is that the device carries
-                # the camera.
                 res.check(f"{engine}: frames flow at the camera's rate",
                           float(r.get("fps", "0")) >= CAMERA_FPS * RATE_FLOOR,
                           f"{r.get('fps')} of {CAMERA_FPS}")
-                # Both engines capture the same published camera, so both are held to
-                # its pixels: the 4:3 picture sits pillarboxed in the 16:9 device,
-                # centre green and the bar at x=20 black.
+                # The 4:3 picture sits pillarboxed in the 16:9 device: centre green,
+                # the bar at x=20 black.
                 res.check(f"{engine}: centre is the camera's green",
                           near(r["samples"].get((640, 360)), GREEN), str(r["samples"]))
                 res.check(f"{engine}: pillarbox is black",
@@ -545,8 +546,6 @@ def reformat_block() -> "H.Results":
             res.check("a video uplink brings the device up raw", wait_format("YU12"), device_format())
             browser.close()
 
-        # An interposer client that outlives the switch: the device it opened must not change
-        # under it, whatever the next uplink would prefer.
         reader = start_reader()
         with sync_playwright() as p:
             browser, page, _errors = launch(p, "chromium", cam.sock_dir, "websockets", init_js=NO_WEBCODECS_JS)

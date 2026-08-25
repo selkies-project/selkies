@@ -14,6 +14,13 @@ agree on about settings: the client-facing settings payload
 client-proposed values (`sanitize_client_setting`), and the WebSocket message
 size ceiling with its bounded gzip inflater.
 
+The ceiling (`WS_MAX_MESSAGE_BYTES`) is one value for both directions:
+enforced on receive (aiohttp `max_msg_size`), advertised to clients so
+multipart chunk sizing (clipboard, uploads) fills the frame on either end, and
+the bound on inflating a client 0x05 gzip frame. It is clamped under
+`WS_MESSAGE_SIZE_HARD_CAP`, above which the server also refuses to emit any
+single frame.
+
 Override value syntax, by setting type:
 
 - List/enum (e.g. `SELKIES_ENCODER="jpeg,h264enc"`): first item is the
@@ -38,14 +45,8 @@ import re
 import zlib
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-# One WebSocket message ceiling for BOTH directions: enforced on receive
-# (aiohttp max_msg_size) and advertised to clients so multipart chunk sizing
-# (clipboard, uploads) fills the frame on either end.
-# WS_MESSAGE_SIZE_HARD_CAP is the absolute per-message bound (32 MiB): proxies
-# and WebSocket stacks in the field degrade or reject frames beyond it, so the
-# advertised/enforced value is clamped under it and the server refuses to emit
-# any single frame above it (see _broadcast_to_clients) or to inflate a client
-# 0x05 gzip frame past WS_MAX_MESSAGE_BYTES.
+# 32 MiB: proxies and WebSocket stacks in the field degrade or reject frames
+# beyond it.
 WS_MESSAGE_SIZE_HARD_CAP = 32 * 1024 * 1024
 WS_MAX_MESSAGE_BYTES = min(8 * 1024 * 1024, WS_MESSAGE_SIZE_HARD_CAP)
 
@@ -81,8 +82,6 @@ def inflate_gz_bounded(payload: bytes) -> str:
     return inflated.decode("utf-8")
 
 SETTING_DEFINITIONS: List[Dict[str, Any]] = [
-    # -------------------- Common Settings for both modes --------------------
-    # Core Feature Toggles
     {
         "name": "addr",
         "type": "str",
@@ -198,9 +197,8 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "rate_control_mode",
         "type": "enum",
         "default": "crf",
-        # CBR listed first purely for dropdown order; the default stays "crf" and
-        # allowed[0] is never used as a fallback for this setting (clients only
-        # ever send crf/cbr, both valid), so ordering is display-only here.
+        # "cbr" first is dropdown order only: the default stays "crf" and
+        # allowed[0] is never a fallback here (clients only send crf/cbr).
         "meta": {"allowed": ["cbr", "crf"]},
         "help": "Rate control mode for the H.264 encoders (crf = constant quality/QP, cbr = constant bitrate). Honored for every H.264 encoder when enable_rate_control is true (the default).",
     },
@@ -234,7 +232,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "max": 51,
         "help": "CBR-mode maximum H.264 QP (0 = encoder default). Lowering it keeps screen text legible under motion at the cost of overshooting the bitrate target on hard content (measured at 720p60 scrolling text: 35 lifts x264 by ~19 dB at ~2.5x the target).",
     },
-    # Audio Settings
     {
         "name": "audio_frame_duration_ms",
         "type": "enum",
@@ -246,9 +243,8 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "audio_bitrate",
         "type": "enum",
         "default": "128000",
-        # Curated dropdown stops for the web UI; 510000 is libopus's hard maximum
-        # (not 512k). value_range lets the SERVER (env/CLI) accept any Opus bitrate
-        # in 6000-510000 bps verbatim, while the UI keeps offering only the stops.
+        # 510000 is libopus's hard maximum (not 512k); value_range lets env/CLI
+        # accept any Opus bitrate verbatim while the UI offers only these stops.
         "meta": {
             "allowed": ["32000", "48000", "64000", "96000", "128000", "192000", "256000", "320000", "384000", "510000"],
             "value_range": [6000, 510000],
@@ -269,7 +265,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "max": 4,
         "help": "Number of prior Opus frames carried as RED redundancy when audio_redundancy is enabled (0-4; higher survives longer loss bursts at proportionally more bandwidth).",
     },
-    # Display & Resolution Settings
     {
         "name": "is_manual_resolution_mode",
         "type": "bool",
@@ -280,8 +275,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "manual_width",
         "type": "int",
         "default": 0,
-        # Ceiling is the common GPU/X framebuffer limit, not 8K, so >8K manual
-        # resolutions still drive xrandr --fb without being silently clamped.
+        # 16384 is the GPU/X framebuffer limit, not 8K, so >8K is not clamped.
         "meta": {"min": 0, "max": 16384},
         "help": "Lock width to a fixed value. Setting this forces manual resolution mode.",
     },
@@ -289,8 +283,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "manual_height",
         "type": "int",
         "default": 0,
-        # Ceiling is the common GPU/X framebuffer limit, not 8K, so >8K manual
-        # resolutions still drive xrandr --fb without being silently clamped.
+        # 16384 is the GPU/X framebuffer limit, not 8K, so >8K is not clamped.
         "meta": {"min": 0, "max": 16384},
         "help": "Lock height to a fixed value. Setting this forces manual resolution mode.",
     },
@@ -309,7 +302,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "default": False,
         "help": "Forces the display resolution to be a multiple of 16 pixels.",
     },
-    # Input & Client Behavior Settings
     {
         "name": "enable_binary_clipboard",
         "type": "bool",
@@ -328,7 +320,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "default": False,
         "help": "HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched.",
     },
-    # UI Visibility Settings
     {
         "name": "ui_title",
         "type": "str",
@@ -449,7 +440,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "default": True,
         "help": "Show the soft buttons section in the sidebar.",
     },
-    # Shared Modes
     {
         "name": "enable_sharing",
         "type": "bool",
@@ -557,8 +547,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "basic_auth_password",
         "type": "str",
-        # No built-in credential: the server refuses to serve a login until an
-        # operator names a password, so there is nothing here to ship or leak.
         "default": "",
         "env_var": ["PASSWORD", "PASSWD"],
         "help": "Password used when basic authentication is set; resolves from SELKIES_BASIC_AUTH_PASSWORD, then PASSWORD, then PASSWD, so an image that already names a container account password does not have to repeat it. There is no default: the server will not start with basic authentication enabled until one of these is set.",
@@ -589,8 +577,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "default": "",
         "help": "Shell command run after the last client has disconnected ('' = off), including on server shutdown while clients are connected.",
     },
-    # -------------------- WEBSOCKETS Settings --------------------
-    # Video & Encoder
     {
         "name": "encoder",
         "type": "enum",
@@ -656,7 +642,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "default": True,
         "help": "Enable support for a second monitor/display.",
     },
-    # Server Startup & Operational Settings
     {
         "name": "encode_dri",
         "type": "str",
@@ -738,14 +723,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "min": 0,
         "help": "Index for the Wayland command socket (e.g. 0 for wayland-0).",
     },
-    # -------------------- WEBRTC Settings --------------------
     {
         "name": "rtc_config_json",
         "type": "str",
         "default": "/tmp/rtc.json",
         "help": "JSON file with WebRTC configuration to use, checked periodically, overriding all other STUN/TURN settings",
     },
-    # TURN/STUN
     {
         "name": "turn_rest_uri",
         "type": "str",
@@ -1008,8 +991,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     },
 ]
 
-# Secret/credential settings, flagged 'sensitive' so consumers exclude them from
-# client broadcasts. Add new secrets here.
+# Secrets, flagged sensitive so consumers keep them out of client broadcasts.
 SENSITIVE_SETTING_NAMES = frozenset({
     "master_token",
     "https_key",
@@ -1052,15 +1034,12 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return text.split("|")[0].strip().lower() in ("true", "1")
 
 
-# Encoders the WebRTC pipeline can produce (pixelflux emits H.264 only; the
-# jpeg/striped framing is a websockets-stream concept). The single `encoder`
-# knob is filtered to these in webrtc mode rather than carrying a second knob.
+# Encoders the WebRTC pipeline can produce: pixelflux emits H.264 only, and
+# the jpeg/striped framing is a websockets-stream concept.
 WEBRTC_ENCODER_CHOICES = ("h264enc",)
 
-# Encoder names accepted for their current spelling: x264enc is the historical
-# name base images still ship in SELKIES_ENCODER, and openh264enc was the
-# separate OpenH264 choice before software H.264 became a property of the
-# pixelflux build (software_h264_encoder). Both mean full-frame H.264.
+# Spellings base images still ship in SELKIES_ENCODER; both mean full-frame
+# H.264 (the software encoder is the pixelflux build's, software_h264_encoder).
 ENCODER_ALIASES = {"x264enc": "h264enc", "openh264enc": "h264enc"}
 _RETIRED_ENCODER_WARNED = set()
 
@@ -1118,11 +1097,30 @@ class AppSettings:
     `(min, max)` tuple (with the initial value kept in the definition's
     `meta["default_value"]`), and other types to their parsed scalar/list
     value. `was_provided` reports whether an operator set a value explicitly,
-    which drives conditional defaults and operator locks downstream.
+    which drives conditional defaults and operator locks downstream. The
+    class-level annotations type the settings static tools access by
+    attribute; every other setting is attached dynamically by
+    `_process_and_set_attributes`.
+
+    Attributes:
+        ENCODER_RC_DEFAULTS: Per-encoder websockets rate-control default;
+            resolved by `resolve_rate_control_default`.
+        _setting_definitions: The definition list, mutated in place when an
+            override narrows a menu.
+        _overridden: Setting name to whether CLI/env gave it explicitly; what
+            `was_provided` reads and conditional defaults key off.
+        _operator_encoder_allowed: The `encoder` menu after operator narrowing,
+            snapshotted by the first `apply_webrtc_encoder_filter`.
+        _operator_encoder_value: The operator's resolved `encoder` value,
+            snapshotted alongside the menu.
+        _pre_webrtc_encoder: A websockets-only encoder pick clamped away for
+            webrtc, restored on the switch back; None when nothing is stashed.
+        _webrtc_encoder_fallback: The encoder the clamp substituted; the stash
+            applies only while this is still in force.
+        _encoder_client_set: True once a client picked an encoder during the
+            webrtc leg, which outranks the stash.
     """
 
-    # Typing for settings that static tools access as attributes (everything
-    # else is attached dynamically at runtime by _process_and_set_attributes).
     debug: tuple[bool, bool]
     gamepad_enabled: tuple[bool, bool]
     command_enabled: tuple[bool, bool]
@@ -1153,16 +1151,20 @@ class AppSettings:
     file_transfer_cc: tuple[bool, bool]
 
     def __init__(self, setting: List[Dict[str, Any]]) -> None:
+        """Parse the command line and environment against `setting`.
+
+        Unrecognized arguments are tolerated so a wrapper can pass its own
+        through, which also means a misspelled flag is accepted and ignored
+        rather than rejected; warning about each by name is what makes that
+        visible, since a setting that never took its value looks the same as
+        one left at its default.
+        """
         parser = argparse.ArgumentParser(
             description="Selkies WebSocket Streaming Server"
         )
         self._setting_definitions = setting
         self._add_arguments(parser)
         args, unknown = parser.parse_known_args()
-        # Unrecognized arguments are tolerated so a wrapper can pass its own through,
-        # which also means a misspelled flag is accepted and ignored rather than
-        # rejected. Naming them is what makes that visible, since a setting that never
-        # took its value looks the same as one left at its default.
         for token in unknown:
             if token.startswith("-"):
                 logging.warning(
@@ -1187,14 +1189,13 @@ class AppSettings:
 
         Every flag parses as a raw string (type conversion happens later in
         `_process_and_set_attributes`) so CLI and environment values flow
-        through the identical parsing path.
+        through the identical parsing path. Both `--my-setting` and
+        `--my_setting` are registered: dashes are the documented spelling, but
+        the setting's own name is what every environment variable uses, so
+        the underscore form is accepted rather than dropped as unknown.
         """
         for setting in self._setting_definitions:
             name = setting["name"]
-            # Dashes are the documented spelling, but the setting's own name is the
-            # obvious thing to type and every environment variable uses it, so the
-            # underscore spelling is accepted too rather than being parsed as an
-            # unknown argument and dropped.
             cli_flags = [f"--{name.replace('_', '-')}"]
             if "_" in name:
                 cli_flags.append(f"--{name}")
@@ -1216,8 +1217,23 @@ class AppSettings:
         an instance attribute.
 
         Also records which settings were explicitly overridden (CLI or env) in
-        `self._overridden`, and derives manual-resolution mode from positive
-        manual width/height overrides.
+        `self._overridden`. An override that resolves to the built-in value
+        (the empty string, or an entirely-invalid enum/list) reads as
+        not-provided too: an operator intent the server discarded must not go
+        on suppressing client changes or the client's own conditional default.
+
+        Enum and list items match `allowed` case-insensitively and are carried
+        forward in its spelling, so `SELKIES_ENCODER=JPEG` selects the encoder
+        every consumer compares against. A numeric enum declaring
+        `meta.value_range` takes a single in-range value verbatim as the server
+        value while `allowed` keeps the curated stops for the web UI: the
+        server accepts more than the UI offers.
+
+        Manual-resolution mode follows a positive manual width or height
+        override, or an explicit `is_manual_resolution_mode`: 0 is both the
+        built-in default and the no-manual-width sentinel, so a templated
+        launcher emitting `--manual-width 0` for an unset field must not lock
+        the display to 1024x768.
         """
         processed = {}
         overrides = {}
@@ -1251,10 +1267,6 @@ class AppSettings:
                     )
                 )
             )
-            # An override set to the empty string means "use the built-in
-            # default": it lets images neutralize envs baked into a base layer
-            # (ENV SELKIES_FOO=) without guessing each default here. list-type
-            # settings keep their explicit ""/none = disable semantics.
             if (
                 is_override
                 and stype != "list"
@@ -1276,58 +1288,35 @@ class AppSettings:
                         master_list = setting.get("meta", {}).get("allowed", [])
                         raw_value_str = str(raw_value)
                         if stype == "list" and raw_value_str.strip().lower() in ("", "none"):
-                            # Disable list-type settings if set to "" or "none"
                             setting["meta"]["allowed"] = []
                             processed_value = []
                         else:
                             user_items = [item.strip() for item in raw_value_str.split(',') if item.strip()]
                             if name == "encoder":
                                 user_items = [canonical_encoder(item) for item in user_items]
-                            # Matched case-insensitively and carried forward in the
-                            # spelling `allowed` uses, so an operator's SELKIES_ENCODER=JPEG
-                            # selects the encoder every consumer compares against rather
-                            # than being dropped as unknown.
                             canonical = {item.lower(): item for item in master_list}
                             user_items = [canonical.get(item.lower(), item) for item in user_items]
                             valid_items = [item for item in user_items if item in master_list]
-                            # A numeric enum may declare meta.value_range: an admin-set
-                            # single value inside that span is taken verbatim as the
-                            # server value while the curated `allowed` stops are kept for
-                            # the web UI (the server accepts more than the UI offers).
                             vr = setting.get("meta", {}).get("value_range")
                             in_range_value = None
-                            # Gate on value_range presence, NOT on `not valid_items`:
-                            # a single in-range value that happens to equal a curated
-                            # stop must still keep the full menu (the whole point of
-                            # value_range is that the server accepts more than the UI
-                            # shows).
+                            # Gated on value_range, not on `not valid_items`: an in-range
+                            # value equal to a curated stop must still keep the full menu.
                             if stype == "enum" and vr and len(user_items) == 1:
                                 try:
                                     n = float(user_items[0])
                                     if vr[0] <= n <= vr[1]:
-                                        # Normalize to canonical integer form so a
-                                        # decimal-formatted override ('128000.0')
-                                        # can't crash downstream int() consumers.
+                                        # '128000.0' must not reach int() consumers.
                                         in_range_value = (
                                             str(int(n)) if n == int(n) else user_items[0]
                                         )
                                 except ValueError:
                                     pass
                             if in_range_value is not None:
-                                # `allowed` stays the curated stops.
                                 processed_value = in_range_value
                             elif valid_items:
                                 setting["meta"]["allowed"] = valid_items
                                 processed_value = valid_items[0] if stype == "enum" else valid_items
                             else:
-                                # Entirely-invalid override (e.g. a stale env
-                                # baked into a container image): no restriction —
-                                # full allowed list, built-in default. The value
-                                # is the built-in one, so the setting must read
-                                # as not-provided too: an operator intent the
-                                # server just discarded cannot go on suppressing
-                                # client changes or the client's own conditional
-                                # default.
                                 is_override = False
                                 overrides[name] = False
                                 if user_items:
@@ -1352,8 +1341,7 @@ class AppSettings:
                             ]
                 elif stype in ("int", "float"):
                     processed_value = int(raw_value) if stype == "int" else float(raw_value)
-                    # Clamp to bounds from top-level ("min"/"max") or "meta" (top-level
-                    # wins); only when declared, so -1/negative sentinels are preserved.
+                    # Only declared bounds clamp, so -1/negative sentinels survive.
                     meta = setting.get("meta") or {}
                     lo = setting.get("min", meta.get("min"))
                     hi = setting.get("max", meta.get("max"))
@@ -1369,10 +1357,6 @@ class AppSettings:
                 elif stype == "str":
                     processed_value = str(raw_value)
                 elif stype == "range":
-                    # "min-max" sets the allowed span; a bare value sets the
-                    # initial value on the built-in span, widening it when it
-                    # falls outside (fixed-value configs must stay valid).
-                    # "60,8-240" sets both; a degenerate span ("60-60") locks.
                     tokens = [
                         token.strip()
                         for token in str(raw_value).split(",")
@@ -1406,7 +1390,6 @@ class AppSettings:
                         if meta is not None:
                             meta["default_value"] = initial
                     else:
-                        # Normalize an inverted span ("100-1").
                         lo, hi = sorted(span)
                         processed_value = (lo, hi)
                         if meta is not None and initial is not None:
@@ -1433,11 +1416,6 @@ class AppSettings:
                     )
                     processed_value = (min_val, max_val)
             processed[name] = processed_value
-        # A manual dimension activates manual mode only when it is a POSITIVE value.
-        # 0 is both the built-in default and the "no manual width" sentinel, so a
-        # templated launcher emitting `--manual-width 0` for an unset field must not
-        # silently lock the display to 1024x768. (An explicit is_manual_resolution_mode
-        # override still forces manual mode via manual_mode_bool_is_set below.)
         width_overridden = overrides.get("manual_width", False) and processed.get("manual_width", 0) > 0
         height_overridden = overrides.get("manual_height", False) and processed.get("manual_height", 0) > 0
         manual_mode_bool_is_set = processed.get(
@@ -1459,8 +1437,6 @@ class AppSettings:
                 logging.info("Manual height not set or invalid, defaulting to 768.")
         for name, value in processed.items():
             setattr(self, name, value)
-        # Which settings were explicitly given (CLI/env), for default
-        # resolution that depends on other settings (e.g. rate control).
         self._overridden = overrides
 
     def was_provided(self, name: str) -> bool:
@@ -1471,15 +1447,6 @@ class AppSettings:
         """
         return bool(getattr(self, "_overridden", {}).get(name, False))
 
-    # Rate-control default per encoder for websockets streams: quality-driven
-    # (CRF), except that OpenH264 — the software H.264 encoder of a GPL-free
-    # pixelflux build — targets a bandwidth, so a session known to be on the
-    # software path defaults to CBR there (resolve_rate_control_default). WebRTC
-    # streams default to CBR regardless of encoder: a congestion-controlled
-    # transport needs the encoder holding a bandwidth target. An explicit
-    # rate_control_mode override wins; encoders not listed keep the built-in
-    # default. The dashboards derive the same default client-side
-    # (conditional-settings.js) from the published software_h264_encoder.
     ENCODER_RC_DEFAULTS = {
         "h264enc": "crf",
         "h264enc-striped": "crf",
@@ -1495,6 +1462,15 @@ class AppSettings:
 
     def resolve_rate_control_default(self) -> None:
         """Apply the transport's rate-control default for the current mode.
+
+        WebRTC streams default to CBR whatever the encoder: a
+        congestion-controlled transport needs the encoder holding a bandwidth
+        target. Websockets streams are quality-driven (`ENCODER_RC_DEFAULTS`),
+        except that OpenH264 — the software H.264 encoder of a GPL-free
+        pixelflux build — targets a bandwidth, so a session known to be on the
+        software path defaults to CBR; encoders not listed keep their value.
+        The dashboards derive the same default client-side
+        (conditional-settings.js) from the published `software_h264_encoder`.
 
         A no-op when the operator pinned rate_control_mode or disabled rate
         control. Called again on a live transport switch so an unpinned mode
@@ -1605,20 +1581,28 @@ class AppSettings:
 
     def _post_process_settings(self) -> None:
         """Normalize and cross-check settings whose meaning spans several
-        entries: transport mode spelling, the deployment subfolder, rate-control
-        resolution, the audio/microphone dependency, the clipboard policy
-        string, and the TURN REST username default."""
-        # Every route is built by concatenating this in front of a path that
-        # begins with a slash, so it is stored the one way that composes:
-        # empty, or a leading slash and no trailing one. "/" is the root, which
-        # is the empty prefix rather than a prefix of one slash.
+        entries.
+
+        The subfolder is stored the one way that composes — empty, or a
+        leading slash and no trailing one — because every route concatenates
+        it in front of a slash-led path; "/" is the root, which is the empty
+        prefix. The transport mode is lowercased before anything branches on
+        it: the service registry is keyed on this value, so a differently-cased
+        one would abort the server at startup rather than select the transport
+        it names. With rate control locked off the engine runs constant
+        quality on both transports, so the resolved mode and the menu
+        published to clients are CRF alone; an encoder-derived "cbr" would
+        leave the dashboards showing a bitrate slider the encoder ignores and
+        hiding the CRF slider in force. Microphone forwarding requires audio.
+        The clipboard policy is normalized to exactly one of its four values.
+        The TURN username (the REST service's x-auth-user and the HMAC
+        credential alike) defaults to a generic name so the credential stays
+        stable and non-empty (`<expiry>:selkies`) instead of a bare
+        `<expiry>:` or a volatile pod hostname.
+        """
         subfolder = str(self.subfolder).strip().strip("/")
         self.subfolder = ("/" + subfolder) if subfolder else ""
 
-        # One spelling of the transport for every consumer, normalized before
-        # anything branches on it. The service registry is keyed on this value,
-        # so a differently-cased one would otherwise abort the server at startup
-        # rather than selecting the transport it names.
         mode = str(self.mode).strip().lower()
         if mode not in ("websockets", "webrtc"):
             logging.warning("Invalid mode value %r; using 'websockets'.", self.mode)
@@ -1628,11 +1612,6 @@ class AppSettings:
         self.apply_webrtc_encoder_filter()
 
         if not self.enable_rate_control[0]:
-            # Rate control locked off means the engine runs constant quality on
-            # both transports, so the resolved mode and the menu published to
-            # clients are CRF alone: an encoder-derived "cbr" would leave the
-            # dashboards showing a bitrate slider the encoder ignores and hiding
-            # the CRF slider that is actually in force.
             if (
                 self._overridden.get("rate_control_mode")
                 and self.rate_control_mode != "crf"
@@ -1655,8 +1634,7 @@ class AppSettings:
                 rc_definition["meta"]["allowed"] = ["crf"]
         else:
             self.resolve_rate_control_default()
-        # The paint-over default keys off the resolved mode whether that mode
-        # came from the transport, the encoder, or an operator pin.
+        # Keys off the resolved mode whichever branch above produced it.
         self.resolve_paint_over_default()
 
         audio_enabled = self.audio_enabled[0]
@@ -1666,8 +1644,6 @@ class AppSettings:
             )
             self.microphone_enabled = (False, self.microphone_enabled[1])
 
-        # The single clipboard policy knob for both transports; normalize so
-        # every consumer sees exactly one of the four values.
         mode = str(self.enable_clipboard).split("|")[0].strip().lower()
         if mode not in ("true", "false", "in", "out"):
             logging.warning(
@@ -1676,21 +1652,16 @@ class AppSettings:
             mode = "true"
         self.enable_clipboard = mode
 
-        # Username embedded in the TURN credential (the REST service's x-auth-user and
-        # the HMAC credential alike). A generic default keeps it stable and non-empty
-        # ('<expiry>:selkies') instead of a bare '<expiry>:' or a volatile pod hostname.
         if not self.turn_rest_username:
             self.turn_rest_username = "selkies"
 
 settings = AppSettings(SETTING_DEFINITIONS)
 
-# Non-bool settings the server stops accepting client updates for once an
-# operator sets them explicitly. They are published as locked so a dashboard
-# renders them read-only instead of offering a control the server ignores.
+# Non-bool settings a client may not change once an operator set them;
+# published as locked so a dashboard renders them read-only.
 OPERATOR_LOCKED_WHEN_OVERRIDDEN = ("scaling_dpi",)
 
-# Encoders with no hardware path: selecting one implies software encoding
-# regardless of what the client asked for.
+# Encoders with no hardware path: selecting one implies software encoding.
 CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
 
 
@@ -1714,9 +1685,8 @@ def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) ->
     return bool(default) if requested is None else bool(requested)
 
 
-# Settings never broadcast to clients: server-local listener, filesystem and
-# lifecycle-hook settings. A browser has no use for them and they disclose
-# host layout.
+# Never broadcast to clients: listener, filesystem and lifecycle-hook settings
+# a browser has no use for and that disclose host layout.
 CLIENT_PAYLOAD_EXCLUDED = [
     'port', 'addr', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',
     'audio_device_name', 'watermark_path', 'recording_socket',
@@ -1758,9 +1728,18 @@ def _published_enum_allowed(setting_def: Dict[str, Any], value: Any) -> List[str
 
 
 def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
-    """Build the client-facing settings snapshot shared by both transports:
-    skips server-local/sensitive entries, carries locked/overridden flags plus
-    enum/range metadata, and derives the clipboard gate booleans."""
+    """Build the client-facing settings snapshot shared by both transports.
+
+    Skips server-local and sensitive entries and carries each setting's
+    locked/overridden flags plus enum/range metadata. `overridden` says the
+    value came from an explicit CLI/env choice rather than the built-in
+    default; the client uses it to decide whether a conditional default (HiDPI
+    off under a manual resolution, say) applies or defers to the operator.
+    Adds the clipboard gate booleans derived from the single
+    `enable_clipboard` policy and the pixelflux build's
+    `software_h264_encoder` ("x264" or "openh264"), which the dashboards'
+    rate-control default reads.
+    """
     out = {}
     for setting_def in SETTING_DEFINITIONS:
         name = setting_def['name']
@@ -1772,10 +1751,6 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
             payload_entry = {'value': bool_val, 'locked': is_locked}
         else:
             payload_entry = {'value': value}
-        # Whether this value came from an explicit CLI/env choice (vs the
-        # built-in default). The client uses it to decide if a conditional
-        # default (e.g. HiDPI-off when a manual resolution is set) should
-        # apply or defer to the operator's explicit setting.
         payload_entry['overridden'] = bool(settings._overridden.get(name, False))
         if name in OPERATOR_LOCKED_WHEN_OVERRIDDEN and payload_entry['overridden']:
             payload_entry['locked'] = True
@@ -1791,21 +1766,16 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
                     else setting_def['meta']['allowed']
                 )
         out[name] = payload_entry
-    # Booleans the client gates its clipboard UI/handlers on, derived from
-    # the single enable_clipboard policy string.
     clip = settings.enable_clipboard
     out['clipboard_enabled'] = {'value': clip != 'false'}
     out['clipboard_in_enabled'] = {'value': clip in ('true', 'in')}
     out['clipboard_out_enabled'] = {'value': clip in ('true', 'out')}
-    # The software H.264 encoder of the pixelflux build ("x264" | "openh264"):
-    # informational, and what the dashboards' rate-control default reads.
     out['software_h264_encoder'] = {'value': software_h264_encoder()}
     return out
 
 
-# Default int bounds for client-provided numeric settings. Min is not 0:
-# settings without an explicit min may use -1 sentinels that must not be
-# clamped up. Shared by both transports' sanitizers.
+# Bounds for client numerics without declared ones; the min is not 0 because
+# -1 sentinels must not be clamped up.
 INT_SETTING_DEFAULT_MAX = 1_000_000
 INT_SETTING_DEFAULT_MIN = -1_000_000
 
@@ -1819,11 +1789,17 @@ def sanitize_client_setting(name: str, client_value: Any, source: Any,
     clamped identically whichever path delivered it.
 
     Rules: ranges clamp into the server min/max (fractional values are legal,
-    integral values stay ints); enums fall back to the server default when not
-    allowed; ints/floats clamp into declared bounds
+    integral values stay ints); ints/floats clamp into declared bounds
     (top-level min/max win over meta so declared bounds aren't loosened by the
     sentinel-safe negative fallback); locked bools keep the server value. A
     None client value resolves to the server value/default for the type.
+
+    An enum outside `allowed` falls back to the server's own resolved value
+    (an admin override, or the built-in default), never to `allowed[0]`: the
+    first entry is merely one end of the curated stops, so echoing a stale
+    stored value must not land the client on the cheapest or slowest option.
+    That value is published as a stop of its own (`_published_enum_allowed`),
+    so a client echoing it back is agreeing with the server, not proposing.
 
     Args:
         name: The setting name as defined in SETTING_DEFINITIONS.
@@ -1847,7 +1823,6 @@ def sanitize_client_setting(name: str, client_value: Any, source: Any,
         elif setting_def['type'] == 'bool':
             return server_limit[0]
         else:
-            # enum, list, str and int all resolve to the server value as-is.
             return server_limit
     try:
         if setting_def['type'] == 'range':
@@ -1866,14 +1841,8 @@ def sanitize_client_setting(name: str, client_value: Any, source: Any,
             if name == 'encoder':
                 client_value = canonical_encoder(client_value)
             if str(client_value) in allowed_values:
-                # Normalize to str so later equality checks don't flip on str-vs-int.
+                # str, so later equality checks don't flip on str-vs-int.
                 return str(client_value)
-            # The server's own resolved value (an admin override, or the built-in
-            # default) is the fallback: the first entry of `allowed` is merely one end
-            # of the curated stops, so echoing a stale stored value must not land the
-            # client on the cheapest or slowest option in the menu. That value is
-            # published as a stop of its own (_published_enum_allowed), so a client
-            # echoing it back is agreeing with the server, not proposing anything.
             server_default = str(server_limit) if server_limit else str(setting_def['default'])
             if str(client_value) == server_default:
                 return server_default
@@ -1903,7 +1872,7 @@ def sanitize_client_setting(name: str, client_value: Any, source: Any,
                 return server_val
             return client_bool
     except (ValueError, TypeError, IndexError, OverflowError):
-        # OverflowError guards JSON inf (1e999 -> int(inf)); fall back to default.
+        # OverflowError: JSON inf (1e999 -> int(inf)).
         def_val_meta = setting_def.get('meta', {}).get('default_value')
         return def_val_meta if def_val_meta is not None else setting_def.get('default')
     return client_value

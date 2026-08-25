@@ -15,8 +15,8 @@ import sys
 
 from . import __version__
 
-# Answered before the settings module parses the command line: reporting the
-# version needs neither a configuration nor the native extensions
+# Before the settings import parses argv: --version needs neither a
+# configuration nor the native extensions.
 if "--version" in sys.argv[1:]:
     print(f"selkies {__version__}")
     sys.exit(0)
@@ -88,16 +88,18 @@ def _install_shutdown_signal_handlers() -> None:
 
 
 async def run() -> None:
-    """Build the stream server, register its services, and run until cancelled."""
+    """Build the stream server, register its services, and run until cancelled.
+
+    Publishes the resolved gamepad and webcam socket directories to the
+    environment first, so the LD_PRELOAD interposers in app processes (which
+    read `SELKIES_JS_SOCKET_PATH` and `SELKIES_WEBCAM_SOCKET_PATH`) use the
+    same directories selkies does however the settings were supplied. The
+    virtual webcam outlives mode switches (applications hold `/dev/videoN`
+    open across them), so it is released only when the server exits.
+    """
     _install_shutdown_signal_handlers()
 
-    # Publish the resolved gamepad-socket directory so the LD_PRELOAD interposer in
-    # app processes (which reads SELKIES_JS_SOCKET_PATH) writes/reads sockets in the
-    # same directory selkies uses, regardless of how the setting was configured.
     os.environ["SELKIES_JS_SOCKET_PATH"] = settings.js_socket_path
-
-    # Same rationale for the V4L2 webcam interposer, which reads
-    # SELKIES_WEBCAM_SOCKET_PATH in app processes.
     os.environ["SELKIES_WEBCAM_SOCKET_PATH"] = settings.webcam_socket_path
 
     if settings.computer_use_bind:
@@ -120,19 +122,19 @@ async def run() -> None:
     try:
         await server.run()
     finally:
-        # The virtual webcam outlives mode switches (applications hold
-        # /dev/videoN open across them), so it is released only here.
         await stop_shared_webcam()
 
 
 def main() -> None:
-    """Entry point for command-line execution."""
-    # uvloop makes the whole asyncio loop (timers, callbacks, socket I/O) markedly
-    # faster, which directly lifts the pure-Python WebRTC SCTP data-channel
-    # throughput and keeps large transfers from stalling input. Optional: fall
-    # back to the stock loop if it isn't installed. uvloop.run owns how its
-    # loop is installed per interpreter, so no event-loop policy API (removed
-    # in Python 3.16) is touched here.
+    """Entry point for command-line execution.
+
+    Runs under uvloop when installed, else the stock loop: uvloop makes the
+    whole loop (timers, callbacks, socket I/O) markedly faster, which lifts
+    the pure-Python WebRTC SCTP data-channel throughput and keeps large
+    transfers from stalling input. `uvloop.run` owns how its loop is
+    installed per interpreter, so no event-loop policy API (removed in
+    Python 3.16) is touched here.
+    """
     try:
         import uvloop
         runner = uvloop.run

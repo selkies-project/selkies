@@ -92,7 +92,6 @@ async def main() -> None:
 
 asyncio.run(main())
 
-# ---- assertions ----
 fails: list[str] = []
 def check(name: str, cond, detail: str = "") -> None:
     """Record and print one pass/fail result."""

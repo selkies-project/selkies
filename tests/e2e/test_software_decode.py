@@ -240,10 +240,9 @@ def block_ladder(r: "H.Results") -> None:
                         "prefer-software" in state["cfgs"], state["cfgs"][:6])
                 r.check("fallback ladder still reached", state["navs"] > 1,
                         state["navs"])
-                # The preference is dropped on the way into the ladder, so the
-                # reloaded page probes hardware again instead of being pinned to
-                # software by a failure software did not cause. (It arms its own
-                # retry from there, which is why the stored key is set again.)
+                # The preference is dropped on the way into the ladder, so the reloaded
+                # page re-probes hardware rather than being pinned by a failure software
+                # did not cause; it then arms its own retry, which sets the key again.
                 after_software = state["cfgs"][state["cfgs"].index("prefer-software") + 1:]
                 r.check("next load re-probes hardware",
                         bool(after_software) and after_software[0] == "default",

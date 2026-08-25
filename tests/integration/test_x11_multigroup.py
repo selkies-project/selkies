@@ -204,7 +204,7 @@ def pump_keymap_events(handler) -> int:
 async def run(res: "H.Results", display_name: str) -> None:
     from selkies.Xlib import display as xdisplay
 
-    # --- single-group control: the bare fast path and the overlay stay ---
+    # Single-group control: the bare fast path, with the overlay still in play.
     set_layout(display_name, "us")
     obs = Observer(display_name)
     d = xdisplay.Display(display_name)
@@ -221,7 +221,7 @@ async def run(res: "H.Results", display_name: str) -> None:
     d.close()
     obs.close()
 
-    # --- German control: AltGr levels, not groups ---
+    # German control: accented keys are AltGr levels, not groups.
     set_layout(display_name, "de")
     obs = Observer(display_name)
     d = xdisplay.Display(display_name)
@@ -234,7 +234,7 @@ async def run(res: "H.Results", display_name: str) -> None:
     d.close()
     obs.close()
 
-    # --- us,ru: Cyrillic keysyms via a group lock on their physical keycode ---
+    # Cyrillic keysyms reach the app via a group lock on their physical keycode.
     set_layout(display_name, "us,ru")
     obs = Observer(display_name)
     d = xdisplay.Display(display_name)
@@ -318,7 +318,6 @@ async def run(res: "H.Results", display_name: str) -> None:
     res.check("us,ru: reset restores the lock at once",
               obs.locked_group() == 0 and h.keyboard._group_hold is None, obs.locked_group())
 
-    # --- a layout switch under a live handler is seen through XKB ---
     pump_keymap_events(h)
     set_layout(display_name, "us")
     handled = pump_keymap_events(h)

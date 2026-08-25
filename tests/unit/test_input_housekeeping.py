@@ -49,7 +49,7 @@ def make_handler() -> WebRTCInput:
 
 
 async def main() -> None:
-    # --- session tasks are spawned with a keep-alive reference ---
+    # Session tasks are spawned with a keep-alive reference.
     h = make_handler()
     started = []
 
@@ -71,7 +71,7 @@ async def main() -> None:
     check("both ran and dropped their reference", started == ["hold", ("dpi", 120)]
           and not h._bg_tasks, str(started))
 
-    # --- xdotool type fallback ends its options before the text ---
+    # The xdotool type fallback ends its options before the text.
     hx = WebRTCInput.__new__(WebRTCInput)
     hx.is_wayland = False
     hx.active_modifiers = set()
@@ -95,7 +95,7 @@ async def main() -> None:
     check("xdotool type gets '--' before the text",
           argv == [["xdotool", "type", "--", "--delay 5"]], str(argv))
 
-    # --- REQUEST_CLIPBOARD's wait leaves the XFixes change edge to the monitor ---
+    # REQUEST_CLIPBOARD's wait leaves the XFixes change edge to the monitor.
     m = _X11ClipboardMonitor.__new__(_X11ClipboardMonitor)
     m._changed = threading.Event()
     m._changed.set()
@@ -106,7 +106,7 @@ async def main() -> None:
     check("wait_change consumes it", consumed is True and not m._changed.is_set())
     check("peek_change times out quietly with no change", await m.peek_change(0.05) is False)
 
-    # --- the per-connect cursor fetch reuses the monitor's encode ---
+    # The per-connect cursor fetch reuses the monitor's encode.
     hc = WebRTCInput.__new__(WebRTCInput)
     hc.cursor_size_cap = 64
     hc._cursor_msg_cache = None

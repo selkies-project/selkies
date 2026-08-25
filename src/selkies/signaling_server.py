@@ -12,6 +12,20 @@ eviction mirrors websockets mode so a page refresh supersedes its own stale
 socket, with a takeover-storm breaker so two live auto-reconnecting pages
 cannot trade the session forever.
 
+Wire protocol (text frames, space-separated): a peer opens with
+`HELLO <server|client> [<json-metadata>]` (`client_type`, `client_slot`,
+`client_strict_viewer`, `client_token`, `server_token`, `display_id`,
+`display_position`) and is answered `HELLO`. `SESSION <peer-id|server>` pairs
+the caller with the callee: the caller gets `SESSION_OK <callee-id>`, the callee
+`SESSION_START <caller-id> <client_type> <display_id> <display_position>
+[<client_token>]`, and a disconnect sends the partner `SESSION_END <peer-id>
+<client_type>`. In a session every message is addressed `<peer-id> <message>`
+and relayed as `<sender-id> <message>`, only between session partners. `ROOM
+<room-id>` joins or creates a room (`ROOM_OK <member-ids>`, members get
+`ROOM_PEER_JOINED` / `ROOM_PEER_LEFT <peer-id>`), where `ROOM_PEER_MSG
+<peer-id> <message>` is relayed as `ROOM_PEER_MSG <sender-id> <message>`.
+Errors are `ERROR <text>`.
+
 Concurrency model: all registry mutation happens under a single asyncio.Lock,
 and every socket send/close triggered while holding it is deferred and flushed
 after release, so one slow peer socket can never serialize other handshakes.
@@ -19,7 +33,8 @@ after release, so one slow peer socket can never serialize other handshakes.
 In secure mode (a master token is configured) the auth middleware forwards
 WebSocket upgrades without Basic auth, so the token checks here are the only
 gate: client peers must present a provisioned session token and server peers
-the master token itself.
+the master token itself. Token checks are constant-time lookups in the live
+control-plane table (`/api/tokens`), read per handshake.
 """
 
 import os
@@ -36,8 +51,6 @@ from typing import Awaitable, Callable, Dict, Set, Optional, Any, Tuple, List
 
 from .webrtc_utils import _is_trusted_config_file
 from .settings import settings as app_settings
-# Constant-time lookup in the live control-plane token table (provisioned via
-# /api/tokens), read per handshake.
 from .selkies import _lookup_session_token
 
 logger = logging.getLogger("signaling")
@@ -55,6 +68,16 @@ class Peer:
         client_type: For clients, "viewer" or "controller".
         client_slot: Player slot number, or -1 when unassigned.
         client_strict_viewer: Whether the client is a strict shared viewer.
+        client_token: Secure-mode session token; matched against the active
+            mk token to grant a viewer read-write collaboration (websockets
+            mk-token parity).
+        peer_status: None until paired, then "session" or the room id.
+        display_id: Display this peer drives ("primary", "display2", ...);
+            controller and slot uniqueness are scoped per display so a second
+            display's client never evicts the primary (websockets parity).
+        display_position: Where a secondary display sits relative to the
+            primary ("right"/"left"/"up"/"down"), carried to the server side
+            so it lays the framebuffer out like websockets mode.
     """
 
     uid: str
@@ -64,17 +87,9 @@ class Peer:
     client_type: Optional[str]
     client_slot: Optional[int]
     client_strict_viewer: Optional[bool]
-    # Secure-mode session token; matched against active_mk_token to grant a viewer
-    # read-write collaboration (mirrors the WS mk-token path).
     client_token: Optional[str] = None
     peer_status: Optional[str] = None
-    # Which display this peer drives ("primary", "display2", ...). Controller and
-    # slot uniqueness are scoped per display so a second display's client does not
-    # evict the primary (mirrors the WS per-display model).
     display_id: str = "primary"
-    # Where a secondary display sits relative to the primary in the extended
-    # desktop layout ("right"/"left"/"up"/"down"); carried to the server side so
-    # it can lay the framebuffer out like the WS mode does.
     display_position: str = "right"
 
 
@@ -86,24 +101,28 @@ class WebRTCPeerManagement:
         sessions: Unidirectional caller-to-callee (client-to-server) session map;
             stored one-way so termination is unambiguous on client disconnect.
         rooms: Sets of member peer uids by room id.
+        on_client_presence: Called with True/False as browser (client-type)
+            peers come and go; the server's own signaling peer does not count.
+        rtc_config: Config served from `/api/turn`. Primarily the config the
+            server itself resolved via `get_rtc_configuration()` (REST,
+            Cloudflare, JSON file, legacy, HMAC or built-in default), passed
+            as `options.rtc_config` and kept fresh by the RTC monitors through
+            `set_rtc_config`, so the client negotiates with the same ICE
+            servers as the server; the local `rtc_config_file` is read only
+            when no resolved config was supplied.
+        _eviction_times: Recent newest-wins takeover times per identity key,
+            the takeover-storm window `_eviction_storm` reads.
     """
 
     def __init__(self, options: Any) -> None:
         self.peers: Dict[str, Peer] = {}
         self.sessions: Dict[str, str] = {}
         self.rooms: Dict[str, Set[str]] = {}
-        # Called with True/False as browser (client-type) peers come and go;
-        # the server's own signaling peer does not count.
         self.on_client_presence: Optional[Callable[[bool], None]] = None
-        # Recent newest-wins takeovers per identity key: two LIVE pages that both
-        # auto-reconnect would otherwise trade the session forever (each eviction
-        # closes the other mid-handshake). See _eviction_storm.
         self._eviction_times: Dict[Any, List[float]] = {}
 
-        # Options
         self.keepalive_timeout: int = options.keepalive_timeout
 
-        # TURN options
         self.turn_shared_secret: Optional[str] = options.turn_shared_secret
         self.turn_host: Optional[str] = options.turn_host
         self.turn_port: Optional[int] = options.turn_port
@@ -115,7 +134,6 @@ class WebRTCPeerManagement:
         self.stun_host: Optional[str] = options.stun_host
         self.stun_port: Optional[int] = options.stun_port
 
-        # Sharing mode options
         self.enable_sharing: bool = options.enable_sharing
         self.enable_shared: bool = options.enable_shared
         self.enable_player2: bool = options.enable_player2
@@ -123,12 +141,6 @@ class WebRTCPeerManagement:
         self.enable_player4: bool = options.enable_player4
         self.lock: asyncio.Lock = asyncio.Lock()
 
-        # RTC config served to clients from /api/turn. PRIMARY source: the config the
-        # server itself resolved via get_rtc_configuration() (REST / Cloudflare / JSON
-        # file / legacy / HMAC / built-in default), passed in as options.rtc_config and
-        # kept fresh by the RTC monitors via set_rtc_config(). This guarantees the client
-        # negotiates with the SAME ICE servers as the server. Fall back to reading the
-        # local rtc_config_file only when no resolved config was supplied.
         self.rtc_config: Optional[Any] = getattr(options, "rtc_config", None)
         if not self.rtc_config and os.path.exists(options.rtc_config_file):
             logger.info("parsing rtc_config_file: {}".format(options.rtc_config_file))
@@ -140,7 +152,6 @@ class WebRTCPeerManagement:
                         options.rtc_config_file
                     )
                 )
-        # Validate TURN arguments
         if self.turn_shared_secret:
             if not (self.turn_host and self.turn_port):
                 raise Exception(
@@ -201,6 +212,14 @@ class WebRTCPeerManagement:
     async def cleanup_session(self, uid: str) -> None:
         """Clean up a session when a peer disconnects.
 
+        Every client — a primary controller included — only tells the server
+        its session ended: the server socket is shared by every display's
+        session and every viewer, so dropping it would reset the whole
+        session. The server side reaps just this peer and keeps a reconnect
+        grace on the primary capture, so a controller tab reload never kicks
+        the viewers or the second display (websockets `_teardown_if_unclaimed`
+        parity).
+
         Args:
             uid: Peer ID to clean up.
         """
@@ -218,14 +237,6 @@ class WebRTCPeerManagement:
             if not peer:
                 return
             if peer.client_type in ("controller", "viewer"):
-                # Every client — a primary controller included — only tells the
-                # server its session ended; the server socket is shared by every
-                # display's session and every viewer, so dropping it on a primary
-                # controller's departure would reset the whole session (the old
-                # full-reset). The server side reaps just this peer and keeps a
-                # reconnect grace on the primary capture, so a controller tab
-                # reload never kicks the viewers or the second display (websockets
-                # _teardown_if_unclaimed parity).
                 other_peer = self.peers.get(other_id)
                 if other_peer:
                     wso = other_peer.ws
@@ -244,10 +255,9 @@ class WebRTCPeerManagement:
         if not room_peers or uid not in room_peers:
             return
         room_peers.remove(uid)
-        # Free empty rooms so self.rooms can't grow unbounded over join/leave cycles.
         if not room_peers:
             del self.rooms[room_id]
-        # Iterate a snapshot: the awaits below can interleave with a concurrent join.
+        # Snapshot: the awaits below can interleave with a concurrent join.
         for pid in list(room_peers):
             peer = self.peers.get(pid)
             if not peer:
@@ -262,6 +272,12 @@ class WebRTCPeerManagement:
         """Detach a dead peer from shared state (in-memory only) while holding
         ``self.lock``.
 
+        Mirrors `cleanup_session` and `cleanup_room` without socket I/O. The
+        session partner (the server) is told the session ended and keeps its
+        socket: it serves every client, and closing it would cascade —
+        `remove_peer` on the server closes all clients, including the
+        replacement just registered, a self-terminating reconnect.
+
         Returns:
             Zero-arg coroutine factories for the partner notifications
             (SESSION_END / ROOM_PEER_LEFT / close); the caller MUST run them
@@ -271,7 +287,6 @@ class WebRTCPeerManagement:
         deferred: List[Callable[[], Awaitable[Any]]] = []
         peer = self.peers.get(pid)
 
-        # --- session teardown (mirrors cleanup_session) ---
         if pid in self.sessions:
             other_id = self.sessions[pid]
             del self.sessions[pid]
@@ -279,16 +294,10 @@ class WebRTCPeerManagement:
                 other_peer = self.peers.get(other_id)
                 if other_peer is not None:
                     wso = other_peer.ws
-                    # A replacement client is connecting into the same slot, so
-                    # tell the server the session ended and keep its socket: it
-                    # serves every client, and closing it would cascade
-                    # (remove_peer(server) closes ALL clients, including the
-                    # replacement just registered -> self-terminating reconnect).
                     msg = "SESSION_END {} {}".format(pid, peer.client_type)
                     logger.info("{} -> {}: {}".format(pid, other_id, msg))
                     deferred.append(lambda ws=wso, m=msg: ws.send_str(m))
 
-        # --- room teardown (mirrors cleanup_room) ---
         peer_status = getattr(peer, "peer_status", None) if peer else None
         if peer_status and peer_status != "session":
             room_peers: Optional[Set[str]] = self.rooms.get(peer_status)
@@ -310,21 +319,20 @@ class WebRTCPeerManagement:
                         lambda ws=other_peer.ws, m=msg: ws.send_str(m)
                     )
 
-        # Finally drop the dead peer itself.
         self.peers.pop(pid, None)
         return deferred
 
     async def remove_peer(self, uid: str) -> None:
         """Remove a peer and clean up its session, room, and socket.
 
-        A server peer leaving closes every client connection; a client peer
-        leaving closes only its own socket.
+        A server peer leaving closes every client connection, since the server
+        owns the media graph they all stream from; a client peer leaving
+        closes only its own socket. Closes are collected under the lock and
+        awaited after it, bounded per socket and best-effort.
 
         Args:
             uid: Peer ID to remove.
         """
-        # Collect socket closes under the lock but await them AFTER releasing it,
-        # so a slow socket can't serialize all signaling (mirrors hello_peer).
         deferred_closes: List[Callable[[], Awaitable[Any]]] = []
         async with self.lock:
             await self.cleanup_session(uid)
@@ -338,8 +346,6 @@ class WebRTCPeerManagement:
                 client_type = peer.client_type
                 if peer_status and peer_status != "session":
                     await self.cleanup_room(uid, peer_status)
-                # A server peer disconnecting takes every client with it: the
-                # server owns the media graph they are all streaming from.
                 if peer_type == "server":
                     del self.peers[uid]
                     for p in list(self.peers.values()):
@@ -362,7 +368,6 @@ class WebRTCPeerManagement:
                             uid, raddr, client_type
                         )
                     )
-        # Flush closes outside the lock; bounded per socket, best-effort.
         for make_coro in deferred_closes:
             try:
                 await asyncio.wait_for(make_coro(), timeout=5)
@@ -383,8 +388,16 @@ class WebRTCPeerManagement:
 
         Relays session messages between paired partners, room messages between
         room members, and processes the SESSION/ROOM commands that establish
-        those pairings. The peer was already registered atomically in
-        ``hello_peer``.
+        those pairings (message formats in the module docstring). The peer
+        was already registered atomically in ``hello_peer``.
+
+        A session relay is accepted in either direction between partners
+        (`sessions` is stored client-to-server only) and refused toward an
+        unrelated peer or one not in a session. SESSION_START carries the
+        caller's secure-mode token (space-free) as a trailing field, omitted
+        when absent, so the server side can grant a matching viewer
+        read-write collaboration. A room id may not be the "session" status
+        sentinel, empty, or contain whitespace.
 
         Args:
             ws: The peer's WebSocket.
@@ -421,24 +434,17 @@ class WebRTCPeerManagement:
                     logger.error(f"Peer {uid} not found in peers dict")
                     break
                 peer_status = peer.peer_status
-                # In a session or a room, messages must be relayed.
                 if peer_status is not None:
                     if peer_status == "session":
                         parts = msg.split(maxsplit=1)
                         if len(parts) < 2:
                             logger.warning(f"Malformed session message from {uid}")
                             continue
-                        # Session messages are addressed by target peer id
-                        # ("<peer-id> <message>") and relayed re-prefixed with
-                        # the sender's uid.
                         other_id, msg_string = parts
                         other_peer = self.peers.get(other_id)
                         if not other_peer:
                             logger.warning(f"Peer {other_id} not found for session message relay")
                             continue
-                        # Only relay between session partners. self.sessions is
-                        # unidirectional (client->server), so accept either direction
-                        # but reject a message aimed at an unrelated peer.
                         if not (
                             self.sessions.get(uid) == other_id
                             or self.sessions.get(other_id) == uid
@@ -456,9 +462,7 @@ class WebRTCPeerManagement:
                         logger.info("{} -> {}: {}".format(uid, other_id, msg))
                         msg_string = "{} {}".format(uid, msg_string)
                         await wso.send_str(msg_string)
-                    # In a room, accept room-specific commands.
                     elif peer_status:
-                        # Format: ROOM_PEER_MSG <peer-id> <message>
                         if msg.startswith("ROOM_PEER_MSG"):
                             parts = msg.split(maxsplit=2)
                             if len(parts) < 3:
@@ -489,7 +493,6 @@ class WebRTCPeerManagement:
                             continue
                     else:
                         raise AssertionError("Unknown peer status {!r}".format(peer_status))
-                # Requested a session with a specific peer
                 elif msg.startswith("SESSION"):
                     logger.info("{!r} command {!r}".format(uid, msg))
                     parts = msg.split(maxsplit=1)
@@ -522,22 +525,15 @@ class WebRTCPeerManagement:
                             uid, raddr, callee_id, wsc_raadr
                         )
                     )
-                    # Notify the callee (always the server peer).
                     session_start = "SESSION_START {} {} {} {}".format(
                         uid, client_type, peer.display_id, peer.display_position
                     )
-                    # Relay the caller's secure-mode token (space-free) as an extra field
-                    # so the server side can grant read-write collaboration to a matching
-                    # viewer; omitted when absent to avoid a trailing empty token.
                     if peer.client_token:
                         session_start += " " + peer.client_token
                     await wsc.send_str(session_start)
                     peer.peer_status = peer_status = "session"
                     callee_peer.peer_status = "session"
-                    # Store session caller->callee (client->server) so termination is
-                    # unambiguous when the client disconnects.
                     self.sessions[uid] = callee_id
-                # Requested joining or creation of a room
                 elif msg.startswith("ROOM"):
                     logger.info("{!r} command {!r}".format(uid, msg))
                     parts = msg.split(maxsplit=1)
@@ -545,8 +541,6 @@ class WebRTCPeerManagement:
                         logger.warning(f"Malformed room message from {uid}")
                         continue
                     _, room_id = parts
-                    # A room id must not collide with the "session" status
-                    # sentinel, be empty, or contain whitespace.
                     if room_id == "session" or room_id.split() != [room_id]:
                         await ws.send_str("ERROR invalid room id {!r}".format(room_id))
                         continue
@@ -564,7 +558,7 @@ class WebRTCPeerManagement:
                     # setdefault: a concurrent cleanup_room may have deleted the room during the await.
                     room_set = self.rooms.setdefault(room_id, set())
                     room_set.add(uid)
-                    # Iterate a snapshot: peers can join/leave across the awaits.
+                    # Snapshot: peers can join/leave across the awaits.
                     for pid in list(room_set):
                         if pid == uid:
                             continue
@@ -651,7 +645,25 @@ class WebRTCPeerManagement:
         Validation, eviction of superseded/dead holders, and registration all
         happen atomically under the lock; the HELLO reply and any deferred
         eviction notifications are sent after release so a slow socket can't
-        serialize other handshakes.
+        serialize other handshakes. A HELLO send that fails unregisters the
+        peer so a half-open peer never stays in the table.
+
+        Identity collisions resolve newest-wins, as in websockets mode where a
+        new display connection supersedes the old one: a page refresh
+        reconnects before its old socket is reaped and must not bounce off
+        itself, so dead holders are reaped and a live one is closed. The
+        identities are the display's sole client in non-sharing mode, a
+        player slot in sharing mode (`-1` is the unassigned sentinel, exempt
+        from uniqueness), and a display's controller — each scoped per
+        display so display2 never supersedes the primary — unless the
+        takeover-storm breaker (`_eviction_storm`) rejects the claimant. A
+        viewer first reaps a dead, unreaped controller and treats it as
+        absent rather than pairing with a stale peer; a viewer of the primary
+        display needs no controller, since the desktop exists regardless and
+        the server starts its capture for a lone viewer (websockets parity),
+        while a secondary display exists only through its controller's layout,
+        so its viewer is refused without one. Strict shared viewers (the
+        `#shared` URL hash) are refused when `enable_shared` is off.
 
         Args:
             ws: The connecting WebSocket.
@@ -681,8 +693,6 @@ class WebRTCPeerManagement:
         server_token = None
         display_id = "primary"
         display_position = "right"
-        # Partner notifications for evicted dead peers: collected under the lock but
-        # flushed after release so a slow partner socket can't stall other handshakes.
         dead_peer_notifications: List[Callable[[], Awaitable[Any]]] = []
 
         def evict_peer_locked(
@@ -706,7 +716,6 @@ class WebRTCPeerManagement:
         try:
             async with self.lock:
                 if len(toks) > 2:
-                    # Format: HELLO <server|client> <json-metadata>
                     hello, peer_type, json_metadata_str = toks
                     try:
                         json_metadata = json.loads(json_metadata_str)
@@ -721,8 +730,8 @@ class WebRTCPeerManagement:
                     except json.JSONDecodeError as e:
                         await ws.close(code=1002, message=b"invalid protocol")
                         raise Exception("Invalid JSON metadata from {!r}".format(raddr)) from e
-                    # Normalize client_slot to int so collision checks hold (1.0 != a
-                    # distinct slot); None stays None, bool and non-coercible are rejected.
+                    # Coerced to int so collision checks hold (1.0 is slot 1); bool is
+                    # an int subclass and is rejected rather than read as slot 1.
                     if client_slot is not None:
                         if isinstance(client_slot, bool):
                             await ws.close(code=1002, message=b"invalid protocol")
@@ -765,8 +774,6 @@ class WebRTCPeerManagement:
 
                 if peer_type == "client":
                     client_type = self._secure_effective_client_type(client_type, client_token)
-                    # Legacy basic-auth: a view-only credential caps the role at
-                    # viewer no matter what this self-asserted client_type claims.
                     if auth_role_ceiling == "viewer" and client_type == "controller":
                         client_type = "viewer"
                     if not self.enable_sharing:
@@ -776,11 +783,6 @@ class WebRTCPeerManagement:
                             if hasattr(peer, "peer_type") and peer.peer_type == "client"
                             and getattr(peer, "display_id", "primary") == display_id
                         ]
-                        # The newest connection wins (parity with websockets mode,
-                        # where a new display connection supersedes the old one): a
-                        # refresh must never be blocked by its own not-yet-reaped
-                        # predecessor. Dead holders are reaped; a live one is closed.
-                        # Scoped per display so display2 never supersedes primary.
                         if existing_clients and self._eviction_storm(("client", display_id)):
                             await ws.close(
                                 code=4000,
@@ -808,7 +810,6 @@ class WebRTCPeerManagement:
                             raise Exception(
                                 "Invalid client slot provided {!r}".format(client_slot)
                             )
-                        # Slot uniqueness; -1 is the "unassigned" sentinel and is exempt.
                         if client_slot != -1:
                             colliding = [
                                 (pid, peer)
@@ -816,11 +817,6 @@ class WebRTCPeerManagement:
                                 if getattr(peer, "client_slot", None) == client_slot
                                 and getattr(peer, "display_id", "primary") == display_id
                             ]
-                            # The newest claimant wins the slot (parity with
-                            # websockets mode): reap dead holders, supersede live
-                            # ones — a page refresh reconnects before its old socket
-                            # is reaped and must not bounce off itself. Scoped per
-                            # display so the same slot on display2 is independent.
                             if colliding and self._eviction_storm(("slot", display_id, client_slot)):
                                 await ws.close(
                                     code=4000,
@@ -843,7 +839,6 @@ class WebRTCPeerManagement:
                                     )
                                 )
 
-                    # Strict-viewer clients (the "#shared" URL hash).
                     if not self.enable_shared and client_strict_viewer:
                         await ws.close(
                             code=4000, message=b"Strict shared clients are not enabled."
@@ -867,12 +862,6 @@ class WebRTCPeerManagement:
                     peer_controller = controller_entry[1] if controller_entry else None
                     if client_type == "controller":
                         if peer_controller is not None:
-                            # The newest controller wins (parity with websockets
-                            # mode, which kills the old primary client when a new
-                            # one connects). _evict_dead_peer_locked keeps the
-                            # server alive (SESSION_END, not a server-socket close).
-                            # Scoped per display: display2's controller and the
-                            # primary's controller coexist without evicting each other.
                             if self._eviction_storm(("controller", display_id)):
                                 await ws.close(
                                     code=4000,
@@ -895,9 +884,6 @@ class WebRTCPeerManagement:
                                 )
                             )
                     if client_type == "viewer":
-                        # Reap a dead (closed, unreaped) controller and treat it
-                        # as absent, matching the liveness-aware sibling checks
-                        # above instead of pairing the viewer with a stale peer.
                         if peer_controller is not None:
                             assert controller_entry is not None
                             ctrl_pid, ctrl_peer = controller_entry
@@ -912,11 +898,6 @@ class WebRTCPeerManagement:
                                         ctrl_pid, raddr
                                     )
                                 )
-                        # A viewer of the primary display needs no controller:
-                        # the desktop exists regardless and the server starts
-                        # its capture for a lone viewer (websockets parity). A
-                        # secondary display exists only through its controller's
-                        # layout, so a viewer of one is refused without it.
                         if not peer_controller and display_id != "primary":
                             await ws.close(
                                 code=4000,
@@ -930,9 +911,6 @@ class WebRTCPeerManagement:
 
                 uid = str(uuid.uuid4())
                 puid = "-".join([peer_type, uid])
-                # Register under the same lock as validation so check-and-insert is
-                # atomic. HELLO is sent AFTER the lock (below) so a slow client
-                # socket can't serialize other handshakes.
                 self.peers[puid] = Peer(
                     uid=puid,
                     ws=ws,
@@ -947,8 +925,6 @@ class WebRTCPeerManagement:
                 )
                 result = (puid, peer_type, client_type, client_slot, client_strict_viewer)
         finally:
-            # Flush deferred dead-peer notifications outside the lock (bounded per
-            # socket so a blocked partner can't wedge this handshake); best-effort.
             for make_coro in dead_peer_notifications:
                 try:
                     await asyncio.wait_for(make_coro(), timeout=5)
@@ -956,10 +932,6 @@ class WebRTCPeerManagement:
                     logger.debug(
                         "Deferred dead-peer notification failed/timed out: {}".format(exc)
                     )
-        # Send HELLO outside the lock so a slow client socket can't serialize other
-        # handshakes. Reached only on success (validation failures raise above). The
-        # peer is already registered; if the send fails, unregister it so a half-open
-        # peer never stays in the table.
         try:
             await ws.send_str("HELLO")
         except Exception:
@@ -1028,20 +1000,18 @@ class WebRTCPeerManagement:
         """GET /api/turn: serve the RTC/TURN configuration to clients.
 
         Who may ask is the auth middleware's call (Basic credentials, or a
-        session token in secure mode); this only serves the config.
+        session token in secure mode); this only serves the config. It is the
+        exact config the server resolved (`rtc_config`), the single source of
+        truth, with no per-request credential path: the client always
+        negotiates with the same ICE servers the server uses. When the HMAC
+        method is active, `generate_rtc_config()` mints the username with a
+        generic default so it is never a bare `<expiry>:`.
 
         Returns:
             The RTC configuration as JSON, or 404 when none is resolved.
         """
         path = request.path
 
-        # ONE source of truth: serve the exact config the server resolved via
-        # get_rtc_configuration() (REST / Cloudflare / JSON file / legacy / HMAC /
-        # built-in default), kept current by the RTC monitors -- so the client always
-        # negotiates with the SAME ICE servers the server uses. No separate per-request
-        # credential path: the resolved config is the single path. (Its HMAC username,
-        # when that method is active, is minted with a generic default in
-        # generate_rtc_config() so it is never a bare '<expiry>:'.)
         if self.rtc_config:
             data = self.rtc_config
             if isinstance(data, str):

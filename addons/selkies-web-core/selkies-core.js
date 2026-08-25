@@ -124,7 +124,8 @@ function determineStreamingMode() {
  * Persists a dashboard's `{type: "mode", mode}` request and reloads the page.
  *
  * Only the two real transports are persisted: anything else would make every
- * following load throw until localStorage was repaired by hand.
+ * following load throw until localStorage was repaired by hand. The reload
+ * waits two seconds so the server has switched modes before it lands.
  * @param {MessageEvent} event Same-origin window message.
  */
 function handleMessage(event) {
@@ -135,7 +136,6 @@ function handleMessage(event) {
         console.log(`Switching streaming mode to: ${message.mode}`);
         safeSetItem(getPrefixedKey('stream_mode'), message.mode);
 
-        // Gives the server time to switch modes before the reload.
         setTimeout(() => {
             window.location.reload();
         }, 2000)

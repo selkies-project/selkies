@@ -63,7 +63,8 @@ def main() -> int:
 
     Returns:
         Process exit code: 0 with the backend on stdout, non-zero (and no
-        backend printed) when no report could be obtained.
+        backend printed) when no report could be obtained: a pixelflux too
+        old to carry one, or a driver that refuses to answer at all.
     """
     # Imported here so the module stays usable where pixelflux is absent, and so
     # the settings parser never sees this tool's own invocation.
@@ -75,8 +76,6 @@ def main() -> int:
             str(getattr(settings, "auto_gpu", "") or ""),
         )
     except Exception as e:
-        # A pixelflux too old to carry the report, or a driver that refuses to
-        # answer at all: say so and leave the choice to the caller.
         print(f"Wayland backend: GPU support cannot be determined ({e})", file=sys.stderr)
         return 1
     backend, reason = recommend(

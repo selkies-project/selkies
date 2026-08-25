@@ -97,10 +97,8 @@ check("openh264 build: an operator crf pin beats the software-path cbr default",
 got = probe("print(s.build_client_settings_payload()['software_h264_encoder']['value'])", "openh264")
 check("the software encoder is published to clients", got == "openh264", got)
 
-# The retired openh264enc name (a separate OpenH264 choice before software H.264
-# became a property of the pixelflux build) still configures a session: it is an
-# alias of h264enc for an operator's env/CLI and for a client's stored setting,
-# like the historical x264enc.
+# openh264enc and x264enc are aliases of h264enc for an operator's env/CLI and
+# for a client's stored setting; neither is a published encoder.
 got = probe("print(s.settings.encoder)", SELKIES_MODE="websockets", SELKIES_ENCODER="openh264enc")
 check("an operator's openh264enc becomes h264enc", got == "h264enc", got)
 got = probe("print(s.settings.encoder)", SELKIES_MODE="websockets", SELKIES_ENCODER="x264enc")

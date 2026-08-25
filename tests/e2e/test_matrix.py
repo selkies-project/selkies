@@ -55,8 +55,8 @@ def run_block(mode: str, wayland: bool, block: str = "",
             if mode == "websockets":
                 info = C.wait_ws_video(page)
                 res.check("video: canvas painted", info is not None, info)
-                # headless rAF throttling zeroes the client's fps metric; count
-                # binary WS frames instead (instrumented at page init).
+                # Headless rAF throttling zeroes the client's fps metric, so
+                # binary WS frames are counted instead.
                 deadline = time.time() + 10
                 frames = 0
                 while time.time() < deadline:
@@ -72,7 +72,6 @@ def run_block(mode: str, wayland: bool, block: str = "",
                     res.check("audio: audio track negotiated", info.get("audio", 0) >= 1, info.get("audio"))
             time.sleep(1.0)
 
-            # --- keyboard injection ---------------------------------------
             if wayland:
                 wl_obs = H.WlObs(wl_socket)
                 res.check("wl observer mapped", wl_obs.ready(), "")
@@ -96,10 +95,8 @@ def run_block(mode: str, wayland: bool, block: str = "",
                 res.check("input: key released in X keymap", pressed2 is False, pressed2)
 
 
-            # --- mouse -----------------------------------------------------
-            # Wayland pointer events reach the focused surface only: aim INSIDE
-            # the observer's own surface (it starts at 0,0, 16x16); X11 global
-            # coordinates are absolute.
+            # Wayland pointer events reach the focused surface only, so the aim is
+            # inside the observer's own 16x16 surface at 0,0; X11 is absolute.
             if wayland:
                 page.mouse.move(8, 8)
                 time.sleep(0.6)
@@ -120,7 +117,6 @@ def run_block(mode: str, wayland: bool, block: str = "",
                 page.mouse.click(300, 200)
                 time.sleep(0.3)
 
-            # --- clipboard: client -> server -------------------------------
             probe = f"e2e-{tag}-c2s-{int(time.time())}"
             C.send_clipboard_from_client(page, probe, engine)
             deadline = time.time() + 8
@@ -132,7 +128,6 @@ def run_block(mode: str, wayland: bool, block: str = "",
                 time.sleep(0.5)
             res.check("clipboard: client text reached server", got == probe, repr(got)[:80])
 
-            # --- clipboard: server -> client -------------------------------
             push_payload = f"e2e-{tag}-s2c-{int(time.time())}"
             if wayland:
                 H.wl_copy(wl_socket, push_payload)
@@ -144,7 +139,6 @@ def run_block(mode: str, wayland: bool, block: str = "",
                 stop["flag"] = True
             res.check("clipboard: server push reached page", got, "")
 
-            # --- resize ----------------------------------------------------
             if not wayland:
                 req_w, req_h = 1242, 694
                 page.set_viewport_size({"width": req_w, "height": req_h})
@@ -163,7 +157,6 @@ def run_block(mode: str, wayland: bool, block: str = "",
                 ok = (C.wait_log("Wayland realized geometry", timeout=12))
                 res.check("resize: wayland realized geometry logged", ok, "")
 
-            # --- settings live apply (framerate) ---------------------------
             C.settings_change(page, {"framerate": 30})
             if mode == "websockets":
                 ok = C.wait_log("Applying video settings for 'primary' live (no restart)", timeout=10)
@@ -171,9 +164,8 @@ def run_block(mode: str, wayland: bool, block: str = "",
                 ok = C.wait_log("Updated framerate to", timeout=10)
             res.check("settings: framerate change applied live", ok, "")
 
-            # --- F3: unsanitized wr opcode clamp (webrtc only) -------------
-            # The wr core turns the video_bitrate settings key into the 'vb,'
-            # opcode; the server must sanitize it to the configured range.
+            # The wr core turns video_bitrate into the 'vb,' opcode, which the
+            # server must clamp to the configured range.
             if mode == "webrtc":
                 C.settings_change(page, {"video_bitrate": 1})
                 time.sleep(1.5)
@@ -181,10 +173,6 @@ def run_block(mode: str, wayland: bool, block: str = "",
                           C.wait_log("clamped to 100", timeout=6), "")
                 C.settings_change(page, {"video_bitrate": 6000})
 
-            # --- A1 is covered protocol-level in test_protocol.py (browser
-            # settings changes legitimately reload the page and reset video_active).
-
-            # --- roles: #shared viewer gates -------------------------------
             vpage = C.new_page(browser.contexts[0], mode=mode, url_hash="#shared")
             time.sleep(4.0)
             vinfo = C.wait_ws_video(vpage, timeout=12) if mode == "websockets" else C.wait_wr_video(vpage, timeout=40)
@@ -198,11 +186,9 @@ def run_block(mode: str, wayland: bool, block: str = "",
                           posviewer)
             vpage.close()
 
-            # --- second display --------------------------------------------
             dpage = C.new_page(browser.contexts[0], mode=mode, url_hash="#display2-right")
             time.sleep(6.0)
             if mode == "websockets":
-                # DISPLAY_CONFIG_UPDATE rides the ws text channel to every client.
                 deadline = time.time() + 10
                 texts = []
                 while time.time() < deadline:
@@ -213,16 +199,14 @@ def run_block(mode: str, wayland: bool, block: str = "",
                 res.check("second display: config update reached primary page",
                           any("display2" in t for t in texts), str(texts)[:90])
             else:
-                # WebRTC sends the same typed message over the datachannel; the
-                # server-side effect (media graph for the secondary) is what the
-                # page consumes, so verify at the source.
+                # The datachannel carries the same message; the server-side media
+                # graph is what the page consumes, so it is verified at the source.
                 res.check("second display: media graph started (server)",
                           C.wait_log("display 'display2'", timeout=10), "")
             dinfo = C.wait_ws_video(dpage, timeout=12) if mode == "websockets" else C.wait_wr_video(dpage, timeout=40)
             res.check("second display: video flows", dinfo is not None, dinfo)
             if mode == "webrtc":
-                # The wr core forwards displayPosition via SETTINGS passthrough;
-                # the server re-lays out the secondary (A9 runtime reposition).
+                # displayPosition reaches the server through SETTINGS passthrough.
                 dpage.evaluate(
                     "window.postMessage({ type: 'settings', settings: { displayPosition: 'down' } }, window.location.origin)")
                 time.sleep(2.5)

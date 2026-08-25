@@ -63,7 +63,7 @@ async def _no_sdp(sdp_type, sdp, peer_id):
 
 
 async def scenario(res: H.Results) -> None:
-    # --- second screen disabled: the page is refused with the reason -----
+    # Second screen disabled: the page is refused with the reason.
     svc, app = make_service(second_screen=False)
     ws = FakeWs()
     svc.peer_manager.peers["client-1"] = SimpleNamespace(ws=ws, peer_type="client")
@@ -78,7 +78,7 @@ async def scenario(res: H.Results) -> None:
               "client-1" not in app.peer_connections and app.displays == {},
               (sorted(app.peer_connections), sorted(app.displays)))
 
-    # --- available, but the start fails: no phantom registration ---------
+    # Available, but the start fails: no phantom registration.
     svc, app = make_service(second_screen=True)
     ws = FakeWs()
     svc.peer_manager.peers["client-2"] = SimpleNamespace(ws=ws, peer_type="client")
@@ -100,7 +100,7 @@ async def scenario(res: H.Results) -> None:
     res.check("failed start: no verdict sent (the peer simply never connected)",
               not ws.closed, ws.close_args)
 
-    # --- available and the start succeeds: the display stays registered --
+    # Available and the start succeeds: the display stays registered.
     svc, app = make_service(second_screen=True)
     app.on_sdp = _no_sdp
     await svc.handle_session_start("client-3", "controller", None, "display2", "up")

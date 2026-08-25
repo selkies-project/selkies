@@ -46,7 +46,6 @@ def main() -> "H.Results":
         page.goto(H.BASE_URL, wait_until="load")
         try:
             verify(page, "webrtc", res, "initial webrtc")
-            # Flip to websockets while the webrtc peer is still alive.
             s, body = H.curl("/api/switch", method="POST", data={"mode": "websockets"})
             res.check("switch to websockets returns 200", s == 200, body[:40])
             time.sleep(5.0)
@@ -56,7 +55,6 @@ def main() -> "H.Results":
             p2 = ctx2.new_page()
             p2.goto(H.BASE_URL, wait_until="load")
             verify(p2, "websockets", res, "after flip to websockets")
-            # Reverse direction: back to webrtc with the websockets client alive.
             s, body = H.curl("/api/switch", method="POST", data={"mode": "webrtc"})
             res.check("switch back to webrtc returns 200", s == 200, body[:40])
             time.sleep(5.0)
@@ -65,10 +63,9 @@ def main() -> "H.Results":
             p3 = ctx3.new_page()
             p3.goto(H.BASE_URL, wait_until="load")
             verify(p3, "webrtc", res, "after flip back to webrtc")
-            # A client whose stored transport is the one the server is not
-            # running gets 409 from its websocket probe and moves itself onto
-            # the live transport, so a stale tab heals instead of retrying
-            # forever. The probe URL is built from the document's own path.
+            # A client stored on the transport the server is not running gets 409 from
+            # its websocket probe (built from the document's own path) and moves itself
+            # onto the live one, so a stale tab heals instead of retrying forever.
             ctx4 = browser.new_context(viewport={"width": 1280, "height": 720})
             ctx4.add_init_script(
                 "try { const app = (location.origin + location.pathname)"

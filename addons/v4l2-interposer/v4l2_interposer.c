@@ -127,7 +127,7 @@ typedef int ioctl_request_t;
 #define WC_MAX_BUFFERS 8u
 #define WC_MAX_HANDLES 16
 
-/* --- Logging (WEBCAM_LOG enables stderr diagnostics) --- */
+/* WEBCAM_LOG in the environment enables stderr diagnostics. */
 static int g_swc_log_enabled = 0;
 
 #define SWC_LOG_DEBUG "[DEBUG]"
@@ -228,9 +228,9 @@ static int load_real_func(void (**target)(void), const char *name) {
     return 0;
 }
 
-/* --- Wire configuration, identical layout in the pixelflux writer --- */
-/* Sent once by the backend on accept, ahead of the doorbell stream, with the
- * staging memfd attached as SCM_RIGHTS ancillary data. */
+/* Wire configuration, identical layout in the pixelflux writer. Sent once by
+ * the backend on accept, ahead of the doorbell stream, with the staging memfd
+ * attached as SCM_RIGHTS ancillary data. */
 typedef struct {
     uint32_t magic;        /* WC_SHM_MAGIC */
     uint32_t version;      /* WC_SHM_VERSION */
@@ -575,7 +575,7 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
                  g_device_path, g_socket_path, g_swc_log_enabled ? "ENABLED" : "DISABLED");
 }
 
-/* --- Forged device metadata so directory scans and stat() see a char device --- */
+/* Forged character device for the device path and interposed fds. */
 #define FILL_FAKE_STAT_FIELDS(buf) do {                 \
     (buf)->st_mode = S_IFCHR | 0666;                    \
     (buf)->st_rdev = makedev(WC_VIDEO_MAJOR, g_device_minor); \
@@ -806,17 +806,16 @@ int statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct 
 }
 #endif
 
-/* --- Device enumeration: directory listing injection --- */
-/* Consumers discover cameras by listing a directory, not by probing the
- * device path: some scan /dev for videoN nodes, others scan
- * /sys/class/video4linux for class entries. Streams opened on exactly those
- * two directories are tracked, and the device entry is
- * appended once at end-of-listing unless a real entry of the same name already
- * appeared (e.g. a placeholder node or a real camera). When the sysfs class
- * directory does not exist at all, the stream is backed by an existing
- * directory purely to obtain a valid DIR handle and only synthetic entries are
- * emitted. Every other directory stream passes through untouched, gated by a
- * tracked-stream counter so the common path stays lock-free. */
+/* Directory listing injection. Consumers discover cameras by listing a
+ * directory, not by probing the device path: some scan /dev for videoN nodes,
+ * others scan /sys/class/video4linux for class entries. Streams opened on
+ * exactly those two directories are tracked, and the device entry is appended
+ * once at end-of-listing unless a real entry of the same name already appeared
+ * (e.g. a placeholder node or a real camera). When the sysfs class directory
+ * does not exist at all, the stream is backed by an existing directory purely
+ * to obtain a valid DIR handle and only synthetic entries are emitted. Every
+ * other directory stream passes through untouched, gated by a tracked-stream
+ * counter so the common path stays lock-free. */
 #define WC_MAX_TRACKED_DIRS 8
 
 typedef struct {
@@ -1068,8 +1067,6 @@ int closedir(DIR *dirp) {
     return real_closedir(dirp);
 }
 
-/* --- Socket connection and config handshake --- */
-
 /* Receives the config struct plus the staging memfd (SCM_RIGHTS) in one
  * message. Runs on the private open() fd, so it may block briefly without the
  * global lock held. Returns the received memfd (>=0) on success, -1 on error. */
@@ -1184,9 +1181,8 @@ static int connect_socket(wc_handle_t *out, int open_flags) {
 
 static size_t round_up_page(size_t n);
 
-/* --- Frame source: PipeWire --- */
-/* A PipeWire Video/Source node (the pixelflux virtual camera publishes one; any
- * other producer works too) can stand in for the backend's staging ring. The
+/* PipeWire frame source. A PipeWire Video/Source node (the pixelflux virtual camera
+ * publishes one; any other producer works too) can stand in for the backend's staging ring. The
  * application fd is our end of a socketpair: the PipeWire data thread copies each
  * frame into the handle's latest-frame buffer and writes one byte, so poll(),
  * DQBUF and read() behave exactly as with the ring. libpipewire is loaded at run
@@ -1894,7 +1890,6 @@ int __openat64_2(int dirfd, const char *file, int oflag) {
 }
 #endif
 
-/* --- Buffer memfd allocation --- */
 static size_t round_up_page(size_t n) {
     long pg = sysconf(_SC_PAGESIZE);
     size_t page = (pg > 0) ? (size_t)pg : 4096;
@@ -1949,10 +1944,10 @@ static int allocate_buffers_locked(wc_handle_t *h, uint32_t count) {
     return 0;
 }
 
-/* --- Staging frame read (seqlock) --- */
-/* Copies the newest staged frame into dest if it is newer than h->last_frame_seq.
- * Returns 1 on a fresh frame copied (updates bytesused, ts_ns, last_frame_seq),
- * 0 if no new frame, -1 on inconsistency after retries. */
+/* Copies the newest staged frame into dest if it is newer than h->last_frame_seq,
+ * reading the slot under its seqlock. Returns 1 on a fresh frame copied (updates
+ * bytesused, ts_ns, last_frame_seq), 0 if no new frame, -1 on inconsistency
+ * after retries. */
 static int read_latest_frame(wc_handle_t *h, void *dest, uint32_t dest_cap,
                              uint32_t *bytesused, uint64_t *ts_ns) {
 #ifdef HAVE_PIPEWIRE
@@ -2002,8 +1997,7 @@ static int read_latest_frame(wc_handle_t *h, void *dest, uint32_t dest_cap,
     return -1;
 }
 
-/* Drain any pending doorbell bytes without blocking. */
-/* Discards pending wakeups. Returns 1 once the source has hung up, which is
+/* Discards pending doorbell bytes without blocking. Returns 1 once the source has hung up, which is
  * how a frame source ends (the backend closed its socket, the PipeWire stream
  * closed its doorbell): readers then get ENODEV instead of EAGAIN, so a
  * non-blocking consumer polling a hung-up fd does not spin. */
@@ -2017,8 +2011,6 @@ static int drain_doorbell(int fd) {
         return n == 0;
     }
 }
-
-/* --- ioctl emulation --- */
 
 static int is_compressed_fourcc(uint32_t fourcc) {
     return fourcc == V4L2_PIX_FMT_MJPEG || fourcc == V4L2_PIX_FMT_JPEG;
@@ -2110,7 +2102,6 @@ static int handle_dqbuf(int fd, struct v4l2_buffer *b) {
             errno = EIO;
             return -1;
         }
-        /* No fresh frame yet. */
         int nonblock = h->open_flags & O_NONBLOCK;
         int sockfd = h->fd;
         pthread_mutex_unlock(&handles_mutex);

@@ -118,7 +118,7 @@ async def stop_monitor(h: WebRTCInput, task: "asyncio.Task") -> None:
 
 
 async def main() -> None:
-    # --- armed once, idle ticks do not re-register ---
+    # Armed once; idle ticks do not re-register.
     h = make_handler()
     comp = h.wayland_input
     task = asyncio.create_task(h.start_clipboard())
@@ -135,7 +135,7 @@ async def main() -> None:
     check("idle ticks do not re-read the selection", comp.reads == 1, str(comp.reads))
     check("idle ticks do not re-send", h.sent == [("one", "text/plain")], str(h.sent))
 
-    # --- an unchanged selection handed over again is not re-broadcast ---
+    # An unchanged selection handed over again is not re-broadcast.
     comp._deliver_current()
     await asyncio.sleep(0.5)
     check("the same selection delivered again is not re-sent",
@@ -154,7 +154,7 @@ async def main() -> None:
           data == image and mime == "image/png" and comp.reads == reads_before,
           f"reads={comp.reads}")
 
-    # --- a monitor restart registers again, and the re-staged read is not re-sent ---
+    # A monitor restart registers again, and the re-staged read is not re-sent.
     await stop_monitor(h, task)
     check("monitor loop stops", h._clipboard_monitor_active is False)
     task = asyncio.create_task(h.start_clipboard())
@@ -164,7 +164,7 @@ async def main() -> None:
           len(h.sent) == 2, str(len(h.sent)))
     await stop_monitor(h, task)
 
-    # --- the backend not up yet: retried per tick, said once ---
+    # The backend not up yet: retried per tick, said once.
     h = make_handler()
     comp = h.wayland_input
     comp.arm_error = "wayland backend not running"
