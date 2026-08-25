@@ -7,13 +7,13 @@
  * it encodes the camera in real time: a frame offered to a busy encoder is
  * dropped rather than queued, so an engine that cannot keep up spends a core
  * and sends a fraction of the camera, and the share dropped is what moves the
- * uplink down the ladder (lib/encode-pace.js). Past the last codec -- and on
- * engines with no WebCodecs at all -- it encodes JPEG frames from a canvas,
- * which the server passes on as an MJPEG device or decodes just the same:
- * more bytes on the wire, but the camera's own rate, which is what a browser
- * whose software encoder cannot reach it needs. The WebRTC transport does not use this
- * class: it attaches the camera track to a sendonly transceiver
- * (lib/webrtc.js `setWebcam`) and the browser's own encoder takes over.
+ * uplink down the ladder (`createEncodePace`). Past the last codec, and on
+ * engines with no WebCodecs or no frame source but a `<video>` element, it
+ * encodes JPEG frames from a canvas, which the server passes on as an MJPEG
+ * device or decodes just the same: more bytes on the wire at the camera's
+ * own rate. The WebRTC transport does not use this class: it attaches the
+ * camera track to a sendonly transceiver (lib/webrtc.js `setWebcam`) and the
+ * browser's own encoder takes over.
  *
  * Frame orientation: the upright transform is relayed with every encoded
  * frame instead of being drawn into the pixels. It is read from VideoFrame
@@ -27,10 +27,10 @@
  * offers: MediaStreamTrackProcessor on the page (Chromium), the standard
  * worker-only MediaStreamTrackProcessor with the track transferred into a
  * DedicatedWorker (Safari 18+), and a `<video>` element sampled with
- * requestVideoFrameCallback into VideoFrames (Firefox and anything else). The
- * last rung encodes like the others: it delivers the camera's own rate, and
- * the worker drops an input frame rather than queue it when the encoder is
- * behind, so no encoder drifts behind real time.
+ * requestVideoFrameCallback (Firefox and anything else). The last rung pins
+ * the JPEG path: every sample is materialized on the page thread, and a
+ * software VideoEncoder fed that way drifts behind real time where a native
+ * JPEG encode holds the camera's rate.
  *
  * Encoding runs off the page thread when the engine allows: the encode
  * worker is opened first, and an engine that transfers the camera track into
@@ -40,8 +40,6 @@
  * feeds a page-thread encoder through the same source paths.
  * @module
  */
-
-import { PACE_BEHIND_RATIO, PACE_MIN_SAMPLES, createEncodePace } from "./encode-pace.js";
 
 /** Codec id of independent JPEG frames, as the server's webcam module numbers them. */
 export const WEBCAM_CODEC_MJPEG = 0;
@@ -81,9 +79,57 @@ const KEYFRAME_INTERVAL_MS = 4000;
  */
 const FRAME_CREDIT_INTERVALS = 2;
 
+/** Frames the encode pace is measured over before it can be believed. */
+export const PACE_MIN_SAMPLES = 60;
+/** Share of offered frames the encoder may drop before it counts as too slow. */
+export const PACE_BEHIND_RATIO = 1 / 6;
+
 /**
- * Closes a VideoFrame; the `<video>` element the no-WebCodecs path hands
- * over has nothing to close.
+ * Whether the encoder keeps up with the camera. A frame offered to a busy
+ * encoder is dropped rather than queued, so the share dropped, measured on
+ * live camera frames, is the signal that a codec is too slow.
+ * @returns {{note: function(boolean): void, tooSlow: function(): boolean,
+ *   behindRatio: function(): number, reset: function(): void}}
+ */
+export function createEncodePace() {
+  let offered = 0;
+  let behind = 0;
+  return {
+    /**
+     * Records one frame offered to the encoder.
+     * @param {boolean} wasBehind Whether it was dropped for a busy encoder.
+     */
+    note(wasBehind) {
+      offered++;
+      if (wasBehind) behind++;
+    },
+    /**
+     * Whether the encoder fell behind over a whole window; true starts a
+     * fresh window so the next codec is measured alone.
+     * @returns {boolean}
+     */
+    tooSlow() {
+      if (offered < PACE_MIN_SAMPLES) return false;
+      const slow = behind / offered > PACE_BEHIND_RATIO;
+      offered = 0;
+      behind = 0;
+      return slow;
+    },
+    /** @returns {number} Share of frames dropped so far in this window. */
+    behindRatio() {
+      return offered ? behind / offered : 0;
+    },
+    /** Starts a fresh window. */
+    reset() {
+      offered = 0;
+      behind = 0;
+    },
+  };
+}
+
+/**
+ * Closes a VideoFrame; the `<video>` element the pinned JPEG rung hands over
+ * has nothing to close.
  * @param {VideoFrame|HTMLVideoElement} frame
  */
 const closeFrame = (frame) => {
@@ -194,7 +240,7 @@ let probing = false, probeFrames = [], probeTimer = null;
 let fps = 30, bitrate = 2500000, encodedSize = null, forceKeyframe = true, lastKeyframeMs = 0;
 let trackReader = null, trackRef = null;
 // Frames offered to the encoder in this window and those it was too busy to
-// take; see lib/encode-pace.js for why the share is the signal.
+// take; see createEncodePace for why the share is the signal.
 let paceOffered = 0, paceBehind = 0;
 // The upright transform every chunk is stamped with, and the one the encoder
 // latched: they differ where the page derives what the frames do not carry, and
@@ -459,6 +505,7 @@ export class WebcamCapture {
     this._active = false;
     this._generation = 0;
     this._encodeWorker = null;
+    this._settleEncodeWorker = null;
     this._workerIsSource = false;
     this._encoderCodecName = null;
   }
@@ -743,7 +790,14 @@ export class WebcamCapture {
     }
     return new Promise((resolve) => {
       let settled = false;
-      const done = () => { if (!settled) { settled = true; resolve(); } };
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        if (this._settleEncodeWorker === settle) this._settleEncodeWorker = null;
+        resolve();
+      };
+      // Lets _stopEncodeWorker resolve a probe still being awaited.
+      const settle = () => { clearTimeout(timer); done(); };
       const drop = (why) => {
         console.warn("[Webcam] encode-worker unavailable, encoding on the page:", why);
         const wasSource = this._workerIsSource;
@@ -811,6 +865,7 @@ export class WebcamCapture {
       };
       worker.onerror = (ev) => { clearTimeout(timer); drop("worker.onerror: " + (ev && ev.message)); };
       this._encodeWorker = worker;
+      this._settleEncodeWorker = settle;
       try {
         worker.postMessage({ type: "probe", width: this.width, height: this.height, fps: this.fps, bitrate: this.bitrate });
       } catch (error) {
@@ -858,15 +913,19 @@ export class WebcamCapture {
     }
   }
 
-  /** Tears down the encode worker (idempotent); the page-thread encoder takes over. */
+  /** Tears down the encode worker and settles a pending probe; idempotent. */
   _stopEncodeWorker() {
     const worker = this._encodeWorker;
+    const settle = this._settleEncodeWorker;
     this._encodeWorker = null;
+    this._settleEncodeWorker = null;
     this._workerIsSource = false;
     if (worker) {
+      worker.onmessage = null;
       try { worker.postMessage({ type: "stop" }); } catch (e) { /* ignore */ }
       setTimeout(() => { try { worker.terminate(); } catch (e) { /* ignore */ } }, 100);
     }
+    if (settle) settle();
   }
 
   /**
@@ -895,7 +954,10 @@ export class WebcamCapture {
       this._logPath("capture: MediaStreamTrackProcessor in a worker");
       return worker;
     }
-    this._logPath("capture: <video> element sampled with requestVideoFrameCallback");
+    this._stopEncodeWorker();
+    this._candidateIndex = ENCODER_CANDIDATES.length;
+    this._encoderCodecName = "mjpeg";
+    this._logPath("capture: <video> element sampled with requestVideoFrameCallback (JPEG)");
     return this._videoSource(track, generation);
   }
 
@@ -1021,9 +1083,8 @@ export class WebcamCapture {
   /**
    * A `<video>` element sampled with requestVideoFrameCallback (or a timer
    * without it); the element must stay in the DOM, visually inert, or engines
-   * stop decoding for it. Each sample becomes a VideoFrame the encoder takes,
-   * through a canvas on an engine that refuses the element as a frame source;
-   * with no WebCodecs at all the element itself is handed to the JPEG rung.
+   * stop decoding for it. The element itself is handed to the pinned JPEG
+   * rung, whose drawImage bakes in any orientation the engine knows.
    * @param {MediaStreamTrack} track
    * @param {number} generation
    * @returns {{close: function(): void}}
@@ -1038,40 +1099,12 @@ export class WebcamCapture {
     video.srcObject = new MediaStream([track]);
     let handle = null;
     let timer = null;
-    let canvas = null;
-    let ctx = null;
     const sample = () => {
       if (this._generation !== generation) {
         return;
       }
-      if (video.readyState >= 2 && video.videoWidth > 0 && typeof VideoFrame === "undefined") {
-        // No WebCodecs at all: the JPEG rung draws the element itself.
+      if (video.readyState >= 2 && video.videoWidth > 0) {
         this._handleFrame(video);
-      } else if (video.readyState >= 2 && video.videoWidth > 0) {
-        let frame = null;
-        const timestamp = Math.round(performance.now() * 1000);
-        try {
-          frame = new VideoFrame(video, { timestamp });
-        } catch (error) {
-          // Engines that reject <video> as a VideoFrame source go through a canvas.
-          if (!canvas) {
-            canvas = document.createElement("canvas");
-            ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
-          }
-          if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-          }
-          try {
-            ctx.drawImage(video, 0, 0);
-            frame = new VideoFrame(canvas, { timestamp });
-          } catch (e) {
-            frame = null;
-          }
-        }
-        if (frame) {
-          this._handleFrame(frame);
-        }
       }
       if (video.requestVideoFrameCallback) {
         handle = video.requestVideoFrameCallback(sample);
@@ -1101,9 +1134,8 @@ export class WebcamCapture {
    * method now owns, or the `<video>` element on the pinned JPEG rung. A
    * frame is always closed. Frames arriving faster than `fps` or while
    * `canSend` refuses are dropped. With an encode worker the frame is
-   * transferred to it, zero-copy; the worker only takes VideoFrames, so a
-   * `<video>`-element frame or a dead worker throws and encoding drops back
-   * to this thread from then on. On the page-thread encoder a changed size
+   * transferred to it, zero-copy; a dead worker throws and encoding drops
+   * back to this thread from then on. On the page-thread encoder a changed size
    * or orientation rebuilds the encoder, since a VideoEncoder latches the
    * orientation of its first frame and rejects any other; one rebuild runs
    * at a time and frames racing it are dropped, never queued.

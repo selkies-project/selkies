@@ -15,7 +15,7 @@ import {
     createEncodePace,
     PACE_BEHIND_RATIO,
     PACE_MIN_SAMPLES,
-} from '../../addons/selkies-web-core/lib/encode-pace.js';
+} from '../../addons/selkies-web-core/lib/webcam-capture.js';
 
 let failed = 0;
 
