@@ -3,22 +3,29 @@
 dashboard's pipeline control, must come out of the virtual V4L2 device on the
 server — over the WebSocket (WebCodecs frames) and over WebRTC (the camera
 track on the reserved sendonly transceiver) — and switch off again. Chromium
-captures a known-colour y4m file as its fake camera, so the device's pixels
-are checked, not just their presence; Firefox's synthetic fake camera proves
-the `<video>` source (it has no ``MediaStreamTrackProcessor``, so its frames
-are sampled from an element and encoded by the codec the worker measured) and
-the Firefox WebRTC path deliver frames.
+Both engines capture the same camera: pixelflux's ``VirtualCamera`` published
+through the interposer, so the device's pixels are checked rather than just
+their presence and neither engine is measured on content the other never sees.
+Which codec an engine settles on is left to what it measured it could sustain
+and is never asserted -- that moves with the browser -- while the camera
+reaching the device at its own rate has to hold whatever was chosen.
 The operator lock (``webcam_enabled=false|locked``) must withhold the uplink
 on both transports.
 
     python3 tests/e2e/test_webcam.py websockets|webrtc|locked
 """
+import io
 import os
+import random
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Optional
+
+import pixelflux
+from PIL import Image, ImageChops, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -32,10 +39,6 @@ ADDON = os.path.join(ROOT, "addons", "v4l2-interposer")
 TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
 INTERPOSER = os.path.join(ADDON, "selkies_v4l2_interposer.so")
 PROBE = os.path.join(TOOLS, "v4l2probe")
-
-# The I420 samples the fake camera's y4m carries; the camera is limited-range
-# video, so they travel unchanged and the encoders land within a few steps.
-GREEN = (150, 44, 21)
 
 CAM_JS = """
   window.__camStatus = [];
@@ -54,35 +57,114 @@ def build() -> None:
     subprocess.run(["make", "-C", TOOLS, "v4l2probe"], check=True, stdout=subprocess.DEVNULL)
 
 
-def green_y4m(path: str, width: int = 640, height: int = 480, frames: int = 30) -> None:
-    """A solid green I420 y4m clip for Chromium's --use-file-for-fake-video-capture."""
-    y = bytes([150]) * (width * height)
-    u = bytes([44]) * (width * height // 4)
-    v = bytes([21]) * (width * height // 4)
-    with open(path, "wb") as f:
-        f.write(f"YUV4MPEG2 W{width} H{height} F30:1 Ip A1:1 C420jpeg\n".encode())
-        for _ in range(frames):
-            f.write(b"FRAME\n" + y + u + v)
+# Camera content is authored in YCbCr, which is what the device carries and what
+# the samples below are checked against; a JPEG round trip leaves a flat colour
+# where it started, so the published pixels and the device's are the same ones.
+GREEN = (150, 44, 21)
+BLACK = (16, 128, 128)
 
-
-# Two flat halves in one I420 frame: a turn relayed on the wire has to swap them
-# in the device picture, which a solid clip could never show.
+# Two flat halves in one frame: a turn relayed on the wire has to swap them in
+# the device picture, which a solid frame could never show.
 LEFT_HALF = (150, 44, 21)
 RIGHT_HALF = (80, 200, 120)
 
+# The rate the camera publishes at, and the share of it the device must carry.
+# Whichever rung the client's ladder settled on has to sustain the camera; one
+# that cannot is the failure this guards, and detailed content -- where the
+# choice is a real one -- is held to more.
+CAMERA_FPS = 30
+RATE_FLOOR = 0.4
+DETAIL_RATE_FLOOR = 0.6
 
-def split_y4m(path: str, width: int = 640, height: int = 480, frames: int = 30) -> None:
-    """A y4m split down the middle, for Chromium's --use-file-for-fake-video-capture."""
-    def row(values, count):
-        half = count // 2
-        return bytes([values[0]]) * half + bytes([values[1]]) * (count - half)
-    y = row((LEFT_HALF[0], RIGHT_HALF[0]), width) * height
-    u = row((LEFT_HALF[1], RIGHT_HALF[1]), width // 2) * (height // 2)
-    v = row((LEFT_HALF[2], RIGHT_HALF[2]), width // 2) * (height // 2)
-    with open(path, "wb") as f:
-        f.write(f"YUV4MPEG2 W{width} H{height} F30:1 Ip A1:1 C420jpeg\n".encode())
-        for _ in range(frames):
-            f.write(b"FRAME\n" + y + u + v)
+
+def encode(im: "Image.Image") -> bytes:
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=92, subsampling=0)
+    return buf.getvalue()
+
+
+def flat_frames(colour=GREEN, width: int = 640, height: int = 480):
+    return [encode(Image.new("YCbCr", (width, height), colour))]
+
+
+def split_frames(width: int = 640, height: int = 480):
+    """A frame split down the middle, for the rotation checks."""
+    im = Image.new("YCbCr", (width, height), LEFT_HALF)
+    ImageDraw.Draw(im).rectangle([width // 2, 0, width, height], fill=RIGHT_HALF)
+    return [encode(im)]
+
+
+def detail_frames(width: int = 1280, height: int = 720, count: int = 24):
+    """A detailed scene that pans under moving grain: what an HD lens costs an
+    encoder. Flat or repeating content is encoded almost for free and would rank
+    every codec as fast enough, which is the measurement error this exists to
+    keep out of the codec decision."""
+    rnd = random.Random(7)
+    scene = Image.new("YCbCr", (width * 2, height), (90, 128, 128))
+    draw = ImageDraw.Draw(scene)
+    for _ in range(900):
+        x, y = rnd.randrange(scene.width), rnd.randrange(height)
+        w, h = rnd.randrange(6, 80), rnd.randrange(6, 80)
+        draw.rectangle([x, y, x + w, y + h],
+                       fill=(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)))
+    grain = Image.frombytes("L", (width * 2, height), os.urandom(width * 2 * height))
+    out = []
+    for i in range(count):
+        off = int(i * width / count)
+        frame = scene.crop((off, 0, off + width, height))
+        speck = grain.crop((width - off, 0, 2 * width - off, height)).point(lambda v: v // 8)
+        luma, cb, cr = frame.split()
+        out.append(encode(Image.merge("YCbCr", (ImageChops.add(luma, speck), cb, cr))))
+    return out
+
+
+class PublishedCamera:
+    """The camera both engines capture. pixelflux's VirtualCamera publishes the
+    frames through the interposer, so Firefox and Chromium read the same pixels
+    at the same rate rather than each engine's own synthetic fake, and what the
+    camera is showing is the test's to choose."""
+
+    def __init__(self, frames, width: int = 640, height: int = 480, fps: int = CAMERA_FPS,
+                 pixel_format: str = "I420"):
+        self.frames, self.width, self.height, self.fps = frames, width, height, fps
+        self.pixel_format = pixel_format
+        self.sock_dir = tempfile.mkdtemp(prefix="selkies-cam-")
+        self._cam = None
+        self._stop = threading.Event()
+
+    def start(self) -> "PublishedCamera":
+        settings = pixelflux.VirtualCameraSettings()
+        settings.socket_path = os.path.join(self.sock_dir, "selkies_webcam0.sock")
+        settings.width, settings.height = self.width, self.height
+        settings.pixel_format = self.pixel_format
+        settings.device_path = ""
+        # Reachable only over its own socket, which is the browser's to read: a
+        # PipeWire node would also be found by the probe and the device under
+        # test would then be this camera rather than the server's.
+        settings.pipewire = False
+        self._cam = pixelflux.VirtualCamera()
+        self._cam.start(settings)
+        threading.Thread(target=self._pump, daemon=True).start()
+        time.sleep(0.5)
+        return self
+
+    def _pump(self) -> None:
+        i = 0
+        while not self._stop.is_set():
+            try:
+                self._cam.push(self.frames[i % len(self.frames)],
+                               pixelflux.VirtualCamera.CODEC_MJPEG, True)
+            except Exception:
+                return
+            i += 1
+            time.sleep(1.0 / self.fps)
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            self._cam.stop()
+        except Exception:
+            pass
 
 
 # A half turn stamped onto every uplink frame's flags byte, which is what a client
@@ -153,8 +235,35 @@ def start_reader() -> subprocess.Popen:
                             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def near(got, want, tol=12) -> bool:
+# The picture reaches the device through whichever codec the engine chose, so a
+# flat colour arrives a few steps off and how many depends on that choice. The
+# colours checked against each other are tens of steps apart, so a tolerance
+# wide enough for any of those round trips still tells them apart.
+COLOUR_TOL = 20
+
+
+def near(got, want, tol=COLOUR_TOL) -> bool:
     return got is not None and all(abs(g - w) <= tol for g, w in zip(got, want))
+
+
+def wait_for_picture(wants, frames: int = 30, timeout: float = 30) -> dict:
+    """Poll until the device shows this uplink's picture, then measure it.
+
+    A device that exists is not yet a device carrying the camera: the server
+    decodes what arrives, and the picture lands a moment after the first frame
+    does -- sooner or later depending on the engine and the rung it took. Waiting
+    on the picture rather than on a fixed delay keeps that out of the checks.
+    """
+    samples = [point for point, _ in wants]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = probe(5, timeout_ms=3000, samples=samples)
+        # Every sample, not just one: a frame caught mid-transition is a single
+        # flat colour, which one sample on its own cannot tell from the picture.
+        if r.get("rc") == 0 and all(near(r["samples"].get(point), want) for point, want in wants):
+            break
+        time.sleep(0.5)
+    return probe(frames, samples=samples)
 
 
 def toggle(page, enabled: bool) -> None:
@@ -182,11 +291,17 @@ NO_WEBCODECS_JS = """
 """
 
 
-def launch(p, engine: str, y4m: str, mode: str, init_js: Optional[str] = None):
+def launch(p, engine: str, cam_sock: str, mode: str, init_js: Optional[str] = None):
+    # Both engines capture the published camera through the interposer rather
+    # than an engine-specific fake, so what they are asked to encode is the same.
+    env = dict(os.environ, LD_PRELOAD=INTERPOSER, SELKIES_WEBCAM_SOCKET_PATH=cam_sock)
     if engine == "firefox":
         prefs = {
             "media.navigator.permission.disabled": True,
-            "media.navigator.streams.fake": True,
+            # Stated, not omitted: the persistent profile carries whatever a
+            # previous run left behind, and a fake camera persisted there would
+            # be captured instead of the published one.
+            "media.navigator.streams.fake": False,
             "media.autoplay.default": 0,
             "media.autoplay.blocking_policy": 0,
             "media.autoplay.block-webaudio": False,
@@ -197,10 +312,11 @@ def launch(p, engine: str, y4m: str, mode: str, init_js: Optional[str] = None):
             # The side-loaded OpenH264 lives in the persistent e2e profile; with it
             # Firefox plays the session's H.264 and the WebRTC uplink can be driven.
             ctx = p.firefox.launch_persistent_context(user_data_dir=TB.FF_E2E_PROFILE, headless=True,
-                                                      viewport={"width": 1280, "height": 720}, firefox_user_prefs=prefs)
+                                                      viewport={"width": 1280, "height": 720},
+                                                      firefox_user_prefs=prefs, env=env)
             browser = ctx.browser or ctx
         else:
-            kw = {"headless": True, "firefox_user_prefs": prefs}
+            kw = {"headless": True, "firefox_user_prefs": prefs, "env": env}
             if C.FIREFOX_PATH:
                 kw["executable_path"] = C.FIREFOX_PATH
             browser = p.firefox.launch(**kw)
@@ -208,8 +324,8 @@ def launch(p, engine: str, y4m: str, mode: str, init_js: Optional[str] = None):
     else:
         # The headless shell has no media capture; the full Chromium build (new
         # headless mode) or the system Chrome named by E2E_CHROME is needed.
-        args = C.BROWSER_ARGS + ["--use-fake-device-for-media-stream", f"--use-file-for-fake-video-capture={y4m}"]
-        kw = {"headless": True, "args": args}
+        args = C.BROWSER_ARGS + ["--use-fake-ui-for-media-stream"]
+        kw = {"headless": True, "args": args, "env": env}
         if C.CHROME_PATH:
             kw["executable_path"] = C.CHROME_PATH
         else:
@@ -242,13 +358,12 @@ def nowebcodecs_block() -> "H.Results":
     JPEG, the camera goes up the JPEG rung, and the server's default device format
     follows that uplink into an MJPEG device whose frames carry the camera picture."""
     res = H.Results("webcam-nowebcodecs")
-    y4m = os.path.join(tempfile.mkdtemp(prefix="selkies-cam-"), "green.y4m")
-    green_y4m(y4m)
-    dump = os.path.join(os.path.dirname(y4m), "frame.jpg")
+    cam = PublishedCamera(flat_frames()).start()
+    dump = os.path.join(cam.sock_dir, "frame.jpg")
     H.server_start(mode="websockets", wayland=False, extra_env={"SELKIES_WEBCAM_ENABLED": "false"})
     try:
         with sync_playwright() as p:
-            browser, page, errors = launch(p, "chromium", y4m, "websockets", init_js=NO_WEBCODECS_JS)
+            browser, page, errors = launch(p, "chromium", cam.sock_dir, "websockets", init_js=NO_WEBCODECS_JS)
             logs = []
             page.on("console", lambda m: logs.append(m.text) if "[Webcam]" in m.text else None)
             video = C.wait_ws_video(page, timeout=30)
@@ -279,18 +394,24 @@ def nowebcodecs_block() -> "H.Results":
             browser.close()
     finally:
         H.server_stop()
+        cam.stop()
     return res
 
 
 def transport_block(mode: str) -> "H.Results":
     res = H.Results(f"webcam-{mode}")
-    y4m = os.path.join(tempfile.mkdtemp(prefix="selkies-cam-"), "green.y4m")
-    green_y4m(y4m)
-    H.server_start(mode=mode, wayland=False, extra_env={"SELKIES_WEBCAM_ENABLED": "false"})
+    cam = PublishedCamera(flat_frames()).start()
+    # I420 whatever the client sends: the device's format follows the uplink by
+    # default, which would make the picture readable only on some rungs, and
+    # which rung an engine takes is not this suite's to fix. The reformat
+    # selector is where that default is exercised.
+    H.server_start(mode=mode, wayland=False,
+                   extra_env={"SELKIES_WEBCAM_ENABLED": "false",
+                              "SELKIES_WEBCAM_PIXEL_FORMAT": "I420"})
     try:
         for engine in ("chromium", "firefox"):
             with sync_playwright() as p:
-                browser, page, errors = launch(p, engine, y4m, mode)
+                browser, page, errors = launch(p, engine, cam.sock_dir, mode)
                 video = C.wait_ws_video(page) if mode == "websockets" else C.wait_wr_video(page)
                 if not video and engine == "firefox" and mode == "webrtc":
                     # Playwright's Firefox ships no OpenH264, so the session's H.264
@@ -303,24 +424,29 @@ def transport_block(mode: str) -> "H.Results":
                 res.check(f"{engine}: webcam reports active", wait_status(page, True), str(page.evaluate("window.__camStatus")))
                 # The server brings the camera up on the first frame; give it a moment
                 # to appear before the measured capture.
-                deadline = time.time() + 20
-                while time.time() < deadline and probe(2, timeout_ms=1500).get("rc") != 0:
-                    time.sleep(0.5)
-                r = probe(30, samples=[(640, 360), (20, 20)])
+                r = wait_for_picture([((640, 360), GREEN), ((20, 20), BLACK)])
                 res.check(f"{engine}: 30 frames reach /dev/video0", r.get("rc") == 0 and r.get("frames") == "30",
                           f"rc={r.get('rc')} frames={r.get('frames')} err={r.get('error', '')}")
-                # The process-wide camera came up I420 on chromium's encoded uplink
-                # and outlives it; firefox's WebSocket leg is decoded into the same
-                # device, whichever codec its encode worker measured as keeping up.
+                # The process-wide camera outlives whichever uplink brought it up and
+                # is decoded into the same device on either transport, whatever rung
+                # the client's encoder ladder settled on.
                 res.check(f"{engine}: device is the configured 1280x720 I420",
                           (r.get("format"), r.get("width"), r.get("height")) == ("YU12", "1280", "720"),
                           f"{r.get('format')} {r.get('width')}x{r.get('height')}")
-                res.check(f"{engine}: frames flow at camera rate", float(r.get("fps", "0")) >= 12, r.get("fps"))
-                if engine == "chromium":
-                    # The 4:3 green camera sits pillarboxed in the 16:9 device: picture
-                    # centre green, the strip at x=20 black.
-                    res.check("chromium: centre is the fake camera's green", near(r["samples"].get((640, 360)), GREEN), str(r["samples"]))
-                    res.check("chromium: pillarbox is black", near(r["samples"].get((20, 20)), (16, 128, 128)), str(r["samples"]))
+                # Deliberately not a check on which codec was chosen: that follows
+                # what the engine measured it could sustain and moves with the
+                # browser. What has to hold either way is that the device carries
+                # the camera.
+                res.check(f"{engine}: frames flow at the camera's rate",
+                          float(r.get("fps", "0")) >= CAMERA_FPS * RATE_FLOOR,
+                          f"{r.get('fps')} of {CAMERA_FPS}")
+                # Both engines capture the same published camera, so both are held to
+                # its pixels: the 4:3 picture sits pillarboxed in the 16:9 device,
+                # centre green and the bar at x=20 black.
+                res.check(f"{engine}: centre is the camera's green",
+                          near(r["samples"].get((640, 360)), GREEN), str(r["samples"]))
+                res.check(f"{engine}: pillarbox is black",
+                          near(r["samples"].get((20, 20)), (16, 128, 128)), str(r["samples"]))
                 toggle(page, False)
                 res.check(f"{engine}: webcam reports inactive", wait_status(page, False), str(page.evaluate("window.__camStatus")))
                 # Frames already in flight (RTP jitter buffer, decoder queue) land for a
@@ -332,18 +458,18 @@ def transport_block(mode: str) -> "H.Results":
                 browser.close()
     finally:
         H.server_stop()
+        cam.stop()
     return res
 
 
 def locked_block() -> "H.Results":
     res = H.Results("webcam-locked")
-    y4m = os.path.join(tempfile.mkdtemp(prefix="selkies-cam-"), "green.y4m")
-    green_y4m(y4m)
+    cam = PublishedCamera(flat_frames()).start()
     for mode in ("websockets", "webrtc"):
         H.server_start(mode=mode, wayland=False, extra_env={"SELKIES_WEBCAM_ENABLED": "false|locked"})
         try:
             with sync_playwright() as p:
-                browser, page, _ = launch(p, "chromium", y4m, mode)
+                browser, page, _ = launch(p, "chromium", cam.sock_dir, mode)
                 video = C.wait_ws_video(page) if mode == "websockets" else C.wait_wr_video(page)
                 res.check(f"{mode}: stream up", bool(video))
                 toggle(page, True)
@@ -366,23 +492,21 @@ def rotation_block() -> "H.Results":
     without a half turn must come out of /dev/video0 mirrored against each other.
     """
     res = H.Results("webcam-rotation")
-    y4m = os.path.join(tempfile.mkdtemp(prefix="selkies-cam-"), "split.y4m")
-    split_y4m(y4m)
-    # Well inside each half of the 4:3 picture as it sits pillarboxed in the device.
+    cam = PublishedCamera(split_frames()).start()
+    # Well inside each half of the 4:3 picture as the server letterboxes it.
     left_at, right_at = (400, 360), (880, 360)
-    H.server_start(mode="websockets", wayland=False, extra_env={"SELKIES_WEBCAM_ENABLED": "false"})
+    H.server_start(mode="websockets", wayland=False,
+                   extra_env={"SELKIES_WEBCAM_ENABLED": "false",
+                              "SELKIES_WEBCAM_PIXEL_FORMAT": "I420"})
     try:
         for label, init_js, want in (("upright", None, (LEFT_HALF, RIGHT_HALF)),
                                      ("half turn", HALF_TURN_JS, (RIGHT_HALF, LEFT_HALF))):
             with sync_playwright() as p:
-                browser, page, errors = launch(p, "chromium", y4m, "websockets", init_js=init_js)
+                browser, page, errors = launch(p, "chromium", cam.sock_dir, "websockets", init_js=init_js)
                 res.check(f"{label}: stream up", bool(C.wait_ws_video(page)))
                 toggle(page, True)
                 res.check(f"{label}: webcam reports active", wait_status(page, True))
-                deadline = time.time() + 20
-                while time.time() < deadline and probe(2, timeout_ms=1500).get("rc") != 0:
-                    time.sleep(0.5)
-                r = probe(30, samples=[left_at, right_at])
+                r = wait_for_picture([(left_at, want[0]), (right_at, want[1])])
                 res.check(f"{label}: frames reach /dev/video0", r.get("rc") == 0, str(r.get("error", "")))
                 res.check(f"{label}: left of the device picture", near(r["samples"].get(left_at), want[0]),
                           f"{r['samples'].get(left_at)} want {want[0]}")
@@ -395,6 +519,7 @@ def rotation_block() -> "H.Results":
                 time.sleep(1.5)
     finally:
         H.server_stop()
+        cam.stop()
     return res
 
 
@@ -408,13 +533,12 @@ def reformat_block() -> "H.Results":
     interposer client proves by keeping the device exactly as it was.
     """
     res = H.Results("webcam-reformat")
-    y4m = os.path.join(tempfile.mkdtemp(prefix="selkies-cam-"), "green.y4m")
-    green_y4m(y4m)
+    cam = PublishedCamera(flat_frames()).start()
     H.server_start(mode="websockets", wayland=False, extra_env={"SELKIES_WEBCAM_ENABLED": "false"})
     reader = None
     try:
         with sync_playwright() as p:
-            browser, page, _errors = launch(p, "chromium", y4m, "websockets")
+            browser, page, _errors = launch(p, "chromium", cam.sock_dir, "websockets")
             C.wait_ws_video(page, timeout=30)
             toggle(page, True)
             wait_status(page, True)
@@ -425,7 +549,7 @@ def reformat_block() -> "H.Results":
         # under it, whatever the next uplink would prefer.
         reader = start_reader()
         with sync_playwright() as p:
-            browser, page, _errors = launch(p, "chromium", y4m, "websockets", init_js=NO_WEBCODECS_JS)
+            browser, page, _errors = launch(p, "chromium", cam.sock_dir, "websockets", init_js=NO_WEBCODECS_JS)
             C.wait_ws_video(page, timeout=30)
             toggle(page, True)
             wait_status(page, True)
@@ -448,6 +572,43 @@ def reformat_block() -> "H.Results":
     return res
 
 
+def detail_block() -> "H.Results":
+    """An HD camera showing real detail, which is where the encoder ladder makes
+    a decision it can get wrong. Whichever rung an engine settles on has to carry
+    the camera at close to its own rate: a codec the engine cannot sustain spends
+    a core to deliver a fraction of the frames, and the device shows it. Nothing
+    here asserts which rung was taken, so an engine whose codecs get faster keeps
+    passing on the rung it earns."""
+    res = H.Results("webcam-detail")
+    cam = PublishedCamera(detail_frames(), width=1280, height=720).start()
+    H.server_start(mode="websockets", wayland=False, extra_env={"SELKIES_WEBCAM_ENABLED": "false"})
+    try:
+        for engine in ("chromium", "firefox"):
+            with sync_playwright() as p:
+                browser, page, errors = launch(p, engine, cam.sock_dir, "websockets")
+                res.check(f"{engine}: stream up", bool(C.wait_ws_video(page)), "")
+                toggle(page, True)
+                res.check(f"{engine}: webcam reports active", wait_status(page, True),
+                          str(page.evaluate("window.__camStatus")))
+                deadline = time.time() + 30
+                while time.time() < deadline and probe(2, timeout_ms=1500).get("rc") != 0:
+                    time.sleep(0.5)
+                r = probe(60, timeout_ms=8000)
+                res.check(f"{engine}: the detailed camera reaches the device",
+                          r.get("rc") == 0 and r.get("frames") == "60",
+                          f"rc={r.get('rc')} frames={r.get('frames')} err={r.get('error', '')}")
+                res.check(f"{engine}: the chosen rung sustains the camera",
+                          float(r.get("fps", "0")) >= CAMERA_FPS * DETAIL_RATE_FLOOR,
+                          f"{r.get('fps')} of {CAMERA_FPS}")
+                res.check(f"{engine}: no page errors", not errors, "; ".join(errors)[:200])
+                toggle(page, False)
+                browser.close()
+    finally:
+        H.server_stop()
+        cam.stop()
+    return res
+
+
 def main() -> int:
     sel = sys.argv[1] if len(sys.argv) > 1 else "websockets"
     build()
@@ -459,6 +620,8 @@ def main() -> int:
         ok = nowebcodecs_block().summary()
     elif sel == "reformat":
         ok = reformat_block().summary()
+    elif sel == "detail":
+        ok = detail_block().summary()
     else:
         ok = transport_block(sel).summary()
     return 0 if ok else 1

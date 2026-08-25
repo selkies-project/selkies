@@ -120,7 +120,7 @@ SUITES: list = [
     {"path": "e2e/test_software_h264.py", "tier": "e2e", "timeout": 600,
      "selectors": ["x11", "wl"]},
     {"path": "e2e/test_webcam.py", "tier": "e2e", "timeout": 900,
-     "selectors": ["websockets", "webrtc", "locked", "nowebcodecs", "rotation", "reformat"]},
+     "selectors": ["websockets", "webrtc", "locked", "nowebcodecs", "rotation", "reformat", "detail"]},
     {"path": "e2e/test_microphone.py", "tier": "e2e", "timeout": 600,
      "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_core_parity.py", "tier": "e2e", "timeout": 900,
