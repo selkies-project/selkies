@@ -22,17 +22,11 @@ import time
 from typing import Optional
 
 CHUNK = 65536
-# Sub-chunk quantum for bucket grabs: one 64 KiB atomic grab at single-digit
-# Mbit/s holds the modeled link for tens of milliseconds, which a real
-# packet-granular link never does to a small frame beside a bulk flow.
+# Bucket grab quantum: one atomic 64 KiB grab at single-digit Mbit/s would hold
+# the link for tens of milliseconds, which a packet-granular link never does.
 GRAIN = 8192
-# Locked receive buffer toward the target: with the kernel's autotuned rmem
-# (megabytes on loopback) the standing queue behind the bucket hides inside
-# this socket and no sender-side congestion gauge can see it for tens of
-# seconds. A real bottleneck queues in the PATH, so the model bounds it.
-# BWRELAY_RCVBUF sizes that modeled queue: a metered first hop with a fat
-# buffer holds seconds of data, which is what turns a bulk transfer into
-# input lag for everything sharing the direction.
+# Locked rather than the kernel's autotuned rmem (megabytes on loopback), which
+# would hide the standing queue where no sender-side congestion gauge sees it.
 TARGET_RCVBUF = int(os.environ.get("BWRELAY_RCVBUF", 128 * 1024))
 
 
@@ -57,17 +51,19 @@ class Bucket:
         self.ts = now
 
     async def take(self, n: int) -> None:
+        """Debit `n` bytes, sleeping off any deficit while holding the gate.
+
+        The deficit is repaid by the next top-up's elapsed-time refill; zeroing
+        it after the sleep would credit the slept interval twice (double the
+        delivered rate) and park the balance at `<= 0`, where a concurrent small
+        take never sees tokens > 0.
+        """
         async with self._gate:
             while True:
                 self._topup()
                 if self.tokens >= n or (self.tokens > 0 and n <= self.cap):
                     self.tokens -= n
                     if self.tokens < 0:
-                        # The deficit is slept off here and repaid by the next
-                        # _topup's elapsed-time refill; zeroing it after the
-                        # sleep would credit the slept interval twice (double
-                        # the delivered rate) and park the balance at <= 0,
-                        # where a concurrent small take never sees tokens > 0.
                         await asyncio.sleep(-self.tokens / self.rate)
                     return
                 await asyncio.sleep(min((n - self.tokens) / self.rate, 0.01))
@@ -137,9 +133,8 @@ async def handle(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter,
         return
 
     if up is not None:
-        # Bound the client-facing receive buffer like the target-facing one:
-        # an uplink's standing queue must stand in the modeled path, not hide
-        # in an autotuned relay buffer the sender never feels.
+        # Bounded like the target-facing socket, so the uplink's standing queue
+        # stands in the modeled path rather than in an autotuned relay buffer.
         csock = client_w.get_extra_info("socket")
         if csock is not None:
             csock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, TARGET_RCVBUF)
@@ -181,9 +176,6 @@ async def main(listen_port: int, target_port: int, rate_kbit: int,
                   f"total={now/1e6:.1f} MB{up_part}", flush=True)
             last, up_last = now, up_now
 
-    # One queue per direction across ALL connections: the relay is the
-    # bottleneck link itself, so every byte of a direction waits in the same
-    # line for the same allowance.
     down = Link(rate_bps, TARGET_RCVBUF, stats)
     down.start()
     up = None

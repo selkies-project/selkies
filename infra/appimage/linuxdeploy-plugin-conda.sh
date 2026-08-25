@@ -43,6 +43,18 @@ PYTHON_VERSION="${CONDA_PYTHON_VERSION:-}"
 REQUIREMENTS="${PIP_REQUIREMENTS:-}"
 unset CONDA_CHANNELS CONDA_PACKAGES CONDA_PYTHON_VERSION PIP_REQUIREMENTS
 
+# Retry every remote fetch below. The two solvers want the same settings under
+# different prefixes: mamba reads MAMBA_* and leaves its defaults alone when
+# only CONDA_* is set, so both names are exported rather than one. mamba's own
+# defaults are already 3 retries with a backoff factor of 3, so the factor is
+# matched rather than lowered. These are not the CONDA_* names cleared above --
+# those are this plugin's own inputs, which conda would misread as its config.
+export MAMBA_REMOTE_MAX_RETRIES="5" MAMBA_REMOTE_BACKOFF_FACTOR="3" \
+    MAMBA_REMOTE_CONNECT_TIMEOUT_SECS="30"
+export CONDA_REMOTE_MAX_RETRIES="5" CONDA_REMOTE_BACKOFF_FACTOR="3" \
+    CONDA_REMOTE_CONNECT_TIMEOUT_SECS="30" CONDA_REMOTE_READ_TIMEOUT_SECS="120"
+export PIP_RETRIES="5" PIP_TIMEOUT="60"
+
 mkdir -p "${DOWNLOAD_DIR}" "${APPDIR}"
 # Miniforge names its installers after `uname -m`
 INSTALLER="Miniforge3-Linux-${ARCH}.sh"
@@ -55,7 +67,7 @@ if [ -x "${HERE}/fetch.sh" ]; then
         "https://github.com/conda-forge/miniforge/releases/latest/download/${INSTALLER}" \
         "${DOWNLOAD_DIR}/${INSTALLER}"
 else
-    curl -fsSL -o "${DOWNLOAD_DIR}/${INSTALLER}" \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 -o "${DOWNLOAD_DIR}/${INSTALLER}" \
         "https://github.com/conda-forge/miniforge/releases/latest/download/${INSTALLER}"
 fi
 

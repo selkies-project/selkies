@@ -22,222 +22,161 @@
 
 /*eslint no-unused-vars: ["error", { "vars": "local" }]*/
 
+/**
+ * Signaling client for the WebRTC transport.
+ *
+ * Speaks the line protocol of the server's signaling WebSocket. `HELLO
+ * <peer type> <json>` registers the client, the JSON carrying its type, slot,
+ * strict-viewer flag, secure-mode token, display id and display position;
+ * `SESSION server` asks for the server peer and is answered with
+ * `SESSION_OK <peer id>`; from then on the SDP and the ICE candidates travel
+ * as `<peer id> {"sdp": ...}` and `<peer id> {"ice": ...}` lines, and
+ * `ERROR ...` lines report server-side failures. The server always offers
+ * and the client answers.
+ *
+ * A failed or dropped connection retries after three seconds; the fourth
+ * consecutive failure hands over to `onfatalretry` (or reloads the page) so
+ * the browser re-runs HTTP authentication.
+ * @module
+ */
 
 /**
-* @typedef {Object} WebRTCSignaling
-* @property {function} ondebug - Callback fired when a new debug message is set.
-* @property {function} onstatus - Callback fired when a new status message is set.
-* @property {function} onerror - Callback fired when an error occurs.
-* @property {function} onice - Callback fired when a new ICE candidate is received.
-* @property {function} onsdp - Callback fired when SDP is received.
-* @property {function} connect - initiate connection to server.
-* @property {function} disconnect - close connection to server.
-*/
+ * Connection to the signaling server, delivering SDP and ICE to callbacks.
+ *
+ * Callbacks are assigned as properties: `onstatus`, `ondebug` and `onerror`
+ * receive messages, `onsdp` an `RTCSessionDescription`, `onice` an
+ * `RTCIceCandidate`, `ondisconnect` whether the app should reconnect,
+ * `onshowalert` a reason to show the user, and `onfatalretry` replaces the
+ * page reload after repeated failures.
+ */
 export class WebRTCSignaling {
     /**
-     * Interface to the WebRTC signaling server.
-     * Protocol: WebSocket offer/answer and ICE candidate exchange for the WebRTC transport,
-     *   kept in lockstep with the vendored server implementation.
-     *
-     * @constructor
-     * @param {URL} [server]
-     *    The URL object of the signaling server to connect to, created with `new URL()`.
+     * @param {URL} server Signaling WebSocket URL.
+     * @param {string} client_type `'controller'` or `'viewer'`.
+     * @param {number} client_slot Client slot the server assigns per display.
+     * @param {boolean} client_strict_viewer Whether a viewer may never gain control.
+     * @param {string} client_token Secure-mode session token; the server matches
+     *     it against the active mouse+keyboard token to grant a viewer
+     *     read-write collaboration.
+     * @param {string=} display_id Display this client drives, `'primary'` by
+     *     default; the server scopes controller and slot uniqueness per display
+     *     so a secondary display never evicts the primary.
+     * @param {string=} display_position Where a secondary display sits relative
+     *     to the primary in the extended desktop, `'right'` by default.
      */
     constructor(server, client_type, client_slot, client_strict_viewer, client_token, display_id, display_position) {
-        /**
-         * @private
-         * @type {URL}
-         */
+        /** @type {URL} */
         this._server = server;
 
-        /**
-         * @private
-         * @type {number}
-         */
+        /** Local peer id, set by the WebRTC client before `connect`. @type {number} */
         this.peer_id = 1;
 
-        /**
-         * @private
-         * @type {WebSocket}
-         */
+        /** @type {WebSocket} */
         this._ws_conn = null;
 
-        /**
-         * @event
-         * @type {function}
-         */
+        /** @type {?function(string): void} */
         this.onstatus = null;
 
         /**
-         * Fired instead of the built-in page reload after repeated connect
-         * failures; the app may inspect the endpoint before reloading.
-         * @event
-         * @type {function}
+         * Called instead of the page reload after repeated connect failures,
+         * so the app may inspect the endpoint before reloading.
+         * @type {?function(): void}
          */
         this.onfatalretry = null;
 
-        /**
-         * @event
-         * @type {function}
-         */
+        /** @type {?function(string): void} */
         this.onerror = null;
 
-        /**
-         * @type {function}
-         */
+        /** @type {?function(string): void} */
         this.ondebug = null;
 
-        /**
-         * @event
-         * @type {function}
-         */
+        /** @type {?function(RTCIceCandidate): void} */
         this.onice = null;
 
-        /**
-         * @event
-         * @type {function}
-         */
+        /** @type {?function(RTCSessionDescription): void} */
         this.onsdp = null;
 
-        /**
-         * @event
-         * @type {function}
-         */
+        /** Called with whether the app should reconnect. @type {?function(boolean): void} */
         this.ondisconnect = null;
 
-        /**
-         * @type {string}
-         */
+        /** `'disconnected'`, `'connecting'` or `'connected'`. @type {string} */
         this.state = 'disconnected';
 
-        /**
-         * @type {number}
-         */
+        /** @type {number} */
         this.retry_count = 0;
 
         /**
-         * Pending retry timer; a failed handshake fires both 'error' and 'close',
-         * and both funnel into one scheduled retry.
-         * @private
+         * Pending retry timer; a failed handshake fires both `error` and
+         * `close`, and both funnel into this one scheduled retry.
          */
         this._retry_timer = null;
 
         /**
-         * Set by disconnect() so a locally requested close is not treated as a
-         * server-side drop needing recovery.
-         * @private
+         * Set by `disconnect` so a locally requested close is not treated as
+         * a server-side drop needing recovery.
          */
         this._intentional_close = false;
 
-        /**
-         * @type {Array<number>}
-         */
+        /** @type {Array<number>} */
         this.currRes = null;
 
-        /**
-         * @type {string}
-         */
+        /** @type {string} */
         this.peer_type = "client";
 
-        /**
-         * @type {string}
-         * possible values: 'viewer', 'controller'
-         */
+        /** `'viewer'` or `'controller'`. @type {string} */
         this.client_type = client_type;
 
-        /**
-         * @type {string}
-         */
+        /** @type {string} */
         this.server_peer_id = null;
 
-        /**
-         * @type {number}
-         */
+        /** @type {number} */
         this.client_slot = client_slot;
 
-        /**
-         * @type {boolean}
-         */
+        /** @type {boolean} */
         this.client_strict_viewer = client_strict_viewer;
-        // Secure-mode session token; the server matches it against the active
-        // mk (mouse+keyboard) token to grant a viewer read-write collaboration.
+
+        /** @type {string} */
         this.client_token = client_token;
 
-        /**
-         * @private
-         * @type {string}
-         */
-        // Which display this client drives; the server scopes controller/slot
-        // uniqueness per display so display2 never evicts the primary.
+        /** @type {string} */
         this.display_id = display_id || 'primary';
 
-        /**
-         * @private
-         * @type {string}
-         */
-        // Where a secondary display sits relative to the primary in the
-        // extended desktop layout.
+        /** @type {string} */
         this.display_position = display_position || 'right';
 
-        /**
-         * @type {function}
-         */
+        /** @type {?function(string): void} */
         this.onshowalert = null;
     }
 
-    /**
-     * Sets status message.
-     *
-     * @private
-     * @param {String} message
-     */
+    /** Forwards a status message to `onstatus`. */
     _setStatus(message) {
         if (this.onstatus !== null) {
             this.onstatus(message);
         }
     }
 
-    /**
-     * Sets a debug message.
-     * @private
-     * @param {String} message
-     */
+    /** Forwards a debug message to `ondebug`. */
     _setDebug(message) {
         if (this.ondebug !== null) {
             this.ondebug(message);
         }
     }
 
-    /**
-     * Sets error message.
-     *
-     * @private
-     * @param {String} message
-     */
+    /** Forwards an error message to `onerror`. */
     _setError(message) {
         if (this.onerror !== null) {
             this.onerror(message);
         }
     }
 
-    /**
-     * Sets SDP
-     *
-     * @private
-     * @param {String} message
-     */
+    /** Forwards a remote description to `onsdp`. */
     _setSDP(sdp) {
         if (this.onsdp !== null) {
             this.onsdp(sdp);
         }
     }
 
-    /**
-     * Sets ICE
-     *
-     * @private
-     * @param {RTCIceCandidate} icecandidate
-     */
+    /** Forwards a remote ICE candidate to `onice`. */
     _setICE(icecandidate) {
         if (this.onice !== null) {
             this.onice(icecandidate);
@@ -245,14 +184,10 @@ export class WebRTCSignaling {
     }
 
     /**
-     * Fired whenever the signaling websocket is opened.
-     * Sends the peer id to the signaling server.
-     *
-     * @private
-     * @event
+     * Registers with the server once the socket opens: sends `HELLO` with
+     * the client metadata and resets the retry count.
      */
     _onServerOpen() {
-        // Send local device resolution and scaling with HELLO message.
         this.state = 'connected';
         const meta = {
             'client_type': this.client_type,
@@ -268,11 +203,13 @@ export class WebRTCSignaling {
     }
 
     /**
-     * Fired whenever the signaling websocket emits and error.
-     * Reconnects after 3 seconds.
+     * Schedules one reconnect three seconds out; a timer already pending
+     * absorbs the second of the paired `error` and `close` events.
      *
-     * @private
-     * @event
+     * After three failed retries the credentials have most likely expired and
+     * the upgrade is being rejected, so the page reloads for the browser to
+     * re-run HTTP authentication, unless `onfatalretry` is set to let the app
+     * probe the endpoint first (for a server-side transport mode change, say).
      */
     _scheduleRetry() {
         if (this._retry_timer) return;
@@ -280,10 +217,6 @@ export class WebRTCSignaling {
         this._retry_timer = setTimeout(() => {
             this._retry_timer = null;
             if (this.retry_count > 3) {
-                // Repeated connect failures (e.g. credentials expired and the WS
-                // upgrade now 401s): reload so the browser re-runs HTTP auth.
-                // onfatalretry lets the app probe the endpoint first (e.g. detect
-                // a server-side transport mode change) before reloading.
                 if (this.onfatalretry !== null) {
                     this.onfatalretry();
                 } else {
@@ -295,6 +228,7 @@ export class WebRTCSignaling {
         }, 3000);
     }
 
+    /** Socket error: retries when the socket is already closed, else the close event does. */
     _onServerError() {
         this._setStatus("Connection error, retry in 3 seconds.");
         if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
@@ -302,21 +236,17 @@ export class WebRTCSignaling {
         }
     }
 
+    /** Asks the server for a session with its server peer. */
     _setupCall() {
         this._setStatus("Initiating session with server.");
         this._ws_conn.send(`SESSION server`);
     }
     /**
-     * Fired whenever a message is received from the signaling server.
-     * Message types:
-     *   HELLO: response from server indicating peer is registered.
-     *   ERROR*: error messages from server.
-     *   {"sdp": ...}: JSON SDP message
-     *   {"ice": ...}: JSON ICE message
-     *
-     * @private
-     * @event
-     * @param {Event} event The event: https://developer.mozilla.org/en-US/docs/Web/API/MessageEvent
+     * Dispatches a server line: `HELLO` (registered, so request the session),
+     * `SESSION_OK <peer id>` (session established), `ERROR ...` (the missing
+     * server peer is retried after a second), and otherwise a
+     * `<peer id> {"sdp": ...}` or `<peer id> {"ice": ...}` line.
+     * @param {MessageEvent} event
      */
     _onServerMessage(event) {
         this._setDebug("server message: " + event.data);
@@ -343,10 +273,8 @@ export class WebRTCSignaling {
             return;
         }
 
-        // Attempt to parse JSON SDP or ICE message
         var msg;
         try {
-            // strip off prefix
             msg = event.data.substring(event.data.indexOf(' ') + 1);
             msg = JSON.parse(msg);
         } catch (e) {
@@ -369,17 +297,20 @@ export class WebRTCSignaling {
     }
 
     /**
-     * Fired whenever the signaling websocket is closed.
-     * Reconnects after 1 second.
-     *
-     * @private
-     * @event
+     * Socket closed. A close during the handshake (the upgrade was rejected,
+     * say) schedules the retry itself, since the paired `error` event is not
+     * guaranteed to observe `readyState` CLOSED. Afterwards the close code
+     * decides: 4000 shows the server's reason; 4001 means another live
+     * connection superseded this session, and auto-reconnecting would make
+     * the two pages evict each other forever, so it stays down and tells the
+     * user; a clean close that `disconnect` requested reports
+     * `ondisconnect(false)`; any other server-initiated close reports
+     * `ondisconnect(true)` so the app recovers like the WebSocket transport
+     * (reconnect, and repeated failures reload for re-authentication).
+     * @param {CloseEvent} event
      */
     _onServerClose(event) {
         if (this.state === 'connecting') {
-            // Handshake never completed (e.g. the upgrade was rejected with 401).
-            // Recover here: the paired 'error' event is not guaranteed to observe
-            // readyState CLOSED, so this close may be the only recovery signal.
             this.state = 'disconnected';
             this._scheduleRetry();
             return;
@@ -392,17 +323,12 @@ export class WebRTCSignaling {
             if (event.code === 4000) {
                 if (this.onshowalert !== null) this.onshowalert(event.reason);
             } else if (event.code === 4001) {
-                // Superseded: another live connection took this session over. Auto-
-                // reconnecting would evict the new holder and the two pages would
-                // take the slot from each other forever — stay down, tell the user.
                 if (this.onshowalert !== null) {
                     this.onshowalert(event.reason || 'Session superseded by a new connection. Reload to take over.');
                 }
             } else if ((event.code === 1000 || event.code === 1001) && intentional) {
                 this.ondisconnect(false);
             } else {
-                // Server-initiated close, clean or not: recover like the websockets
-                // transport (reconnect; repeated failures reload for re-auth).
                 console.log("Reconnecting due to server-side connection closure.");
                 this.ondisconnect(true);
             }
@@ -410,9 +336,8 @@ export class WebRTCSignaling {
     }
 
     /**
-     * Initiates the connection to the signaling server.
-     * After this is called, a series of handshakes occurs between the signaling
-     * server and the server (peer) to negotiate ICE candidates and media capabilities.
+     * Opens the signaling socket; registration, the session request and the
+     * SDP and ICE exchange follow from the socket events.
      */
     connect() {
         this.state = 'connecting';
@@ -420,25 +345,20 @@ export class WebRTCSignaling {
 
         this._ws_conn = new WebSocket(this._server);
 
-        // Bind event handlers.
         this._ws_conn.addEventListener('open', this._onServerOpen.bind(this));
         this._ws_conn.addEventListener('error', this._onServerError.bind(this));
         this._ws_conn.addEventListener('message', this._onServerMessage.bind(this));
         this._ws_conn.addEventListener('close', this._onServerClose.bind(this));
     }
 
-    /**
-     * Closes connection to signaling server.
-     * Triggers onServerClose event.
-     */
+    /** Closes the socket; the close is reported as `ondisconnect(false)`, not as a drop. */
     disconnect() {
         this._intentional_close = true;
         this._ws_conn.close();
     }
 
     /**
-     * Send ICE candidate.
-     *
+     * Sends a local ICE candidate to the server peer.
      * @param {RTCIceCandidate} ice
      */
     sendICE(ice) {
@@ -447,8 +367,7 @@ export class WebRTCSignaling {
     }
 
     /**
-     * Send local session description.
-     *
+     * Sends the local description (the answer) to the server peer.
      * @param {RTCSessionDescription} sdp
      */
     sendSDP(sdp) {

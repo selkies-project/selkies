@@ -22,15 +22,49 @@
  * under the License.
  */
 
+/**
+ * Keyboard, pointer, touch, wheel and gamepad capture on the stream element,
+ * sent to the server as the text messages of the input protocol.
+ *
+ * Keyboard: every event resolves to an X11 keysym through noVNC's key tables
+ * and `KeyboardUtil`, and what is held server-side is tracked per physical
+ * code so a keyup releases what its keydown pressed. While anything is held a
+ * `kh` heartbeat repeats the held keysyms so the server can release keys whose
+ * keyup was lost, and modifiers a trusted event reports up are healed. IME
+ * composition streams the preedit as momentary presses diffed per codepoint;
+ * a shortcut chord pressed mid-composition is held until the commit lands so
+ * it applies after the text. Chords on non-Latin layouts resolve from the
+ * physical key position, and a chord whose modifier keydown never reached the
+ * server is sent self-contained, wrapped in the missing modifiers. macOS
+ * Command is remapped onto Control, and Windows defers a ControlLeft keydown
+ * briefly to tell AltGr apart.
+ *
+ * Pointer: absolute positions map through the presenting sink (the canvas or
+ * `<video>` box) where the stream has a fixed size, and through the element's
+ * window math otherwise; motion is coalesced to one send per animation frame.
+ * Under pointer lock the payload is a relative delta, scaled to server pixels
+ * and quantized with a carried remainder. Gaming mode is document fullscreen
+ * plus pointer and keyboard lock. Touch is direct (tap, drag, long-press right
+ * click, two-finger scroll) or a trackpad emulation. Wheel events are
+ * classified as discrete wheel or trackpad and accumulated in fractional
+ * notches so no distance is lost. The server-drawn cursor is painted on a
+ * page canvas or applied as a CSS cursor.
+ *
+ * Wire messages: `kd,<keysym>`, `ku,<keysym>`, `kh,<keysym>,...`, `kr`;
+ * `m,<x>,<y>,<mask>,<magnitude>` (absolute) and
+ * `m2,<dx>,<dy>,<mask>,<magnitude>` (relative; scroll pulses ride mask bits
+ * 3 to 7); `p,<0|1>` and `SET_NATIVE_CURSOR_RENDERING,<0|1>` on pointer lock
+ * changes; `js,c`, `js,d`, `js,b`, `js,a` and `js,h` for gamepads.
+ * @module
+ */
+
 import { GamepadManager } from './gamepad.js';
 import { Queue } from './util.js';
 
-/**
- * Class used by frontend to whitelist elements for input
- */
+/** CSS class on elements (and their descendants) whose input stays native. */
 const WHITELIST_CLASS = 'allow-native-input';
 
-// code -> getModifierState() name, for every modifier tracked in _keyDownList.
+/** Physical code to `getModifierState()` name, for every modifier tracked in `_keyDownList`. */
 const MODIFIER_STATE_BY_CODE = {
     ShiftLeft: 'Shift', ShiftRight: 'Shift',
     ControlLeft: 'Control', ControlRight: 'Control',
@@ -38,6 +72,7 @@ const MODIFIER_STATE_BY_CODE = {
     MetaLeft: 'Meta', MetaRight: 'Meta',
 };
 
+/** X11 keysym values by name. */
 const KeyTable = {
     XK_VoidSymbol:                  0xffffff,
     XK_BackSpace:                   0xff08,
@@ -595,6 +630,7 @@ const KeyTable = {
     XF86XK_LogGrabInfo:             0x1008FE25,
 };
 
+/** Unicode codepoints above Latin-1 that have a legacy keysym. */
 const keysymsByCodepoint = {
     0x0100: 0x03c0, 0x0101: 0x03e0, 0x0102: 0x01c3, 0x0103: 0x01e3, 0x0104: 0x01a1, 0x0105: 0x01b1,
     0x0106: 0x01c6, 0x0107: 0x01e6, 0x0108: 0x02c6, 0x0109: 0x02e6, 0x010a: 0x02c5, 0x010b: 0x02e5,
@@ -707,6 +743,7 @@ const keysymsByCodepoint = {
     0x30e8: 0x04d6, 0x30e9: 0x04d7, 0x30ea: 0x04d8, 0x30eb: 0x04d9, 0x30ec: 0x04da, 0x30ed: 0x04db,
     0x30ef: 0x04dc, 0x30f2: 0x04a6, 0x30f3: 0x04dd, 0x30fb: 0x04a5, 0x30fc: 0x04b0,
 };
+/** Keysym for a codepoint: Latin-1 directly, the legacy table, else the Unicode keysym range. */
 const Keysyms = {
     lookup: function(u) {
         if ((u >= 0x20) && (u <= 0xff)) { return u; }
@@ -716,6 +753,7 @@ const Keysyms = {
     }
 };
 
+/** `event.key` name to keysyms indexed by DOM key location (standard, left, right, numpad). */
 const DOMKeyTable = {};
 (function() {
     function addStandard(key, standard) {
@@ -885,6 +923,7 @@ const DOMKeyTable = {};
     addNumpad("9", KeyTable.XK_9, KeyTable.XK_KP_9);
 })();
 
+/** Legacy `keyCode` to `event.code`, for engines without `code`. */
 const vkeys = {
     0x08: 'Backspace', 0x09: 'Tab', 0x0a: 'NumpadClear', 0x0d: 'Enter',
     0x10: 'ShiftLeft', 0x11: 'ControlLeft', 0x12: 'AltLeft', 0x13: 'Pause',
@@ -914,6 +953,7 @@ const vkeys = {
     0xb7: 'LaunchApp2', 0xe1: 'AltRight',
 };
 
+/** `event.code` to `event.key` for keys whose name is fixed, for engines without `key`. */
 const fixedkeys = {
     'Backspace': 'Backspace', 'AltLeft': 'Alt', 'AltRight': 'Alt',
     'CapsLock': 'CapsLock', 'ContextMenu': 'ContextMenu', 'ControlLeft': 'Control',
@@ -943,14 +983,17 @@ const fixedkeys = {
     'WakeUp': 'WakeUp',
 };
 
+/** Platform and engine probes that select keyboard quirks. */
 const browser = {
     isMac: function() { return /Mac|iPod|iPhone|iPad/.test(navigator.platform); },
     isIOS: function() { return /iPod|iPhone|iPad/.test(navigator.platform); },
     isWindows: function() { return /Win/.test(navigator.platform); },
     isLinux: function() { return /Linux/.test(navigator.platform); },
-    // Engines that implement the textInput event deliver an IME commit there.
-    // Where the event does not exist, compositionend is the only thing carrying
-    // the committed text and skipping it drops every composed character.
+    /**
+     * Whether the engine delivers an IME commit on the textInput event; where
+     * it does not exist, compositionend is the only carrier of the committed
+     * text.
+     */
     hasTextInput: function() { return typeof window.TextEvent === 'function'; },
     isChrome: function() {
         const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
@@ -960,6 +1003,7 @@ const browser = {
     isSafari: function() { return /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent); },
 };
 
+/** Keypad keysyms sent as their main-keyboard equivalents, the NumLock-on set. */
 const NumpadTranslations_NumLockOn = {
     [KeyTable.XK_KP_Space]: KeyTable.XK_space,
     [KeyTable.XK_KP_Enter]: KeyTable.XK_Return,
@@ -982,6 +1026,7 @@ const NumpadTranslations_NumLockOn = {
     [KeyTable.XK_KP_9]: KeyTable.XK_9,
 };
 
+/** Keypad keysyms sent as their main-keyboard equivalents, the NumLock-off set. */
 const NumpadTranslations_NumLockOff = {
     [KeyTable.XK_KP_Home]: KeyTable.XK_Home,
     [KeyTable.XK_KP_Up]: KeyTable.XK_Up,
@@ -999,7 +1044,14 @@ const NumpadTranslations_NumLockOff = {
     [KeyTable.XK_KP_Enter]: KeyTable.XK_Return,
 };
 
+/** Event-to-keysym resolution, following noVNC's handling of engine differences. */
 const KeyboardUtil = {
+    /**
+     * Physical key code of an event, derived from the legacy `keyCode` and
+     * location where the engine reports no `code`.
+     * @param {KeyboardEvent} evt
+     * @returns {string} A `KeyboardEvent.code` value, or `Unidentified`.
+     */
     getKeyCode: function(evt) {
         if (evt.code) {
             switch (evt.code) {
@@ -1040,6 +1092,12 @@ const KeyboardUtil = {
         return 'Unidentified';
     },
 
+    /**
+     * Logical key of an event, derived from the code or the character where
+     * the engine reports no usable `key`.
+     * @param {KeyboardEvent} evt
+     * @returns {string} A `KeyboardEvent.key` value, or `Unidentified`.
+     */
     getKey: function(evt) {
         if ((evt.key !== undefined) && (evt.key !== 'Unidentified')  && (evt.key !== 'Dead')) {
             switch (evt.key) {
@@ -1067,6 +1125,16 @@ const KeyboardUtil = {
         return 'Unidentified';
     },
 
+    /**
+     * Keysym of an event: named keys through `DOMKeyTable` by location, single
+     * characters through `Keysyms`. The location is corrected where engines
+     * misreport it: Safari on Mojave and Chrome on Linux report MetaRight at
+     * location 0, and Numpad Clear with NumLock on is the standard-location
+     * Clear. Option reports `Meta` on macOS and maps to Meta_L/R there only;
+     * on Linux that remap would break xkb Ctrl/Alt swaps.
+     * @param {KeyboardEvent} evt
+     * @returns {number|null}
+     */
     getKeysym: function(evt) {
         const key = KeyboardUtil.getKey(evt);
         if (key === 'Unidentified') {
@@ -1075,15 +1143,11 @@ const KeyboardUtil = {
 
         if (key in DOMKeyTable) {
             let location = evt.location;
-            // Safari on Mojave and Chrome on Linux both report MetaRight with
-            // location 0; force DOM_KEY_LOCATION_RIGHT for them.
             if ((browser.isSafari() && key === 'Meta' && location === 0) ||
                 (browser.isChrome() && key === 'Meta' && location === 0 && KeyboardUtil.getKeyCode(evt) === 'MetaRight')) {
                 location = 2;
             }
 
-            // Numpad Clear: with NumLock on the key is the standard-location
-            // Clear, so report DOM_KEY_LOCATION_STANDARD.
             if ((key === 'Clear') && (location === 3)) {
                 let code = KeyboardUtil.getKeyCode(evt);
                 if (code === 'NumLock') {
@@ -1094,8 +1158,6 @@ const KeyboardUtil = {
                 location = 0;
             }
             if (key === 'Meta' && (browser.isMac() || browser.isIOS())) {
-                // macOS-only: Option reports key='Meta'. On Linux this remap
-                // breaks xkb Ctrl/Alt swaps (AltLeft must not force Meta).
                 let code = KeyboardUtil.getKeyCode(evt);
                 if (code === 'AltLeft') { return KeyTable.XK_Meta_L; }
                 if (code === 'AltRight') { return KeyTable.XK_Meta_R; }
@@ -1123,15 +1185,18 @@ const KeyboardUtil = {
         return null;
     },
 
-    // Resolve a keysym from the PHYSICAL key code. Used when the IME swallows the
-    // logical key (keyCode 229 / key 'Process') but the event is really a shortcut
-    // chord: shortcuts match on the base (level-0) keysym, so letters map lowercase.
-    // Covers every key that participates in common shortcuts: letters, digits,
-    // punctuation, and the non-printable set (Tab, Enter, arrows, F-keys, ...).
+    /**
+     * Keysym from the physical key code, for a shortcut chord whose logical
+     * key an IME swallowed (keyCode 229, key `Process`) or a non-Latin layout
+     * localized. Shortcuts match on the base level keysym, so letters map
+     * lowercase; covers letters, digits, punctuation and the non-printable
+     * keys common shortcuts use.
+     * @param {string} code
+     * @returns {number|null}
+     */
     getKeysymFromCode: function(code) {
         if (!code) return null;
         if (/^Key[A-Z]$/.test(code)) {
-            // 'KeyA' -> 'a'.
             return Keysyms.lookup(code.charCodeAt(3) + 32);
         }
         if (/^Digit[0-9]$/.test(code)) {
@@ -1165,13 +1230,32 @@ const KeyboardUtil = {
     }
 };
 
+/** Stops propagation and the default action of an event. */
 const _stopEvent = function (e) {
     e.stopPropagation();
     e.preventDefault();
 };
 
 
+/**
+ * Captures input on the stream element and sends it to the server.
+ *
+ * One instance is live per page: `attach` detaches any previous one. Hotkeys:
+ * Ctrl+Shift+M opens the dashboard menu (`onmenuhotkey`), Ctrl+Shift+F enters
+ * gaming mode (`onfullscreenhotkey`, `enterFullscreen` by default),
+ * Ctrl+Shift+G toggles the gamepad overlay (`ongamepadhotkey`), and
+ * Ctrl+Shift+Click takes pointer lock. Elements carrying the
+ * `allow-native-input` class keep native keyboard and touch handling.
+ */
 export class Input {
+    /**
+     * @param {HTMLElement} element Overlay element the stream input lands on; it also hosts IME composition.
+     * @param {(message: string) => void} send Sends one input protocol message to the server.
+     * @param {boolean} [isSharedMode=false] Viewer-only session: listeners are limited to suppressing touch defaults.
+     * @param {number} [playerIndex=0] Gamepad slot used while the server has assigned no controller slot.
+     * @param {boolean} [useCssScaling=false] Whether the stream is realized in CSS pixels, so no device pixel ratio applies.
+     * @param {number|null} [initialSlot=null] One-based controller slot assigned by the server.
+     */
     constructor(element, send, isSharedMode = false, playerIndex = 0,  useCssScaling = false, initialSlot = null) {
         this.element = element;
         this.send = send;
@@ -1207,6 +1291,8 @@ export class Input {
         this._pendingMove = null;
         this._moveFlushScheduled = false;
         this.onmenuhotkey = null;
+        this.gamingMode = false;
+        this.ongamingmode = null;
         this.onfullscreenhotkey = this.enterFullscreen;
         this.ongamepadhotkey = null;
         this.ongamepadconnected = null;
@@ -1215,31 +1301,33 @@ export class Input {
         this.listeners_context = [];
         this._queue = new Queue();
         this._allowTrackpadScrolling = true;
-        // Until the detector has its 4 samples, treat wheel input as a trackpad:
-        // the throttle path never drops events (they accumulate and flush at the
-        // window end), so an unclassified burst costs at most one smoothing window
-        // of latency, and the first event of a session still emits immediately.
-        // Starting as a discrete wheel instead would emit every unclassified event
-        // on arrival — a trackpad gesture's opening deltas would blast through as
-        // scroll clicks before the detector can engage.
+        /**
+         * Whether wheel input is classified as a trackpad. Starts true until
+         * the detector has its samples: the throttle path never drops events,
+         * so an unclassified burst costs at most one smoothing window, whereas
+         * a discrete-wheel start would emit a trackpad gesture's opening deltas
+         * as scroll clicks.
+         */
         this._allowThreshold = true;
         this._smallestDeltaY = 10000;
         this._smallestLineDeltaY = 10000;
         this._wheelThreshold = 100;
         this._scrollMagnitude = 10;
-        // Running fractional-notch accumulators, one per wheel axis: a fast discrete
-        // wheel must never collapse to the throttle rate, so we sum normalized notches
-        // and carry the sub-notch remainder forward instead of discarding events.
+        /**
+         * Fractional-notch accumulators, one per wheel axis: a fast discrete
+         * wheel keeps every notch, and the sub-notch remainder carries forward.
+         */
         this._wheelAccumY = 0;
         this._wheelDirY = null;
         this._wheelAccumX = 0;
         this._wheelDirX = null;
-        // Timestamp of the last wheel event, driving the idle reset of the learned
-        // notch quantums: the smallest-delta learning is only valid within one input
-        // device's scroll session. Without a reset, a trackpad's tiny pixel deltas
-        // (quantum ~1-10px) poison the divisor for a later mouse wheel's 120px
-        // detents (120 notches per click). A device switch always involves an idle
-        // gap, so forgetting after one re-learns from scratch exactly like page load.
+        /**
+         * Last wheel event time, driving the idle reset of the learned notch
+         * quantums: the smallest-delta learning only holds within one device's
+         * scroll session (a trackpad's 1-10px deltas would divide a later
+         * mouse wheel's 120px detents), and a device switch always has an
+         * idle gap.
+         */
         this._lastWheelEventTs = 0;
         this.cursorScaleFactor = null;
         this._cursorBase64Data = null;
@@ -1247,10 +1335,9 @@ export class Input {
         this._guacKeyboardID = Input._nextGuacID++;
         this._EVENT_MARKER = '_GUAC_KEYBOARD_HANDLED_BY_' + this._guacKeyboardID;
 
-        // Maps event.code -> keysym for every key currently held.
+        /** `event.code` to keysym for every key held server-side. */
         this._keyDownList = {};
-        // While any key is held, heartbeat the held keysyms so the server can
-        // auto-release them if a key-up is lost to congestion (stuck keys).
+        /** While any key is held, repeats the held keysyms so the server can release a key whose keyup was lost. */
         this._keyHeartbeatTimer = null;
         this._KEY_HEARTBEAT_INTERVAL = 100;
         this._altGrArmed = false;
@@ -1261,17 +1348,16 @@ export class Input {
         this._isSynth = false;
         this.isComposing = false;
         this.compositionString = "";
-        // Shortcut chord (e.g. Ctrl+A) that arrived while an IME composition was
-        // active: held until the composition the chord terminates has committed,
-        // so the shortcut applies AFTER the committed text lands server-side.
+        /** Shortcut chord that arrived mid-composition, held until the commit lands so it applies after the text. */
         this._pendingChord = null;
-        // Modifiers momentarily pressed around a self-contained chord (they
-        // bypass _keyDownList). Kept briefly so _chordModifierHeld — and thus
-        // the text/composition echo suppression — can still see the chord.
+        /**
+         * Modifiers pressed momentarily around a self-contained chord (they
+         * bypass `_keyDownList`), kept briefly so the text echo suppression
+         * still sees the chord.
+         */
         this._momentaryChordMods = new Set();
         this._momentaryChordModsTimer = null;
-        // Last text typed by a textInput commit, so a compositionend carrying
-        // the same text right after stays clear-only (Blink chains both).
+        /** Last textInput commit, so a compositionend carrying the same text right after stays clear-only (Blink chains both). */
         this._lastTextInputCommit = null;
         this.keyboardInputAssist = document.getElementById('keyboard-input-assist');
 
@@ -1295,16 +1381,19 @@ export class Input {
         this.inputAttached = false;
     }
 
+    /** Sets whether this is a viewer-only session. */
     setSharedMode(enabled) {
         this.isSharedMode = !!enabled;
     }
 
+    /** Assigns the one-based controller slot the server gave this client. */
     updateControllerSlot(newSlot) {
         if (this.controllerSlot !== newSlot) {
             console.log(`Input class: Controller slot updated to: ${newSlot}`);
             this.controllerSlot = newSlot;
         }
     }
+    /** Tracks the dashboard's `sidebarVisibilityChanged` message so gamepad state is only mirrored while it is open. */
     _handleVisibilityMessage(event) {
         if (event.origin !== window.location.origin) return;
         const message = event.data;
@@ -1315,10 +1404,10 @@ export class Input {
 
     static _nextGuacID = 0;
 
-    // Cleared the first time an engine refuses raw pointer movement, so the
-    // option costs one refused request per page instead of one per lock.
+    /** Cleared the first time an engine refuses raw pointer movement, so the option costs one refused request per page. */
     static _unadjustedMovement = true;
 
+    /** Paints the server cursor bitmap onto the cursor canvas at the current device pixel ratio and rebases the hotspot. */
     _drawAndScaleCursor() {
         if (!this._cursorImageBitmap) {
             return;
@@ -1336,11 +1425,13 @@ export class Input {
         this._updateCursorPosition(this._latestMouseX, this._latestMouseY);
     }
 
+    /** Hides the page-drawn cursor when a press lands outside the stream. */
     _handleOutsideClick(event) {
         if (!this.use_browser_cursors && !this.element.contains(event.target)) {
             this.cursorDiv.style.display = 'none';
         }
     }
+    /** Moves the page-drawn cursor so its hotspot sits at a client position. */
     _updateCursorPosition(clientX, clientY) {
         if (this.cursorDiv.style.display !== 'none') {
             const newX = clientX - this.cursorHotspot.x;
@@ -1349,11 +1440,10 @@ export class Input {
         }
     }
 
-    // cursor image-set() support: 'image-set' | '-webkit-image-set' | null,
-    // probed once — the cursor path is hot, and CSS.supports parses the whole
-    // value, so probing per update with a multi-KB data URL would be wasteful.
+    /** Cursor `image-set()` function name or null, probed once since `CSS.supports` parses the multi-KB value. */
     static _cursorImageSetFn;
 
+    /** Probes and caches which `image-set()` spelling the engine accepts in `cursor`. */
     _cursorImageSetFunction() {
         if (Input._cursorImageSetFn === undefined) {
             Input._cursorImageSetFn = null;
@@ -1369,18 +1459,20 @@ export class Input {
         return Input._cursorImageSetFn;
     }
 
+    /**
+     * Applies the server cursor as a CSS cursor. The PNG is in remote device
+     * pixels but CSS cursors render one image pixel per CSS pixel, so above a
+     * device pixel ratio of 1 the density is declared through `image-set()`
+     * and the hotspot rebased into CSS pixels, mirroring `_drawAndScaleCursor`;
+     * a plain `url()` with the raw hotspot is the fallback where `image-set()`
+     * is unsupported.
+     */
     _updateBrowserCursor() {
         if (!this._cursorBase64Data) {
             this.element.style.setProperty('cursor', 'none', 'important');
             return;
         }
         const cursorUrl = `url("data:image/png;base64,${this._cursorBase64Data}")`;
-        // The PNG arrives in remote device pixels, but CSS cursors render 1
-        // image px = 1 CSS px — at dpr>1 that draws the cursor dpr× oversized.
-        // Declare the image density via image-set and rebase the hotspot into
-        // CSS px, mirroring _drawAndScaleCursor's dpr math; plain url() with
-        // the raw hotspot stays as the fallback for browsers without
-        // image-set-in-cursor support.
         const dpr = this.useCssScaling ? 1 : (window.devicePixelRatio || 1);
         let cursorValue = `${cursorUrl} ${this._rawHotspotX} ${this._rawHotspotY}, default`;
         const imageSetFn = dpr !== 1 ? this._cursorImageSetFunction() : null;
@@ -1392,14 +1484,23 @@ export class Input {
         this.element.style.setProperty('cursor', cursorValue, 'important');
     }
 
-    // Decode the base64 cursor PNG inline rather than fetch()ing a data: URL:
-    // the cursor path is hot and needs no Response machinery (and no request
-    // sink for scanners to misread as SSRF).
+    /**
+     * Decodes the base64 cursor PNG inline; the path is hot and a `fetch()` of
+     * a data URL would add Response machinery for nothing.
+     * @param {string} b64
+     * @returns {Promise<ImageBitmap>}
+     */
     _cursorBitmapFromBase64(b64) {
         const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
         return createImageBitmap(new Blob([bytes], { type: 'image/png' }));
     }
 
+    /**
+     * Applies a cursor update from the server; an empty or null-handle update,
+     * and trackpad mode, hide the cursor.
+     * @param {{curdata?: string, handle: string|number, hotx?: string|number, hoty?: string|number}} cursorData
+     *     Base64 PNG and hotspot as the server sends them.
+     */
     async updateServerCursor(cursorData) {
         if (!cursorData.curdata ||
             parseInt(cursorData.handle, 10) === 0 ||
@@ -1432,11 +1533,13 @@ export class Input {
         }
     }
 
+    /** Marks input as synthetic (tests), which disables the keydown stuck-modifier heal. */
     setSynth(isSynth) {
         console.log(`Input: Synthetic mode ${isSynth ? 'enabled' : 'disabled'}.`);
         this._isSynth = isSynth;
     }
 
+    /** Switches CSS-pixel scaling and re-derives the window math and cursor. */
     updateCssScaling(newUseCssScalingValue) {
         if (this.useCssScaling !== newUseCssScalingValue) {
             console.log(`Input: Updating useCssScaling from ${this.useCssScaling} to ${newUseCssScalingValue}`);
@@ -1446,6 +1549,15 @@ export class Input {
         }
     }
 
+    /**
+     * Sends a key press or release, translating keypad keysyms to their main
+     * keyboard equivalents, and tracks it in `_keyDownList` so the release
+     * sends whatever the press did; a release for a code that is not held is
+     * dropped.
+     * @param {number|null} keysym
+     * @param {string} code Physical `event.code`.
+     * @param {boolean} down
+     */
     _sendKeyEvent(keysym, code, down) {
         if (keysym === null) return;
         let finalKeysymToSend = keysym;
@@ -1469,6 +1581,7 @@ export class Input {
         else if (Object.keys(this._keyDownList).length === 0) this._stopKeyHeartbeat();
     }
 
+    /** Starts the `kh` heartbeat of held keysyms; it stops itself once nothing is held. */
     _startKeyHeartbeat() {
         if (this._keyHeartbeatTimer !== null) return;
         this._keyHeartbeatTimer = setInterval(() => {
@@ -1478,6 +1591,7 @@ export class Input {
         }, this._KEY_HEARTBEAT_INTERVAL);
     }
 
+    /** Stops the held-key heartbeat. */
     _stopKeyHeartbeat() {
         if (this._keyHeartbeatTimer !== null) {
             clearInterval(this._keyHeartbeatTimer);
@@ -1485,20 +1599,24 @@ export class Input {
         }
     }
 
-    // Synthetic press+release (kd/ku direct) without touching _keyDownList or the
-    // heartbeat, so momentary paths (Unidentified text, ISO_Level3_Shift, CapsLock,
-    // JP toggles) don't churn the setInterval per char. Safe: never Numpad, released same call.
+    /**
+     * Sends a press and release without touching `_keyDownList` or the
+     * heartbeat, for momentary paths (unidentified text, ISO_Level3_Shift,
+     * CapsLock, the Japanese toggles) that would otherwise churn the interval
+     * per character. Never a keypad keysym, and released in the same call.
+     * @param {number|null} keysym
+     */
     _sendMomentaryKey(keysym) {
         if (keysym === null) return;
         this.send("kd," + keysym);
         this.send("ku," + keysym);
     }
 
+    /** Focuses the overlay element so the IME composes there, unless a real form field (dashboard inputs) holds focus. */
     _focusCompositionHost() {
         const el = this.element;
         if (!el || typeof el.focus !== 'function') return;
         const active = document.activeElement;
-        // Never steal focus from a real form field (dashboard inputs, chat boxes).
         if (active && active !== document.body && active !== el &&
             (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
             return;
@@ -1506,18 +1624,18 @@ export class Input {
         try { el.focus({ preventScroll: true }); } catch (e) { /* detached element */ }
     }
 
+    /**
+     * Releases modifiers the event reports as no longer down. A keyup the
+     * browser never delivered (grabbed by the OS, an IME, or a sibling surface
+     * while focus never left) leaves the modifier in `_keyDownList`, where the
+     * heartbeat refreshes it forever and every later keystroke arrives
+     * modified. Trusted events carry live modifier state, so whatever they
+     * report up is released. Composition and `Process` events are exempt: an
+     * IME does not report modifier state reliably, even when keyCode is not
+     * 229.
+     */
     _releaseDesyncedModifiers(event) {
-        // A keyup the browser never delivered (grabbed by the OS, an IME, or a
-        // sibling surface while focus never left) leaves the modifier in
-        // _keyDownList, and the 'kh' heartbeat then refreshes it forever — the
-        // server's stale-key sweep never fires and every later keystroke
-        // arrives modified (the "everything types uppercase" lock). Trusted
-        // events carry live modifier state, so release anything the browser
-        // says is no longer down. Composition events are exempt: IMEs do not
-        // report modifier state reliably mid-composition.
         if (typeof event.getModifierState !== 'function') return;
-        // 'Process' events are IME-touched even when keyCode !== 229 and can
-        // carry stale (unset) modifier flags — never heal from them.
         if (this.isComposing || event.isComposing || event.keyCode === 229 ||
             event.key === 'Process') return;
         for (const code in this._keyDownList) {
@@ -1529,10 +1647,13 @@ export class Input {
         }
     }
 
+    /**
+     * Releases every held key and stops the heartbeat. The armed Windows AltGr
+     * timer is cancelled so it cannot synthesize a Control keydown after the
+     * reset, while the page is hidden or detached.
+     */
     resetKeyboard() {
         this._stopKeyHeartbeat();
-        // Cancel the pending Windows-AltGr timer so it can't fire after a reset and
-        // synthesize a stray Control keydown while the page is hidden/detached.
         clearTimeout(this._altGrTimeout);
         this._altGrArmed = false;
         for (const code in this._keyDownList) {
@@ -1541,14 +1662,17 @@ export class Input {
         this._keyDownList = {};
     }
 
+    /** Releases held keys when the page is hidden: throttled heartbeats in a background tab can exceed the server's stale-key window. */
     _onVisibilityChange() {
-        // Release held keys when hidden: throttled heartbeats in a backgrounded tab can
-        // exceed the server's stale-key window (and no key should stay held while hidden).
         if (document.visibilityState === 'hidden') {
             this.resetKeyboard();
         }
     }
 
+    /**
+     * Marks an event as handled by this instance.
+     * @returns {boolean} False when it already was.
+     */
     _guac_markEvent(e) {
         if (e[this._EVENT_MARKER]) {
             return false;
@@ -1557,19 +1681,52 @@ export class Input {
         return true;
     }
 
+    /**
+     * Keydown handler, in order: the dashboard hotkeys, the native-input
+     * class, modifier healing, CapsLock, repeat suppression, the IME path,
+     * the stuck-modifier heal, keysym resolution with the Windows AltGr and
+     * macOS remaps, and the send, wrapped in any chord modifiers the server
+     * is not holding.
+     *
+     * Hotkeys come before the native-input class, which exempts plain typing,
+     * not the chords. CapsLock is swallowed: case is already resolved into
+     * `event.key`, and forwarding it would toggle the server's Lock modifier
+     * and invert every letter (an OS-level remap reports a different key and
+     * passes through).
+     *
+     * With an IME active (composing, or keyCode 229) a modifier chord is a
+     * shortcut the IME will not compose, resolved from the physical code.
+     * Idle IME: sent momentarily, the modifier is already held server-side;
+     * an armed Windows AltGr Control is disarmed without being held, since
+     * the IME may swallow the keyup a held Control would depend on. Mid-
+     * composition: the keypress makes the IME commit, so the whole chord is
+     * held until the composition settles and applied after the text; no
+     * prompt commit means the IME consumed it. The armed Control counts as an
+     * intended Ctrl either way, as the Korean IME can deliver the Process
+     * keydown with ctrlKey unset.
+     *
+     * The stuck-modifier heal skips `Process` events, whose modifier flags
+     * can be stale, and matches on the stored keysym rather than the physical
+     * code: an xkb remap can leave an Alt code holding Control_L, and the
+     * macOS Option remap leaves AltLeft/AltRight holding Meta_L/R while
+     * Option drives altKey and AltGraph, not metaKey.
+     *
+     * A shortcut chord on a non-Latin layout resolves from the physical
+     * position (the OS convention), since `event.key` is a localized
+     * character the server layout cannot map with the modifier; ASCII keys
+     * stay layout-resolved (QWERTZ Ctrl+Z is `z`) and AltGr chords are text.
+     * Outside Chromium, Ctrl/Cmd+V keeps its default action because clipboard
+     * sync rides the trusted `paste` event (lib/clipboard-sync.js); the key
+     * still streams to the remote desktop.
+     */
     _handleKeyDown(event) {
-        // Dashboard hotkeys pierce the allow-native-input veil on the
-        // dashboard tree: that class exempts plain typing, not the chords.
-        // Resolve them before the target-class labeling below so a focused
-        // dashboard control never swallows them.
         if (event.ctrlKey && event.shiftKey) {
             let hotkey = null;
-            if (event.code === 'KeyM' && document.fullscreenElement === null) hotkey = this.onmenuhotkey;
+            if (event.code === 'KeyM' && !this.gamingMode) hotkey = this.onmenuhotkey;
             else if (event.code === 'KeyF' && document.fullscreenElement === null) hotkey = this.onfullscreenhotkey;
             else if (event.code === 'KeyG') hotkey = this.ongamepadhotkey;
             if (hotkey !== null && this._guac_markEvent(event)) {
-                // Receiver-bound: a bare hotkey() would lose `this` for a
-                // method-style handler (the default is this.enterFullscreen).
+                // call() keeps `this` for the method-style default (enterFullscreen).
                 hotkey.call(this);
                 _stopEvent(event);
                 return;
@@ -1580,12 +1737,6 @@ export class Input {
         this._releaseDesyncedModifiers(event);
         const keycode = KeyboardUtil.getKeyCode(event);
         if (keycode === 'CapsLock' && KeyboardUtil.getKey(event) === 'CapsLock') {
-            // Case is already resolved into event.key and sent as the final keysym
-            // (XK_a vs XK_A). Forwarding CapsLock only toggles the server's Lock
-            // modifier, which then inverts every letter (types uppercase; Shift then
-            // yields lowercase). Swallow the unremapped key; an OS-level remap
-            // (caps:escape / caps:ctrl_modifier) reports a different event.key and
-            // still passes through as that key.
             _stopEvent(event);
             return;
         }
@@ -1594,21 +1745,6 @@ export class Input {
             return;
         }
         if (this.isComposing || event.isComposing || event.keyCode === 229) {
-            // A modifier chord (e.g. Ctrl+A with a CJK layout active) is a real
-            // shortcut the IME will not compose; resolve it from the physical code.
-            // IME idle: send the key momentarily (the modifier keydown arrived
-            // outside composition, so it is already held server-side). Mid-
-            // composition: the same keypress makes the IME commit, so hold the
-            // FULL chord (modifier snapshot + key) until the composition settles —
-            // firing now would apply the shortcut BEFORE the committed text lands,
-            // and no modifier is held server-side (their keydowns are swallowed
-            // below along with everything else while composing). If no commit
-            // follows promptly, the IME consumed the chord itself: discard it.
-            // Windows defers a fresh ControlLeft keydown (AltGr detection): Control is
-            // physically down but not yet held server-side while _altGrArmed, and the
-            // Korean IME can deliver the Process (229) chord keydown with ctrlKey UNSET.
-            // Treat the armed state as an intended Ctrl or the chord letter escapes as
-            // a bare keypress (the "first Ctrl+A types 'a'" report).
             const armedCtrl = this._altGrArmed;
             if ((event.ctrlKey || event.altKey || event.metaKey || armedCtrl) &&
                 !(event.getModifierState && event.getModifierState('AltGraph'))) {
@@ -1622,20 +1758,10 @@ export class Input {
                             at: performance.now(),
                         };
                     } else {
-                        // Disarm WITHOUT holding Control: the chord is sent
-                        // self-contained below (press+release together). Holding the
-                        // armed Control and relying on its keyup would strand it when
-                        // the IME swallows that keyup — a stuck Control turns every
-                        // later key into Ctrl+key, so the IME only yields Latin letters
-                        // ("locked to English") until the heartbeat reaper clears it.
                         if (this._altGrArmed) {
                             this._altGrArmed = false;
                             clearTimeout(this._altGrTimeout);
                         }
-                        // Wrap the key with the missing chord modifiers or it
-                        // lands as a bare keypress and types the letter. The armed
-                        // (deferred) Control counts as missing since it was never
-                        // sent, so it is pressed and released with the key here.
                         const missingMods = this._missingChordModifiers({
                             ctrl: event.ctrlKey || armedCtrl, alt: event.altKey,
                             meta: event.metaKey, shift: event.shiftKey,
@@ -1651,18 +1777,9 @@ export class Input {
             return;
         }
 
-        // 'Process' marks an IME-touched event whose modifier flags can be
-        // stale (e.g. ctrlKey unset while Control is physically held) — healing
-        // from it would release a genuinely-held modifier and send the chord's
-        // letter bare.
         if (!this._isSynth && event.key !== 'Process') {
             for (const code in this._keyDownList) {
                 const keysym = this._keyDownList[code];
-                // Heal a stuck modifier by keying off the STORED KEYSYM, not the
-                // physical code. An xkb remap (e.g. ctrl:swap_lalt_lctl) can leave a
-                // physical Alt code holding Control_L; matching on the code would then
-                // release Control on a plain (altKey=false) keydown and break Ctrl+key.
-                // Only release when the modifier's own browser flag has actually cleared.
                 if ((keysym === KeyTable.XK_Control_L || keysym === KeyTable.XK_Control_R) && !event.ctrlKey) {
                     this._sendKeyEvent(keysym, code, false);
                 } else if ((keysym === KeyTable.XK_Alt_L || keysym === KeyTable.XK_Alt_R) && !event.altKey) {
@@ -1673,11 +1790,6 @@ export class Input {
                     this._sendKeyEvent(keysym, code, false);
                 } else if (keysym === KeyTable.XK_Super_L || keysym === KeyTable.XK_Super_R ||
                             keysym === KeyTable.XK_Meta_L || keysym === KeyTable.XK_Meta_R) {
-                    // The macOS Option remap stores the physical Option key (AltLeft/
-                    // AltRight) as Meta_L/R, but Option drives altKey/AltGraph — not
-                    // metaKey. Heal those off the flag the physical key actually drives
-                    // so a still-held Option isn't force-released; genuine Command/Meta/
-                    // Super stay gated on metaKey.
                     if ((keysym === KeyTable.XK_Meta_L || keysym === KeyTable.XK_Meta_R) &&
                         (code === 'AltLeft' || code === 'AltRight')) {
                         if (!event.altKey && !event.getModifierState('AltGraph')) {
@@ -1703,14 +1815,6 @@ export class Input {
             }
         }
 
-        // Shortcut chord on a non-Latin layout (Cyrillic/Greek/Hebrew/CJK jamo...):
-        // event.key is the localized character, whose keysym the server session's
-        // layout usually cannot map with the modifier applied — Ctrl+A arrives as
-        // Ctrl+<U+0444> and the shortcut is lost. Shortcuts match on the physical
-        // position for such layouts (the OS convention), so resolve the keysym
-        // from event.code instead. ASCII event.key values stay layout-resolved
-        // (QWERTZ Ctrl+Z must stay 'z', not the positional 'y'), and AltGr chords
-        // are character input, never shortcuts.
         if (keysym !== null &&
             (event.ctrlKey || event.metaKey ||
              (event.altKey && !event.getModifierState('AltGraph')))) {
@@ -1754,15 +1858,14 @@ export class Input {
         }
 
         if ((browser.isMac() || browser.isIOS()) && keysym === KeyTable.XK_ISO_Level3_Shift) {
-            // macOS Option(Right) -> ISO_Level3_Shift sends its keyup unreliably, so
-            // holding the bit leaves AltGr stuck. Emit a momentary press+release instead.
+            // The right Option's keyup is unreliable, so a held ISO_Level3_Shift
+            // would stick; it is sent momentarily instead.
             console.log(`macOS: AltRight pressed, sending ISO_Level3_Shift momentarily`);
             this._sendMomentaryKey(KeyTable.XK_ISO_Level3_Shift);
             _stopEvent(event);
             return;
         }
 
-        // The key is already pressed; reuse the keysym it went down with.
         if (code in this._keyDownList) {
             keysym = this._keyDownList[code];
         }
@@ -1777,15 +1880,6 @@ export class Input {
             return;
         }
 
-        // Non-Chromium clipboard sync rides the 'paste' event (see
-        // lib/clipboard-sync.js), which only fires as the browser's default
-        // action of a trusted Ctrl/Cmd+V. preventDefault here cancels that
-        // command before it ever becomes a paste, silently killing local->
-        // server paste on Firefox/WebKit. Let the chord keep its default
-        // action: the window 'paste' listener forwards the local clipboard,
-        // and the key still streams to the remote desktop below. Absent a
-        // paste-capable listener the default is inert (the overlay input is
-        // not a text editor the user sees).
         const allowNativePaste = !browser.isChrome() && code === 'KeyV' &&
             (event.ctrlKey || event.metaKey) && !event.altKey &&
             !this.isComposing;
@@ -1800,16 +1894,7 @@ export class Input {
             }, 100);
             return;
         }
-        // A chord keydown whose modifier the event reports held but which is
-        // absent from _keyDownList (its keydown was swallowed without a 229
-        // marker, or an earlier heal released it): without a re-press the
-        // letter lands bare and types instead of firing the shortcut — and
-        // stays broken for every following chord until the user physically
-        // re-presses the modifier. Wrap it with the missing modifiers,
-        // mirroring the self-contained IME/229 chord path. Momentary mods are
-        // registered so the text-echo suppression still sees the chord. Meta is
-        // exempt while the macOS Cmd->Ctrl swap is active (Control carries the
-        // chord there).
+        // Meta is exempt while the macOS Cmd-to-Ctrl swap carries the chord.
         if (keysym !== null && !MODIFIER_STATE_BY_CODE[code] &&
             (event.ctrlKey || event.altKey || event.metaKey) &&
             !(event.getModifierState && event.getModifierState('AltGraph'))) {
@@ -1830,6 +1915,7 @@ export class Input {
         this._sendKeyEvent(keysym, code, true);
     }
 
+    /** Keyup handler: releases the keysym the key went down with, with the macOS Command and Windows Shift cleanups. */
     _handleKeyUp(event) {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
@@ -1839,7 +1925,7 @@ export class Input {
         const code = KeyboardUtil.getKeyCode(event);
 
         if (code === 'CapsLock' && KeyboardUtil.getKey(event) === 'CapsLock') {
-            // Never forwarded on keydown (see _handleKeyDown), so nothing to release.
+            // Never forwarded on keydown, so nothing to release.
             return;
         }
 
@@ -1848,7 +1934,6 @@ export class Input {
 
             const pressedCodes = Object.keys(this._keyDownList);
             for (const pressedCode of pressedCodes) {
-                // Ignore the meta key that is currently being released, and other modifiers.
                 if (pressedCode === 'ShiftLeft' || pressedCode === 'ShiftRight' ||
                     pressedCode === 'ControlLeft' || pressedCode === 'ControlRight' ||
                     pressedCode === 'AltLeft' || pressedCode === 'AltRight' ||
@@ -1889,13 +1974,17 @@ export class Input {
         }
     }
 
+    /**
+     * Streams a preedit change as backspaces and momentary presses, diffed
+     * per codepoint rather than UTF-16 unit: an astral character is one keysym
+     * and one backspace on the server, and its surrogate halves are not
+     * keysyms.
+     * @param {string} newText
+     */
     _updateCompositionText(newText) {
         const oldValue = this.compositionString;
         const newValue = newText || "";
 
-        // Diffed per codepoint, not per UTF-16 unit: an astral character (emoji,
-        // rare CJK) is one keysym and one backspace on the server side, and its
-        // surrogate halves are not valid keysyms on their own.
         const oldChars = Array.from(oldValue);
         const newChars = Array.from(newValue);
         let diff_start = 0;
@@ -1903,8 +1992,6 @@ export class Input {
             diff_start++;
         }
 
-        // Synthetic composition chars: use momentary kd/ku (like _handleTextInput) to
-        // skip per-character heartbeat churn from _sendKeyEvent.
         const backspaces = oldChars.length - diff_start;
         for (let i = 0; i < backspaces; i++) {
             this._sendMomentaryKey(KeyTable.XK_BackSpace);
@@ -1920,28 +2007,29 @@ export class Input {
         this.compositionString = newValue;
     }
 
+    /**
+     * Composition start. The textInput echo stamp is cleared, since a commit
+     * of this composition that matches it is real typing, and so is a chord
+     * held from a composition that continued instead of committing, which the
+     * IME consumed itself.
+     */
     _compositionStart(event) {
         if (!this._guac_markEvent(event)) return;
         this.isComposing = true;
         this.compositionString = "";
-        // A fresh composition invalidates the textInput echo stamp: a commit
-        // of this composition that matches a recent stamp is real typing, not
-        // an echo, and must not be dropped by _compositionEnd's echo check.
         this._lastTextInputCommit = null;
-        // Composition continued instead of committing: the held chord (if any)
-        // was consumed by the IME itself, so it must not fire remotely.
         this._pendingChord = null;
     }
 
     /**
-     * Fire a chord that was held during composition, after the commit's text
-     * has been delivered. Scheduled via setTimeout(0) from _compositionEnd so
+     * Fires the chord held during composition once the commit's text has
+     * been delivered. Scheduled with `setTimeout(0)` from `_compositionEnd` so
      * the browser's post-commit input event (which carries the committed text
-     * on Linux) is processed first; stale chords (no prompt commit) are dropped.
-     * Sent as a self-contained press/release sequence — the chord's modifier
-     * keydowns were swallowed by the composition guard, so nothing is held
-     * server-side, and holding a modifier across the commit would corrupt it
-     * (the preedit clear would arrive as Ctrl+BackSpace).
+     * on Linux) is processed first; a stale chord (no prompt commit) is
+     * dropped. Sent as a self-contained press and release sequence: the
+     * chord's modifier keydowns were swallowed by the composition guard, so
+     * nothing is held server-side, and a modifier held across the commit
+     * would turn the preedit clear into Ctrl+BackSpace.
      */
     _flushPendingChord() {
         const chord = this._pendingChord;
@@ -1960,24 +2048,26 @@ export class Input {
         for (const m of mods.reverse()) this.send("ku," + m);
     }
 
+    /** Composition update: streams the preedit diff. */
     _compositionUpdate(event) {
         if (!this._guac_markEvent(event)) return;
         if (!this.isComposing) return;
         this._updateCompositionText(event.data);
     }
 
+    /**
+     * Composition end. An empty-data end means the commit rides the following
+     * textInput, so it only clears the preedit; a non-empty end is the commit,
+     * except the one Blink chains after its own textInput. On Linux the input
+     * methods deliver the syllable on the textInput after the end, so the end
+     * is clear-only wherever the engine has that event.
+     */
     _compositionEnd(event) {
         if (!this._guac_markEvent(event)) return;
         if (!this.isComposing) return;
         if (this._pendingChord !== null) {
             setTimeout(() => this._flushPendingChord(), 0);
         }
-        // Empty-data end means the commit rides the following textInput: clear
-        // the preedit without typing. A non-empty end is the commit, except the
-        // one Blink chains after its own textInput — then the text already
-        // typed and the end only clears the preedit. On Linux the input methods
-        // deliver the syllable on the textInput after the end, so the end is
-        // clear-only there wherever the engine has that event to deliver it on.
         const echo = this._lastTextInputCommit;
         const echoMatches = echo !== null && echo.data === event.data &&
             (performance.now() - echo.at) < 400;
@@ -1994,11 +2084,13 @@ export class Input {
         this._clearCompositionHostSoon();
     }
 
+    /**
+     * Empties the overlay input once the IME is idle: committed text would
+     * accumulate there, and some IMEs reconvert against that stale surrounding
+     * text and corrupt later syllables. Never synchronously mid-composition,
+     * since mutating the value then aborts the active composition.
+     */
     _clearCompositionHostSoon() {
-        // Committed IME text accumulates in the overlay <input> forever; some IMEs
-        // reconvert against that stale surrounding text and corrupt later syllables.
-        // Clear once the IME is fully idle (never synchronously mid-composition —
-        // mutating the value then aborts the active composition).
         setTimeout(() => {
             const el = this.element;
             if (!this.isComposing && el && el.tagName === 'INPUT' && el.value) {
@@ -2008,13 +2100,14 @@ export class Input {
     }
 
     /**
-     * Type a string as momentary key presses: one keysym per codepoint, so an astral
-     * character (emoji, rare CJK) is sent whole rather than as two lone surrogates the
-     * server cannot type. Each character carries its OWN keysym and the server resolves
-     * the shift level for it; injecting Shift around the unshifted keysym instead would
-     * lose the case wherever the X keymap does not bind Shift as a real modifier. Sent
-     * as raw kd/ku rather than through _sendKeyEvent to skip per-character heartbeat
-     * churn.
+     * Types a string as momentary presses, one keysym per codepoint so an
+     * astral character is sent whole rather than as two lone surrogates the
+     * server cannot type. Each character carries its own keysym and the server
+     * resolves the shift level; injecting Shift around the unshifted keysym
+     * would lose the case wherever the X keymap does not bind Shift as a real
+     * modifier. Sent as raw presses rather than through `_sendKeyEvent` to
+     * skip per-character heartbeat churn.
+     * @param {string} text
      */
     _typeText(text) {
         for (const char of text) {
@@ -2026,18 +2119,23 @@ export class Input {
         }
     }
 
+    /**
+     * Types a textInput commit, unless a chord is held (the keydown path sent
+     * it, and the text echo must not also type the letter), and stamps it so
+     * the compositionend Blink chains after it only clears the preedit. Only
+     * an IME commit reaches this: plain keydowns are stopped before the
+     * browser action, and Blink can deliver a commit as textInput with an
+     * empty compositionend.
+     */
     _handleTextInput(event) {
         if (!event.data) return;
-        // A chord (Ctrl/Alt/Meta held) is sent by the keydown path; the browser's
-        // text echo of it must not ALSO type the letter.
         if (this._chordModifierHeld()) return;
         this._typeText(event.data);
-        // A commit that Blink chains compositionend(data) after: the end sees
-        // this stamp and only clears the preedit instead of typing again.
         this._lastTextInputCommit = { data: event.data, at: performance.now() };
         this._clearCompositionHostSoon();
     }
 
+    /** True while a chord modifier is held server-side or momentarily pressed. */
     _chordModifierHeld() {
         if (this._momentaryChordMods.size > 0) return true;
         for (const code in this._keyDownList) {
@@ -2054,9 +2152,10 @@ export class Input {
 
     /**
      * Chord modifiers the event reports held but which are absent from
-     * _keyDownList (their keydowns were swallowed by an IME/OS grab, or an
-     * earlier heal released them) — these must be re-pressed around the chord
+     * `_keyDownList` (their keydowns were swallowed by an IME or OS grab, or an
+     * earlier heal released them); these must be re-pressed around the chord
      * key or it lands as a bare keypress and types the letter.
+     * @returns {number[]} Keysyms to press, in order.
      */
     _missingChordModifiers({ ctrl, alt, meta, shift }) {
         const missing = [];
@@ -2076,7 +2175,7 @@ export class Input {
         return missing;
     }
 
-    /** Register momentary chord modifiers for _chordModifierHeld (short-lived). */
+    /** Registers momentary chord modifiers for `_chordModifierHeld`, briefly. */
     _noteMomentaryChordMods(keysyms) {
         for (const ks of keysyms) this._momentaryChordMods.add(ks);
         clearTimeout(this._momentaryChordModsTimer);
@@ -2091,13 +2190,12 @@ export class Input {
         return false;
     }
 
+    /** Types text from the mobile keyboard assist element and clears it; a held chord was sent by the keydown path, so its echo is dropped. */
     _handleMobileInput(event) {
         const text = event.target.value;
         if (!text) {
             return;
         }
-        // A chord (Ctrl/Alt/Meta held) is sent by the keydown path; the assist
-        // element's text echo of it must not ALSO type the letter.
         if (this._chordModifierHeld()) {
             event.target.value = '';
             return;
@@ -2106,6 +2204,19 @@ export class Input {
         event.target.value = '';
     }
 
+    /**
+     * Mouse and pen handler: moves the page-drawn cursor (to the predicted
+     * position where the engine offers one), maps the position through the
+     * sink or the window math, keeps the button mask, and sends motion
+     * coalesced to one message per animation frame, button events flushing
+     * what is pending first. Button events map their own coordinates too: a
+     * non-hovering stylus emits no pointermove before contact, and a press
+     * right after a pointer lock ends has only seen deltas. Under pointer
+     * lock the payload is the movement delta instead, in CSS pixels, scaled
+     * and quantized where the motion is sent so a frame's worth rounds once.
+     * Ctrl+Shift+Click takes pointer lock, and in gaming mode a click re-arms
+     * it after an Escape unlock while the click still goes to the server.
+     */
     _mouseButtonMovement(event) {
         if (this.buttonMask === 0 && event.target !== this.element) {
             return;
@@ -2162,30 +2273,19 @@ export class Input {
             event.preventDefault();
             return;
         }
-        // Fullscreen must hold pointer lock: re-arm it when a click lands on
-        // the stream after an in-fullscreen Escape unlock. The click itself
-        // still goes to the server.
-        if (down && event.button === 0) {
+        if (down && event.button === 0 && this.gamingMode) {
             this._armPointerLock();
         }
         if (this._isStreamLocked()) {
             mtype = "m2";
-            // CSS pixels, scaled and quantized where the motion is sent so that
-            // a frame's worth of it is rounded once.
             relX = event.movementX || 0;
             relY = event.movementY || 0;
         } else if (event.type === 'mousemove' || event.type === 'pointermove' ||
                    event.type === 'mousedown' || event.type === 'mouseup' ||
                    event.type === 'pointerdown' || event.type === 'pointerup') {
-            // A button event maps its own coordinates rather than trusting the
-            // last motion's: a non-hovering stylus emits no pointermove before
-            // contact, and a press that lands right after a pointer lock ends
-            // has only ever seen movement deltas.
             if (this._applySinkCoordinates(event.clientX, event.clientY, canvas, videoEle)) {
-                // Absolute coords mapped against the active sink (ws-core canvas or
-                // wr-core <video>); this.x/this.y were set by the helper.
+                // Mapped through the sink; this.x/this.y are set.
             } else {
-                // Auto resolution mode (non-manual).
                 if (!this.m) {
                     this._windowMath();
                 }
@@ -2199,10 +2299,8 @@ export class Input {
                 }
             }
         }
-        // Pen pointerdown/pointerup must drive the mask too: the pen handlers
-        // preventDefault() the pointerdown, which suppresses the compatibility
-        // mousedown, so without this a stylus tap would move the cursor but never
-        // click.
+        // Pen pointer events drive the mask too: their preventDefault()
+        // suppresses the compatibility mousedown.
         if (event.type === 'mousedown' || event.type === 'mouseup' ||
             ((event.type === 'pointerdown' || event.type === 'pointerup') && event.button >= 0)) {
             var mask = 1 << event.button;
@@ -2212,24 +2310,15 @@ export class Input {
                 this.buttonMask &= ~mask;
             }
         } else if (event.type === 'pointercancel') {
-            // A cancel ends all pen contact with button = -1 (no per-button
-            // transition), and no pointerup follows: clear every pen-mappable
-            // button (tip 0, barrel 2, eraser 5) or the mask stays stuck down.
+            // A cancel ends all pen contact with button -1 and no pointerup
+            // follows: every pen button (tip 0, barrel 2, eraser 5) is cleared.
             this.buttonMask &= ~((1 << 0) | (1 << 2) | (1 << 5));
         }
-        // Under lock the payload is a movement delta, everywhere else the mapped
-        // position.
         const outX = (mtype === "m2") ? relX : this.x;
         const outY = (mtype === "m2") ? relY : this.y;
         if (event.type === 'mousemove' || event.type === 'pointermove') {
-            // Coalesce high-frequency motion: a 1000 Hz mouse would otherwise emit
-            // ~1000 tiny WS messages/s, congesting the uplink and the server's input
-            // loop. At most one motion send per animation frame; the local cursor
-            // still tracks every event.
             this._queueCoalescedMouseMove(mtype, outX, outY, this.buttonMask);
         } else {
-            // Button / non-move event: flush pending motion first so ordering
-            // (move-then-click, accumulated relative deltas) is preserved.
             this._flushCoalescedMouseMove();
             if (mtype === "m2") {
                 const moved = this._relativeToServer(outX, outY);
@@ -2240,9 +2329,18 @@ export class Input {
         }
     }
 
+    /**
+     * Queues motion for the next animation frame, so a 1000 Hz mouse cannot
+     * congest the uplink and the server's input loop: relative deltas sum,
+     * absolute positions keep only the latest, and a mode change flushes
+     * first.
+     * @param {'m'|'m2'} mtype
+     * @param {number} x CSS-pixel delta under lock, else the mapped position.
+     * @param {number} y
+     * @param {number} buttonMask
+     */
     _queueCoalescedMouseMove(mtype, x, y, buttonMask) {
         if (mtype === "m2") {
-            // Relative mode: CSS-pixel deltas must be summed, never dropped.
             if (this._pendingMove && this._pendingMove.mtype === "m2") {
                 this._pendingMove.x += x;
                 this._pendingMove.y += y;
@@ -2252,7 +2350,6 @@ export class Input {
                 this._pendingMove = { mtype: "m2", x: x, y: y, buttonMask: buttonMask };
             }
         } else {
-            // Absolute mode: only the latest position matters.
             if (this._pendingMove && this._pendingMove.mtype !== "m") {
                 this._flushCoalescedMouseMove();
             }
@@ -2270,14 +2367,13 @@ export class Input {
         }
     }
 
+    /** Sends the queued motion; a relative move that quantizes to (0, 0) is dropped and its remainder stays for the next frame. */
     _flushCoalescedMouseMove() {
         const m = this._pendingMove;
         if (!m) return;
         this._pendingMove = null;
         if (m.mtype === "m2") {
             const moved = this._relativeToServer(m.x, m.y);
-            // An accumulated relative move of (0,0) carries no information; the
-            // sub-pixel remainder stays behind for the next frame.
             if (moved[0] === 0 && moved[1] === 0) return;
             this.send([ m.mtype, moved[0], moved[1], m.buttonMask, 0 ].join(","));
             return;
@@ -2285,6 +2381,7 @@ export class Input {
         this.send([ m.mtype, m.x, m.y, m.buttonMask, 0 ].join(","));
     }
 
+    /** Pen pointer events feed the mouse path; other pointer types arrive as mouse events. */
     _handlePointerDown(event) {
         if (event.pointerType !== 'pen') {
             return;
@@ -2293,6 +2390,7 @@ export class Input {
         this._mouseButtonMovement(event);
     }
 
+    /** Pen pointer motion, see `_handlePointerDown`. */
     _handlePointerMove(event) {
         if (event.pointerType !== 'pen') {
            return;
@@ -2300,6 +2398,7 @@ export class Input {
         this._mouseButtonMovement(event);
     }
  
+    /** Pen pointer release and cancel, see `_handlePointerDown`. */
     _handlePointerUp(event) {
         if (event.pointerType !== 'pen') {
             return;
@@ -2307,6 +2406,11 @@ export class Input {
         this._mouseButtonMovement(event);
     }
 
+    /**
+     * Trackpad emulation: one finger moves the pointer relatively, a tap
+     * clicks, a tap then hold drags, two fingers scroll, and a two-finger tap
+     * right-clicks. Every payload is relative motion.
+     */
     _handleTrackpadEvent(event) {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         event.preventDefault();
@@ -2446,18 +2550,32 @@ export class Input {
     }
 
     /**
-     * The box a fixed-size sink presents the stream in, in CSS pixels, or null
-     * when no sink applies (auto resolution) or the box cannot be measured, so
-     * callers run their DPR-scaled window math instead. The sink is the ws-core
-     * canvas (manual resolution / shared mode) or the wr-core <video> (manual
-     * resolution; each core has its own flag).
+     * The box a fixed-size sink presents the stream in, in CSS pixels, or
+     * null when no sink applies (auto resolution) or the box cannot be
+     * measured, so callers run their device-scaled window math instead. The
+     * sink is the ws-core canvas (manual resolution or shared mode) or the
+     * wr-core `<video>` (manual resolution; each core has its own flag).
      *
-     * streamResolutionDiverged: the server realized a different resolution
-     * than the window-derived request (mode snapping / rejected mode-set),
-     * so the window-math contract (CSS × dpr == server px) is broken and
-     * coordinates must be mapped through the stream box like manual mode —
-     * the canvas buffer on the websockets core, the <video> intrinsic size
-     * on the WebRTC core.
+     * `window.streamResolutionDiverged` means the server realized a different
+     * resolution than the window-derived request (mode snapping, a rejected
+     * mode set), so the window-math contract (CSS times dpr equals server
+     * pixels) is broken and coordinates map through the stream box like
+     * manual mode: the canvas buffer on the WebSocket core, the `<video>`
+     * intrinsic size on the WebRTC core.
+     *
+     * ws-core hides `#videoCanvas` while frames are presented on the video or
+     * worker sink, which mirrors the canvas box, so a zero-size box means
+     * hidden, not resized: the visible mirror (`videoStream`,
+     * `videoWorkerCanvas`) is measured instead, else the last valid rect. The
+     * mirror lookups are cached since this runs per pointer event; a node
+     * that left the DOM (`deactivateVideoWorker`) is re-queried. A `<video>`
+     * reports its realized stream size in `videoWidth`/`videoHeight` (the
+     * attributes may be unset) and `object-fit: contain` letterboxes the
+     * frame inside the element box, so the mapping uses the fitted content
+     * box; a canvas reports its buffer.
+     * @param {HTMLCanvasElement|null} canvas
+     * @param {HTMLVideoElement|null} videoEle
+     * @returns {{boxLeft: number, boxTop: number, boxW: number, boxH: number, sinkW: number, sinkH: number}|null}
      */
     _sinkBox(canvas, videoEle) {
         const sink = ((window.is_manual_resolution_mode || this.isSharedMode || window.streamResolutionDiverged) && canvas)
@@ -2466,18 +2584,8 @@ export class Input {
         if (!sink) {
             return null;
         }
-        // ws-core hides #videoCanvas (display: none) whenever frames are being
-        // presented on the <video>/worker sink, mirroring the canvas box onto
-        // that sink unchanged — so a zero-size measurement means "hidden right
-        // now", not "geometry changed". Measure the visible mirror instead,
-        // falling back to the last valid rect (resize handlers re-show the
-        // canvas, so a real geometry change is re-measured on the next event).
-        // CSS logical size.
         let rect = sink.getBoundingClientRect();
         if (!(rect.width > 0 && rect.height > 0)) {
-            // Cache the mirror lookups (this runs per pointer event while the
-            // canvas is hidden); re-query if a cached node left the DOM
-            // (deactivateVideoWorker replaces the worker canvas).
             if (!this._sinkMirrors) {
                 this._sinkMirrors = {};
             }
@@ -2498,16 +2606,12 @@ export class Input {
         if (!(rect.width > 0 && rect.height > 0) && this._lastSinkRect) {
             rect = this._lastSinkRect;
         }
-        // A <video> reports its realized stream size in videoWidth/Height (the
-        // width/height attributes may be unset); a canvas reports its buffer.
         const sinkW = sink.videoWidth || sink.width;
         const sinkH = sink.videoHeight || sink.height;
         if (rect.width > 0 && rect.height > 0 && sinkW > 0 && sinkH > 0) {
             this._lastSinkRect = rect;
             let boxLeft = rect.left, boxTop = rect.top, boxW = rect.width, boxH = rect.height;
             if (sink.tagName === 'VIDEO' && (sink.style.objectFit || 'contain') !== 'fill') {
-                // object-fit: contain letterboxes the frame inside the element
-                // box; map against the fitted content box, not the element box.
                 const fit = Math.min(rect.width / sinkW, rect.height / sinkH);
                 boxW = sinkW * fit;
                 boxH = sinkH * fit;
@@ -2516,11 +2620,13 @@ export class Input {
             }
             return { boxLeft, boxTop, boxW, boxH, sinkW, sinkH };
         }
-        // Never measured: fall back to the windowMath path instead of
-        // claiming success with (0, 0).
         return null;
     }
 
+    /**
+     * Maps a client position through the sink box into `this.x`/`this.y`.
+     * @returns {boolean} False when no sink applies.
+     */
     _applySinkCoordinates(clientX, clientY, canvas, videoEle) {
         const box = this._sinkBox(canvas, videoEle);
         if (!box) {
@@ -2613,6 +2719,7 @@ export class Input {
         return this._quantizeRelative(cssX * scale.x, cssY * scale.y);
     }
 
+    /** Maps a touch point into `this.x`/`this.y` and moves the page-drawn cursor to it. */
     _calculateTouchCoordinates(touchPoint) {
         this._updateCursorPosition(touchPoint.clientX, touchPoint.clientY);
         this._latestMouseX = touchPoint.clientX;
@@ -2622,9 +2729,8 @@ export class Input {
         let videoEle = document.getElementById('stream');
 
         if (this._applySinkCoordinates(touchPoint.clientX, touchPoint.clientY, canvas, videoEle)) {
-            // Sink-mapped absolute coords (covers wr-core manual mode on touch too).
+            // Mapped through the sink; this.x/this.y are set.
         } else {
-            // Auto resolution mode (non-manual).
             if (!this.m) this._windowMath();
             if (this.m) {
                 let logicalX_on_element = this._clientToServerX(touchPoint.clientX);
@@ -2638,19 +2744,17 @@ export class Input {
         }
     }
 
+    /** Sends the button mask after flushing pending motion; under lock as a zero delta, since `this.x`/`this.y` hold deltas there. */
     _sendMouseState() {
-        // Touch/trackpad paths call this for button changes: flush pending motion
-        // first so ordering is preserved.
         this._flushCoalescedMouseMove();
         if (this._isStreamLocked()) {
-            // A button change carries no motion of its own, and under lock
-            // this.x/this.y hold movement deltas, not a position.
             this.send([ "m2", 0, 0, this.buttonMask, 0 ].join(","));
             return;
         }
         this.send([ "m", this.x, this.y, this.buttonMask, 0 ].join(","));
     }
 
+    /** Switches trackpad emulation, clearing touch state and any held button. */
     setTrackpadMode(enabled) {
         const newMode = !!enabled;
         if (this._trackpadMode === newMode) {
@@ -2685,6 +2789,7 @@ export class Input {
         }
     }
 
+    /** Switches between the CSS cursor and the page-drawn cursor canvas. */
     async setUseBrowserCursors(enabled) {
         const newMode = !!enabled;
         if (this.use_browser_cursors === newMode) {
@@ -2712,6 +2817,11 @@ export class Input {
         }
     }
 
+    /**
+     * Direct touch: a tap clicks at the touch point, a drag beyond the tap
+     * threshold holds the left button, a long press right-clicks, two fingers
+     * scroll, and a third finger releases everything.
+     */
     _handleTouchEvent(event) {
         if (this._trackpadMode) {
             this._handleTrackpadEvent(event);
@@ -2878,7 +2988,7 @@ export class Input {
                 const deltaY = startData.currentY - startData.startY;
                 const deltaDistSq = deltaX * deltaX + deltaY * deltaY;
                 if (this._isTwoFingerGesture) {
-                    // Scrolling is handled externally
+                    // Two-finger scrolling is handled above.
                 } else if (!swipeDetected && this._activeTouchIdentifier === null && this._activeTouches.size === 1 && this._activeTouches.has(identifier)) {
                     if (duration < this._TAP_MAX_DURATION && deltaDistSq < TAP_THRESHOLD_DISTANCE_SQ_LOGICAL) {
                         this._calculateTouchCoordinates(endedTouch); this.buttonMask |= 1; this._sendMouseState(); preventDefault = true;
@@ -2949,16 +3059,20 @@ export class Input {
         }
     }
 
+    /**
+     * Sends a vertical scroll pulse. The server scrolls on each rising edge of
+     * the scroll bit, so a held bit would coalesce rapid events; bits 3 and 4
+     * are shared with the physical Back and Forward buttons, so the bit is
+     * cleared in a baseline first, set for the rising edge, then the held
+     * mask restored.
+     * @param {'up'|'down'} direction
+     * @param {number} magnitude Notches, at least 1.
+     */
     _triggerMouseWheel(direction, magnitude) {
         magnitude = Math.max(1, Math.round(magnitude));
         const button = (direction === 'up') ? 4 : 3;
         const mask = 1 << button;
 
-        // Pulse (press+release), not a held bit: the server scrolls on each 0->1
-        // edge, so a held bit would coalesce rapid wheel events. Bits 3/4 are shared
-        // with the physical Back/Forward buttons, so if one is held the scroll bit is
-        // already set and OR-ing it produces no edge. Force the scroll bit CLEAR in a
-        // baseline first, then set it for the rising edge, then restore the held mask.
         const cleared = this.buttonMask & ~mask;
         const mtype = "m2";
         this.send([ mtype, 0, 0, cleared, magnitude ].join(","));
@@ -2966,25 +3080,32 @@ export class Input {
         this.send([ mtype, 0, 0, this.buttonMask, magnitude ].join(","));
     }
 
+    /**
+     * Sends a horizontal scroll pulse. Bits 6 and 7 are scroll-only, so
+     * setting the bit always yields the rising edge and the release restores
+     * the mask.
+     * @param {'left'|'right'} direction
+     * @param {number} magnitude Notches, at least 1.
+     */
     _triggerHorizontalMouseWheel(direction, magnitude) {
         magnitude = Math.max(1, Math.round(magnitude));
         const button = (direction === 'left') ? 6 : 7;
         const mask = 1 << button;
 
-        // Pulse (press+release) for the 0->1 edge. Bits 6/7 are scroll-only (not
-        // shared with any physical mouse button, which only sets 1 << event.button),
-        // so OR-ing always yields an edge and the release just restores the mask.
         const mtype = "m2";
         this.send([ mtype, 0, 0, this.buttonMask | mask, magnitude ].join(","));
         this.send([ mtype, 0, 0, this.buttonMask, magnitude ].join(","));
     }
 
+    /**
+     * Drains the sampled vertical pixel deltas and classifies the device. A
+     * mouse wheel emits clean integer multiples of a base notch quantum
+     * (uniform notches, or 2x and 3x on a fast spin); a trackpad emits finely
+     * varying deltas that share no quantum. Matching on multiples rather than
+     * equality keeps fast, varying-magnitude spins classified as a wheel.
+     * @returns {boolean}
+     */
     _isDiscreteWheel() {
-        // Drain the queued vertical pixel deltas and decide wheel-vs-trackpad. A real
-        // mouse wheel emits deltas that are clean integer multiples of a base notch
-        // quantum (uniform notches, or 2x/3x on a fast spin); a trackpad emits finely
-        // varying deltas that share no clean quantum. Matching multiples-of-quantum
-        // (not exact equality) keeps fast, varying-magnitude spins classified as wheel.
         var vals = [];
         while (!this._queue.isEmpty()) {
             var v = this._queue.dequeue();
@@ -3001,12 +3122,12 @@ export class Input {
         return true;
     }
 
-    // Forget everything learned about the current scroll device: notch quantums,
-    // wheel-vs-trackpad classification samples, and fractional-notch carries. Called
-    // after a wheel-idle gap, because the learned state is only valid for the device
-    // that produced it — a mouse wheel following trackpad use must not divide its
-    // 120px detents by the trackpad's 1-10px learned quantum (massive over-scroll),
-    // and vice versa. Post-reset behavior is identical to a fresh page load.
+    /**
+     * Forgets everything learned about the current scroll device: notch
+     * quantums, classification samples and fractional-notch carries. Called
+     * after a wheel-idle gap, since the learned state only holds for the
+     * device that produced it; afterwards behavior matches a fresh page load.
+     */
     _resetWheelLearning() {
         this._smallestDeltaY = 10000;
         this._smallestLineDeltaY = 10000;
@@ -3018,18 +3139,24 @@ export class Input {
         this._wheelDirX = null;
     }
 
+    /**
+     * Wheel handler: ends the scroll session after an idle second, samples
+     * pixel deltas for the device classifier, and routes a trackpad through
+     * the smoothing throttle and a discrete wheel straight to emission. Line
+     * and page mode bypass the classifier, being always a discrete wheel
+     * (trackpads report pixels). The throttle rate-limits emission but drops
+     * no delta: throttled ticks accumulate and flush at the window end. A
+     * discrete wheel emits per event, so a fast spin never collapses to the
+     * throttle rate.
+     */
     _mouseWheelWrapper(event) {
-        // One second without wheel events ends the scroll session: longer than any
-        // intra-gesture gap (momentum tails included), far shorter than a physical
-        // trackpad<->mouse hand-over, so per-device learning never leaks across.
+        // One idle second is longer than any intra-gesture gap (momentum
+        // tails included) and far shorter than a trackpad-to-mouse hand-over.
         const nowTs = performance.now();
         if (nowTs - this._lastWheelEventTs > 1000) {
             this._resetWheelLearning();
         }
         this._lastWheelEventTs = nowTs;
-        // Line- and page-mode wheel events are always a discrete mouse wheel
-        // (trackpads report pixel deltas), so bypass the trackpad detector and
-        // accumulate them directly — never dropping a notch.
         if (event.deltaMode !== 0) {
             this._mouseWheel(event);
             event.preventDefault();
@@ -3041,9 +3168,6 @@ export class Input {
             this._allowThreshold = !this._isDiscreteWheel();
         }
         if (this._allowThreshold) {
-            // Trackpad-classified: rate-limit emission to smooth it, but never drop a
-            // delta. A high-resolution wheel misclassified as a trackpad still scrolls
-            // its full distance because throttled ticks accumulate and flush at window end.
             if (this._allowTrackpadScrolling) {
                 this._allowTrackpadScrolling = false;
                 this._mouseWheel(event);
@@ -3057,16 +3181,24 @@ export class Input {
                 this._accumulateWheelX(event);
             }
         } else {
-            // Discrete mouse wheel (or not yet classified): accumulate + emit every event
-            // so a fast spin is never collapsed to the throttle rate.
             this._mouseWheel(event);
         }
         event.preventDefault();
     }
 
-    // Normalize a wheel delta to a fractional count of physical notches, learning the
-    // per-notch quantum per deltaMode (smallest observed jump) so mice, high-DPI mice,
-    // and line-mode (Firefox) wheels all resolve to ~1 notch per detent.
+    /**
+     * Normalizes a vertical wheel delta to a fractional count of notches,
+     * learning the per-notch quantum per delta mode (the smallest observed
+     * jump) so mice, high-resolution mice and line-mode wheels all resolve to
+     * about one notch per detent. Trackpad pixel deltas measure pan distance,
+     * not notches, so they take a fixed 100px notch like the horizontal axis
+     * (the learned quantum would be the gesture's tiniest ramp-up sample);
+     * the quantum keeps learning meanwhile for a wheel classified later in
+     * the session.
+     * @param {number} deltaY
+     * @param {number} deltaMode
+     * @returns {number}
+     */
     _wheelNotches(deltaY, deltaMode) {
         const magnitude = Math.abs(Math.trunc(deltaY));
         if (magnitude === 0) { return 0; }
@@ -3082,19 +3214,19 @@ export class Input {
         // DOM_DELTA_PIXEL
         if (magnitude < this._smallestDeltaY) { this._smallestDeltaY = magnitude; }
         if (this._allowThreshold) {
-            // Trackpad-classified deltas measure pan distance, not notches: the
-            // learned quantum would be the gesture's tiniest ramp-up sample
-            // (1-2px), turning one glide into hundreds of clicks. Use the same
-            // fixed 100px-per-notch as the horizontal axis. The quantum keeps
-            // learning above so a discrete wheel classified later in the session
-            // resolves against its true notch size.
             return magnitude / 100;
         }
         return magnitude / this._smallestDeltaY;
     }
 
-    // Horizontal deltas have no learned quantum (trackpads dominate the axis):
-    // pixel mode uses a fixed 100px notch; line/page modes are one notch per unit.
+    /**
+     * Normalizes a horizontal wheel delta to notches. The axis has no learned
+     * quantum (trackpads dominate it): pixel mode uses a fixed 100px notch,
+     * line and page modes one notch per unit.
+     * @param {number} deltaX
+     * @param {number} deltaMode
+     * @returns {number}
+     */
     _wheelNotchesX(deltaX, deltaMode) {
         const magnitude = Math.abs(deltaX);
         if (magnitude === 0) { return 0; }
@@ -3102,16 +3234,15 @@ export class Input {
         return magnitude / 100;
     }
 
-    // Accumulate one event's vertical delta into the fractional-notch carry (no emit).
+    /** Adds one event's vertical delta to the fractional-notch carry; a direction change resets it so a remainder cannot swallow the first notch. */
     _accumulateWheelY(event) {
         if (event.deltaY === 0) { return; }
         const direction = (event.deltaY < 0) ? 'up' : 'down';
-        // Reset the accumulator on a direction change so a leftover remainder cannot
-        // swallow the first notch of the new direction.
         if (direction !== this._wheelDirY) { this._wheelAccumY = 0; this._wheelDirY = direction; }
         this._wheelAccumY += this._wheelNotches(event.deltaY, event.deltaMode);
     }
 
+    /** Horizontal counterpart of `_accumulateWheelY`. */
     _accumulateWheelX(event) {
         if (event.deltaX === 0) { return; }
         const direction = (event.deltaX < 0) ? 'left' : 'right';
@@ -3119,9 +3250,11 @@ export class Input {
         this._wheelAccumX += this._wheelNotchesX(event.deltaX, event.deltaMode);
     }
 
-    // Drain whole accumulated notches into scroll pulses, carrying the fractional
-    // remainder forward. Emission is chunked to the per-message magnitude bound —
-    // every whole notch is sent, so an oversized flush never discards scroll distance.
+    /**
+     * Drains whole accumulated notches into scroll pulses, carrying the
+     * fraction forward. Emission is chunked to the per-message magnitude
+     * bound, so an oversized flush never discards distance.
+     */
     _emitWheelY() {
         let pulses = Math.floor(this._wheelAccumY);
         if (pulses < 1) { return; }
@@ -3133,6 +3266,7 @@ export class Input {
         }
     }
 
+    /** Horizontal counterpart of `_emitWheelY`. */
     _emitWheelX() {
         let pulses = Math.floor(this._wheelAccumX);
         if (pulses < 1) { return; }
@@ -3144,6 +3278,7 @@ export class Input {
         }
     }
 
+    /** Accumulates and emits both axes of one wheel event. */
     _mouseWheel(event) {
         this._accumulateWheelY(event);
         this._emitWheelY();
@@ -3151,6 +3286,7 @@ export class Input {
         this._emitWheelX();
     }
 
+    /** Suppresses the native context menu over the stream. */
     _contextMenu(event) {
         if (this.element.contains(event.target)) {
             event.preventDefault();
@@ -3167,6 +3303,11 @@ export class Input {
             (canvas !== null && document.pointerLockElement === canvas);
     }
 
+    /**
+     * Pointer lock change: reports it to the server (`p`,
+     * `SET_NATIVE_CURSOR_RENDERING`), resets the relative carry, and on unlock
+     * releases the keyboard and shows the page-drawn cursor.
+     */
     _pointerLock() {
         this._relCarryX = 0;
         this._relCarryY = 0;
@@ -3181,6 +3322,7 @@ export class Input {
         }
     }
 
+    /** Derives the client-to-frame mapping of the element (letterbox offset and scale) into `this.m`, or null when it has no size. */
     _windowMath() {
         this._pointerScaleFrame = null;
         const elementRect = this.element.getBoundingClientRect();
@@ -3217,11 +3359,12 @@ export class Input {
     }
 
     /**
-     * Base64-encodes a gamepad name for the 'js,c' message. The server decodes it
-     * as latin-1, so codepoints outside that range (localized vendor names) are
-     * replaced rather than handed to btoa, which throws on them.
+     * Base64-encodes a gamepad name for the `js,c` message. The server
+     * decodes it as Latin-1, so codepoints outside that range (localized
+     * vendor names) are replaced rather than handed to `btoa`, which throws
+     * on them.
      * @param {string} id Gamepad id reported by the browser.
-     * @returns {string} Base64 of the latin-1-safe name.
+     * @returns {string} Base64 of the Latin-1-safe name.
      */
     _encodeGamepadId(id) {
         const safeId = String(id || 'Gamepad').replace(/[^\x00-\xFF]/g, '?');
@@ -3232,22 +3375,25 @@ export class Input {
         }
     }
 
+    /**
+     * Announces a pad (`js,c`) on this client's slot and creates the shared
+     * manager. A negative slot (a controller slot of 0) is refused, as the
+     * button and axis sends refuse it, so no phantom slot is created. The
+     * axis and button counts are advisory: the server presents a fixed Xbox
+     * pad, and Firefox's non-standard axis layout is normalized on the way.
+     */
     _gamepadConnected(event) {
-        // Reject negatives too (e.g. a controllerSlot of 0 yields -1): button/axis
-        // sends refuse such an index, so connecting it would create a phantom slot
-        // that never receives input.
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
         if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
         if (!this.gamepadManager) {
             this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this), this._gamepadHeartbeat.bind(this));
         }
-        // Counts are advisory: the server presents a fixed Xbox pad regardless, and
-        // Firefox's non-standard axis layout is normalized in _gamepadButton/_gamepadAxis.
         const connectMsg = "js,c," + server_gp_index + "," + this._encodeGamepadId(event.gamepad.id) + "," + event.gamepad.axes.length + "," + event.gamepad.buttons.length;
         this.send(connectMsg);
         if (this.ongamepadconnected !== null) { this.ongamepadconnected(event.gamepad.id); }
     }
 
+    /** Announces a pad's disconnection (`js,d`). */
     _gamepadDisconnect(event) {
          if (this.ongamepaddisconnected !== null) { this.ongamepaddisconnected(); }
          const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
@@ -3255,6 +3401,7 @@ export class Input {
          this.send("js,d," + server_gp_index);
     }
 
+    /** Sends a button change (`js,b`) and mirrors it to the dashboard while the sidebar is open. */
     _gamepadButton(gp_num, btn_num, val) {
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
         if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
@@ -3264,12 +3411,14 @@ export class Input {
         }
     }
 
+    /** Sends the held-pad heartbeat (`js,h`). */
     _gamepadHeartbeat() {
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
         if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
         this.send("js,h," + server_gp_index);
     }
 
+    /** Sends an axis change (`js,a`); Firefox's non-standard layout reports the triggers on axes 4 and 5, sent as buttons 6 and 7. */
     _gamepadAxis(gp_num, axis_num, val) {
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
         if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
@@ -3293,8 +3442,8 @@ export class Input {
 
     /**
      * True when the active fullscreen element hosts the stream (the video
-     * container, or the whole document via a dashboard's browser-fullscreen
-     * control) — every such fullscreen must hold pointer lock.
+     * container, or the whole document through a dashboard's fullscreen
+     * control); every such fullscreen must hold pointer lock.
      */
     _isStreamFullscreen() {
         const fsElement = document.fullscreenElement;
@@ -3315,6 +3464,9 @@ export class Input {
      * `again` re-runs the request the way its caller would, so guarded callers
      * re-check their guards. Engines older than the promise-returning API
      * report failures through pointerlockerror instead.
+     * @param {Element} element
+     * @param {() => void} again Re-runs the request after the option is turned off.
+     * @param {(err: Error) => void} onFailure
      */
     _requestPointerLock(element, again, onFailure) {
         const lockPromise = Input._unadjustedMovement
@@ -3332,12 +3484,12 @@ export class Input {
     }
 
     /**
-     * Acquire pointer lock for the fullscreen stream. Chrome rejects a
-     * request made while the fullscreen transition is still settling
-     * (WrongDocumentError), so retry over a few short intervals.
+     * Acquires pointer lock for the fullscreen stream in gaming mode. Chrome
+     * rejects a request made while the fullscreen transition is still
+     * settling (WrongDocumentError), so it retries over a few short intervals.
      */
     _armPointerLock(attempt = 0) {
-        if (this.isSharedMode || !this._isStreamFullscreen()) return;
+        if (this.isSharedMode || !this.gamingMode || !this._isStreamFullscreen()) return;
         if (this._isStreamLocked()) return;
         this._requestPointerLock(this.element, () => this._armPointerLock(attempt), (err) => {
             if (attempt < 5) {
@@ -3348,21 +3500,30 @@ export class Input {
         });
     }
 
+    /**
+     * Fullscreen change: arms pointer and keyboard lock for gaming mode, ends
+     * gaming mode on exit, and releases every key on both sides since a
+     * transition can eat keyups (Escape on exit, the Ctrl+Shift+F chord on
+     * entry).
+     */
     _onFullscreenChange() {
         if (this._isStreamFullscreen()) {
-            if (!this.isSharedMode) {
+            if (!this.isSharedMode && this.gamingMode) {
                 this._armPointerLock();
                 this.requestKeyboardLock();
             }
-        } else if (this._isStreamLocked()) {
-            document.exitPointerLock();
+        } else {
+            this._setGamingMode(false);
+            if (this._isStreamLocked()) document.exitPointerLock();
         }
-        // A fullscreen transition can eat keyups (held Escape on exit, the
-        // Ctrl-Shift-F chord on entry): release everything on both sides.
         this.send("kr");
         this.resetKeyboard();
     }
 
+    /**
+     * True when the target or one of its ancestors carries the class.
+     * @returns {boolean}
+     */
     _targetHasClass(target, className) {
         let element = target;
         while (element && element.classList) {
@@ -3372,6 +3533,10 @@ export class Input {
         return false;
     }
 
+    /**
+     * The page size in device pixels, rounded down to even.
+     * @returns {number[]} Width and height.
+     */
     getWindowResolution() {
         const bodyWidth = document.body ? document.body.offsetWidth : window.innerWidth;
         const bodyHeight = document.body ? document.body.offsetHeight : window.innerHeight;
@@ -3381,25 +3546,30 @@ export class Input {
         return [ Math.max(1, parseInt(offsetRatioWidth - offsetRatioWidth % 2)), Math.max(1, parseInt(offsetRatioHeight - offsetRatioHeight % 2)) ];
     }
 
+    /** Re-derives the window math after a layout change. */
     resize() {
         this._windowMath();
     }
 
+    /** True while the full input context is attached. */
     isInputAttached() {
         return this.inputAttached;
     }
 
+    /**
+     * Attaches the window and document listeners, and the input context
+     * unless this is a viewer-only session. Any previously attached instance
+     * is detached first: reconnect paths construct a fresh Input, whose
+     * predecessor's listeners and gamepad poller would otherwise keep firing
+     * alongside it. The overlay element takes focus, since browsers only run
+     * IME composition on the focused editable element, unless the user is in
+     * another field.
+     */
     attach() {
-        // One live instance per page: reconnect paths construct a fresh Input without
-        // detaching the old one, whose window/document listeners and 16 ms gamepad
-        // poller would otherwise keep firing alongside this one (every event doubled).
         if (Input._attachedInstance && Input._attachedInstance !== this) {
             try { Input._attachedInstance.detach(); } catch (e) { /* already torn down */ }
         }
         Input._attachedInstance = this;
-        // The overlay input hosts IME composition, which browsers only run on the
-        // FOCUSED editable element. Take focus at attach (covers page load/refresh
-        // with a CJK layout already active) unless the user is in another field.
         this._focusCompositionHost();
         this.listeners.push(addListener(this.element, 'resize', this._windowMath, this));
         this.listeners.push(addListener(document, 'pointerlockchange', this._pointerLock, this));
@@ -3426,6 +3596,7 @@ export class Input {
         }    
     }
 
+    /** Attaches the keyboard, pointer, touch, wheel and composition listeners, shows the cursor and adopts connected pads. */
     attach_context() {
         if (this.inputAttached) return;
         this._windowMath();
@@ -3443,8 +3614,7 @@ export class Input {
         this.listeners_context.push(addListener(window, 'blur', this.resetKeyboard, this));
         this.listeners_context.push(addListener(document, 'visibilitychange', this._onVisibilityChange, this));
         this.listeners_context.push(addListener(window, 'pagehide', this.resetKeyboard, this));
-        // Page Lifecycle freeze: a backgrounded tab may be frozen (heartbeats stop), so
-        // release held keys first to avoid one sticking down server-side.
+        // A frozen background tab stops the heartbeat, so keys are released first.
         this.listeners_context.push(addListener(document, 'freeze', this.resetKeyboard, this));
         this.listeners_context.push(addListener(this.keyboardInputAssist, 'input', this._handleMobileInput, this));
         this.listeners_context.push(addListener(document, 'mousedown', this._handleOutsideClick, this, true));
@@ -3457,10 +3627,6 @@ export class Input {
         this.listeners_context.push(addListener(compositionTarget, 'compositionstart', this._compositionStart, this));
         this.listeners_context.push(addListener(compositionTarget, 'compositionupdate', this._compositionUpdate, this));
         this.listeners_context.push(addListener(compositionTarget, 'compositionend', this._compositionEnd, this));
-        // Blink on every platform can deliver an IME commit as textInput with
-        // an empty compositionend (IBus/GTK and some TSF paths). Plain typing
-        // never reaches this listener: plain keydowns are stopEvent'ed before
-        // the browser action.
         this.listeners_context.push(addListener(this.element, 'textInput', this._handleTextInput, this));
         this.listeners_context.push(addListener(this.element, 'pointerdown', this._handlePointerDown, this));
         this.listeners_context.push(addListener(this.element, 'pointermove', this._handlePointerMove, this));
@@ -3477,7 +3643,7 @@ export class Input {
         this.listeners_context.push(addListener(window, 'mousemove', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(window, 'mouseup', this._mouseButtonMovement, this));
 
-        if (this._isStreamFullscreen()) {
+        if (this._isStreamFullscreen() && this.gamingMode) {
              this._armPointerLock();
              this.requestKeyboardLock();
         } else if (this._isStreamLocked()) {
@@ -3488,9 +3654,11 @@ export class Input {
         this._resyncGamepads();
     }
 
-    // gamepadconnected fires only on physical connect (or first press): a re-attach
-    // after a mode switch / reconnect must adopt pads the browser already exposes,
-    // or the pad stays dead until it is re-plugged.
+    /**
+     * Adopts pads the browser already exposes: gamepadconnected fires only on
+     * physical connect (or first press), so a re-attach after a mode switch
+     * or reconnect would otherwise leave the pad dead until re-plugged.
+     */
     _resyncGamepads() {
         let pads = [];
         try {
@@ -3507,6 +3675,7 @@ export class Input {
         }
     }
 
+    /** Removes every listener and the gamepad manager, then the input context. */
     detach() {
         if (Input._attachedInstance === this) {
             Input._attachedInstance = null;
@@ -3520,6 +3689,7 @@ export class Input {
         this.detach_context();
     }
 
+    /** Removes the input context listeners, releases every key and button, and exits pointer lock. */
     detach_context() {
         this._stopKeyHeartbeat();
         removeListeners(this.listeners_context);
@@ -3531,9 +3701,7 @@ export class Input {
         this._activeTouches.clear();
         this._activeTouchIdentifier = null;
         this._isTwoFingerGesture = false;
-        // Drop any coalesced motion still waiting on its animation-frame flush so a
-        // queued move cannot fire send() after this instance is detached. The
-        // already-scheduled RAF then no-ops (the flush early-returns on null).
+        // A queued move must not send after detach; the scheduled flush then no-ops.
         this._pendingMove = null;
         this._relCarryX = 0;
         this._relCarryY = 0;
@@ -3545,7 +3713,7 @@ export class Input {
         this._exitPointerLock();
     }
 
-    /** Release a stream-held pointer lock, hiding the server-drawn pointer. */
+    /** Releases a stream-held pointer lock, hiding the server-drawn pointer. */
     _exitPointerLock() {
         if (this._isStreamLocked()) {
             document.exitPointerLock();
@@ -3554,46 +3722,95 @@ export class Input {
         }
     }
 
+    /**
+     * Fullscreen with no lock, leaving the pointer and the keyboard to the
+     * browser: the dashboard button and the Ctrl+Shift+F chord land here. The
+     * whole document goes fullscreen, not the stream container: the dashboard
+     * overlay is a body-level sibling, which container fullscreen would hide.
+     */
     enterFullscreen() {
-        // Fullscreen the whole document, not just the stream container: the
-        // dashboard overlay is a body-level sibling of the container, so
-        // container fullscreen would hide the menu/settings/toggle entirely.
-        // Whole-document keeps them reachable and doesn't change pointer lock
-        // or keyboard-lock (long-press-Escape) behavior, which are independent
-        // of the fullscreened element.
-        // A lock requested before the transition would be cancelled by it; the
-        // fullscreenchange handler arms it once fullscreen lands (still inside
-        // the gesture's transient-activation window).
         if (document.fullscreenElement === null) {
             document.documentElement.requestFullscreen()
                 .catch(err => console.error("Fullscreen request failed:", err));
-        } else {
-            this._armPointerLock();
         }
     }
 
+    /**
+     * Enters gaming mode: fullscreen that also holds the pointer and the
+     * keyboard, so a game sees Escape, Alt+Tab and raw motion instead of the
+     * browser. A locked keyboard delivers a short Escape to the session, so
+     * holding it is what leaves this mode.
+     *
+     * A lock requested before the transition would be cancelled by it, so the
+     * fullscreenchange handler arms both once fullscreen lands, still inside
+     * the gesture's transient-activation window. A refused request takes the
+     * mode back down with it: left set, the next transition from any source
+     * would arm the locks.
+     */
+    enterGamingMode() {
+        this._setGamingMode(true);
+        if (document.fullscreenElement === null) {
+            document.documentElement.requestFullscreen()
+                .catch(err => {
+                    console.error("Fullscreen request failed:", err);
+                    this._setGamingMode(false);
+                });
+            return;
+        }
+        this._armPointerLock();
+        this.requestKeyboardLock();
+    }
+
+    /** Publishes the mode to `ongamingmode`, releasing the keyboard as it ends. */
+    _setGamingMode(active) {
+        if (this.gamingMode === active) return;
+        this.gamingMode = active;
+        if (!active) {
+            this.releaseKeyboardLock();
+        }
+        if (this.ongamingmode) {
+            this.ongamingmode(active);
+        }
+    }
+
+    /** Locks the system keys the browser would otherwise intercept, for gaming mode alone, where the Keyboard Lock API exists. */
     requestKeyboardLock() {
-        if (document.fullscreenElement && 'keyboard' in navigator && (navigator.keyboard && 'lock' in navigator.keyboard)) {
+        if (!this.gamingMode || !document.fullscreenElement) return;
+        if (navigator.keyboard && 'lock' in navigator.keyboard) {
             const keys = [ "AltLeft", "AltRight", "Tab", "Escape", "MetaLeft", "MetaRight", "ContextMenu" ];
-            navigator.keyboard.lock(keys).then(() => {
-            }).catch(err => {
-            });
+            navigator.keyboard.lock(keys).catch(() => {});
+        }
+    }
+
+    /** Hands the system keys back; a browser that never locked them ignores it. */
+    releaseKeyboardLock() {
+        if (navigator.keyboard && 'unlock' in navigator.keyboard) {
+            try {
+                navigator.keyboard.unlock();
+            } catch (e) {
+                /* nothing was locked */
+            }
         }
     }
 }
 
+/**
+ * Adds a listener bound to `ctx`, with `passive: false` so the handler keeps
+ * `preventDefault()`.
+ * @returns {Array|null} The tuple `removeListeners` takes, or null for an invalid target.
+ */
 function addListener(obj, name, func, ctx, useCapture = false) {
     if (!obj || typeof obj.addEventListener !== 'function') {
         console.error("addListener: Invalid target object", obj);
         return null;
     }
     const newFunc = ctx ? func.bind(ctx) : func;
-    // passive: false keeps preventDefault() available in the handler.
     const options = { capture: useCapture, passive: false };
     obj.addEventListener(name, newFunc, options);
     return [obj, name, newFunc, options];
 }
 
+/** Removes listeners added by `addListener` and empties the list. */
 function removeListeners(listeners) {
     for (const listener of listeners) {
         if (listener && listener[0] && typeof listener[0].removeEventListener === 'function') {

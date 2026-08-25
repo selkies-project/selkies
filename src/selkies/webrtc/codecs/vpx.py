@@ -31,43 +31,20 @@
 #   OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 #   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import logging
-import multiprocessing
 import random
 from struct import pack, unpack_from
-from typing import Optional, Type, TypeVar, cast
+from typing import Optional, Type, TypeVar, Union
 
-import av
-from av import CodecContext, VideoFrame
-from av.frame import Frame
-from av.packet import Packet
-from av.video.codeccontext import VideoCodecContext
-
-from ..jitterbuffer import JitterFrame
 from ..mediastreams import VIDEO_TIME_BASE, convert_timebase
-from .base import Decoder, Encoder
-
-logger = logging.getLogger(__name__)
+from .base import Decoder, Encoder, EncodedPacket
 
 DEFAULT_BITRATE = 500000  # 500 kbps
 MIN_BITRATE = 250000  # 250 kbps
 MAX_BITRATE = 1500000  # 1.5 Mbps
 
-MAX_FRAME_RATE = 30
 PACKET_MAX = 1200
 
 DESCRIPTOR_T = TypeVar("DESCRIPTOR_T", bound="VpxPayloadDescriptor")
-
-
-def number_of_threads(pixels: int, cpus: int) -> int:
-    if pixels >= 1920 * 1080 and cpus > 8:
-        return 8
-    elif pixels > 1280 * 960 and cpus >= 6:
-        return 3
-    elif pixels > 640 * 480 and cpus >= 3:
-        return 2
-    else:
-        return 1
 
 
 class VpxPayloadDescriptor:
@@ -200,87 +177,17 @@ class VpxPayloadDescriptor:
 
 
 class Vp8Decoder(Decoder):
-    def __init__(self) -> None:
-        self.codec = CodecContext.create("libvpx", "r")
-
-    def decode(self, encoded_frame: JitterFrame) -> list[Frame]:
-        try:
-            packet = Packet(encoded_frame.data)
-            packet.pts = encoded_frame.timestamp
-            packet.time_base = VIDEO_TIME_BASE
-            return cast(list[Frame], self.codec.decode(packet))
-        except av.FFmpegError as e:
-            logger.warning("Vp8Decoder() failed to decode, skipping package: " + str(e))
-            return []
+    """VP8 receive codec. The webcam uplink is decoded by pixelflux off the GIL,
+    so this registry entry carries no libav decode of its own."""
 
 
 class Vp8Encoder(Encoder):
     def __init__(self) -> None:
-        self.codec: Optional[VideoCodecContext] = None
         self.picture_id = random.randint(0, (1 << 15) - 1)
         self.__target_bitrate = DEFAULT_BITRATE
 
-    def encode(
-        self, frame: Frame, force_keyframe: bool = False
-    ) -> tuple[list[bytes], int]:
-        assert isinstance(frame, VideoFrame)
-        if frame.format.name != "yuv420p":
-            frame = frame.reformat(format="yuv420p")
-
-        if self.codec and (
-            frame.width != self.codec.width
-            or frame.height != self.codec.height
-            # We only adjust bitrate if it changes by over 10%.
-            or abs(self.target_bitrate - self.codec.bit_rate) / self.codec.bit_rate
-            > 0.1
-        ):
-            self.codec = None
-
-        # Force a complete image if a keyframe was requested.
-        if force_keyframe:
-            frame.pict_type = av.video.frame.PictureType.I
-
-        if self.codec is None:
-            self.codec = av.CodecContext.create("libvpx", "w")
-            self.codec.width = frame.width
-            self.codec.height = frame.height
-            self.codec.bit_rate = self.target_bitrate
-            self.codec.pix_fmt = "yuv420p"
-            self.codec.gop_size = 3000  # kf_max_dist
-            self.codec.qmin = 2  # rc_min_quantizer
-            self.codec.qmax = 56  # rc_max_quantizer
-            self.codec.options = {
-                # We want rc_buf_sz = 1000 and FFmpeg sets:
-                #   rc_buf_sz =  bufsize * 1000 / bit_rate
-                "bufsize": str(self.__target_bitrate),
-                "cpu-used": "-6",
-                "deadline": "realtime",
-                "lag-in-frames": "0",
-                # Setting minrate = maxrate = bit_rate triggers CBR.
-                "minrate": str(self.target_bitrate),
-                "maxrate": str(self.target_bitrate),
-                "noise-sensitivity": "4",
-                "overshoot-pct": "15",
-                "partitions": "0",  # VP8_ONE_TOKENPARTITION
-                "static-thresh": "1",
-                "undershoot-pct": "100",
-            }
-            self.codec.thread_count = number_of_threads(
-                frame.width * frame.height, multiprocessing.cpu_count()
-            )
-
-        data_to_send = b""
-        for package in self.codec.encode(frame):
-            data_to_send += bytes(package)
-
-        # Packetize.
-        payloads = self._packetize(data_to_send, self.picture_id)
-        timestamp = convert_timebase(frame.pts, frame.time_base, VIDEO_TIME_BASE)
-        self.picture_id = (self.picture_id + 1) % (1 << 15)
-        return payloads, timestamp
-
-    def pack(self, packet: Packet) -> tuple[list[bytes], int]:
-        payloads = self._packetize(bytes(packet), self.picture_id)
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
+        payloads = self._packetize(memoryview(packet.data), self.picture_id)
         timestamp = convert_timebase(packet.pts, packet.time_base, VIDEO_TIME_BASE)
         self.picture_id = (self.picture_id + 1) % (1 << 15)
         return payloads, timestamp
@@ -298,7 +205,7 @@ class Vp8Encoder(Encoder):
         self.__target_bitrate = bitrate
 
     @classmethod
-    def _packetize(cls, buffer: bytes, picture_id: int) -> list[bytes]:
+    def _packetize(cls, buffer: Union[bytes, memoryview], picture_id: int) -> list[bytes]:
         payloads = []
         descr = VpxPayloadDescriptor(
             partition_start=1, partition_id=0, picture_id=picture_id
@@ -308,7 +215,9 @@ class Vp8Encoder(Encoder):
         while pos < length:
             descr_bytes = bytes(descr)
             size = min(length - pos, PACKET_MAX - len(descr_bytes))
-            payloads.append(descr_bytes + buffer[pos : pos + size])
+            # join takes the buffer slice zero-copy and materializes only this
+            # payload's bytes; the frame is never copied whole.
+            payloads.append(b"".join((descr_bytes, buffer[pos : pos + size])))
             descr.partition_start = 0
             pos += size
         return payloads

@@ -89,44 +89,37 @@ def run() -> "H.Results":
         async with websockets.connect(uri, max_size=None) as ws:
             mode_msg = await asyncio.wait_for(ws.recv(), timeout=10)
             assert mode_msg.startswith("MODE "), mode_msg[:40]
-            # initial settings -> capture starts
             await ws.send("SETTINGS," + json.dumps(_settings_payload()))
             await asyncio.sleep(4.0)
             txt = H.server_log()
             res.check("protocol: capture started from initial SETTINGS",
                       "Capture started for 'primary'" in txt, "")
 
-            # STOP_VIDEO -> capture stops
             st = loglen()
             await ws.send("STOP_VIDEO")
             await asyncio.sleep(2.5)
             res.check("protocol: STOP_VIDEO stops capture",
                       wait_log_from(st, "Stopping all streams for display 'primary'", 6), "")
 
-            # A1: SETTINGS change while stopped must NOT restart the capture
             st = loglen()
             await ws.send("SETTINGS," + json.dumps(_settings_payload(framerate=30)))
             ok = wait_log_from(st, "deferring the restart", 8)
             res.check("A1: settings change defers restart while stopped", ok, "")
             res.check("A1: no capture restart while stopped",
                       not wait_log_from(st, "Preparing to start capture", 1) or ok, "")
-            # still stopped after the deferral
             res.check("A1: capture stays stopped after deferral",
                       wait_log_from(st, "SUCCESS: Capture started", 2) is False, "")
 
-            # START_VIDEO resumes with the stored values
             await ws.send("START_VIDEO")
             res.check("protocol: START_VIDEO resumes capture",
                       wait_log_from(loglen()-1000, "Capture started", 8)
                       or wait_log_from(st, "Capture started", 8), "")
 
-            # F4: _arg_fps applies live
             st = loglen()
             await ws.send("_arg_fps,33")
             ok = wait_log_from(st, "framerate", 6)
             res.check("F4: '_arg_fps,33' applied", ok, "")
 
-            # F5: wr-dialect opcodes apply live (sanitized)
             st = loglen()
             await ws.send("vb,1")
             ok = wait_log_from(st, "clamped to 100", 6)
@@ -137,22 +130,19 @@ def run() -> "H.Results":
             ok = wait_log_from(st, "3912", 6)
             res.check("F5: 'vb,3912' live bitrate applied", ok, "")
 
-            # structural: rate control change restarts the capture (websockets
-            # defaults h264enc to CRF, so toggle to CBR)
+            # websockets defaults h264enc to CRF, so CBR is the structural change.
             st = loglen()
             await ws.send("_rc,cbr")
             ok = wait_log_from(st, "Applied rate-control via '_rc'", 8) or \
                  wait_log_from(st, "Restarting its capture stream", 8)
             res.check("F5: '_rc,cbr' triggers structural restart", ok, "")
-            # Toggle back so the run ends in the transport's default CRF mode.
+            # Back to CRF so the run ends in the transport's default mode.
             st = loglen()
             await ws.send("_rc,crf")
             await asyncio.sleep(5)
             res.check("F5: '_rc,crf' toggles back to CRF",
                       wait_log_from(st, "Applied rate-control via '_rc': crf", 8), "")
 
-            # The apps panel posts the wrapper by name, so PATH resolution in
-            # the server's shell is what makes the panel work at all.
             await ws.send("cmd,selkies-proot install demo-app")
             deadline = time.time() + 10
             while time.time() < deadline and not os.path.exists(sentinel):
@@ -164,8 +154,7 @@ def run() -> "H.Results":
             res.check("cmd: a bare command name resolves on the server's PATH",
                       got == "install demo-app", got)
 
-            # A command that is not installed must reach the client as
-            # command_error carrying the echoed command, which is what the
+            # command_error carries the echoed command, which is what the
             # dashboards match their pending action against.
             await ws.send("cmd,selkies-proot-absent install demo-app")
             err = ""
@@ -183,12 +172,9 @@ def run() -> "H.Results":
                       err.endswith(": selkies-proot-absent install demo-app")
                       and "127" in err, err)
 
-            # A clipboard fetch belongs to the client that asked for it. A
-            # second client that receives the tagged reply reads it as its own
-            # fetch and caches the content without ever writing it locally, so
-            # the next real change of that content is suppressed too. The
-            # bystander joins as a viewer: a second controller on one display
-            # takes the display over and disconnects the first.
+            # A bystander that receives a fetch reply reads it as its own and
+            # caches the content unwritten, suppressing the next real change. It
+            # joins as a viewer: a second controller would take the display over.
             async with websockets.connect(uri + "?role=viewer", max_size=None) as other:
                 await asyncio.wait_for(other.recv(), timeout=10)
                 await ws.send("cr")

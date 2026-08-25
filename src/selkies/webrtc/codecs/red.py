@@ -34,12 +34,9 @@
 import collections
 from typing import Optional
 
-from av.frame import Frame
-from av.packet import Packet
-
 from ... import audio_config
 from ..mediastreams import convert_timebase
-from .base import Encoder
+from .base import Encoder, EncodedPacket
 from .opus import TIME_BASE, OpusEncoder
 
 # RFC 2198 field limits: 14-bit timestamp offset, 10-bit block length.
@@ -116,23 +113,9 @@ class RedOpusEncoder(Encoder):
             maxlen=self.distance
         )
 
-    def encode(
-        self, frame: Frame, force_keyframe: bool = False
-    ) -> tuple[list[bytes], int]:
-        payloads, timestamp = self.inner.encode(frame, force_keyframe)
-        if not payloads:
-            return [], timestamp
-        red_payloads = []
-        for payload in payloads:
-            red_payloads.append(
-                _build_red(list(self.history), payload, timestamp, self.block_pt)
-            )
-            self.history.append((payload, timestamp))
-        return red_payloads, timestamp
-
-    def pack(self, packet: Packet) -> tuple[list[bytes], int]:
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
         timestamp = convert_timebase(packet.pts, packet.time_base, TIME_BASE)
-        primary = bytes(packet)
+        primary = bytes(packet.data)
         red = _build_red(list(self.history), primary, timestamp, self.block_pt)
         self.history.append((primary, timestamp))
         return [red], timestamp

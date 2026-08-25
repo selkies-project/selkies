@@ -5,7 +5,7 @@
 FROM python:3-alpine
 
 ARG PIP_BREAK_SYSTEM_PACKAGES="1"
-RUN pip3 install --no-cache-dir --force-reinstall flask gunicorn
+RUN pip3 install --no-cache-dir --retries 5 --timeout 60 --force-reinstall flask gunicorn
 
 COPY app.py /etc
 

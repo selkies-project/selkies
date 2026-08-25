@@ -4,7 +4,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// app.js
+/**
+ * Test page driver for the universal touch gamepad: sends
+ * `TOUCH_GAMEPAD_SETUP` to the library, toggles its visibility, and mirrors
+ * the synthetic pad from `navigator.getGamepads()` into the status panel.
+ * @module
+ */
 (function() {
     'use strict';
 
@@ -12,7 +17,6 @@
     const targetDivId = 'touch-gamepad-container';
     let isGamepadUIVisible = false;
 
-    // Status display elements
     const gamepadInfoIdDiv = document.getElementById('gamepad-info-id');
     const gamepadInfoConnectedDiv = document.getElementById('gamepad-info-connected');
     const gamepadInfoIndexDiv = document.getElementById('gamepad-info-index');
@@ -37,12 +41,10 @@
         }
     }
 
-    // Initial setup message to the library
     window.postMessage({
         type: 'TOUCH_GAMEPAD_SETUP',
         payload: {
             targetDivId: targetDivId,
-            // initialProfileName: 'default', // Library uses its own default if not specified
             visible: false
         }
     }, window.location.origin);
@@ -54,12 +56,13 @@
             type: 'TOUCH_GAMEPAD_VISIBILITY',
             payload: {
                 visible: isGamepadUIVisible,
-                targetDivId: targetDivId // Good to include if lib might not have it from initial SETUP
+                targetDivId: targetDivId // lets the library resolve the host if SETUP was missed
             }
         }, window.location.origin);
         toggleButton.textContent = isGamepadUIVisible ? 'Hide Touch Gamepad' : 'Show Touch Gamepad';
     });
 
+    /** Copies the synthetic pad's axes and buttons into the panel every animation frame. */
     function updateStatusDisplay() {
         const gamepads = navigator.getGamepads();
         let activeGamepad = null;

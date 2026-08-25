@@ -21,31 +21,62 @@ import {
     writeInstalledApps,
 } from "../../../../selkies-web-core/lib/app-commands.js";
 
+/**
+ * The apps modal: the proot-apps catalog, fetched from its GitHub metadata,
+ * with install, remove, update and launch actions.
+ *
+ * Actions go through the apps command contract both dashboards share
+ * (`selkies-web-core/lib/app-commands.js`): it posts the selkies-proot wrapper
+ * commands to the core and tracks them for rollback, and the installed list
+ * lives in localStorage under the shared key. Commands run server-side only
+ * while the `command_enabled` server setting is on; without it the core
+ * suppresses every `cmd,` send, so the modal says why instead of pretending
+ * the install happened. Listens for `serverSettings` messages and the
+ * rollback event the contract dispatches on a failed command.
+ * @module
+ */
+
 const REPO_BASE_URL = 'https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/';
 const METADATA_URL = `${REPO_BASE_URL}metadata.yml`;
 const IMAGE_BASE_URL = `${REPO_BASE_URL}img/`;
 const METADATA_FETCH_TIMEOUT_MS = 10000;
 
+/** One catalog entry of the proot-apps metadata. */
 interface App {
+    /** Package name, the argument of every command. */
     name: string;
+    /** Display name. */
     full_name: string;
     description: string;
+    /** Icon file name under the catalog's image directory. */
     icon: string;
+    /** Listed but not installable. */
     disabled?: boolean;
 }
 
-// Session cache of the fetched catalog: the modal is conditionally mounted by
-// its parent, so each open is a fresh mount; a hit here skips the network.
+/**
+ * Session cache of the fetched catalog: the modal is conditionally mounted by
+ * its parent, so each open is a fresh mount; a hit here skips the network.
+ */
 let cachedAppData: { include: App[] } | null = null;
 
 interface AppsProps {
+    /** Whether the dialog is shown; the parent controls it. */
     isOpen?: boolean;
+    /** Called when the dialog asks to close. */
     onClose?: () => void;
 }
 
+/**
+ * Renders the catalog grid, its search box and the per-app detail view
+ * inside a dialog controlled by the parent.
+ *
+ * The catalog is fetched once per modal open, plus explicit Retry presses; a
+ * failure settles into the error view rather than refetching. The fetch is
+ * aborted after a timeout and on close or unmount.
+ */
 export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
-    const [isAppsModalOpen, setIsAppsModalOpen] = useState(isOpen);
-    const [appData, setAppData] = useState<{ include: App[] } | null>(null);
+    const [appData, setAppData] = useState<{ include: App[] } | null>(() => cachedAppData);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [fetchAttempt, setFetchAttempt] = useState(0);
@@ -57,8 +88,8 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         writeInstalledApps(installedApps);
     }, [installedApps]);
 
-    // A failed install/remove already rolled the stored list back; mirror it
-    // into this mounted list so the badge flips without a remount.
+    // A failed command already rolled the stored list back; mirror it here so
+    // the badge flips without a remount.
     useEffect(() => {
         const onRollback = (event: Event) => {
             const { app, action } = (event as CustomEvent).detail || {};
@@ -71,9 +102,6 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         return () => window.removeEventListener(INSTALLED_APPS_ROLLBACK_EVENT, onRollback);
     }, []);
 
-    // Commands run server-side only when command_enabled is on; without it the
-    // core suppresses every 'cmd,' send, so the modal must say why instead of
-    // pretending the install happened (classic-dashboard parity).
     const [serverSettings, setServerSettings] = useState<any>(() => getLastServerSettings());
     useEffect(() => {
         const handleWindowMessage = (event: MessageEvent) => {
@@ -88,32 +116,21 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     const commandsKnown = serverSettings != null;
     const commandsAvailable = serverSettings?.command_enabled?.value === true;
 
-    // Sync with external isOpen prop
-    useEffect(() => {
-        setIsAppsModalOpen(isOpen);
-    }, [isOpen]);
-
-    // Handle modal close
     const handleModalClose = (open: boolean) => {
-        setIsAppsModalOpen(open);
         if (!open && onClose) {
             onClose();
         }
     };
 
-    // Catalog fetch: one attempt per modal open (plus explicit Retry bumps of
-    // fetchAttempt) — a failure settles into the error view rather than
-    // refetching. The fetch is aborted after a timeout and on close/unmount,
-    // and the cleanup's `active` flag suppresses any late setState.
     useEffect(() => {
-        if (!isAppsModalOpen || appData) return;
-        if (cachedAppData) {
-            setAppData(cachedAppData);
-            return;
-        }
+        if (!isOpen || appData) return;
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), METADATA_FETCH_TIMEOUT_MS);
+        // Suppresses any setState landing after cleanup.
         let active = true;
+        // Not derivable during render: this is the transition into a fetch,
+        // and a Retry has to re-enter it.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setIsLoading(true);
         setError(null);
         (async () => {
@@ -141,7 +158,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
             clearTimeout(timeoutId);
             controller.abort();
         };
-    }, [isAppsModalOpen, appData, fetchAttempt]);
+    }, [isOpen, appData, fetchAttempt]);
 
     const handleSearchChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         setSearchTerm(event.target.value.toLowerCase());
@@ -155,8 +172,6 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         setSelectedApp(null);
     };
 
-    // Unified apps command contract (both dashboards): app-commands.js posts
-    // the selkies-proot wrapper commands and tracks them for rollback.
     const handleInstall = (appName: string) => {
         if (!commandsAvailable) return;
         postAppCommand('install', appName);
@@ -190,7 +205,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
 
     return (
         <>
-            <Dialog open={isAppsModalOpen} onOpenChange={handleModalClose}>
+            <Dialog open={isOpen} onOpenChange={handleModalClose}>
                 <DialogContent className="max-h-screen sm:max-w-[50vw] p-0">
                     <DialogHeader className="sticky top-0 z-10 bg-background p-6 border-b">
                         <div className="flex flex-col space-y-6">

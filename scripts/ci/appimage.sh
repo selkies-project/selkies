@@ -20,12 +20,30 @@ WORK="${PWD}/build/appimage"
 rm -rf "${WORK}" AppDir
 mkdir -p "${WORK}"
 
+# pixi has no retry of its own, and neither does a piped installer script.
+retry() {
+  local i=1
+  until "$@"; do
+    [ "${i}" -ge 5 ] && return 1
+    i=$((i + 1)); sleep 5
+  done
+}
+
 # 1) rattler-build: selkies conda package (noarch) from the repo
 export PATH="${HOME}/.pixi/bin:${PATH}"
+# Both solvers, because the conda plugin invoked further down prefers mamba and
+# mamba does not read the CONDA_* names.
+export MAMBA_REMOTE_MAX_RETRIES="5" MAMBA_REMOTE_BACKOFF_FACTOR="3" \
+    MAMBA_REMOTE_CONNECT_TIMEOUT_SECS="30"
+export CONDA_REMOTE_MAX_RETRIES="5" CONDA_REMOTE_BACKOFF_FACTOR="3" \
+    CONDA_REMOTE_CONNECT_TIMEOUT_SECS="30" CONDA_REMOTE_READ_TIMEOUT_SECS="120"
 if ! command -v pixi >/dev/null; then
-  curl -fsSL https://pixi.sh/install.sh | sh
+  # fetch.sh rather than a bare curl: the installer is a GitHub release asset,
+  # and this is the same rate limit the linuxdeploy download below waits out.
+  scripts/ci/fetch.sh https://pixi.sh/install.sh "${WORK}/pixi-install.sh"
+  sh "${WORK}/pixi-install.sh"
 fi
-pixi global install rattler-build
+retry pixi global install rattler-build
 rattler-build build \
     --recipe infra/appimage/recipe.yaml \
     --output-dir "${WORK}/conda-output" \
@@ -68,6 +86,13 @@ for project in pixelflux pcmflux; do
   if [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then
     wheel="$(find "${PIXELFLUX_PCMFLUX_WHEELS_DIR}" -maxdepth 1 \
         -name "${project}-*cp312*manylinux*${ARCH}*.whl" | head -n1)"
+  fi
+  # A wheels directory that yielded nothing is worth saying out loud: the
+  # AppImage then carries whatever PyPI resolves rather than the build that was
+  # meant to ride along. No directory at all is the release path, where the
+  # pinned version is published and PyPI is the right answer.
+  if [ -z "${wheel}" ] && [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then
+    echo "::warning::No ${project} wheel in ${PIXELFLUX_PCMFLUX_WHEELS_DIR}; the AppImage resolves it from PyPI"
   fi
   PIP_REQUIREMENTS="${PIP_REQUIREMENTS} ${wheel:-${project}}"
 done
@@ -147,16 +172,23 @@ export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 # LD_PRELOAD here: selkies itself must keep seeing the real device nodes.
 export SELKIES_INTERPOSER="${HERE}/usr/lib/selkies_joystick_interposer.so"
 
-# A help query prints and exits, so it starts no display or audio server
+# A help or version query prints and exits, so it starts no display or audio server
 for arg in "$@"; do
     case "${arg}" in
-        -h|--help) exec "${ENV_BIN}/selkies" "$@" ;;
+        -h|--help|--version) exec "${ENV_BIN}/selkies" "$@" ;;
     esac
 done
 
+# Backend toggle, resolved the way selkies resolves it: SELKIES_WAYLAND when
+# set (blank included, which means the default), else the legacy
+# PIXELFLUX_WAYLAND; "true" or "1", in any case and ahead of a "|locked"
+# suffix, selects Wayland.
+wayland="${SELKIES_WAYLAND-${PIXELFLUX_WAYLAND-}}"
+wayland="$(printf '%s' "${wayland%%|*}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+
 # X11 mode streams an existing display; start a virtual one when none is up.
 # Wayland mode starts its own compositor and needs nothing here.
-if [ "${SELKIES_WAYLAND:-false}" != "true" ]; then
+if [ "${wayland}" != "true" ] && [ "${wayland}" != "1" ]; then
     export DISPLAY="${DISPLAY:-:20}"
     if [ ! -S "/tmp/.X11-unix/X${DISPLAY#*:}" ] && command -v Xvfb >/dev/null 2>&1; then
         Xvfb "${DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem >/tmp/Xvfb_selkies.log 2>&1 &

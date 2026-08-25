@@ -10,35 +10,38 @@ import { X } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { computeRenderableSettings, getLastServerSettings } from "@/utils";
 import { t } from "@/i18n";
+import { withSessionToken } from "../../../../selkies-web-core/lib/session-token.js";
 
-// Helper function to format bytes
-function formatBytes(bytes: number, decimals = 2): string {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const dm = decimals < 0 ? 0 : decimals;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-}
+/**
+ * The files panel (upload and download buttons) and the Download Files
+ * dialog.
+ *
+ * The dialog is not rendered by the panel: the panel lives inside a menubar
+ * submenu, and Radix closes every open menu when the window blurs, which a
+ * click inside the file-manager iframe causes. A dialog mounted in the submenu
+ * would be torn down by that click, so TopMenu hosts `FilesDialog` beside the
+ * menubar, as it does the Apps modal, and only the request to open it comes
+ * from the panel. Uploads are requested with the `requestFileUpload` window
+ * event; `serverSettings` messages gate which buttons show.
+ * @module
+ */
 
 interface FilesProps {
-    // No props needed for direct content rendering
+    /** Opens the Download Files dialog hosted by TopMenu. */
+    onOpenDownloads?: () => void;
 }
 
-export function Files({}: FilesProps = {}) {
-    const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
+/**
+ * Renders the upload and download buttons the server settings allow, or
+ * nothing when both are disabled.
+ */
+export function Files({ onOpenDownloads }: FilesProps) {
     const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
 
     const handleUploadClick = () => {
         window.dispatchEvent(new CustomEvent('requestFileUpload'));
     };
 
-    const toggleFilesModal = () => {
-        setIsFilesModalOpen(!isFilesModalOpen);
-    };
-
-    // The upload and command notices are raised by UploadNotifications, which
-    // stays mounted while this panel is closed.
     useEffect(() => {
         const handleWindowMessage = (event: MessageEvent) => {
             if (event.origin !== window.location.origin) return;
@@ -61,63 +64,76 @@ export function Files({}: FilesProps = {}) {
     if (!showUpload && !showDownload) return null;
 
     return (
-        <>
-            <div className="w-auto p-4 flex flex-col gap-2">
-                {showUpload && (
-                    <Button
-                        variant="outline"
-                        className="mb-2"
-                        onClick={handleUploadClick}
-                    >
-                        {t('sections.files.uploadButton')}
-                    </Button>
-                )}
-                {showDownload && (
-                    <Button
-                        variant="outline"
-                        className="mb-2"
-                        onClick={toggleFilesModal}
-                    >
-                        {t('sections.files.downloadButtonTitle')}
-                    </Button>
-                )}
-            </div>
+        <div className="w-auto p-4 flex flex-col gap-2">
+            {showUpload && (
+                <Button
+                    variant="outline"
+                    className="mb-2"
+                    onClick={handleUploadClick}
+                >
+                    {t('sections.files.uploadButton')}
+                </Button>
+            )}
+            {showDownload && (
+                <Button
+                    variant="outline"
+                    className="mb-2"
+                    onClick={onOpenDownloads}
+                >
+                    {t('sections.files.downloadButtonTitle')}
+                </Button>
+            )}
+        </div>
+    );
+}
 
-            <Dialog open={isFilesModalOpen} onOpenChange={setIsFilesModalOpen}>
-                <DialogContent className="max-h-[90vh] sm:max-w-[80vw] p-0">
-                    <DialogHeader className="sticky top-0 z-10 bg-background p-6 border-b">
-                        <div className="flex flex-col space-y-6">
-                            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
-                                <div>
-                                    <DialogTitle>{t('sections.files.title')}</DialogTitle>
-                                    <DialogDescription>
-                                        {t('files.subtitle')}
-                                    </DialogDescription>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <Button
-                                        variant="secondary"
-                                        size="icon"
-                                        onClick={() => setIsFilesModalOpen(false)}
-                                        className="h-10 w-10"
-                                    >
-                                        <X className="h-4 w-4" />
-                                        <span className="sr-only">{t('common.close')}</span>
-                                    </Button>
-                                </div>
+interface FilesDialogProps {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+}
+
+/**
+ * The Download Files dialog: the server's file index in an iframe, whose
+ * file links are attachments. Mounted by TopMenu outside the menubar so a
+ * click in the iframe, which blurs the window and closes the menus, leaves
+ * it open.
+ */
+export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
+    return (
+        <Dialog open={open} onOpenChange={onOpenChange}>
+            <DialogContent className="max-h-[90vh] sm:max-w-[80vw] p-0">
+                <DialogHeader className="sticky top-0 z-10 bg-background p-6 border-b">
+                    <div className="flex flex-col space-y-6">
+                        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+                            <div>
+                                <DialogTitle>{t('sections.files.title')}</DialogTitle>
+                                <DialogDescription>
+                                    {t('files.subtitle')}
+                                </DialogDescription>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <Button
+                                    variant="secondary"
+                                    size="icon"
+                                    onClick={() => onOpenChange(false)}
+                                    className="h-10 w-10"
+                                >
+                                    <X className="h-4 w-4" />
+                                    <span className="sr-only">{t('common.close')}</span>
+                                </Button>
                             </div>
                         </div>
-                    </DialogHeader>
-
-                    <div className="flex-1 overflow-hidden">
-                        <iframe
-                            src="api/files/"
-                            title={t('filesModal.iframeTitle')}
-                            className="w-full h-[calc(90vh-8rem)] border-0"
-                        />
                     </div>
-                </DialogContent>
-            </Dialog>
-        </>
+                </DialogHeader>
+
+                <div className="flex-1 overflow-hidden">
+                    <iframe
+                        src={withSessionToken("api/files/")}
+                        title={t('filesModal.iframeTitle')}
+                        className="w-full h-[calc(90vh-8rem)] border-0"
+                    />
+                </div>
+            </DialogContent>
+        </Dialog>
     );
 }

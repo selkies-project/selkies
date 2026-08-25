@@ -133,9 +133,8 @@ def measure(res, browser: str, dpr: float) -> None:
 
     profile = os.path.join(H.WORKDIR, f"motion-profile-{browser}")
     if browser == "firefox" and browser not in WARMED:
-        # A first run writes the profile and shows onboarding; get both out of
-        # the way before the window that has to hold pointer lock opens. The
-        # profile is then reused, since user.js is rewritten per launch.
+        # A first run writes the profile and shows onboarding, neither of which may
+        # happen in the window holding pointer lock; user.js is rewritten per launch.
         shutil.rmtree(profile, ignore_errors=True)
         os.makedirs(profile, exist_ok=True)
         subprocess.run([binary("firefox"), "--headless", "--profile", profile,
@@ -154,9 +153,8 @@ def measure(res, browser: str, dpr: float) -> None:
             res.check(f"{label}: the probe page loads", False, "no report")
             return
         root = d.screen().root
-        # The lock needs a click that lands on the page. A browser still
-        # opening its window swallows the first one, so keep asking: a machine
-        # under load is not a product regression.
+        # A browser still opening its window swallows the first click; a machine
+        # under load is not a product regression, so the click is repeated.
         for _ in range(15):
             root.warp_pointer(700, 450)
             d.sync()
@@ -189,10 +187,8 @@ def measure(res, browser: str, dpr: float) -> None:
             time.sleep(1.2)
             injected = count * delta
             travelled = LATEST.get("travelX", 0) - mark.get("travelX", 0)
-            # One event's worth of travel for an event swallowed around the
-            # warp, or one percent for the engine's own sub-pixel carry caught
-            # mid-flight, whichever is the larger. A scale error survives both:
-            # the reported miss was tens of percent.
+            # Tolerance: one event swallowed around the warp, or one percent of
+            # sub-pixel carry caught mid-flight; a scale error is tens of percent.
             res.check(f"{label}: a {name} move of {injected} px travels {injected} px",
                       abs(travelled - injected) <= max(delta, injected // 100),
                       f"{travelled}")

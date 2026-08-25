@@ -5,8 +5,12 @@ Connects to a compositor socket, maps a tiny xdg_toplevel surface, and listens
 for seat keyboard/pointer events plus clipboard offers. Prints JSONL events on
 stdout so the test driver can assert input/clipboard parity vs X11.
 """
+import atexit
 import json
+import mmap
 import os
+import signal
+import struct
 import sys
 import tempfile
 import time
@@ -19,6 +23,26 @@ from pywayland.protocol.xdg_shell import XdgWmBase
 
 SOCKET = sys.argv[1] if len(sys.argv) > 1 else "wayland-1"
 DURATION = float(os.environ.get("WLOBS_DURATION", "25"))
+# Solid ARGB8888 colour (hex, e.g. ff2878dc) painted on the observer surface,
+# so a captured frame carries a known picture; unset leaves the surface
+# transparent and the compositor's own background shows through it.
+FILL = int(os.environ.get("WLOBS_FILL", "0"), 16)
+# Keymap files handed to the driver; removed when this observer ends, so a
+# suite that never reads them leaves nothing behind.
+KEYMAP_FILES = []
+
+
+def _remove_keymap_files() -> None:
+    for path in KEYMAP_FILES:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+atexit.register(_remove_keymap_files)
+# The driver stops the observer with SIGTERM; exit through atexit on it.
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
 
 def emit(kind: str, **kv) -> None:
@@ -69,7 +93,20 @@ seat = registry.bind(name, WlSeat, ver)
 
 
 def kbd_keymap(kbd, fmt, fd, size):
-    os.close(fd)
+    """Save the keymap the seat hands out and report where it went: resolving
+    a delivered keycode the way an application does needs that text together
+    with the key and modifier events that follow it."""
+    try:
+        if size > 0:
+            with mmap.mmap(fd, size, mmap.MAP_PRIVATE, mmap.PROT_READ) as m:
+                text = bytes(m[:size]).rstrip(b"\0")
+            fd_out, path = tempfile.mkstemp(prefix="wlobs-keymap-", suffix=".xkb")
+            with os.fdopen(fd_out, "wb") as f:
+                f.write(text)
+            KEYMAP_FILES.append(path)
+            emit("keymap", format=fmt, path=path, size=len(text))
+    finally:
+        os.close(fd)
 
 
 def kbd_enter(kbd, serial, surface, keys):
@@ -162,6 +199,9 @@ W, H = 1280, 2160
 stride = W * 4
 size = stride * H
 os.ftruncate(fd, size)
+if FILL:
+    with mmap.mmap(fd, size) as m:
+        m.write(struct.pack("<I", FILL) * (W * H))
 pool = handles["shm"].create_pool(fd, size)
 buf = pool.create_buffer(0, W, H, stride, 0)
 pool.destroy()

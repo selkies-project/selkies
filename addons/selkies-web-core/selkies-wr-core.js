@@ -25,34 +25,80 @@
  *   limitations under the License.
  */
 
+/**
+ * The WebRTC streaming core: one bundled peer connection carrying the video
+ * and audio the server encodes, the webcam and microphone uplinks on sendonly
+ * transceivers, and a data channel for everything else.
+ *
+ * Client to server on the data channel, as text: `SETTINGS,{json}` (the
+ * persisted settings on connect and the passthrough settings later), `r,WxH`
+ * (stream resolution), `s,DPI`, `vb,kbps`, `ab,bps`, `_arg_fps,N`, `_crf,N`,
+ * `_rc,mode`, `_ebc,bool`, `cmd,command`, `kr` (release every key), `cr`
+ * (cache-only clipboard fetch), `REQUEST_CLIPBOARD`, `START_VIDEO` /
+ * `STOP_VIDEO` (this peer's feed), `SET_NATIVE_CURSOR_RENDERING,0|1`, the
+ * `_f,fps` and `_l,ms` client metrics, `_stats_video,{json}` when the server
+ * asked for raw reports, and the chunked clipboard transfer of
+ * `lib/clipboard-worker-bridge.js`. Server to client arrives through the
+ * `WebRTCClient` callbacks: the settings payload, `clipboard-msg*` messages,
+ * cursor and display-config updates, stats, and system actions (`reload`,
+ * `mk_access,0|1`, `command_error,text`, `auth_success,{json}` /
+ * `role_update,{json}`, `resolution,WxH`).
+ *
+ * The page hash selects the role: none is the controller, `#shared` a strict
+ * viewer, `#playerN` a viewer with gamepad slot N, and `#display2-<position>`
+ * the secondary display page, which streams its own region of the extended
+ * desktop and keeps its per-display settings under `_display2` keys.
+ * Signaling scopes controller and slot uniqueness per display id, the server
+ * runs one pipeline per display, and the position rides the connect metadata.
+ *
+ * Contract with the dashboards. Globals published on `window`: `selkiesLogs`
+ * (capped log ring buffers), `fps`, `network_stats`, `gpu_stats`,
+ * `system_stats`, `currentAudioBufferSize`, `isManualResolutionMode`,
+ * `enable_resize`, `streamResolutionDiverged`, `webrtcInput`, and every server
+ * setting as `window[key]`. Window messages handled (same origin):
+ * `setScaleLocally`, `resetResolutionToWindow`, `setManualResolution`,
+ * `setUseCssScaling`, `settings`, `command`, `pipelineControl`,
+ * `gamepadControl`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
+ * `audioDeviceSelected`, `requestFullscreen`, `setSynth`,
+ * `showVirtualKeyboard`, `setAntiAliasing`, `setUseBrowserCursors`,
+ * `touchinput:trackpad`, `touchinput:touch`, plus the `requestFileUpload` DOM
+ * event. Window messages posted: `sidebarButtonStatusUpdate`,
+ * `pipelineStatusUpdate`, `effectiveCursorState`, `serverSettings`,
+ * `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
+ * `clientRoleUpdate`, `toggleDashboard`, `toggleTouchGamepad`. Flags read:
+ * `window.__selkiesModeSwitching` (a mode switch in progress suppresses
+ * alerts and recovery reloads), `window.__selkiesAuthProbe` (re-presents the
+ * login after an auth drop), `window.clipboard_enabled`.
+ * @module
+ */
+
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
 import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
-// Inline (base64 blob) so the worker travels inside selkies-core.js itself —
-// no separate hashed file to place next to whichever chunk references it.
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
+import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName } from './lib/util.js';
 
 installAuthGuard();
+installSessionCookie();
 
-// Best-effort local keyboard layout, resolved once at script init so the value
-// is ready by the time signaling + ICE bring the data channel up (getLayoutMap
-// resolves in microtask time next to that). If it somehow loses the race the
-// hint simply rides the next SETTINGS send. null = unknown = omit.
+/**
+ * Local keyboard layout hint, resolved once at script init so it is ready by
+ * the time signaling and ICE bring the data channel up; `null` is unknown and
+ * omitted. This core sends its settings once per session, so a probe that
+ * lands after that send follows on its own.
+ */
 let detectedKeyboardLayout = null;
 let persistentSettingsSent = false;
-// The WebRTCClient lives inside the exported function's scope, so a module-scope
-// holder mirrors it for module-scope consumers (the late layout send below).
+/** The live WebRTCClient, mirrored here for module-scope consumers. */
 let activeWebrtcClient = null;
 detectKeyboardLayout().then((layout) => {
     detectedKeyboardLayout = layout;
-    // This core sends its settings once per session; a probe landing later
-    // would leave the hint out for the whole session, so it follows here.
     if (layout && persistentSettingsSent && activeWebrtcClient) {
         try {
             activeWebrtcClient.sendDataChannelMessage(`SETTINGS,${JSON.stringify({ keyboardLayout: layout })}`);
@@ -60,11 +106,12 @@ detectKeyboardLayout().then((layout) => {
     }
 });
 
-// Per-transfer id so concurrent multipart clipboard sends are not interleaved.
+/** Per-transfer id, so concurrent multipart clipboard sends never interleave. */
 let __clipboardTransferCounter = 0;
-// Mirrors the server's command_enabled; default true for older servers that don't advertise it.
+/** The server's `command_enabled`; true until a server advertises otherwise. */
 let serverCommandEnabled = true;
 
+/** Injects the stylesheet for the video container, overlay and status bar. */
 function InitUI() {
 	let style = document.createElement('style');
 	style.textContent = `
@@ -168,19 +215,28 @@ function InitUI() {
   document.head.appendChild(style);
 }
 
+/**
+ * Builds the WebRTC core.
+ * @returns {{initialize: () => void, cleanup: () => void}} `initialize`
+ *     builds the DOM, connects signaling and opens the peer connection;
+ *     `cleanup` tears the session down and resets every session-scoped value.
+ */
 export default function webrtc() {
 	let appName;
 	let crf = 23;
-	// Video bitrate in kbps.
+	/** Video bitrate in kbps. */
 	let videoBitRate = 8000;
 	let videoFramerate = 60;
-	// Audio bitrate in bps.
+	/** Audio bitrate in bps. */
 	let audioBitRate = 128000;
 	let showStart = false;
 	let showDrawer = false;
-	// Log/debug entries are retained in capped ring buffers (devtools inspection via
-	// window.selkiesLogs); everything is also mirrored to the console as it happens.
-	// Cap so the log buffers can't grow for the whole session.
+	/**
+	 * Gaming mode is fullscreen holding the pointer and the keyboard; a transport
+	 * switch rebuilds Input, so the mode it was in is carried over.
+	 */
+	let gamingModeActive = false;
+	/** Cap of the `window.selkiesLogs` ring buffers; every entry also goes to the console. */
 	const MAX_LOG_ENTRIES = 1000;
 	const pushCapped = (arr, v) => { arr.push(v); if (arr.length > MAX_LOG_ENTRIES) arr.shift(); };
 	let logEntries = [];
@@ -188,7 +244,7 @@ export default function webrtc() {
 	window.selkiesLogs = { log: logEntries, debug: debugEntries };
 	let status = 'connecting';
 	let clipboardStatus = 'disabled';
-	// Per-direction gates (server-synced): in = client->server, out = server->client.
+	/** Server-synced direction gates: in is client to server, out is server to client. */
 	let clipboard_in_enabled = true;
 	let clipboard_out_enabled = true;
 	let windowResolution = [];
@@ -221,15 +277,19 @@ export default function webrtc() {
 
 	var videoElement = null;
 	var audioElement = null;
-	// Set on a fatal server verdict (4000/4001): blocks every recovery reload —
-	// the peer-connection one and the resume watchdog's — so a superseded page
-	// cannot re-enter the takeover loop.
+	/**
+	 * Set on a fatal server verdict (close 4000/4001): blocks every recovery
+	 * reload, the peer connection's and the resume watchdog's, so a superseded
+	 * page cannot re-enter the takeover loop.
+	 */
 	let fatalConnectionHalt = false;
-	// Last stream resolution asked of the server, in physical stream pixels;
-	// compared against the track's intrinsic size to detect a realized size
-	// that differs from the request (mode snapping / rejected resize).
+	/**
+	 * Last stream resolution asked of the server, in physical pixels; compared
+	 * with the track's intrinsic size to detect a realized size that differs
+	 * from the request (snapping, a rejected resize).
+	 */
 	var lastRequestedStreamRes = null;
-	// Screen Wake Lock sentinel + preferred audio output device (parity with the WS core).
+	/** Screen Wake Lock sentinel, null while not held. */
 	let wakeLockSentinel = null;
 	let preferredOutputDeviceId = null;
 	let preferredInputDeviceId = null;
@@ -241,7 +301,7 @@ export default function webrtc() {
 	let playButtonElement = null;
 	let statusDisplayElement = null;
 	let rtime = null;
-	// Resize debounce delay in milliseconds.
+	/** Resize debounce delay in milliseconds. */
 	let rdelta = 500;
 	let rtimeout = false;
 	let manualWidth, manualHeight = 0;
@@ -255,26 +315,35 @@ export default function webrtc() {
 	var statWatchEnabled = false;
 	var webrtc = null;
 	var input = null;
-	// track interval ids so they can be cleared on cleanup/reconnect (avoid leaks/double-start)
+	/** Interval ids, cleared on cleanup so a reconnect never double-starts a loop. */
 	let statsLoopId = null;
 	let metricsLoopId = null;
+	/**
+	 * CSS scaling on means dpr 1 everywhere; off, the resolution senders and the
+	 * input math apply devicePixelRatio. Off by default so an auto-resolution
+	 * HiDPI client renders a physical-resolution buffer.
+	 */
 	let useCssScaling = false;
-	// scaling_dpi (the desktop-DPI slider, 96 = 100%). INDEPENDENT of resolution / the HiDPI
-	// toggle. Defaults to the local display scaling (devicePixelRatio) so the remote desktop's
-	// fonts/UI match the local environment regardless of the streamed resolution; an explicit
-	// slider value wins.
+	/**
+	 * The desktop DPI slider value (96 is 100%), independent of the resolution
+	 * and the HiDPI toggle; derived from devicePixelRatio unless a pick is stored.
+	 */
 	let scalingDPI = 96;
-	// Webrtc mode has video and audio active by default,
-	// and no microphone support yet.
 	let isVideoPipelineActive = true;
 	let isAudioPipelineActive = true;
 	let isMicrophoneActive = false;
+	let isWebcamActive = false;
+	let webcamBusy = false;
+	let preferredWebcamDeviceId = null;
 	let isGamepadEnabled = true;
 
-	// Per-message budget on the data channel: the browser exposes the negotiated
-	// SCTP max-message-size (min of both ends); fall back to the 256 KiB standard
-	// pre-negotiation, cap at 1 MiB to bound per-message buffering. The trailing
-	// 512 bytes leave room for the message prefix/envelope.
+	/**
+	 * Per-message budget on the data channel: the negotiated SCTP maximum
+	 * message size (the minimum of both ends) where the browser exposes it,
+	 * else the 256 KiB pre-negotiation standard, capped at 1 MiB to bound
+	 * per-message buffering, less 512 bytes for the message prefix.
+	 * @returns {number}
+	 */
 	const dcMessageBudget = () => {
 		const nego = (typeof webrtc !== 'undefined' && webrtc && webrtc.peerConnection &&
 			webrtc.peerConnection.sctp && webrtc.peerConnection.sctp.maxMessageSize) || 0;
@@ -283,55 +352,58 @@ export default function webrtc() {
 	};
 	const CLIENT_CONTROLLER = "controller";
 	const CLIENT_VIEWER = "viewer";
-	// leave some room for metadata in the message
-
 
 	let detectedSharedModeType = null;
 	let playerInputTargetIndex = 0;
 	let clientRole = null;
 	let clientSlot = null;
 
-	// Render/input preferences shared with the websockets core (same
-	// localStorage keys, same dashboard messages).
+	/** Render and input preferences, persisted under the keys the WebSocket core uses too. */
 	let antiAliasingEnabled = true;
 	let trackpadMode = false;
-	// Cursor-rendering preference in force. Seeded from localStorage at connect,
-	// then updated by an explicit dashboard pick (which persists) or by a
-	// server-pushed value (which does not, so a later server-side change stays
-	// re-pushable). The effective value adds the multi-monitor override.
+	/**
+	 * Cursor-rendering preference in force: seeded from localStorage at
+	 * connect, then updated by a dashboard pick (persisted) or a server-pushed
+	 * value (not persisted, so a later server-side change stays re-pushable).
+	 * The effective value adds the multi-monitor override.
+	 */
 	let useBrowserCursors = true;
-	// Whether a secondary display page is connected (server display_config_update
-	// broadcast). Multi-monitor forces browser-cursor rendering: the server-drawn
-	// cursor overlay only tracks one capture region.
+	/**
+	 * Whether a secondary display page is connected (server display-config
+	 * broadcast). Multi-monitor forces browser-cursor rendering: the
+	 * server-drawn cursor overlay tracks only one capture region.
+	 */
 	let isSecondaryDisplayConnected = false;
-	// Round resolutions to multiples of 16 (encoder macroblock alignment) instead
-	// of the default 2 when the force_aligned_resolution setting is on.
+	/** Rounds resolutions to multiples of 16 (encoder macroblocks) instead of 2. */
 	let force_aligned_resolution = false;
 
 	let enable_binary_clipboard = true;
-	// Multipart download state + connect-time cache-only fetch ('cr') tracking:
-	// shared factories (lib/clipboard-sync.js), identical in the WebSocket core.
+	/** Multipart download state and connect-time cache-only fetch tracking (`lib/clipboard-sync.js`). */
 	const multipartClipboard = createMultipartClipboardState();
 	let clipboardWorker = new ClipboardWorkerBridge();
 	const taggedClipboardFetch = createTaggedClipboardFetch();
 	const armTaggedClipboardReply = () => taggedClipboardFetch.arm();
 	const consumeInitClipboardFetch = () => taggedClipboardFetch.consume();
-	// Server-clipboard cache + change-only sync + Ctrl/Cmd+C request queue
-	// (see lib/clipboard-sync.js). The send hook late-binds `webrtc`.
+	/** Server-clipboard cache, change-only sync and copy request queue; the send hook late-binds `webrtc`. */
 	const clipboardSync = createClipboardSync({
 		sendRequest: () => webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD')
 	});
-	// Server pushes carry no user activation; Firefox/WebKit reject the write
-	// until the next real gesture, so those writes go through this retry queue.
+	/**
+	 * Retry queue for local clipboard writes of server pushes, which carry no
+	 * user activation: Firefox and WebKit reject the write until the next real
+	 * gesture.
+	 */
 	const deferredClipboardWriter = createDeferredClipboardWriter();
+	/**
+	 * Chromium-engine detection: userAgentData brands are authoritative and
+	 * `window.chrome` a fallback for older engines that expose no brands; iOS,
+	 * Firefox and CriOS are excluded.
+	 */
 	const isChromium = (() => {
 		const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
 			(navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 		const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
 		const isCriOS = /CriOS/.test(navigator.userAgent);
-		// userAgentData brands are the authoritative Chromium signal;
-		// window.chrome is only a fallback for older engines, as not every
-		// Chromium build defines it.
 		const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
 		const isChromiumBrand = brands.some((b) => /Chromium|Google Chrome/.test(b.brand));
 		return (isChromiumBrand || typeof window.chrome !== 'undefined') && !isIOS && !isFirefox && !isCriOS;
@@ -359,13 +431,11 @@ export default function webrtc() {
 
 	const isSharedMode = detectedSharedModeType !== null;
 	const isStrictViewer = detectedSharedModeType === "shared";
-	// Secure-mode collab: an mk-token viewer is granted the full input context
-	// via the server's mk_access system action (websockets MK_ACCESS parity).
+	/** Whether the server's `mk_access` action granted this viewer the full input context. */
 	let collabInputGranted = false;
 
 	const storageAppName = getStorageAppName();
-	// Guarded write: a full or unavailable store degrades to a warning instead of
-	// throwing QuotaExceededError into the caller.
+	/** Writes a key, degrading a full or unavailable store to a warning. */
 	const safeSetItem = (key, value) => {
 		try {
 			window.localStorage.setItem(key, value);
@@ -374,9 +444,11 @@ export default function webrtc() {
 		}
 	};
 
-	// Per-display settings get a display2 suffix on the second-display page so
-	// the two displays' picks never share (or clobber) one key. Must match the
-	// dashboard's getPrefixedKey and the websockets core.
+	/**
+	 * Settings that get a `_display2` suffix on the second-display page, so the
+	 * two displays' picks never share a key; must match the dashboards'
+	 * `getPrefixedKey` and the WebSocket core.
+	 */
 	const storageDisplayId = window.location.hash.startsWith('#display2') ? 'display2' : 'primary';
 	const PER_DISPLAY_SETTINGS = [
 		'framerate', 'video_crf', 'video_fullcolor',
@@ -399,7 +471,7 @@ export default function webrtc() {
 		const value = window.localStorage.getItem(prefixedKey);
 		return (value === null || value === undefined) ? default_value : parseInt(value);
 	};
-	// Fraction-preserving variant: range bounds stay float-capable.
+	/** Like getIntParam but keeps fractions: range-bounded settings can be floats. */
 	const getFloatParam = (key, default_value) => {
 		const prefixedKey = storageKeyFor(key);
 		const value = window.localStorage.getItem(prefixedKey);
@@ -444,24 +516,26 @@ export default function webrtc() {
 		}
 	};
 
-	// Function to add timestamp to logs.
+	/** Prefixes a log line with the wall-clock time. */
 	var applyTimestamp = (msg) => {
 		var now = new Date();
 		var ts = now.getHours() + ":" + now.getMinutes() + ":" + now.getSeconds();
 		return "[" + ts + "]" + " " + msg;
 	}
 
-	// Resolution rounding shared with the websockets core: 2-pixel alignment
-	// normally (YUV 4:2:0 chroma), 16-pixel when force_aligned_resolution is on.
+	/** Rounds a dimension down to the encoder alignment: 2 (YUV 4:2:0 chroma), or 16 when forced. */
 	const alignResolution = (num) => {
 		const alignment = force_aligned_resolution ? 16 : 2;
 		return Math.floor(num / alignment) * alignment;
 	};
 
-	// Browser-cursor rendering resolves from the user preference PLUS the
-	// multi-monitor override (this page being a secondary, or the primary while a
-	// secondary is connected) — the server-drawn cursor overlay only tracks one
-	// capture region. Mirrors the websockets core.
+	/**
+	 * Applies the effective cursor-rendering setting: the user preference, or
+	 * browser cursors forced on when this page is a secondary display or the
+	 * primary while a secondary is connected, since the server-drawn overlay
+	 * tracks only one capture region. The dashboard is told the value in
+	 * force, so its toggle reflects the override.
+	 */
 	function applyEffectiveCursorSetting() {
 		const userPreference = useBrowserCursors;
 		const isDisplay2 = window.location.hash.startsWith('#display2');
@@ -471,13 +545,12 @@ export default function webrtc() {
 			console.log(`Applying effective cursor setting. Multi-monitor: ${isMultiMonitorActive}, User Pref: ${userPreference}, Final: ${finalSetting}`);
 			input.setUseBrowserCursors(finalSetting);
 		}
-		// Tell the dashboard the value actually in effect so its toggle reflects
-		// the multi-monitor override instead of the user preference alone.
 		try {
 			window.postMessage({ type: 'effectiveCursorState', value: finalSetting }, window.location.origin);
 		} catch (e) { /* postMessage unavailable */ }
 	}
 
+	/** Starts playback after the user's gesture and takes the wake lock. */
 	function playStream() {
 		showStart = false;
 		if (playButtonElement) playButtonElement.classList.add('hidden');
@@ -485,8 +558,7 @@ export default function webrtc() {
 		requestWakeLock();
 	}
 
-	// Keep the screen awake while streaming. request() early-returns if already held
-	// and no-ops (with a warning) where the API is absent.
+	/** Keeps the screen awake while streaming; a no-op when held or where the API is absent. */
 	const requestWakeLock = async () => {
 		if (wakeLockSentinel !== null) return;
 		if ('wakeLock' in navigator) {
@@ -505,6 +577,7 @@ export default function webrtc() {
 		}
 	};
 
+	/** Releases the wake lock if held. */
 	const releaseWakeLock = async () => {
 		if (wakeLockSentinel !== null) {
 			await wakeLockSentinel.release();
@@ -512,31 +585,14 @@ export default function webrtc() {
 		}
 	};
 
-	// A backgrounded tab drops the wake lock automatically; re-acquire when
-	// visible. A hidden tab also pauses its own video feed server-side
-	// (per-peer STOP_VIDEO / START_VIDEO on the data channel, websockets
-	// parity): the browser throttles a hidden tab's rendering anyway, so the
-	// encode and bandwidth are pure waste. The pause is deferred because a
-	// navigating/reloading document reports hidden just before it unloads and
-	// timers never fire in an unloading document, so only a genuine tab-hide
-	// sends it. Recovery on resume is the server's IDR (plus PLI) — the client
-	// sends no keyframe requests of its own. Shared/#player viewer pages register
-	// it too: the verbs are viewer-allowed and gate only this peer's RTP sender,
-	// so a hidden viewer stops wasting encode/bandwidth on its own feed while the
-	// controller and any other viewers keep streaming (the shared capture only
-	// stops once every consumer is paused).
 	let hiddenVideoPauseTimer = null;
 	let videoPausedForHiddenTab = false;
-	// The resume is one message on a data channel that can be closed exactly then,
-	// and a lost one is answered with nothing: the peer stays subscribed to a feed
-	// nobody encodes and the picture never returns. So a tab that came back proves
-	// the frames followed — the websockets core's START_VIDEO watchdog, on the
-	// signal WebRTC has: the element's playback clock.
 	let resumeWatchdogTimer = null;
 	let resumeWatchdogAttempts = 0;
 	const RESUME_WATCHDOG_MS = 3000;
 	const RESUME_WATCHDOG_MAX_ATTEMPTS = 3;
 
+	/** Cancels the resume watchdog. */
 	function clearResumeWatchdog() {
 		if (resumeWatchdogTimer !== null) {
 			clearTimeout(resumeWatchdogTimer);
@@ -545,22 +601,35 @@ export default function webrtc() {
 		resumeWatchdogAttempts = 0;
 	}
 
+	/**
+	 * Verifies that frames follow a START_VIDEO. The resume is one message on
+	 * a data channel that can close at that very moment, and a lost one is
+	 * answered with nothing: the peer would stay subscribed to a feed nobody
+	 * encodes. The element's playback clock is the signal WebRTC has, so the
+	 * check is whether it advanced past the mark taken here.
+	 */
 	function armResumeWatchdog() {
 		if (resumeWatchdogTimer !== null) clearTimeout(resumeWatchdogTimer);
 		const mark = videoElement ? videoElement.currentTime : 0;
 		resumeWatchdogTimer = setTimeout(() => checkResumed(mark), RESUME_WATCHDOG_MS);
 	}
 
+	/**
+	 * Watchdog tick: resends START_VIDEO while the playback clock has not moved
+	 * past `mark`, up to RESUME_WATCHDOG_MAX_ATTEMPTS, then reloads to
+	 * reconnect unless a fatal verdict or a mode switch forbids it. A tab
+	 * hidden again stands the watchdog down: the visibility path owns that
+	 * state. Each attempt also replays the element, since one the browser
+	 * paused while the tab was away plays nothing however much RTP arrives.
+	 * @param {number} mark Playback time when the watchdog was armed.
+	 */
 	function checkResumed(mark) {
 		resumeWatchdogTimer = null;
-		// Hidden again: the visibility path owns that state.
 		if (document.hidden || !webrtc) { resumeWatchdogAttempts = 0; return; }
 		if (videoElement && videoElement.currentTime > mark) {
 			resumeWatchdogAttempts = 0;
 			return;
 		}
-		// A media element the browser paused while the tab was away plays nothing
-		// however much RTP arrives.
 		if (videoElement && videoElement.paused) videoElement.play().catch(() => {});
 		resumeWatchdogAttempts++;
 		if (resumeWatchdogAttempts <= RESUME_WATCHDOG_MAX_ATTEMPTS) {
@@ -576,6 +645,19 @@ export default function webrtc() {
 		location.reload();
 	}
 
+	/**
+	 * Pauses this peer's video feed while the tab is hidden and resumes it on
+	 * show, re-acquiring the wake lock the browser dropped.
+	 *
+	 * A hidden tab's rendering is throttled anyway, so its encode and bandwidth
+	 * are waste. STOP_VIDEO and START_VIDEO gate only this peer's RTP sender,
+	 * and the shared capture stops once every consumer is paused, so viewer
+	 * pages send them too. The pause is deferred because a navigating document
+	 * reports hidden just before it unloads and timers never fire in an
+	 * unloading document, so only a genuine tab-hide sends it. Recovery on
+	 * resume is the server's IDR (plus PLI); the client sends no keyframe
+	 * requests, and the resume watchdog verifies frames follow.
+	 */
 	async function handleVisibilityChange() {
 		if (document.hidden) {
 			clearResumeWatchdog();
@@ -583,9 +665,7 @@ export default function webrtc() {
 				hiddenVideoPauseTimer = setTimeout(() => {
 					hiddenVideoPauseTimer = null;
 					if (!document.hidden || videoPausedForHiddenTab || !webrtc) return;
-					// A feed the user already stopped from the dashboard is left
-					// alone: pausing it here would make the resume on show
-					// resurrect a stream the user turned off.
+					// A feed the user stopped from the dashboard must not be resurrected on show.
 					if (!isVideoPipelineActive) return;
 					videoPausedForHiddenTab = true;
 					try { webrtc.sendDataChannelMessage('STOP_VIDEO'); } catch (_) {}
@@ -606,8 +686,7 @@ export default function webrtc() {
 			console.log("Tab visible: sent START_VIDEO to resume this peer's feed.");
 			armResumeWatchdog();
 		} else if (videoElement && videoElement.paused) {
-			// Nothing was paused here, but the browser can still have stopped the
-			// element itself while the tab was away.
+			// The browser can have paused the element itself while the tab was away.
 			videoElement.play().catch(() => {});
 		}
 		if (wakeLockSentinel === null) {
@@ -615,8 +694,10 @@ export default function webrtc() {
 		}
 	}
 
-	// Route WebRTC audio to a chosen output device. The <video> element carries both
-	// audio and video (one bundled stream), so setSinkId on it moves the audio sink.
+	/**
+	 * Routes audio to the preferred output device: the `video` element carries
+	 * the bundled audio track, so `setSinkId` on it moves the audio sink.
+	 */
 	async function applyOutputDevice() {
 		if (!preferredOutputDeviceId || !videoElement) return;
 		if (!('setSinkId' in HTMLMediaElement.prototype) || typeof videoElement.setSinkId !== 'function') {
@@ -631,13 +712,15 @@ export default function webrtc() {
 		}
 	}
 
+	/**
+	 * Shows the sentence-cased status (the internal value stays lower-case for
+	 * comparisons); once connected, hides it and shows the play button if
+	 * playback still needs a gesture.
+	 */
 	function updateStatusDisplay() {
 		if (statusDisplayElement) {
-			// Sentence-case the status word for display (internal `status` stays lower-case
-			// for comparisons like `status == 'connected'`): 'connecting' -> 'Connecting'.
 			statusDisplayElement.textContent = status ? status.charAt(0).toUpperCase() + status.slice(1) : status;
 			if (status == 'connected') {
-				// clear the status and show the play button
 				statusDisplayElement.classList.add("hidden");
 				if (playButtonElement && showStart) {
 					playButtonElement.classList.remove('hidden');
@@ -646,12 +729,14 @@ export default function webrtc() {
 		}
 	}
 
+	/**
+	 * Picks the video's `image-rendering`: pixelated with anti-aliasing off or
+	 * at 1:1, `auto` (smoothed) when CSS-scaled above 1 dpr.
+	 */
 	function updateVideoImageRendering(){
 		if (!videoElement) return;
 
 		if (!antiAliasingEnabled) {
-			// Same contract as the websockets core: anti-aliasing off forces
-			// sharp pixels regardless of scaling.
 			if (videoElement.style.imageRendering !== 'pixelated') {
 				videoElement.style.imageRendering = 'pixelated';
 			}
@@ -660,13 +745,11 @@ export default function webrtc() {
 		const dpr = window.devicePixelRatio || 1;
 		const isOneToOne = !useCssScaling || (useCssScaling && dpr <= 1);
 		if (isOneToOne) {
-			// Use 'pixelated' for a sharp, 1:1 pixel look
 			if (videoElement.style.imageRendering !== 'pixelated') {
 				console.log("Setting video rendering to 'pixelated' for sharp display.");
 				videoElement.style.imageRendering = 'pixelated';
 			}
 		} else {
-			// Use 'auto' to let the browser smooth the upscaled video
 			if (videoElement.style.imageRendering !== 'auto') {
 				console.log("Setting video rendering to 'auto' for smooth upscaling.");
 				videoElement.style.imageRendering = 'auto';
@@ -674,30 +757,38 @@ export default function webrtc() {
 		}
 	};
 
+	/**
+	 * Applies the server's settings payload to the runtime and reconciles the
+	 * user's stored overrides against it.
+	 *
+	 * Every value is applied to `window[key]`; only a genuine user override is
+	 * persisted. A server value with no stored override is not written to
+	 * localStorage, so a later server-side change can still be re-pushed, and a
+	 * locked value is never written into the user's key, where it would
+	 * masquerade as their pick after an unlock. The override is read under the
+	 * key the dashboard writes (HiDPI stores as `useCssScaling`), or an
+	 * unlocked operator value would win forever. An unlocked operator override
+	 * with no stored pick is reported back as a change, so it is applied for
+	 * real: window state alone leaves runtime consumers on their defaults.
+	 * Ranged settings are parsed as floats: `"0.5"` read as an int is 0, out of
+	 * range, and wiped on every connect. Plain values (`audio_channels`,
+	 * `app_terminal`) configure pipelines rather than preferences and stay
+	 * runtime-only.
+	 * @param {Object<string, object>} serverSettings The payload's per-key specs.
+	 * @returns {Object<string, *>} Corrections the server has to be told about.
+	 */
 	function sanitizeAndStoreSettings(serverSettings) {
 		console.log("Sanitizing and storing settings based on server payload.");
 		const changes = {};
 
-		// Persist ONLY genuine user overrides. A server-pushed value with no stored
-		// override is applied to the runtime (window[key]) but NOT written to
-		// localStorage, so a later server-side change can still be re-pushed.
-		// Persisting server defaults here left them stuck against future updates.
 		for (const key in serverSettings) {
 			if (!serverSettings.hasOwnProperty(key)) continue;
 			const setting = serverSettings[key];
-			// The user's pick may live under a different name than the server's key
-			// (HiDPI stores as useCssScaling), and the override check must read the
-			// key the dashboard actually writes, or an unlocked operator value wins
-			// forever.
 			const storeKey = storageKeyForServerKey(key);
 			const finalKey = storageKeyFor(storeKey);
 			const wasUnset = window.localStorage.getItem(finalKey) === null;
 
 			if (setting.min !== undefined && setting.max !== undefined) {
-				// Float-aware: fractional ranges must not be
-				// parsed as ints — that reads "0.5" as 0, flags it out of range,
-				// and wipes the pick back to the server default on every connect.
-				// In-range stored values are kept verbatim (no write-back).
 				const clientValue = getFloatParam(storeKey, setting.default);
 				if (wasUnset) {
 					window[key] = clientValue;
@@ -738,14 +829,9 @@ export default function webrtc() {
 						changes[key] = serverValue;
 					}
 					window[key] = serverValue;
-					// Not persisted: the lock governs at runtime, and writing it into the
-					// user's own key would masquerade as their pick after an unlock.
 				} else if (wasUnset) {
 					window[key] = serverValue;
 					if (setting.overridden) {
-						// An operator-configured (unlocked) value must actually be applied
-						// when the user has no stored pick — mirroring window state alone
-						// leaves runtime consumers on their built-in defaults.
 						changes[key] = serverValue;
 					}
 				} else {
@@ -754,19 +840,31 @@ export default function webrtc() {
 					setBoolParam(storeKey, clientValue);
 				}
 			}
+			else if (setting.value !== undefined) {
+				window[key] = setting.value;
+			}
 		}
 		return changes;
 	}
 
+	/**
+	 * Sends the persisted settings as the session's initial SETTINGS payload.
+	 *
+	 * Every display page sends its own: the server applies a payload to the
+	 * display whose channel delivered it, so a secondary configures only its
+	 * stream, its resolution still riding the resize message. Per-display keys
+	 * carry a `_display2` suffix and each display reads only its own variant.
+	 * Manual dimensions are exact physical pixels and go raw, as on the resize
+	 * path. The DPR-derived `scaling_dpi` is seeded into this first payload
+	 * unless a stored pick was collected: without it the desktop comes up at
+	 * the default DPI and the dashboard's correction a second later forces a
+	 * second capture restart on every HiDPI connect.
+	 */
 	function sendClientPersistedSettings() {
 		if (isSharedMode) {
 			console.log("Skipping sending client persisted settings in shared mode.");
 			return;
 		}
-		// Every display page sends its persisted settings: the server applies a
-		// payload to the display whose channel delivered it, so a secondary
-		// configures only its own stream (websockets model). Its resolution
-		// still flows through the standard resize message.
 		const settingsPrefix = `${storageAppName}_`;
 		const settingsToSend = {};
 		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
@@ -791,9 +889,6 @@ export default function webrtc() {
 		for (const key in localStorage) {
 			if (Object.hasOwnProperty.call(localStorage, key) && key.startsWith(settingsPrefix)) {
 				const unprefixedKey = key.substring(settingsPrefix.length);
-				// Per-display keys carry a display2 suffix: this display reads only
-				// its own variant, and the primary skips display2's keys, so picks
-				// never leak across displays.
 				let baseKey = unprefixedKey;
 				if (unprefixedKey.endsWith('_display2')) {
 					if (storageDisplayId !== 'display2') continue;
@@ -816,18 +911,9 @@ export default function webrtc() {
 
 		if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
 			settingsToSend['is_manual_resolution_mode'] = true;
-			// Manual dimensions are exact physical pixels by definition — no dpr
-			// multiply (parity with the websockets core and this core's own
-			// resize-message path, which both send them raw).
 			settingsToSend['manual_width'] = alignResolution(manualWidth);
 			settingsToSend['manual_height'] = alignResolution(manualHeight);
 		}
-		// Seed the DPR-derived scaling_dpi into the very FIRST payload: without
-		// it the server brings the desktop up at its default DPI and the
-		// dashboard's derived correction ~1s later forces a second (Wayland)
-		// capture restart on every HiDPI connect. A user-pinned preset was
-		// already collected from localStorage by the loop above and wins;
-		// scalingDPI itself is stored-else-DPR-derived at init.
 		if (settingsToSend['scaling_dpi'] === undefined) {
 			settingsToSend['scaling_dpi'] = scalingDPI;
 		}
@@ -846,6 +932,13 @@ export default function webrtc() {
 		}
 	}
 
+	/**
+	 * Sizes and centers the video element for a manual resolution; the exact
+	 * size is centered too, or a larger viewport would pin the box top-left.
+	 * @param {number} targetWidth Stream width in pixels.
+	 * @param {number} targetHeight Stream height in pixels.
+	 * @param {boolean} scaleToFit Letterbox into the container instead of showing the exact size.
+	 */
 	function applyManualStyle(targetWidth, targetHeight, scaleToFit) {
 		if (targetWidth <=0 || targetHeight <=0) {
 			console.log("Invalid target height or width")
@@ -885,8 +978,6 @@ export default function webrtc() {
 			videoElement.style.objectFit = 'contain';
 			console.log(`Applied manual style (Scaled): CSS ${cssWidth}x${cssHeight}, Pos ${leftOffset},${topOffset}`);
 		} else {
-			// Center the exact-size box too (ws-core parity): a viewport larger
-			// than the stream otherwise leaves it pinned to the top-left corner.
 			const topOffset = (containerHeight - targetHeight) / 2;
 			const leftOffset = (containerWidth - targetWidth) / 2;
 			videoElement.style.position = 'absolute';
@@ -901,12 +992,16 @@ export default function webrtc() {
 		updateVideoImageRendering();
 	}
 
+	/**
+	 * Sizes the video element to the window: the buffer hint in physical
+	 * pixels, the on-screen box in CSS pixels (styling it with physical pixels
+	 * overflows the viewport by dpr squared on HiDPI displays).
+	 * @param {number} targetWidth Window width in CSS pixels.
+	 * @param {number} targetHeight Window height in CSS pixels.
+	 */
 	function resetToWindowResolution(targetWidth, targetHeight) {
 		if (!videoElement) return;
 
-		// Buffer hint in physical pixels; the on-screen box stays at CSS pixels
-		// (`target*`) — styling with physical pixels overflows the viewport by
-		// dpr^2 on HiDPI displays.
 		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
 		const logicalWidth = alignResolution(targetWidth * dpr);
 		const logicalHeight = alignResolution(targetHeight * dpr);
@@ -926,13 +1021,16 @@ export default function webrtc() {
 		console.log(`Resized to window resolution: ${logicalWidth}x${logicalHeight} (css ${targetWidth}x${targetHeight})`);
 	}
 
-	// scaling_dpi synced to the local display scaling (devicePixelRatio), NOT the resolution:
-	// dpr 1.5 -> 144 (150%), 2 -> 192 (200%); 96 (100%) otherwise. Snapped to the DPI presets.
-	// scaling_dpi stops, in 25% steps. Snapping to the NEAREST puts a density the
-	// stops do not name (a 3.5x phone, a 133% desktop) on the closest one, and
-	// clamps at both ends.
+	/** The DPI slider stops, in 25% steps from 96. */
 	const DPI_STOPS = [96, 120, 144, 168, 192, 216, 240, 264, 288];
 
+	/**
+	 * Derives `scaling_dpi` from the local display scaling so remote fonts
+	 * match local ones: dpr 1.5 is 144, 2 is 192. Snapping to the nearest stop
+	 * puts a density the stops do not name (a 3.5x phone, a 133% desktop) on
+	 * the closest one and clamps at both ends.
+	 * @returns {number}
+	 */
 	function autoDeriveDpi() {
 		const dpr = window.devicePixelRatio || 1;
 		const target = Math.round(dpr * 4) * 24;
@@ -940,6 +1038,17 @@ export default function webrtc() {
 			Math.abs(cur - target) < Math.abs(prev - target) ? cur : prev);
 	}
 
+	/**
+	 * Requests a stream resolution with the `r,WxH` message.
+	 *
+	 * A manual resolution is the exact framebuffer and is not multiplied by the
+	 * device pixel ratio, or a HiDPI toggle would swing it between 1x and 2x;
+	 * an auto resolution is CSS pixels times dpr unless CSS scaling is on. Both
+	 * are capped at 4080 so a dpr-2 4K fullscreen never asks for a 7680-wide
+	 * framebuffer.
+	 * @param {number} width
+	 * @param {number} height
+	 */
 	function sendResolutionToServer(width, height) {
 		if (isSharedMode) {
 			console.log("Skipping sending resolution in shared mode.");
@@ -947,8 +1056,6 @@ export default function webrtc() {
 		}
 		let realWidth, realHeight, dpr;
 		if (window.isManualResolutionMode) {
-			// A manual/preset resolution IS the exact framebuffer; don't multiply by dpr, or a
-			// useCssScaling flip (HiDPI toggle / preset apply) swings it 2x<->1x. Mirrors ws-core.
 			dpr = 1;
 			realWidth = alignResolution(width);
 			realHeight = alignResolution(height);
@@ -957,8 +1064,6 @@ export default function webrtc() {
 			realWidth = alignResolution(width * dpr);
 			realHeight = alignResolution(height * dpr);
 		}
-		// Requested-dimension cap (ws-core parity): a dpr-2 4K fullscreen must
-		// not ask the server for a 7680-wide framebuffer.
 		if (realWidth > 4080) realWidth = 4080;
 		if (realHeight > 4080) realHeight = 4080;
 		const resString = `${realWidth}x${realHeight}`;
@@ -967,19 +1072,22 @@ export default function webrtc() {
 		webrtc.sendDataChannelMessage(`r,${resString}`);
 	}
 
+	/** Follows window resizes with stream resolution requests. */
 	function enableAutoResize() {
 		window.addEventListener("resize", resizeStart);
 	}
 
+	/** Stops following window resizes. */
 	function disableAutoResize() {
 		window.removeEventListener("resize", resizeStart);
 	}
 
-	// Manual-resolution mode detaches the auto-resize listener, but the manual
-	// style's CENTERING offsets still depend on the container size: recompute
-	// them when the window geometry changes (fullscreen enter/exit, window
-	// resize) or the stream stays anchored where it was first placed.
-	// Self-gating (no-op outside manual mode), so it is registered once.
+	/**
+	 * Manual mode detaches the auto-resize listener, but the manual style's
+	 * centering offsets still depend on the container size, so they are
+	 * recomputed on every window geometry change (fullscreen, resize). The
+	 * listener gates itself and is registered once.
+	 */
 	window.addEventListener('resize', () => {
 		if (window.isManualResolutionMode && !isSharedMode
 			&& manualWidth > 0 && manualHeight > 0 && videoElement && videoElement.parentElement) {
@@ -987,6 +1095,7 @@ export default function webrtc() {
 		}
 	});
 
+	/** Debounces window resizes into handleResizeUI. */
 	function resizeStart() {
 		rtime = new Date();
 		if (rtimeout === false) {
@@ -995,35 +1104,51 @@ export default function webrtc() {
 		}
 	}
 
+	/** Runs handleResizeUI once the resize has been quiet for `rdelta`. */
 	function resizeEnd() {
 		if (new Date() - rtime < rdelta) {
 			setTimeout(() => { resizeEnd() }, rdelta);
 		} else {
 			rtimeout = false;
-			// enable_resize=false pins the PRIMARY's resolution server-side:
-			// the resize it ignores must not be requested nor restyled onto.
-			// A secondary's resize stays allowed (server gate matches).
-			if (window.enable_resize === false && storageDisplayId !== 'display2') {
-				return;
-			}
-			windowResolution = input.getWindowResolution();
-			// Clamp the CSS-px size so the physical request stays within the
-			// 4080 cap and the element box matches what the server realizes
-			// (mirrors ws-core handleResizeUI).
-			const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
-			if (windowResolution[0] * dpr > 4080) windowResolution[0] = Math.floor(4080 / dpr);
-			if (windowResolution[1] * dpr > 4080) windowResolution[1] = Math.floor(4080 / dpr);
-			sendResolutionToServer(windowResolution[0], windowResolution[1])
-			resetToWindowResolution(windowResolution[0], windowResolution[1])
+			handleResizeUI();
 		}
 	}
 
-	// Auto-mode framebuffer resolution is logical-size x devicePixelRatio, but a DPR
-	// change alone (window dragged to a monitor of a different pixel density, or an OS
-	// display-scaling change) fires no 'resize' event, so the stream stays at the old
-	// density until the next resize. Re-run the auto-resize path when DPR changes;
-	// self-gated to auto mode (mirrors the manual-centering resize listener above).
-	// matchMedia resolution queries are one-shot at a given dppx, so re-arm each time.
+	/**
+	 * Auto-mode resize: requests the window's CSS-pixel size from the server
+	 * (sendResolutionToServer applies the device pixel ratio) and restyles the
+	 * element onto it; shared by the debounced resize tail and the
+	 * reset-to-window path.
+	 *
+	 * A manual preset applied while a debounce is pending is not overwritten
+	 * when it fires. `enable_resize` false pins the primary's resolution
+	 * server-side, so the resize the server ignores is neither requested nor
+	 * restyled onto; a secondary's stays allowed. The CSS size is clamped so
+	 * the physical request stays within the 4080 cap and the element box
+	 * matches what the server realizes.
+	 */
+	function handleResizeUI() {
+		if (window.isManualResolutionMode) {
+			return;
+		}
+		if (window.enable_resize === false && storageDisplayId !== 'display2') {
+			return;
+		}
+		windowResolution = input.getWindowResolution();
+		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+		if (windowResolution[0] * dpr > 4080) windowResolution[0] = Math.floor(4080 / dpr);
+		if (windowResolution[1] * dpr > 4080) windowResolution[1] = Math.floor(4080 / dpr);
+		sendResolutionToServer(windowResolution[0], windowResolution[1]);
+		resetToWindowResolution(windowResolution[0], windowResolution[1]);
+	}
+
+	/**
+	 * Re-runs the auto-resize path when the device pixel ratio changes: a
+	 * window dragged to a monitor of another density, or an OS scaling change,
+	 * fires no resize event, and the stream would stay at the old density
+	 * until the next one. A matchMedia resolution query is one-shot at a given
+	 * dppx, so it is re-armed after each change.
+	 */
 	const watchDevicePixelRatio = () => {
 		let mql = null;
 		const onDprChange = () => {
@@ -1040,37 +1165,36 @@ export default function webrtc() {
 	};
 	watchDevicePixelRatio();
 
+	/**
+	 * Restores the last session's resolution and desktop DPI on connect.
+	 *
+	 * The DPI goes through the server's idempotent `set_dpi` path, the same one
+	 * the initial SETTINGS seed takes, so whichever lands first wins. Persisted
+	 * trackpad mode re-asserts cursor compositing (touch has no hover cursor).
+	 * A manual-mode secondary display reports its size on connect because a
+	 * secondary lays out from what it reports; a pinned primary
+	 * (`enable_resize` false) is styled to the window but keeps the server's
+	 * resolution.
+	 */
 	function loadLastSessionSettings() {
 		if (isSharedMode) {
 			console.log("Skipping loading last session settings in shared mode.");
 			return;
 		}
-		// Sync the remote desktop DPI to the local display scaling on connect (server applies via
-		// handle_scaling -> set_dpi; the initial SETTINGS payload's scaling_dpi seed goes through
-		// the same idempotent path, so whichever lands first wins and the other no-ops). This is
-		// the desktop-font sync, unrelated to the resolution.
 		if (webrtc) { try { webrtc.sendDataChannelMessage(`s,${scalingDPI}`); } catch (_) {} }
-		// Re-assert persisted trackpad mode's cursor compositing (websockets parity:
-		// touch has no hover cursor, so the pointer must be baked into the video).
 		if (trackpadMode && webrtc) {
 			try { webrtc.sendDataChannelMessage('SET_NATIVE_CURSOR_RENDERING,1'); } catch (_) {}
 		}
-		// Preset the video element to last session resolution
 		if (window.isManualResolutionMode && manualWidth && manualHeight) {
 			console.log(`Applying manual resolution: ${manualWidth}x${manualHeight}`);
 			applyManualStyle(manualWidth, manualHeight, scaleLocal);
-			// A secondary display lays out from its reported size, so a manual-mode
-			// secondary must report on connect too; the auto branch below covers the primary.
 			if (window.location.hash.startsWith('#display2')) {
 				sendResolutionToServer(manualWidth, manualHeight);
 			}
 		} else {
 			console.log("Applying window resolution");
-			// If manual resolution is not set, reset to window resolution
 			const currentWindowRes = input.getWindowResolution();
 			resetToWindowResolution(...currentWindowRes);
-			// A pinned primary keeps the server's resolution: the initial
-			// element styling above still applies, the request does not.
 			if (window.enable_resize !== false || storageDisplayId === 'display2') {
 				sendResolutionToServer(currentWindowRes[0], currentWindowRes[1]);
 			}
@@ -1078,18 +1202,69 @@ export default function webrtc() {
 		}
 	}
 
+	/** Posts `sidebarButtonStatusUpdate` with the state of every pipeline toggle. */
 	function postSidebarButtonUpdate() {
 		const updatePayload = {
 			type: 'sidebarButtonStatusUpdate',
 			video: isVideoPipelineActive,
 			audio: isAudioPipelineActive,
 			microphone: isMicrophoneActive,
+			webcam: isWebcamActive,
 			gamepad: isGamepadEnabled
 		};
 		console.log('Posting sidebarButtonStatusUpdate:', updatePayload);
 		window.postMessage(updatePayload, window.location.origin);
 	}
 
+	/**
+	 * Starts the webcam uplink: the camera track rides the sendonly video
+	 * transceiver the server reserved in the bundled SDP (the mirror of the
+	 * microphone), so the browser's own encoder produces the H.264 or VP8 the
+	 * server's virtual camera decodes, with RTP congestion control and no
+	 * data-channel framing.
+	 */
+	async function startWebcamCapture() {
+		if (isSharedMode || !webrtc || isWebcamActive || webcamBusy) {
+			return;
+		}
+		webcamBusy = true;
+		try {
+			const ok = await webrtc.setWebcam(true, preferredWebcamDeviceId);
+			if (ok) {
+				const track = webrtc.webcamTrack;
+				if (track) {
+					track.addEventListener('ended', () => {
+						if (isWebcamActive) stopWebcamCapture();
+					});
+				}
+				isWebcamActive = true;
+			} else {
+				isWebcamActive = false;
+			}
+		} catch (error) {
+			console.error('Webcam capture error:', error);
+			isWebcamActive = false;
+		} finally {
+			webcamBusy = false;
+		}
+		postSidebarButtonUpdate();
+	}
+
+	/** Stops the webcam uplink and reports the toggle state. */
+	function stopWebcamCapture() {
+		if (webrtc) {
+			webrtc.setWebcam(false).catch(() => {});
+		}
+		if (isWebcamActive) {
+			isWebcamActive = false;
+			postSidebarButtonUpdate();
+		}
+	}
+
+	/**
+	 * Applies the gamepad toggle to the manager; a shared page always polls.
+	 * @returns {boolean} Whether polling is on.
+	 */
 	function toggleGamepadConnection() {
 		if (input && input.gamepadManager) {
 			if (isSharedMode) {
@@ -1112,7 +1287,13 @@ export default function webrtc() {
 		return false;
 	}
 
-	// callback invoked when "message" event is triggered
+	/**
+	 * Handles a same-origin dashboard window message; the module docblock
+	 * lists the types. A shared page ignores the resolution, command and
+	 * clipboard cases: a viewer never drives resolution policy, never reaches
+	 * the server's command execution path and never writes its clipboard.
+	 * @param {MessageEvent} event
+	 */
 	function handleMessage(event) {
 		if (event.origin !== window.location.origin) {
 			console.warn("Received message from unexpected origin");
@@ -1121,16 +1302,13 @@ export default function webrtc() {
 		let message = event.data;
 		switch(message.type) {
 			case "setScaleLocally":
-				// Shared-mode parity with ws-core: a viewer must not drive resolution policy.
 				if (isSharedMode) { break; }
 				if (typeof message.value === 'boolean') {
-					console.log("Scaling the stream locally: ", message.value);
-					// setScaleLocally returns true or false; false, to turn off the scaling
-					if (message.value === true) disableAutoResize();
 					scaleLocal = message.value;
-					if (manualWidth && manualHeight) {
+					setBoolParam("scaleLocallyManual", scaleLocal);
+					console.log(`Set scaleLocallyManual to ${scaleLocal} and persisted.`);
+					if (window.isManualResolutionMode && manualWidth && manualHeight) {
 						applyManualStyle(manualWidth, manualHeight, scaleLocal);
-						setBoolParam("scaleLocallyManual", scaleLocal);
 					}
 				} else {
 					console.warn("Invalid value received for setScaleLocally:", message.value);
@@ -1139,22 +1317,14 @@ export default function webrtc() {
 			case "resetResolutionToWindow":
 				if (isSharedMode) { break; }
 				console.log("Resetting to window size");
-				// Clear the manual dimensions before re-deriving from the window.
+				// The flag drops first so the re-send takes the auto path (window size times dpr).
+				window.isManualResolutionMode = false;
 				manualHeight = manualWidth = 0;
-				// With the primary pinned (enable_resize=false) the stream is
-				// not moving: only return to auto mode, without a resend or
-				// restyle (resizeEnd gates later resizes itself).
-				if (window.enable_resize !== false || storageDisplayId === 'display2') {
-					let currentWindowRes = input.getWindowResolution();
-					resetToWindowResolution(...currentWindowRes);
-					sendResolutionToServer(...currentWindowRes);
-				}
-				enableAutoResize();
-				// snake_case keys: these are the ones read back at init.
 				setIntParam('manual_width', null);
 				setIntParam('manual_height', null);
 				setBoolParam('is_manual_resolution_mode', false);
-				window.isManualResolutionMode = false;
+				enableAutoResize();
+				handleResizeUI();
 				break;
 			case "setManualResolution":
 				if (isSharedMode) { break; }
@@ -1165,28 +1335,25 @@ export default function webrtc() {
 					break;
 				}
 				console.log(`Setting manual resolution: ${width}x${height}`);
-				disableAutoResize();
+				// The flag rises before the send: a preset is exact framebuffer pixels, which the
+				// auto path would multiply by dpr.
+				window.isManualResolutionMode = true;
 				manualWidth = width;
 				manualHeight = height;
-				applyManualStyle(manualWidth, manualHeight, scaleLocal);
-				sendResolutionToServer(manualWidth, manualHeight);
-				// Use snake_case keys (read at init) so the choice persists across reloads.
 				setIntParam('manual_width', manualWidth);
 				setIntParam('manual_height', manualHeight);
 				setBoolParam('is_manual_resolution_mode', true);
-				window.isManualResolutionMode = true;
+				disableAutoResize();
+				sendResolutionToServer(manualWidth, manualHeight);
+				applyManualStyle(manualWidth, manualHeight, scaleLocal);
 				break;
 			case "setUseCssScaling":
-				// ws-core parity. hiDPI is handled by re-deriving the DPR everywhere the
-				// flag matters: sendResolutionToServer/resetToWindowResolution multiply by
-				// devicePixelRatio only when CSS scaling is off, and input.updateCssScaling
-				// realigns the coordinate math (touch included via the shared sink mapper).
 				if (isSharedMode) { break; }
 				if (typeof message.value === 'boolean') {
 					const changed = useCssScaling !== message.value;
 					useCssScaling = message.value;
-					// persist === false marks a server-authored value: apply it, but
-					// leave the user's own key alone so their pick survives the lock.
+					// persist === false is a server-authored value: applied, but the user's own key
+					// is left alone.
 					if (message.persist !== false) {
 						setBoolParam('useCssScaling', useCssScaling);
 					}
@@ -1201,11 +1368,7 @@ export default function webrtc() {
 							applyManualStyle(manualWidth, manualHeight, scaleLocal);
 						} else if (!isSharedMode && input &&
 							(window.enable_resize !== false || storageDisplayId === 'display2')) {
-							// enable_resize=false pins the PRIMARY to the server's
-							// resolution: the resize it ignores must not be
-							// requested, and the layout must not restyle onto a
-							// size whose source never moves. Secondaries stay
-							// allowed (ws-core and server parity).
+							// A pinned primary keeps its resolution; secondaries stay allowed.
 							const currentWindowRes = input.getWindowResolution();
 							const autoWidth = alignResolution(currentWindowRes[0]);
 							const autoHeight = alignResolution(currentWindowRes[1]);
@@ -1222,14 +1385,12 @@ export default function webrtc() {
 				handleSettingsMessage(message.settings);
 				break;
 			case "command":
-				// Defense in depth (ws-core parity): a shared/strict-viewer page never
-				// reaches the server-side 'cmd,' execution path.
 				if (isSharedMode) { break; }
 				if (!serverCommandEnabled) {
 					console.log("Command sending suppressed: server has command_enabled=false; not sending 'cmd,'.");
 					break;
 				}
-				// && (not ||) so only a real value is forwarded, not the string "null"/"undefined".
+				// A real value only, never the string "null" or "undefined".
 				if (message.value !== null && message.value !== undefined) {
 					const commandString = message.value;
 					console.log(`Received 'command' message with value: "${commandString}"`);
@@ -1257,9 +1418,6 @@ export default function webrtc() {
 					console.log("Shared mode: Video pipelineControl blocked.");
 					break;
 				} else if (message.pipeline === 'video' && webrtc) {
-					// Same per-peer server gate the tab-hide pause uses: the sender
-					// stops RTP for THIS peer, capture stops when every consumer is
-					// paused, and resume comes back with an IDR.
 					const videoOn = !!message.enabled;
 					try {
 						webrtc.sendDataChannelMessage(videoOn ? 'START_VIDEO' : 'STOP_VIDEO');
@@ -1270,13 +1428,22 @@ export default function webrtc() {
 						console.error('Video toggle failed:', e);
 					}
 				} else if (message.pipeline === 'audio' && videoElement) {
-					// Audio stays negotiated for the session; the toggle is a local
-					// element mute (the bundled <video> carries the audio track).
+					// Audio stays negotiated; the toggle only mutes the element carrying it.
 					const audioOn = !!message.enabled;
 					videoElement.muted = !audioOn;
 					isAudioPipelineActive = audioOn;
 					window.postMessage({ type: 'pipelineStatusUpdate', audio: audioOn }, window.location.origin);
 					postSidebarButtonUpdate();
+				} else if (message.pipeline === 'webcam') {
+					if (isSharedMode) {
+						console.log("Shared mode: Webcam control blocked.");
+						break;
+					}
+					if (!!message.enabled) {
+						startWebcamCapture();
+					} else {
+						stopWebcamCapture();
+					}
 				}
 				break;
 			case 'gamepadControl':
@@ -1299,10 +1466,7 @@ export default function webrtc() {
 				sendClipboardData(newClipboardText);
 				break;
 			case 'clipboardImageUpdate': {
-				// Dashboard image upload: hand the blob to the same binary path the
-				// focus/paste read uses. Only meaningful when binary clipboard is on
-				// (the server drops image writes otherwise). Every skip surfaces a
-				// notification — a dead click with no feedback reads as a bug.
+				// Every skip surfaces a notification: a dead click reads as a bug.
 				if (isSharedMode) {
 					console.log("Shared mode: Clipboard image write to server blocked.");
 					notifyClipboardImageSkip('viewers cannot set the clipboard', 'clipboardSkipReadonly');
@@ -1333,7 +1497,6 @@ export default function webrtc() {
 					applyOutputDevice();
 				} else if (message.context === 'input' && message.deviceId) {
 					preferredInputDeviceId = message.deviceId;
-					// A live mic must move to the new device: cycle the track.
 					if (isMicrophoneActive && webrtc && typeof webrtc.setMicrophone === 'function') {
 						webrtc.setMicrophone(false).then(() =>
 							webrtc.setMicrophone(true, preferredInputDeviceId)
@@ -1346,22 +1509,28 @@ export default function webrtc() {
 				}
 				break;
 			case 'requestFullscreen':
-				// Parity with the websockets core: fullscreen the stream container
-				// (pointer-lock aware) rather than the whole document.
-				if (input) {
+			case 'requestGamingMode': {
+				// Plain fullscreen leaves the pointer and the keyboard to the browser; gaming mode
+				// holds both.
+				const gaming = message.type === 'requestGamingMode';
+				gamingModeActive = gaming;
+				if (input && gaming && typeof input.enterGamingMode === 'function') {
+					input.enterGamingMode();
+				} else if (input) {
 					input.enterFullscreen();
 				} else if (document.fullscreenElement === null) {
 					document.documentElement.requestFullscreen().catch(() => {});
 				}
 				break;
+			}
 			case 'setSynth':
 				if (input && typeof input.setSynth === 'function') {
 					input.setSynth(message.value);
 				}
 				break;
 			case 'showVirtualKeyboard': {
-				// Parity with ws-core: focus the off-screen assist input so the
-				// mobile soft keyboard opens; blur it on the next touch of the stream.
+				// Focusing the off-screen assist input opens the mobile soft keyboard; the next
+				// touch of the stream blurs it.
 				if (isSharedMode) { break; }
 				const kbdAssistInput = document.getElementById('keyboard-input-assist');
 				const mainInteractionOverlay = document.getElementById('overlayInput');
@@ -1389,7 +1558,6 @@ export default function webrtc() {
 				if (typeof message.value === 'boolean') {
 					useBrowserCursors = message.value;
 					setBoolParam('use_browser_cursors', message.value);
-					// The multi-monitor override may force the effective value on.
 					applyEffectiveCursorSetting();
 				} else {
 					console.warn("Invalid value received for setUseBrowserCursors:", message.value);
@@ -1400,8 +1568,7 @@ export default function webrtc() {
 					trackpadMode = true;
 					setBoolParam('trackpadMode', true);
 					input.setTrackpadMode(true);
-					// Touch has no hover cursor: composite the pointer into the
-					// video (websockets parity).
+					// Touch has no hover cursor: the pointer is composited into the video.
 					if (webrtc) {
 						try { webrtc.sendDataChannelMessage('SET_NATIVE_CURSOR_RENDERING,1'); } catch (_) {}
 					}
@@ -1422,28 +1589,31 @@ export default function webrtc() {
 		}
 	}
 
+	/**
+	 * Applies a settings payload from the dashboard or the server.
+	 *
+	 * A server-authored payload (the locked and overridden values replayed on
+	 * every connect) is applied to the runtime but never written to the user's
+	 * own keys, where it would outlive the lock and masquerade as their pick;
+	 * only a dashboard-authored payload persists. Settings with no dedicated
+	 * data-channel opcode ride a SETTINGS passthrough the server applies through
+	 * `handle_update_settings`; `displayPosition` among them moves a secondary
+	 * page to another side of the primary, and the primary ignores it.
+	 * @param {Object<string, *>} settings Keys named as the server names them.
+	 * @param {boolean} [fromServer] Whether the server authored the payload.
+	 */
 	function handleSettingsMessage(settings, fromServer) {
-		// A server-authored payload (the locked/overridden values replayed on every
-		// connect) is applied to the runtime but never written to the user's own
-		// keys, where it would outlive the lock and masquerade as their pick. Only a
-		// dashboard-authored payload persists.
 		const storeInt = fromServer ? () => {} : setIntParam;
 		const storeBool = fromServer ? () => {} : setBoolParam;
 		const storeString = fromServer ? () => {} : setStringParam;
-		// Debug toggle parity with the websockets core: persist and reload so the
-		// verbose log buffers/flips apply at every layer (server push included).
 		if (settings.debug !== undefined) {
 			debug = settings.debug;
-			// Persisted even for a server-authored value: the reload below only
-			// settles once the flag is already in storage.
+			// Persisted even from the server: the reload only settles once the flag is in storage.
 			setBoolParam('debug', debug);
 			console.log(`Applied debug setting: ${debug}. Reloading...`);
 			setTimeout(() => { window.location.reload(); }, 700);
 			return;
 		}
-		// Turbo/4:4:4/paint-over have no dedicated data-channel opcode; the server applies
-		// them via handle_update_settings, so forward them as a SETTINGS payload (mirrors the
-		// WebSocket SETTINGS path; the dashboard already persisted them to localStorage).
 		const passthrough = {};
 		if (settings.video_fullcolor !== undefined) passthrough.video_fullcolor = !!settings.video_fullcolor;
 		if (settings.video_streaming_mode !== undefined) passthrough.video_streaming_mode = !!settings.video_streaming_mode;
@@ -1452,11 +1622,7 @@ export default function webrtc() {
 		if (settings.video_paintover_burst_frames !== undefined) passthrough.video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames, 10);
 		if (settings.force_aligned_resolution !== undefined) passthrough.force_aligned_resolution = !!settings.force_aligned_resolution;
 		if (settings.use_cpu !== undefined) passthrough.use_cpu = !!settings.use_cpu;
-		// Encoder switch (h264enc <-> openh264enc): the server restarts the pipeline on this.
 		if (settings.encoder !== undefined) passthrough.encoder = settings.encoder;
-	// A secondary page's runtime move to another side of the primary (WS
-	// displayPosition parity): the server applies and re-lays out; unguarded
-	// for the primary, which ignores it server-side.
 	if (settings.displayPosition !== undefined) passthrough.displayPosition = settings.displayPosition;
 		if (Object.keys(passthrough).length > 0) {
 			webrtc.sendDataChannelMessage(`SETTINGS,${JSON.stringify(passthrough)}`);
@@ -1477,8 +1643,7 @@ export default function webrtc() {
 			storeInt('audio_bitrate', audioBitRate);
 		}
 		if (settings.encoder !== undefined) {
-			// The server restarts the pipeline with the new encoder (forwarded via the
-			// SETTINGS passthrough above); track it locally for the decode path.
+			// The pipeline restart rides the passthrough; tracked here for the decode path.
 			encoder = settings.encoder;
 			storeString('encoder', encoder);
 			console.log("Encoder switched to:", encoder);
@@ -1486,11 +1651,8 @@ export default function webrtc() {
 		if (settings.scaling_dpi !== undefined) {
 			const dpi = parseInt(settings.scaling_dpi, 10);
 			if (!isNaN(dpi) && dpi > 0) {
-				// Not persisted here: the localStorage pin belongs to the dashboard,
-				// which writes it only for an explicit slider pick. Persisting every
-				// posted value would re-pin the derived-default and reset-to-derived
-				// posts, freezing DPI across displays with different devicePixelRatio
-				// (the connect path derives the DPI when unpinned).
+				// Not persisted: the pin belongs to the dashboard's explicit slider pick; pinning
+				// every post would freeze the DPI across displays of different devicePixelRatio.
 				scalingDPI = dpi;
 				webrtc.sendDataChannelMessage(`s,${dpi}`);
 			}
@@ -1510,19 +1672,14 @@ export default function webrtc() {
 			storeBool('clipboard_out_enabled', clipboard_out_enabled);
 		}
 		if (settings.use_css_scaling !== undefined) {
-			// Route a server-locked/overridden HiDPI value through the same flow
-			// as the dashboard toggle (websockets core parity), so the operator's
-			// setting reaches every layer that reacts to the toggle.
+			// Routed through the dashboard toggle's flow so the value reaches every layer.
 			handleMessage({
 				origin: window.location.origin,
 				data: { type: 'setUseCssScaling', value: !!settings.use_css_scaling, persist: !fromServer },
 			});
 		}
 		if (settings.use_browser_cursors !== undefined) {
-			// Server-pushed (locked/overridden) value: applied to the input layer
-			// through the same re-derivation as the dashboard toggle, but never
-			// written to the user's key, where it would masquerade as their pick
-			// after an unlock. Only the setUseBrowserCursors message persists.
+			// Never persisted: only the setUseBrowserCursors message persists.
 			useBrowserCursors = !!settings.use_browser_cursors;
 			applyEffectiveCursorSetting();
 		}
@@ -1542,9 +1699,7 @@ export default function webrtc() {
 		if (settings.force_aligned_resolution !== undefined) {
 			force_aligned_resolution = !!settings.force_aligned_resolution;
 			storeBool('force_aligned_resolution', force_aligned_resolution);
-			// Re-assert the current resolution so the stream snaps to the new
-			// alignment without waiting for the next window resize. A pinned
-			// primary (enable_resize=false) keeps the server's resolution.
+			// Re-sent so the stream snaps to the new alignment; a pinned primary is left alone.
 			if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
 				sendResolutionToServer(manualWidth, manualHeight);
 			} else if (!isSharedMode && input &&
@@ -1555,6 +1710,7 @@ export default function webrtc() {
 		}
 	}
 
+	/** Re-sends the parameter the new rate-control mode reads: the bitrate for CBR, the CRF for CRF. */
 	function sendRespectiveRCvalue(newMode) {
 		if (newMode === "cbr") {
 			webrtc.sendDataChannelMessage(`vb,${videoBitRate}`);
@@ -1563,24 +1719,37 @@ export default function webrtc() {
 		}
 	};
 
-	// HTTP uploads + drag-drop/file-picker plumbing live in the shared factory
-	// (see lib/file-upload.js); shared sessions must not upload.
+	/** HTTP uploads and the drag-drop and file-picker plumbing (`lib/file-upload.js`); shared sessions never upload. */
 	const fileUploader = createFileUploader({ canUpload: () => !isSharedMode });
 	const handleRequestFileUpload = fileUploader.handleRequestFileUpload;
 	const handleFileInputChange = fileUploader.handleFileInputChange;
 	const handleDragOver = fileUploader.handleDragOver;
 	const handleDrop = fileUploader.handleDrop;
 
-	// Metrics surfacing contract: the essentials are published on window (fps,
-	// network_stats, video_bitrate) for the sidebar/dashboard bridge, the full
-	// connectionStat object stays readable here, and enableWebrtcStatics optionally
-	// streams the raw reports to the server as `_stats_video`.
+	/**
+	 * Starts the once-a-second stats loop: the essentials are published on
+	 * `window` (`fps`, `network_stats`, `currentAudioBufferSize`) for the
+	 * dashboards, the full `connectionStat` stays readable here, and
+	 * `enableWebrtcStatics` streams the raw reports to the server as
+	 * `_stats_video`.
+	 *
+	 * A tick whose predecessor still awaits `getStats()` is skipped, since
+	 * overlapping ticks would double-update the byte baselines, and the time
+	 * window is re-anchored only on success, alongside those baselines, so
+	 * both cover the same interval. The bandwidth reported is the received
+	 * throughput (video plus audio), matching the WebSocket server's stat:
+	 * `availableReceiveBandwidth` is only the congestion-control estimate and
+	 * reads far below the real rate on a relay. The audio-buffer gauge is a
+	 * proxy: the de-jitter depth over the 20 ms Opus frame approximates the
+	 * frames buffered ahead of playout, since browser-managed audio exposes no
+	 * frame count. The audio concealment counters (NetEQ) are the RED
+	 * acceptance metric.
+	 */
 	function enableStatWatch() {
 		if (isSharedMode) {
 			console.log("Shared mode detected, skipping stats watch setup.");
 			return;
 		}
-		// Start watching stats
 		var videoBytesReceivedStart = 0;
 		var audioBytesReceivedStart = 0;
 		var previousVideoJitterBufferDelay = 0.0;
@@ -1588,14 +1757,10 @@ export default function webrtc() {
 		var previousAudioJitterBufferDelay = 0.0;
 		var previousAudioJitterBufferEmittedCount = 0;
 		var statsStart = new Date().getTime() / 1000;
-		// Non-racy gate: already running.
 		if (statsLoopId !== null) return;
-		// Set synchronously, before any async work.
 		statWatchEnabled = true;
 		let statsTickBusy = false;
 		statsLoopId = setInterval(async () => {
-			// Skip a tick whose predecessor still awaits getStats() (busy pc, GC
-			// pause): overlapping ticks would double-update the byte baselines.
 			if (statsTickBusy) return;
 			statsTickBusy = true;
 			var now = new Date().getTime() / 1000;
@@ -1603,10 +1768,8 @@ export default function webrtc() {
 				const stats = await webrtc.getConnectionStats();
 				connectionStat = {};
 
-				// Connection latency in milliseconds
 				const rtt = (stats.general.currentRoundTripTime !== null) ? (stats.general.currentRoundTripTime * 1000.0) : (serverLatency)
 
-				// Connection stats
 				connectionStat.connectionPacketsReceived = stats.general.packetsReceived;
 				connectionStat.connectionPacketsLost = stats.general.packetsLost;
 				connectionStat.connectionStatType = stats.general.connectionType
@@ -1614,7 +1777,6 @@ export default function webrtc() {
 				connectionStat.connectionBytesSent = (stats.general.bytesSent * 1e-6).toFixed(2) + " MBytes";
 				connectionStat.connectionAvailableBandwidth = (parseInt(stats.general.availableReceiveBandwidth) / 1e+6).toFixed(2) + " mbps";
 
-				// Video stats
 				connectionStat.connectionCodec = stats.video.codecName;
 				connectionStat.connectionVideoDecoder = stats.video.decoder;
 				connectionStat.connectionResolution = stats.video.frameWidth + "x" + stats.video.frameHeight;
@@ -1622,64 +1784,51 @@ export default function webrtc() {
 				connectionStat.connectionVideoBitrate = (((stats.video.bytesReceived - videoBytesReceivedStart) / (now - statsStart)) * 8 / 1e+6).toFixed(2);
 				videoBytesReceivedStart = stats.video.bytesReceived;
 
-				// Audio stats
 				connectionStat.connectionAudioCodecName = stats.audio.codecName;
 				connectionStat.connectionAudioBitrate = (((stats.audio.bytesReceived - audioBytesReceivedStart) / (now - statsStart)) * 8 / 1e+3).toFixed(2);
 				audioBytesReceivedStart = stats.audio.bytesReceived;
-				// NetEQ concealment counters — the RED before/after acceptance metric.
 				connectionStat.connectionAudioConcealedSamples = stats.audio.concealedSamples;
 				connectionStat.connectionAudioConcealmentEvents = stats.audio.concealmentEvents;
 				connectionStat.connectionAudioTotalSamplesReceived = stats.audio.totalSamplesReceived;
 				connectionStat.connectionAudioPacketsDiscarded = stats.audio.packetsDiscarded;
-				// Anchor the time window with the byte baselines (success path only) so the
-				// next tick's byte window and time window cover the same interval.
 				statsStart = now;
 
-				// Latency stats
 				connectionStat.connectionVideoLatency = parseInt(Math.round(rtt + (1000.0 * (stats.video.jitterBufferDelay - previousVideoJitterBufferDelay) / (stats.video.jitterBufferEmittedCount - previousVideoJitterBufferEmittedCount) || 0)));
 				previousVideoJitterBufferDelay = stats.video.jitterBufferDelay;
 				previousVideoJitterBufferEmittedCount = stats.video.jitterBufferEmittedCount;
 				connectionStat.connectionAudioLatency = parseInt(Math.round(rtt + (1000.0 * (stats.audio.jitterBufferDelay - previousAudioJitterBufferDelay) / (stats.audio.jitterBufferEmittedCount - previousAudioJitterBufferEmittedCount) || 0)));
-				// Audio-buffer proxy so the dashboard's Audio Buffer gauge works in WebRTC too:
-				// the RTCInboundRtpStreamStats de-jitter depth (ms) over the ~20ms Opus frame is
-				// roughly the number of frames buffered ahead of playout (browser-managed audio
-				// has no direct frame count like the websockets worklet).
 				const _audioJitterMs = 1000.0 * (stats.audio.jitterBufferDelay - previousAudioJitterBufferDelay) / (stats.audio.jitterBufferEmittedCount - previousAudioJitterBufferEmittedCount) || 0;
 				window.currentAudioBufferSize = Math.max(0, Math.round(_audioJitterMs / 20));
 				previousAudioJitterBufferDelay = stats.audio.jitterBufferDelay;
 				previousAudioJitterBufferEmittedCount = stats.audio.jitterBufferEmittedCount;
 
-				// Format latency
 				connectionStat.connectionLatency =  Math.max(connectionStat.connectionVideoLatency, connectionStat.connectionAudioLatency);
 
 				window.fps = connectionStat.connectionFrameRate;
 				window.network_stats = {
-					// Actual received throughput (video Mbps + audio kbps→Mbps), matching the WS
-					// server-side bandwidth stat. availableReceiveBandwidth is only the
-					// congestion-control estimate and reads far below the real rate on a relay.
 					"bandwidth_mbps": (parseFloat(connectionStat.connectionVideoBitrate) || 0) + (parseFloat(connectionStat.connectionAudioBitrate) || 0) / 1000,
 					"latency_ms": connectionStat.connectionLatency,
 				};
 				if (enableWebrtcStatics) webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
 			} catch (e) {
-				// webrtc may be null after cleanup; log anything unexpected for observability.
-				// Don't re-anchor statsStart here: on error the byte baselines are NOT updated,
-				// so advancing only the time window would inflate the next tick's bitrate.
 				if (webrtc !== null) console.warn("Error collecting connection stats:", e);
 			} finally {
 				statsTickBusy = false;
 			}
-		// Stats refresh interval (1000 ms)
 		}, 1000);
 	}
 
-	// Focus/gesture local->server sync (lib/clipboard-sync.js), identical in the
-	// WebSocket core; text re-sends are deduped here client-side.
+	/**
+	 * Focus and gesture local-to-server clipboard sync (`lib/clipboard-sync.js`),
+	 * with text re-sends deduped. Every read is gated on the server's clipboard
+	 * policy as well as browser capability, so a clipboard-disabled server never
+	 * arms the focus read or its permission prompt.
+	 */
 	const localClipboardSender = createLocalClipboardSender({
 		isChromium,
 		getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
 		isSharedMode: () => isSharedMode,
-		canSync: () => clipboardStatus === "enabled",
+		canSync: () => clipboardStatus === "enabled" && !!window.clipboard_enabled,
 		canRead: () => !!clipboard_in_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
 		sendClipboardData: (data, mime) => sendClipboardData(data, mime),
@@ -1688,14 +1837,12 @@ export default function webrtc() {
 	const readLocalClipboardAndSend = () => localClipboardSender.readAndSend();
 	const maybeSendInitialClipboard = () => localClipboardSender.maybeInitial();
 
-	// Paste-ordering hold + non-Chromium copy/paste gestures live in the shared
-	// factory (see lib/clipboard-sync.js); only the gates and the transport's
-	// send function are per-core. Wired/unwired with the session lifecycle.
+	/** Paste-ordering hold and non-Chromium copy/paste gestures (`lib/clipboard-sync.js`), wired with the session. */
 	const clipboardGestures = createClipboardGestures({
 		isChromium,
 		clipboardSync,
 		sendClipboardData: (data, mime) => sendClipboardData(data, mime),
-		canSync: () => !isSharedMode && clipboardStatus === "enabled",
+		canSync: () => !isSharedMode && clipboardStatus === "enabled" && !!window.clipboard_enabled,
 		canRead: () => !!clipboard_in_enabled,
 		canWrite: () => !!clipboard_out_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
@@ -1703,22 +1850,29 @@ export default function webrtc() {
 		getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
 	});
 
+	/**
+	 * Releases every key server-side and, on Chromium, reads the local
+	 * clipboard: Firefox and WebKit raise a paste prompt on every focus read,
+	 * so there the read is driven only by the paste gesture handlers.
+	 */
 	async function handleWindowFocus() {
 		webrtc.sendDataChannelMessage("kr");
-		// Chromium reads the clipboard on focus without friction. Firefox/WebKit raise an
-		// intrusive paste prompt on every focus read, so there the read is driven only by
-		// the Ctrl/Cmd+V keydown and paste-event handlers.
 		if (isChromium) {
 			readLocalClipboardAndSend();
 		}
 	}
 
 
+	/** Releases every key server-side so none sticks across the blur. */
 	function handleWindowBlur() {
-		// reset keyboard to avoid stuck keys.
 		webrtc.sendDataChannelMessage("kr");
 	}
 
+	/**
+	 * Forwards the control keys mobile keyboards emit as keydown on the
+	 * off-screen assist input (Enter, Backspace); typed characters are handled
+	 * by the Input class's own listener on the element.
+	 */
 	function setupKeyBoardAssisstant() {
 		if (isSharedMode) {
 			console.log("Shared mode detected, skipping keyboard assistant setup.");
@@ -1726,9 +1880,6 @@ export default function webrtc() {
 		}
 		const keyboardInputAssist = document.getElementById('keyboard-input-assist');
 		if (keyboardInputAssist && input) {
-		// Typed characters are handled by the Input class's own 'input' listener
-		// on this element (_handleMobileInput); only the control keys mobile
-		// keyboards emit as keydown need forwarding here.
 		keyboardInputAssist.addEventListener('keydown', (event) => {
 			if (event.key === 'Enter' || event.keyCode === 13) {
 			input._sendMomentaryKey(0xFF0D);
@@ -1745,9 +1896,12 @@ export default function webrtc() {
 		}
 	}
 
-	// A skipped clipboard-image upload tells the dashboard why, in its
-	// notification channel (the same {type:'fileUpload',status:'warning'} shape
-	// transfer warnings already use).
+	/**
+	 * Tells the dashboard why a clipboard-image upload was skipped, in the
+	 * `fileUpload` warning channel transfer warnings use.
+	 * @param {string} reason Human-readable reason.
+	 * @param {string} code Machine-readable code the dashboard translates.
+	 */
 	function notifyClipboardImageSkip(reason, code) {
 		console.warn('Clipboard image upload skipped: ' + reason);
 		window.postMessage({
@@ -1756,9 +1910,23 @@ export default function webrtc() {
 		}, window.location.origin);
 	}
 
+	/**
+	 * Sends clipboard content to the server in chunks.
+	 *
+	 * Uses the chunked transfer of `lib/clipboard-worker-bridge.js`, the same
+	 * wire protocol as the WebSocket core, over the data channel with a drain
+	 * gate: a multi-MB burst overflows the SCTP send buffer and Chromium closes
+	 * the channel, taking the session with it. Raw chunks are sized so their
+	 * base64 fits the data-channel message budget. Only a completed transfer
+	 * marks the content synced, so a failure leaves it re-sendable.
+	 * @param {string|ArrayBuffer|Uint8Array} data Text or binary content.
+	 * @param {string} [mimeType] Content type; text is always `text/plain`.
+	 * @param {?function(string, string): void} [onSkip] Called with reason and
+	 *     code when nothing is sent.
+	 */
 	async function sendClipboardData(data, mimeType = 'text/plain', onSkip = null) {
 		const skip = (reason, code) => { if (onSkip) onSkip(reason, code); };
-		if (clipboardStatus !== "enabled" || !clipboard_in_enabled || data == null) {
+		if (clipboardStatus !== "enabled" || !window.clipboard_enabled || !clipboard_in_enabled || data == null) {
 			skip('clipboard-in disabled', 'clipboardSkipInDisabled');
 			return;
 		}
@@ -1766,7 +1934,6 @@ export default function webrtc() {
 			skip('not connected', 'clipboardSkipNotConnected');
 			return;
 		}
-		// Change-only sync: skip content the session already carries in either direction.
 		if (!clipboardSync.shouldSend(data, mimeType)) {
 			skip('already the current clipboard', 'clipboardSkipUnchanged');
 			return;
@@ -1780,11 +1947,6 @@ export default function webrtc() {
 			dataBytes = new TextEncoder().encode(data);
 			mimeType = 'text/plain';
 		}
-		// Shared chunked send (see lib/clipboard-worker-bridge.js) — identical wire
-		// protocol and per-chunk worker offload as WebSockets. Transport specifics:
-		// the data-channel send + a drain gate (a multi-MB burst overflows the SCTP
-		// send buffer and Chromium closes the channel -> whole session dies). Raw
-		// chunk sized so its base64 fits the data-channel message budget.
 		try {
 			await sendClipboardChunked(dataBytes, mimeType, {
 				worker: clipboardWorker,
@@ -1796,15 +1958,11 @@ export default function webrtc() {
 				chunkRawBytes: Math.max(1, Math.floor(dcMessageBudget() * 3 / 4)),
 				nextTid: () => ++__clipboardTransferCounter,
 			});
-			// sendDataChannelMessage drops quietly on a closed channel, so a
-			// mid-transfer death completes without a throw: keep the content
-			// re-sendable and say why nothing arrived.
+			// A closed channel drops sends quietly, so a mid-transfer death throws nothing.
 			if (!webrtc.dataChannelOpen()) {
 				skip('connection lost during send', 'clipboardSkipSendFailed');
 				return;
 			}
-			// Only a completed transfer marks the content synced; a throw above
-			// leaves it re-sendable on the next copy of the same content.
 			clipboardSync.markSynced(data, mimeType);
 		} catch (err) {
 			console.error("Error sending clipboard data:", err);
@@ -1813,6 +1971,14 @@ export default function webrtc() {
 		}
 	}
 
+	/**
+	 * Decodes a server clipboard message, assembling multipart transfers.
+	 * @param {{type: string, data: object}} msg The `clipboard-msg*` message.
+	 * @returns {Promise<{isMultipart: boolean, mimeType: ?string, content: ?(string|ClipboardItem)}>}
+	 *     `content` is null while a multipart transfer is in progress, on
+	 *     failure, and for images on insecure origins, which have no
+	 *     ClipboardItem.
+	 */
 	async function handleClipboardData(msg) {
 		if (!msg.data) {
 			console.warn("Received clipboard message with null data");
@@ -1833,8 +1999,7 @@ export default function webrtc() {
 					}
 					blob = new Blob([result], { type: mimeType });
 					if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
-						// ClipboardItem accepts only image/png on write (shared
-						// re-encode; see lib/clipboard-sync.js).
+						// ClipboardItem accepts only image/png on write.
 						blob = await reencodeBlobAsPng(blob);
 						mimeType = 'image/png';
 					}
@@ -1842,7 +2007,6 @@ export default function webrtc() {
 					console.error("Image conversion failed for clipboard message:", err);
 					return { isMultipart, mimeType, content: null };
 				}
-				// Insecure origins have no ClipboardItem; text still caches above.
 				if (typeof ClipboardItem === 'undefined') return { isMultipart, mimeType, content: null };
 				return { isMultipart, mimeType, content: new ClipboardItem({ [mimeType]: blob }) };
 			case "clipboard-msg-start":
@@ -1868,7 +2032,6 @@ export default function webrtc() {
 					if (mimeType === 'text/plain') {
 						content = result;
 					} else if (typeof ClipboardItem === 'undefined') {
-						// Insecure origins have no ClipboardItem for image payloads.
 						content = null;
 					} else {
 						let blob = new Blob([result], { type: mimeType });
@@ -1889,9 +2052,14 @@ export default function webrtc() {
 
 
 	return {
+		/**
+		 * Builds the DOM, reads the persisted settings, connects signaling and
+		 * opens the peer connection. Settings are read with fallbacks and never
+		 * written back, so a fresh profile keeps every key unset and
+		 * server-pushed defaults stay re-pushable.
+		 */
 		initialize() {
 			InitUI();
-			// Create the nodes and configure its attributes
 			const appDiv = document.getElementById('app');
 			let videoContainer = document.createElement("div");
 			videoContainer.className = "video-container";
@@ -1907,25 +2075,29 @@ export default function webrtc() {
 			statusDisplayElement.className = 'status-bar';
 			statusDisplayElement.textContent = 'Connecting...';
 
-			// Editable (not readOnly): the overlay hosts IME composition — browsers
-			// never activate an IME on a read-only input. Mirrors the websockets core.
+			// Editable: the overlay hosts IME composition, and no browser activates an IME on a
+			// read-only input.
 			let overlayInput = document.createElement('input');
 			overlayInput.type = 'search';
 			overlayInput.readOnly = false;
 			overlayInput.autocomplete = 'off';
+			// Keeps a mobile soft keyboard off the taps this overlay collects for
+			// the stream; #keyboard-input-assist is what deliberately opens one.
+			overlayInput.inputMode = 'none';
+			overlayInput.virtualKeyboardPolicy = 'manual';
+			overlayInput.setAttribute('autocorrect', 'off');
+			overlayInput.setAttribute('autocapitalize', 'off');
+			overlayInput.setAttribute('spellcheck', 'false');
 			overlayInput.id = 'overlayInput';
 
-			// prepare the video and audio elements
 			videoElement = document.createElement('video');
 			videoElement.id = 'stream';
 			videoElement.className = 'video';
 			videoElement.autoplay = true;
 			videoElement.playsInline = true;
 			videoElement.addEventListener('resize', () => {
-				// The track's intrinsic size IS the realized server resolution.
-				// When it disagrees with what was requested, window-math input
-				// mapping (CSS × dpr == server px) is wrong; the flag routes
-				// input.js through the video's fitted content box instead.
+				// The track's intrinsic size is the realized resolution; a divergence from the
+				// request routes input through the video's fitted box instead of window math.
 				const vw = videoElement.videoWidth, vh = videoElement.videoHeight;
 				if (vw > 0 && vh > 0 && lastRequestedStreamRes) {
 					window.streamResolutionDiverged =
@@ -1949,7 +2121,7 @@ export default function webrtc() {
 
 			if (!document.getElementById('keyboard-input-assist')) {
 				const keyboardInputAssist = document.createElement('input');
-				keyboardInputAssist.type = 'text';
+				keyboardInputAssist.type = 'search';
 				keyboardInputAssist.id = 'keyboard-input-assist';
 				keyboardInputAssist.style.position = 'absolute';
 				keyboardInputAssist.style.left = '-9999px';
@@ -1968,10 +2140,6 @@ export default function webrtc() {
 				document.body.appendChild(keyboardInputAssist);
 				console.log("Dynamically added #keyboard-input-assist element.");
 			}
-			// Fetch locally stored application data. Reads with fallbacks only and
-			// persists nothing: a fresh profile keeps every key unset so server-pushed
-			// defaults stay re-pushable. Only genuine user actions (and
-			// sanitizeAndStoreSettings for keys the user already overrode) write localStorage.
 			appName = "webrtc"
 			debug = getBoolParam('debug', false);
 			turnSwitch = getBoolParam('turn_switch', false);
@@ -1986,14 +2154,7 @@ export default function webrtc() {
 			manualHeight = getIntParam('manual_height', null);
 			encoder = getStringParam('encoder', 'h264enc');
 			rateControlMode = getStringParam('rate_control_mode', 'cbr');
-			// hiDPI contract: CSS scaling on => DPR 1 everywhere (resolution + input);
-			// off => devicePixelRatio is applied by the resolution senders and input math.
-			// Default OFF (ws-core parity, = HIDPI_SPEC fallback) so an auto-resolution HiDPI
-			// client renders a crisp physical-res buffer. scaling_dpi is an INDEPENDENT user
-			// setting (the DPI slider) — the HiDPI toggle does not touch it.
 			useCssScaling = getBoolParam('useCssScaling', false);
-			// scaling_dpi default: sync to the local display scaling so remote fonts match local;
-			// an explicit slider value wins. Independent of resolution (no manual/auto coupling).
 			scalingDPI = (getStringParam('scaling_dpi', null) !== null) ? getIntParam('scaling_dpi', 96) : autoDeriveDpi();
 			enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 			clipboard_in_enabled = getBoolParam('clipboard_in_enabled', clipboard_in_enabled);
@@ -2005,22 +2166,14 @@ export default function webrtc() {
 			force_aligned_resolution = getBoolParam('force_aligned_resolution', false);
 
 			if (!isSharedMode) {
-				// listen for dashboard messages (Dashboard -> core client)
 				window.addEventListener("message", handleMessage);
-				// listen for file upload event
 				window.addEventListener('requestFileUpload', handleRequestFileUpload);
-				// handlers to handle the drop in files/directories for upload
 				overlayInput.addEventListener('dragover', handleDragOver);
 				overlayInput.addEventListener('drop', handleDrop);
 			}
-			// Per-peer tab-visibility video pause and wake-lock re-acquire apply to
-			// every page — controllers and shared/#player viewers alike.
+			// Applies to every page, viewers included.
 			document.addEventListener('visibilitychange', handleVisibilityChange);
 
-			// Additional displays: signaling scopes controller/slot uniqueness per
-			// display_id and the server runs one media pipeline per display, so a
-			// #display2-<position> page streams its own region of the extended
-			// desktop (websockets parity). The position rides the connect metadata.
 			const displayId = hash.startsWith('#display2') ? 'display2' : 'primary';
 			let displayPosition = 'right';
 			if (displayId === 'display2') {
@@ -2028,19 +2181,19 @@ export default function webrtc() {
 				if (posMatch) displayPosition = posMatch[1];
 			}
 
-			// WebRTC entrypoint, connect to the signaling server
 			var pathname = getRoutePrefix() + "/";
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
 			var url = new URL(protocol + window.location.host + pathname + "api/" + appName + "/signaling/");
-			// Secure-mode token from the page URL (?token=...); the server matches it
-			// against the active mk token to grant a viewer read-write collaboration.
+			// Secure-mode token, matched against the active mk token to grant collaboration.
 			var authToken = new URLSearchParams(window.location.search).get('token') || undefined;
 			fatalConnectionHalt = false;
 			let pcRecoveryTimer = null;
 			var signaling = new WebRTCSignaling(url, clientRole, clientSlot, isStrictViewer, authToken, displayId, displayPosition);
-			// A plain GET on the signaling endpoint returns 409 exactly when the
-			// server is serving WebSockets. After repeated connect failures, probe
-			// once and converge the stored mode instead of reload-looping.
+			/**
+			 * A plain GET on the signaling endpoint returns 409 exactly when the
+			 * server is serving WebSockets: after repeated connect failures, probe
+			 * once and converge the stored mode instead of reload-looping.
+			 */
 			signaling.onfatalretry = async () => {
 				let flipGuard = null;
 				try { flipGuard = sessionStorage.getItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
@@ -2048,7 +2201,7 @@ export default function webrtc() {
 					try {
 						const probeURL = new URL(url.href);
 						probeURL.protocol = (location.protocol === 'http:' ? 'http:' : 'https:');
-						const res = await fetch(probeURL.href, { cache: 'no-store' });
+						const res = await fetch(probeURL.href, { cache: 'no-store', headers: sessionAuthHeaders() });
 						if (res.status === 409) {
 							try { sessionStorage.setItem('selkies_mode_flip', '1'); } catch (e) { /* ignore */ }
 							setStringParam('stream_mode', 'websockets');
@@ -2058,55 +2211,63 @@ export default function webrtc() {
 				}
 				location.reload();
 			};
-			// (constructor takes 3 args; strict-viewer gating lives in the send wrapper below)
 			webrtc = new WebRTCClient(signaling, videoElement, 1);
 			activeWebrtcClient = webrtc;
+			/** Strict viewers send nothing until collaboration is granted. */
 			const send = (data) => {
 				if (isSharedMode && isStrictViewer && !collabInputGranted) return;
 				webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
+			/**
+			 * Assigned before attach(), so the pad resync inside it and a pad
+			 * pressed before the channel opens go through the persisted toggle
+			 * like any later connect. A disconnect only updates the reported
+			 * state: the manager polls every slot, so the other pads keep working.
+			 */
+			input.ongamepadconnected = (gamepad_id) => {
+				const connected = toggleGamepadConnection();
+				if (connected) {
+					gamepad.gamepadState = "connected";
+					gamepad.gamepadName = gamepad_id;
+					webrtc._setStatus('Gamepad connected: ' + gamepad_id);
+				}
+			};
+			input.ongamepaddisconnected = () => {
+				gamepad.gamepadState = "disconnected";
+				gamepad.gamepadName = "none";
+				webrtc._setStatus('Gamepad disconnected');
+			};
 			if (!isSharedMode) {
-				// Actions to take whenever window changes focus
 				window.addEventListener('focus', handleWindowFocus);
 				window.addEventListener('blur', handleWindowBlur);
-				// Registered before input attaches (both capture on window,
-				// registration order decides), so the paste-ordering hold sees
-				// a Ctrl+V before Input forwards it.
+				// Registered before input attaches (both capture on window), so the paste-ordering
+				// hold sees a Ctrl+V first.
 				clipboardGestures.wire();
 			}
-			// Page-lifetime input binding: the overlay must host IME composition
-			// before negotiation ends, reconnects reuse it, and sends into a
-			// closed channel drop quietly in sendDataChannelMessage.
-			// Strict-viewer sends stay gated in the send wrapper.
+			// Bound before negotiation ends: the overlay hosts IME composition from the start, and
+			// sends into a closed channel drop quietly.
 			input.attach();
-			// CSS-pixel window size (websockets-core parity): the library default
-			// multiplies by devicePixelRatio, and every caller here applies dpr
-			// itself — without this override HiDPI sessions double-multiply (4x
-			// the pixels at dpr 2) in both the requested resolution and the
-			// element sizing.
+			/**
+			 * Window size in CSS pixels: the library default multiplies by
+			 * devicePixelRatio, and every caller here applies the dpr itself, so
+			 * HiDPI sessions would otherwise double-multiply.
+			 */
 			input.getWindowResolution = () => {
 				const container = videoElement && videoElement.parentElement;
 				if (!container) return [window.innerWidth, window.innerHeight];
 				const rect = container.getBoundingClientRect();
 				return [rect.width, rect.height];
 			};
-			// Same global handle the websockets core exposes.
 			window.webrtcInput = input;
 
-			// Apply persisted input preferences and announce state to the
-			// dashboard (parity with the websockets core).
 			if (trackpadMode) input.setTrackpadMode(true);
-			// Resolves the user preference plus the multi-monitor override (a
-			// #display2 page always renders its own cursor).
 			applyEffectiveCursorSetting();
 			window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
 			window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 
 			setupKeyBoardAssisstant();
 
-			// assign the handlers to respective objects; entries land in the capped
-			// window.selkiesLogs buffers and mirror to the console
 			signaling.onstatus = (message) => {
 				pushCapped(logEntries, applyTimestamp("[signaling] " + message));
 				console.log("[signaling] " + message);
@@ -2119,8 +2280,6 @@ export default function webrtc() {
 			signaling.ondisconnect = (reconnect) => {
 				videoElement.style.cursor = "auto";
 				releaseWakeLock();
-				// Same probe as the websockets close: an auth wall dropped this
-				// session and a fresh document is what re-presents the login.
 				if (window.__selkiesAuthProbe) window.__selkiesAuthProbe();
 				if (reconnect) {
 					status = 'connecting';
@@ -2131,19 +2290,19 @@ export default function webrtc() {
 				updateStatusDisplay();
 			};
 
+			/**
+			 * A fatal server verdict (invalid slot, superseded takeover): stay
+			 * down. The peer connection goes `failed` shortly after, and the
+			 * recovery timer must not reload into an eviction ping-pong. The
+			 * alert is suppressed during a mode switch, which closes the peer
+			 * (code 4000) before the page reloads.
+			 */
 			signaling.onshowalert = (msg) => {
-				// Fatal server verdict (invalid slot / superseded takeover): stay down.
-				// The peer connection will go 'failed' shortly after — the recovery
-				// timer below must not reload us back into an eviction ping-pong.
 				fatalConnectionHalt = true;
-				// Suppress the disconnect alert when it's the result of an intentional
-				// mode switch: the dashboard sets this flag before requesting /api/switch,
-				// which closes the WebRTC peer (code 4000) before the page reloads.
 				if (typeof window !== 'undefined' && window.__selkiesModeSwitching) return;
 				alert("Disconnected: " + msg + " Please try again.");
 			}
 
-			// Send webrtc status and error messages to logs.
 			webrtc.onstatus = (message) => {
 				pushCapped(logEntries, applyTimestamp("[webrtc] " + message));
 				console.log("[webrtc] " + message);
@@ -2159,10 +2318,15 @@ export default function webrtc() {
 			}
 
 			webrtc.ongpustats = (stats) => {
-				// Gpu stats for the Dashboard to render
 				window.gpu_stats = stats;
 			}
 
+			/**
+			 * Once the server tears the pipeline down only a fresh SDP exchange
+			 * brings the picture back, so `failed` and `disconnected` reload to
+			 * reconnect after a grace: `disconnected` can self-heal and gets the
+			 * longer one, `failed` is final.
+			 */
 			webrtc.onconnectionstatechange = (state) => {
 				videoConnected = state;
 				if (videoConnected === "connected") {
@@ -2176,15 +2340,8 @@ export default function webrtc() {
 						enableStatWatch();
 					}
 					requestWakeLock();
-					// Re-assert the chosen output device on the (re)connected stream.
 					applyOutputDevice();
 				} else if (state === "failed" || state === "disconnected") {
-					// ICE consent expiry / network loss: once the server tears the
-					// pipeline down the screen stays black forever without a fresh
-					// SDP exchange — reload to reconnect. 'disconnected' can self-heal
-					// on transient loss, so it gets a grace window; 'failed' is final.
-					// Never fight a fatal server verdict (superseded/invalid slot) or
-					// an intentional mode switch.
 					if (!fatalConnectionHalt && pcRecoveryTimer === null) {
 						const graceMs = state === "failed" ? 1500 : 8000;
 						pcRecoveryTimer = setTimeout(() => {
@@ -2200,36 +2357,14 @@ export default function webrtc() {
 				updateStatusDisplay();
 			};
 
+			/**
+			 * Pulls the server clipboard once on connect (cache-only; the server
+			 * drops a viewer's `cr`), then restores the session settings and
+			 * starts the client metrics loop. Input is bound for the page
+			 * lifetime, so a reopened channel needs no rebind.
+			 */
 			webrtc.ondatachannelopen = () => {
 				console.log("Data channel opened");
-				if (!isStrictViewer) {
-					input.ongamepadconnected = (gamepad_id) => {
-					let connected = toggleGamepadConnection();
-					if (connected) {
-						gamepad.gamepadState = "connected";
-						gamepad.gamepadName = gamepad_id;
-						webrtc._setStatus('Gamepad connected: ' + gamepad_id);
-					}
-					}
-					input.ongamepaddisconnected = () => {
-						if (input.gamepadManager !== null) {
-							input.gamepadManager.disable();
-							gamepad.gamepadState = "disconnected";
-							gamepad.gamepadName = "none";
-							webrtc._setStatus('Gamepad disconnected');
-						}
-					}
-				}
-
-				// Input is bound for the page lifetime at construction, so a
-				// reopened channel needs no rebind.
-
-				// Pull the current server clipboard once on connect (cache-only),
-				// mirroring the websockets core. Without this a WebRTC session (or
-				// one reached by switching transports, which reloads the page)
-				// shows no server clipboard — images included — until the next
-				// server-side change. The server silently drops a viewer's 'cr',
-				// so this is safe in shared mode too.
 				try {
 					taggedClipboardFetch.armLegacyWindow(5000);
 					webrtc.sendDataChannelMessage('cr');
@@ -2245,8 +2380,7 @@ export default function webrtc() {
 				loadLastSessionSettings();
 				sendClientPersistedSettings();
 
-				// Send client-side metrics over data channel every 5 seconds
-				// Avoid a duplicate loop when the data channel reopens.
+				// One loop per channel: a reopened channel restarts it.
 				if (metricsLoopId !== null) clearInterval(metricsLoopId);
 				metricsLoopId = setInterval(async () => {
 					if (connectionStat.connectionFrameRate === parseInt(connectionStat.connectionFrameRate, 10)) {
@@ -2258,9 +2392,7 @@ export default function webrtc() {
 				}, 5000)
 			}
 
-			// Unified dashboard hotkeys (parity with the websockets core): the core
-			// owns the chords; dashboards react to these messages. The legacy
-			// built-in drawer still toggles for bare-core sessions.
+			/** The core owns the hotkey chords; dashboards react to the posted messages. */
 			input.onmenuhotkey = () => {
 				showDrawer = !showDrawer;
 				window.postMessage({ type: 'toggleDashboard' }, window.location.origin);
@@ -2268,29 +2400,33 @@ export default function webrtc() {
 			input.ongamepadhotkey = () => {
 				window.postMessage({ type: 'toggleTouchGamepad' }, window.location.origin);
 			}
+			input.gamingMode = gamingModeActive;
+			input.ongamingmode = (active) => {
+				gamingModeActive = active;
+				window.postMessage({ type: 'gamingModeUpdate', active }, window.location.origin);
+			}
 
 			webrtc.onplaystreamrequired = () => {
 				showStart = true;
 			}
 
+			/**
+			 * Caches server clipboard content and writes it locally when policy
+			 * allows. A tagging server marks the payload answering this client's
+			 * own `cr` with `reply_to`, which retires the timed heuristic for the
+			 * session; it is armed before the shared-mode return so the state is
+			 * consistent either way. Caching is unconditional, since gating it on
+			 * clipboardStatus made the first payload depend on message ordering;
+			 * only the local write is gated, on enablement, direction policy and
+			 * the connect-time reply being cache-only. The fetch flag is consumed
+			 * before the decode, so arrival order decides which payload settles
+			 * the init fetch.
+			 */
 			webrtc.onclipboardcontent = async (msg) => {
-				// A tagging server marks the payload answering this client's own
-				// fetch with reply_to (currently only 'cr') on the single message
-				// or the multipart start: cache-only, and the timed heuristic is
-				// retired for the rest of the session. Armed before the shared
-				// early-return so the session state is consistent either way.
 				if (msg.data && msg.data.reply_to === 'cr') armTaggedClipboardReply();
 				if (isSharedMode) {
 					return;
 				}
-				// Cache/settle unconditionally (ws-core parity): gating parsing on
-				// clipboardStatus made the first payload depend on server_settings
-				// ordering on the data channel. Only the LOCAL clipboard write is
-				// gated — on enablement, direction policy, and the connect-time
-				// 'cr' reply being cache-only.
-				// The fetch flag is consumed before the async decode (ws-core
-				// parity): arrival order, not decode duration, decides which
-				// payload settles the init fetch.
 				const isInitClipboardFetch = consumeInitClipboardFetch();
 				const {isMultipart, mimeType, content} = await handleClipboardData(msg);
 				const isText = mimeType === "text/plain";
@@ -2301,14 +2437,9 @@ export default function webrtc() {
 					clipboardStatus === 'enabled' && clipboard_out_enabled;
 
 				if (isText) {
-					// Freshness is computed before resolveServer records the sig:
-					// a value the session already carries must not churn the
-					// local clipboard again.
+					// Freshness is computed before resolveServer records the signature.
 					const isFreshContent = clipboardSync.shouldSend(content, 'text/plain');
 					clipboardSync.resolveServer(content, null, 'text/plain');
-					// The dashboard UI gets the (bounded) preview regardless; the
-					// local write is retried on the next gesture when the browser
-					// demands activation.
 					window.postMessage(clipboardPreviewMessage(content),
 						window.location.origin);
 					if (canWriteLocal && isFreshContent) {
@@ -2347,9 +2478,8 @@ export default function webrtc() {
 				input.updateServerCursor(cursorData);
 			}
 
+			/** A secondary joining or leaving flips the multi-monitor cursor override. */
 			webrtc.ondisplayconfig = (config) => {
-				// A secondary joining/leaving flips the multi-monitor cursor
-				// override on the primary page (websockets parity).
 				const displays = (config && config.displays) || [];
 				const secondaryConnected = displays.some((d) => d !== 'primary');
 				if (isSecondaryDisplayConnected !== secondaryConnected) {
@@ -2359,17 +2489,20 @@ export default function webrtc() {
 				}
 			}
 
+			/**
+			 * Handles a server system action; the module docblock lists them. The
+			 * role verdict overrides the hash-derived role and gamepad slot, which
+			 * are only defaults. `resolution` reports what the server realized
+			 * (snapped or clamped), which manual-mode bookkeeping follows so the UI
+			 * stops re-requesting a size the server cannot produce.
+			 */
 			webrtc.onsystemaction = (action) => {
 				webrtc._setStatus("Executing system action: " + action);
 				if (action === 'reload') {
 					setTimeout(() => {
-						// trigger webrtc.reset() by disconnecting from the signaling server.
 						signaling.disconnect();
 					}, 700);
 				} else if (action.startsWith('mk_access,')) {
-					// Secure-mode collab verdict (websockets MK_ACCESS parity):
-					// grant attaches the full input context; revocation detaches
-					// it and re-closes the strict-viewer send gate.
 					const granted = action.slice('mk_access,'.length) === '1';
 					collabInputGranted = granted;
 					if (input) {
@@ -2384,9 +2517,7 @@ export default function webrtc() {
 						}
 					}
 				} else if (action.startsWith('command_error,') && !isSharedMode) {
-					// A client-requested command failed server-side (apps modal
-					// installs above all): surface it in the same warning channel
-					// clipboard skips use, or the optimistic UI reads as success.
+					// Uses the fileUpload warning channel, or the optimistic UI reads as success.
 					window.postMessage({
 						type: 'fileUpload',
 						payload: {
@@ -2397,11 +2528,6 @@ export default function webrtc() {
 						},
 					}, window.location.origin);
 				} else if (action.startsWith('auth_success,') || action.startsWith('role_update,')) {
-					// Secure-mode role verdict (websockets AUTH_SUCCESS / ROLE_UPDATE
-					// parity). The server decides role and gamepad slot; the hash-derived
-					// guess made at load time is only a default, so a token client must
-					// adopt the verdict or it drives a controller UI whose input the
-					// server drops, and its gamepad reports land on the wrong slot.
 					const verdict = action.slice(action.indexOf(',') + 1);
 					let perms;
 					try {
@@ -2419,10 +2545,8 @@ export default function webrtc() {
 					if (input) {
 						input.updateControllerSlot(clientSlot);
 						if (clientRole === CLIENT_VIEWER) input.setSharedMode(true);
-						// Only a live slot change gates polling (websockets ROLE_UPDATE
-						// parity): the initial verdict carries slot null outside secure
-						// mode, which means "slots unmanaged", not a revoked controller,
-						// and input.controllerSlot already falls back to the player index.
+						// Only a live slot change gates polling: the initial verdict carries slot
+						// null outside secure mode, meaning unmanaged, not revoked.
 						if (isLiveRoleChange && input.gamepadManager) {
 							if (previousSlot !== null && clientSlot === null) {
 								input.gamepadManager.disable();
@@ -2433,13 +2557,6 @@ export default function webrtc() {
 					}
 					window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 				} else if (action.startsWith('resolution,')) {
-					// Realized-size reconciliation (websockets stream_resolution
-					// parity): the server may snap or clamp a request (16-px
-					// alignment, compositor refusal), so manual-mode bookkeeping
-					// must follow what was actually realized — otherwise the UI
-					// keeps advertising, and re-requesting, a size the server
-					// cannot produce. The <video> itself follows the RTP track's
-					// intrinsic size either way.
 					const dims = action.slice('resolution,'.length).split('x');
 					const rw = parseInt(dims[0], 10);
 					const rh = parseInt(dims[1], 10);
@@ -2461,10 +2578,17 @@ export default function webrtc() {
 			}
 
 			webrtc.onsystemstats = (stats) => {
-				// Dashboard takes care of data validation
 				window.system_stats = stats;
 			}
 
+			/**
+			 * Applies the server settings payload: sanitizes the stored overrides,
+			 * mirrors the policy gates (`command_enabled`, `enable_resize`, the
+			 * clipboard directions, `enable_binary_clipboard`, which the stored
+			 * choice governs unless locked), pushes the pre-copied local clipboard
+			 * once the gates are in place, and switches between the manual and
+			 * auto resize handlers.
+			 */
 			webrtc.onserversettings = (obj) => {
 				if (obj.settings === undefined || obj.settings === null) {
 					console.warn("Received invalid server settings paylod");
@@ -2472,33 +2596,18 @@ export default function webrtc() {
 				}
 				console.log("Received server settings payload:", obj.settings);
 				const changes = sanitizeAndStoreSettings(obj.settings);
-				// Gate 'cmd,' on the server-advertised value, not window.command_enabled
-				// (a persisted client pref); absent/malformed => true for older servers.
 				const ce = obj.settings && obj.settings.command_enabled;
 				serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
-				// Deployment policy the resize paths read (window.enable_resize):
-				// a pinned false means requesting or restyling toward a new size
-				// is pointless. Absent/malformed keeps the historic enabled default.
 				const er = obj.settings && obj.settings.enable_resize;
 				if (er && typeof er.value === 'boolean') window.enable_resize = er.value;
-				// Per-direction clipboard gates are policy, so the server value wins
-				// (module mirrors, not window[...], gate the actual handlers).
 				const cin = obj.settings && obj.settings.clipboard_in_enabled;
 				if (cin && typeof cin.value === 'boolean') clipboard_in_enabled = cin.value;
 				const cout = obj.settings && obj.settings.clipboard_out_enabled;
 				if (cout && typeof cout.value === 'boolean') clipboard_out_enabled = cout.value;
-				// Parity with the websockets core: without this mirror a fresh WebRTC
-				// client keeps its default (false) and silently discards server images
-				// AND never sends local ones, even with binary clipboard on server-side.
 				const ebc = obj.settings && obj.settings.enable_binary_clipboard;
-				// User-toggleable: force the gate only when the server locks it;
-				// otherwise the stored choice governs (the dashboard toggle and
-				// the server-side apply both already follow the stored value).
 				if (ebc && typeof ebc.value === 'boolean') {
 					enable_binary_clipboard = ebc.locked ? ebc.value : getBoolParam('enable_binary_clipboard', ebc.value);
 				}
-				// Clipboard gates are now in place: push the user's pre-copied
-				// local content once so their first paste isn't stale.
 				maybeSendInitialClipboard();
 				window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
 				if (Object.keys(changes).length > 0) {
@@ -2533,35 +2642,28 @@ export default function webrtc() {
 				}
 			}
 
-			// Enable clipboard sync on capability + secure context for every engine,
-			// matching the websockets core. The clipboard-read permission query
-			// rejects with TypeError on Firefox/WebKit and reports 'prompt' on
-			// Chromium until the user grants persistent access; gating the whole
-			// sync (send AND receive) on state === 'granted' silently disabled the
-			// clipboard on Chromium over WebRTC while websockets worked. Per-call
-			// NotAllowed/NotFound errors are handled at each read with paste
-			// fallbacks, and the Chromium focus read still raises its one-time
-			// prompt exactly as before.
+			// No permission query: Firefox and WebKit reject it, and Chromium reports 'prompt' until
+			// persistent access is granted; each read handles its own errors.
 			if (window.isSecureContext && navigator.clipboard) {
 				clipboardStatus = 'enabled';
 			}
 
-			// Apply the fetched (or fallback) RTC config and open the connection.
-			// A shared function, so a failed TURN fetch still connects: the data channel is
-			// what delivers serverSettings, and without it the dashboard never
-			// renders its controls or the WebSocket/WebRTC toggle — i.e. it freezes.
+			/**
+			 * Applies an RTC configuration and opens the connection. Shared by
+			 * the fetched and the fallback configuration, so a failed TURN fetch
+			 * still connects: the data channel delivers the server settings, and
+			 * without it the dashboard never renders its controls or the
+			 * transport toggle.
+			 */
 			const applyRtcConfigAndConnect = (config) => {
-				// for debugging, force use of relay server.
 				webrtc.forceTurn = turnSwitch;
 
-				// get initial local resolution
 				windowResolution = input.getWindowResolution();
 				signaling.currRes = windowResolution;
 
 				if (scaleLocal === false) {
-						// windowResolution is already CSS px (getWindowResolution
-						// override above); dividing by devicePixelRatio again would
-						// leave the element 1/dpr too small until the first restyle.
+						// Already CSS pixels; dividing by devicePixelRatio again would leave the
+						// element too small until the first restyle.
 						webrtc.element.style.width = windowResolution[0]+'px';
 						webrtc.element.style.height = windowResolution[1]+'px';
 				}
@@ -2575,8 +2677,7 @@ export default function webrtc() {
 				webrtc.connect();
 			};
 
-			// Fetch RTC configuration containing STUN/TURN servers.
-			fetch(getRoutePrefix() + "/api/turn")
+			fetch(getRoutePrefix() + "/api/turn", { headers: sessionAuthHeaders() })
 				.then(function (response) {
 					if (!response.ok) {
 						throw new Error(`Status: ${response.status}`);
@@ -2587,22 +2688,19 @@ export default function webrtc() {
 					applyRtcConfigAndConnect(config);
 				})
 				.catch((error) => {
-					// A 404 here is expected when no TURN server is configured, and is
-					// NOT fatal. Fall back to an empty ICE config (host/STUN candidates,
-					// which serve LAN/localhost) and still connect, so the data channel —
-					// and therefore serverSettings and the mode toggle — comes up rather
-					// than leaving the dashboard frozen with no way back to WebSockets.
+					// A 404 is expected with no TURN server configured; host and STUN candidates
+					// still serve LANs.
 					pushCapped(debugEntries, applyTimestamp(`TURN config unavailable (${error}); connecting without TURN.`));
 					console.warn(`Failed to fetch TURN server details (${error}); continuing without TURN.`);
 					applyRtcConfigAndConnect({ iceServers: [] });
 				})
 		},
+		/** Tears the session down: listeners, timers, the worker, and every session-scoped value back to its default. */
 		cleanup() {
-			// reset the data
 			window.isManualResolutionMode = false;
 			window.fps = 0;
+			stopWebcamCapture();
 
-			// remove the listeners
 			window.removeEventListener("message", handleMessage);
 			window.removeEventListener("resize", resizeStart);
 			window.removeEventListener("requestFileUpload", handleRequestFileUpload);
@@ -2621,7 +2719,6 @@ export default function webrtc() {
 			}
 			clipboardWorker = null;
 
-			// Reset the session-scoped state so a later connect starts clean.
 			appName = null;
 			videoBitRate = 8000;
 			videoFramerate = 60;
@@ -2672,7 +2769,6 @@ export default function webrtc() {
 			videoConnected = "";
 			audioConnected = "";
 			statWatchEnabled = false;
-			// clear polling timers so they don't leak/fire on null webrtc after reconnect
 			if (statsLoopId !== null) { clearInterval(statsLoopId); statsLoopId = null; }
 			if (metricsLoopId !== null) { clearInterval(metricsLoopId); metricsLoopId = null; }
 			clearResumeWatchdog();
@@ -2684,7 +2780,6 @@ export default function webrtc() {
 			playerInputTargetIndex = 0;
 			enableWebrtcStatics = false;
 			enable_binary_clipboard = true;
-			// Reset the command gate to its default-true semantics for the next session.
 			serverCommandEnabled = true;
 			multipartClipboard.reset();
 

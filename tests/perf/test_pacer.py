@@ -42,8 +42,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)
 RUNNER_DIR = os.path.join(H.WORKDIR, "pacer")
 os.makedirs(RUNNER_DIR, exist_ok=True)
 
-# ---------------------------------------------------------------- metrics -----
-
 class Recorder:
     """Wire-level arrival metrics captured by the RTP receive tap.
 
@@ -93,9 +91,8 @@ async def _wrapped_handle_rtp(self, packet, arrival_time_ms):
         REC.n_video += 1
         REC.video_bytes += len(packet.payload) + 40
         REC.video_pkts.append((time.monotonic(), packet.timestamp))
-    # True one-way latency (send->recv, incl. pacer/queue): RTP abs_send_time
-    # is (ntp>>14)&0xFFFFFF — 24-bit, unit 2^-18 s, wraps every 64 s. Client
-    # and server share the host clock here, so skew/freerun error is ~0.
+    # abs_send_time is (ntp>>14)&0xFFFFFF: 24-bit, 2^-18 s units, wraps every
+    # 64 s. Client and server share the host clock, so skew error is ~0.
     ast = getattr(packet.extensions, "abs_send_time", None)
     if ast:
         diff = (((current_ntp_time() >> 14) & 0xFFFFFF) - ast) & 0xFFFFFF
@@ -113,8 +110,6 @@ async def _wrapped_handle_rtp(self, packet, arrival_time_ms):
 
 rrx_mod.RTCRtpReceiver._handle_rtp_packet = _wrapped_handle_rtp
 
-
-# ---- receiver-side TWCC feedback emission (what real browsers do) ------------
 
 def _build_twcc_fci(arrivals: dict, fb_count: int) -> Optional[bytes]:
     """Encode a transport-cc FCI block from an arrival window.
@@ -134,7 +129,6 @@ def _build_twcc_fci(arrivals: dict, fb_count: int) -> Optional[bytes]:
     base = seqs[0]
     statuses = []
     deltas = b""
-    # Fill gaps as "not received" so base..end stays contiguous.
     end = seqs[-1]
     ref_t = arrivals[base][0]
     n = ((end - base) & 0xFFFF) + 1
@@ -180,8 +174,6 @@ def _build_twcc_fci(arrivals: dict, fb_count: int) -> Optional[bytes]:
 
 TWCC_DEBUG = os.environ.get("TWCC_DEBUG", "0") == "1"
 
-
-# ---------------------------------------------------------------- shaping -----
 
 class Shaper:
     """One-direction token-bucket+FIFO virtual clock, exact departure times,
@@ -272,8 +264,6 @@ async def make_relay(dest_addr: tuple, up: Shaper, down: Shaper, name: str) -> t
     relay.vis_tr = vis_tr
     return relay, vis_tr.get_extra_info("sockname")
 
-# ---------------------------------------------------------------- ICE rewrite -
-
 CAND_RE = re.compile(r"a=candidate:(\S+) (\d+) (\S+) (\d+) (\S+) (\d+) typ (\S+)(.*)")
 
 async def rewrite_candidates(sdp_text: str, up: Shaper, down: Shaper, tag: str) -> str:
@@ -295,8 +285,6 @@ async def rewrite_candidates(sdp_text: str, up: Shaper, down: Shaper, tag: str) 
             f"a=candidate:{found} {comp} UDP {prio} {rh} {rp} typ host{rest}")
         LOG.info("%s relay: %s:%s -> %s:%s", tag, rh, rp, host, port)
     return "\r\n".join(out_lines)
-
-# ---------------------------------------------------------------- client ------
 
 async def run_client(ws_url: str, measure_s: float, warmup_s: float,
                      client_type: str = "controller", client_slot: int = -1) -> dict:
@@ -386,9 +374,9 @@ async def run_client(ws_url: str, measure_s: float, warmup_s: float,
                         ic.sdpMLineIndex = obj["ice"].get("sdpMLineIndex", 0)
                         await pc.addIceCandidate(ic)
 
-    # TWCC feedback emitter: mirrors what Chrome/Firefox receivers emit, so the
-    # server's pacer + GCC loop get real goodput feedback over the shaped link.
     async def twcc_loop():
+        """Emit TWCC feedback the way Chrome/Firefox receivers do, so the server's
+        pacer and GCC loop get real goodput feedback over the shaped link."""
         receiver = None
         while True:
             if receiver is None:
@@ -420,7 +408,6 @@ async def run_client(ws_url: str, measure_s: float, warmup_s: float,
     tw_task = asyncio.create_task(twcc_loop())
     window = {}
     try:
-        # Warmup: wait for media to start flowing, then let it settle.
         t0 = time.monotonic()
         while time.monotonic() - t0 < warmup_s:
             await asyncio.sleep(0.5)
@@ -461,8 +448,6 @@ async def run_client(ws_url: str, measure_s: float, warmup_s: float,
             except Exception:
                 pass
     return window
-
-# ------------------------------------------------------------- summarizing ----
 
 def measure_window(rec: Optional[Recorder] = None) -> dict:
     """Summarize a Recorder window into the metrics dict a cell reports."""
@@ -514,8 +499,6 @@ def measure_window(rec: Optional[Recorder] = None) -> dict:
         "video_mbps": round(rec.video_bytes * 8 / 1e6 / (rec.video_pkts[-1][0] - rec.video_pkts[0][0]), 3) if len(rec.video_pkts) > 2 else None,
     }
 
-# ------------------------------------------------------------ server-side -----
-
 def server_log_delta(path: str, before_bytes: int) -> str:
     """The server log's contents past the `before_bytes` offset."""
     size = os.path.getsize(path)
@@ -532,8 +515,6 @@ def server_cpu(pid: int) -> Optional[float]:
     except Exception:
         return None
 
-# ------------------------------------------------------------------ cells -----
-
 LOAD_GEN = os.environ.get("PACER_E2E_LOAD", "1") != "0"
 CURRENT_SHAPER = {"up": None, "down": None}
 
@@ -548,7 +529,6 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
     Returns:
         The cell's metrics row, including server CPU and log-derived counts.
     """
-    # Pass-through by default; the regimes below replace both legs.
     up = Shaper()
     down = Shaper()
     if regime == "shaped":
@@ -579,7 +559,6 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
         "SELKIES_VIDEO_BITRATE": "8000",
         "SELKIES_DEBUG": "true",
     }
-    # Forward pacer tuning knobs from our own env to the server under test.
     for k in os.environ:
         if k.startswith("SELKIES_WEBRTC_PACER_") or k in ("SELKIES_CONGESTION_CONTROL", "SELKIES_ENCODER"):
             env[k] = os.environ[k]
@@ -587,7 +566,7 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
     proc = H.server_start(mode="webrtc", extra_env=env, log=log)
     from psutil import Process
     pr = Process(proc.pid)
-    # The first cpu_percent() call primes psutil's delta counter.
+    # psutil's first cpu_percent() only primes the delta counter.
     pr.cpu_percent()
     window = {}
     load_proc = None
@@ -612,7 +591,6 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
             load_proc.terminate()
             subprocess.run(["pkill", "-9", "-f", "pacer-load"], capture_output=True)
         cell_log = server_log_delta(log, log_before)
-        # Second cpu_percent() reads the average since the priming call.
         cpu = pr.cpu_percent()
         H.server_stop()
     return {
@@ -633,6 +611,13 @@ async def main() -> bool:
     purging hard and protecting audio at the cost of later video -- and a single
     sample of that reads as a solid number while being neither. Repeats make the
     spread visible instead; PACER_REPEATS overrides how many.
+
+    The numbers are the point of this benchmark and are left to the reader; what
+    is asserted is that every cell completed with media flowing, which is what
+    breaks when the pacer or the ICE path regresses. It is deliberately not
+    asserted that the pacer improves any of them: on the oscillating regime the
+    same code lands either side of the trade from run to run, so a single-sample
+    comparison is a coin flip dressed as a gate.
     """
     repeats = max(1, int(os.environ.get("PACER_REPEATS", "3")))
     cells = [
@@ -644,7 +629,6 @@ async def main() -> bool:
     rows = []
     for pacer_on, reg in cells:
         regime = "osc" if reg.startswith("osc") else ("shaped" if reg.startswith("shaped") else "flat")
-        # Only the bistable regime needs the repeats; the steady ones reproduce.
         for run in range(repeats if regime == "osc" else 1):
             LOG.info("=== cell pacer=%s regime=%s run=%d", pacer_on, reg, run + 1)
             row = await run_cell(pacer_on, regime)
@@ -655,12 +639,6 @@ async def main() -> bool:
     with open(os.path.join(RUNNER_DIR, "pacer_e2e_results.json"), "w") as f:
         json.dump(rows, f, indent=1)
     print("DONE ->", os.path.join(RUNNER_DIR, "pacer_e2e_results.json"))
-    # The numbers are the point of this benchmark and are left to the reader;
-    # what it asserts is that every cell completed with media actually flowing,
-    # which is what breaks when the pacer or the ICE path regresses. It is
-    # deliberately not asserted that the pacer improves any of them: on the
-    # oscillating regime the same code lands either side of the trade from run
-    # to run, so any single-sample comparison is a coin flip dressed as a gate.
     empty = [f"pacer={r['pacer']} {r['cell']}" for r in rows
              if not r.get("video_pkts") or not r.get("audio_pkts")]
     print("RESULT", "all cells carried media" if not empty else f"FAILED: {empty}")

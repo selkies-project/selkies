@@ -4,65 +4,84 @@ Selkies is developed together with two sibling repositories, [pixelflux](https:/
 (screen capture and video encode) and [pcmflux](https://github.com/selkies-project/pcmflux) (audio capture and
 encode). A change in one often belongs in another; coordinate across all three.
 
-Use web search, web fetch, and other available tools as necessary. Make sure that the comments or documentation are
-not too verbose (do not add comments more fit for a PR summary than a comment). Do not leave arbitrary numbers (such
-as issue or task numbers) in the code or documentation. Do not use inline comments. Do not use comments or
-documentation that describe arbitrary code changes of previous states compared to the current code that do not need
-explanation. The code commenting should reflect the current state of the codebase and be used to convey information
-to an LLM bot or developer.
+This file holds working conventions and the cross-cutting invariants no single module reveals. Mechanism and
+rationale live in the docstring of the module that implements them, never here.
 
-Python follows a fixed documentation standard: Google-style docstrings plus type hints on signatures, kept as you
-touch code. Modules, classes, and any function that is not trivially self-describing carry a docstring (summary
-line, then `Args:`/`Returns:`/`Raises:` only where non-obvious; never pad trivial helpers). Rationale that explains
-a whole function belongs in its docstring, not in a block comment above it; contrasting with a rejected design
-alternative is good rationale, narrating the codebase's own past revisions is forbidden. Type hints must stay
-Python-3.9-safe: `Optional`/`Union` from `typing`, no `X | Y`, no new `from __future__ import annotations`, and
-conditionally imported types (pixelflux, pcmflux, Xlib) never appear in runtime-evaluated annotations — use `Any`
-rather than guess; a wrong hint is worse than none. The website's Developer Reference is generated from these
-docstrings at docs build time (fumadocs-python/griffe via `website/scripts/generate-python-docs.mjs`; output is
-gitignored, never committed), so docstrings are rendered as MDX: keep anything shaped like `<name>` or containing
-braces inside backticks. The vendored forks `src/selkies/Xlib`, `src/selkies/webrtc`, and `src/selkies/ice` are
-the exception — they keep upstream documentation style for diffability and are excluded from the reference; only
-Selkies-added comments there follow the rules above.
+## Comments and documentation
 
-Empirical testing is a very useful way to develop this project, and empirical testing is possible for EVERYTHING,
-including implementation, auditing, validation, or verification. A few such options are by utilizing the currently
-installed Firefox and Chrome, as well as the WebKit engine provided by Playwright/Selenium/Puppeteer/Cypress in place
-of Safari, for end-to-end tests. HOWEVER, ask the user for permission to create a test environment (possibly using
-Miniforge; but note that it is likely the system `libgbm.so` should be used for GBM support on NVIDIA and other GPUs)
-and receive directives from the user on how the environment should be constructed and constrained.
+The developer reference is generated from the docblocks, so explanation that lives in an inline comment is lost to
+it. Put rationale in the docblock of the function or module it explains, and prefer a clearer name or a small
+helper over a comment. An inline comment is for the line that stays surprising after that — a workaround for a
+specific bug, an ordering or value that looks wrong but is required — and says why the line is that way, not what
+it does. Comments are terse and current: no PR summaries, no issue or task numbers, no narration of what the code
+used to do.
 
-Note that parity between X11 and Wayland, as well as between WebSockets and WebRTC, or between the default dashboard
-and the wish dashboard, is considered a key focus (things that were not wired up correctly on either side, and similar
-discrepancies, are subject to fixes or deduplication). I prefer deduplicating code that performs similar purposes
-across different modes over keeping duplicate code for no reason and more fragility. Refactor through deduplication if
-you are confident there will be no regressions (or able to validate regressions). Screen coroutine usage in both
-Python and JavaScript, as well as thread usage in all languages, so that everything is performant and does not lead to
-hanging or lagging. Performance preservation or improvements such as zero-copy and latency-reducing measures are
-always important. Note that compatibility should be ensured for Python 3.9 to 3.14 or even higher, and CUDA/NVENC 11
-to 13 or higher. Gate on capabilities, never on interpreter versions: prefer the API that already encapsulates the
-difference (e.g. a library's own runner), else probe the feature itself (`hasattr`, a parameter's presence in
-`inspect.signature`, a try/except of the API) — never compare `sys.version_info`. Update the translations as well (and write/update additional entries if necessary) as necessary.
-Injection and clipboard mechanisms form fallback ladders that resolve the newest architecture first and degrade rung
-by rung: ext- before zwlr-data-control; on Wayland the seat keymap, then the in-process virtual-keyboard client, then
-the data-control clipboard paste; on X11 in-process XTEST before an xdotool fork. Cooldowns re-probe the top rung
-rather than latching into a fallback. Under a NESTED app compositor the seat rung only carries keysyms the base
-layout resolves — the seat overlay never survives the inner compositor's own keymap — so the keyboard worker routes
-character-bearing keysyms the base lacks (Cyrillic/Arabic/legacy planes, the Unicode plane) onto the
-virtual-keyboard text batch by classification, not by failure. Which socket that batch and the selection are aimed at
-is auto-detected: the compositor is the live `wayland-<N>` socket beside the capture compositor's, never a
-differently named relay a session listens on, and aiming at the capture compositor instead is what silently kills
-every non-ASCII key. A DPI is an output scale on that same compositor (wlr-output-management, in-process), never Xft
-resources: XWayland runs in its logical space and is scaled with it, and scaling the CAPTURE output instead shrinks
-the session and upscales it. The scale carries the size that screen is about to take in the same configuration,
-because a session lays its desktop out once per applied configuration: a scale arriving alone leaves it at the
-pre-connect mode under the new scale, a fraction of its final size, which a client that does not lay out again keeps.
-Only what that compositor leaves — a KWin session, or no session at all — becomes the capture scale, and only a
-changed capture scale restarts a capture. The Wayland path is subprocess-free by design — never reintroduce wtype, wl-copy or similar
-forks where the in-process pixelflux harness exists.
-A defect that predates the change you are making is still in scope: finding it does not make it someone else's,
-and "pre-existing" is not a reason to leave it. Fix it, or say precisely what is broken, what you ruled out, and
-what you would do next. The same applies to a failure you cannot reproduce yet -- narrow it until it is either
-fixed or precisely described, and never let a test that fails for an unknown reason pass unremarked.
+Every language follows one shape: a Google-style docblock on the module, on every class, and on every function
+that is not trivially self-describing, with the types on the signature. A docblock opens with a summary line, then
+parameters, return value and exceptions only where non-obvious; never pad trivial helpers. Contrasting with a
+rejected design alternative is good rationale; narrating past revisions is forbidden. A module's docblock carries
+the mechanism the module implements — a fallback ladder, a wire framing, the `window` contract a streaming core
+publishes for the dashboards. Docblocks render as Markdown, so keep anything shaped like `<name>` or containing
+braces inside backticks.
 
-Update this file when certain details change.
+- Python: Google-style docstrings (`Args:`/`Returns:`/`Raises:`) plus type hints on signatures, kept as you touch
+  code. Hints must stay Python-3.9-safe: `Optional`/`Union` from `typing`, no `X | Y`, no new
+  `from __future__ import annotations`, and conditionally imported types (pixelflux, pcmflux, Xlib) never appear in
+  runtime-evaluated annotations — use `Any` rather than guess.
+- TypeScript (`.ts`/`.tsx`): JSDoc blocks with `@param name description`, `@returns`, `@throws`, and no types in
+  the tags — the signature is the type. Props are an `interface` or `type` with a line per field.
+- JavaScript (`.js`/`.jsx`): the same JSDoc blocks, but the tags carry the types (`@param {Type} name`,
+  `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks). The wish dashboard's `tsc` compiles
+  `selkies-web-core/lib` through `allowJs`, so these types are checked contracts: a `@type` on an exported
+  constant replaces its inferred type for every TypeScript consumer.
+- Both: a `/** ... @module */` block after the license header is the module docstring; `_`-prefixed members are
+  private and hidden from the reference; a React component documents what it renders and which core messages or
+  `window` state it consumes. A tag TypeDoc does not know (`@constructor`) is a build warning. Every docblock is
+  published, exported or not, so a closure's docblock is reference material, not a private note.
+
+Vendored code keeps upstream documentation style and is excluded from the reference: the Python forks
+`src/selkies/Xlib`, `src/selkies/webrtc` and `src/selkies/ice`, and the shadcn/ui primitives under
+`addons/selkies-dashboard-wish/src/components/ui`; only Selkies-added comments there follow these rules. The
+translation tables and the build helpers (`copy-*.js`, `gendb.js`, the vite and eslint configs) are excluded too.
+
+Update the translations whenever user-facing strings change, adding entries where necessary.
+
+## Testing
+
+End-to-end testing is possible with the installed Firefox and Chrome, and Playwright/Selenium/Puppeteer/Cypress
+WebKit in place of Safari. Ask the user for permission before creating a test environment (possibly Miniforge; the
+system `libgbm.so` should likely be used for GBM support on NVIDIA and other GPUs) and take their directives on how
+it is constructed and constrained.
+
+A defect that predates the change you are making is still in scope: fix it, or say precisely what is broken, what
+you ruled out, and what you would do next. The same applies to a failure you cannot reproduce yet — narrow it until
+it is fixed or precisely described, and never let a test that fails for an unknown reason pass unremarked.
+
+## Engineering priorities
+
+- Parity between X11 and Wayland, WebSockets and WebRTC, and the default and wish dashboards: anything wired up on
+  one side but not the other is a bug. Prefer deduplicating code that serves the same purpose across modes over
+  keeping parallel copies, when you are confident there is no regression or can validate it.
+- Screen coroutine usage in Python and JavaScript and thread usage in every language so nothing hangs or lags.
+  Zero-copy and latency-reducing measures are always worth preserving or adding.
+- Compatibility spans Python 3.9 to 3.14 or higher and CUDA/NVENC 11 to 13 or higher. Gate on capabilities, never
+  on interpreter versions: prefer the API that already encapsulates the difference (e.g. a library's own runner),
+  else probe the feature itself (`hasattr`, a parameter's presence in `inspect.signature`, a try/except of the
+  API) — never compare `sys.version_info`.
+
+## Cross-cutting invariants
+
+Each is documented in full where named; read that before changing the subsystem.
+
+- The Wayland path is subprocess-free: never reintroduce wtype, wl-copy or similar forks where the in-process
+  pixelflux harness exists. Injection and clipboard are fallback ladders whose cooldowns re-probe the top rung
+  rather than latching (`src/selkies/input_handler.py` module docstring).
+- A DPI is an output scale on the session compositor, never Xft resources; only a changed capture scale restarts a
+  capture (`src/selkies/display_utils.py` module docstring).
+- Software H.264 is a property of the installed pixelflux build, never a Selkies setting
+  (`settings.software_h264_encoder`, `canonical_encoder`; the OpenH264 profile gate in `src/selkies/rtc.py`).
+- The sound-server control plane is in-process over pulsectl_asyncio under a never-cancel discipline; `pactl` is
+  only the fallback when the bindings are missing (`src/selkies/audio_control.py` module docstring).
+- The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python
+  (`addons/selkies-web-core/lib/webcam-capture.js` header, `src/selkies/webcam.py`,
+  `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).

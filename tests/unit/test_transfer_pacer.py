@@ -183,7 +183,6 @@ check("negative limit clamps to 0 (pacing off)", probe_limit("-5") == "0.0",
 check("nan limit clamps to 0 (pacing off)", probe_limit("nan") == "0.0",
       probe_limit("nan"))
 
-# --- the upload allowance ------------------------------------------------
 async def drive_uplink(rate_bps: float, seconds: float,
                        chunk: int = 64 * 1024) -> tuple:
     """Feed an allowance from a client whose link delivers `rate_bps`.

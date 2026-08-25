@@ -7,7 +7,16 @@
 import React from "react";
 import { t } from "@/i18n";
 
+/**
+ * The floating, draggable touch-gamepad toggle for the `#player2` to
+ * `#player4` clients, which render no dashboard. It drives the touch overlay
+ * with the same `TOUCH_GAMEPAD_SETUP` and `TOUCH_GAMEPAD_VISIBILITY` messages
+ * DashboardOverlay posts on the primary display.
+ * @module
+ */
+
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
+/** Pointer travel in pixels before a press counts as a drag rather than a click. */
 const DRAG_THRESHOLD = 10;
 
 const GamepadIcon = () => (
@@ -16,10 +25,12 @@ const GamepadIcon = () => (
     </svg>
 );
 
-// Floating, draggable touch-gamepad toggle for the #player2..#player4
-// clients, which render no dashboard. Always visible: these slots exist to
-// contribute gamepad input, so the toggle must be reachable on any device
-// without depending on touch detection.
+/**
+ * Renders the toggle. Always visible: these slots exist to contribute
+ * gamepad input, so the toggle must be reachable on any device without
+ * depending on touch detection. The title names the action a click performs,
+ * with the same wording as the classic sidebar's touch-gamepad button.
+ */
 export default function PlayerGamepadButton() {
     const [isTouchGamepadActive, setIsTouchGamepadActive] = React.useState(false);
     const [isTouchGamepadSetup, setIsTouchGamepadSetup] = React.useState(false);
@@ -103,6 +114,10 @@ export default function PlayerGamepadButton() {
         handleToggleTouchGamepad();
     };
 
+    const title = t(isTouchGamepadActive
+        ? "sections.gamepads.touchDisableTitle"
+        : "sections.gamepads.touchEnableTitle");
+
     return (
         <button
             className={`player-gamepad-button ${isTouchGamepadActive ? "active" : ""}`}
@@ -130,8 +145,8 @@ export default function PlayerGamepadButton() {
                 boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
                 transition: 'background-color 0.2s ease-in-out',
             }}
-            title={t('gamepads.toggleTouchTitle')}
-            aria-label={t('gamepads.toggleTouchTitle')}
+            title={title}
+            aria-label={title}
         >
             <GamepadIcon />
         </button>

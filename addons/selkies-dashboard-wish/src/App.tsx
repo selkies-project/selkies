@@ -10,10 +10,18 @@ import { ThemeProvider } from './components/ui/theme-provider';
 import { UploadNotifications } from './components/dashboard/upload-notifications';
 import { Toaster } from 'sonner';
 
+/**
+ * Root of the primary-display dashboard: the theme provider, the overlay
+ * portaled into the dashboard root, upload notifications and the toaster.
+ * @module
+ */
+
 interface AppProps {
+  /** Element the dashboard chrome is portaled into. */
   dashboardRoot: Element;
 }
 
+/** Wraps the dashboard overlay in the providers every card relies on. */
 function App({ dashboardRoot }: AppProps): React.ReactElement {
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">

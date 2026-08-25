@@ -16,6 +16,7 @@ const en = {
         videoStream: "Video Stream",
         audioStream: "Audio Stream",
         microphone: "Microphone",
+        webcam: "Webcam",
         touchControls: "Touch Controls",
         touchGamepad: "Touch Gamepad",
         virtualKeyboard: "Virtual Keyboard",
@@ -64,11 +65,6 @@ const en = {
         previewAlt: "Clipboard preview",
     },
     shortcuts: { citeNotice: "Cite our paper academically" },
-    gamepads: {
-        loadingGamepad: "Loading Gamepad {index}...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Toggle Touch Gamepad",
-    },
 };
 
 const es = {
@@ -80,6 +76,7 @@ const es = {
         videoStream: "Transmisión de vídeo",
         audioStream: "Transmisión de audio",
         microphone: "Micrófono",
+        webcam: "Cámara web",
         touchControls: "Controles táctiles",
         touchGamepad: "Mando táctil",
         virtualKeyboard: "Teclado virtual",
@@ -128,11 +125,6 @@ const es = {
         previewAlt: "Vista previa del portapapeles",
     },
     shortcuts: { citeNotice: "Cita nuestro artículo académicamente" },
-    gamepads: {
-        loadingGamepad: "Cargando mando {index}...",
-        gamepadTitle: "Mando {index}",
-        toggleTouchTitle: "Alternar mando táctil",
-    },
 };
 
 const zh = {
@@ -144,6 +136,7 @@ const zh = {
         videoStream: "视频流",
         audioStream: "音频流",
         microphone: "麦克风",
+        webcam: "摄像头",
         touchControls: "触控",
         touchGamepad: "触屏手柄",
         virtualKeyboard: "虚拟键盘",
@@ -192,11 +185,6 @@ const zh = {
         previewAlt: "剪贴板预览",
     },
     shortcuts: { citeNotice: "学术引用我们的论文" },
-    gamepads: {
-        loadingGamepad: "正在加载手柄 {index}...",
-        gamepadTitle: "手柄 {index}",
-        toggleTouchTitle: "切换触屏手柄",
-    },
 };
 
 const hi = {
@@ -208,6 +196,7 @@ const hi = {
         videoStream: "वीडियो स्ट्रीम",
         audioStream: "ऑडियो स्ट्रीम",
         microphone: "माइक्रोफ़ोन",
+        webcam: "वेबकैम",
         touchControls: "टच नियंत्रण",
         touchGamepad: "टच गेमपैड",
         virtualKeyboard: "वर्चुअल कीबोर्ड",
@@ -256,11 +245,6 @@ const hi = {
         previewAlt: "क्लिपबोर्ड पूर्वावलोकन",
     },
     shortcuts: { citeNotice: "हमारे शोधपत्र को अकादमिक रूप से उद्धृत करें" },
-    gamepads: {
-        loadingGamepad: "गेमपैड {index} लोड हो रहा है...",
-        gamepadTitle: "गेमपैड {index}",
-        toggleTouchTitle: "टच गेमपैड टॉगल करें",
-    },
 };
 
 const pt = {
@@ -272,6 +256,7 @@ const pt = {
         videoStream: "Transmissão de vídeo",
         audioStream: "Transmissão de áudio",
         microphone: "Microfone",
+        webcam: "Webcam",
         touchControls: "Controles de toque",
         touchGamepad: "Gamepad de toque",
         virtualKeyboard: "Teclado virtual",
@@ -320,11 +305,6 @@ const pt = {
         previewAlt: "Prévia da área de transferência",
     },
     shortcuts: { citeNotice: "Cite nosso artigo academicamente" },
-    gamepads: {
-        loadingGamepad: "Carregando gamepad {index}...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Alternar gamepad de toque",
-    },
 };
 
 const fr = {
@@ -336,6 +316,7 @@ const fr = {
         videoStream: "Flux vidéo",
         audioStream: "Flux audio",
         microphone: "Microphone",
+        webcam: "Webcam",
         touchControls: "Commandes tactiles",
         touchGamepad: "Manette tactile",
         virtualKeyboard: "Clavier virtuel",
@@ -384,11 +365,6 @@ const fr = {
         previewAlt: "Aperçu du presse-papiers",
     },
     shortcuts: { citeNotice: "Citez notre article académiquement" },
-    gamepads: {
-        loadingGamepad: "Chargement de la manette {index}...",
-        gamepadTitle: "Manette {index}",
-        toggleTouchTitle: "Basculer la manette tactile",
-    },
 };
 
 const ru = {
@@ -400,6 +376,7 @@ const ru = {
         videoStream: "Видеопоток",
         audioStream: "Аудиопоток",
         microphone: "Микрофон",
+        webcam: "Веб-камера",
         touchControls: "Сенсорное управление",
         touchGamepad: "Сенсорный геймпад",
         virtualKeyboard: "Виртуальная клавиатура",
@@ -448,11 +425,6 @@ const ru = {
         previewAlt: "Предпросмотр буфера обмена",
     },
     shortcuts: { citeNotice: "Цитируйте нашу статью в научных работах" },
-    gamepads: {
-        loadingGamepad: "Загрузка геймпада {index}...",
-        gamepadTitle: "Геймпад {index}",
-        toggleTouchTitle: "Переключить сенсорный геймпад",
-    },
 };
 
 const de = {
@@ -464,6 +436,7 @@ const de = {
         videoStream: "Videostream",
         audioStream: "Audiostream",
         microphone: "Mikrofon",
+        webcam: "Webcam",
         touchControls: "Touch-Steuerung",
         touchGamepad: "Touch-Gamepad",
         virtualKeyboard: "Virtuelle Tastatur",
@@ -512,11 +485,6 @@ const de = {
         previewAlt: "Zwischenablage-Vorschau",
     },
     shortcuts: { citeNotice: "Zitieren Sie unser Paper wissenschaftlich" },
-    gamepads: {
-        loadingGamepad: "Gamepad {index} wird geladen...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Touch-Gamepad umschalten",
-    },
 };
 
 const tr = {
@@ -528,6 +496,7 @@ const tr = {
         videoStream: "Video yayını",
         audioStream: "Ses yayını",
         microphone: "Mikrofon",
+        webcam: "Web kamerası",
         touchControls: "Dokunmatik denetimler",
         touchGamepad: "Dokunmatik oyun kolu",
         virtualKeyboard: "Sanal klavye",
@@ -576,11 +545,6 @@ const tr = {
         previewAlt: "Pano önizlemesi",
     },
     shortcuts: { citeNotice: "Makalemize akademik atıfta bulunun" },
-    gamepads: {
-        loadingGamepad: "Oyun kolu {index} yükleniyor...",
-        gamepadTitle: "Oyun kolu {index}",
-        toggleTouchTitle: "Dokunmatik oyun kolunu aç/kapat",
-    },
 };
 
 const it = {
@@ -592,6 +556,7 @@ const it = {
         videoStream: "Stream video",
         audioStream: "Stream audio",
         microphone: "Microfono",
+        webcam: "Webcam",
         touchControls: "Controlli touch",
         touchGamepad: "Gamepad touch",
         virtualKeyboard: "Tastiera virtuale",
@@ -640,11 +605,6 @@ const it = {
         previewAlt: "Anteprima degli appunti",
     },
     shortcuts: { citeNotice: "Cita il nostro articolo accademicamente" },
-    gamepads: {
-        loadingGamepad: "Caricamento gamepad {index}...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Attiva/disattiva gamepad touch",
-    },
 };
 
 const nl = {
@@ -656,6 +616,7 @@ const nl = {
         videoStream: "Videostream",
         audioStream: "Audiostream",
         microphone: "Microfoon",
+        webcam: "Webcam",
         touchControls: "Aanraakbediening",
         touchGamepad: "Touch-gamepad",
         virtualKeyboard: "Virtueel toetsenbord",
@@ -704,11 +665,6 @@ const nl = {
         previewAlt: "Klembordvoorbeeld",
     },
     shortcuts: { citeNotice: "Citeer ons artikel academisch" },
-    gamepads: {
-        loadingGamepad: "Gamepad {index} wordt geladen...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Touch-gamepad wisselen",
-    },
 };
 
 const ar = {
@@ -720,6 +676,7 @@ const ar = {
         videoStream: "بث الفيديو",
         audioStream: "بث الصوت",
         microphone: "الميكروفون",
+        webcam: "كاميرا الويب",
         touchControls: "عناصر التحكم باللمس",
         touchGamepad: "ذراع تحكم لمسية",
         virtualKeyboard: "لوحة مفاتيح افتراضية",
@@ -768,11 +725,6 @@ const ar = {
         previewAlt: "معاينة الحافظة",
     },
     shortcuts: { citeNotice: "استشهد بورقتنا البحثية أكاديميًا" },
-    gamepads: {
-        loadingGamepad: "جارٍ تحميل ذراع التحكم {index}...",
-        gamepadTitle: "ذراع التحكم {index}",
-        toggleTouchTitle: "تبديل ذراع التحكم اللمسية",
-    },
 };
 
 const ko = {
@@ -784,6 +736,7 @@ const ko = {
         videoStream: "비디오 스트림",
         audioStream: "오디오 스트림",
         microphone: "마이크",
+        webcam: "웹캠",
         touchControls: "터치 제어",
         touchGamepad: "터치 게임패드",
         virtualKeyboard: "가상 키보드",
@@ -832,11 +785,6 @@ const ko = {
         previewAlt: "클립보드 미리보기",
     },
     shortcuts: { citeNotice: "논문을 학술적으로 인용하기" },
-    gamepads: {
-        loadingGamepad: "게임패드 {index} 불러오는 중...",
-        gamepadTitle: "게임패드 {index}",
-        toggleTouchTitle: "터치 게임패드 전환",
-    },
 };
 
 const ja = {
@@ -848,6 +796,7 @@ const ja = {
         videoStream: "映像ストリーム",
         audioStream: "音声ストリーム",
         microphone: "マイク",
+        webcam: "ウェブカメラ",
         touchControls: "タッチ操作",
         touchGamepad: "タッチゲームパッド",
         virtualKeyboard: "仮想キーボード",
@@ -896,11 +845,6 @@ const ja = {
         previewAlt: "クリップボードのプレビュー",
     },
     shortcuts: { citeNotice: "論文の学術的引用はこちら" },
-    gamepads: {
-        loadingGamepad: "ゲームパッド {index} を読み込み中...",
-        gamepadTitle: "ゲームパッド {index}",
-        toggleTouchTitle: "タッチゲームパッドの切り替え",
-    },
 };
 
 const vi = {
@@ -912,6 +856,7 @@ const vi = {
         videoStream: "Luồng video",
         audioStream: "Luồng âm thanh",
         microphone: "Micrô",
+        webcam: "Webcam",
         touchControls: "Điều khiển cảm ứng",
         touchGamepad: "Tay cầm cảm ứng",
         virtualKeyboard: "Bàn phím ảo",
@@ -960,11 +905,6 @@ const vi = {
         previewAlt: "Xem trước bảng nhớ tạm",
     },
     shortcuts: { citeNotice: "Trích dẫn học thuật bài báo của chúng tôi" },
-    gamepads: {
-        loadingGamepad: "Đang tải tay cầm {index}...",
-        gamepadTitle: "Tay cầm {index}",
-        toggleTouchTitle: "Bật/tắt tay cầm cảm ứng",
-    },
 };
 
 const th = {
@@ -976,6 +916,7 @@ const th = {
         videoStream: "สตรีมวิดีโอ",
         audioStream: "สตรีมเสียง",
         microphone: "ไมโครโฟน",
+        webcam: "เว็บแคม",
         touchControls: "การควบคุมแบบสัมผัส",
         touchGamepad: "เกมแพดแบบสัมผัส",
         virtualKeyboard: "แป้นพิมพ์เสมือน",
@@ -1024,11 +965,6 @@ const th = {
         previewAlt: "ตัวอย่างคลิปบอร์ด",
     },
     shortcuts: { citeNotice: "อ้างอิงบทความของเราเชิงวิชาการ" },
-    gamepads: {
-        loadingGamepad: "กำลังโหลดเกมแพด {index}...",
-        gamepadTitle: "เกมแพด {index}",
-        toggleTouchTitle: "สลับเกมแพดแบบสัมผัส",
-    },
 };
 
 const fil = {
@@ -1040,6 +976,7 @@ const fil = {
         videoStream: "Video stream",
         audioStream: "Audio stream",
         microphone: "Mikropono",
+        webcam: "Webcam",
         touchControls: "Mga touch control",
         touchGamepad: "Touch gamepad",
         virtualKeyboard: "Virtual na keyboard",
@@ -1088,11 +1025,6 @@ const fil = {
         previewAlt: "Preview ng clipboard",
     },
     shortcuts: { citeNotice: "Banggitin ang aming papel nang akademiko" },
-    gamepads: {
-        loadingGamepad: "Nilo-load ang gamepad {index}...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "I-toggle ang touch gamepad",
-    },
 };
 
 const da = {
@@ -1104,6 +1036,7 @@ const da = {
         videoStream: "Videostream",
         audioStream: "Lydstream",
         microphone: "Mikrofon",
+        webcam: "Webcam",
         touchControls: "Touch-kontroller",
         touchGamepad: "Touch-gamepad",
         virtualKeyboard: "Virtuelt tastatur",
@@ -1152,11 +1085,6 @@ const da = {
         previewAlt: "Forhåndsvisning af udklipsholder",
     },
     shortcuts: { citeNotice: "Citér vores artikel akademisk" },
-    gamepads: {
-        loadingGamepad: "Indlæser gamepad {index}...",
-        gamepadTitle: "Gamepad {index}",
-        toggleTouchTitle: "Slå touch-gamepad til/fra",
-    },
 };
 
 export const extras: Record<string, any> = { en, es, zh, hi, pt, fr, ru, de, tr, it, nl, ar, ko, ja, vi, th, fil, da };

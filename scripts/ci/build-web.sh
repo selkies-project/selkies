@@ -14,20 +14,38 @@ test -f pyproject.toml
 
 npm_install() {
     # Lockfiles are gitignored in this repository, so `npm ci` has nothing to
-    # install from
-    npm install --no-audit --no-fund
+    # install from.
+    #
+    # npm gives a failed registry fetch two retries and no more, and this pulls
+    # a large dependency tree three times over. The flags go here rather than on
+    # an image because two of this script's four callers -- the wheel and test
+    # workflows -- run it on a bare runner with no Dockerfile in the picture.
+    npm install --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000
 }
 
 # The core is built first: both dashboards take it, and the gamepad DB built
 # alongside it, out of its dist through their own copy-core.js/copy-jsdb.js
 # build steps.
 (cd addons/selkies-web-core && npm_install && npm run build)
-(cd addons/selkies-dashboard && npm_install && SELKIES_INJECT=1 npm run build)
 
 # The Wish dashboard is an alternative front end: it is not what the wheel
 # ships, but it is built here so a break in it fails the build, and so the
-# dashboard e2e tier has a bundle to serve
-(cd addons/selkies-dashboard-wish && npm_install && npm run build)
+# dashboard e2e tier has a bundle to serve.
+#
+# Installs run in turn, so two npm processes never write the same cache entry;
+# the builds themselves share nothing but the core's dist, which is already
+# there, so they run at the same time and the step costs the slower of the two
+# rather than their sum. Their output interleaves in the log.
+(cd addons/selkies-dashboard && npm_install)
+(cd addons/selkies-dashboard-wish && npm_install)
+(cd addons/selkies-dashboard && SELKIES_INJECT=1 npm run build) &
+classic_build=$!
+(cd addons/selkies-dashboard-wish && npm run build) &
+wish_build=$!
+# Each is waited on by pid, so `set -e` sees the failing one rather than the
+# exit status of whichever finished last.
+wait "${classic_build}"
+wait "${wish_build}"
 
 mkdir -p addons/selkies-dashboard/dist/src
 cp addons/selkies-web-core/dist/selkies-core.js addons/selkies-dashboard/dist/src/
@@ -36,6 +54,11 @@ cp addons/universal-touch-gamepad/universalTouchGamepad.js addons/selkies-dashbo
 # .gitignore keeps src/selkies/selkies_web out of git; it is generated here
 rm -rf src/selkies/selkies_web
 cp -ar addons/selkies-dashboard/dist src/selkies/selkies_web
+
+# A regular package rather than an implicit namespace one: importlib.resources
+# on Python 3.9 cannot locate the files of a namespace package, and that is how
+# the server reads the bundled client.
+printf '%s\n' '"""Bundled web client, served by the stream server as package data."""' > src/selkies/selkies_web/__init__.py
 
 # start_url is relative so an installed client launches back into the subfolder
 # it was served from, which an absolute "/" would discard.

@@ -4,7 +4,22 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// universalTouchGamepad.js
+/**
+ * On-screen touch gamepad exposed to the page as a standard-mapping Gamepad.
+ *
+ * `navigator.getGamepads` is wrapped so the synthetic pad occupies the first
+ * free slot beside the physical pads, and `gamepadconnected` fires on the
+ * first touch after the overlay is shown. The page drives it over
+ * `window.postMessage`: `TOUCH_GAMEPAD_SETUP` (`targetDivId`, optional
+ * `initialProfileName`, `visible`) names the host element and may show the
+ * overlay; `TOUCH_GAMEPAD_VISIBILITY` (`visible`, optional `targetDivId`)
+ * shows or hides it, hiding also disconnects the pad. Layouts are the
+ * `profiles` table (8-bit, 16-bit, modern); the pick persists under the
+ * `universalTouchGamepad_currentProfile` localStorage key. Buttons are hit
+ * tested per cluster so a finger sliding between neighbours re-targets
+ * without lifting; a short, still tap on a stick clicks L3/R3.
+ * @module
+ */
 (function() {
     'use strict';
 
@@ -59,6 +74,7 @@
         </svg>
     `;
 
+    /** Publishes `--vh` from `innerHeight`, since mobile `100vh` includes the browser chrome. */
     function setRealViewportHeight() {
       const vh = window.innerHeight * 0.01;
       document.documentElement.style.setProperty('--vh', `${vh}px`);
@@ -92,6 +108,10 @@
 
     const originalGetGamepads = navigator.getGamepads ? navigator.getGamepads.bind(navigator) : () => [];
 
+    /**
+     * Wraps `navigator.getGamepads` to splice the synthetic pad, while
+     * connected, into its slot or the first free one among the physical pads.
+     */
     function overrideGamepadAPI() {
         navigator.getGamepads = function() {
             const nativeGamepads = originalGetGamepads();
@@ -126,6 +146,13 @@
         window.dispatchEvent(event);
     }
 
+    /**
+     * Sets a button's state; an analog trigger's `pressed` follows its value
+     * past 0.05. The first change while visible connects the pad.
+     * @param {number} buttonIndex
+     * @param {boolean} pressed
+     * @param {number|null} [analogValue] 0 to 1 for analog triggers.
+     */
     function updateGamepadButton(buttonIndex, pressed, analogValue = null) {
         if (buttonIndex < 0 || buttonIndex >= MAX_BUTTONS) return;
         const buttonState = gamepadState.buttons[buttonIndex];
@@ -149,6 +176,7 @@
         }
     }
 
+    /** Sets an axis, clamped to -1 to 1; the first change while visible connects the pad. */
     function updateGamepadAxis(index, value) {
         if (index < 0 || index >= MAX_AXES) return;
         const clampedValue = Math.max(-1, Math.min(1, value));
@@ -166,6 +194,7 @@
         }
     }
 
+    /** Disconnects the pad and releases every tracked button and trigger visual. */
     function disconnectGamepad() {
          if (gamepadState.connected) {
             gamepadState.connected = false;
@@ -188,6 +217,11 @@
         });
     }
 
+    /**
+     * Layouts, each a set of `buttons` (standard button index, label, style),
+     * optional `joysticks` (axis pair and click button) and `analogTriggers`,
+     * and `clusters` grouping buttons into one touch-hit-tested surface.
+     */
     const profiles = {
         eightBit: {
             name: "8-bit",
@@ -326,6 +360,13 @@
         document.head.appendChild(styleSheet);
     }
 
+    /**
+     * Scales a profile style value for the preview: numbers and px lengths
+     * multiply, and a `calc()` scales its px terms unless it mixes in `%`.
+     * @param {string|number} valueStr
+     * @param {number} scale
+     * @returns {string}
+     */
     function parseStyleValue(valueStr, scale) {
         if (typeof valueStr !== 'string') {
             return (valueStr * scale) + 'px';
@@ -341,6 +382,15 @@
         return (numericalPart * scale) + (unit || 'px');
     }
 
+    /**
+     * Builds a profile's controls into `parentEl`. The live overlay adds the
+     * safe-area padding and the touch handlers and resets the tracking tables;
+     * a preview is scaled, inert, and omits triggers and clusters.
+     * @param {object} profile An entry of `profiles`.
+     * @param {HTMLElement} parentEl
+     * @param {number} [scale=1.0]
+     * @param {boolean} [isPreview=false]
+     */
     function renderControlElements(profile, parentEl, scale = 1.0, isPreview = false) {
         if (!isPreview) {
             buttonElementsToTrack = {};
@@ -435,6 +485,7 @@
                             }
                         }
                     };
+                    /** Moves the handle to the touch, clamped to the base, and sets the axes. */
                     function updateStick(touch, stickBaseElement, handleElement, unscaledBaseSize, handleRelFactor, currentScale) { 
                         const rect = stickBaseElement.getBoundingClientRect();
                         const touchX = touch.clientX - rect.left; const touchY = touch.clientY - rect.top;
@@ -446,9 +497,8 @@
                         else if (maxDistance <= 0) { x = 0; y = 0;}
                         handleElement.style.left = `${x + (currentBaseSize - currentHandleSize) / 2}px`;
                         handleElement.style.top = `${y + (currentBaseSize - currentHandleSize) / 2}px`;
-                        // Screen-Y grows downward, matching the standard-gamepad
-                        // axis convention (down = +1), so the vertical axis passes
-                        // through unnegated just like the horizontal one.
+                        // Screen Y grows downward like the standard-gamepad axis
+                        // (down = +1), so the vertical axis is deliberately unnegated.
                         if (maxDistance > 0) { updateGamepadAxis(joyConfig.axes[0], x / maxDistance); updateGamepadAxis(joyConfig.axes[1], y / maxDistance); }
                         else { updateGamepadAxis(joyConfig.axes[0], 0); updateGamepadAxis(joyConfig.axes[1], 0); }
                     }
@@ -574,6 +624,12 @@
                 Object.assign(clusterDiv.style, clusterStyles);
                 parentEl.appendChild(clusterDiv);
 
+                /**
+                 * One handler for every touch event on a cluster: each active
+                 * touch is hit tested (with `HIT_TEST_SLOP`) against the cluster's
+                 * buttons, so a finger sliding between them re-targets without
+                 * lifting, and a button stays pressed while any touch holds it.
+                 */
                 const handleClusterTouch = (event) => {
                     let interactionOccurred = false;
                     const touches = event.touches;
@@ -639,6 +695,7 @@
         }
     }
     
+    /** Maps the touch's depth into a trigger (top to bottom) onto its 0 to 1 value and fill. */
     function updateAnalogTriggerVisuals(buttonIndex, currentClientY, isActive) {
         const triggerTrack = analogTriggersToTrack[buttonIndex];
         if (!triggerTrack || !triggerTrack.element) return;
@@ -684,6 +741,10 @@
         }
     }
 
+    /**
+     * Full-screen picker of scaled profile previews; a pick persists and
+     * re-renders the live overlay.
+     */
     function showProfileSelector() {
         if (profileSelectorOverlayElement) profileSelectorOverlayElement.remove();
         isProfileSelectorVisible = true;
@@ -767,6 +828,7 @@
         isProfileSelectorVisible = false;
     }
 
+    /** Rebuilds the live overlay from the current profile. */
     function renderMainGamepadUI() {
         if (!gamepadControlsOverlayElement || !profiles[currentProfileName]) return;
         injectBaseStyles();
@@ -792,6 +854,7 @@
         }
     }
 
+    /** Shows the overlay with the persisted profile; requires a prior SETUP. */
     function showGamepad() {
         if (!hostAnchorElement) {
             console.error(GAMEPAD_ID + ": Host anchor element not set. Call SETUP first.");
@@ -807,6 +870,7 @@
         renderMainGamepadUI();
     }
 
+    /** Hides the overlay and the picker and disconnects the pad. */
     function hideGamepad() {
         if (gamepadControlsOverlayElement) {
             gamepadControlsOverlayElement.innerHTML = ''; 

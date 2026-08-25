@@ -73,7 +73,7 @@ def make_handler(vk_error: bool = True, separate: bool = True,
     h.writes = []
     h.clipboard = clipboard
 
-    async def send(keysym, down=True):
+    async def send(keysym, down=True, neutralize=None):
         h.keys.append((keysym, down))
     h.send_x11_keypress = send
 

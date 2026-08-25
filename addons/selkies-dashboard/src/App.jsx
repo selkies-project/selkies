@@ -4,10 +4,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// src/App.jsx
+/**
+ * Root component of the dashboard bundle.
+ * @module
+ */
 import DashboardOverlay from './components/DashboardOverlay';
 
-// App receives the dashboardRoot element created in main.jsx
+/**
+ * Renders the dashboard overlay into the element main.jsx created for it.
+ * @param {object} props
+ * @param {HTMLElement} props.dashboardRoot Portal target main.jsx appended to `document.body`.
+ */
 function App({ dashboardRoot }) {
   return (
     <>

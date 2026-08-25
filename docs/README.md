@@ -25,15 +25,21 @@ While designed for clustered or unprivileged containerized environments, Selkies
 
 **NOTE: this project is licensed under the [Mozilla Public License, version 2.0](https://www.mozilla.org/en-US/MPL/2.0/FAQ/), which obliges to share modified code files licensed by MPL-2.0 when distributed externally, but does not apply for any larger work outside this project, which might be open-source or proprietary under any license of choice. Externally originated components outside this project may contain works licensed over more restrictive copyleft/proprietary licenses, as well as other terms of intellectual property, including but not limited to patents, which users or developers are obliged to adhere to.**
 
+[**Licensing**](licensing.md) inventories those components (Python and npm dependencies, the vendored python-xlib, the GPL libraries that pixelflux and PyAV wheels bring in) with their licenses.
+
 [**What is Selkies?**](design.md)
 
 [**Getting Started**](start.md)
 
 [**Usage**](usage.md)
 
+[**Settings Reference**](settings.md)
+
 [**Troubleshooting and FAQs**](faq.md)
 
 [**WebRTC and Firewall Issues (cannot connect)**](firewall.md)
+
+[**Secure Mode (token authentication)**](secure-mode.md)
 
 [**Components including Encoders and Interfaces**](component.md)
 

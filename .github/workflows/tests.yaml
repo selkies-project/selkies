@@ -75,11 +75,11 @@ jobs:
         run: scripts/ci/install-shellcheck.sh
       - name: Run the unit tier
         run: |
-          # The suites reach into selkies.input_handler and
-          # selkies.stream_server, so their module-level imports have to
-          # resolve; everything below that is lazy, which is what keeps this
-          # tier off the capture and WebRTC stacks
-          python -m pip install pytest aiofiles msgpack Pillow aiohttp prometheus_client
+          # The suites import the source tree, so every module-level import
+          # under selkies has to resolve: the runtime dependencies from
+          # pyproject.toml minus the capture stack, which the suites stub.
+          python scripts/ci/unit-deps.py > "${RUNNER_TEMP}/unit-requirements.txt"
+          python -m pip install pytest -r "${RUNNER_TEMP}/unit-requirements.txt"
           python -m pytest tests -m unit -v --junitxml=unit-report.xml
       - name: Fail if any suite skipped
         if: ${{ !cancelled() }}
@@ -215,7 +215,12 @@ jobs:
           # packages the very artifact these suites ran against instead of
           # spending another build on a second copy of it.
           python -m pip wheel --no-deps -w dist .
-          python -m pip install dist/selkies-*.whl -r tests/requirements.txt
+          # The pinned pixelflux/pcmflux are a pre-release, not on PyPI: resolve
+          # them from the main-HEAD wheels downloaded above. The test extras
+          # (pytest, playwright, ...) come from the wheel's own [test] group.
+          mkdir -p main-wheels
+          wheel="$(ls dist/selkies-*.whl)"
+          python -m pip install --find-links "$PWD/main-wheels" "${wheel}[test]"
           TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
           WHEEL_GLOB="*${TAG}-*manylinux*$(uname -m)*.whl"
           # Fatal rather than a note: a run that quietly drops to PyPI tests a
@@ -227,6 +232,7 @@ jobs:
               exit 1
             fi
             echo "${found}" | xargs python -m pip install --force-reinstall --no-deps
+            echo "${found}" | xargs cp -t dist/
           done
           python -c 'import pixelflux, pcmflux; print("capture stack:", pixelflux.__file__)'
       - name: Build the web client

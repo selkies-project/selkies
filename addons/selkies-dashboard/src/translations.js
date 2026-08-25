@@ -23,6 +23,7 @@ const en = {
     closeDashboardTitle: "Close Dashboard",
     fullscreenTitle: "Enter Fullscreen",
     gamingModeTitle: "Gaming Mode",
+    gamingModeHint: "Fullscreen with the pointer and keyboard locked",
     trackpadModeTitle: "Trackpad Mode",
     streamingModeTitle: "Streaming Mode",
     buttons: {
@@ -32,6 +33,8 @@ const en = {
         audioStreamDisableTitle: "Disable Audio Stream",
         microphoneEnableTitle: "Enable Microphone",
         microphoneDisableTitle: "Disable Microphone",
+        webcamEnableTitle: "Enable Webcam",
+        webcamDisableTitle: "Disable Webcam",
         gamepadEnableTitle: "Enable Gamepad Input",
         gamepadDisableTitle: "Disable Gamepad Input",
         virtualKeyboardButtonTitle: "Pop Keyboard",
@@ -155,7 +158,9 @@ const en = {
             touchActiveLabel: "Touch Gamepad: ON",
             touchInactiveLabel: "Touch Gamepad: OFF",
             physicalHiddenForTouch: "Physical gamepad display is hidden while touch gamepad is active.",
-            noActivityMobileOrEnableTouch: "No physical gamepads. Enable touch gamepad or connect a controller."
+            noActivityMobileOrEnableTouch: "No physical gamepads. Enable touch gamepad or connect a controller.",
+            gamepadTitle: "Gamepad {index}",
+            loadingGamepad: "Loading Gamepad {index}..."
         },
         apps: {
           title: "Apps",
@@ -250,6 +255,7 @@ const es = {
     closeDashboardTitle: "Cerrar el panel",
     fullscreenTitle: "Entrar en Pantalla Completa",
     gamingModeTitle: "Modo Juego",
+    gamingModeHint: "Pantalla completa con el puntero y el teclado bloqueados",
     trackpadModeTitle: "Modo Trackpad",
     streamingModeTitle: "Modo Streaming",
     buttons: {
@@ -259,6 +265,8 @@ const es = {
         audioStreamDisableTitle: "Desactivar Stream de Audio",
         microphoneEnableTitle: "Activar Micrófono",
         microphoneDisableTitle: "Desactivar Micrófono",
+        webcamEnableTitle: "Activar Cámara Web",
+        webcamDisableTitle: "Desactivar Cámara Web",
         gamepadEnableTitle: "Activar Entrada de Mando",
         gamepadDisableTitle: "Desactivar Entrada de Mando",
         virtualKeyboardButtonTitle: "Mostrar Teclado",
@@ -382,7 +390,9 @@ const es = {
              touchActiveLabel: "Mando Táctil: ENCENDIDO",
              touchInactiveLabel: "Mando Táctil: APAGADO",
              physicalHiddenForTouch: "La visualización de mandos físicos está oculta mientras el mando táctil está activo.",
-             noActivityMobileOrEnableTouch: "No hay mandos físicos. Active el mando táctil o conecte un controlador."
+             noActivityMobileOrEnableTouch: "No hay mandos físicos. Active el mando táctil o conecte un controlador.",
+             gamepadTitle: "Mando {index}",
+             loadingGamepad: "Cargando mando {index}..."
         },
         apps: { 
           title: "Aplicaciones",
@@ -477,6 +487,7 @@ const zh = {
     closeDashboardTitle: "关闭仪表板",
     fullscreenTitle: "进入全屏",
     gamingModeTitle: "游戏模式",
+    gamingModeHint: "全屏并锁定指针和键盘",
     trackpadModeTitle: "触控板模式",
     streamingModeTitle: "串流模式",
     buttons: {
@@ -486,6 +497,8 @@ const zh = {
         audioStreamDisableTitle: "禁用音频流",
         microphoneEnableTitle: "启用麦克风",
         microphoneDisableTitle: "禁用麦克风",
+        webcamEnableTitle: "启用摄像头",
+        webcamDisableTitle: "禁用摄像头",
         gamepadEnableTitle: "启用游戏手柄输入",
         gamepadDisableTitle: "禁用游戏手柄输入",
         virtualKeyboardButtonTitle: "弹出键盘",
@@ -609,7 +622,9 @@ const zh = {
             touchActiveLabel: "触摸手柄: 开",
             touchInactiveLabel: "触摸手柄: 关",
             physicalHiddenForTouch: "触摸手柄激活时，物理手柄显示将被隐藏。",
-            noActivityMobileOrEnableTouch: "没有物理手柄。请启用触摸手柄或连接控制器。"
+            noActivityMobileOrEnableTouch: "没有物理手柄。请启用触摸手柄或连接控制器。",
+            gamepadTitle: "手柄 {index}",
+            loadingGamepad: "正在加载手柄 {index}..."
         },
         apps: { 
           title: "应用程序",
@@ -704,6 +719,7 @@ const hi = {
     closeDashboardTitle: "डैशबोर्ड बंद करें",
     fullscreenTitle: "फुलस्क्रीन दर्ज करें",
     gamingModeTitle: "गेमिंग मोड",
+    gamingModeHint: "पॉइंटर और कीबोर्ड लॉक के साथ फुलस्क्रीन",
     trackpadModeTitle: "ट्रैकपैड मोड",
     streamingModeTitle: "स्ट्रीमिंग मोड",
     buttons: {
@@ -713,6 +729,8 @@ const hi = {
         audioStreamDisableTitle: "ऑडियो स्ट्रीम अक्षम करें",
         microphoneEnableTitle: "माइक्रोफ़ोन सक्षम करें",
         microphoneDisableTitle: "माइक्रोफ़ोन अक्षम करें",
+        webcamEnableTitle: "वेबकैम सक्षम करें",
+        webcamDisableTitle: "वेबकैम अक्षम करें",
         gamepadEnableTitle: "गेमपैड इनपुट सक्षम करें",
         gamepadDisableTitle: "गेमपैड इनपुट अक्षम करें",
         virtualKeyboardButtonTitle: "कीबोर्ड दिखाएँ",
@@ -836,7 +854,9 @@ const hi = {
             touchActiveLabel: "टच गेमपैड: चालू",
             touchInactiveLabel: "टच गेमपैड: बंद",
             physicalHiddenForTouch: "टच गेमपैड सक्रिय होने पर भौतिक गेमपैड डिस्प्ले छिपा रहता है।",
-            noActivityMobileOrEnableTouch: "कोई भौतिक गेमपैड नहीं। टच गेमपैड सक्षम करें या नियंत्रक कनेक्ट करें।"
+            noActivityMobileOrEnableTouch: "कोई भौतिक गेमपैड नहीं। टच गेमपैड सक्षम करें या नियंत्रक कनेक्ट करें।",
+            gamepadTitle: "गेमपैड {index}",
+            loadingGamepad: "गेमपैड {index} लोड हो रहा है..."
         },
         apps: {
           title: "ऐप्स",
@@ -931,6 +951,7 @@ const pt = {
     closeDashboardTitle: "Fechar o painel",
     fullscreenTitle: "Entrar em Tela Cheia",
     gamingModeTitle: "Modo de Jogo",
+    gamingModeHint: "Tela cheia com o ponteiro e o teclado bloqueados",
     trackpadModeTitle: "Modo Trackpad",
     streamingModeTitle: "Modo Streaming",
     buttons: {
@@ -940,6 +961,8 @@ const pt = {
         audioStreamDisableTitle: "Desativar Stream de Áudio",
         microphoneEnableTitle: "Ativar Microfone",
         microphoneDisableTitle: "Desativar Microfone",
+        webcamEnableTitle: "Ativar Webcam",
+        webcamDisableTitle: "Desativar Webcam",
         gamepadEnableTitle: "Ativar Entrada de Gamepad",
         gamepadDisableTitle: "Desativar Entrada de Gamepad",
         virtualKeyboardButtonTitle: "Exibir Teclado",
@@ -1063,7 +1086,9 @@ const pt = {
             touchActiveLabel: "Gamepad Tátil: LIGADO",
             touchInactiveLabel: "Gamepad Tátil: DESLIGADO",
             physicalHiddenForTouch: "A exibição de gamepads físicos fica oculta enquanto o gamepad tátil está ativo.",
-            noActivityMobileOrEnableTouch: "Sem gamepads físicos. Ative o gamepad tátil ou conecte um controle."
+            noActivityMobileOrEnableTouch: "Sem gamepads físicos. Ative o gamepad tátil ou conecte um controle.",
+            gamepadTitle: "Gamepad {index}",
+            loadingGamepad: "Carregando gamepad {index}..."
         },
         apps: {
           title: "Aplicativos",
@@ -1158,6 +1183,7 @@ const fr = {
     closeDashboardTitle: "Fermer le tableau de bord",
     fullscreenTitle: "Passer en plein écran",
     gamingModeTitle: "Mode Jeu",
+    gamingModeHint: "Plein écran avec le pointeur et le clavier verrouillés",
     trackpadModeTitle: "Mode Trackpad",
     streamingModeTitle: "Mode Streaming",
     buttons: {
@@ -1167,6 +1193,8 @@ const fr = {
         audioStreamDisableTitle: "Désactiver le flux audio",
         microphoneEnableTitle: "Activer le microphone",
         microphoneDisableTitle: "Désactiver le microphone",
+        webcamEnableTitle: "Activer la webcam",
+        webcamDisableTitle: "Désactiver la webcam",
         gamepadEnableTitle: "Activer l'entrée manette",
         gamepadDisableTitle: "Désactiver l'entrée manette",
         virtualKeyboardButtonTitle: "Afficher le Clavier",
@@ -1290,7 +1318,9 @@ const fr = {
             touchActiveLabel: "Manette tactile : ACTIVÉE",
             touchInactiveLabel: "Manette tactile : DÉSACTIVÉE",
             physicalHiddenForTouch: "L'affichage des manettes physiques est masqué lorsque la manette tactile est active.",
-            noActivityMobileOrEnableTouch: "Aucune manette physique. Activez la manette tactile ou connectez un contrôleur."
+            noActivityMobileOrEnableTouch: "Aucune manette physique. Activez la manette tactile ou connectez un contrôleur.",
+            gamepadTitle: "Manette {index}",
+            loadingGamepad: "Chargement de la manette {index}..."
         },
         apps: {
           title: "Applications",
@@ -1386,6 +1416,7 @@ const ru = {
     closeDashboardTitle: "Закрыть панель",
     fullscreenTitle: "Войти в полноэкранный режим",
     gamingModeTitle: "Игровой режим",
+    gamingModeHint: "Полноэкранный режим с блокировкой указателя и клавиатуры",
     trackpadModeTitle: "Режим трекпада",
     streamingModeTitle: "Режим стриминга",
     buttons: {
@@ -1395,6 +1426,8 @@ const ru = {
         audioStreamDisableTitle: "Отключить аудиопоток",
         microphoneEnableTitle: "Включить микрофон",
         microphoneDisableTitle: "Отключить микрофон",
+        webcamEnableTitle: "Включить веб-камеру",
+        webcamDisableTitle: "Отключить веб-камеру",
         gamepadEnableTitle: "Включить ввод с геймпада",
         gamepadDisableTitle: "Отключить ввод с геймпада",
         virtualKeyboardButtonTitle: "Показать Клавиатуру",
@@ -1518,7 +1551,9 @@ const ru = {
             touchActiveLabel: "Сенсорный геймпад: ВКЛ",
             touchInactiveLabel: "Сенсорный геймпад: ВЫКЛ",
             physicalHiddenForTouch: "Отображение физических геймпадов скрыто, пока активен сенсорный геймпад.",
-            noActivityMobileOrEnableTouch: "Физические геймпады отсутствуют. Включите сенсорный геймпад или подключите контроллер."
+            noActivityMobileOrEnableTouch: "Физические геймпады отсутствуют. Включите сенсорный геймпад или подключите контроллер.",
+            gamepadTitle: "Геймпад {index}",
+            loadingGamepad: "Загрузка геймпада {index}..."
         },
         apps: {
           title: "Приложения",
@@ -1613,6 +1648,7 @@ const de = {
     closeDashboardTitle: "Dashboard schließen",
     fullscreenTitle: "Vollbildmodus aktivieren",
     gamingModeTitle: "Gaming-Modus",
+    gamingModeHint: "Vollbild mit gesperrtem Zeiger und gesperrter Tastatur",
     trackpadModeTitle: "Trackpad-Modus",
     streamingModeTitle: "Streaming-Modus",
     buttons: {
@@ -1622,6 +1658,8 @@ const de = {
         audioStreamDisableTitle: "Audiostream deaktivieren",
         microphoneEnableTitle: "Mikrofon aktivieren",
         microphoneDisableTitle: "Mikrofon deaktivieren",
+        webcamEnableTitle: "Webcam aktivieren",
+        webcamDisableTitle: "Webcam deaktivieren",
         gamepadEnableTitle: "Gamepad-Eingabe aktivieren",
         gamepadDisableTitle: "Gamepad-Eingabe deaktivieren",
         virtualKeyboardButtonTitle: "Tastatur einblenden",
@@ -1745,7 +1783,9 @@ const de = {
             touchActiveLabel: "Touch-Gamepad: AN",
             touchInactiveLabel: "Touch-Gamepad: AUS",
             physicalHiddenForTouch: "Die Anzeige physischer Gamepads ist ausgeblendet, während das Touch-Gamepad aktiv ist.",
-            noActivityMobileOrEnableTouch: "Keine physischen Gamepads. Aktivieren Sie das Touch-Gamepad oder schließen Sie einen Controller an."
+            noActivityMobileOrEnableTouch: "Keine physischen Gamepads. Aktivieren Sie das Touch-Gamepad oder schließen Sie einen Controller an.",
+            gamepadTitle: "Gamepad {index}",
+            loadingGamepad: "Gamepad {index} wird geladen..."
         },
         apps: {
           title: "Anwendungen",
@@ -1840,6 +1880,7 @@ const tr = {
     closeDashboardTitle: "Paneli kapat",
     fullscreenTitle: "Tam Ekrana Gir",
     gamingModeTitle: "Oyun Modu",
+    gamingModeHint: "İşaretçi ve klavye kilitliyken tam ekran",
     trackpadModeTitle: "Dokunmatik Yüzey Modu",
     streamingModeTitle: "Yayın Modu",
     buttons: {
@@ -1849,6 +1890,8 @@ const tr = {
         audioStreamDisableTitle: "Ses Akışını Devre Dışı Bırak",
         microphoneEnableTitle: "Mikrofonu Etkinleştir",
         microphoneDisableTitle: "Mikrofonu Devre Dışı Bırak",
+        webcamEnableTitle: "Web Kamerasını Etkinleştir",
+        webcamDisableTitle: "Web Kamerasını Devre Dışı Bırak",
         gamepadEnableTitle: "Oyun Kumandası Girişini Etkinleştir",
         gamepadDisableTitle: "Oyun Kumandası Girişini Devre Dışı Bırak",
         virtualKeyboardButtonTitle: "Klavyeyi Göster",
@@ -1972,7 +2015,9 @@ const tr = {
             touchActiveLabel: "Dokunmatik Kumanda: AÇIK",
             touchInactiveLabel: "Dokunmatik Kumanda: KAPALI",
             physicalHiddenForTouch: "Dokunmatik oyun kumandası etkinken fiziksel oyun kumandası ekranı gizlenir.",
-            noActivityMobileOrEnableTouch: "Fiziksel oyun kumandası yok. Dokunmatik oyun kumandasını etkinleştirin veya bir denetleyici bağlayın."
+            noActivityMobileOrEnableTouch: "Fiziksel oyun kumandası yok. Dokunmatik oyun kumandasını etkinleştirin veya bir denetleyici bağlayın.",
+            gamepadTitle: "Oyun kolu {index}",
+            loadingGamepad: "Oyun kolu {index} yükleniyor..."
         },
         apps: {
           title: "Uygulamalar",
@@ -2067,6 +2112,7 @@ const it = {
     closeDashboardTitle: "Chiudi la dashboard",
     fullscreenTitle: "Entra in Schermo Intero",
     gamingModeTitle: "Modalità Gioco",
+    gamingModeHint: "Schermo intero con puntatore e tastiera bloccati",
     trackpadModeTitle: "Modalità Trackpad",
     streamingModeTitle: "Modalità Streaming",
     buttons: {
@@ -2076,6 +2122,8 @@ const it = {
         audioStreamDisableTitle: "Disabilita Stream Audio",
         microphoneEnableTitle: "Abilita Microfono",
         microphoneDisableTitle: "Disabilita Microfono",
+        webcamEnableTitle: "Abilita Webcam",
+        webcamDisableTitle: "Disabilita Webcam",
         gamepadEnableTitle: "Abilita Input Gamepad",
         gamepadDisableTitle: "Disabilita Input Gamepad",
         virtualKeyboardButtonTitle: "Mostra Tastiera",
@@ -2199,7 +2247,9 @@ const it = {
             touchActiveLabel: "Gamepad Touch: ON",
             touchInactiveLabel: "Gamepad Touch: OFF",
             physicalHiddenForTouch: "La visualizzazione dei gamepad fisici è nascosta mentre il gamepad touch è attivo.",
-            noActivityMobileOrEnableTouch: "Nessun gamepad fisico. Abilita il gamepad touch o collega un controller."
+            noActivityMobileOrEnableTouch: "Nessun gamepad fisico. Abilita il gamepad touch o collega un controller.",
+            gamepadTitle: "Gamepad {index}",
+            loadingGamepad: "Caricamento gamepad {index}..."
         },
         apps: {
           title: "Applicazioni",
@@ -2294,6 +2344,7 @@ const nl = {
     closeDashboardTitle: "Dashboard sluiten",
     fullscreenTitle: "Volledig scherm openen",
     gamingModeTitle: "Gaming Modus",
+    gamingModeHint: "Volledig scherm met vergrendelde aanwijzer en toetsenbord",
     trackpadModeTitle: "Trackpad-modus",
     streamingModeTitle: "Streamingmodus",
     buttons: {
@@ -2303,6 +2354,8 @@ const nl = {
         audioStreamDisableTitle: "Audiostream uitschakelen",
         microphoneEnableTitle: "Microfoon inschakelen",
         microphoneDisableTitle: "Microfoon uitschakelen",
+        webcamEnableTitle: "Webcam inschakelen",
+        webcamDisableTitle: "Webcam uitschakelen",
         gamepadEnableTitle: "Gamepad-invoer inschakelen",
         gamepadDisableTitle: "Gamepad-invoer uitschakelen",
         virtualKeyboardButtonTitle: "Toetsenbord Weergeven",
@@ -2426,7 +2479,9 @@ const nl = {
             touchActiveLabel: "Touch Gamepad: AAN",
             touchInactiveLabel: "Touch Gamepad: UIT",
             physicalHiddenForTouch: "Weergave van fysieke gamepads is verborgen terwijl de touch gamepad actief is.",
-            noActivityMobileOrEnableTouch: "Geen fysieke gamepads. Schakel de touch gamepad in of sluit een controller aan."
+            noActivityMobileOrEnableTouch: "Geen fysieke gamepads. Schakel de touch gamepad in of sluit een controller aan.",
+            gamepadTitle: "Gamepad {index}",
+            loadingGamepad: "Gamepad {index} wordt geladen..."
         },
         apps: {
           title: "Applicaties",
@@ -2521,6 +2576,7 @@ const ar = {
     closeDashboardTitle: "إغلاق لوحة التحكم",
     fullscreenTitle: "الدخول في وضع ملء الشاشة",
     gamingModeTitle: "وضع الألعاب",
+    gamingModeHint: "ملء الشاشة مع قفل المؤشر ولوحة المفاتيح",
     trackpadModeTitle: "وضع لوحة اللمس",
     streamingModeTitle: "وضع البث",
     buttons: {
@@ -2530,6 +2586,8 @@ const ar = {
         audioStreamDisableTitle: "تعطيل بث الصوت",
         microphoneEnableTitle: "تمكين الميكروفون",
         microphoneDisableTitle: "تعطيل الميكروفون",
+        webcamEnableTitle: "تمكين كاميرا الويب",
+        webcamDisableTitle: "تعطيل كاميرا الويب",
         gamepadEnableTitle: "تمكين إدخال لوحة الألعاب",
         gamepadDisableTitle: "تعطيل إدخال لوحة الألعاب",
         virtualKeyboardButtonTitle: "إظهار لوحة المفاتيح",
@@ -2653,7 +2711,9 @@ const ar = {
             touchActiveLabel: "لوحة ألعاب اللمس: تشغيل",
             touchInactiveLabel: "لوحة ألعاب اللمس: إيقاف",
             physicalHiddenForTouch: "يتم إخفاء عرض لوحة الألعاب الفعلية أثناء تنشيط لوحة ألعاب اللمس.",
-            noActivityMobileOrEnableTouch: "لا توجد لوحات ألعاب فعلية. قم بتمكين لوحة ألعاب اللمس أو قم بتوصيل وحدة تحكم."
+            noActivityMobileOrEnableTouch: "لا توجد لوحات ألعاب فعلية. قم بتمكين لوحة ألعاب اللمس أو قم بتوصيل وحدة تحكم.",
+            gamepadTitle: "ذراع التحكم {index}",
+            loadingGamepad: "جارٍ تحميل ذراع التحكم {index}..."
         },
         apps: {
           title: "التطبيقات",
@@ -2748,6 +2808,7 @@ const ko = {
     closeDashboardTitle: "대시보드 닫기",
     fullscreenTitle: "전체 화면 시작",
     gamingModeTitle: "게임 모드",
+    gamingModeHint: "포인터와 키보드를 고정한 전체 화면",
     trackpadModeTitle: "트랙패드 모드",
     streamingModeTitle: "스트리밍 모드",
     buttons: {
@@ -2757,6 +2818,8 @@ const ko = {
         audioStreamDisableTitle: "오디오 스트림 비활성화",
         microphoneEnableTitle: "마이크 활성화",
         microphoneDisableTitle: "마이크 비활성화",
+        webcamEnableTitle: "웹캠 활성화",
+        webcamDisableTitle: "웹캠 비활성화",
         gamepadEnableTitle: "게임패드 입력 활성화",
         gamepadDisableTitle: "게임패드 입력 비활성화",
         virtualKeyboardButtonTitle: "키보드 표시",
@@ -2880,7 +2943,9 @@ const ko = {
             touchActiveLabel: "터치 게임패드: 켜짐",
             touchInactiveLabel: "터치 게임패드: 꺼짐",
             physicalHiddenForTouch: "터치 게임패드가 활성화되어 있는 동안에는 물리적 게임패드 표시가 숨겨집니다.",
-            noActivityMobileOrEnableTouch: "물리적 게임패드가 없습니다. 터치 게임패드를 활성화하거나 컨트롤러를 연결하십시오."
+            noActivityMobileOrEnableTouch: "물리적 게임패드가 없습니다. 터치 게임패드를 활성화하거나 컨트롤러를 연결하십시오.",
+            gamepadTitle: "게임패드 {index}",
+            loadingGamepad: "게임패드 {index} 불러오는 중..."
         },
         apps: {
           title: "앱",
@@ -2975,6 +3040,7 @@ const ja = {
     closeDashboardTitle: "ダッシュボードを閉じる",
     fullscreenTitle: "フルスクリーンに入る",
     gamingModeTitle: "ゲームモード",
+    gamingModeHint: "ポインターとキーボードをロックした全画面",
     trackpadModeTitle: "トラックパッドモード",
     streamingModeTitle: "ストリーミングモード",
     buttons: {
@@ -2984,6 +3050,8 @@ const ja = {
         audioStreamDisableTitle: "オーディオストリームを無効にする",
         microphoneEnableTitle: "マイクを有効にする",
         microphoneDisableTitle: "マイクを無効にする",
+        webcamEnableTitle: "ウェブカメラを有効にする",
+        webcamDisableTitle: "ウェブカメラを無効にする",
         gamepadEnableTitle: "ゲームパッド入力を有効にする",
         gamepadDisableTitle: "ゲームパッド入力を無効にする",
         virtualKeyboardButtonTitle: "キーボードを表示",
@@ -3107,7 +3175,9 @@ const ja = {
             touchActiveLabel: "タッチゲームパッド: オン",
             touchInactiveLabel: "タッチゲームパッド: オフ",
             physicalHiddenForTouch: "タッチゲームパッドがアクティブな間、物理ゲームパッドの表示は非表示になります。",
-            noActivityMobileOrEnableTouch: "物理ゲームパッドがありません。タッチゲームパッドを有効にするか、コントローラーを接続してください。"
+            noActivityMobileOrEnableTouch: "物理ゲームパッドがありません。タッチゲームパッドを有効にするか、コントローラーを接続してください。",
+            gamepadTitle: "ゲームパッド {index}",
+            loadingGamepad: "ゲームパッド {index} を読み込み中..."
         },
         apps: {
           title: "アプリ",
@@ -3202,6 +3272,7 @@ const vi = {
     closeDashboardTitle: "Đóng bảng điều khiển",
     fullscreenTitle: "Vào Toàn màn hình",
     gamingModeTitle: "Chế độ Chơi game",
+    gamingModeHint: "Toàn màn hình với con trỏ và bàn phím bị khóa",
     trackpadModeTitle: "Chế độ Bàn di chuột",
     streamingModeTitle: "Chế độ Truyền phát",
     buttons: {
@@ -3211,6 +3282,8 @@ const vi = {
         audioStreamDisableTitle: "Tắt Luồng Âm thanh",
         microphoneEnableTitle: "Bật Micro",
         microphoneDisableTitle: "Tắt Micro",
+        webcamEnableTitle: "Bật Webcam",
+        webcamDisableTitle: "Tắt Webcam",
         gamepadEnableTitle: "Bật Đầu vào Tay cầm chơi game",
         gamepadDisableTitle: "Tắt Đầu vào Tay cầm chơi game",
         virtualKeyboardButtonTitle: "Hiển thị Bàn phím",
@@ -3334,7 +3407,9 @@ const vi = {
             touchActiveLabel: "Tay cầm cảm ứng: BẬT",
             touchInactiveLabel: "Tay cầm cảm ứng: TẮT",
             physicalHiddenForTouch: "Màn hình tay cầm vật lý bị ẩn khi tay cầm cảm ứng đang hoạt động.",
-            noActivityMobileOrEnableTouch: "Không có tay cầm vật lý. Bật tay cầm cảm ứng hoặc kết nối bộ điều khiển."
+            noActivityMobileOrEnableTouch: "Không có tay cầm vật lý. Bật tay cầm cảm ứng hoặc kết nối bộ điều khiển.",
+            gamepadTitle: "Tay cầm {index}",
+            loadingGamepad: "Đang tải tay cầm {index}..."
         },
         apps: {
           title: "Ứng dụng",
@@ -3429,6 +3504,7 @@ const th = {
     closeDashboardTitle: "ปิดแดชบอร์ด",
     fullscreenTitle: "เข้าสู่โหมดเต็มหน้าจอ",
     gamingModeTitle: "โหมดเกมมิ่ง",
+    gamingModeHint: "เต็มหน้าจอโดยล็อกตัวชี้และแป้นพิมพ์",
     trackpadModeTitle: "โหมดแทร็คแพด",
     streamingModeTitle: "โหมดสตรีมมิ่ง",
     buttons: {
@@ -3438,6 +3514,8 @@ const th = {
         audioStreamDisableTitle: "ปิดใช้งานสตรีมเสียง",
         microphoneEnableTitle: "เปิดใช้งานไมโครโฟน",
         microphoneDisableTitle: "ปิดใช้งานไมโครโฟน",
+        webcamEnableTitle: "เปิดใช้งานเว็บแคม",
+        webcamDisableTitle: "ปิดใช้งานเว็บแคม",
         gamepadEnableTitle: "เปิดใช้งานอินพุตเกมแพด",
         gamepadDisableTitle: "ปิดใช้งานอินพุตเกมแพด",
         virtualKeyboardButtonTitle: "แสดงแป้นพิมพ์",
@@ -3561,7 +3639,9 @@ const th = {
             touchActiveLabel: "ทัชเกมแพด: เปิด",
             touchInactiveLabel: "ทัชเกมแพด: ปิด",
             physicalHiddenForTouch: "การแสดงผลเกมแพดจริงจะถูกซ่อนขณะที่ทัชเกมแพดทำงานอยู่",
-            noActivityMobileOrEnableTouch: "ไม่มีเกมแพดจริง เปิดใช้งานทัชเกมแพดหรือเชื่อมต่อคอนโทรลเลอร์"
+            noActivityMobileOrEnableTouch: "ไม่มีเกมแพดจริง เปิดใช้งานทัชเกมแพดหรือเชื่อมต่อคอนโทรลเลอร์",
+            gamepadTitle: "เกมแพด {index}",
+            loadingGamepad: "กำลังโหลดเกมแพด {index}..."
         },
         apps: {
           title: "แอป",
@@ -3656,6 +3736,7 @@ const fil = {
     closeDashboardTitle: "Isara ang dashboard",
     fullscreenTitle: "Pumasok sa Fullscreen",
     gamingModeTitle: "Modo ng Paglalaro",
+    gamingModeHint: "Fullscreen na naka-lock ang pointer at keyboard",
     trackpadModeTitle: "Modo ng Trackpad",
     streamingModeTitle: "Modo ng Streaming",
     buttons: {
@@ -3665,6 +3746,8 @@ const fil = {
         audioStreamDisableTitle: "Huwag paganahin ang Audio Stream",
         microphoneEnableTitle: "Paganahin ang Mikropono",
         microphoneDisableTitle: "Huwag paganahin ang Mikropono",
+        webcamEnableTitle: "Paganahin ang Webcam",
+        webcamDisableTitle: "Huwag paganahin ang Webcam",
         gamepadEnableTitle: "Paganahin ang Gamepad Input",
         gamepadDisableTitle: "Huwag paganahin ang Gamepad Input",
         virtualKeyboardButtonTitle: "Ipakita ang Keyboard",
@@ -3788,7 +3871,9 @@ const fil = {
             touchActiveLabel: "Touch na Gamepad: ON",
             touchInactiveLabel: "Touch na Gamepad: OFF",
             physicalHiddenForTouch: "Nakatago ang display ng pisikal na gamepad habang aktibo ang touch gamepad.",
-            noActivityMobileOrEnableTouch: "Walang pisikal na gamepad. Paganahin ang touch gamepad o kumonekta ng controller."
+            noActivityMobileOrEnableTouch: "Walang pisikal na gamepad. Paganahin ang touch gamepad o kumonekta ng controller.",
+            gamepadTitle: "Gamepad {index}",
+            loadingGamepad: "Nilo-load ang gamepad {index}..."
         },
         apps: {
           title: "Mga App",
@@ -3883,6 +3968,7 @@ const da = {
     closeDashboardTitle: "Luk dashboardet",
     fullscreenTitle: "Start Fuldskærm",
     gamingModeTitle: "Spiltilstand",
+    gamingModeHint: "Fuldskærm med markør og tastatur låst",
     trackpadModeTitle: "Trackpad-tilstand",
     streamingModeTitle: "Streaming-tilstand",
     buttons: {
@@ -3892,6 +3978,8 @@ const da = {
         audioStreamDisableTitle: "Deaktiver lydstream",
         microphoneEnableTitle: "Aktiver mikrofon",
         microphoneDisableTitle: "Deaktiver mikrofon",
+        webcamEnableTitle: "Aktiver webcam",
+        webcamDisableTitle: "Deaktiver webcam",
         gamepadEnableTitle: "Aktiver Gamepad-input",
         gamepadDisableTitle: "Deaktiver Gamepad-input",
         virtualKeyboardButtonTitle: "Vis tastatur",
@@ -4015,7 +4103,9 @@ const da = {
             touchActiveLabel: "Touch Gamepad: TIL",
             touchInactiveLabel: "Touch Gamepad: FRA",
             physicalHiddenForTouch: "Visning af fysisk gamepad er skjult, mens touch gamepad er aktiv.",
-            noActivityMobileOrEnableTouch: "Ingen fysiske gamepads. Aktiver touch gamepad eller tilslut en controller."
+            noActivityMobileOrEnableTouch: "Ingen fysiske gamepads. Aktiver touch gamepad eller tilslut en controller.",
+            gamepadTitle: "Gamepad {index}",
+            loadingGamepad: "Indlæser gamepad {index}..."
         },
         apps: {
           title: "Apps",

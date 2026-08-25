@@ -27,15 +27,12 @@ def rect(x: int, y: int, w: int, h: int) -> dict:
 def main() -> bool:
     res = H.Results("realized-layout")
 
-    # A root that covers the layout changes nothing.
     layouts = {"primary": rect(0, 0, 1280, 720), "d2": rect(1280, 0, 800, 600)}
     fit = reconcile_realized_layout(layouts, 2080, 720)
     res.check("a root that fits leaves the layout alone",
               fit == ([], False, []) and layouts["d2"] == rect(1280, 0, 800, 600),
               "{} {}".format(fit, layouts))
 
-    # A display whose origin is inside the root but whose extent runs past it
-    # keeps its place at a smaller size.
     layouts = {"primary": rect(0, 0, 1280, 720), "d2": rect(1280, 0, 1280, 720)}
     fit = reconcile_realized_layout(layouts, 1920, 720)
     res.check("an overhanging display is clamped, not dropped",
@@ -49,7 +46,6 @@ def main() -> bool:
     res.check("a clamped size stays even",
               layouts["d2"]["w"] == 684 and layouts["d2"]["w"] % 2 == 0, layouts["d2"])
 
-    # An origin at or past the edge leaves nothing to show.
     layouts = {"primary": rect(0, 0, 1280, 720), "d2": rect(1280, 0, 1280, 720)}
     fit = reconcile_realized_layout(layouts, 1280, 720)
     res.check("a display starting at the edge is dropped",
@@ -85,14 +81,12 @@ def main() -> bool:
               fit.dropped == [] and not fit.reanchored
               and layouts["primary"] == rect(0, 0, 1024, 768), "{} {}".format(fit, layouts))
 
-    # A primary at an offset that still fits is left where it is.
     layouts = {"primary": rect(800, 0, 1280, 720), "d2": rect(0, 0, 800, 720)}
     fit = reconcile_realized_layout(layouts, 2080, 720)
     res.check("an offset primary that fits is not disturbed",
               not fit.reanchored and layouts["primary"]["x"] == 800,
               "{} {}".format(fit, layouts))
 
-    # Degenerate roots must not produce zero-sized or negative rectangles.
     layouts = {"primary": rect(0, 0, 1280, 720)}
     reconcile_realized_layout(layouts, 1, 1)
     res.check("a clamp never yields a rectangle an encoder cannot take",

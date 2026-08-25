@@ -93,7 +93,6 @@ def make_settings(encoder: str = "h264enc", w: int = 1024, h: int = 640, **kw):
     cs.jpeg_quality = 90
     cs.output_mode = 1
     cs.video_fullframe = True
-    cs.use_openh264 = False
     for k, v in kw.items():
         setattr(cs, k, v)
     return cs
@@ -192,7 +191,6 @@ def main() -> Results:
                    env={"DISPLAY": TEST_DISPLAY, "PATH": os.environ.get("PATH", "")},
                    capture_output=True)
 
-    # ============================= Phase A: X11 Computer Use matrix =====
     print("\n=== Phase A: X11 Computer Use ===", flush=True)
     pixelflux.start_computer_use(f"127.0.0.1:{CU_PORT}")
     time.sleep(1.0)
@@ -212,7 +210,6 @@ def main() -> Results:
     got = png_size(base64.b64decode(out.get("data", ""))) if out.get("data") else None
     res.check("cu: screenshot PNG dims match root", got == (RW, RH), got)
 
-    # coordinate clamping
     cu("cu: mouse_move clamps off-screen",
        {"action": "mouse_move", "coordinate": [90_000, 90_000]},
        lambda s, o: o.get("result") == "ok")
@@ -242,7 +239,6 @@ def main() -> Results:
        {"action": "left_mouse_up"},
        lambda s, o: o.get("result") == "ok")
 
-    # key specs
     for spec in ["tab", "Return", "space", "Escape", "BackSpace", "minus",
                  "F5", "ctrl+a", "shift", "kp_enter", "a"]:
         cu(f"cu: key {spec!r}",
@@ -256,7 +252,6 @@ def main() -> Results:
        {"action": "hold_key", "text": "a"},
        lambda s, o: "error" in o or s not in (200,))
 
-    # scroll directions + modifier + coordinate
     for d_ in ["up", "down", "left", "right"]:
         cu(f"cu: scroll {d_}",
            {"action": "scroll", "scroll_direction": d_, "scroll_amount": 3,
@@ -266,7 +261,6 @@ def main() -> Results:
        {"action": "scroll", "scroll_direction": "diagonal", "scroll_amount": 1},
        lambda s, o: "error" in o)
 
-    # type: shift-levels, punctuation, unicode
     cu("cu: type basic text",
        {"action": "type", "text": "Hello, World! 123"},
        lambda s, o: o.get("result") == "ok")
@@ -278,7 +272,6 @@ def main() -> Results:
        {"action": "wait", "duration": 0.2},
        lambda s, o: o.get("result") == "ok")
 
-    # zoom: crop + clamp
     st, out = cu_json({"action": "zoom", "region": [10.0, 10.0, 100.0, 80.0]})
     z = png_size(base64.b64decode(out.get("data", ""))) if out.get("data") else None
     res.check("cu: zoom crop dims", z == (90, 70), z)
@@ -298,12 +291,10 @@ def main() -> Results:
     res.check("cu: cursor_position text format",
               re.fullmatch(r"X=\d+,Y=\d+", out.get("text", "")), out)
 
-    # 413 body cap
     big = "x" * (4 * 1024 * 1024 + 1024)
     st, out = curl(f"{CU_BASE}/computer-use", big)
     res.check("cu: oversized body rejected (413)", st == 413, (st, out[:40]))
 
-    # real keyboard landing via xev
     try:
         xev_log = os.path.join(H.WORKDIR, "cap2-xev.log")
         xev = H.spawn(["xev", "-event", "keyboard"], stdout=open(xev_log, "w"),
@@ -338,7 +329,6 @@ def main() -> Results:
     except Exception as e:
         res.check("cu: typed keys land (xev)", False, repr(e)[:120])
 
-    # ============================= Phase B: MP4 recorder (X11) ===========
     print("\n=== Phase B: MP4 recorder X11 ===", flush=True)
     rec1 = os.path.join(H.WORKDIR, "cap2-rec1.mp4")
     os.path.exists(rec1) and os.unlink(rec1)
@@ -381,7 +371,6 @@ def main() -> Results:
     except Exception as e:
         res.check("rec: stop with none active errors", True, str(e)[:60])
 
-    # custom-settings recording (explicit 640x400) then restart
     rec3 = os.path.join(H.WORKDIR, "cap2-rec3.mp4")
     os.path.exists(rec3) and os.unlink(rec3)
     rw, rh = x_root_size()
@@ -418,7 +407,6 @@ def main() -> Results:
     except Exception as e:
         res.check("rec: JPEG rejection harness", False, repr(e)[:80])
 
-    # ============================= Phase C: pixelflux fields =============
     print("\n=== Phase C: untested CaptureSettings fields ===", flush=True)
     try:
         cap = pixelflux.ScreenCapture()
@@ -480,7 +468,6 @@ def main() -> Results:
     t.start(); t.join(timeout=5)
     res.check("module: _stop_all_captures (idempotent, no live capture)", not t.is_alive(), "")
 
-    # ============================= Phase D: Wayland + CU-on-wayland ======
     print("\n=== Phase D: Wayland backend extras ===", flush=True)
     wc = pixelflux.ScreenCapture()
     wcs = make_settings(w=800, h=480)
@@ -490,7 +477,6 @@ def main() -> Results:
         time.sleep(3.0)
         res.check("wl: capture up", wc.is_capturing, "")
 
-        # clipboard write/read round trip via the app compositor dcclient
         try:
             wc.clipboard_write_app("wayland-1", [("text/plain;charset=utf-8", b"cap2-wl-probe")])
             time.sleep(0.4)
@@ -501,8 +487,9 @@ def main() -> Results:
         except Exception as e:
             res.check("wl: clipboard write_app round trip", False, repr(e)[:140])
 
-        # watch fires with the selection current at registration
         try:
+            # Set before watching: the watch must fire with the selection
+            # current at registration, not only on the next change.
             wc.set_clipboard("text/plain;charset=utf-8", b"watch-probe")
             time.sleep(0.3)
             seen = []
@@ -515,7 +502,6 @@ def main() -> Results:
         except Exception as e:
             res.check("wl: clipboard_watch_app", False, repr(e)[:140])
 
-        # callbacks register cleanly on the running wayland backend
         cb_ev = []
         try:
             wc.set_clipboard_callback(lambda mime, data: cb_ev.append((mime, len(data or b""))))
@@ -528,7 +514,6 @@ def main() -> Results:
         except Exception as e:
             res.check("wl: set_cursor_callback", False, repr(e)[:110])
 
-        # move_window_to_output: graceful on unknown ids; real move when a window exists
         try:
             mb = wc.move_window_to_output(0, 0)
             if list(wc.list_windows()):
@@ -540,7 +525,6 @@ def main() -> Results:
         except Exception as e:
             res.check("wl: move_window_to_output", False, repr(e)[:120])
 
-        # set_app_wayland_display + CU-on-wayland
         try:
             wc.set_app_wayland_display("wayland-1")
             st, out = cu_json({"action": "type", "text": "wayland-type"})
@@ -570,7 +554,6 @@ def main() -> Results:
     except Exception as e:
         res.check("wl: phase D", False, repr(e)[:220])
 
-    # recorder own-capture on wayland
     recw = os.path.join(H.WORKDIR, "cap2-rec-wl.mp4")
     os.path.exists(recw) and os.unlink(recw)
     try:
@@ -597,12 +580,10 @@ def main() -> Results:
     except Exception as e:
         res.check("rec(wl): wayland recorder", False, repr(e)[:200])
 
-    # ============================= Phase E: pcmflux extras ===============
     print("\n=== Phase E: pcmflux extras ===", flush=True)
     H.pulse_setup()
     cs2out = H.pulse_null_sink("cs2out", rate=48000, channels=2)
 
-    # silence gate: silent monitor -> few frames; tone -> frames
     tone = None
     try:
         frames_silent = []
@@ -639,7 +620,6 @@ def main() -> Results:
         tone and tone.terminate()
         res.check("pcm: silence gate", False, repr(e)[:160])
 
-    # CBR + frame durations + half-rate + mono + debug + latency
     for label, fd, sr, ch, vbr in [("10ms/48k", 10.0, 48000, 2, False),
                                    ("60ms/24k mono", 60.0, 24000, 1, True),
                                    ("20ms/48k mono", 20.0, 48000, 1, False)]:
@@ -669,11 +649,9 @@ def main() -> Results:
         except Exception as e:
             res.check(f"pcm: {label}", False, repr(e)[:130])
 
-    # A source that does not exist is reported and retried rather than raised:
-    # the open happens inside the capture loop, so a sink that appears late
-    # recovers instead of taking the session down. What must not happen is
-    # capturing something else in its place, which is silent and undetectable
-    # from the stream.
+    # A missing source is retried inside the capture loop rather than raised, so
+    # a sink that appears late recovers; what must never happen is capturing
+    # something else in its place, which the stream cannot reveal.
     try:
         bad = pcmflux.AudioCaptureSettings()
         bad.device_name = "definitely-not-a-sink.monitor"
@@ -690,7 +668,6 @@ def main() -> Results:
         res.check("pcm: a missing capture device yields no audio", True,
                   f"raised instead: {str(e)[:60]}")
 
-    # RED round trip + playback small buffer + debug
     try:
         ps = pcmflux.AudioCaptureSettings()
         ps.device_name = "cs2out.monitor"
@@ -726,10 +703,9 @@ def main() -> Results:
         res.check("pcm: RED round trip", False, repr(e)[:150])
 
     try:
-        # PulseAudio falls back to the default sink and renegotiates the spec when a
-        # named playback device does not exist (server behavior, not a pcmflux defect):
-        # assert the deterministic contract instead — write/write_red raise once the
-        # playback worker is not running.
+        # PulseAudio silently falls back to the default sink for a missing playback
+        # device, so the deterministic contract is asserted instead: write/write_red
+        # raise while the playback worker is not running.
         pbx = pcmflux.AudioPlayback()
         try:
             pbx.write(b"\x00" * 64)

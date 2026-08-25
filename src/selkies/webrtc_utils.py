@@ -51,8 +51,6 @@ from prometheus_client import Gauge, Histogram, Info
 from . import gpu_stats
 
 
-# ---------------- RTC ICE config utilities ----------------
-
 logger_rtcice = logging.getLogger("rtcice")
 logger_rtcice.setLevel(logging.INFO)
 
@@ -141,11 +139,13 @@ async def _dispatch_rtc_callback(callback: Callable[[List[str], List[str], bytes
 
 
 def _log_asyncio_task_error(task: asyncio.Task) -> None:
-    """Surfaces exceptions from fire-and-forget callback tasks in the log."""
+    """Surfaces exceptions from fire-and-forget callback tasks in the log.
+
+    Cancellation (pending callbacks at shutdown) is expected and silent.
+    """
     try:
         task.result()
     except asyncio.CancelledError:
-        # Expected when pending callback tasks are cancelled at shutdown.
         pass
     except Exception as e:
         logger_rtcice.warning(f"Error in on_rtc_config callback task: {e}")
@@ -179,8 +179,9 @@ def generate_rtc_config(
         turn_host: TURN server hostname or IP.
         turn_port: TURN server port.
         shared_secret: The secret shared with the TURN server for HMAC auth.
-        user: Base username for the credential; colons are replaced and an
-            empty/None value falls back to a generic default.
+        user: Base username for the credential. Colons are replaced because
+            they delimit the expiry field, and an empty/None value falls back
+            to `selkies` so the username is never a bare `expiry:`.
         protocol: TURN transport, `udp` or `tcp`.
         turn_tls: Emit a `turns:` URL instead of `turn:`.
         stun_host: Optional additional STUN host to list first.
@@ -189,9 +190,6 @@ def generate_rtc_config(
     Returns:
         Pretty-printed RTC config JSON.
     """
-    # A generic default keeps the credential username non-empty
-    # ('<expiry>:selkies' rather than a bare '<expiry>:') when none is
-    # supplied; colons are stripped because they delimit the expiry field.
     user = (user or "").strip() or "selkies"
     user = user.replace(":", "-")
 
@@ -402,7 +400,9 @@ class CloudflareRTCMonitor:
     """Refreshes Cloudflare TURN credentials before their TTL (default 24h) expires.
 
     Delivers each refreshed config through the `on_rtc_config` callback, which
-    the consumer must assign before `start()`.
+    the consumer must assign before `start()`. `period` defaults to half the
+    TTL (at least a minute) so a refresh lands well within the credential
+    lifetime.
     """
 
     def __init__(
@@ -416,7 +416,6 @@ class CloudflareRTCMonitor:
         self.turn_token_id = turn_token_id
         self.api_token = api_token
         self.ttl = ttl
-        # Refresh well within the credential lifetime (default: half the TTL).
         self.period = period if period is not None else max(60, ttl // 2)
         self.enabled = enabled
         self.stop_event = asyncio.Event()
@@ -432,10 +431,13 @@ class CloudflareRTCMonitor:
         logger_rtcice.info("Cloudflare TURN RTC monitor started")
 
     async def _monitor_loop(self) -> None:
-        """Refreshes and dispatches Cloudflare credentials until stopped."""
+        """Refreshes and dispatches Cloudflare credentials until stopped.
+
+        Each iteration waits a period before fetching: the initial credentials
+        were already fetched at startup by `get_rtc_configuration`.
+        """
         try:
             while not self.stop_event.is_set():
-                # Wait first: the initial fetch already happened at startup.
                 try:
                     await asyncio.wait_for(self.stop_event.wait(), timeout=self.period)
                     break
@@ -468,7 +470,9 @@ class RTCConfigFileMonitor(FileSystemEventHandler):
     Runs a watchdog observer thread on the file's directory; parsed configs
     are marshalled back onto the event loop captured at construction time and
     delivered through the `on_rtc_config` callback. Must therefore be
-    constructed on a running event loop.
+    constructed on a running event loop. Reloads on `on_closed` (an
+    in-place write) and on `on_moved`/`on_created`, which is how the
+    write-temp-then-rename pattern surfaces (never as a close).
     """
 
     def __init__(self, rtc_file: str, enabled: bool = True):
@@ -533,9 +537,8 @@ class RTCConfigFileMonitor(FileSystemEventHandler):
         except Exception as e:
             logger_rtcice.warning(f"Could not read or parse RTC JSON file: {self.rtc_file}: {e}")
 
-    # FileSystemEventHandler overrides: catch in-place writes (on_closed) and the
-    # write-temp-then-rename pattern (surfaces as move/create, not close).
     def on_closed(self, event: Any) -> None:
+        """Reloads after an in-place write of the config file."""
         if not isinstance(event, FileClosedEvent):
             return
         if os.path.abspath(event.src_path) != self.rtc_file:
@@ -543,11 +546,13 @@ class RTCConfigFileMonitor(FileSystemEventHandler):
         self._reload_config(event.src_path)
 
     def on_moved(self, event: Any) -> None:
+        """Reloads when a temp file is renamed onto the config file."""
         dest = getattr(event, "dest_path", None)
         if dest and os.path.abspath(dest) == self.rtc_file:
             self._reload_config(dest)
 
     def on_created(self, event: Any) -> None:
+        """Reloads when the config file is created anew."""
         if os.path.abspath(event.src_path) == self.rtc_file:
             self._reload_config(event.src_path)
 
@@ -709,12 +714,10 @@ def parse_rtc_config(data: Union[str, bytes]) -> Tuple[List[str], List[str], byt
             normalized_config = True
             continue
 
-        # Convert 'uris' to 'urls' for compatibility with RTCPeerConnection spec
         if "uris" in ice_server and "urls" not in ice_server:
             ice_server["urls"] = ice_server.pop("uris")
             normalized_config = True
 
-        # Convert TURN REST-style password field to RTCPeerConnection-style credential field
         if "password" in ice_server and "credential" not in ice_server:
             ice_server["credential"] = ice_server.pop("password")
             normalized_config = True
@@ -1085,8 +1088,6 @@ async def get_rtc_configuration(args: Any) -> Tuple[List[str], List[str], bytes,
     return *parse_rtc_config(DEFAULT_RTC_CONFIG), monitoring_utilities_used
 
 
-# ---------------- Metrics utilities ----------------
-
 logger_metrics = logging.getLogger("metrics")
 logger_metrics.setLevel(logging.INFO)
 
@@ -1106,6 +1107,26 @@ class Metrics:
     client-reported stat dictionaries are also appended to per-connection CSV
     files whose column schema follows the (untrusted) client's field set with
     bounded width and row count.
+
+    Attributes:
+        webrtc_pacer_pace_bps: Pacer gauges are per display and exist only
+            while a pacer is attached; the event counters are cumulative
+            since transport start.
+        prev_stats_video_header_names: Header names of the video CSV (and
+            `prev_stats_audio_header_names` for audio), tracked alongside the
+            lengths so a same-count field swap still triggers a remap.
+        stats_video_row_count: On-disk data rows (excluding the header) of the
+            video CSV (`stats_audio_row_count` for audio), so the append path
+            bounds file growth without re-reading the file each write.
+        _csv_lock: Serializes CSV writes, which run in worker threads, so
+            concurrent stat messages cannot interleave rows or race the
+            `prev_stats_*` state.
+        _csv_executor: Single-worker executor for CSV writes, so `unregister`
+            can drain them with `shutdown(wait=True)` (the shared default
+            executor must not be shut down) and rows keep their order.
+        _csv_tasks: Strong references to in-flight write futures so they are
+            not collected before completion and their exceptions stay
+            observed.
     """
 
     def __init__(self, using_webrtc_csv: bool = False):
@@ -1116,8 +1137,6 @@ class Metrics:
         self.gpu_utilization = Gauge('gpu_utilization', 'Utilization percentage reported by GPU')
         self.latency = Gauge('latency', 'Latency observed by client')
         self.webrtc_statistics = Info('webrtc_statistics', 'WebRTC Statistics from the client')
-        # Pacer observability (per display; series exist only while a pacer
-        # is attached). Counters are cumulative since transport start.
         self.webrtc_pacer_pace_bps = Gauge(
             'webrtc_pacer_pace_bps', 'Current pacer rate in bits per second', ['display'])
         self.webrtc_pacer_queue_bytes = Gauge(
@@ -1130,22 +1149,12 @@ class Metrics:
         self.stats_audio_file_path: Optional[str] = None
         self.prev_stats_video_header_len: Optional[int]  = None
         self.prev_stats_audio_header_len: Optional[int]  = None
-        # Track header names so a same-count field swap still triggers a remap.
         self.prev_stats_video_header_names: Optional[Tuple[str, ...]] = None
         self.prev_stats_audio_header_names: Optional[Tuple[str, ...]] = None
-        # On-disk data-row counts (excluding header), tracked so the steady-state
-        # append path can bound file growth without re-reading the file each write.
         self.stats_video_row_count: int = 0
         self.stats_audio_row_count: int = 0
-        # Serializes CSV writes (which run in worker threads) so concurrent stat
-        # messages cannot interleave rows or race the shared prev_stats state.
         self._csv_lock = threading.Lock()
-        # Dedicated single-worker executor for CSV writes so unregister() can drain
-        # them deterministically via shutdown(wait=True) (the shared default
-        # executor must not be shut down). Single worker also preserves row order.
         self._csv_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="webrtc-csv")
-        # Hold strong references to in-flight write futures so they are not garbage
-        # collected before completion (and their exceptions stay observed).
         self._csv_tasks: set = set()
 
     def set_fps(self, fps: float) -> None:
@@ -1173,22 +1182,21 @@ class Metrics:
         self.latency.set(latency_ms)
 
     def unregister(self) -> None:
-        """Unregisters all metrics from the global registry and drains CSV writers."""
-        # Drain CSV writers deterministically. The writes run on a dedicated
-        # single-worker executor (self._csv_executor); cancel any not-yet-started
-        # futures, then shut the executor down with wait=True so no writer thread
-        # is still running (or about to acquire the lock) after teardown. This
-        # closes the window the lock-drain alone leaves open (a worker that
-        # acquires the lock right after we release it).
+        """Unregisters all metrics from the global registry and drains CSV writers.
+
+        Not-yet-started CSV futures are cancelled and the executor shut down
+        with `wait=True` first, so no writer thread is still running (or about
+        to take the lock) after teardown; draining the lock alone would leave
+        that window open. Every collector built in `__init__` is then released,
+        each independently so an already-released one does not strand the
+        rest: any left behind makes the next `Metrics()` raise
+        DuplicateTimeseries and a mode switch back into metrics-enabled
+        streaming fails to start.
+        """
         for fut in list(self._csv_tasks):
             fut.cancel()
         self._csv_tasks.clear()
         self._csv_executor.shutdown(wait=True)
-        # Every collector built in __init__ must be released here: any one left
-        # behind makes the next Metrics() raise DuplicateTimeseries, so a mode
-        # switch back into metrics-enabled streaming would fail to start. Each
-        # is unregistered independently so an already-released collector does
-        # not strand the rest.
         for collector in (self.fps, self.fps_hist, self.gpu_utilization,
                           self.latency, self.webrtc_statistics,
                           self.webrtc_pacer_pace_bps, self.webrtc_pacer_queue_bytes,
@@ -1201,6 +1209,12 @@ class Metrics:
     async def set_webrtc_stats(self, webrtc_stat_type: str, webrtc_stats: str) -> None:
         """Publishes a client stats report to Prometheus and, optionally, CSV.
 
+        The CSV write is submitted to the dedicated executor rather than
+        `asyncio.to_thread`, whose shared executor cannot be drained, so
+        `unregister` can join it; a write refused by an already shut-down
+        executor (teardown in progress) is dropped. The Prometheus Info
+        update is a cheap dict copy and stays inline.
+
         Args:
             webrtc_stat_type: `_stats_audio` for the audio stream; anything
                 else is treated as video.
@@ -1212,17 +1226,13 @@ class Metrics:
         if self.using_webrtc_csv:
             is_audio = webrtc_stat_type == "_stats_audio"
             csv_path = self.stats_audio_file_path if is_audio else self.stats_video_file_path
-            # Submit to the dedicated executor (not asyncio.to_thread, whose shared
-            # executor can't be drained) so unregister() can join these writers.
             try:
                 fut = self._csv_executor.submit(self.write_webrtc_stats_csv, sanitized_stats, csv_path, is_audio)
             except RuntimeError:
-                # Executor already shut down (teardown in progress): drop the write.
                 fut = None
             if fut is not None:
                 self._csv_tasks.add(fut)
                 fut.add_done_callback(self._csv_tasks.discard)
-        # Cheap inline dict copy; not worth a thread dispatch.
         self.webrtc_statistics.info(sanitized_stats)
 
     def _parse_and_sanitize_stats(self, webrtc_stats: str) -> OrderedDict:
@@ -1232,28 +1242,26 @@ class Metrics:
         """Flattens a list of RTCStats objects into `reportName.fieldName` keys.
 
         The first entry of each stat type gets the bare type as its report
-        name; later same-type entries get a stable dedup suffix. All values
-        are stringified. Entries that are not dicts are skipped and a
-        missing/non-string `type` defaults to `unknown`, since the list comes
-        from the untrusted browser client.
+        name; later same-type entries get a `-id` suffix, or `-n` (the
+        per-type occurrence index) without an id, plus a collision counter.
+        Both stay stable across reorders and inserts, unlike a global list
+        index, which would shift every column name whenever the browser
+        reordered the list and churn the CSV schema (full rewrites, an
+        unbounded union header). Entries are sorted by `(type, id)` first for
+        the same reason: the browser may emit same-type stats (two
+        `inbound-rtp` for distinct SSRCs) in a different order each message,
+        and without a fixed order the bare-named first occurrence could be a
+        different SSRC on each row; `sorted` is stable, so entries sharing a
+        key keep their input order. All values are stringified. Entries that
+        are not dicts are skipped and a missing/non-string `type` defaults to
+        `unknown`, since the list comes from the untrusted browser client.
         """
         obj_type = set()
         sanitized_stats = OrderedDict()
-        # Per-type occurrence counter for a content-stable dedup suffix. A
-        # suffix keyed on a global list index would shift every column name
-        # whenever the stats list reordered/inserted, churning the CSV schema
-        # (full rewrites) and growing the union header unbounded. A per-type
-        # counter (and the entry 'id' when present) keeps a given logical
-        # stat mapped to the same column across messages.
         type_counts: Dict[str, int] = {}
 
         def _identity(entry: Any) -> Tuple[str, str]:
-            # Stable (type, id) sort key. The browser may emit same-type stats
-            # (e.g. two 'inbound-rtp' for distinct SSRCs) in a different order
-            # each message. Without a deterministic order the *first* occurrence
-            # of a type — which gets the bare column name — could be a different
-            # SSRC on each row, so a single column would mix SSRCs. Sorting by
-            # (type, id) pins each (type, id) to the same column every message.
+            """Stable `(type, id)` sort key; non-dict entries sort first."""
             if not isinstance(entry, dict):
                 return ("", "")
             t = entry.get('type')
@@ -1262,22 +1270,16 @@ class Metrics:
             i = i if isinstance(i, str) else ""
             return (t, i)
 
-        # sorted() is stable, so entries sharing a (type, id) keep their relative
-        # input order; entries that are not dicts are skipped in the loop below.
         for entry in sorted(obj_list, key=_identity) if isinstance(obj_list, list) else obj_list:
             if not isinstance(entry, dict):
                 continue
             base_key = entry.get('type')
             if not isinstance(base_key, str):
                 base_key = "unknown"
-            # Per-base-type occurrence index, stable across reorders/inserts.
             occurrence = type_counts.get(base_key, 0)
             type_counts[base_key] = occurrence + 1
             curr_key = base_key
             if curr_key in obj_type:
-                # Prefer the entry's stable 'id'; fall back to the per-type
-                # occurrence index. Both stay stable across reorders/inserts,
-                # unlike a global loop index would.
                 entry_id = entry.get('id')
                 if isinstance(entry_id, str) and entry_id:
                     suffix = entry_id
@@ -1362,18 +1364,16 @@ class Metrics:
 
         dt = datetime.now()
         timestamp = dt.strftime("%d/%B/%Y:%H:%M:%S")
-        # Writes run in worker threads; serialize them.
         with self._csv_lock:
             try:
                 headers = ["timestamp"]
                 headers += obj.keys()
 
-                # Reconnecting clients can send redundant near-empty reports;
-                # discard rows with too few fields to be a real stats sample.
+                # Reconnecting clients send near-empty reports; too few fields to
+                # be a real stats sample.
                 if len(headers) < 15:
                     return
 
-                # Pass raw values to csv.writer; pre-quoting would be double-quoted.
                 values = [timestamp]
                 values.extend(obj.values())
 
@@ -1383,7 +1383,6 @@ class Metrics:
 
                 if prev_len is not None and prev_names != header_names:
                     if prev_names is not None and frozenset(prev_names) == frozenset(header_names):
-                        # Same fields, reordered: remap one row into stored order, no O(N) rewrite.
                         value_by_name = dict(zip(headers, values))
                         remapped = [value_by_name.get(name, "NaN") for name in prev_names]
                         with open(file_path, 'a+', newline='') as stats_file:
@@ -1391,8 +1390,7 @@ class Metrics:
                         self._bump_and_cap_rows(file_path, is_audio)
                         return
 
-                    # Field set changed: rewrite with merged schema (no open handle;
-                    # os.replace() onto an open file fails on Windows).
+                    # Outside any open handle: os.replace() onto an open file fails on Windows.
                     new_len, new_names, new_rows = self.update_webrtc_stats_csv(file_path, headers, values, is_audio)
                     if is_audio:
                         self.prev_stats_audio_header_len = new_len
@@ -1419,8 +1417,6 @@ class Metrics:
                             self.stats_video_row_count = 1
                     else:
                         csv_writer.writerow(values)
-                # Bound the append path so steady-state writes can't grow the
-                # file unbounded. No-op until the cap is exceeded.
                 if prev_len is not None:
                     self._bump_and_cap_rows(file_path, is_audio)
 
@@ -1430,9 +1426,14 @@ class Metrics:
     def update_webrtc_stats_csv(self, file_path: str, headers: List[str], values: List[Any], is_audio: bool = False) -> Tuple[Optional[int], Optional[Tuple[str, ...]], int]:
         """Rewrites the CSV when the set of stat fields changes.
 
-        Aligns the previously stored rows onto the new (union) header layout
-        by field name, filling missing fields with "NaN". Caller must hold
-        `self._csv_lock`.
+        The stored rows are aligned by field name onto the union header (prior
+        order, new fields appended, width capped at `WEBRTC_CSV_MAX_HEADERS`
+        because the names come from the client), gaps filled with "NaN", and
+        only the most recent `WEBRTC_CSV_MAX_RETAINED_ROWS` rows are carried
+        forward. The rewrite goes through a temp file and an atomic replace so
+        an interrupted one cannot truncate the stats; a file deleted since the
+        last write, or holding only a header, is recreated with the current
+        schema. Caller must hold `self._csv_lock`.
 
         Returns:
             A tuple of the new header length, the new header-name tuple, and
@@ -1455,11 +1456,8 @@ class Metrics:
                         else:
                             prev_values.append(row)
             except FileNotFoundError:
-                # File deleted externally since the last write; recreate it
-                # below with the current schema.
                 pass
 
-            # Empty/header-only file: (re)write current schema plus this row.
             if not prev_headers:
                 with open(file_path, 'w', newline='') as stats_file:
                     csv_writer = csv.writer(stats_file)
@@ -1467,8 +1465,6 @@ class Metrics:
                     csv_writer.writerow(values)
                 return len(headers), tuple(headers), 1
 
-            # Union header: prior order then new fields appended; remap all rows by
-            # name, gaps -> "NaN". Width capped (untrusted field names).
             merged_headers = list(prev_headers)
             seen_names = set(prev_headers)
             for name in headers:
@@ -1481,7 +1477,6 @@ class Metrics:
                     merged_headers.append(name)
                     seen_names.add(name)
 
-            # Bound retained history: carry only the most recent rows forward.
             if len(prev_values) > WEBRTC_CSV_MAX_RETAINED_ROWS:
                 prev_values = prev_values[-WEBRTC_CSV_MAX_RETAINED_ROWS:]
 
@@ -1501,8 +1496,6 @@ class Metrics:
             remapped_prev = [remap(row, prev_index) for row in prev_values]
             remapped_new = remap(values, new_index)
 
-            # Rewrite via a temp file + atomic replace so an interrupted rewrite
-            # cannot truncate or corrupt the existing stats.
             tmp_path = file_path + ".tmp"
             with open(tmp_path, 'w', newline='') as stats_file:
                 csv_writer = csv.writer(stats_file)
@@ -1512,22 +1505,23 @@ class Metrics:
             os.replace(tmp_path, file_path)
 
             logger_metrics.debug("WebRTC Statistics file {} rewritten with updated schema".format(file_path))
-            # remapped_prev was already capped above, so the new count is bounded.
             return len(merged_headers), tuple(merged_headers), len(remapped_prev) + 1
         except Exception as e:
             logger_metrics.error("writing WebRTC Statistics to CSV file: " + str(e))
             return prev_len, prev_names, prev_rows
 
     async def initialize_webrtc_csv_file(self, webrtc_stats_dir: str = '/tmp') -> None:
-        """Points CSV capture at fresh timestamped files for a new connection."""
+        """Points CSV capture at fresh timestamped files for a new connection.
+
+        The header state is reset under `_csv_lock` off the loop thread: a CSV
+        rewrite in flight on the executor may hold the lock, so taking it here
+        would stall the event loop, and without it a worker could read a torn
+        `(len, names)` pair and wrongly rewrite.
+        """
         dt = datetime.now()
         timestamp = dt.strftime("%Y-%m-%d:%H:%M:%S")
         self.stats_video_file_path = '{}/selkies-stats-video-{}.csv'.format(webrtc_stats_dir, timestamp)
         self.stats_audio_file_path = '{}/selkies-stats-audio-{}.csv'.format(webrtc_stats_dir, timestamp)
-        # Reset header state under the lock off the loop thread: the lock may be
-        # held by an in-flight CSV rewrite on _csv_executor, so acquiring it here
-        # would stall the event loop. Lock so a worker can't read a torn
-        # (len, names) pair and wrongly rewrite.
         await asyncio.to_thread(self._reset_csv_header_state)
 
     def _reset_csv_header_state(self) -> None:
@@ -1539,8 +1533,6 @@ class Metrics:
             self.stats_video_row_count = 0
             self.stats_audio_row_count = 0
 
-
-# ---------------- Monitoring utilities ----------------
 
 logger_system = logging.getLogger("system_monitor")
 logger_system.setLevel(logging.INFO)
@@ -1583,6 +1575,7 @@ class SystemMonitor:
         return cpu, mem.total, mem.used
 
     async def _monitor_loop(self) -> None:
+        """Samples until stopped."""
         try:
             while not self.stop_event.is_set():
                 self.cpu_percent, self.mem_total, self.mem_used = await asyncio.to_thread(
@@ -1616,14 +1609,16 @@ class GPUMonitor:
     as `(load, mem_total, mem_used)`. GPU queries run in a worker thread so
     sampling never blocks the event loop. When no GPU is found on the first
     probe, the loop exits instead of polling forever.
+
+    Attributes:
+        dri_node: The render node the pipeline captures/encodes on; stats
+            must describe the same card, so `get_gpus` filters by it when set.
     """
 
     def __init__(self, gpu_id: int = 0, period: int = 1, enabled: bool = True, dri_node: str = ""):
         self.period = max(1, int(period))
         self.enabled = enabled
         self.gpu_id = gpu_id
-        # The render node the pipeline captures/encodes on; stats must describe
-        # the same card, so get_gpus() filters by it when set.
         self.dri_node = dri_node
         self.stop_event = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
@@ -1640,13 +1635,14 @@ class GPUMonitor:
     def _get_gpu_stats(self) -> Optional[Tuple]:
         """Returns `(load, mem_total, mem_used)` for the target GPU; blocking.
 
+        A `dri_node` match already narrows `get_gpus` to the pipeline's card;
+        `gpu_id` indexes only the unfiltered list.
+
         Returns:
             The stats tuple, or None when the GPU cannot be found or queried.
         """
         try:
             gpus = gpu_stats.get_gpus(self.dri_node)
-            # A dri_node match returns exactly the pipeline's GPU; the index only
-            # applies to the unfiltered list.
             idx = 0 if (self.dri_node and len(gpus) == 1) else self.gpu_id
             if not gpus or idx >= len(gpus):
                 return None
@@ -1657,10 +1653,12 @@ class GPUMonitor:
             return None
 
     async def _monitor_loop(self) -> None:
-        # No GPU present: report nothing and stop, mirroring the WebSocket GPU monitor.
-        # CPU load and system memory are surfaced separately by SystemMonitor; the GPU
-        # gauge contract (fractional load, MB memory) cannot carry CPU stats without
-        # mislabeling and unit errors (percent-as-fraction, bytes-as-MB).
+        """Samples until stopped; exits at once when the first probe finds no GPU.
+
+        Nothing is substituted for a missing GPU: CPU load and system memory
+        are `SystemMonitor`'s, and the GPU gauge contract (fractional load, MiB
+        memory) cannot carry them without unit errors.
+        """
         try:
             if await asyncio.to_thread(self._get_gpu_stats) is None:
                 logger_gpu.info(

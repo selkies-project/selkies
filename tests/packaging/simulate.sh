@@ -22,17 +22,27 @@ if ! ls "${WHEEL_SRC}"/selkies-*.whl >/dev/null 2>&1; then
 fi
 
 chmod -R u+w "$SB/repo" 2>/dev/null
-rm -rf "$SB"; mkdir -p "$SB"/{repo,dist,out,stubs,log,home} "$SB/etc/apk/keys"
+rm -rf "$SB"; mkdir -p "$SB"/{repo,dist,out,stubs,log,home} "$SB/etc/apk/keys" "$SB/etc/apt/apt.conf.d"
 cp -r "$REPO/infra" "$SB/repo/"
 # only what the packaging scripts read: addons/ also holds node_modules
 mkdir -p "$SB/repo/addons"
-cp -r "$REPO/addons/js-interposer" "$SB/repo/addons/"
+cp -r "$REPO/addons/js-interposer" "$REPO/addons/v4l2-interposer" "$SB/repo/addons/"
 cp "$WHEEL_SRC"/selkies-*.whl "$SB/dist/"
+# infra/packaging/mkvenv.sh installs the capture stack out of the same directory
+# when it is there, which is how CI packages the very pixelflux and pcmflux the
+# suites ran against. Without them the wheel's pinned pre-release is resolved
+# from PyPI, where a release that is still pending does not exist.
+for pkg in pixelflux pcmflux; do
+  if ls "$WHEEL_SRC/${pkg}"-*.whl > /dev/null 2>&1; then
+    cp "$WHEEL_SRC/${pkg}"-*.whl "$SB/dist/"
+  fi
+done
 
 # Rebase the container-absolute paths onto the sandbox, using a sentinel so an
 # already-rewritten path is never rewritten a second time.
 for f in "$SB"/repo/infra/packaging/*.sh; do
   sed -i -e "s#/etc/apk/keys#@SB@/etc/apk/keys#g" \
+         -e "s#/etc/apt/apt.conf.d#@SB@/etc/apt/apt.conf.d#g" \
          -e "s#/pkg-root/opt/selkies#@PRS@#g" \
          -e "s#/pkg-root#@SB@/pkg-root#g" -e "s#/opt/selkies#@SB@/opt/selkies#g" \
          -e "s#/repo#@SB@/repo#g" -e "s#/dist#@SB@/dist#g" -e "s#/out#@SB@/out#g" \
@@ -42,7 +52,7 @@ done
 # This is the read-only bind mount the workflow gives the container.
 chmod -R a-w "$SB/repo"
 
-# interposer.sh builds a 32-bit variant wherever gcc can. Hosts without a
+# The interposer scripts build a 32-bit variant wherever gcc can. Hosts without a
 # multilib toolchain can point MULTILIB_SYSROOT at an unpacked one (see
 # tests/README.md) and the gcc stub below hands the real compiler the flags that
 # reach it, so the 32-bit branch is exercised rather than skipped.
@@ -62,7 +72,7 @@ elif [ -n "${MULTILIB_SYSROOT:-}" ]; then
     echo "note: 32-bit toolchain through MULTILIB_SYSROOT=${MULTILIB_SYSROOT}"
   fi
 else
-  echo "note: no 32-bit toolchain, interposer.sh will skip its 32-bit variant"
+  echo "note: no 32-bit toolchain, the interposer scripts will skip their 32-bit variant"
 fi
 if [ -n "${MULTILIB_FLAGS}" ]; then
   cat > "$SB/stubs/gcc" <<EOF

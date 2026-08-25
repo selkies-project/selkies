@@ -4,14 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "node scripts/sync-assets.mjs && node scripts/generate-python-docs.mjs",
+    "predev": "node scripts/sync-assets.mjs && node scripts/generate-python-docs.mjs && node scripts/generate-web-docs.mjs",
     "dev": "next dev",
-    "prebuild": "node scripts/sync-assets.mjs && node scripts/generate-python-docs.mjs",
+    "prebuild": "node scripts/sync-assets.mjs && node scripts/generate-python-docs.mjs && node scripts/generate-web-docs.mjs",
     "build": "next build",
     "postbuild": "node scripts/mirror-page-urls.mjs",
     "typecheck": "next typegen && tsc --noEmit",
     "check-links": "node scripts/check-links.mjs",
-    "generate:api": "node scripts/generate-python-docs.mjs"
+    "generate:api": "node scripts/generate-python-docs.mjs && node scripts/generate-web-docs.mjs"
   },
   "dependencies": {
     "@mdx-js/mdx": "^3.1.1",
@@ -30,9 +30,11 @@
     "@types/mdx": "^2.0.14",
     "@types/node": "^26.1.2",
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
+    "@types/react-dom": "^19.2.5",
     "postcss": "^8.5.25",
     "tailwindcss": "^4.3.3",
+    "typedoc": "^0.28.20",
+    "typedoc-plugin-markdown": "^4.12.0",
     "typescript": "^6.0.3"
   }
 }

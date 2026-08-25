@@ -17,8 +17,10 @@ test -f pyproject.toml
 for pkg in addons/selkies-dashboard addons/selkies-dashboard-wish; do
     if [ ! -d "${pkg}/node_modules" ]; then
         # Lockfiles are gitignored in this repository, so `npm ci` has nothing
-        # to install from
-        (cd "${pkg}" && npm install --no-audit --no-fund)
+        # to install from. Retried like build-web.sh's install: npm gives a
+        # failed registry fetch two attempts and no more.
+        (cd "${pkg}" && npm install --no-audit --no-fund \
+            --fetch-retries=5 --fetch-retry-maxtimeout=120000)
     fi
     echo "eslint: ${pkg}"
     (cd "${pkg}" && npm run --silent lint)

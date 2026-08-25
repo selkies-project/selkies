@@ -1,10 +1,15 @@
 name: Release
 
-# Maintainer-triggered release: builds the wheel ONCE at the release version
-# plus fresh pixelflux/pcmflux wheels from the main HEAD of selkies-project/*,
-# then builds multi-arch images, native packages, and AppImages around those
-# wheels, and assembles a DRAFT GitHub release with every build artifact
-# attached. The draft is finalized and published manually.
+# Maintainer-triggered release: builds the wheel ONCE at the release version,
+# then builds multi-arch images, native packages and AppImages around it, and
+# assembles a DRAFT GitHub release with every build artifact attached. The
+# draft is finalized and published manually.
+#
+# A release is cut after the pinned pixelflux and pcmflux are published, so
+# everything here resolves that capture stack from PyPI -- the smoke test, the
+# images, the packages and the AppImages alike ship what users install. The
+# per-commit main-HEAD wheels the other workflows build are for the builds that
+# run ahead of a release, where the pinned version exists nowhere else.
 
 on:
   workflow_dispatch:
@@ -76,16 +81,23 @@ jobs:
     with:
       package_version: ${{ needs.validate.outputs.version }}
 
-  pixelflux-pcmflux:
-    name: Build pixelflux and pcmflux wheels (main HEAD)
-    needs: validate
+  wheel-smoke:
+    name: Smoke test the wheel
+    needs: [validate, wheel]
     permissions:
       contents: read
-    uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+    uses: ./.github/workflows/smoke-wheel.yaml
+    with:
+      # A release is cut once the pinned pixelflux and pcmflux are published, so
+      # the smoke test resolves them from PyPI: what it proves installable is
+      # then the artifact users get, not a main-HEAD build of the capture stack.
+      # A pin that is not published yet fails here, which is the release being
+      # cut too early.
+      capture_stack_published: true
 
   images:
     name: Build and publish multi-arch images
-    needs: [validate, wheel, pixelflux-pcmflux]
+    needs: [validate, wheel, wheel-smoke]
     # A called workflow can only narrow the caller's token, so the GHCR push
     # scope has to be granted here
     permissions:
@@ -96,20 +108,22 @@ jobs:
       tag_prefix: v${{ needs.validate.outputs.version }}
       floating_tags: ${{ needs.validate.outputs.floating_tags == 'true' }}
       wheel_artifact: selkies-wheel
+      capture_stack_published: true
 
   packages:
     name: Build native packages
-    needs: [validate, wheel, pixelflux-pcmflux]
+    needs: [validate, wheel, wheel-smoke]
     permissions:
       contents: read
     uses: ./.github/workflows/packages.yaml
     with:
       package_version: ${{ needs.validate.outputs.version }}
       wheel_artifact: selkies-wheel
+      capture_stack_published: true
 
   draft-release:
     name: Assemble draft release
-    needs: [validate, wheel, images, packages]
+    needs: [validate, wheel, wheel-smoke, images, packages]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -127,9 +141,6 @@ jobs:
           # Drop the empty image-digest placeholder files (64-hex filenames);
           # they only exist for the multi-arch manifest merge
           find release-artifacts -type f -regextype posix-extended -regex '.*/[0-9a-f]{64}' -delete
-          # Drop the pixelflux/pcmflux HEAD wheels: they are CI inputs (baked
-          # into the images, packages, and AppImages above), not selkies assets
-          find release-artifacts -type f \( -name 'pixelflux-*.whl' -o -name 'pcmflux-*.whl' \) -delete
           find release-artifacts -type f -exec mv {} release/ \;
           ls -la release/
       - name: Create draft release

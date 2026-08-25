@@ -4,11 +4,20 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// src/components/DashboardOverlay.jsx
+/**
+ * Portal that places the sidebar over the stream.
+ * @module
+ */
 import ReactDOM from 'react-dom';
 import Sidebar from './Sidebar';
 import '../styles/Overlay.css';
 
+/**
+ * Renders the sidebar into `container` through a portal, or nothing until a
+ * container exists.
+ * @param {object} props
+ * @param {HTMLElement|null} props.container Element the overlay is portaled into.
+ */
 function DashboardOverlay({ container }) {
 
   if (!container) {

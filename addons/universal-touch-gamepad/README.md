@@ -270,6 +270,6 @@ Contributions are welcome! Please feel free to submit pull requests or open issu
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0.
-See the [LICENSE](LICENSE) file for details.
-A copy of the GPLv3 license text can also be found at [https://www.gnu.org/licenses/gpl-3.0.html](https://www.gnu.org/licenses/gpl-3.0.html).
+This project is licensed under the Mozilla Public License 2.0, like the rest of Selkies.
+See the repository [LICENSE](../../LICENSE) file for details.
+A copy of the MPL 2.0 license text can also be found at [https://mozilla.org/MPL/2.0/](https://mozilla.org/MPL/2.0/).

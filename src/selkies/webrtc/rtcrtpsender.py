@@ -40,8 +40,6 @@ import uuid
 from collections.abc import Callable
 from typing import Optional, Union
 
-from av import AudioFrame
-from av.frame import Frame
 
 from . import clock, rtp
 from .pacer import CLASS_AUDIO, CLASS_VIDEO, h264_payloads_suggest_idr
@@ -371,42 +369,28 @@ class RTCRtpSender(AsyncIOEventEmitter):
     async def _next_encoded_frame(
         self, codec: RTCRtpCodecParameters
     ) -> Optional[RTCEncodedFrame]:
-        # Get [Frame|Packet].
         data = await self.__track.recv()
 
-        # If the sender is disabled, drop the frame instead of encoding it.
+        # If the sender is disabled, drop the frame instead of packing it.
         # We still want to read from the track in order to avoid frames
         # accumulating in memory.
         if not self._enabled:
             return None
 
-        audio_level = None
-
         if self.__encoder is None:
             self.__encoder = get_encoder(codec)
 
+        # Tracks serve frames pixelflux/pcmflux have already encoded; the sender
+        # only packs them into RTP payloads. Keyframes are requested out of band
+        # (the capture side produces the IDR), so no encode runs here.
         self.__force_keyframe_used = False
-        if isinstance(data, Frame):
-            # Encode the frame.
-            if isinstance(data, AudioFrame):
-                audio_level = rtp.compute_audio_level_dbov(data)
+        payloads, timestamp = self.__encoder.pack(data)
 
-            force_keyframe = self.__force_keyframe
-            self.__force_keyframe = False
-            payloads, timestamp = await self.__loop.run_in_executor(
-                None, self.__encoder.encode, data, force_keyframe
-            )
-            self.__force_keyframe_used = force_keyframe
-        else:
-            # Pack the pre-encoded data.
-            payloads, timestamp = self.__encoder.pack(data)
-
-        # If the encoder did not return any payloads, return `None`.
-        # This may be due to a delay caused by resampling.
+        # If the packer did not return any payloads, return `None`.
         if not payloads:
             return None
 
-        return RTCEncodedFrame(payloads, timestamp, audio_level)
+        return RTCEncodedFrame(payloads, timestamp, None)
 
     async def _retransmit(self, sequence_number: int) -> None:
         """

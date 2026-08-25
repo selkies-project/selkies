@@ -5,8 +5,8 @@ name: Build pixelflux and pcmflux wheels
 # native packages, and AppImages ride the latest code instead of the last
 # PyPI release. Mirrors the two projects' own release workflows: a single
 # pypa/cibuildwheel invocation per (arch, libc), with each repository's own
-# pyproject.toml [tool.cibuildwheel] section driving the cp39-cp314 build
-# matrix and the native dependency setup.
+# pyproject.toml [tool.cibuildwheel] section driving the native dependency
+# setup and its python_requires the interpreters built.
 
 on:
   workflow_dispatch:
@@ -17,65 +17,34 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.project }} (${{ matrix.arch.name }}, ${{ matrix.arch.platform }})
-    runs-on: ${{ matrix.arch.runner }}
+    name: ${{ matrix.project }} (${{ matrix.target.arch }}, ${{ matrix.platform }})
+    runs-on: ${{ matrix.target.runner }}
     strategy:
       fail-fast: false
+      # One job per (project, arch, libc): an extra interpreter rebuilds only
+      # the PyO3 layer and the extension, so splitting them would duplicate
+      # before-all for far less than it costs.
       matrix:
         project: [pixelflux, pcmflux]
-        arch:
-          - name: x86_64
+        platform: [manylinux, musllinux]
+        target:
+          - arch: x86_64
             runner: ubuntu-latest
-            platform: manylinux
-            build: >-
-              cp39-manylinux_x86_64
-              cp310-manylinux_x86_64
-              cp311-manylinux_x86_64
-              cp312-manylinux_x86_64
-              cp313-manylinux_x86_64
-              cp314-manylinux_x86_64
-          - name: x86_64
-            runner: ubuntu-latest
-            platform: musllinux
-            build: >-
-              cp39-musllinux_x86_64
-              cp310-musllinux_x86_64
-              cp311-musllinux_x86_64
-              cp312-musllinux_x86_64
-              cp313-musllinux_x86_64
-              cp314-musllinux_x86_64
-          - name: aarch64
+          - arch: aarch64
             runner: ubuntu-24.04-arm
-            platform: manylinux
-            build: >-
-              cp39-manylinux_aarch64
-              cp310-manylinux_aarch64
-              cp311-manylinux_aarch64
-              cp312-manylinux_aarch64
-              cp313-manylinux_aarch64
-              cp314-manylinux_aarch64
-          - name: aarch64
-            runner: ubuntu-24.04-arm
-            platform: musllinux
-            build: >-
-              cp39-musllinux_aarch64
-              cp310-musllinux_aarch64
-              cp311-musllinux_aarch64
-              cp312-musllinux_aarch64
-              cp313-musllinux_aarch64
-              cp314-musllinux_aarch64
     steps:
       - uses: actions/checkout@v7
         with:
           repository: selkies-project/${{ matrix.project }}
           ref: main
-      - name: Build wheels (${{ matrix.arch.build }})
+      - name: Build wheels (${{ matrix.platform }}_${{ matrix.target.arch }})
         uses: pypa/cibuildwheel@v4.2.0
         env:
-          CIBW_BUILD: ${{ matrix.arch.build }}
+          # Every interpreter cibuildwheel offers, floored by python_requires.
+          CIBW_BUILD: "*-${{ matrix.platform }}_${{ matrix.target.arch }}"
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.project }}-wheels-${{ matrix.arch.name }}-${{ matrix.arch.platform }}
+          name: ${{ matrix.project }}-wheels-${{ matrix.target.arch }}-${{ matrix.platform }}
           path: wheelhouse/*.whl
           if-no-files-found: error
           retention-days: 14

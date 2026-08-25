@@ -263,6 +263,12 @@
     display: block;
 }
 
+/* Icons drawn as strokes rather than shapes: the fill above would flood them,
+   because a stylesheet outranks an svg's own fill attribute. */
+.header-action-button svg.stroke-icon {
+    fill: none;
+}
+
 /* Sidebar wordmark: gradient text drawn from the logo hues, with a solid
    fallback where background-clip: text is unsupported. */
 .sidebar h2 {

@@ -14,6 +14,12 @@ echo "Use Wayland backend: ${WAYLAND:-false}"
 
 export DEBIAN_FRONTEND="noninteractive"
 
+# Retried for the same reason the devcontainer image retries: a feature install
+# that reaches for the apt index or PyPI is one transient failure away from
+# failing the whole container create. install-desktop-environment.sh, invoked
+# below, inherits the drop-in.
+printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' > /etc/apt/apt.conf.d/99-selkies-retries
+
 # Install base dependencies (X11 capture/input for pixelflux, PulseAudio for
 # pcmflux, Mesa/VA-API for GPU acceleration, and the display stack)
 apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
@@ -71,9 +77,9 @@ fi
 
 # Install Selkies from PyPI (latest release or a requested release tag)
 if [ "${RELEASE:-latest}" = "latest" ]; then
-    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --upgrade selkies
+    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --upgrade selkies
 else
-    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir "selkies==${RELEASE#v}"
+    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 "selkies==${RELEASE#v}"
 fi
 
 mkdir -p /etc/OpenCL/vendors && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd

@@ -1,6 +1,10 @@
 # Both Dockerfiles build from the repository root, so keep the context small.
 # npm dependencies and every generated bundle are rebuilt inside the image.
 .git
+# Sibling clones a developer may keep beside the sources; the images take both
+# libraries from their wheels
+pixelflux/
+pcmflux/
 **/node_modules
 **/dist
 src/selkies/selkies_web/

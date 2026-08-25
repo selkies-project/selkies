@@ -239,11 +239,9 @@ def send_clipboard_from_client(page: Any, text: str, engine: str = "chromium") -
         }""", text)
         if engine == "webkit":
             return
-        # Firefox: the first Ctrl+V may be consumed by the paste-ordering hold
-        # (it flushes any stashed server->client clipboard write and replays
-        # the chord synthetically — no native paste action). A genuine second
-        # press, with the clipboard re-written first, performs the real paste
-        # that the core's paste listener forwards to the server.
+        # Firefox: the paste-ordering hold may consume the first Ctrl+V (it
+        # replays the chord synthetically, with no native paste); the second
+        # press, with the clipboard re-written first, performs the real paste.
         for _ in range(2):
             page.keyboard.down("Control")
             page.keyboard.press("v")
@@ -279,8 +277,6 @@ def wait_log_absent(substr: str, timeout: float = 6, log: str = H.LOG) -> bool:
     time.sleep(timeout)
     return substr not in H.server_log(log)
 
-
-# ---------------- X11-observable input checks ----------------
 
 def x11_keymap_pressed(keysym_char: str = "x") -> Optional[bool]:
     """Whether the X server currently reports the key for `keysym_char` as

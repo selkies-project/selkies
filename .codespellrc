@@ -5,5 +5,6 @@ skip = ./.git,./build,./addons/*/node_modules,./addons/*/dist,./website/node_mod
 # renderD: DRM render node prefix (renderD128). requestor: X11 selection
 # protocol field name. currentY/initialY: pointer coordinate variables.
 # chage: the shadow-utils command. anc: SDI ancillary-data region.
-# zink: the Mesa OpenGL-on-Vulkan driver.
-ignore-words-list = renderd,requestor,requestors,currenty,initialy,chage,anc,zink
+# zink: the Mesa OpenGL-on-Vulkan driver. parm: the v4l2_streamparm member.
+# datas: PipeWire spa_buffer field (buffer->datas, n_datas).
+ignore-words-list = renderd,requestor,requestors,currenty,initialy,chage,anc,zink,parm,datas

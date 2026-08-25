@@ -7,9 +7,33 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 /*
     Selkies Joystick Interposer
 
-    An LD_PRELOAD library to redirect /dev/input/jsX and /dev/input/event*
-    device access to corresponding Unix domain sockets. This allows joystick
-    input to be piped from another source (e.g., a remote session).
+    An LD_PRELOAD library that redirects /dev/input/jsN and /dev/input/eventN
+    access onto Unix domain sockets served by the Selkies backend, so gamepad
+    input forwarded from the browser reaches unmodified applications without a
+    kernel device. Four js nodes and four evdev nodes (event1000..event1003,
+    numbered clear of real devices) map to "selkies_<sysname>.sock" in the
+    socket directory (SELKIES_JS_SOCKET_PATH, default /tmp), which must match
+    the backend's js_socket_path.
+
+    Every open() of a device gets its own socket connection, so each handle is
+    a distinct fd as POSIX requires, O_NONBLOCK applies per handle, and every
+    handle receives every event (the server broadcasts per device). The fd
+    handed to the application is the connected socket itself, so poll/select/
+    epoll/dup work with no interception. On connect the server sends one
+    js_config_t (identity, button and axis maps), then the client answers with
+    a one-byte architecture specifier (sizeof(long)) and the server streams
+    struct js_event or struct input_event records. read() only ever delivers
+    whole events: a short consume would desync the SOCK_STREAM for every later
+    read, so partially drained events are stashed per handle and completed on
+    the next call.
+
+    Device identity (name, VID/PID, uniq) answered through the ioctls is hard
+    coded to the same values the sibling fake-udev library publishes, so udev,
+    joydev and evdev consumers agree on one device. stat()/fstat() families
+    forge a character device with major 13 and the node's index as minor,
+    which SDL uses to dedupe devices, and /dev/input listings (readdir/scandir)
+    gain the evdev nodes whose sockets are currently bound, for scanners that
+    bypass libudev. JS_LOG in the environment enables stderr diagnostics.
 */
 
 #define _GNU_SOURCE
@@ -35,6 +59,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <dirent.h>
 #include <linux/joystick.h>
 #include <linux/input.h>
 #include <linux/input-event-codes.h>
@@ -52,53 +77,27 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
  * The guards are intentional, so silence the false-positive -Wnonnull-compare. */
 #pragma GCC diagnostic ignored "-Wnonnull-compare"
 
-/**
- * @brief Definitions for O_TMPFILE and mode requirement checking.
- *
- * O_TMPFILE allows creating unnamed temporary files, which requires a third
- * 'mode' argument just like O_CREAT. The NEEDS_MODE macro safely identifies
- * if the flags passed to open/openat require extracting this mode argument
- * from the variadic list to prevent creating files with 000 permissions.
- */
+/* O_TMPFILE carries a mode argument like O_CREAT; NEEDS_MODE tells the open
+ * wrappers when to pull it from the varargs. */
 #ifndef O_TMPFILE
 #define __O_TMPFILE     020000000
 #define O_TMPFILE       (__O_TMPFILE | O_DIRECTORY)
 #endif
 #define NEEDS_MODE(flags) (((flags) & O_CREAT) || (((flags) & O_TMPFILE) == O_TMPFILE))
 
-/**
- * @brief Defines the data type for ioctl request codes.
- *
- * This type is defined as `unsigned long` if `__GLIBC__` is defined,
- * and `int` otherwise, to maintain portability across different C libraries
- * where the underlying type of ioctl requests might vary.
- */
+/* glibc declares ioctl's request as unsigned long, musl as int. */
 #ifdef __GLIBC__
 typedef unsigned long ioctl_request_t;
 #else
 typedef int ioctl_request_t;
 #endif
 
-/**
- * @brief Timeout for socket connection attempts in milliseconds.
- */
 #define SOCKET_CONNECT_TIMEOUT_MS 250
-
-/**
- * @brief Maximum time to wait for the full device configuration to arrive on a
- * freshly connected socket, in milliseconds. Prevents a connected-but-silent
- * (stalled or hostile) peer from hanging the application thread that opened the
- * device indefinitely inside the intercepted open()/openat().
- */
+/* Bounds the config wait inside the intercepted open(), so a connected-but-silent
+ * peer cannot hang the opening thread. */
 #define SOCKET_CONFIG_READ_TIMEOUT_MS 5000
 
-/**
- * @brief Device paths for /dev/input/jsX joystick devices to be interposed.
- */
 #define JS0_DEVICE_PATH "/dev/input/js0"
-/**
- * @brief Socket paths corresponding to /dev/input/jsX devices.
- */
 #define JS0_SOCKET_PATH "/tmp/selkies_js0.sock"
 #define JS1_DEVICE_PATH "/dev/input/js1"
 #define JS1_SOCKET_PATH "/tmp/selkies_js1.sock"
@@ -106,19 +105,9 @@ typedef int ioctl_request_t;
 #define JS2_SOCKET_PATH "/tmp/selkies_js2.sock"
 #define JS3_DEVICE_PATH "/dev/input/js3"
 #define JS3_SOCKET_PATH "/tmp/selkies_js3.sock"
-/**
- * @brief Number of /dev/input/jsX devices to interpose.
- */
 #define NUM_JS_INTERPOSERS 4
 
-/**
- * @brief Device paths for /dev/input/event* devices to be interposed.
- * High event numbers (e.g., event1000) are used to avoid conflict with real devices.
- */
 #define EV0_DEVICE_PATH "/dev/input/event1000"
-/**
- * @brief Socket paths corresponding to /dev/input/event* devices.
- */
 #define EV0_SOCKET_PATH "/tmp/selkies_event1000.sock"
 #define EV1_DEVICE_PATH "/dev/input/event1001"
 #define EV1_SOCKET_PATH "/tmp/selkies_event1001.sock"
@@ -126,49 +115,25 @@ typedef int ioctl_request_t;
 #define EV2_SOCKET_PATH "/tmp/selkies_event1002.sock"
 #define EV3_DEVICE_PATH "/dev/input/event1003"
 #define EV3_SOCKET_PATH "/tmp/selkies_event1003.sock"
-/**
- * @brief Number of /dev/input/event* devices to interpose.
- */
 #define NUM_EV_INTERPOSERS 4
 
-/**
- * @brief Calculates the total number of interposers (js + ev).
- * @return The sum of NUM_JS_INTERPOSERS and NUM_EV_INTERPOSERS.
- */
 #define NUM_INTERPOSERS() (NUM_JS_INTERPOSERS + NUM_EV_INTERPOSERS)
 
-/* --- Hardcoded Identity to match fake_udev.c --- */
-/**
- * @brief These values are used to respond to ioctl queries for device identity,
- * ensuring consistency with a potential fake udev setup.
- */
+/* Identity answered by the ioctls; must match the fake-udev definitions. */
 #define FAKE_UDEV_DEVICE_NAME "Microsoft X-Box 360 pad"
 #define FAKE_UDEV_VENDOR_ID   0x045e
 #define FAKE_UDEV_PRODUCT_ID  0x028e
 #define FAKE_UDEV_VERSION_ID  0x0114
 #define FAKE_UDEV_BUS_TYPE    BUS_USB
 
-/* --- Logging --- */
-/**
- * @brief Global flag to control logging.
- * Initialized by sji_logging_init() based on the JS_LOG environment variable.
- * 1 if logging is enabled, 0 otherwise.
- */
 static int g_sji_log_enabled = 0;
 
-/**
- * @brief Log level constants for interposer_log.
- */
 #define SJI_LOG_LEVEL_DEBUG "[DEBUG]"
 #define SJI_LOG_LEVEL_INFO  "[INFO]"
 #define SJI_LOG_LEVEL_WARN  "[WARN]"
 #define SJI_LOG_LEVEL_ERROR "[ERROR]"
 
-/* --- Real Function Pointers & Loading --- */
-/**
- * @brief Pointers to the real libc functions that this library intercepts.
- * These are loaded using dlsym(RTLD_NEXT, ...) during initialization.
- */
+/* Real libc entry points, resolved with dlsym(RTLD_NEXT) by the constructor. */
 static int (*real_open)(const char *pathname, int flags, ...) = NULL;
 static int (*real_open64)(const char *pathname, int flags, ...) = NULL;
 static int (*real_openat)(int dirfd, const char *pathname, int flags, ...) = NULL;
@@ -199,14 +164,22 @@ static int (*real___xstat64)(int ver, const char *pathname, struct stat64 *buf) 
 static int (*real___lxstat64)(int ver, const char *pathname, struct stat64 *buf) = NULL;
 static int (*real___fxstat64)(int ver, int fd, struct stat64 *buf) = NULL;
 #endif
+/* Directory listing: apps that scan /dev/input directly instead of asking
+ * libudev (SDL with udev disabled or a sandbox build, GLFW, evtest) find the
+ * gamepads only if the evdev nodes appear in the enumeration. */
+static DIR *(*real_opendir)(const char *name) = NULL;
+static struct dirent *(*real_readdir)(DIR *dirp) = NULL;
+static int (*real_closedir)(DIR *dirp) = NULL;
+static int (*real_scandir)(const char *dirp, struct dirent ***namelist,
+                           int (*filter)(const struct dirent *),
+                           int (*compar)(const struct dirent **, const struct dirent **)) = NULL;
+#ifdef SJI_LFS64
+static struct dirent64 *(*real_readdir64)(DIR *dirp) = NULL;
+static int (*real_scandir64)(const char *dirp, struct dirent64 ***namelist,
+                             int (*filter)(const struct dirent64 *),
+                             int (*compar)(const struct dirent64 **, const struct dirent64 **)) = NULL;
+#endif
 
-/**
- * @brief Initializes the logging system.
- *
- * Checks the `JS_LOG` environment variable. If it is set, logging is enabled
- * by setting `g_sji_log_enabled` to 1. This function should be called once
- * at the very start of the library's initialization.
- */
 static void sji_logging_init() {
     if (getenv("JS_LOG") != NULL) {
         g_sji_log_enabled = 1;
@@ -214,17 +187,8 @@ static void sji_logging_init() {
 }
 
 /**
- * @brief Central logging function for the interposer library.
- *
- * If `g_sji_log_enabled` is true and `real_write` has been loaded, this function
- * formats and prints log messages to `STDERR_FILENO`. Messages include a timestamp,
- * log level, source function name, line number, and the provided message.
- *
- * @param level The log level string (e.g., SJI_LOG_LEVEL_DEBUG).
- * @param func_name The name of the function calling the logger (typically `__func__`).
- * @param line_num The line number where the log call occurs (typically `__LINE__`).
- * @param format A printf-style format string for the log message.
- * @param ... Variadic arguments corresponding to the format string.
+ * Writes one timestamped, level-tagged line to stderr through real_write (never
+ * the interposed write) when logging is enabled.
  */
 static void interposer_log(const char *level, const char *func_name, int line_num, const char *format, ...) {
     if (!g_sji_log_enabled) {
@@ -287,43 +251,14 @@ static void interposer_log(const char *level, const char *func_name, int line_nu
     }
 }
 
-/**
- * @brief Convenience macros for logging at different levels.
- * These macros automatically provide the function name and line number
- * to the `interposer_log` function.
- */
-/**
- * @brief Macro for logging debug messages.
- * @param ... Variadic arguments forming the log message, passed to interposer_log.
- */
 #define sji_log_debug(...) interposer_log(SJI_LOG_LEVEL_DEBUG, __func__, __LINE__, __VA_ARGS__)
-/**
- * @brief Macro for logging informational messages.
- * @param ... Variadic arguments forming the log message, passed to interposer_log.
- */
 #define sji_log_info(...)  interposer_log(SJI_LOG_LEVEL_INFO,  __func__, __LINE__, __VA_ARGS__)
-/**
- * @brief Macro for logging warning messages.
- * @param ... Variadic arguments forming the log message, passed to interposer_log.
- */
 #define sji_log_warn(...)  interposer_log(SJI_LOG_LEVEL_WARN,  __func__, __LINE__, __VA_ARGS__)
-/**
- * @brief Macro for logging error messages.
- * @param ... Variadic arguments forming the log message, passed to interposer_log.
- */
 #define sji_log_error(...) interposer_log(SJI_LOG_LEVEL_ERROR, __func__, __LINE__, __VA_ARGS__)
 
 /**
- * @brief Loads a real function pointer using `dlsym(RTLD_NEXT, name)`.
- *
- * If the target function pointer is already loaded, the function returns immediately.
- * Otherwise, it attempts to load the function specified by `name`.
- * Errors during `dlsym` are logged.
- *
- * @param target_func_ptr Address of the function pointer variable where the
- *                        address of the loaded function will be stored.
- * @param name The name of the function to load (e.g., "open").
- * @return 0 on success (or if already loaded), -1 if `dlsym` fails.
+ * Resolves `name` with dlsym(RTLD_NEXT) into *target_func_ptr unless already
+ * set. Returns 0, or -1 when dlsym fails.
  */
 static int load_real_func(void (**target_func_ptr)(void), const char *name) {
     if (*target_func_ptr != NULL) {
@@ -337,46 +272,17 @@ static int load_real_func(void (**target_func_ptr)(void), const char *name) {
     return 0;
 }
 
-/* --- Data Structures --- */
-/**
- * @brief Typedef for joystick correction data.
- * The actual structure `struct js_corr` is defined in `<linux/joystick.h>`
- * and is treated as opaque by this interposer. This typedef is for storing
- * data related to `JSIOCSCORR` and `JSIOCGCORR` ioctls.
- */
+/* Opaque JSIOCSCORR/JSIOCGCORR payload, stored and returned verbatim. */
 typedef struct js_corr js_corr_t;
 
-/**
- * @brief Maximum length for controller name string in `js_config_t`.
- */
 #define CONTROLLER_NAME_MAX_LEN 255
-/**
- * @brief Maximum number of buttons supported in `js_config_t`.
- */
 #define INTERPOSER_MAX_BTNS 512
-/**
- * @brief Maximum number of axes supported in `js_config_t`.
- */
 #define INTERPOSER_MAX_AXES 64
 
 /**
- * @brief Configuration for a joystick/controller, received from the socket server.
- *
- * This structure holds the configuration details for a joystick or game controller,
- * which is typically sent by a server application over a Unix domain socket.
- * The layout and size of this structure must be identical between the client (this
- * interposer library) and the server to ensure correct data interpretation.
- *
- * Members:
- *  - name: Null-terminated string for the controller's name.
- *  - vendor: USB Vendor ID of the controller.
- *  - product: USB Product ID of the controller.
- *  - version: Device version number.
- *  - num_btns: Number of buttons the controller has.
- *  - num_axes: Number of axes the controller has.
- *  - btn_map: Array mapping logical button indices to evdev key codes.
- *  - axes_map: Array mapping logical axis indices to evdev abs codes.
- *  - final_alignment_padding: Padding to ensure consistent struct size.
+ * Device configuration the server sends first on every connection; layout and
+ * size must match the server's byte for byte. btn_map and axes_map map logical
+ * button and axis indices to evdev key and abs codes.
  */
 typedef struct {
     char name[CONTROLLER_NAME_MAX_LEN];
@@ -390,34 +296,19 @@ typedef struct {
     uint8_t final_alignment_padding[6];
 } js_config_t;
 
-/**
- * @brief Maximum number of concurrently open application handles per device.
- *
- * Every open() of a device gets its own socket connection, so this bounds the
- * connections per device. Real applications hold one handle (two briefly when
- * an enumeration pass overlaps active use); opens beyond the bound fail with
- * EMFILE.
- */
+/* Socket connections per device; real applications hold one handle (two briefly
+ * when an enumeration pass overlaps use). Opens beyond this fail with EMFILE. */
 #define SJI_MAX_HANDLES_PER_DEVICE 16
 
-/**
- * @brief Largest single device event we ever read in one go (input_event > js_event).
- * Bounds the per-handle partial-event stash below.
- */
+/* Largest event read in one go (input_event > js_event); bounds the partial stash. */
 #define SJI_MAX_EVENT_SIZE (sizeof(struct input_event))
 
 /**
- * @brief One application open() handle: a dedicated socket connection.
- *
- * Members:
- *  - fd: Connected socket file descriptor returned to the application.
- *  - open_flags: Flags the application passed to open() for this handle.
- *  - partial: Bytes of one event already dequeued from the SOCK_STREAM but not
- *    yet delivered (a non-blocking read drained part of an event and then ran
- *    out of budget). recv() removes these from the kernel buffer, so they cannot
- *    be re-peeked; they are stashed here and prepended on the next read() of
- *    this handle. Accessed only under interposers_mutex.
- *  - partial_len: Number of valid leading bytes in `partial` (0 == none stashed).
+ * One application open() handle: its own socket connection (fd) and open()
+ * flags. `partial` holds the leading bytes of an event a non-blocking read
+ * dequeued but could not complete within its budget: recv() removed them from
+ * the kernel buffer, so they cannot be re-peeked and are prepended on this
+ * handle's next read(). Accessed only under interposers_mutex.
  */
 typedef struct {
     int fd;
@@ -427,30 +318,13 @@ typedef struct {
 } sji_handle_t;
 
 /**
- * @brief State for each interposed device.
- *
- * This structure maintains the state associated with each device path
- * (e.g., "/dev/input/js0") that the interposer handles.
- *
- * Each open() handle owns a dedicated socket connection, so every open()
- * returns a unique file descriptor (as POSIX requires), O_NONBLOCK applies
- * per handle, and every handle receives every device event (the server
- * broadcasts events to all connections for a device). close() of one handle
- * never disturbs the others.
- *
- * Members:
- *  - type: Indicates if the device is a joystick (DEV_TYPE_JS) or event (DEV_TYPE_EV) device.
- *  - open_dev_name: The original device path (e.g., "/dev/input/js0").
- *  - socket_path: Path to the Unix domain socket for this device.
- *  - handles: One entry per outstanding open() handle of this device.
- *  - handle_count: Number of valid entries in `handles`. Statically zero, so
- *    fd lookups match nothing before the first open() (even if an intercepted
- *    call runs before the library constructor).
- *  - corr: Stores joystick correction data (for JSIOCSCORR/GCORR ioctls);
- *    device-global, matching the kernel joystick driver's correction state.
- *  - js_config: Device configuration received from the socket server. The
- *    server sends identical content on every connection for a device; each
- *    successful open() refreshes this copy.
+ * One interposed device: its type (DEV_TYPE_JS/DEV_TYPE_EV), device path, socket
+ * path and the table of outstanding open() handles. handle_count is statically
+ * zero, so fd lookups match nothing before the first open() even when an
+ * intercepted call runs before the constructor. corr is device-global like the
+ * kernel joystick driver's correction state; js_config is the server's
+ * per-device configuration, identical on every connection and refreshed by
+ * each successful open().
  */
 typedef struct {
     uint8_t type;
@@ -462,29 +336,16 @@ typedef struct {
     js_config_t js_config;
 } js_interposer_t;
 
-/**
- * @brief Device type identifiers used in `js_interposer_t`.
- */
-#define DEV_TYPE_JS 0 /**< Identifier for joystick devices (/dev/input/jsX). */
-#define DEV_TYPE_EV 1 /**< Identifier for event devices (/dev/input/event*). */
+#define DEV_TYPE_JS 0
+#define DEV_TYPE_EV 1
 
-/**
- * @brief Default values for `struct input_absinfo` fields in EVIOCGABS ioctl responses.
- * These are used to provide sensible defaults for various axis types.
- */
+/* EVIOCGABS ranges: sticks and triggers, and the HAT/D-pad axes. */
 #define ABS_AXIS_MIN_DEFAULT -32767
 #define ABS_AXIS_MAX_DEFAULT 32767
 #define ABS_HAT_MIN_DEFAULT -1
 #define ABS_HAT_MAX_DEFAULT 1
 
-/**
- * @brief Array holding the state for all configured interposers.
- * This array is initialized with predefined device paths and socket paths
- * for both joystick (`jsX`) and event (`event*`) devices.
- */
 static js_interposer_t interposers[NUM_INTERPOSERS()] = {
-    /* Remaining members are zero-initialized; handle_count 0 means no open
-     * handles, so the handle tables start empty. */
     { .type = DEV_TYPE_JS, .open_dev_name = JS0_DEVICE_PATH, .socket_path = JS0_SOCKET_PATH },
     { .type = DEV_TYPE_JS, .open_dev_name = JS1_DEVICE_PATH, .socket_path = JS1_SOCKET_PATH },
     { .type = DEV_TYPE_JS, .open_dev_name = JS2_DEVICE_PATH, .socket_path = JS2_SOCKET_PATH },
@@ -496,35 +357,20 @@ static js_interposer_t interposers[NUM_INTERPOSERS()] = {
 };
 
 /**
- * @brief Mutex protecting concurrent access to the global interposers[] array.
- *
- * LD_PRELOAD libraries run inside multithreaded hosts (e.g. SDL runs joystick
- * handling on its own thread), so the open/close mutation paths and the fd
- * lookups must be serialized to avoid torn js_config and use of a handle
- * another thread is tearing down. The lock guards only the brief array
- * lookups and state transitions; it is intentionally NOT held across blocking
- * socket I/O — neither the recv() on the event path (read()) nor the
- * connect/config-read on the open path. Each open() builds its connection on
- * a private fd without the lock and only publishes it into the handle table
- * under the lock once fully configured, so lookups never observe a
- * half-initialized handle.
+ * Guards the interposers[] handle tables. Hosts are multithreaded (SDL runs
+ * joystick handling on its own thread), so fd lookups and the open/close
+ * transitions are serialized against torn js_config and use of a handle another
+ * thread is retiring. The lock covers only the brief lookups and transitions,
+ * never blocking socket I/O: the event recv() in read() and the connect/config
+ * read in open() run unlocked, and open() publishes its private fd into the
+ * table only once fully configured, so lookups never see a half-built handle.
  */
 static pthread_mutex_t interposers_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**
- * @brief Finds the interposer slot owning an application file descriptor.
- *
- * Must be called with `interposers_mutex` held. Every fd handed to the
- * application by an interposed open() is registered in exactly one slot's
- * handle table until the matching close().
- *
- * @param fd The application file descriptor to look up.
- * @param open_flags_out Optional output; receives the open() flags recorded
- *                       for the matching handle.
- * @param handle_idx_out Optional output; receives the index of the matching
- *                       handle within the slot's handles[] (for per-handle state
- *                       such as the partial-event stash).
- * @return Pointer to the owning slot, or NULL if `fd` is not interposed.
+ * The slot owning application fd `fd`, or NULL when it is not interposed.
+ * Caller holds interposers_mutex. The optional outputs receive the handle's
+ * open() flags and its index in the slot's handles[].
  */
 static js_interposer_t *find_interposer_for_fd_locked(int fd, int *open_flags_out, int *handle_idx_out) {
     if (fd < 0) {
@@ -546,13 +392,11 @@ static js_interposer_t *find_interposer_for_fd_locked(int fd, int *open_flags_ou
     return NULL;
 }
 
-/* Library constructor: init logging and load pointers to the real libc functions we intercept. */
+/* Constructor: logging, socket directory override, real libc entry points. */
 __attribute__((constructor)) void init_interposer() {
     sji_logging_init();
 
-    // Socket directory: selkies writes the interposer sockets to js_socket_path
-    // (SELKIES_JS_SOCKET_PATH, default /tmp). Mirror a non-default directory onto each
-    // seeded socket path (basename kept) so gamepad connect still finds the sockets.
+    /* SELKIES_JS_SOCKET_PATH relocates the sockets (basename kept) to match the backend. */
     const char *sock_dir = getenv("SELKIES_JS_SOCKET_PATH");
     if (sock_dir && sock_dir[0]) {
         for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
@@ -580,18 +424,17 @@ __attribute__((constructor)) void init_interposer() {
     load_real_func((void *)&real_open64, "open64");
     load_real_func((void *)&real_openat, "openat");
     load_real_func((void *)&real_openat64, "openat64");
+    load_real_func((void *)&real_opendir, "opendir");
+    load_real_func((void *)&real_readdir, "readdir");
+    load_real_func((void *)&real_closedir, "closedir");
+    load_real_func((void *)&real_scandir, "scandir");
+#ifdef SJI_LFS64
+    load_real_func((void *)&real_readdir64, "readdir64");
+    load_real_func((void *)&real_scandir64, "scandir64");
+#endif
     sji_log_info("Selkies Joystick Interposer initialized. Logging is %s.", g_sji_log_enabled ? "ENABLED" : "DISABLED");
 }
 
-/**
- * @brief Sets a socket file descriptor to non-blocking mode.
- *
- * Retrieves the current flags of the socket, and if `O_NONBLOCK` is not set,
- * attempts to add it using `fcntl`.
- *
- * @param sockfd The socket file descriptor to make non-blocking.
- * @return 0 on success or if already non-blocking, -1 on failure (e.g., `fcntl` error).
- */
 static int make_socket_nonblocking(int sockfd) {
     int flags = fcntl(sockfd, F_GETFL, 0);
     if (flags == -1) {
@@ -611,18 +454,8 @@ static int make_socket_nonblocking(int sockfd) {
 }
 
 /**
- * @brief Intercepted `access()` system call.
- *
- * If the `pathname` matches one of the device paths configured for interposition
- * (e.g., "/dev/input/js0"), this function will always return 0 (success),
- * effectively making these virtual devices appear accessible.
- * For any other `pathname`, the call is passed through to the real `access()` function.
- *
- * @param pathname The path to the file whose accessibility is to be checked.
- * @param mode The accessibility checks to be performed (e.g., `R_OK`, `W_OK`).
- * @return 0 if `pathname` is an interposed device path or if the real `access()`
- *         call succeeds for other paths. -1 on error (errno is set by the real
- *         `access()` or if `real_access` is not loaded).
+ * Interposed access(): the device paths are always accessible (the real call
+ * is made only for the log); everything else passes through.
  */
 int access(const char *pathname, int mode) {
     if (!real_access) {
@@ -665,17 +498,10 @@ int access(const char *pathname, int mode) {
     }
 }
 
-/**
- * @brief Helper to populate a stat structure with fake device IDs.
- *
- * SDL uses the st_rdev field (device ID) to check for duplicates.
- * Since our sockets are just unix sockets, they usually return 0 or a generic ID.
- * We must forge unique IDs (Major 13 for Input) matching the virtual path indices.
- */
 /* The device index after `prefix`, or -1 when `path` is not that prefix followed
- * by digits alone. The digits are parsed here because glibc 2.38 redirects
- * sscanf to __isoc23_sscanf, and referencing that symbol would stop this library
- * from loading on every distribution older than the one it was built on. */
+ * by digits alone. Parsed by hand because glibc 2.38 redirects sscanf to
+ * __isoc23_sscanf, and referencing that symbol would stop this library from
+ * loading on every distribution older than the one it was built on. */
 static int dev_index_after(const char *path, const char *prefix) {
     size_t prefix_len = strlen(prefix);
     if (strncmp(path, prefix, prefix_len) != 0) return -1;
@@ -690,8 +516,10 @@ static int dev_index_after(const char *path, const char *prefix) {
     return index;
 }
 
-/* Field names are identical between struct stat and struct stat64, so a single
- * macro fills either flavour without risking a layout mismatch between them. */
+/* Forged character device: SDL dedupes devices by st_rdev, and a socket would
+ * report 0 or a generic id, so each node gets input major 13 with its own index
+ * as minor. Field names are identical in struct stat and stat64, so one macro
+ * fills either. */
 #define FILL_FAKE_STAT_FIELDS(buf, path) do {                              \
     (buf)->st_mode = S_IFCHR | 0666;                                       \
     int _dev_num = dev_index_after((path), "/dev/input/event");            \
@@ -715,9 +543,6 @@ static void fill_fake_stat64(const char* path, struct stat64 *buf) {
 }
 #endif
 
-/**
- * @brief Intercepted `fstat()` system call.
- */
 int fstat(int fd, struct stat *buf) {
     if (!real_fstat) {
          if (load_real_func((void *)&real_fstat, "fstat") < 0) {
@@ -731,7 +556,7 @@ int fstat(int fd, struct stat *buf) {
     if (interposer != NULL) {
         memset(buf, 0, sizeof(struct stat));
         fill_fake_stat(interposer->open_dev_name, buf);
-        /* Snapshot the device name (static string), then log after unlock so a blocked stderr can't stall other hooked calls. */
+        /* Log after unlock so a blocked stderr can't stall other hooked calls. */
         const char *dev = interposer->open_dev_name;
         pthread_mutex_unlock(&interposers_mutex);
         sji_log_debug("Intercepted fstat for fd %d (%s), returning fake rdev %d:%d",
@@ -742,9 +567,6 @@ int fstat(int fd, struct stat *buf) {
     return real_fstat(fd, buf);
 }
 
-/**
- * @brief Intercepted `stat()` system call.
- */
 int stat(const char *pathname, struct stat *buf) {
     if (!real_stat) {
         if (load_real_func((void *)&real_stat, "stat") < 0) {
@@ -768,9 +590,6 @@ int stat(const char *pathname, struct stat *buf) {
     return real_stat(pathname, buf);
 }
 
-/**
- * @brief Intercepted `lstat()` system call.
- */
 int lstat(const char *pathname, struct stat *buf) {
     if (!real_lstat) {
         if (load_real_func((void *)&real_lstat, "lstat") < 0) {
@@ -794,8 +613,8 @@ int lstat(const char *pathname, struct stat *buf) {
     return real_lstat(pathname, buf);
 }
 
-/* Helper: is this one of our interposed device paths? Only the glibc-specific
- * wrappers below call it, so it stays inline to keep musl builds warning-free. */
+/* inline: only the glibc-specific wrappers below call it, so musl builds would
+ * otherwise warn about an unused static. */
 static inline int is_interposed_path(const char *pathname) {
     if (!pathname) return 0;
     for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
@@ -805,9 +624,6 @@ static inline int is_interposed_path(const char *pathname) {
 }
 
 #ifdef SJI_LFS64
-/**
- * @brief Intercepted `stat64()` (LFS variant used by 64-bit-off_t callers).
- */
 int stat64(const char *pathname, struct stat64 *buf) {
     if (!real_stat64) {
         if (load_real_func((void *)&real_stat64, "stat64") < 0) { errno = EFAULT; return -1; }
@@ -822,9 +638,6 @@ int stat64(const char *pathname, struct stat64 *buf) {
     return real_stat64(pathname, buf);
 }
 
-/**
- * @brief Intercepted `lstat64()`.
- */
 int lstat64(const char *pathname, struct stat64 *buf) {
     if (!real_lstat64) {
         if (load_real_func((void *)&real_lstat64, "lstat64") < 0) { errno = EFAULT; return -1; }
@@ -839,9 +652,6 @@ int lstat64(const char *pathname, struct stat64 *buf) {
     return real_lstat64(pathname, buf);
 }
 
-/**
- * @brief Intercepted `fstat64()`.
- */
 int fstat64(int fd, struct stat64 *buf) {
     if (!real_fstat64) {
         if (load_real_func((void *)&real_fstat64, "fstat64") < 0) { errno = EFAULT; return -1; }
@@ -863,13 +673,8 @@ int fstat64(int fd, struct stat64 *buf) {
 #endif /* SJI_LFS64 */
 
 #ifdef __GLIBC__
-/**
- * @brief Intercepted `__xstat()` (pre-2.33 glibc lowering of `stat()`).
- *
- * The leading `ver` argument identifies the caller's struct-stat ABI version;
- * for our forged nodes it is irrelevant, and for everything else it is forwarded
- * verbatim to the real versioned symbol.
- */
+/* `ver` is the caller's struct-stat ABI version: irrelevant for the forged
+ * nodes, forwarded verbatim otherwise. Same for the five variants below. */
 int __xstat(int ver, const char *pathname, struct stat *buf) {
     if (!real___xstat) {
         if (load_real_func((void *)&real___xstat, "__xstat") < 0) { errno = EFAULT; return -1; }
@@ -884,9 +689,6 @@ int __xstat(int ver, const char *pathname, struct stat *buf) {
     return real___xstat(ver, pathname, buf);
 }
 
-/**
- * @brief Intercepted `__lxstat()` (pre-2.33 glibc lowering of `lstat()`).
- */
 int __lxstat(int ver, const char *pathname, struct stat *buf) {
     if (!real___lxstat) {
         if (load_real_func((void *)&real___lxstat, "__lxstat") < 0) { errno = EFAULT; return -1; }
@@ -901,9 +703,6 @@ int __lxstat(int ver, const char *pathname, struct stat *buf) {
     return real___lxstat(ver, pathname, buf);
 }
 
-/**
- * @brief Intercepted `__fxstat()` (pre-2.33 glibc lowering of `fstat()`).
- */
 int __fxstat(int ver, int fd, struct stat *buf) {
     if (!real___fxstat) {
         if (load_real_func((void *)&real___fxstat, "__fxstat") < 0) { errno = EFAULT; return -1; }
@@ -923,9 +722,6 @@ int __fxstat(int ver, int fd, struct stat *buf) {
     return real___fxstat(ver, fd, buf);
 }
 
-/**
- * @brief Intercepted `__xstat64()` (pre-2.33 glibc lowering of `stat64()`).
- */
 int __xstat64(int ver, const char *pathname, struct stat64 *buf) {
     if (!real___xstat64) {
         if (load_real_func((void *)&real___xstat64, "__xstat64") < 0) { errno = EFAULT; return -1; }
@@ -940,9 +736,6 @@ int __xstat64(int ver, const char *pathname, struct stat64 *buf) {
     return real___xstat64(ver, pathname, buf);
 }
 
-/**
- * @brief Intercepted `__lxstat64()` (pre-2.33 glibc lowering of `lstat64()`).
- */
 int __lxstat64(int ver, const char *pathname, struct stat64 *buf) {
     if (!real___lxstat64) {
         if (load_real_func((void *)&real___lxstat64, "__lxstat64") < 0) { errno = EFAULT; return -1; }
@@ -957,9 +750,6 @@ int __lxstat64(int ver, const char *pathname, struct stat64 *buf) {
     return real___lxstat64(ver, pathname, buf);
 }
 
-/**
- * @brief Intercepted `__fxstat64()` (pre-2.33 glibc lowering of `fstat64()`).
- */
 int __fxstat64(int ver, int fd, struct stat64 *buf) {
     if (!real___fxstat64) {
         if (load_real_func((void *)&real___fxstat64, "__fxstat64") < 0) { errno = EFAULT; return -1; }
@@ -980,18 +770,342 @@ int __fxstat64(int ver, int fd, struct stat64 *buf) {
 }
 #endif /* __GLIBC__ */
 
+#define SJI_INPUT_DIR "/dev/input"
+
+/* "SJI": a non-zero d_ino base that cannot collide with real /dev/input inodes. */
+#define SJI_SYNTH_INO_BASE 0x00534A49u
+
+/* True when `path` names /dev/input (trailing slashes tolerated), the only
+ * directory whose listing is augmented. */
+static int is_dev_input_dir(const char *path) {
+    if (!path) return 0;
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') len--;
+    return len == strlen(SJI_INPUT_DIR) && strncmp(path, SJI_INPUT_DIR, len) == 0;
+}
+
+/* The evdev slot (0..NUM_EV_INTERPOSERS-1) whose node basename is `name`, or -1;
+ * dedupes a synthetic entry against a real one of the same name. */
+static int ev_slot_for_basename(const char *name) {
+    if (!name) return -1;
+    for (int i = 0; i < NUM_EV_INTERPOSERS; i++) {
+        const char *dev = interposers[NUM_JS_INTERPOSERS + i].open_dev_name;
+        const char *slash = strrchr(dev, '/');
+        if (strcmp(name, slash ? slash + 1 : dev) == 0) return i;
+    }
+    return -1;
+}
+
+/* Whether evdev slot `i` has a bound server socket. Only bound slots are
+ * advertised, so a scanner never opens a node the server is not serving (which
+ * would cost the full connect timeout before failing). */
+static int ev_slot_socket_live(int i) {
+    if (!real_access) return 0;
+    /* errno must survive: the readdir/scandir caller reads it to tell
+     * end-of-directory from an error. */
+    int saved = errno;
+    int live = real_access(interposers[NUM_JS_INTERPOSERS + i].socket_path, F_OK) == 0;
+    errno = saved;
+    return live;
+}
+
+static const char *ev_slot_basename(int i) {
+    const char *dev = interposers[NUM_JS_INTERPOSERS + i].open_dev_name;
+    const char *slash = strrchr(dev, '/');
+    return slash ? slash + 1 : dev;
+}
+
+/* Per-open() state for a /dev/input DIR* stream: which synthetic slots the
+ * real listing already carried (never emit those twice), which this stream has
+ * already emitted, the next slot to consider, and the buffers the emitted
+ * dirent points into (owned by the stream, valid until the next readdir). */
+typedef struct {
+    DIR *dir;
+    uint8_t seen_mask;
+    uint8_t emitted_mask;
+    int cursor;
+    struct dirent buf;
+#ifdef SJI_LFS64
+    struct dirent64 buf64;
+#endif
+} sji_dir_stream_t;
+
+#define SJI_MAX_DIR_STREAMS 32
+static sji_dir_stream_t dir_streams[SJI_MAX_DIR_STREAMS];
+static pthread_mutex_t dir_streams_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Must hold dir_streams_mutex. */
+static sji_dir_stream_t *find_dir_stream_locked(DIR *dir) {
+    for (int i = 0; i < SJI_MAX_DIR_STREAMS; i++) {
+        if (dir_streams[i].dir == dir) return &dir_streams[i];
+    }
+    return NULL;
+}
+
+/* The next unseen, unemitted, live evdev slot for this stream, or -1 when the
+ * synthetic entries are exhausted. Marks the slot emitted. Holds the mutex. */
+static int next_synth_slot_locked(sji_dir_stream_t *st) {
+    for (; st->cursor < NUM_EV_INTERPOSERS; st->cursor++) {
+        int slot = st->cursor;
+        if (st->seen_mask & (1u << slot)) continue;
+        if (st->emitted_mask & (1u << slot)) continue;
+        if (!ev_slot_socket_live(slot)) continue;
+        st->emitted_mask |= (1u << slot);
+        st->cursor++;
+        return slot;
+    }
+    return -1;
+}
+
+/* Tags a /dev/input stream so its readdir augments the listing; a stream that
+ * cannot be tagged (table full, other directory) behaves like the real one. */
+DIR *opendir(const char *name) {
+    if (!real_opendir && load_real_func((void *)&real_opendir, "opendir") < 0) {
+        errno = EFAULT;
+        return NULL;
+    }
+    DIR *dir = real_opendir(name);
+    if (dir && is_dev_input_dir(name)) {
+        pthread_mutex_lock(&dir_streams_mutex);
+        sji_dir_stream_t *slot = find_dir_stream_locked(NULL);
+        if (slot) {
+            memset(slot, 0, sizeof(*slot));
+            slot->dir = dir;
+        }
+        pthread_mutex_unlock(&dir_streams_mutex);
+        sji_log_debug("Intercepted opendir(%s); augmenting listing.", name);
+    }
+    return dir;
+}
+
+/* Releases the tag before the DIR* is freed, so a later opendir reusing the
+ * pointer starts clean. */
+int closedir(DIR *dirp) {
+    if (!real_closedir && load_real_func((void *)&real_closedir, "closedir") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    pthread_mutex_lock(&dir_streams_mutex);
+    sji_dir_stream_t *st = find_dir_stream_locked(dirp);
+    if (st) st->dir = NULL;
+    pthread_mutex_unlock(&dir_streams_mutex);
+    return real_closedir(dirp);
+}
+
+/* Real entries first (noting any that match an interposer node so it is not
+ * duplicated), then one synthetic evdev entry per call until the bound slots
+ * are exhausted, then NULL. readdir64 below is the same for dirent64. */
+struct dirent *readdir(DIR *dirp) {
+    if (!real_readdir && load_real_func((void *)&real_readdir, "readdir") < 0) {
+        errno = EFAULT;
+        return NULL;
+    }
+    pthread_mutex_lock(&dir_streams_mutex);
+    int tagged = find_dir_stream_locked(dirp) != NULL;
+    pthread_mutex_unlock(&dir_streams_mutex);
+    if (!tagged) return real_readdir(dirp);
+
+    int saved_errno = errno;
+    struct dirent *ent = real_readdir(dirp);
+    if (ent) {
+        int slot = ev_slot_for_basename(ent->d_name);
+        if (slot >= 0) {
+            pthread_mutex_lock(&dir_streams_mutex);
+            sji_dir_stream_t *st = find_dir_stream_locked(dirp);
+            if (st) st->seen_mask |= (1u << slot);
+            pthread_mutex_unlock(&dir_streams_mutex);
+        }
+        return ent;
+    }
+
+    pthread_mutex_lock(&dir_streams_mutex);
+    sji_dir_stream_t *st = find_dir_stream_locked(dirp);
+    struct dirent *out = NULL;
+    if (st) {
+        int slot = next_synth_slot_locked(st);
+        if (slot >= 0) {
+            memset(&st->buf, 0, sizeof(st->buf));
+            st->buf.d_ino = SJI_SYNTH_INO_BASE + slot;
+            st->buf.d_type = DT_CHR;
+            st->buf.d_reclen = sizeof(st->buf);
+            snprintf(st->buf.d_name, sizeof(st->buf.d_name), "%s", ev_slot_basename(slot));
+            out = &st->buf;
+        }
+    }
+    pthread_mutex_unlock(&dir_streams_mutex);
+    /* The caller reads errno to tell EOF from error; hand back what it was. */
+    errno = saved_errno;
+    return out;
+}
+
+/* Appends the bound evdev nodes not already present and passing `passes` to a
+ * scandir result (allocated like scandir's own entries, so the caller frees
+ * them), then re-sorts with `compare`. Shared by the 32- and 64-bit variants
+ * through the element size and dirent writer. */
+static int augment_scandir(void ***namelist, int n, size_t entry_size,
+                           int (*passes)(const void *),
+                           int (*compare)(const void *, const void *),
+                           void (*fill)(void *ent, int slot)) {
+    if (n < 0) return n;
+    uint8_t seen = 0;
+    for (int i = 0; i < n; i++) {
+        /* d_name sits at the same offset in dirent and dirent64. */
+        int slot = ev_slot_for_basename(((struct dirent *)(*namelist)[i])->d_name);
+        if (slot >= 0) seen |= (1u << slot);
+    }
+    for (int slot = 0; slot < NUM_EV_INTERPOSERS; slot++) {
+        if (seen & (1u << slot)) continue;
+        if (!ev_slot_socket_live(slot)) continue;
+        void *ent = malloc(entry_size);
+        if (!ent) break;
+        fill(ent, slot);
+        if (passes && !passes(ent)) {
+            free(ent);
+            continue;
+        }
+        void **grown = realloc(*namelist, (size_t)(n + 1) * sizeof(void *));
+        if (!grown) {
+            free(ent);
+            break;
+        }
+        *namelist = grown;
+        grown[n++] = ent;
+    }
+    if (compare && n > 1) qsort(*namelist, (size_t)n, sizeof(void *), compare);
+    return n;
+}
+
+static void fill_scandir_dirent(void *ent, int slot) {
+    struct dirent *d = ent;
+    memset(d, 0, sizeof(*d));
+    d->d_ino = SJI_SYNTH_INO_BASE + slot;
+    d->d_type = DT_CHR;
+    d->d_reclen = sizeof(*d);
+    snprintf(d->d_name, sizeof(d->d_name), "%s", ev_slot_basename(slot));
+}
+
+/* scandir hands the comparator (const struct dirent **); qsort calls it with
+ * the addresses of the array elements, which are exactly those pointers. */
+struct sji_scandir_ctx {
+    int (*filter)(const struct dirent *);
+    int (*compar)(const struct dirent **, const struct dirent **);
+};
+static __thread struct sji_scandir_ctx sji_scandir_ctx;
+static int sji_scandir_passes(const void *ent) {
+    return sji_scandir_ctx.filter(ent);
+}
+static int sji_scandir_compare(const void *a, const void *b) {
+    return sji_scandir_ctx.compar((const struct dirent **)a, (const struct dirent **)b);
+}
+
+int scandir(const char *dirp, struct dirent ***namelist,
+            int (*filter)(const struct dirent *),
+            int (*compar)(const struct dirent **, const struct dirent **)) {
+    if (!real_scandir && load_real_func((void *)&real_scandir, "scandir") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    int n = real_scandir(dirp, namelist, filter, compar);
+    if (n < 0 || !is_dev_input_dir(dirp)) return n;
+    sji_scandir_ctx.filter = filter;
+    sji_scandir_ctx.compar = compar;
+    return augment_scandir((void ***)namelist, n, sizeof(struct dirent),
+                           filter ? sji_scandir_passes : NULL,
+                           compar ? sji_scandir_compare : NULL,
+                           fill_scandir_dirent);
+}
+
+#ifdef SJI_LFS64
+struct dirent64 *readdir64(DIR *dirp) {
+    if (!real_readdir64 && load_real_func((void *)&real_readdir64, "readdir64") < 0) {
+        errno = EFAULT;
+        return NULL;
+    }
+    pthread_mutex_lock(&dir_streams_mutex);
+    int tagged = find_dir_stream_locked(dirp) != NULL;
+    pthread_mutex_unlock(&dir_streams_mutex);
+    if (!tagged) return real_readdir64(dirp);
+
+    int saved_errno = errno;
+    struct dirent64 *ent = real_readdir64(dirp);
+    if (ent) {
+        int slot = ev_slot_for_basename(ent->d_name);
+        if (slot >= 0) {
+            pthread_mutex_lock(&dir_streams_mutex);
+            sji_dir_stream_t *st = find_dir_stream_locked(dirp);
+            if (st) st->seen_mask |= (1u << slot);
+            pthread_mutex_unlock(&dir_streams_mutex);
+        }
+        return ent;
+    }
+
+    pthread_mutex_lock(&dir_streams_mutex);
+    sji_dir_stream_t *st = find_dir_stream_locked(dirp);
+    struct dirent64 *out = NULL;
+    if (st) {
+        int slot = next_synth_slot_locked(st);
+        if (slot >= 0) {
+            memset(&st->buf64, 0, sizeof(st->buf64));
+            st->buf64.d_ino = SJI_SYNTH_INO_BASE + slot;
+            st->buf64.d_type = DT_CHR;
+            st->buf64.d_reclen = sizeof(st->buf64);
+            snprintf(st->buf64.d_name, sizeof(st->buf64.d_name), "%s", ev_slot_basename(slot));
+            out = &st->buf64;
+        }
+    }
+    pthread_mutex_unlock(&dir_streams_mutex);
+    errno = saved_errno;
+    return out;
+}
+
+static void fill_scandir_dirent64(void *ent, int slot) {
+    struct dirent64 *d = ent;
+    memset(d, 0, sizeof(*d));
+    d->d_ino = SJI_SYNTH_INO_BASE + slot;
+    d->d_type = DT_CHR;
+    d->d_reclen = sizeof(*d);
+    snprintf(d->d_name, sizeof(d->d_name), "%s", ev_slot_basename(slot));
+}
+
+struct sji_scandir64_ctx {
+    int (*filter)(const struct dirent64 *);
+    int (*compar)(const struct dirent64 **, const struct dirent64 **);
+};
+static __thread struct sji_scandir64_ctx sji_scandir64_ctx;
+static int sji_scandir64_passes(const void *ent) {
+    return sji_scandir64_ctx.filter(ent);
+}
+static int sji_scandir64_compare(const void *a, const void *b) {
+    return sji_scandir64_ctx.compar((const struct dirent64 **)a, (const struct dirent64 **)b);
+}
+
+int scandir64(const char *dirp, struct dirent64 ***namelist,
+              int (*filter)(const struct dirent64 *),
+              int (*compar)(const struct dirent64 **, const struct dirent64 **)) {
+    if (!real_scandir64 && load_real_func((void *)&real_scandir64, "scandir64") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    int n = real_scandir64(dirp, namelist, filter, compar);
+    if (n < 0 || !is_dev_input_dir(dirp)) return n;
+    sji_scandir64_ctx.filter = filter;
+    sji_scandir64_ctx.compar = compar;
+    return augment_scandir((void ***)namelist, n, sizeof(struct dirent64),
+                           filter ? sji_scandir64_passes : NULL,
+                           compar ? sji_scandir64_compare : NULL,
+                           fill_scandir_dirent64);
+}
+#endif /* SJI_LFS64 */
+
 /**
- * @brief Reads the joystick configuration (`js_config_t`) from a connected socket.
+ * Reads one js_config_t from a freshly connected socket. The socket is made
+ * blocking for the read (and restored), while SO_RCVTIMEO makes real_read
+ * return EAGAIN periodically so a monotonic deadline of
+ * SOCKET_CONFIG_READ_TIMEOUT_MS caps the cumulative wait; a connected-but-silent
+ * peer therefore cannot hang the opening thread. The peer-supplied button and
+ * axis counts are clamped to the map array bounds.
  *
- * This function attempts to read `sizeof(js_config_t)` bytes from the provided
- * socket file descriptor into the `config_dest` buffer. If the socket is
- * non-blocking, it is temporarily set to blocking for this read operation and
- * restored afterwards.
- *
- * @param sockfd The file descriptor of the connected socket from which to read.
- * @param config_dest Pointer to a `js_config_t` structure to store the read configuration.
- * @return 0 on successful read of the complete configuration, -1 on failure
- *         (e.g., read error, EOF, timeout). `errno` may be set by underlying calls.
+ * @return 0 with the config filled, -1 on read error, EOF or timeout.
  */
 static int read_socket_config(int sockfd, js_config_t *config_dest) {
     ssize_t bytes_to_read = sizeof(js_config_t);
@@ -1000,10 +1114,6 @@ static int read_socket_config(int sockfd, js_config_t *config_dest) {
     int original_socket_flags = fcntl(sockfd, F_GETFL, 0);
     int socket_was_nonblocking = 0;
 
-    /* Bound the total time spent waiting for the config so a connected-but-silent
-     * peer cannot hang the calling application thread forever. SO_RCVTIMEO makes
-     * an otherwise-blocking real_read return EAGAIN periodically; the monotonic
-     * deadline below caps the cumulative wait across retries. */
     struct timeval rcv_timeout = { .tv_sec = 1, .tv_usec = 0 };
     struct timeval saved_rcv_timeout;
     socklen_t saved_rcv_timeout_len = sizeof(saved_rcv_timeout);
@@ -1062,10 +1172,8 @@ static int read_socket_config(int sockfd, js_config_t *config_dest) {
                  sockfd, config_dest->name, config_dest->vendor, config_dest->product, config_dest->version,
                  config_dest->num_btns, config_dest->num_axes);
 
-    /* Clamp the button/axis counts to the static array bounds. These values come
-     * straight from the socket peer and are otherwise trusted verbatim; without
-     * this, an oversized num_btns/num_axes drives out-of-bounds reads of
-     * btn_map/axes_map in the EVIOCGBIT handlers (and any other count-keyed loop). */
+    /* Unclamped peer counts would drive out-of-bounds reads of btn_map/axes_map
+     * in the EVIOCGBIT handlers. */
     if (config_dest->num_btns > INTERPOSER_MAX_BTNS) {
         sji_log_warn("read_socket_config: num_btns %u exceeds max %u; clamping.", config_dest->num_btns, INTERPOSER_MAX_BTNS);
         config_dest->num_btns = INTERPOSER_MAX_BTNS;
@@ -1089,22 +1197,13 @@ config_read_cleanup:
 }
 
 /**
- * @brief Connects to the Unix domain socket backing an interposed device.
+ * Connects to a device socket (retrying ENOENT/ECONNREFUSED for up to
+ * SOCKET_CONNECT_TIMEOUT_MS), reads the device configuration and sends the
+ * one-byte architecture specifier. Works on locals and out-params only, never
+ * the shared slot, so it runs without interposers_mutex; the caller publishes
+ * the fd and config under the lock.
  *
- * This function creates a new socket, attempts to connect to the Unix domain
- * socket at `socket_path` with a timeout. Upon successful connection, it reads
- * the device configuration into `config_dest` using `read_socket_config()` and
- * sends a 1-byte architecture specifier (sizeof(long)) to the server.
- *
- * It deliberately operates on locals/out-params only — never on the shared
- * interposers[] slot — so it can run without `interposers_mutex` held while
- * other threads scan the array; the caller publishes the returned fd and
- * config into the slot under the lock once fully configured.
- *
- * @param socket_path Path of the Unix domain socket to connect to.
- * @param config_dest Receives the device configuration on success.
- * @return The connected socket fd on success, -1 on failure.
- *         `errno` may be set by underlying system calls.
+ * @return The connected socket fd, or -1.
  */
 static int connect_interposer_socket(const char *socket_path, js_config_t *config_dest) {
     int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1162,22 +1261,24 @@ connect_fail:
     return -1;
 }
 
-/* Shared open()/open64() interposition. Each open of a matched device gets its OWN
- * socket connection (unique fd per POSIX, per-handle O_NONBLOCK, every handle gets
- * every event). connect_interposer_socket() runs WITHOUT interposers_mutex (it can
- * block on timeouts and would stall every other interposed call); the fd stays
- * private to this thread until published under the lock.
- * Returns the socket fd; -1 on error (errno EIO on connect fail, EMFILE at
- * SJI_MAX_HANDLES_PER_DEVICE); -2 if not an interposable path (caller uses real open). */
+/**
+ * Shared body of the open wrappers: a matched device gets its own socket
+ * connection, built unlocked on a private fd (the connect can block on its
+ * timeout and would stall every other interposed call) and published into the
+ * handle table under the lock once configured.
+ *
+ * @return The socket fd; -1 with errno EIO (connect failed) or EMFILE (handle
+ *         table full); -2 when the path is not interposed and the caller uses
+ *         the real open (a NULL path included, for the real EFAULT).
+ */
 static int common_open_logic(const char *pathname, int flags, js_interposer_t **found_interposer_ptr) {
     *found_interposer_ptr = NULL;
 
     if (pathname == NULL) {
-        return -2;  /* let the real open*() set errno=EFAULT for a NULL path */
+        return -2;
     }
 
-    /* Match the slot by device name without the lock: the name fields are set
-     * once at static initialization and never mutated. */
+    /* Unlocked: the name fields are set at static initialization and never mutated. */
     js_interposer_t *interposer = NULL;
     for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
         if (strcmp(pathname, interposers[i].open_dev_name) == 0) {
@@ -1190,8 +1291,6 @@ static int common_open_logic(const char *pathname, int flags, js_interposer_t **
     }
     *found_interposer_ptr = interposer;
 
-    /* Blocking connect + config read on a private fd, deliberately WITHOUT
-     * the global lock. */
     js_config_t pending_config;
     memset(&pending_config, 0, sizeof(pending_config));
     int new_fd = connect_interposer_socket(interposer->socket_path, &pending_config);
@@ -1202,7 +1301,6 @@ static int common_open_logic(const char *pathname, int flags, js_interposer_t **
     }
 
     if (flags & O_NONBLOCK) {
-        /* The fd is still private to this thread; set it up before publishing. */
         sji_log_info("Application opened %s with O_NONBLOCK. Setting socket fd %d to non-blocking.",
                      pathname, new_fd);
         if (make_socket_nonblocking(new_fd) == -1) {
@@ -1211,8 +1309,6 @@ static int common_open_logic(const char *pathname, int flags, js_interposer_t **
         }
     }
 
-    /* Publish the fully configured connection (atomic from the perspective of
-     * every lock-holding scanner). */
     pthread_mutex_lock(&interposers_mutex);
     if (interposer->handle_count >= SJI_MAX_HANDLES_PER_DEVICE) {
         pthread_mutex_unlock(&interposers_mutex);
@@ -1225,35 +1321,20 @@ static int common_open_logic(const char *pathname, int flags, js_interposer_t **
     interposer->handles[interposer->handle_count].fd = new_fd;
     interposer->handles[interposer->handle_count].open_flags = flags;
     interposer->handle_count++;
-    /* The server sends the same per-device config on every connection;
-     * last-write-wins keeps the slot's cached copy current. */
     interposer->js_config = pending_config;
     int open_handles = interposer->handle_count;
     pthread_mutex_unlock(&interposers_mutex);
 
-    /* Gate the fcntl so the success path performs no extra syscall and leaves errno untouched when logging is off. */
+    /* Gated so the success path makes no extra syscall and leaves errno alone when
+     * logging is off. */
     int sock_flags = g_sji_log_enabled ? fcntl(new_fd, F_GETFL, 0) : 0;
     sji_log_info("Successfully interposed 'open' for %s (app_flags=0x%x), socket_fd: %d (%d handle(s) open). Socket flags: 0x%x",
                  pathname, flags, new_fd, open_handles, sock_flags);
     return new_fd;
 }
 
-/**
- * @brief Intercepted `open()` system call.
- *
- * If `real_open` is not loaded, returns -1 with `errno` set to `EFAULT`.
- * Otherwise, it calls `common_open_logic()` to determine if the `pathname`
- * corresponds to a device that should be interposed.
- * If `common_open_logic()` returns:
- *  - A non-negative fd: This fd (representing the socket) is returned to the application.
- *  - -1: An error occurred during interposition; -1 is returned and `errno` is already set.
- *  - -2: The path is not an interposable device; the call is passed to `real_open()`.
- *
- * @param pathname The path to the file to open.
- * @param flags Flags for opening the file (e.g., `O_RDONLY`, `O_NONBLOCK`).
- * @param ... Optional `mode_t mode` argument if `O_CREAT` is in `flags`.
- * @return A file descriptor on success, or -1 on error (`errno` is set).
- */
+/* Device paths get a socket handle from common_open_logic(); everything else
+ * goes to the real open(), with the mode argument pulled only when NEEDS_MODE. */
 int open(const char *pathname, int flags, ...) {
     if (!real_open) {
         errno = EFAULT;
@@ -1281,21 +1362,7 @@ int open(const char *pathname, int flags, ...) {
 #undef open64
 #endif
 
-/**
- * @brief Intercepted `open64()` system call.
- *
- * Similar to the intercepted `open()`, this function uses `common_open_logic()`
- * to handle interposition for target device paths. If the path is not
- * interposable, the call is passed to `real_open64()` if available, or
- * falls back to `real_open()` otherwise.
- * If neither `real_open64` nor `real_open` are loaded, returns -1 with `errno`
- * set to `EFAULT`.
- *
- * @param pathname The path to the file to open.
- * @param flags Flags for opening the file.
- * @param ... Optional `mode_t mode` argument if `O_CREAT` is in `flags`.
- * @return A file descriptor on success, or -1 on error (`errno` is set).
- */
+/* As open(); falls back to the real open() when no real open64 exists. */
 int open64(const char *pathname, int flags, ...) {
     if (!real_open64 && !real_open) {
         errno = EFAULT;
@@ -1328,20 +1395,8 @@ int open64(const char *pathname, int flags, ...) {
     return result_fd;
 }
 
-/**
- * @brief Intercepted `openat()` system call.
- *
- * Resolves the full path if a relative path and directory fd are provided.
- * Uses `common_open_logic()` to handle interposition for target device paths.
- * Safely extracts and passes the `mode` argument if file creation flags
- * (O_CREAT or O_TMPFILE) are present to prevent permission bugs.
- *
- * @param dirfd The directory file descriptor.
- * @param pathname The path to the file to open.
- * @param flags Flags for opening the file.
- * @param ... Optional `mode_t mode` argument if file creation flags are set.
- * @return A file descriptor on success, or -1 on error (`errno` is set).
- */
+/* As open(), with a relative path resolved against dirfd through /proc/self/fd
+ * for the device match only; the real call receives the original arguments. */
 int openat(int dirfd, const char *pathname, int flags, ...) {
     if (!real_openat) {
         errno = EFAULT;
@@ -1384,19 +1439,7 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
 #undef openat64
 #endif
 
-/**
- * @brief Intercepted `openat64()` system call.
- *
- * 64-bit variant of the intercepted `openat()` system call. Resolves relative
- * paths, applies interposer logic, and safely handles variadic `mode` arguments.
- * Falls back to `real_openat()` if `real_openat64` is not available.
- *
- * @param dirfd The directory file descriptor.
- * @param pathname The path to the file to open.
- * @param flags Flags for opening the file.
- * @param ... Optional `mode_t mode` argument if file creation flags are set.
- * @return A file descriptor on success, or -1 on error (`errno` is set).
- */
+/* As openat(); falls back to the real openat() when no real openat64 exists. */
 int openat64(int dirfd, const char *pathname, int flags, ...) {
     if (!real_openat64 && !real_openat) {
         errno = EFAULT;
@@ -1444,21 +1487,9 @@ int openat64(int dirfd, const char *pathname, int flags, ...) {
     return result_fd;
 }
 
-/**
- * @brief Intercepted `close()` system call.
- *
- * If `real_close` is not loaded, returns -1 with `errno` set to `EFAULT`.
- * Checks if the given file descriptor `fd` is a handle created by an
- * interposed open(). If it is, the handle is removed from its device's table
- * and its dedicated socket connection is closed via `real_close()`; other
- * handles for the same device own their own connections and are unaffected.
- * When the last handle of a device closes, the cached device config is
- * cleared.
- * If `fd` is not an interposed handle, the call is passed to `real_close()`.
- *
- * @param fd The file descriptor to close.
- * @return 0 on success, -1 on error (`errno` is set by `real_close()`).
- */
+/* An interposed handle is retired from its device's table and its own socket
+ * closed; other handles of the device are unaffected, and the last one to go
+ * clears the cached config. */
 int close(int fd) {
     if (!real_close) {
         sji_log_error("CRITICAL: real_close not loaded. Cannot proceed with close call.");
@@ -1480,13 +1511,12 @@ int close(int fd) {
             interposer->handles[h] = interposer->handles[interposer->handle_count - 1];
             interposer->handle_count--;
             if (interposer->handle_count == 0) {
-                /* Last handle for this device is gone; drop the cached config. */
                 memset(&(interposer->js_config), 0, sizeof(js_config_t));
             }
             int ret = real_close(fd);
             int close_errno = errno;
-            /* Snapshot under the lock, then log outside it so a blocked stderr can't stall other hooked calls. */
-            const char *dev = interposer->open_dev_name;  /* static string constant, safe after unlock */
+            /* Log after unlock so a blocked stderr can't stall other hooked calls. */
+            const char *dev = interposer->open_dev_name;
             int remaining = interposer->handle_count;
             pthread_mutex_unlock(&interposers_mutex);
             if (ret != 0) {
@@ -1504,17 +1534,14 @@ int close(int fd) {
 }
 
 /**
- * @brief Bounded best-effort drain of the remainder of one partially-read event.
+ * Bounded drain of the remainder of a partially consumed event. The peek and
+ * the consuming recv() are not atomic, so a non-blocking consume can come up
+ * short; those bytes are already out of the kernel buffer, so the rest is
+ * drained here, waiting with poll() for at most `budget_ms` so a peer that
+ * stalls mid-event cannot hang the caller. Appends at `*consumed`.
  *
- * The peek and the consuming recv() are not atomic, so a non-blocking consume can
- * return fewer than `event_size` bytes. Those bytes are already out of the kernel
- * buffer and cannot be re-peeked, so the remainder must be drained here. The wait
- * is capped (poll(), not a spin) so a peer that stalls mid-event cannot hang the
- * caller. Writes into `buf` at `*consumed` and advances `*consumed`.
- *
- * @return 1 if the whole event is now in `buf`; 0 if only a partial prefix is
- *         available (budget exhausted, EOF, or hard error mid-event) — `*consumed`
- *         holds however many leading bytes were obtained, none lost.
+ * @return 1 once the whole event is in `buf`; 0 when only a prefix is (budget
+ *         exhausted, EOF or hard error), with `*consumed` counting it.
  */
 static int drain_event_remainder(int fd, void *buf, size_t *consumed, size_t event_size, int budget_ms) {
     struct timespec drain_start;
@@ -1531,8 +1558,6 @@ static int drain_event_remainder(int fd, void *buf, size_t *consumed, size_t eve
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             return 0; /* hard error */
         }
-        /* Remainder not buffered yet; wait (efficiently) for the rest, but only
-         * for the time left in the budget. */
         struct timespec drain_now;
         clock_gettime(CLOCK_MONOTONIC, &drain_now);
         long elapsed_ms = (drain_now.tv_sec - drain_start.tv_sec) * 1000L +
@@ -1546,20 +1571,14 @@ static int drain_event_remainder(int fd, void *buf, size_t *consumed, size_t eve
         if (prc <= 0) {
             return 0; /* timeout (0) or poll error/EINTR (<0) */
         }
-        /* Readable (or POLLHUP/POLLERR): loop and let recv() report the new
-         * bytes, EOF, or the hard error. */
     }
     return 1;
 }
 
 /**
- * @brief Stashes a partial-event prefix on the handle owning `fd`, under the lock.
- *
- * Called when a non-blocking read drained only part of an event and ran out of
- * budget. The bytes are gone from the kernel buffer, so they are kept here and
- * prepended on this handle's next read(). If the handle was closed concurrently
- * (lookup miss) the bytes are dropped — but that fd is already dead, so nothing
- * that could still be read is lost.
+ * Stashes a partial-event prefix on the handle owning `fd` for its next read().
+ * Caller holds interposers_mutex. A lookup miss means the handle was closed
+ * concurrently; the bytes are dropped, but that fd is already dead.
  */
 static void stash_partial_event_locked(int fd, const void *buf, size_t len) {
     if (len == 0 || len > SJI_MAX_EVENT_SIZE) {
@@ -1574,20 +1593,14 @@ static void stash_partial_event_locked(int fd, const void *buf, size_t len) {
 }
 
 /**
- * @brief Blocking-handle read of the rest of one event, starting at `*consumed`.
+ * Blocking read of the rest of one event from `*consumed`. recv(MSG_WAITALL)
+ * alone returns a short count when a signal lands mid-transfer, which handed
+ * to the application would desync the SOCK_STREAM, so a short return counts as
+ * progress and EINTR restarts; EINTR surfaces only while nothing of the event
+ * is held yet. `*consumed` always reflects the bytes in `buf`, so on EOF or a
+ * hard error the caller can stash the prefix.
  *
- * recv(MSG_WAITALL) alone is not enough for a blocking handle: a signal caught
- * after some bytes were transferred makes it return the short count, and
- * returning that to the application would permanently desync the SOCK_STREAM.
- * So keep receiving until the event completes, treating a short return as
- * progress and restarting on EINTR. EINTR is surfaced only while nothing of
- * the event has been consumed yet (normal blocking-read semantics); once bytes
- * are held, the read is committed to finishing the event. `*consumed` always
- * reflects the bytes present in `buf`, so on EOF/hard error the caller can
- * stash the prefix and keep the stream aligned.
- *
- * @return 1 once the full event is in `buf`; 0 on EOF mid-event; -1 on hard
- *         error (`errno` set).
+ * @return 1 once the event is complete; 0 on EOF mid-event; -1 with errno set.
  */
 static int recv_event_rest_blocking(int fd, void *buf, size_t *consumed, size_t event_size) {
     while (*consumed < event_size) {
@@ -1611,21 +1624,13 @@ static int recv_event_rest_blocking(int fd, void *buf, size_t *consumed, size_t 
 }
 
 /**
- * @brief Intercepted `read()` system call.
- *
- * If `real_read` is not loaded, returns -1 with `errno` set to `EFAULT`.
- * Checks if `fd` is an interposed socket. If not, passes to `real_read()`.
- * If it is an interposed socket:
- *  - Determines the expected event size (`struct js_event` or `struct input_event`).
- *  - If `count` is 0, returns 0.
- *  - If `count` is less than one event size, returns -1 with `errno` set to `EINVAL`.
- *  - Attempts to `recv()` one event from the socket.
- *  - Handles non-blocking behavior (`EAGAIN`/`EWOULDBLOCK`).
- *
- * @param fd The file descriptor to read from.
- * @param buf Buffer to store the read data.
- * @param count Maximum number of bytes to read.
- * @return Number of bytes read on success. 0 on EOF. -1 on error (`errno` is set).
+ * Interposed read(): one whole event (js_event or input_event by device type)
+ * per call, EINVAL for a buffer smaller than that. The event stream must never
+ * be consumed short, or every later read is misaligned: a non-blocking handle
+ * peeks before consuming, and a partially drained event (non-blocking budget
+ * exhausted, or EOF/error on a blocking handle) is stashed on the handle and
+ * completed by its next read(). Blocking mode follows the socket's actual
+ * O_NONBLOCK flag, the handle's open() flags being the fallback.
  */
 ssize_t read(int fd, void *buf, size_t count) {
     if (!real_read) {
@@ -1636,9 +1641,8 @@ ssize_t read(int fd, void *buf, size_t count) {
 
     js_interposer_t *interposer = NULL;
     int handle_open_flags = 0;
-    /* Snapshot (and consume) any partial-event prefix stashed by a previous
-     * budget-exhausted non-blocking read of this handle, under the same lock as
-     * the lookup so a concurrent close() can't tear the handle out mid-copy. */
+    /* Taken under the lookup's lock so a concurrent close() can't tear the
+     * handle out mid-copy. */
     unsigned char stashed[SJI_MAX_EVENT_SIZE];
     size_t stashed_len = 0;
     int handle_idx = -1;
@@ -1675,10 +1679,8 @@ ssize_t read(int fd, void *buf, size_t count) {
         return -1;
     }
 
-    /* recv() on the caller's fd: each handle owns its own connection, so this
-     * reads exactly this handle's event stream. After the unlocked lookup a
-     * concurrent close() can retire the handle; the caller's fd keeps kernel
-     * read() semantics (EBADF at worst). */
+    /* Unlocked from here: a concurrent close() retiring the handle leaves the
+     * caller's fd with kernel read() semantics (EBADF at worst). */
     int socket_actual_flags = fcntl(fd, F_GETFL, 0);
     int socket_is_actually_nonblocking = (socket_actual_flags != -1 && (socket_actual_flags & O_NONBLOCK));
 
@@ -1690,17 +1692,12 @@ ssize_t read(int fd, void *buf, size_t count) {
 
     const int drain_budget_ms = 10;
 
-    /* Resume a previously-stashed partial event: those bytes are already out of
-     * the kernel buffer, so prepend them and drain only the remainder. Completing
-     * the event here (rather than ever returning a short count) is what keeps the
-     * SOCK_STREAM aligned across reads. */
     if (stashed_len > 0) {
         memcpy(buf, stashed, stashed_len);
         size_t event_consumed = stashed_len;
         if (socket_is_actually_nonblocking) {
             if (!drain_event_remainder(fd, buf, &event_consumed, event_size, drain_budget_ms)) {
-                /* Still short: re-stash everything and ask the caller to retry.
-                 * No event bytes are lost — they live in the stash. */
+                /* Still short: re-stash and have the caller retry; no bytes lost. */
                 pthread_mutex_lock(&interposers_mutex);
                 stash_partial_event_locked(fd, buf, event_consumed);
                 pthread_mutex_unlock(&interposers_mutex);
@@ -1708,12 +1705,9 @@ ssize_t read(int fd, void *buf, size_t count) {
                 return -1;
             }
         } else {
-            /* Blocking handle: a short return is not allowed, so block until
-             * the event completes (resumes across signal-shortened recvs). */
             int rest = recv_event_rest_blocking(fd, buf, &event_consumed, event_size);
             if (rest != 1) {
-                /* EOF or hard error before the event completed: re-stash so the
-                 * already-consumed prefix is not lost, then surface the result. */
+                /* Re-stash the prefix, then surface the EOF/error. */
                 if (rest == 0) {
                     sji_log_info("SOCKET_READ_EOF: fd %d (%s) closed mid-stashed-event.",
                                  fd, interposer->open_dev_name);
@@ -1736,9 +1730,7 @@ ssize_t read(int fd, void *buf, size_t count) {
 
     ssize_t bytes_read;
     if (socket_is_actually_nonblocking) {
-        /* Non-blocking: never consume a partial event. Peek first and only
-         * dequeue once a whole event is buffered; consuming a partial event
-         * would permanently desync the SOCK_STREAM for all later reads. */
+        /* Peek first; only dequeue once a whole event is buffered. */
         ssize_t peeked = recv(fd, buf, event_size, MSG_PEEK | MSG_DONTWAIT);
         if (peeked > 0 && (size_t)peeked < event_size) {
             sji_log_debug("read: sockfd %d (%s) has a partial event buffered (%zd/%zu bytes); leaving it queued.",
@@ -1749,16 +1741,12 @@ ssize_t read(int fd, void *buf, size_t count) {
         if (peeked <= 0) {
             bytes_read = peeked; /* error (e.g. EAGAIN) or EOF; handled below */
         } else {
-            /* Peek and consuming recv() aren't atomic; a partial consume must
-             * finish draining the event or the stream desyncs. */
+            /* Peek and consume aren't atomic: a short consume must be drained. */
             bytes_read = recv(fd, buf, event_size, MSG_DONTWAIT);
             if (bytes_read > 0 && (size_t)bytes_read < event_size) {
                 size_t event_consumed = (size_t)bytes_read;
                 if (!drain_event_remainder(fd, buf, &event_consumed, event_size, drain_budget_ms)) {
-                    /* Budget exhausted (or EOF/error) mid-event. Returning the
-                     * short count would permanently desync the SOCK_STREAM, so
-                     * stash the consumed prefix and surface EAGAIN; the next read
-                     * resumes and completes the event. No bytes are lost. */
+                    /* Stash the prefix and report EAGAIN; the next read completes it. */
                     pthread_mutex_lock(&interposers_mutex);
                     stash_partial_event_locked(fd, buf, event_consumed);
                     pthread_mutex_unlock(&interposers_mutex);
@@ -1771,16 +1759,13 @@ ssize_t read(int fd, void *buf, size_t count) {
             }
         }
     } else {
-        /* Blocking: wait for a whole event so a short read cannot desync the
-         * stream (resumes across signal-shortened recvs). */
         size_t event_consumed = 0;
         int rest = recv_event_rest_blocking(fd, buf, &event_consumed, event_size);
         if (rest == 1) {
             bytes_read = (ssize_t)event_consumed;
         } else {
             if (event_consumed > 0) {
-                /* EOF or hard error mid-event: keep the consumed prefix for the
-                 * next read so the stream stays aligned; never return it short. */
+                /* Keep the prefix for the next read rather than return it short. */
                 int saved_errno = errno;
                 pthread_mutex_lock(&interposers_mutex);
                 stash_partial_event_locked(fd, buf, event_consumed);
@@ -1818,22 +1803,9 @@ ssize_t read(int fd, void *buf, size_t count) {
     return bytes_read;
 }
 
-/**
- * @brief Intercepted `epoll_ctl()` system call.
- *
- * If `real_epoll_ctl` is not loaded, returns -1 with `errno` set to `EFAULT`.
- * If the operation is `EPOLL_CTL_ADD` or `EPOLL_CTL_MOD` and `fd` is one
- * of the interposed socket file descriptors, this function ensures that the
- * underlying socket is set to non-blocking mode using `make_socket_nonblocking()`.
- * This is important because `epoll` is typically used with non-blocking FDs.
- * After this potential modification, the call is passed to `real_epoll_ctl()`.
- *
- * @param epfd The epoll instance file descriptor.
- * @param op The operation to perform (e.g., `EPOLL_CTL_ADD`, `EPOLL_CTL_MOD`, `EPOLL_CTL_DEL`).
- * @param fd The file descriptor to add/modify/remove from the epoll instance.
- * @param event Pointer to an `epoll_event` structure describing the event.
- * @return 0 on success, -1 on error (`errno` is set by `real_epoll_ctl()`).
- */
+/* An interposed handle added to or modified in an epoll set is switched to
+ * O_NONBLOCK first, as epoll consumers expect; only that handle's connection
+ * is affected. */
 int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
     if (!real_epoll_ctl) {
         sji_log_error("CRITICAL: real_epoll_ctl not loaded. Cannot proceed with epoll_ctl call.");
@@ -1847,11 +1819,8 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
         const char *dev = NULL;
         int nb_ret = 0;
         if (interposer != NULL) {
-            /* Snapshot the device name (static string) and flip O_NONBLOCK under the lock;
-             * defer all logging until after unlock so a blocked stderr can't stall other hooked calls. */
+            /* Log after unlock so a blocked stderr can't stall other hooked calls. */
             dev = interposer->open_dev_name;
-            /* Each handle owns its own connection, so this flips only the
-             * caller's handle to non-blocking, not other handles of the device. */
             nb_ret = make_socket_nonblocking(fd);
         }
         pthread_mutex_unlock(&interposers_mutex);
@@ -1867,31 +1836,20 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
     return real_epoll_ctl(epfd, op, fd, event);
 }
 
-/* --- IOCTL Handling --- */
-
 /**
- * @brief Handles ioctl calls for interposed joystick devices (DEV_TYPE_JS).
+ * joydev (JSIOC*) ioctls for a js node, answered from the server config and
+ * the hard-coded identity; the map setters are refused with EPERM (the maps
+ * come from the server) and anything else is ENOTTY. `interposer` is the
+ * dispatcher's snapshot; JSIOCSCORR writes its corr, which ioctl() persists.
  *
- * This function processes ioctl requests specific to joystick devices
- * (`/dev/input/jsX`). It emulates the behavior of a standard joystick driver
- * for supported ioctl commands, using configuration data received from the
- * socket server where appropriate (e.g., for number of axes/buttons, mappings).
- * Unsupported ioctls typically result in `ENOTTY` or `EPERM`.
- *
- * @param interposer Pointer to the `js_interposer_t` state for the device.
- * @param fd The application's file descriptor, which is our socket fd.
- * @param request The ioctl request code.
- * @param arg Pointer to the argument for the ioctl request.
- * @return 0 on success, or a positive value if the ioctl returns data (e.g., string length).
- *         -1 on error (`errno` is set appropriately).
+ * @return 0, the string length for JSIOCGNAME, or -1 with errno set.
  */
 int intercept_js_ioctl(js_interposer_t *interposer, int fd, ioctl_request_t request, void *arg) {
     int len;
     uint8_t *u8_ptr;
     uint16_t *u16_ptr;
     int ret_val = 0;
-    (void)fd; /* fd is part of the handler signature for symmetry with the EV
-               * handler; this handler operates on *interposer, not the fd. */
+    (void)fd; /* signature symmetry with the EV handler */
     errno = 0;
 
     if (_IOC_TYPE(request) != 'j') {
@@ -1987,22 +1945,15 @@ exit_js_ioctl:
 }
 
 /**
- * @brief Handles ioctl calls for interposed event devices (DEV_TYPE_EV).
+ * evdev (EVIOC*) ioctls for an event node: identity from the FAKE_UDEV_*
+ * values, key and abs capability bits from the server config, fixed absinfo
+ * ranges, no input properties, and force feedback accepted as a no-op.
+ * `array_idx` is the slot's index in interposers[], from which the pad number
+ * for EVIOCGPHYS/EVIOCGUNIQ derives. Anything else, including joydev ioctls,
+ * is ENOTTY.
  *
- * This function processes ioctl requests specific to evdev input devices
- * (`/dev/input/event*`). It emulates responses for common evdev ioctls like
- * `EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGBIT` (for capabilities),
- * `EVIOCGABS` (for absolute axis info), and basic force feedback ioctls.
- * Device identity (name, IDs) is hardcoded to match `FAKE_UDEV_*` defines.
- * Capabilities (buttons, axes) are derived from `interposer->js_config`.
- * Unsupported ioctls typically result in `ENOTTY`.
- *
- * @param interposer Pointer to the `js_interposer_t` state for the device.
- * @param fd The application's file descriptor, which is our socket fd.
- * @param request The ioctl request code.
- * @param arg Pointer to the argument for the ioctl request.
- * @return 0 on success, or a positive value if the ioctl returns data (e.g., string length or effect ID).
- *         -1 on error (`errno` is set appropriately).
+ * @return 0, a string length, the buffer length or an effect id, or -1 with
+ *         errno set.
  */
 int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd, ioctl_request_t request, void *arg) {
     struct input_absinfo *absinfo_ptr;
@@ -2014,7 +1965,7 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
     unsigned int i;
     int ret_val = 0;
     errno = 0;
-    (void)fd; /* kept for dispatcher symmetry with intercept_js_ioctl */
+    (void)fd; /* signature symmetry with the JS handler */
 
     char ioctl_type = _IOC_TYPE(request);
     unsigned int ioctl_nr = _IOC_NR(request);
@@ -2111,8 +2062,7 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
             }
 
             if (gamepad_idx != -1) {
-                /* Must match the "uniq" sysattr published by fake-udev for the
-                 * same pad so udev and evdev agree on the device's unique id. */
+                /* Must match the "uniq" sysattr fake-udev publishes for the pad. */
                 snprintf((char *)arg, len, "SGVP%04d", gamepad_idx);
             } else {
                 sji_log_warn("IOCTL_EV(%s): EVIOCGUNIQ - Could not determine valid gamepad index for unique ID. Using fallback.", interposer->open_dev_name);
@@ -2129,11 +2079,9 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
         if (ioctl_nr == _IOC_NR(EVIOCGPROP(0))) {
             len = ioctl_size;
             if (!arg || len <=0 ) { errno = EFAULT; ret_val = -1; goto exit_ev_ioctl; }
-            // Report NO input properties: a real gamepad (the X-Box 360 pad we emulate)
-            // sets none. Advertising INPUT_PROP_POINTING_STICK here makes udev/libinput
-            // input_id classify the device as a pointing-stick (pointer) and exclude it
-            // from joystick enumeration, so SDL2-evdev apps such as Xemu fail to detect
-            // the pad even though the /dev/input/jsX path still works.
+            /* No properties, like a real Xbox 360 pad: any bit here (e.g.
+             * INPUT_PROP_POINTING_STICK) makes udev/libinput input_id classify
+             * the device as a pointer and SDL2-evdev apps (Xemu) lose the pad. */
             memset(arg, 0, len);
             ret_val = (int)len;
             sji_log_info("IOCTL_EV(%s): EVIOCGPROP(%d) -> no properties (gamepad)", interposer->open_dev_name, len);
@@ -2295,11 +2243,8 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
                 break;
         }
     } else if (ioctl_type == 'j') {
-        /* A real kernel evdev node rejects legacy joydev (JSIOC*) ioctls with
-         * ENOTTY; modern SDL relies on that to tell an evdev node apart from a
-         * legacy /dev/input/jsX and to pick the proper VID/PID-based GUID. Answer
-         * these here exactly as the kernel would rather than the classic-js path
-         * (JSIOC* remain fully served on the real /dev/input/jsX nodes). */
+        /* A kernel evdev node rejects joydev ioctls with ENOTTY, and SDL relies
+         * on that to tell it apart from /dev/input/jsX and pick the VID/PID GUID. */
         sji_log_info("IOCTL_EV(%s): Joystick ioctl 0x%lx (Type 'j', NR 0x%02x) on EVDEV device. Reporting ENOTTY (kernel-faithful).",
                        interposer->open_dev_name, (unsigned long)request, ioctl_nr);
         errno = ENOTTY;
@@ -2323,21 +2268,12 @@ exit_ev_ioctl:
 }
 
 /**
- * @brief Intercepted `ioctl()` system call.
- *
- * If `real_ioctl` is not loaded, returns -1 with `errno` set to `EFAULT`.
- * Checks if the file descriptor `fd` corresponds to an interposed device.
- * If it is not an interposed fd, the call is passed to `real_ioctl()`.
- * If it is an interposed fd, the call is routed to either `intercept_js_ioctl()`
- * or `intercept_ev_ioctl()` based on the `interposer->type`.
- *
- * @param fd The file descriptor on which the ioctl operation is to be performed.
- * @param request The device-dependent ioctl request code.
- * @param ... A third argument, typically a pointer (`void *arg`), whose type
- *            depends on the specific ioctl request.
- * @return On success, the return value depends on the specific ioctl command.
- *         On error, -1 is returned, and `errno` is set appropriately by the
- *         specific ioctl handler or by `real_ioctl()`.
+ * Interposed ioctl(): routes an interposed fd to the js or ev handler on a
+ * snapshot of its slot taken under the lock, so the handler (and its logging)
+ * runs unlocked. The one handler write, JSIOCSCORR's corr, is persisted back
+ * under the lock only if the fd still owns the same slot: between unlock and
+ * re-lock the fd may have been closed and reused for another device's handle,
+ * and a same-slot match is still correct because corr is device-global.
  */
 int ioctl(int fd, ioctl_request_t request, ...) {
     if (!real_ioctl) {
@@ -2360,9 +2296,6 @@ int ioctl(int fd, ioctl_request_t request, ...) {
         return real_ioctl(fd, request, arg_ptr);
     }
 
-    /* Snapshot the fields the handlers read under the lock, then run the handler
-     * unlocked so blocking logging can't stall other hooked calls. interposers[]
-     * is static, so the live slot stays valid; JSIOCSCORR is persisted back below. */
     js_interposer_t snapshot;
     memset(&snapshot, 0, sizeof(snapshot));
     snapshot.type = interposer->type;
@@ -2377,8 +2310,6 @@ int ioctl(int fd, ioctl_request_t request, ...) {
     if (snapshot.type == DEV_TYPE_JS) {
         ioctl_ret = intercept_js_ioctl(&snapshot, fd, request, arg_ptr);
     } else if (snapshot.type == DEV_TYPE_EV) {
-        /* The EV handler delegates 'j'-type ioctls (incl. JSIOCSCORR) to the
-         * JS handler, which writes snapshot.corr just like the JS path. */
         ioctl_ret = intercept_ev_ioctl(&snapshot, array_idx, fd, request, arg_ptr);
     } else {
         sji_log_error("IOCTL(%s): Interposer has unknown type %d for fd %d. This should not happen. Setting EINVAL.",
@@ -2387,18 +2318,8 @@ int ioctl(int fd, ioctl_request_t request, ...) {
         return -1;
     }
 
-    /* JSIOCSCORR is the only handler write: persist snapshot.corr back to the live
-     * slot (re-acquire the lock, re-validate the fd still owns it). Save/restore
-     * errno so the lock/lookup can't perturb the handler's reported errno.
-     *
-     * Identity guard against fd-reuse TOCTOU: between the unlock above and this
-     * re-lock, fd could be closed and reused for a DIFFERENT device's handle. The
-     * re-found slot must be the same slot we snapshotted (array_idx), or we'd write
-     * stale correction data into the wrong device. corr is device-global, so a same
-     * slot match is correct even if the matched handle is a new open() of that
-     * device; only a different slot is the hazard. */
     if (ioctl_ret >= 0 && _IOC_TYPE(request) == 'j' && _IOC_NR(request) == 0x21) {
-        int saved_errno = errno;
+        int saved_errno = errno; /* the lookup must not perturb the handler's errno */
         pthread_mutex_lock(&interposers_mutex);
         js_interposer_t *live = find_interposer_for_fd_locked(fd, NULL, NULL);
         if (live != NULL && (live - interposers) == array_idx) {

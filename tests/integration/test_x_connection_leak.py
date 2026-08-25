@@ -66,7 +66,6 @@ def main() -> bool:
         finally:
             IH._X11ClipboardMonitor._build = original
 
-        # And a successful monitor still closes cleanly, fds included.
         mon = IH._X11ClipboardMonitor(display_name)
         cmd_fds = (mon._cmd_r, mon._cmd_w)
         mon.close()

@@ -4,12 +4,27 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # Build selkies-<ver>-1-<arch>.pkg.tar.zst (run inside an Arch container)
 set -eux
+
+# Package managers with no retry option of their own -- apk, dnf, pacman and
+# RubyGems all lack one -- are bounded-retried here. This composes with whatever
+# internal retrying the tool already does rather than replacing it, so it cannot
+# lower a default the way an explicit --setopt could.
+retry() {
+    i=1
+    until "$@"; do
+        [ "${i}" -ge 5 ] && return 1
+        i=$((i + 1)); sleep 5
+    done
+}
 # base-devel: dependencies without a wheel for this distribution's Python are
 # compiled from their sdist. libxkbcommon is loaded with ctypes at runtime and
 # lets mkvenv.sh's smoke test exercise that path
-pacman -Syu --noconfirm --needed python python-pip base-devel libxkbcommon sudo
+# pipewire carries the headers the V4L2 interposer's PipeWire frame source is
+# built against (the library is loaded at runtime when an application uses it)
+retry pacman -Syu --noconfirm --needed python python-pip base-devel libxkbcommon sudo pipewire
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
+/repo/infra/packaging/v4l2-interposer.sh /pkg-root
 # makepkg writes src/ and pkg/ next to the PKGBUILD, and /repo is read-only
 rm -rf /build
 mkdir -p /build /out

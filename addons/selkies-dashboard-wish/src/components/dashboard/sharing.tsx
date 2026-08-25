@@ -14,6 +14,14 @@ import { toast } from "sonner";
 import { computeRenderableSettings, getLastServerSettings } from "@/utils";
 import { t } from "@/i18n";
 
+/**
+ * The sharing card: copyable links for the viewer (`#shared`) and the
+ * controller slots (`#player2` to `#player4`), each gated by the matching
+ * server setting from `serverSettings` messages.
+ * @module
+ */
+
+/** Every shareable hash with its label and badge; the server settings filter it. */
 const sharingLinks = [
 	{
 		id: "shared",
@@ -43,17 +51,19 @@ const sharingLinks = [
 
 interface SharingProps {
 	show: boolean;
-	onClose: () => void;
 }
 
-export const Sharing = ({ show, onClose }: SharingProps) => {
+/**
+ * Renders the link cards, a notice when the admin disabled sharing, or
+ * nothing while `show` is false.
+ */
+export const Sharing = ({ show }: SharingProps) => {
 	const [copiedId, setCopiedId] = useState<string | null>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
 
 	const baseUrl =
 		typeof window !== "undefined" ? window.location.href.split("#")[0] : "";
 
-	// --- Server Settings Message Listener ---
 	useEffect(() => {
 		const handleMessage = (event: MessageEvent) => {
 			if (
@@ -70,6 +80,7 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 		};
 	}, []);
 
+	/** Copies a link to the local clipboard and reports the outcome as a toast. */
 	const handleCopyLink = async (fullUrl: string, id: string, label: string) => {
 		if (!navigator.clipboard) {
 			console.warn("Clipboard API not available.");
@@ -80,7 +91,6 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 			setCopiedId(id);
 			setTimeout(() => setCopiedId(null), 2000);
 			
-			// Show success toast
 			toast.success(t('notifications.copiedTitle', { label }), {
 				description: t('notifications.copiedMessage', { textToCopy: fullUrl }),
 				duration: 3000,
@@ -88,7 +98,6 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 		} catch (err) {
 			console.error("Failed to copy link: ", err);
 
-			// Show error toast
 			toast.error(t('notifications.copyFailedTitle', { label }), {
 				description: t('notifications.copyFailedError'),
 				duration: 5000,
@@ -98,7 +107,6 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 
 	if (!show) return null;
 
-	// Filter sharing links based on server settings
 	const filteredSharingLinks = sharingLinks.filter(link => {
 		if (link.id === 'shared') return renderableSettings.enableShared ?? true;
 		if (link.id === 'player2') return renderableSettings.enablePlayer2 ?? true;
@@ -107,7 +115,6 @@ export const Sharing = ({ show, onClose }: SharingProps) => {
 		return false;
 	});
 
-	// Don't show sharing panel if sharing is disabled
 	if (renderableSettings.enableSharing === false) {
 		return (
 			<Card className="w-[320px] bg-background/95 backdrop-blur-sm border shadow-lg rounded-lg relative p-4">

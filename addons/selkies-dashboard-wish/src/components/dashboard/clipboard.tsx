@@ -9,15 +9,36 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { computeRenderableSettings, getLastServerSettings, getPrefixedKey } from "@/utils";
+import { computeRenderableSettings, getLastClipboardContent, getLastServerSettings, getPrefixedKey } from "@/utils";
 import { t } from "@/i18n";
 
+/**
+ * The clipboard panel: the server clipboard's text, editable, plus an image
+ * upload when the binary clipboard is on.
+ *
+ * Reads `clipboardContentUpdate` and `serverSettings` messages from the core
+ * and posts `clipboardUpdateFromUI` (text, on blur), `clipboardImageUpdate`
+ * (an image blob) and `settings` (the `enable_binary_clipboard` toggle, which
+ * the core persists). A rejected non-image file is reported through the
+ * `fileUpload` warning channel core-emitted clipboard skips use.
+ * @module
+ */
+
+/**
+ * Renders the clipboard text area, the binary-clipboard switch and the image
+ * upload controls.
+ *
+ * State is seeded from the cached `clipboardContentUpdate`: the panel mounts
+ * when its submenu opens, usually long after the core last reported the
+ * clipboard. Large server clipboards arrive as a bounded, truncated preview;
+ * editing it would echo the cut-down text back over the real server
+ * clipboard on blur, so truncated content renders read-only.
+ */
 export function Clipboard() {
-	const [dashboardClipboardContent, setDashboardClipboardContent] = useState('');
-	// Large server clipboards arrive as a bounded, truncated preview; editing it
-	// would echo the cut-down text back over the real server clipboard on blur,
-	// so truncated content renders read-only.
-	const [clipboardTruncated, setClipboardTruncated] = useState(false);
+	const [dashboardClipboardContent, setDashboardClipboardContent] = useState(
+		() => getLastClipboardContent()?.text ?? '');
+	const [clipboardTruncated, setClipboardTruncated] = useState(
+		() => getLastClipboardContent()?.truncated ?? false);
 	const [clipboardImageUrl, setClipboardImageUrl] = useState<string | null>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
 	const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
@@ -29,14 +50,12 @@ export function Clipboard() {
 	const handleBinaryClipboardToggle = () => {
 		const newState = !enableBinaryClipboard;
 		setEnableBinaryClipboard(newState);
-		// Core persists enable_binary_clipboard when handling the settings message.
 		window.postMessage(
 			{ type: 'settings', settings: { enable_binary_clipboard: newState } },
 			window.location.origin
 		);
 	};
 
-	// --- Message Listener for Clipboard and Server Settings Updates ---
 	useEffect(() => {
 		const handleWindowMessage = (event: MessageEvent) => {
 			if (event.origin !== window.location.origin) return;
@@ -78,13 +97,10 @@ export function Clipboard() {
 
 	const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
 		const file = event.target.files?.[0];
-		// Allow re-picking the same file: without clearing the value, a
-		// same-path selection fires no change event.
+		// Cleared so re-picking the same file fires a change event.
 		event.target.value = '';
 		if (!file) return;
 		if (!file.type.startsWith('image/')) {
-			// Same warning channel core-emitted clipboard skips use
-			// (classic-dashboard parity).
 			window.postMessage({
 				type: 'fileUpload',
 				payload: {
@@ -98,9 +114,8 @@ export function Clipboard() {
 			}, window.location.origin);
 			return;
 		}
-		// The picked file is already the blob the core wants, and an object URL
-		// previews it without reading a multi-megabyte image through base64 on
-		// the main thread.
+		// An object URL previews the file without reading a multi-megabyte
+		// image through base64 on the main thread.
 		setClipboardImageUrl(previous => {
 			if (previous) URL.revokeObjectURL(previous);
 			return URL.createObjectURL(file);

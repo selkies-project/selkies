@@ -32,26 +32,46 @@
 #   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from abc import ABCMeta, abstractmethod
-
-from av.frame import Frame
-from av.packet import Packet
-
-from ..jitterbuffer import JitterFrame
+from fractions import Fraction
+from typing import Any, Optional
 
 
-class Decoder(metaclass=ABCMeta):
-    @abstractmethod
-    def decode(self, encoded_frame: JitterFrame) -> list[Frame]:
-        pass  # pragma: no cover
+class EncodedPacket:
+    """A pre-encoded media sample on the WebRTC send path: the encoder's output
+    buffer with its presentation timestamp and clock.
+
+    It is what pixelflux/pcmflux hand the packers, replacing `av.Packet` as the
+    passthrough container so packing pulls in no libav wrapper and allocates no
+    per-frame FFmpeg object. `data` is any buffer-protocol object (the encoder's
+    own memory), referenced and never copied; packers walk it through
+    `memoryview(packet.data)` and materialize bytes only for the RTP payloads
+    they emit. Keeping the whole-frame copy out of the path both cuts latency
+    and frees the GIL that a `bytes(frame)` copy would hold for the memcpy.
+    """
+
+    __slots__ = ("data", "pts", "dts", "time_base")
+
+    def __init__(self, data: Any, pts: Optional[int] = None,
+                 time_base: Optional[Fraction] = None) -> None:
+        self.data = data
+        self.pts = pts
+        self.dts = pts
+        self.time_base = time_base
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+
+class Decoder:
+    """Receive-codec marker. Decoding of the browser uplink is done by pcmflux
+    (audio) and pixelflux (video), which the encoded frames are routed to, so a
+    registry decoder carries only the codec's identity, no libav decode."""
 
 
 class Encoder(metaclass=ABCMeta):
-    @abstractmethod
-    def encode(
-        self, frame: Frame, force_keyframe: bool = False
-    ) -> tuple[list[bytes], int]:
-        pass  # pragma: no cover
+    """Packs frames a pixelflux/pcmflux encoder has already produced into RTP
+    payloads. Encoding itself lives in those libraries, not here."""
 
     @abstractmethod
-    def pack(self, packet: Packet) -> tuple[list[bytes], int]:
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
         pass  # pragma: no cover

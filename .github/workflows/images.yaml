@@ -24,6 +24,10 @@ on:
         description: Artifact name of a prebuilt wheel (skips the wheel build when set)
         type: string
         default: ""
+      capture_stack_published:
+        description: The pinned pixelflux/pcmflux are released on PyPI, so this build resolves them there
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       tag_prefix:
@@ -38,6 +42,10 @@ on:
         description: Artifact name of a prebuilt wheel (skips the wheel build when set)
         type: string
         default: ""
+      capture_stack_published:
+        description: The pinned pixelflux/pcmflux are released on PyPI, so this build resolves them there
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -72,7 +80,7 @@ jobs:
           - name: ubuntu26.04
             image: ubuntu
             release: "26.04"
-          - name: trixie
+          - name: debiantrixie
             image: debian
             release: trixie
         arch:
@@ -104,6 +112,7 @@ jobs:
       # selkies-project/* repos by the orchestrating run; absence is tolerated
       # (standalone dispatch) and the Dockerfile falls back to PyPI
       - name: Download pixelflux wheels (main HEAD)
+        if: ${{ !inputs.capture_stack_published }}
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
@@ -111,12 +120,33 @@ jobs:
           path: dist/
           merge-multiple: true
       - name: Download pcmflux wheels (main HEAD)
+        if: ${{ !inputs.capture_stack_published }}
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
           path: dist/
           merge-multiple: true
+      - name: Check the capture stack this build carries
+        env:
+          PUBLISHED: ${{ inputs.capture_stack_published }}
+        run: |
+          if [ "${PUBLISHED}" = "true" ]; then
+            echo "capture stack: the pinned releases, resolved from PyPI"
+            exit 0
+          fi
+          for project in pixelflux pcmflux; do
+            # Away from a release what ships has to be the build the suites ran
+            # against, and the pinned version exists nowhere but this run, so
+            # the wheels are required rather than preferred: the orchestrating
+            # workflow puts them here before calling, and a standalone dispatch
+            # has to supply them the same way.
+            if ! ls "dist/${project}"-*.whl > /dev/null 2>&1; then
+              echo "::error::No main-HEAD ${project} wheel in dist/; run this through ci.yaml, which builds the capture stack first"
+              exit 1
+            fi
+            echo "${project}: main-HEAD wheel from this run"
+          done
       - name: Prepare wheels directory
         run: |
           set -e
@@ -166,7 +196,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [ubuntu26.04, trixie]
+        flavor: [ubuntu26.04, debiantrixie]
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4

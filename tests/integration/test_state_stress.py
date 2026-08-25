@@ -72,7 +72,7 @@ async def drive() -> "H.Results":
         await asyncio.sleep(3.0)
         await read_ws(ws, 2)
 
-        # Phase 1: repeated stop/start cycles must each restart the capture.
+        # Repeated stop/start cycles must each restart the capture.
         for i in range(10):
             st = loglen()
             await ws.send("STOP_VIDEO")
@@ -86,8 +86,8 @@ async def drive() -> "H.Results":
         else:
             res.check("10 stop/start cycles all restart", True, "")
 
-        # Phase 2: encoder toggles must each bring the capture back up.
-        for enc in ("jpeg", "h264enc", "openh264enc", "h264enc"):
+        # Encoder toggles must each bring the capture back up.
+        for enc in ("jpeg", "h264enc", "h264enc-striped", "h264enc"):
             st = loglen()
             await ws.send("SETTINGS," + json.dumps(_settings_payload(encoder=enc)))
             await asyncio.sleep(2.0)
@@ -95,7 +95,7 @@ async def drive() -> "H.Results":
             res.check(f"encoder switch to {enc}", ok, H.server_log()[st:][-160:])
             await read_ws(ws, 1)
 
-        # Phase 3: disconnect and reconnect within the grace window; the fresh
+        # Disconnect and reconnect within the grace window; the fresh
         # client's SETTINGS must still bring the capture up cleanly.
         st = loglen()
         await ws.send("STOP_VIDEO")

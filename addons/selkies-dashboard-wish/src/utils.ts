@@ -4,22 +4,38 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// Selkies-specific utilities shared by the dashboard components.
-// Kept separate from src/lib/utils.ts which is managed by shadcn.
+/**
+ * Selkies-specific utilities shared by the dashboard components, kept apart
+ * from `lib/utils.ts`, which shadcn manages.
+ *
+ * Storage keys: every localStorage key is prefixed with the storage namespace
+ * the streaming cores derive from the page URL (`lib/util.js`), and the
+ * per-display settings gain a `_display2` suffix on the secondary display,
+ * selected by the `#display2` URL hash. The route prefix is the cores'
+ * derivation too, so both dashboards and both cores agree on all of them.
+ *
+ * Core state cache: the core broadcasts `serverSettings` once per connection
+ * and `clipboardContentUpdate`, `effectiveCursorState` and
+ * `audioDeviceSelected` only when something changes, but the panel components
+ * (Settings, Sharing, Files, Clipboard) mount lazily when their menu opens,
+ * after those messages. The latest of each is cached at module scope so a
+ * late mount can seed its state synchronously; the panels' own listeners
+ * still pick up later messages (reconnects, new clipboard events).
+ * @module
+ */
 
-// The route prefix and the storage namespace are the same derivations the
-// streaming cores use, so both dashboards and both cores agree on them.
 import { getRoutePrefix, getStorageAppName } from "../../selkies-web-core/lib/util.js";
 
 export { getRoutePrefix, getStorageAppName };
 
-// --- Storage Key Prefixing ---
-
-// Union of both streaming cores' PER_DISPLAY_SETTINGS lists so the dashboard
-// and whichever core is running agree on which keys get the _display2 suffix.
-// The websockets core alone owns 'jpeg_quality'/'paint_over_jpeg_quality'
-// (jpeg is websockets framing); a key the running core ignores is inert, while
-// a missing one would make the secondary display write the primary's key.
+/**
+ * Union of both streaming cores' `PER_DISPLAY_SETTINGS` lists so the
+ * dashboard and whichever core is running agree on which keys get the
+ * `_display2` suffix. The websockets core alone owns `jpeg_quality` and
+ * `paint_over_jpeg_quality` (jpeg is websockets framing); a key the running
+ * core ignores is inert, while a missing one would make the secondary display
+ * write the primary's key.
+ */
 const PER_DISPLAY_SETTINGS = [
   'framerate', 'video_crf', 'video_fullcolor',
   'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
@@ -30,17 +46,30 @@ const PER_DISPLAY_SETTINGS = [
 ];
 
 const urlHash = typeof window !== 'undefined' ? window.location.hash : '';
+/** Which display this page is, from the `#display2` URL hash. */
 export const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
 export const isSecondaryDisplay = displayId === 'display2';
 
-/// Viewer-designated URL modes, known before the server answers with a role. The
-/// control UI keys off this for its first render so a shared viewer never sees
-/// controls it cannot use in the gap before `clientRoleUpdate` arrives.
+/**
+ * Viewer-designated URL modes, known before the server answers with a role.
+ * The control UI keys off this for its first render so a shared viewer never
+ * sees controls it cannot use in the gap before `clientRoleUpdate` arrives.
+ */
 export const isViewerUrlMode =
   urlHash.toLowerCase().startsWith('#shared') || /^#player[234]$/.test(urlHash.toLowerCase());
 
+/**
+ * Whether this is a mobile browser; the form factor is fixed for the life of
+ * the document, so it is resolved once and available to the first render.
+ */
+export const isMobileClient = typeof window !== 'undefined' && !!(
+  (navigator as any).userAgentData?.mobile ||
+  /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+);
+
 const storageAppName = getStorageAppName();
 
+/** The localStorage key for a setting on this display. */
 export function getPrefixedKey(key: string): string {
   const prefixedKey = `${storageAppName}_${key}`;
   if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
@@ -49,29 +78,59 @@ export function getPrefixedKey(key: string): string {
   return prefixedKey;
 }
 
-// --- Server Settings ---
-
-// The core broadcasts serverSettings once per connection, but panel
-// components (Settings, Sharing, Files, Clipboard) mount lazily when their
-// menu opens — after the broadcast. Cache the latest payload at module scope
-// so late mounts can read it synchronously; their own listeners still pick
-// up subsequent broadcasts (e.g. reconnects).
 let lastServerSettings: any = null;
+let lastClipboardContent: { text: string; truncated: boolean } | null = null;
+let lastEffectiveCursorState: boolean | null = null;
+const lastAudioDevices: { input: string | null; output: string | null } = { input: null, output: null };
 if (typeof window !== 'undefined') {
   window.addEventListener('message', (event: MessageEvent) => {
     if (event.origin !== window.location.origin) return;
-    if (event.data?.type === 'serverSettings') {
-      lastServerSettings = event.data.payload;
+    const message = event.data;
+    if (typeof message !== 'object' || message === null) return;
+    if (message.type === 'serverSettings') {
+      lastServerSettings = message.payload;
+    } else if (message.type === 'clipboardContentUpdate' && typeof message.text === 'string') {
+      lastClipboardContent = { text: message.text, truncated: message.truncated === true };
+    } else if (message.type === 'effectiveCursorState' && typeof message.value === 'boolean') {
+      lastEffectiveCursorState = message.value;
+    } else if (message.type === 'audioDeviceSelected' && message.deviceId) {
+      if (message.context === 'input') lastAudioDevices.input = message.deviceId;
+      else if (message.context === 'output') lastAudioDevices.output = message.deviceId;
     }
   });
 }
 
+/** The last `serverSettings` payload, or null before the first connection. */
 export function getLastServerSettings(): any {
   return lastServerSettings;
 }
 
-// A control is worth rendering only when the user can actually change it:
-// not locked, and with more than one permitted value.
+/** The last server clipboard preview; the core emits it only on clipboard events. */
+export function getLastClipboardContent(): { text: string; truncated: boolean } | null {
+  return lastClipboardContent;
+}
+
+/**
+ * The cursor mode actually in effect (multi-monitor forces browser cursors
+ * on), emitted at connect and display-config time.
+ */
+export function getLastEffectiveCursorState(): boolean | null {
+  return lastEffectiveCursorState;
+}
+
+/**
+ * The dashboard's own audio device picks, which the core keeps for the life
+ * of the page; a remounted Settings panel shows them again instead of
+ * pretending the defaults are in use.
+ */
+export function getLastAudioDevices(): { input: string | null; output: string | null } {
+  return lastAudioDevices;
+}
+
+/**
+ * Whether a control is worth rendering: the user can actually change it,
+ * meaning not locked and with more than one permitted value.
+ */
 export function isSettingRenderable(setting: any): boolean {
   if (!setting) return true;
   if (setting.locked === true) return false;
@@ -80,13 +139,18 @@ export function isSettingRenderable(setting: any): boolean {
   return true;
 }
 
+/**
+ * Derives every visibility flag the panels read from a `serverSettings`
+ * payload: the admin's `ui_*` toggles, per-control renderability from each
+ * setting's own constraints, the sharing roles, the stream-control menu
+ * entries and the file-transfer directions.
+ */
 export function computeRenderableSettings(serverSettings: any): Record<string, any> {
   if (!serverSettings) return {};
   const s = serverSettings;
 
   const newRenderable: Record<string, any> = {};
 
-  // Admin-driven UI visibility toggles.
   newRenderable.videoSettings = s.ui_sidebar_show_video_settings?.value ?? true;
   newRenderable.audioSettings = s.ui_sidebar_show_audio_settings?.value ?? true;
   newRenderable.screenSettings = s.ui_sidebar_show_screen_settings?.value ?? true;
@@ -104,8 +168,9 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.softButtons = s.ui_sidebar_show_soft_buttons?.value ?? true;
   newRenderable.coreButtons = s.ui_show_core_buttons?.value ?? true;
   newRenderable.shortcuts = s.ui_sidebar_show_shortcuts?.value ?? true;
+  // Hides the floating gamepad card only, never the gamepad input toggle.
+  newRenderable.gamepads = s.ui_sidebar_show_gamepads?.value ?? true;
 
-  // Per-control renderability derived from the settings' own constraints.
   newRenderable.encoder = isSettingRenderable(s.encoder);
   newRenderable.framerate = isSettingRenderable(s.framerate);
   newRenderable.jpegQuality = isSettingRenderable(s.jpeg_quality);
@@ -123,11 +188,10 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.useBrowserCursors = isSettingRenderable(s.use_browser_cursors);
   newRenderable.videoBitrate = isSettingRenderable(s.video_bitrate);
   newRenderable.audioBitrate = isSettingRenderable(s.audio_bitrate);
-  // The HiDPI toggle drives use_css_scaling (inverted); hide it when locked.
+  // The HiDPI toggle drives use_css_scaling, inverted.
   newRenderable.hidpi = isSettingRenderable(s.use_css_scaling);
   newRenderable.forceAlignedResolution = isSettingRenderable(s.force_aligned_resolution);
 
-  // Sharing roles.
   newRenderable.enableSharing = s.enable_sharing?.value ?? true;
   newRenderable.enableShared = s.enable_shared?.value ?? true;
   newRenderable.enablePlayer2 = s.enable_player2?.value ?? true;
@@ -135,13 +199,13 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.enablePlayer4 = s.enable_player4?.value ?? true;
   newRenderable.enableDualMode = s.enable_dual_mode?.value ?? false;
 
-  // Stream-control menu entries. There is no server-side video on/off
-  // setting, so the video toggle always renders.
+  // There is no server-side video on/off setting.
   newRenderable.videoToggle = true;
   newRenderable.audioToggle = isSettingRenderable(s.audio_enabled);
   newRenderable.microphoneToggle = isSettingRenderable(s.microphone_enabled);
-  newRenderable.gamepadToggle = isSettingRenderable(s.gamepad_enabled)
-    && (s.ui_sidebar_show_gamepads?.value ?? true);
+  newRenderable.webcamToggle = isSettingRenderable(s.webcam_enabled)
+    && (s.ui_sidebar_show_webcam?.value ?? true);
+  newRenderable.gamepadToggle = isSettingRenderable(s.gamepad_enabled);
 
   newRenderable.enableRateControl = s.enable_rate_control?.value ?? true;
   const ftValue = s.file_transfers?.value;

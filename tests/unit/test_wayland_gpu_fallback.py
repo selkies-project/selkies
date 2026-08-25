@@ -21,9 +21,8 @@ import tempfile
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 ENTRYPOINT = os.path.join(REPO, "addons", "example", "container-entrypoint.sh")
-# The entrypoint hands over to s6 after deriving the service set; everything the
-# services read is already in the environment file by then, so the copy under
-# test stops at that boundary and never touches /etc/service.
+# Everything the services read is in the environment file by this line, so the
+# copy under test stops here and never hands over to s6 or touches /etc/service.
 STOP_AT = "# Derive the service set from the environment toggles"
 
 sys.path.insert(0, os.path.join(REPO, "src"))
@@ -68,8 +67,6 @@ def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
     with tempfile.TemporaryDirectory() as tmp:
         stub_dir = os.path.join(tmp, "bin")
         os.mkdir(stub_dir)
-        # The probe's verdict is the decision's only input; what it answers is
-        # arranged here so each branch is exercised on demand.
         emit = "printf '%%s\\n' %s\n" % _sh_quote(probe_stdout) if probe_stdout else ""
         probe = os.path.join(stub_dir, "selkies-gpu-probe")
         with open(probe, "w") as f:
@@ -92,8 +89,7 @@ def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
 
         runtime = os.path.join(tmp, "runtime")
         child = dict(os.environ)
-        # Cleared so what comes back was set by the entrypoint, not inherited
-        # from whatever session the tests happen to run in.
+        # Cleared so what comes back was set by the entrypoint, not inherited.
         for name in ("SELKIES_WAYLAND", "PIXELFLUX_WAYLAND", "DISPLAY",
                      "XDG_SESSION_TYPE", "GDK_BACKEND", "MOZ_ENABLE_WAYLAND"):
             child.pop(name, None)
@@ -113,8 +109,6 @@ def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
         exported["_probe_ran"] = os.path.exists(os.path.join(tmp, "probe-ran"))
         return exported, proc
 
-
-# --- what the probe recommends -------------------------------------------
 
 backend, why = recommend(report(accelerated=True, gpu=True, node="/dev/dri/renderD128",
                                 renderer="NVIDIA RTX 4090"))
@@ -137,8 +131,6 @@ backend, why = recommend(report(error="No render node"))
 check("no GPU argues for Wayland", backend == "wayland", backend)
 check("the absent GPU is reported", "no GPU in this container" in why, why)
 
-# --- what the entrypoint does with it ------------------------------------
-
 if not shutil.which("bash"):
     print("SKIP bash not found, so the entrypoint cannot be run", flush=True)
     # helpers.SKIP_EXIT, without importing the e2e helper module
@@ -150,10 +142,8 @@ if env is None:
     sys.exit(1)
 check("a Wayland verdict keeps Wayland", env.get("SELKIES_WAYLAND") == "true",
       f"{env.get('SELKIES_WAYLAND')} (exit {proc.returncode})")
-# The two display numbers here are the container's published defaults, asserted
-# as a contract: XWayland owns :0 under the Wayland backend, and the X11 backend
-# runs on :20. They are not the harness's own display, which is named by
-# E2E_DISPLAY and never hardcoded.
+# :0 and :20 are the container's published defaults (XWayland, then Xvfb), a
+# contract distinct from the harness's own display named by E2E_DISPLAY.
 check("Wayland takes the compositor's display", env.get("DISPLAY") == ":0",
       env.get("DISPLAY"))
 check("an accelerated Wayland session keeps hardware GL",
@@ -194,8 +184,8 @@ env, _ = run("wayland", env={"SELKIES_WAYLAND": "false"})
 check("X11 is never probed", env.get("_probe_ran") is False)
 check("X11 stays X11", env.get("SELKIES_WAYLAND") == "false", env.get("SELKIES_WAYLAND"))
 
-# The legacy alias resolves before the probe, so a Wayland session asked for that
-# way is judged the same as one asked for by the current name.
+# The PIXELFLUX_WAYLAND alias resolves before the probe, so a session asked for
+# that way is judged the same as one asked for by SELKIES_WAYLAND.
 env, _ = run("x11", env={"PIXELFLUX_WAYLAND": "true"})
 check("the legacy Wayland toggle is judged too", env.get("SELKIES_WAYLAND") == "false",
       env.get("SELKIES_WAYLAND"))

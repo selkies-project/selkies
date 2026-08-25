@@ -8,10 +8,12 @@
 // (unadjustedMovement), which every engine on Linux and Android refuses with
 // NotSupportedError, so the refusal has to end in a plain lock rather than in
 // no lock at all -- and it has to be remembered, or every lock pays for a
-// refused request. The fullscreen caller guards its request (stream fullscreen,
-// not already locked, not a shared viewer); the request it re-runs after a
-// refusal must pass those guards again, since the page can leave fullscreen
-// while the first one is still pending.
+// refused request. The lock belongs to gaming mode alone -- plain fullscreen
+// leaves the pointer to the browser so the dashboard stays usable -- and its
+// caller guards the request (gaming mode, stream fullscreen, not already locked,
+// not a shared viewer); the request it re-runs after a refusal must pass those
+// guards again, since the page can leave fullscreen while the first one is still
+// pending.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -56,10 +58,11 @@ function makeElement(outcome) {
 }
 
 /** An Input with only what the pointer lock paths touch. */
-function makeInput(element) {
+function makeInput(element, gaming = true) {
     const input = Object.create(Input.prototype);
     input.element = element;
     input.isSharedMode = false;
+    input.gamingMode = gaming;
     return input;
 }
 
@@ -120,15 +123,23 @@ function reset(element) {
           element.calls.join(','));
 }
 
-// --- the fullscreen caller ------------------------------------------------
+// --- the gaming-mode caller -----------------------------------------------
 {
     const element = makeElement('refuse-option');
     reset(element);
     const input = makeInput(element);
     input._armPointerLock();
     await sleep(10);
-    check('fullscreen locks through a refusal', element.calls.join(',') === 'unadjusted,plain',
+    check('gaming mode locks through a refusal', element.calls.join(',') === 'unadjusted,plain',
           element.calls.join(','));
+}
+{
+    // Plain fullscreen: the pointer is the browser's, so nothing is asked for.
+    const element = makeElement('ok');
+    reset(element);
+    makeInput(element, false)._armPointerLock();
+    await sleep(10);
+    check('plain fullscreen asks for no lock', element.calls.length === 0, element.calls.join(','));
 }
 {
     // The page leaves fullscreen while the first request is still pending
@@ -156,7 +167,7 @@ function reset(element) {
     await sleep(700);
     // The transition race is retried a few times; asking for raw movement must
     // not double the requests that budget allows
-    check('a failing fullscreen lock retries a bounded number of times',
+    check('a failing lock retries a bounded number of times',
           element.calls.length === 6, String(element.calls.length));
 }
 {
@@ -172,8 +183,82 @@ function reset(element) {
     input.isSharedMode = true;
     input._armPointerLock();
     await sleep(10);
-    check('no fullscreen lock outside fullscreen, when locked, or when shared',
+    input.isSharedMode = false;
+    input.gamingMode = false;
+    input._armPointerLock();
+    await sleep(10);
+    check('no lock outside fullscreen, when locked, when shared, or outside gaming mode',
           element.calls.length === 0, element.calls.join(','));
+}
+
+// --- the two fullscreen modes ---------------------------------------------
+{
+    const element = makeElement('ok');
+    reset(element);
+    const events = [];
+    const keyboard = { calls: [], lock: (keys) => { keyboard.calls.push('lock'); return Promise.resolve(); },
+                       unlock: () => keyboard.calls.push('unlock') };
+    Object.defineProperty(globalThis, 'navigator', { value: { keyboard }, configurable: true });
+    const requested = [];
+    document.documentElement = { requestFullscreen: () => { requested.push('fullscreen'); return Promise.resolve(); } };
+    document.exitPointerLock = () => { document.pointerLockElement = null; };
+    const input = makeInput(element, false);
+    input.ongamingmode = (active) => events.push(active);
+    input.send = () => {};
+    input.resetKeyboard = () => {};
+
+    document.fullscreenElement = null;
+    input.enterFullscreen();
+    await sleep(10);
+    check('plain fullscreen is fullscreen and nothing else',
+          requested.join(',') === 'fullscreen' && input.gamingMode === false && events.length === 0,
+          `${requested.join(',')} gaming=${input.gamingMode} events=${events.join(',')}`);
+
+    // What the engine reports once the transition lands, with no mode asked for.
+    document.fullscreenElement = element;
+    input._onFullscreenChange();
+    await sleep(10);
+    check('plain fullscreen locks neither pointer nor keyboard',
+          element.calls.length === 0 && keyboard.calls.length === 0,
+          `${element.calls.join(',')} / ${keyboard.calls.join(',')}`);
+
+    document.fullscreenElement = null;
+    input.enterGamingMode();
+    await sleep(10);
+    check('gaming mode asks for fullscreen and announces itself',
+          requested.length === 2 && input.gamingMode === true && events.join(',') === 'true',
+          `${requested.join(',')} gaming=${input.gamingMode} events=${events.join(',')}`);
+
+    document.fullscreenElement = element;
+    input._onFullscreenChange();
+    await sleep(10);
+    check('gaming mode takes the pointer and the keyboard',
+          element.calls.length > 0 && keyboard.calls.join(',') === 'lock',
+          `${element.calls.join(',')} / ${keyboard.calls.join(',')}`);
+
+    document.fullscreenElement = null;
+    input._onFullscreenChange();
+    await sleep(10);
+    check('leaving fullscreen leaves gaming mode',
+          input.gamingMode === false && events.join(',') === 'true,false'
+          && keyboard.calls.join(',') === 'lock,unlock',
+          `gaming=${input.gamingMode} events=${events.join(',')} kb=${keyboard.calls.join(',')}`);
+}
+{
+    // An engine that refuses fullscreen must not leave the mode behind: the locks
+    // would then be armed by the next transition the page makes for any reason.
+    const element = makeElement('ok');
+    reset(element);
+    document.fullscreenElement = null;
+    document.documentElement = { requestFullscreen: () => Promise.reject(new Error('denied')) };
+    const input = makeInput(element, false);
+    const events = [];
+    input.ongamingmode = (active) => events.push(active);
+    input.enterGamingMode();
+    await sleep(20);
+    check('a refused fullscreen rolls the mode back',
+          input.gamingMode === false && events.join(',') === 'true,false',
+          `gaming=${input.gamingMode} events=${events.join(',')}`);
 }
 
 process.exit(failed === 0 ? 0 : 1);

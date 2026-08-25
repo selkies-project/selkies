@@ -23,7 +23,12 @@ FROM coturn/coturn:alpine
 
 USER root
 
-RUN apk add -u --no-cache bind-tools
+# apk has no retry option of its own, so the one package fetch this image makes
+# is bounded-retried in the shell rather than left to fail the build outright.
+RUN i=1; until apk add -u --no-cache bind-tools; do \
+        [ "$i" -ge 5 ] && exit 1; \
+        i=$((i+1)); sleep 5; \
+    done
 
 COPY detect_external_ip.sh /usr/bin/detect_external_ip
 RUN chmod -f +x /usr/bin/detect_external_ip

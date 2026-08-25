@@ -12,7 +12,12 @@ population, and cursor payload/cache-handle helpers.
 Every RandR operation runs natively on a retained python-xlib connection
 first and degrades to an xrandr/cvt/gtf subprocess only when the native
 call fails. Blocking X work runs on executor threads (``asyncio.to_thread``)
-under ``_x11_lock`` so the event loop never waits on the X server.
+under ``_x11_lock`` so the event loop never waits on the X server. A helper
+drops the cached connection on any failure other than an X protocol error:
+an ``XError`` leaves the connection healthy, while a broken connection also
+frees this session's RandR modes. RandR request failures arrive through the
+connection's asynchronous error handler — printed, never raised — so every
+mutation reads its result back before claiming success.
 
 DPI handling here is X11-only by design: on the Wayland backend a DPI is an
 output scale on the session compositor (applied in-process through
@@ -44,6 +49,7 @@ from .Xlib import X as x11_X
 from .Xlib import display as x11_display
 from .Xlib import error as x11_error
 from .Xlib.ext import randr
+from .Xlib.protocol import request as x11_request
 
 import logging
 
@@ -138,24 +144,59 @@ _x11_conn: Optional[x11_display.Display] = None
 def _module_display() -> x11_display.Display:
     """This module's cached X connection; call under ``_x11_lock``.
 
-    RandR user modes are owned by the connection that created them, so the
-    connection stays open for the process lifetime and retains its resources
-    past disconnect (RetainPermanent).
+    RandR user modes are owned by the connection that created them and die
+    with it (the screen falls back to a built-in mode), so the connection
+    stays open for the process lifetime and retains its resources past
+    disconnect. Retention is temporary: a retained client record holds one of
+    the server's client slots until something issues KillClient(AllTemporary),
+    and a server whose selkies is restarted many times would otherwise run out
+    of slots. So the first connection of a process reaps the records its
+    predecessors left, and when that takes the live mode with it (the screen
+    reverts), it recreates that mode at once — a brief revert on a restart,
+    no slot ever held by a finished process.
+
+    The connection carries a blocking timeout: an alive-but-unresponsive X
+    server (driver hang, a foreign client's server grab) would otherwise block
+    these helpers forever — in the handshake, then in any reply wait — while
+    they hold ``_x11_lock``, and every retry would park another executor
+    thread behind it. The bound makes both raise ``ConnectionClosedError``,
+    so the helpers drop this connection and fall back to their subprocess
+    paths.
     """
     global _x11_conn
     if _x11_conn is None:
-        # An alive-but-unresponsive X server (driver hang, a foreign client's
-        # server grab) would otherwise block these helpers forever — first in
-        # the connection handshake, then in any reply wait — while they hold
-        # _x11_lock, and every retry then parks another executor thread behind
-        # that lock. The bound makes both raise ConnectionClosedError instead;
-        # the helpers drop this connection and fall back to their subprocess
-        # paths.
         conn = x11_display.Display(blocking_timeout=15.0)
-        conn.set_close_down_mode(x11_X.RetainPermanent)
+        conn.set_close_down_mode(x11_X.RetainTemporary)
         conn.sync()
+        _reap_retained_predecessors(conn)
         _x11_conn = conn
     return _x11_conn
+
+
+def _reap_retained_predecessors(conn: x11_display.Display) -> None:
+    """Release the temporarily retained resources of earlier processes and
+    restore the screen size if the reap reverted it."""
+    try:
+        geom = conn.screen().root.get_geometry()
+        before = (int(geom.width), int(geom.height))
+        x11_request.KillClient(display=conn.display, resource=x11_X.AllTemporary)
+        conn.sync()
+        geom = conn.screen().root.get_geometry()
+        after = (int(geom.width), int(geom.height))
+    except Exception as e:
+        logger_app_resize.debug(f"Retained X client reap skipped: {e}")
+        return
+    if after == before:
+        return
+    try:
+        realized = _resize_on_display(conn, f"{before[0]}x{before[1]}", before[0], before[1])
+        logger_app_resize.info(
+            f"Restored the {before[0]}x{before[1]} screen mode a finished process had "
+            f"left retained (realized {realized[0]}x{realized[1]}).")
+    except Exception as e:
+        logger_app_resize.warning(
+            f"Screen reverted to {after[0]}x{after[1]} while reaping retained X clients "
+            f"and could not be restored: {e}")
 
 
 def _drop_module_display() -> None:
@@ -219,8 +260,6 @@ def _sync_query_randr() -> Tuple[str, List[str], str]:
             screen_name = name.decode("latin-1") if isinstance(name, bytes) else str(name)
             return curr_res, resolutions, screen_name
         except Exception as e:
-            # X protocol errors leave the connection healthy; only a broken
-            # connection (which also frees this session's modes) is dropped.
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
             raise
@@ -281,8 +320,6 @@ def _sync_ensure_mode(res_str: str) -> None:
                 d, root, res, oi, out_id, names, res_str, w_req, h_req
             )
             d.sync()
-            # create/attach errors arrive asynchronously (printed, not raised),
-            # so verify the mode really is attached before claiming success.
             _, _, _, oi, _ = _connected_output_state(d)
             if mode_id not in oi.modes:
                 raise RuntimeError(f"mode '{res_str}' did not attach (server refused it)")
@@ -333,12 +370,18 @@ def _sync_resize_randr(res_str: str) -> Tuple[int, int]:
 def _resize_on_display(
     d: x11_display.Display, res_str: str, w_req: int, h_req: int
 ) -> Tuple[int, int]:
-    """The RandR mode-create/activate/screen-size sequence on connection ``d``."""
+    """The RandR mode-create/activate/screen-size sequence on connection ``d``.
+
+    CVT-RB snaps the width up to its 8-pixel cell, so the realized mode can be
+    wider than requested; the mode is named for its real geometry because a
+    name that disagrees with the pixel size breaks later xrandr calls that
+    derive framebuffer dimensions from it. The physical size follows the DPI
+    the last ``set_dpi`` stamped (96 when never retargeted): xdpyinfo and the
+    toolkit paths reading RandR's physical size would otherwise un-scale after
+    every resize. The screen may not shrink under an active CRTC, so a CRTC
+    that would poke out of the new screen is disabled first, as xrandr does.
+    """
     root, res, out_id, oi, names = _connected_output_state(d)
-    # CVT-RB snaps the width up to its 8-pixel cell, so the realized mode can
-    # be wider than requested. Key the mode by its REAL geometry: a mode whose
-    # name disagrees with its pixel size breaks later xrandr calls that derive
-    # framebuffer dimensions from the name.
     mode_name = f"{-(-w_req // 8) * 8}x{h_req}"
     mode_id, mode_w, mode_h = _ensure_mode_on_display(
         d, root, res, oi, out_id, names, mode_name, w_req, h_req
@@ -349,16 +392,10 @@ def _resize_on_display(
     ci = randr.get_crtc_info(d, crtc, res.config_timestamp)
     outputs = list(ci.outputs) or [out_id]
     geom = root.get_geometry()
-    # mm follows the session DPI the last set_dpi stamped (96 when the pane
-    # was never retargeted), not a hardcoded assumption: xdpyinfo and the
-    # toolkit paths reading RandR's physical size otherwise un-scale after
-    # every resize.
     dpi_hint = _APPLIED_DPI if _APPLIED_DPI is not None else 96
     mm_w = max(1, round(mode_w * 25.4 / dpi_hint))
     mm_h = max(1, round(mode_h * 25.4 / dpi_hint))
     rotation = ci.rotation or randr.Rotate_0
-    # The screen may not shrink under an active CRTC, so a CRTC that would
-    # poke out of the new screen is disabled first (as xrandr does).
     crtc_fits = ci.x + ci.width <= mode_w and ci.y + ci.height <= mode_h
     d.grab_server()
     try:
@@ -377,11 +414,8 @@ def _resize_on_display(
         if status != randr.SetConfigSuccess:
             raise RuntimeError(f"SetCrtcConfig returned status {status}")
     finally:
-        # The ungrab must be FLUSHED here, not just queued: when an X error
-        # aborts the sequence above, the exception propagates before any later
-        # sync would run, and a queued-but-unsent ungrab leaves the whole X
-        # server grabbed — every other client (xrandr, capture, WMs) hangs
-        # until this process exits.
+        # Flushed, not just queued: an X error aborting the sequence would leave
+        # an unsent ungrab and every other X client wedged until this process exits.
         try:
             d.ungrab_server()
             d.flush()
@@ -740,10 +774,8 @@ def _sync_grow_screen(w: int, h: int) -> None:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
             raise
-        # SetScreenSize failures (e.g. beyond the server's size range) surface
-        # through the connection's error handler, not as a raise: verify the
-        # root actually reached the requested size. The connection is healthy
-        # here, so this must not drop the module display.
+        # Outside the try: the connection is healthy, so a short root must not
+        # drop the module display.
         if geom.width < w or geom.height < h:
             raise RuntimeError(f"screen is {geom.width}x{geom.height} after grow to {w}x{h}")
 
@@ -760,7 +792,9 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
     is unavoidable; the grab makes the swap invisible: every event the WM
     acts on is delivered after the final set is in place, so it never tiles
     against a monitor-less or half-defined screen. Foreign (non-selkies)
-    monitors are left untouched.
+    monitors are left untouched. A request matching the live set returns
+    without touching the server: even that swap costs a delete+create and
+    hands the WM a ConfigureNotify to re-tile against.
     """
     with _x11_lock:
         try:
@@ -780,9 +814,6 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
                     live[name] = (m.x, m.y, m.width_in_pixels, m.height_in_pixels)
                     if m.primary:
                         primary_name = name
-            # A same-set swap still costs a delete+create (RRSetMonitor cannot
-            # replace in place) and hands the WM a ConfigureNotify to re-tile
-            # against, so decline the dance when nothing would change.
             desired = {
                 f"selkies-{did}": (int(l["x"]), int(l["y"]), int(l["w"]), int(l["h"]))
                 for did, l in layouts.items()
@@ -806,9 +837,8 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
                 if layouts:
                     randr.set_output_primary(root, out_id)
             finally:
-                # Flush the ungrab even when an X error aborts the sequence:
-                # a queued-but-unsent ungrab wedges every other X client until
-                # this process exits.
+                # Flushed, not just queued: an X error aborting the sequence
+                # would leave an unsent ungrab and every other X client wedged.
                 try:
                     d.ungrab_server()
                     d.flush()
@@ -866,7 +896,7 @@ def _sync_wm_name() -> str:
             d = _module_display()
             root = d.screen().root
             check_atom = d.intern_atom('_NET_SUPPORTING_WM_CHECK')
-            # 33 is XA_WINDOW, the property type _NET_SUPPORTING_WM_CHECK carries.
+            # 33 is XA_WINDOW, the property's type.
             prop = root.get_full_property(check_atom, 33)
             if not prop or not prop.value:
                 return ""
@@ -900,7 +930,14 @@ class MultiMonitorWindowManager:
         self._supported: Optional[bool] = None
 
     async def ensure_for(self, display_count: int, is_wayland: bool) -> None:
-        """Swap if this session needs it and has not already been swapped."""
+        """Swap if this session needs it and has not already been swapped.
+
+        Openbox is started detached, so the window manager outlives this
+        process's session, and on its stock config chain (user/system rc.xml):
+        a hand-written minimal config would strip the stock ``<mouse>``
+        bindings (titlebar double-click maximize, middle-click, menus) that the
+        compiled-in defaults do not cover, leaving presses on decorations dead.
+        """
         if is_wayland or self._swapped or display_count <= 1:
             return
         if self._supported is None:
@@ -915,12 +952,6 @@ class MultiMonitorWindowManager:
             return
         logger_app_resize.info("Multi-monitor setup: switching to Openbox.")
         try:
-            # Openbox resolves its stock config chain (user/system rc.xml): a
-            # hand-written minimal config would strip the stock <mouse>
-            # bindings (titlebar double-click maximize, middle-click, menus)
-            # that the compiled-in defaults do not cover, leaving presses on
-            # decorations dead. Detached, so the window manager outlives this
-            # process's session.
             await asyncio.create_subprocess_exec(
                 "openbox", "--replace",
                 stdout=asyncio.subprocess.DEVNULL,
@@ -930,9 +961,8 @@ class MultiMonitorWindowManager:
         except Exception as e:
             logger_app_resize.error(f"Failed to switch to Openbox: {e}")
             return
-        # The takeover must finish BEFORE the layout applies: the incoming WM
-        # snapshots the monitor set it starts against, and a snapshot taken
-        # mid-swap re-tiles maximized windows across the whole framebuffer.
+        # Before the layout applies: a WM snapshotting the monitor set mid-swap
+        # re-tiles maximized windows across the whole framebuffer.
         if not await wait_for_wm("openbox"):
             logger_app_resize.warning(
                 "Openbox takeover not confirmed; applying layout anyway.")
@@ -1084,9 +1114,6 @@ def reconcile_realized_layout(
     Callers own the side effects the result implies: stopping captures, telling
     the client, and re-swapping the logical monitors.
     """
-    # A primary placed at an offset (a secondary to its left or above) that now
-    # runs past the realized root — fully outside OR truncated to a sliver —
-    # must stay usable above all else.
     primary = layouts.get("primary")
     reanchored = bool(primary) and (
         (primary["x"] > 0 and primary["x"] + primary["w"] > realized_w)
@@ -1100,10 +1127,6 @@ def reconcile_realized_layout(
         if did != "primary" and (
             reanchored or layout["x"] >= realized_w or layout["y"] >= realized_h
         ):
-            # Entirely outside the realized root, or the arrangement collapsed:
-            # no capture can grab it and no pointer warp can reach it (clicks
-            # would clamp to the primary's edge). Refuse the display instead of
-            # leaving a broken sliver laid out.
             del layouts[did]
             dropped.append(did)
             continue
@@ -1135,6 +1158,20 @@ async def apply_extended_layout(
     logical monitor per display so window managers tile against the
     per-display regions. Mirrors the websockets engine's command sequence.
 
+    The monitors go first, at their final rectangles and under a server grab:
+    window managers re-tile maximized windows on every root ConfigureNotify,
+    so no WM-visible stimulus (the swap itself, the resize after it) may ever
+    expose a monitor-less or partial set. A server that refuses runtime mode
+    creation may still honor a plain framebuffer grow (RRSetScreenSize): the
+    output keeps its mode while captures and pointer warps address the
+    enlarged root. The server, not the request, is the authority on the
+    realized geometry, and it can report success while leaving the root
+    short, so the layout is fitted to what is really there before any capture
+    is pointed at it; where fitting moved a display the monitors are all
+    redefined at the fitted rectangles (a dropped display's monitor
+    disappears with the swap), while a root that merely came back larger than
+    asked leaves them alone, since every swap makes window managers re-tile.
+
     Returns:
         True when the framebuffer and monitors were set. ``layouts`` is fitted
         in place to the root the server actually produced, so the caller must
@@ -1157,27 +1194,16 @@ async def apply_extended_layout(
             except Exception as e:
                 logger_app_resize.error(f"Could not create extended mode {total_mode}: {e}")
                 return False
-    # Monitors first, at their final rectangles, swapped under a server grab:
-    # window managers re-tile maximized windows on every root ConfigureNotify,
-    # so no WM-visible stimulus (the swap itself, the resize below) may ever
-    # expose a monitor-less or partial set.
     if not await replace_selkies_monitors(layouts, screen_name=screen_name):
         await clear_selkies_monitors()
         return False
     if (curr_res or "").lower().replace(" ", "") != total_mode:
         if not await resize_display(total_mode):
-            # Some servers refuse runtime mode creation/attachment but still
-            # honor a plain framebuffer grow (RRSetScreenSize): the output
-            # keeps its mode while captures and pointer warps address the
-            # enlarged root (websockets-engine parity).
             if not await grow_framebuffer(total_w, total_h):
                 logger_app_resize.error(
                     f"Neither a mode-set nor a framebuffer grow reached {total_mode}; "
                     "fitting the layout to whatever the root realized."
                 )
-    # The server, not the request, is the authority on the realized geometry,
-    # and it can report success while leaving the root short. Fit the layout to
-    # what is really there before any capture is pointed at it.
     realized_w, realized_h = await read_realized_root((total_w, total_h))
     if (realized_w, realized_h) == (total_w, total_h):
         return True
@@ -1203,10 +1229,6 @@ async def apply_extended_layout(
             f"Display '{did}': layout clamped to {layouts[did]['w']}x{layouts[did]['h']} "
             "inside the realized root."
         )
-    # The monitors above were defined at the requested rectangles; where fitting
-    # moved one, redefine them all at the fitted rectangles (a dropped display's
-    # monitor disappears with the swap). A root that merely came back larger
-    # than asked for leaves them alone: every swap makes window managers re-tile.
     if fit.dropped or fit.reanchored or fit.clamped:
         if not await replace_selkies_monitors(layouts, screen_name=screen_name):
             await clear_selkies_monitors()
@@ -1321,7 +1343,12 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
 
     Adds a new mode via cvt/gtf if the requested mode doesn't exist, naming
     it for the geometry the modeline really carries (cvt snaps width up to
-    the 8-pixel CVT cell, so it can be wider than requested).
+    the 8-pixel CVT cell, so it can be wider than requested). The mode is set
+    together with ``--fb`` sized from that realized geometry: without it a
+    larger root left over from a prior extended layout keeps the screen
+    oversized, so the new mode lands top-left and whole-root capture shows
+    black bars (the native path and the websockets engine both force it),
+    and a framebuffer narrower than the active mode is rejected outright.
 
     Returns:
         The realized ``(width, height)``, or None on failure.
@@ -1358,9 +1385,7 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
             )
             return None
 
-        # Modeline layout: clock hdisp hss hse htot vdisp vss vse vtot flags…
-        # The active pixels in the timings are the mode's real geometry; the
-        # mode is named for what it IS so the name stays usable for --fb math.
+        # Modeline fields: clock hdisp hss hse htot vdisp vss vse vtot flags...
         params = modeline_params.split()
         try:
             realized_w, realized_h = int(params[1]), int(params[5])
@@ -1394,7 +1419,6 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
                 logger_app_resize.error(
                     f"Failed to add mode '{target_mode_to_set}' to screen '{screen_name}': {stderr_add.decode()}"
                 )
-                # Cleanup commands
                 delmode_proc = await subprocess.create_subprocess_exec(
                     "xrandr", "--delmode", screen_name, target_mode_to_set,
                     stdout=subprocess.PIPE,
@@ -1414,13 +1438,6 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
     logger_app_resize.info(
         f"Applying xrandr mode '{target_mode_to_set}' for screen '{screen_name}'."
     )
-    # Force the framebuffer to the mode too. Without --fb, a larger root left
-    # over from a prior extended layout keeps the screen oversized, so the new
-    # mode lands in the top-left and whole-root capture shows black bars — the
-    # native RandR path (set_screen_size) and the websockets path (--fb) both
-    # force it, so the fallback must match. The framebuffer is sized from the
-    # mode's realized geometry, never the request: a framebuffer narrower than
-    # the active mode is rejected outright by xrandr.
     cmd_output = ["xrandr", "--output", screen_name, "--mode", target_mode_to_set,
                   "--fb", f"{realized_w}x{realized_h}"]
     set_mode_proc = await subprocess.create_subprocess_exec(
@@ -1430,10 +1447,8 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
     )
     stdout_set, stderr_set = await _communicate_or_kill(set_mode_proc)
     if set_mode_proc.returncode != 0:
-        # A pre-existing mode on the server can carry CVT-snapped geometry
-        # wider than its name claims; a framebuffer sized from the name is
-        # then too small and xrandr rejects the whole command. Retry once
-        # with the snapped width.
+        # A pre-existing mode can be CVT-snapped wider than its name claims, so
+        # a framebuffer sized from the name is rejected; retry at the snapped width.
         snapped_w = -(-w_req // 8) * 8
         retried = False
         if target_mode_to_set == res_str and snapped_w != realized_w:
@@ -1462,8 +1477,7 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
     return realized_w, realized_h
 
 
-# A modeline is fully determined by (resolution, refresh) — the timings change
-# with the refresh rate, so resolution alone does not identify a mode.
+# Keyed by (resolution, refresh): the timings change with the refresh rate.
 _MODELINE_CACHE: Dict[Tuple[str, int], Tuple[str, str]] = {}
 
 
@@ -1536,9 +1550,6 @@ async def generate_xrandr_gtf_modeline(
     result = (match.group(1).strip(), match.group(2))
     _MODELINE_CACHE[cache_key] = result
     return result
-
-# AUTO_GPU render-node detection lives in pixelflux (the device library owns
-# hardware detection); selkies forwards only explicit --render-dri/--encode-dri paths.
 
 def _atomic_write_text(path: str, content: str) -> None:
     """Install `content` at `path` by writing a temporary file in the same
@@ -1634,8 +1645,8 @@ def _rewrite_lxqt_font(path: str, dpi_value: int) -> Optional[Tuple[float, int]]
             out.append(line)
             continue
         if points <= 0:
-            # A file Qt has round-tripped carries pixels alone; the density
-            # those were resolved at is the one currently on the display.
+            # A file Qt round-tripped carries pixels alone, resolved at the
+            # density currently on the display.
             points = pixels * 72.0 / max(1, _APPLIED_DPI or 96)
         if points <= 0:
             out.append(line)
@@ -1676,9 +1687,13 @@ async def _run_lxqt_font(dpi_value: int, logger: logging.Logger) -> bool:
 async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
     """Apply DPI via Xresources/xrdb and the xsettingsd config.
 
-    Writes ``Xft.dpi`` into ~/.Xresources, merges it into the running
-    resource database, rewrites ~/.xsettingsd with the matching Xft/DPI
-    value (in 1024ths), and SIGHUPs a running xsettingsd to reload.
+    Writes ``Xft.dpi`` into ~/.Xresources and merges it into the running
+    resource database — merged, never loaded wholesale, so the database keeps
+    every resource the file does not define — then rewrites ~/.xsettingsd
+    with the matching Xft/DPI value (in 1024ths) and SIGHUPs every running
+    xsettingsd: the one serving this display is not necessarily the oldest,
+    and a daemon that is not ours only re-reads a configuration this write
+    did not touch.
 
     Returns:
         True when the xrdb merge succeeded.
@@ -1695,8 +1710,6 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
         )
         logger.info(f"Wrote 'Xft.dpi:   {dpi_value}' to {xresources_path_str}.")
 
-        # Merged, never loaded wholesale: the running resource database keeps every
-        # resource this file does not define.
         cmd_xrdb = ["xrdb", "-merge", xresources_path_str]
         process = await subprocess.create_subprocess_exec(
             *cmd_xrdb,
@@ -1737,9 +1750,6 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
             pgrep_stdout, _ = await _communicate_or_kill(pgrep_proc)
 
             if pgrep_proc.returncode == 0:
-                # Every match, not the lowest pid: the one serving this display
-                # is not necessarily the oldest, and a daemon that is not ours
-                # only re-reads a configuration this write did not touch.
                 signalled = []
                 for line in pgrep_stdout.decode().split():
                     try:
@@ -1877,6 +1887,9 @@ async def _run_xfconf(dpi_value: int, logger: logging.Logger) -> bool:
 async def _run_mate_gsettings(dpi_value: int, logger: logging.Logger) -> bool:
     """Apply DPI via MATE gsettings (window-scaling-factor and font DPI).
 
+    ``window-scaling-factor`` is integer-only, so it carries whole scales and
+    stays 1 otherwise, the fractional part riding on the font DPI.
+
     Returns:
         True when at least one setting was applied.
     """
@@ -1888,14 +1901,11 @@ async def _run_mate_gsettings(dpi_value: int, logger: logging.Logger) -> bool:
 
     try:
         target_mate_scale_float = float(dpi_value) / 96.0
-        # window-scaling-factor is integer-only: use it for whole scales, else 1
-        # (fractional part handled via font DPI).
         if target_mate_scale_float == int(target_mate_scale_float):
             mate_window_scaling_factor = int(target_mate_scale_float)
         else:
             mate_window_scaling_factor = 1 
         
-        # The scaling factor is a positive integer.
         mate_window_scaling_factor = max(1, mate_window_scaling_factor)
 
         cmd_gsettings_mate_window_scale = [
@@ -1921,7 +1931,6 @@ async def _run_mate_gsettings(dpi_value: int, logger: logging.Logger) -> bool:
     except Exception as e:
         logger.error(f"Error running gsettings for MATE window-scaling-factor: {e}")
 
-    # MATE: org.mate.font-rendering dpi, which takes the direct DPI value.
     try:
         cmd_gsettings_mate_font_dpi = [
             "gsettings", "set",
@@ -1959,8 +1968,7 @@ def _is_wayland() -> bool:
         return False
 
 
-# The DPI the last set_dpi actually applied (so resizes keep sizing the pane
-# in mm on the same density instead of flipping it back to 96).
+# The DPI the last set_dpi applied; resizes size the pane in mm from it.
 _APPLIED_DPI: Optional[int] = None
 
 
@@ -1997,9 +2005,15 @@ def _sync_stamp_root_dpi(dpi_value: int) -> None:
 async def set_dpi(dpi_setting: Union[int, str]) -> bool:
     """Set the X11 display DPI using DE-specific methods.
 
-    Detection order: KDE, XFCE, MATE, i3, Openbox, then a generic xrdb
+    Detection order: KDE, XFCE, MATE, i3, LXQt, Openbox, then a generic xrdb
     fallback. XFCE takes only xfconf-query so scaling is never applied
     twice; MATE takes gsettings plus xrdb for wider application coverage.
+    The LXQt font repolish runs whichever branch was taken: the session that
+    owns the windows decides whether anything already drawn follows, and it
+    is the only one that can repolish them. On success the root pane's
+    physical size is stamped with the same density, because xdpyinfo/RandR
+    consumers (Qt's fallback included) read it and would otherwise render
+    unscaled against the rest of the desktop.
 
     X11 only. On the Wayland backend a DPI is an output scale, never Xft
     resources: the compositor hands applications the scale, and XWayland runs
@@ -2032,7 +2046,6 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
         return True
 
     any_method_succeeded = False
-    # Names which DE path was taken, for the logs below.
     de_name_for_log = "Unknown"
 
     if which("startplasma-x11"):
@@ -2079,18 +2092,12 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
         if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
 
-    # Independent of which branch above ran: the session that owns the windows
-    # decides whether anything already drawn follows, and it is the only one
-    # that can repolish them.
     if await _run_lxqt_font(dpi_value, logger_app_resize):
         any_method_succeeded = True
 
     if not any_method_succeeded:
         logger_app_resize.warning(f"No DPI setting method succeeded for DPI {dpi_value} (Attempted for: {de_name_for_log}).")
     else:
-        # xdpyinfo/RandR consumers (Qt's fallback included) read the pane's
-        # physical size, which nothing above touched: stamp it with the same
-        # density or those apps render unscaled against the rest of the DE.
         try:
             await asyncio.to_thread(_sync_stamp_root_dpi, dpi_value)
         except Exception as e:
@@ -2274,6 +2281,24 @@ def apply_common_capture_settings(
     is a parity bug. Callers keep the per-mode fields (geometry, output/JPEG
     mode, stripe-header framing).
 
+    ``use_cpu`` is the caller's resolved choice (`effective_use_cpu`); which
+    software H.264 encoder then runs is the pixelflux build's. Device
+    selection forwards only explicit paths, hardware detection being
+    pixelflux's: an ``--encode-dri`` path is authoritative, otherwise
+    ``--gpu-id`` picks the encoder device by index (-1 requests software
+    encoding) and, unset, pixelflux encodes on ID 0 — the first GPU — unless
+    AUTO_GPU affinity aims it elsewhere. The compositor render node is
+    distinct: ``--render-dri`` wins, else pixelflux resolves ``--auto-gpu``
+    ("true" or a vendor/driver/DT-prefix/PCI-id token) against the machine.
+    The cursor size is the Wayland compositor's theme size (X11 sets it on
+    the X server itself; `<=0` keeps the theme default), and the cap tracks the
+    input handler's DPI-scaled value so pixelflux's XFixes monitor caps shapes
+    the same way the python cursor-monitor fallback does. On Wayland the
+    capture is bound to its compositor output (`display2` -> output 2), the
+    id every per-display IDR/rate/tunable call routes through. The watermark
+    is burned into the frame by pixelflux on every backend and stays
+    server-side (never broadcast).
+
     Args:
         cs: The pixelflux CaptureSettings instance to populate.
         server: The parsed Settings object carrying the global knobs; the
@@ -2292,8 +2317,7 @@ def apply_common_capture_settings(
     cs.video_paintover_burst_frames = paintover_burst
     cs.video_fullcolor = fullcolor
     cs.video_streaming_mode = streaming
-    cs.video_fullframe = encoder in ("h264enc", "openh264enc")
-    cs.use_openh264 = encoder == "openh264enc"
+    cs.video_fullframe = encoder == "h264enc"
     cs.video_cbr_mode = cbr
     cs.video_bitrate_kbps = int(round(float(bitrate_kbps)))
     # 0 = infinite GOP (on-demand keyframes only).
@@ -2301,27 +2325,24 @@ def apply_common_capture_settings(
     # CBR QP clamp (0 = encoder default).
     cs.video_min_qp = int(getattr(server, "video_min_qp", 0) or 0)
     cs.video_max_qp = int(getattr(server, "video_max_qp", 0) or 0)
-    cs.use_cpu = bool(use_cpu) or encoder == "openh264enc"
+    cs.use_cpu = bool(use_cpu)
+    if cs.use_cpu and encoder != "jpeg":
+        from .settings import software_h264_encoder
+        logging.getLogger("display_utils").info(
+            f"Display '{display_name}' encodes H.264 in software ({software_h264_encoder()}).")
 
     cs.use_paint_over_quality = use_paint_over_quality
     cs.paint_over_trigger_frames = 15
     cs.damage_block_threshold = 10
     cs.damage_block_duration = 20
 
-    # Forward explicit --encode-dri as an authoritative PATH; --gpu-id picks the
-    # encoder device by index when no path is given. Unset, pixelflux defaults to
-    # ID 0 — the first GPU — unless AUTO_GPU affinity aims it elsewhere.
     dri_node = str(getattr(server, "encode_dri", "") or "")
     gid = parse_gpu_id(getattr(server, "gpu_id", ""))
     if dri_node:
         cs.encode_node_path = dri_node.encode("utf-8")
         cs.encode_node_index = parse_dri_node_to_index(dri_node)
     elif gid is not None:
-        # >= 0 picks the device; -1 requests software encoding.
         cs.encode_node_index = gid
-    # Compositor render node, distinct from the encoder node above: an explicit
-    # --render-dri wins; otherwise pixelflux resolves --auto-gpu ("true" or a
-    # vendor/driver/DT-prefix/PCI-id token) against the machine itself.
     render_dri = str(getattr(server, "render_dri", "") or "")
     if render_dri:
         cs.render_node_path = render_dri.encode("utf-8")
@@ -2330,21 +2351,13 @@ def apply_common_capture_settings(
     cs.use_wayland = is_wayland
     cs.recording_socket = str(getattr(server, "recording_socket", "") or "")
     cs.wayland_host_display = str(getattr(server, "wayland_host_display", "") or "")
-    # Wayland compositor cursor-theme size (X11 cursor size is set on the X
-    # server itself); <=0 keeps the theme default. The cap tracks the input
-    # handler's DPI-scaled value so pixelflux's XFixes monitor caps shapes the
-    # same way the python cursor-monitor fallback does.
     cs.cursor_size = int(getattr(server, "cursor_size", -1))
     cap = int(cursor_size_cap_hint or 0)
     cs.cursor_size_cap = cap if cap > 0 else max(32, cs.cursor_size)
     if is_wayland:
         cs.scale = scale
-        # Binds this capture to its compositor output ('display2' -> output 2);
-        # per-display IDR/rate/tunable calls route through the same id.
         cs.display_id = wayland_output_id(display_name)
 
-    # Server-embedded watermark, burned into the frame by pixelflux on every
-    # backend. Kept server-side (never broadcast).
     watermark_path = str(getattr(server, "watermark_path", "") or "")
     if watermark_path and os.path.exists(watermark_path):
         cs.watermark_path = watermark_path.encode("utf-8")
@@ -2420,7 +2433,9 @@ def format_pixelflux_cursor(
     transient extraction failure) keeps the last good cursor. The handle is
     derived from the decoded pixel content, so a client's cursor cache
     dedupes flips between the same shapes regardless of which source encoded
-    them.
+    them. The payload carries the image's real pixel size, not the nominal
+    cursor-size setting: clients scale and place the hotspot against these
+    dimensions, and cropped/capped shapes are rarely square.
 
     Returns:
         The payload dict, or None to skip the event.
@@ -2431,9 +2446,6 @@ def format_pixelflux_cursor(
             "hotx": 0, "hoty": 0, "handle": 0,
         }
     if msg_type == "png" and data_bytes:
-        # The payload's real pixel size, not the nominal cursor-size setting:
-        # clients scale and place the hotspot against these dimensions, and
-        # cropped/capped shapes are rarely square.
         width, height = size, size
         try:
             with Image.open(io.BytesIO(data_bytes)) as im:

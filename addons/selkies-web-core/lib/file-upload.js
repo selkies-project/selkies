@@ -7,36 +7,56 @@
 /**
  * File uploads, shared by both transports.
  *
- * Every upload is HTTP POSTs to /api/upload rather than a stream of chunks
+ * Every upload is HTTP POSTs to `/api/upload` rather than a stream of chunks
  * over the WebSocket or a data channel: the browser's native HTTP path and
  * the server's C-accelerated aiohttp saturate the link, whereas per-message
- * chunk processing is bounded by pure-Python per-chunk work — and an upload
- * cannot stall or kill the realtime session socket. The destination path rides
- * URL-encoded in the X-Upload-Path header; progress is reported to the
- * dashboards as `{type: 'fileUpload'}` window messages (statuses: start /
- * progress / end / error / warning).
+ * chunk processing is bounded by pure-Python per-chunk work, and an upload
+ * cannot stall or kill the realtime session socket. The destination path
+ * rides URL-encoded in the `X-Upload-Path` header, the secure-mode session
+ * token as a Bearer header, and progress is reported to the dashboards as
+ * `{type: 'fileUpload'}` window messages with the statuses `start`,
+ * `progress`, `end`, `error` and `warning`.
  *
- * Files at or under UPLOAD_CHUNK_BYTES go up as ONE plain POST (the whole
- * Blob, no extra headers — the shape every server accepts). Larger files are
- * sliced with Blob.slice (never read into memory) into sequential POSTs of at
- * most UPLOAD_CHUNK_BYTES so no single request body exceeds a fronting
- * proxy's per-request cap (e.g. Cloudflare rejects bodies over 100 MB). Each
- * slice carries the same X-Upload-Path plus:
- *   X-Upload-Id:     opaque per-file transfer id
- *   X-Upload-Offset: absolute byte offset of the slice
- *   X-Upload-Total:  final file size in bytes
- *   X-Upload-Final:  "1" on the last slice
- * The server appends slices to a .part file and atomically renames it into
- * place on the final one. Progress is cumulative across slices, so the
- * dashboards render one smooth bar per file.
+ * Files at or under `UPLOAD_CHUNK_BYTES` go up as one plain POST (the whole
+ * Blob, no extra headers, the shape every server accepts). Larger files are
+ * sliced with `Blob.slice`, never read into memory, into sequential POSTs of
+ * at most `UPLOAD_CHUNK_BYTES` so no single request body exceeds a fronting
+ * proxy's per-request cap (Cloudflare rejects bodies over 100 MB). Each slice
+ * carries the same `X-Upload-Path` plus `X-Upload-Id` (an opaque per-file
+ * transfer id), `X-Upload-Offset` (the slice's absolute byte offset),
+ * `X-Upload-Total` (the final file size in bytes) and, on the last slice,
+ * `X-Upload-Final: 1`. The server appends slices to a `.part` file and
+ * atomically renames it into place on the final one. Progress is cumulative
+ * across slices, so the dashboards render one smooth bar per file.
  *
- * One upload OPERATION (a file-picker set or a dropped tree) runs at a time:
+ * One upload operation (a file-picker set or a dropped tree) runs at a time:
  * sequential POSTs keep server-side writes ordered and the progress UI
- * coherent. `canUpload` is a per-core gate (e.g. shared/viewer sessions must
- * not upload).
+ * coherent.
+ * @module
  */
+import { sessionAuthHeaders } from './session-token.js';
+
 const UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
 
+/**
+ * @typedef {object} FileUploader
+ * @property {(file: File, pathToSend: string) => Promise<void>} uploadFileObject
+ *     Uploads one file to the given destination path, reporting progress.
+ * @property {() => void} handleRequestFileUpload Opens the hidden file picker.
+ * @property {(event: Event) => Promise<void>} handleFileInputChange Uploads
+ *     the picker's files sequentially.
+ * @property {(ev: DragEvent) => void} handleDragOver Sets the drop effect.
+ * @property {(ev: DragEvent) => Promise<void>} handleDrop Uploads dropped
+ *     files and directory trees sequentially.
+ */
+
+/**
+ * Creates the upload handlers a core wires to its page.
+ * @param {object} [options]
+ * @param {() => boolean} [options.canUpload] Per-core gate; a shared or
+ *     viewer session returns `false` and every entry point refuses.
+ * @returns {FileUploader}
+ */
 export function createFileUploader({ canUpload = () => true } = {}) {
     let operationInFlight = false;
 
@@ -54,9 +74,17 @@ export function createFileUploader({ canUpload = () => true } = {}) {
         return true;
     }
 
-    // One POST of `body` (a File or Blob slice) to `url`. Resolves on 2xx,
-    // rejects with the dashboard-facing message otherwise; upload progress is
-    // relayed to `onProgress` raw so the caller can accumulate across slices.
+    /**
+     * One POST of a File or Blob slice. Resolves on 2xx and rejects with the
+     * dashboard-facing message otherwise; upload progress is relayed to
+     * `onProgress` raw so the caller can accumulate across slices.
+     * @param {string} url The upload endpoint.
+     * @param {string} pathToSend Destination path.
+     * @param {Blob} body The bytes.
+     * @param {object|null} extraHeaders Slice headers, if any.
+     * @param {(e: ProgressEvent) => void} onProgress Upload progress listener.
+     * @returns {Promise<void>}
+     */
     function postUploadBody(url, pathToSend, body, extraHeaders, onProgress) {
         return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
@@ -64,7 +92,7 @@ export function createFileUploader({ canUpload = () => true } = {}) {
             xhr.withCredentials = true;
             xhr.setRequestHeader('Content-Type', 'application/octet-stream');
             xhr.setRequestHeader('X-Upload-Path', encodeURIComponent(pathToSend));
-            for (const [name, value] of Object.entries(extraHeaders || {})) {
+            for (const [name, value] of Object.entries(sessionAuthHeaders(extraHeaders))) {
                 xhr.setRequestHeader(name, value);
             }
             xhr.upload.onprogress = onProgress;
@@ -82,6 +110,13 @@ export function createFileUploader({ canUpload = () => true } = {}) {
         });
     }
 
+    /**
+     * Uploads one file, as a single POST or as slices by size, reporting
+     * `start`, cumulative `progress` and `end` or `error`.
+     * @param {File} file The file.
+     * @param {string} pathToSend Destination path.
+     * @throws {Error} The upload failure, after reporting it.
+     */
     async function uploadFileObject(file, pathToSend) {
         post({ status: 'start', fileName: pathToSend, fileSize: file.size });
         const report = (status, extra) =>
@@ -89,10 +124,8 @@ export function createFileUploader({ canUpload = () => true } = {}) {
         const percentOf = (sentBytes) => (file.size > 0)
             ? Math.min(100, Math.round((sentBytes / file.size) * 100)) : 0;
         try {
-            // Same-origin URL resolves any subfolder prefix.
             const url = new URL('api/upload', window.location.href).href;
             if (file.size <= UPLOAD_CHUNK_BYTES) {
-                // Single plain POST — no chunk headers.
                 await postUploadBody(url, pathToSend, file, null, (e) => {
                     const progress = (e.lengthComputable && file.size > 0)
                         ? Math.min(100, Math.round((e.loaded / e.total) * 100)) : 0;
@@ -113,7 +146,6 @@ export function createFileUploader({ canUpload = () => true } = {}) {
                     const sentBefore = offset;
                     await postUploadBody(url, pathToSend, file.slice(offset, end), headers, (e) => {
                         if (!e.lengthComputable) return;
-                        // Cumulative across slices: one smooth bar per file.
                         report('progress', { progress: percentOf(sentBefore + e.loaded) });
                     });
                     offset = end;
@@ -133,10 +165,15 @@ export function createFileUploader({ canUpload = () => true } = {}) {
         return new Promise((resolve, reject) => fileEntry.file(resolve, reject));
     }
 
+    /**
+     * Uploads a dropped file or, recursively, a dropped directory. The
+     * entry's `fullPath` preserves a dropped directory's internal structure;
+     * the fallback rebuilds it from the recursion for browsers without one.
+     * @param {FileSystemEntry} entry The dropped entry.
+     * @param {string} [basePathFallback] Parent path when `fullPath` is absent.
+     */
     async function handleDroppedEntry(entry, basePathFallback = "") {
         let pathToSend;
-        // entry.fullPath preserves a dropped directory's internal structure; the
-        // fallback rebuilds it from the recursion for browsers without fullPath.
         if (entry.fullPath && typeof entry.fullPath === 'string' && entry.fullPath !== entry.name &&
             (entry.fullPath.includes('/') || entry.fullPath.includes('\\'))) {
             pathToSend = entry.fullPath;

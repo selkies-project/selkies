@@ -30,13 +30,11 @@ from typing import Any, Dict, List, Optional, Set
 try:
     import pynvml
 except ImportError:
-    # The nvidia-smi subprocess fallback covers its absence.
     pynvml = None
 
 try:
     from aitop.core.gpu.factory import GPUMonitorFactory
 except Exception:
-    # Universal-vendor telemetry; the sysfs backfill covers its absence.
     GPUMonitorFactory = None
 
 logger = logging.getLogger("gpu_stats")
@@ -46,9 +44,8 @@ logger = logging.getLogger("gpu_stats")
 if GPUMonitorFactory is not None:
     logging.getLogger("aitop.core.gpu.factory").setLevel(logging.WARNING)
 
-# NVML availability is terminal per process: None = not yet attempted, True =
-# initialized, False = init failed. The library cannot appear after startup,
-# so a failure is never retried (and never re-logged) on later polls.
+# None = not yet attempted, True = initialized, False = init failed. NVML cannot
+# appear after startup, so a failure is never retried or re-logged.
 _nvml_ready: Optional[bool] = None
 
 # utilization.gpu is a percentage; memory.* are MiB (nounits strips the suffix);
@@ -191,7 +188,6 @@ def _nvidia_gpus() -> List[GPUStat]:
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 3:
             continue
-        # CSV field order: utilization percent (0..100), total MiB, used MiB.
         try:
             util = float(parts[0])
             mem_total = float(parts[1])
@@ -208,10 +204,9 @@ def _aitop_vendor(monitor: Any) -> str:
     return type(monitor).__name__.replace("GPUMonitor", "").replace("NPUMonitor", "").lower()
 
 
-# aitop monitor -> the CLI its readings come from. A monitor whose tool is absent
-# can never produce data, and the NVIDIA/AMD ones log an ERROR every poll cycle
-# when a DRM-visible card has no userspace in the container (a bare /dev/dri
-# mount without the vendor toolkit); NPU/Apple monitors read other sources.
+# aitop monitor -> the CLI its readings come from. Without the tool a monitor can
+# never produce data, and the NVIDIA/AMD ones log an ERROR every poll when a
+# DRM-visible card has no userspace in the container; NPU/Apple read other sources.
 _AITOP_MONITOR_TOOLS: Dict[str, tuple] = {
     "NvidiaGPUMonitor": ("nvidia-smi",),
     "AMDGPUMonitor": ("rocm-smi", "amd-smi"),
@@ -263,6 +258,11 @@ def _aitop_monitors() -> List[Any]:
 def _aitop_gpus(vendors: Optional[Set[str]] = None) -> List[GPUStat]:
     """Multi-vendor telemetry via aitop's monitors (utilization + memory in MiB).
 
+    All-zero readings with no PCI identity are dropped as fabricated
+    placeholders (aitop's Intel monitor emits them on hosts with no Intel
+    GPU); a real but unreadable card resurfaces through the sysfs backfill
+    with a true PCI address that `dri_node` matching can use.
+
     Args:
         vendors: When given, only monitors for these vendor keywords are read.
     """
@@ -275,10 +275,6 @@ def _aitop_gpus(vendors: Optional[Set[str]] = None) -> List[GPUStat]:
             if vendors is not None and vendor not in vendors:
                 continue
             for info in monitor.get_gpu_info() or []:
-                # All-zero readings with no PCI identity are fabricated placeholders
-                # (aitop's Intel monitor emits them on hosts with no Intel GPU); a
-                # real-but-unreadable card resurfaces via the sysfs backfill with a
-                # true PCI address, which dri_node matching can actually use.
                 if not info.utilization and not info.memory_total and not info.memory_used:
                     continue
                 gpus.append(
@@ -307,7 +303,11 @@ def _read_sysfs_number(path: str) -> Optional[float]:
 
 
 def _drm_sysfs_gpus(root: Optional[str] = None) -> List[GPUStat]:
-    """AMD (and best-effort Intel) cards via /sys/class/drm/card*/device counters."""
+    """AMD (and best-effort Intel) cards via /sys/class/drm/card*/device counters.
+
+    i915/xe expose no unprivileged utilization or VRAM counters, so those
+    cards are listed with zeros rather than left out.
+    """
     root = root or _SYSFS_DRM_ROOT
     gpus = []
     for card in sorted(glob.glob(os.path.join(root, "card[0-9]*"))):
@@ -336,8 +336,6 @@ def _drm_sysfs_gpus(root: Optional[str] = None) -> List[GPUStat]:
                 )
             )
         elif driver in ("i915", "xe"):
-            # No unprivileged utilization/VRAM counters; list the card with zeros so
-            # consumers see it exists rather than "no GPU".
             gpus.append(GPUStat(idx, 0.0, 0.0, 0.0, pci, "intel"))
     return gpus
 
@@ -357,11 +355,9 @@ def get_gpus(dri_node: Optional[str] = None) -> List[GPUStat]:
     """
     gpus = _nvml_gpus()
     if gpus:
-        # NVML already covers NVIDIA; aitop adds the other vendors.
         gpus += _aitop_gpus(vendors={"amd", "intel", "apple"})
     else:
         gpus = _aitop_gpus() or _nvidia_gpus()
-    # sysfs backfills vendors nothing above reported (e.g. AMD without ROCm tooling).
     present = {g.vendor for g in gpus}
     gpus += [g for g in _drm_sysfs_gpus() if g.vendor not in present]
     for i, g in enumerate(gpus):

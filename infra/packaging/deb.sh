@@ -7,24 +7,42 @@
 # the release job collects every package into a single directory.
 set -eux
 export DEBIAN_FRONTEND="noninteractive"
+
+# Package managers with no retry option of their own -- apk, dnf, pacman and
+# RubyGems all lack one -- are bounded-retried here. This composes with whatever
+# internal retrying the tool already does rather than replacing it, so it cannot
+# lower a default the way an explicit --setopt could.
+retry() {
+    i=1
+    until "$@"; do
+        [ "${i}" -ge 5 ] && return 1
+        i=$((i + 1)); sleep 5
+    done
+}
+# One transient index failure should not cost a package build that is already
+# several minutes in
+printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' > /etc/apt/apt.conf.d/99-selkies-retries
 apt-get clean && apt-get update
 # python3-dev and build-essential: dependencies without a wheel for this
 # distribution's Python are compiled from their sdist. libxkbcommon0 is loaded
 # with ctypes at runtime and lets mkvenv.sh's smoke test exercise that path
+# libpipewire-0.3-dev gives the V4L2 interposer its PipeWire frame source
+# (headers only; the library is loaded at runtime when an application uses it)
 apt-get install --no-install-recommends -y \
     python3 python3-venv python3-pip python3-dev \
-    libxkbcommon0 pkg-config \
+    libxkbcommon0 pkg-config libpipewire-0.3-dev \
     ruby ruby-dev build-essential ca-certificates
 # gcc-multilib builds the interposer's 32-bit variant, which the Wine and Steam
 # catalog loads through `/usr/$LIB`
 if [ "$(dpkg --print-architecture)" = "amd64" ]; then
     apt-get install --no-install-recommends -y gcc-multilib
 fi
-gem install --no-document fpm
+retry gem install --no-document fpm
 # shellcheck source=infra/packaging/version.sh
 . /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh
 /repo/infra/packaging/interposer.sh /pkg-root
+/repo/infra/packaging/v4l2-interposer.sh /pkg-root
 # dpkg knows the Debian name for whatever this is running on, so a new
 # architecture needs no translation table here
 DEB_ARCH="$(dpkg --print-architecture)"

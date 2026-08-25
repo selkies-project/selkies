@@ -127,9 +127,8 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
           })();
         """)
         page.goto(H.BASE_URL, wait_until="load")
-        # WebKit headless drops synthetic key events after a long idle render
-        # round, so keep the pre-video settle short for it (wait_ws_video polls
-        # until the canvas is actually painted anyway).
+        # Headless WebKit drops synthetic key events after a long idle render
+        # round; wait_ws_video polls for the painted canvas anyway.
         time.sleep(2.0 if engine == "webkit" else 6.0)
 
         try:
@@ -149,14 +148,12 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
                 info = C.wait_wr_video(page, timeout=45)
                 res.check("video: <video> receiving", info is not None, info)
 
-            # keyboard injection
             page.mouse.click(640, 360)
             time.sleep(0.5)
             pressed = False
             for _ in range(4):
-                # WebKit headless drops synthetic keydowns under load/CPU or on a
-                # throttled render round; retry the whole press rather than just
-                # waiting on a possibly-never-delivered event.
+                # Headless WebKit drops synthetic keydowns under load, so the whole
+                # press is retried rather than waited on.
                 page.keyboard.down("x")
                 time.sleep(0.8)
                 pressed = C.x11_keymap_pressed("x")
@@ -170,7 +167,6 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
             res.check("input: key released in X keymap",
                       C.x11_keymap_pressed("x") is False, "")
 
-            # clipboard push: server -> client
             push = f"e2e-{tag}-s2c"
             ext, stop = H.x_own_clipboard(push.encode())
             got = []
@@ -183,15 +179,11 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
             stop["flag"] = True
             res.check("clipboard: server push reached page", push in got, repr(got)[-120:])
 
-            # client -> server
             probe = f"e2e-{tag}-c2s"
             C.send_clipboard_from_client(page, probe, engine)
             if engine == "webkit":
-                # Headless WebKit strips clipboardData from synthetic paste
-                # events and has no system-clipboard surface, so a genuine
-                # client->server transfer cannot be observed there. Recorded as
-                # unobserved rather than as a pass, which would claim coverage
-                # this engine cannot give.
+                # Headless WebKit strips clipboardData from synthetic paste events
+                # and has no system clipboard; a skip claims no coverage.
                 res.skip("clipboard: client text reached server",
                          "headless WebKit has no system clipboard")
             else:
@@ -204,8 +196,8 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
                     time.sleep(0.5)
                 res.check("clipboard: client text reached server", got_text == probe, repr(got_text))
 
-            # Resize; skipped on WebKit, whose headless viewport quirks make
-            # the realized root size unreliable.
+            # Headless WebKit's viewport quirks make the realized root size
+            # unreliable.
             if engine != "webkit":
                 req_w, req_h = 1242, 694
                 page.set_viewport_size({"width": req_w, "height": req_h})

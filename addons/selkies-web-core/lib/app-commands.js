@@ -1,27 +1,46 @@
-// Apps-panel command contract, shared by both dashboards. The UI applies
-// install/remove results optimistically, so every posted command is tracked
-// here until the server's command watch settles it: a failure comes back as
-// a command_error system action whose message ends with the echoed command
-// string, and matching it rolls the optimistic update back.
+/**
+ * Apps-panel command contract, shared by both dashboards.
+ *
+ * The UI applies install and remove results optimistically, so every posted
+ * command is tracked here until the server's command watch settles it: a
+ * failure comes back as a `command_error` system action whose message ends
+ * with the echoed command string, and matching it rolls the optimistic update
+ * back. Commands run through a shell on the server, in the environment of
+ * the session the applications use, so `~` in a launch command is the
+ * session user's home; the launch terminal is the one the server publishes as
+ * `app_terminal` for the session's windowing system (`foot` on Wayland, `st`
+ * on X11).
+ * @module
+ */
 
 const INSTALLED_APPS_STORAGE_KEY = "prootInstalledApps";
 
+/** Window event dispatched when a failed install or remove is rolled back. */
 export const INSTALLED_APPS_ROLLBACK_EVENT = "installedAppsRollback";
 
 const PENDING_COMMAND_TTL_MS = 10 * 60 * 1000;
 const LAUNCH_FAILURE_WINDOW_MS = 15 * 1000;
 
-// The wrapper is on PATH in the image, and the server runs these through a
-// shell, so ~ in the launch command is the session user's home.
+const DEFAULT_APP_TERMINAL = "st";
+const appTerminal = () =>
+    typeof window.app_terminal === "string" && window.app_terminal
+        ? window.app_terminal
+        : DEFAULT_APP_TERMINAL;
+/** Shell command per action; the `selkies-proot` wrapper is on PATH in the image. */
 const appCommandBuilders = {
     install: (app) => `selkies-proot install ${app}`,
     remove: (app) => `selkies-proot remove ${app}`,
     update: (app) => `selkies-proot update ${app}`,
-    launch: (app) => `st ~/.local/bin/${app}-pa`,
+    launch: (app) => `${appTerminal()} ~/.local/bin/${app}-pa`,
 };
 
 const pendingAppCommands = new Map();
 
+/**
+ * Posts an app command to the core and records it as pending.
+ * @param {'install'|'remove'|'update'|'launch'} action The command to build.
+ * @param {string} app The app name the command applies to.
+ */
 export function postAppCommand(action, app) {
     const command = appCommandBuilders[action](app);
     const now = Date.now();
@@ -32,6 +51,10 @@ export function postAppCommand(action, app) {
     window.postMessage({ type: "command", value: command }, window.location.origin);
 }
 
+/**
+ * Reads the stored installed-apps list.
+ * @returns {string[]} The app names, empty when nothing valid is stored.
+ */
 export function readInstalledApps() {
     try {
         const saved = JSON.parse(
@@ -46,18 +69,21 @@ export function readInstalledApps() {
     return [];
 }
 
+/** @param {string[]} apps The installed-apps list to store. */
 export function writeInstalledApps(apps) {
     localStorage.setItem(INSTALLED_APPS_STORAGE_KEY, JSON.stringify(apps));
 }
 
 /**
- * Settle a failed-command notification against the pending map. Returns
- * whether the notice should be shown: a matched launch command older than
- * the failure window is application lifecycle (the app ran, then exited
- * nonzero), so it is suppressed. A matched install/remove rolls back the
- * stored installed-apps list and notifies mounted lists through
- * INSTALLED_APPS_ROLLBACK_EVENT; an unmatched failure is someone else's
- * command and passes through untouched.
+ * Settles a failed-command notification against the pending map.
+ *
+ * A matched launch command older than the failure window is application
+ * lifecycle (the app ran, then exited nonzero), so it is suppressed. A
+ * matched install or remove rolls back the stored installed-apps list and
+ * notifies mounted lists through `INSTALLED_APPS_ROLLBACK_EVENT`; an
+ * unmatched failure is someone else's command and passes through untouched.
+ * @param {string} errMsg The `command_error` message.
+ * @returns {boolean} Whether the notice should be shown.
  */
 export function resolveFailedAppCommand(errMsg) {
     if (typeof errMsg !== "string") return true;

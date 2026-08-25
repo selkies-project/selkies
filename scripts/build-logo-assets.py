@@ -26,6 +26,13 @@ Needs `rsvg-convert` (librsvg) and Pillow. Run from the repository root:
 
 `--check` regenerates into a temporary directory and reports which committed
 images are stale, without writing any of them.
+
+The app icons set the mark on an opaque white disc, so a launcher that masks
+the icon to a circle crops nothing and one that does not still gets a shape
+rather than a floating mark. That plate belongs to the installed-app icon
+alone: a browser tab draws its icon on its own strip, where the bare mark is
+the one that reads, so the dashboards keep both and point each consumer at
+the right one.
 """
 
 import argparse
@@ -57,7 +64,7 @@ LOCKUPS = [
      "wordmark": "translate(16.446 1467.171) scale(0.191433)"},
 ]
 
-# The mark is copied verbatim to wherever a dashboard serves it.
+# The mark verbatim, wherever a dashboard serves it.
 COPIES = ["addons/selkies-dashboard/public/selkies.svg",
           "addons/selkies-dashboard-wish/public/selkies.svg"]
 
@@ -74,12 +81,7 @@ RENDERS = [
 ICONS = [(MARK, 256, "docs/assets/logo/favicon.ico"),
          (MARK, 256, "addons/selkies-dashboard-wish/public/favicon.ico")]
 
-# The app icons set the mark on an opaque white disc, so a launcher that masks
-# the icon to a circle crops nothing and one that does not still gets a shape
-# rather than a floating mark. That plate belongs to the installed-app icon
-# alone: a browser tab draws its icon on its own strip, where the bare mark is
-# the one that reads, so the dashboards keep both and point each consumer at
-# the right one. Proportions are of the icon's side.
+# The plated app icons; the proportions are of the icon's side.
 PLATED = [(MARK, 192, "docs/assets/logo/icon-192x192.png"),
           (MARK, 512, "docs/assets/logo/icon-512x512.png"),
           (MARK, 512, "addons/selkies-dashboard/public/icon-512.png"),
@@ -88,10 +90,8 @@ PLATE_RADIUS = 0.4900
 MARK_WIDTH = 0.7400
 MARK_CENTRE = (0.5000, 0.4844)
 
-# What `--check` treats as a stale image, as a mean per-channel difference. Two
-# librsvg builds disagree on edge pixels by single digits at these sizes, while
-# artwork that has actually moved on differs by an order of magnitude more, so
-# the line sits between the two rather than at zero.
+# Mean per-channel difference `--check` calls stale: librsvg builds disagree on
+# edge pixels by single digits, artwork that moved on by an order of magnitude.
 STALE_THRESHOLD = 12.0
 
 
@@ -125,8 +125,7 @@ def plated_svg(svg: str, size: int, out: str) -> None:
     viewbox = re.search(r'viewBox="([^"]+)"', source).group(1)
     inner = source[source.index(">", source.index("<svg")) + 1:source.rindex("</svg>")]
     mx, my, mw, mh = mark_extent(os.path.join(REPO, svg))
-    # Scale the nested canvas so the ink -- not the canvas -- is MARK_WIDTH wide,
-    # then place it so the ink's centre lands on MARK_CENTRE.
+    # The ink, not the canvas, is MARK_WIDTH wide and centred on MARK_CENTRE.
     canvas = size * MARK_WIDTH / mw
     x = size * MARK_CENTRE[0] - (mx + mw / 2) * canvas
     y = size * MARK_CENTRE[1] - (my + mh / 2) * canvas
@@ -192,9 +191,8 @@ def generate(into: str) -> list[str]:
         shutil.copyfile(os.path.join(REPO, MARK), target)
         produced.append(dest)
 
-    # The lockups were just written under `into`; render from those rather than
-    # from the committed ones, or a check would grade fresh images against stale
-    # artwork and always call them clean.
+    # Rendered from the lockups just written under `into`, or a check would grade
+    # fresh images against stale artwork and always call them clean.
     generated = {spec["dest"] for spec in LOCKUPS}
 
     def source(svg: str) -> str:
@@ -254,9 +252,6 @@ def main() -> int:
                 if open(fresh, "rb").read() != open(committed, "rb").read():
                     stale.append(dest)
             else:
-                # Compared as pixels, and by the average rather than the worst:
-                # any two rasterizers disagree on edge pixels by the full range,
-                # so only a difference spread across the image is a stale asset.
                 a = Image.open(fresh).convert("RGBA")
                 b = Image.open(committed).convert("RGBA")
                 if a.size != b.size:

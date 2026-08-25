@@ -8,11 +8,20 @@ Builds the centralized stream server, registers the WebRTC and WebSockets
 services, switches to the configured mode, and runs the asyncio loop until a
 signal or fatal error unwinds it. Signal handling routes SIGTERM/SIGHUP
 through main-task cancellation so a service-manager stop tears down the same
-way Ctrl-C does.
+way Ctrl-C does. `selkies --version` prints the package version and exits.
 """
 
-import os
 import sys
+
+from . import __version__
+
+# Before the settings import parses argv: --version needs neither a
+# configuration nor the native extensions.
+if "--version" in sys.argv[1:]:
+    print(f"selkies {__version__}")
+    sys.exit(0)
+
+import os
 import signal
 import asyncio
 import logging
@@ -21,6 +30,7 @@ from .settings import settings
 from .webrtc_mode import WebRTCService
 from .selkies import DataStreamingServer
 from .stream_server import CentralizedStreamServer
+from .webcam import stop_shared_webcam
 
 
 logging.basicConfig(level=logging.INFO)
@@ -78,13 +88,19 @@ def _install_shutdown_signal_handlers() -> None:
 
 
 async def run() -> None:
-    """Build the stream server, register its services, and run until cancelled."""
+    """Build the stream server, register its services, and run until cancelled.
+
+    Publishes the resolved gamepad and webcam socket directories to the
+    environment first, so the LD_PRELOAD interposers in app processes (which
+    read `SELKIES_JS_SOCKET_PATH` and `SELKIES_WEBCAM_SOCKET_PATH`) use the
+    same directories selkies does however the settings were supplied. The
+    virtual webcam outlives mode switches (applications hold `/dev/videoN`
+    open across them), so it is released only when the server exits.
+    """
     _install_shutdown_signal_handlers()
 
-    # Publish the resolved gamepad-socket directory so the LD_PRELOAD interposer in
-    # app processes (which reads SELKIES_JS_SOCKET_PATH) writes/reads sockets in the
-    # same directory selkies uses, regardless of how the setting was configured.
     os.environ["SELKIES_JS_SOCKET_PATH"] = settings.js_socket_path
+    os.environ["SELKIES_WEBCAM_SOCKET_PATH"] = settings.webcam_socket_path
 
     if settings.computer_use_bind:
         try:
@@ -103,17 +119,22 @@ async def run() -> None:
     logger.info(f"Initiating server with {settings.mode} mode")
     await server.switch_to_mode(settings.mode)
 
-    await server.run()
+    try:
+        await server.run()
+    finally:
+        await stop_shared_webcam()
 
 
 def main() -> None:
-    """Entry point for command-line execution."""
-    # uvloop makes the whole asyncio loop (timers, callbacks, socket I/O) markedly
-    # faster, which directly lifts the pure-Python WebRTC SCTP data-channel
-    # throughput and keeps large transfers from stalling input. Optional: fall
-    # back to the stock loop if it isn't installed. uvloop.run owns how its
-    # loop is installed per interpreter, so no event-loop policy API (removed
-    # in Python 3.16) is touched here.
+    """Entry point for command-line execution.
+
+    Runs under uvloop when installed, else the stock loop: uvloop makes the
+    whole loop (timers, callbacks, socket I/O) markedly faster, which lifts
+    the pure-Python WebRTC SCTP data-channel throughput and keeps large
+    transfers from stalling input. `uvloop.run` owns how its loop is
+    installed per interpreter, so no event-loop policy API (removed in
+    Python 3.16) is touched here.
+    """
     try:
         import uvloop
         runner = uvloop.run
