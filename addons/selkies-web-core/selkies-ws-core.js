@@ -11,10 +11,11 @@
  * One socket at `<route prefix>/api/websockets` carries the whole session.
  * Binary messages are typed by their first byte. From the server: `0x01`
  * audio (Opus, with the RED redundancy layout documented on
- * extractOpusFrames), `0x03` a JPEG stripe (`u16 frame id`, `u16 stripe Y`,
- * JPEG data), `0x04` an H.264 stripe or full frame (`u8 keyframe`, `u16 frame
- * id`, `u16 stripe Y`, `u16 width`, `u16 height`, Annex-B data), and `0x05` a
- * gzip-wrapped control text once the client advertised `_gz,1`. From the
+ * extractOpusFrames), `0x03` a JPEG stripe (`u8 reserved`, `u16 frame id`,
+ * `u16 stripe Y`, JPEG data), `0x04` an H.264 stripe or full frame (`u8
+ * keyframe`, `u16 frame id`, `u16 stripe Y`, `u16 width`, `u16 height`,
+ * Annex-B data), and `0x05` a gzip-wrapped control text once the client
+ * advertised `_gz,1`. From the
  * client: `0x02` microphone Opus, `0x06` webcam frames (startWebcamCapture),
  * and `0x05` gzipped large text once the server echoed `_gz,1`. Text messages
  * are control. The client sends `SETTINGS,{json}`, `r,WxH,displayId`,
@@ -101,6 +102,7 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder } from './lib/util.js';
+import { createStripeClock } from './lib/stripe-clock.js';
 import { WebcamCapture } from './lib/webcam-capture.js';
 
 installAuthGuard();
@@ -286,6 +288,8 @@ let sinkRevealGen = 0;
  */
 let canvasGeomDirty = true;
 let jpegStripeRenderQueue = [];
+/** JPEG stripes handed to a decoder that have not reached the queue yet. */
+let jpegStripeDecodesPending = 0;
 let triggerInitializeDecoder = () => {
   console.error("initializeDecoder function not yet assigned!");
 };
@@ -382,6 +386,13 @@ let manual_height = null;
 let originalWindowResizeHandler = null;
 let handleResizeUI_globalRef = null;
 let vncStripeDecoders = {};
+/**
+ * Chunks one stripe decoder may have outstanding before its deltas are
+ * dropped. Past it the row is gated until its next IDR: decoding a backlog
+ * late only deepens it, and a dropped delta breaks the row's reference chain.
+ * The video worker holds its full-frame decoder to the same contract.
+ */
+const STRIPE_DECODE_QUEUE_LIMIT = 8;
 let stripeDecodeSoftErrors = {};
 let wakeLockSentinel = null;
 let currentEncoderMode = 'h264enc-striped';
@@ -906,10 +917,27 @@ if (isSharedMode) {
     manual_height = getIntParam('manual_height', null);
 }
 
-/** Enters fullscreen through the input handler, which owns the fullscreen request. */
-const enterFullscreen = () => {
-  if ('webrtcInput' in window && window.webrtcInput && typeof window.webrtcInput.enterFullscreen === 'function') {
-    window.webrtcInput.enterFullscreen();
+/**
+ * Gaming mode is fullscreen holding the pointer and the keyboard; plain
+ * fullscreen holds neither. A transport switch rebuilds Input, so the mode it
+ * was in is carried over.
+ */
+let gamingModeActive = false;
+
+/**
+ * Enters fullscreen through the input handler, which owns both modes.
+ * @param {boolean} gaming Whether to hold the pointer and the keyboard.
+ */
+const enterFullscreen = (gaming) => {
+  gamingModeActive = !!gaming;
+  const input = window.webrtcInput;
+  if (input && gaming && typeof input.enterGamingMode === 'function') {
+    input.enterGamingMode();
+  } else if (input && typeof input.enterFullscreen === 'function') {
+    input.enterFullscreen();
+  } else if (document.fullscreenElement === null) {
+    // Before the stream's input exists there is no mode to hold, only fullscreen.
+    document.documentElement.requestFullscreen().catch(() => {});
   }
 };
 
@@ -2189,7 +2217,15 @@ const initializeUI = () => {
   overlayInput.type = 'search';
   overlayInput.readOnly = false;
   overlayInput.autocomplete = 'off';
+  // The overlay covers the stream, so every tap on it lands here: without these
+  // a mobile engine opens its soft keyboard on each one, over the session and
+  // with no way to dismiss it. Focus, key events and IME composition are
+  // unaffected, and #keyboard-input-assist is what deliberately opens it.
   overlayInput.inputMode = 'none';
+  overlayInput.virtualKeyboardPolicy = 'manual';
+  overlayInput.setAttribute('autocorrect', 'off');
+  overlayInput.setAttribute('autocapitalize', 'off');
+  overlayInput.setAttribute('spellcheck', 'false');
   overlayInput.id = 'overlayInput';
   videoContainer.appendChild(overlayInput);
 
@@ -2376,6 +2412,20 @@ function handleStripeDecodeError(e, vncStripeYStart) {
 }
 
 /**
+ * Whether every stripe chunk handed to a stripe decoder has come back out.
+ * @returns {boolean}
+ */
+function stripeDecodesDrained() {
+  for (const key in vncStripeDecoders) {
+    const info = vncStripeDecoders[key];
+    if (!info || !info.decoder) continue;
+    if (info.decoder.decodeQueueSize > 0) return false;
+    if (info.pendingChunks && info.pendingChunks.length > 0) return false;
+  }
+  return true;
+}
+
+/**
  * Decodes the chunks a stripe queued while its decoder was still configuring.
  * @param {number} stripe_y_start
  */
@@ -2403,15 +2453,22 @@ function processPendingChunksForStripe(stripe_y_start) {
 let decodedStripesQueue = [];
 /**
  * Main-thread back-buffer of the striped paths (h264enc-striped, jpeg).
- * Stripes accumulate here so damage-gated undamaged rows persist, and a whole
- * frame is blitted to the visible canvas only at a frame boundary, so the
- * display never shows a seam between frame ids. Full-frame h264enc presents
- * one decoded frame atomically through the video sinks instead.
+ * Stripes accumulate here so damage-gated undamaged rows persist, and the
+ * whole frame is blitted to the visible canvas once its last row has landed
+ * or the stripe clock says it is complete — or, while stripes still flow, at
+ * the frame-id boundary that proves it — so the display never shows a seam
+ * between frame ids. Full-frame
+ * h264enc presents one decoded frame atomically through the video sinks
+ * instead.
  */
 let stripeBackCanvas = null;
 let stripeBackCtx = null;
 let stripePendingFrameId = null;
 let stripePendingDirty = false;
+/** Newest frame id the striped composite has put on screen. */
+let lastPresentedVideoFrameId = null;
+/** When the striped composite holds a whole frame; see lib/stripe-clock.js. */
+const stripeClock = createStripeClock();
 /**
  * Creates the back-buffer, resized to the canvas.
  * @returns {CanvasRenderingContext2D|null}
@@ -2538,8 +2595,14 @@ function stripeCompositeDraw(stripe, yPos) {
   try { stripe.close(); } catch (e) { /* ignore */ }
 }
 
-/** Presents the composited frame: the worker commits an ImageBitmap, the main thread blits its back-buffer. */
+/**
+ * Presents the composited frame: the worker commits an ImageBitmap, the main
+ * thread blits its back-buffer. Counted as the striped modes' displayed frame,
+ * which is what `window.fps` reports for them.
+ */
 function stripeCompositePresent() {
+  frameCount++;
+  lastPresentedVideoFrameId = stripePendingFrameId;
   if (stripeWorkerActive && stripeWorker) {
     try { stripeWorker.postMessage({ type: 'commit' }); } catch (e) { /* ignore */ }
   } else if (canvasContext && canvas.width > 0 && canvas.height > 0) {
@@ -2803,6 +2866,11 @@ const initializeInput = () => {
   };
   inputInstance.ongamepadhotkey = () => {
     window.postMessage({ type: 'toggleTouchGamepad' }, window.location.origin);
+  };
+  inputInstance.gamingMode = gamingModeActive;
+  inputInstance.ongamingmode = (active) => {
+    gamingModeActive = active;
+    window.postMessage({ type: 'gamingModeUpdate', active }, window.location.origin);
   };
 
   inputInstance.getWindowResolution = () => {
@@ -3488,7 +3556,10 @@ function receiveMessage(event) {
       }
       break;
     case 'requestFullscreen':
-      enterFullscreen();
+      enterFullscreen(false);
+      break;
+    case 'requestGamingMode':
+      enterFullscreen(true);
       break;
     case 'command':
       if (isSharedMode) {
@@ -4083,6 +4154,7 @@ function initWebsockets() {
    * @param {number} frameId
    */
   async function decodeAndQueueJpegStripe(startY, jpegData, frameId) {
+    jpegStripeDecodesPending++;
     try {
       let image;
       if (typeof ImageDecoder !== 'undefined') {
@@ -4098,6 +4170,8 @@ function initWebsockets() {
       jpegStripeRenderQueue.push({ image, startY, frameId });
     } catch (error) {
       console.error('Error decoding JPEG stripe:', error, 'startY:', startY, 'dataLength:', jpegData.byteLength);
+    } finally {
+      jpegStripeDecodesPending--;
     }
   }
 
@@ -4166,9 +4240,11 @@ function initWebsockets() {
 
   /**
    * The per-rAF paint tick. Full-frame h264enc presents only the newest queued
-   * frame; the striped modes composite their stripes and present whole frames
-   * at frame-id boundaries (with an idle flush when a complete frame is still
-   * held); JPEG skips stripes that decoded out of order; the shared main
+   * frame; the striped modes composite their stripes and present the whole
+   * frame as soon as its last row lands or the socket and the decoders go
+   * quiet (the stripe clock), falling back to presenting at frame-id
+   * boundaries while stripes still flow; JPEG skips stripes that decoded out
+   * of order; the shared main
    * decoder path keeps the adaptive jitter cushion. Leaving a full-frame mode
    * tears both video sinks down symmetrically, or a worker canvas would stay
    * shown over the striped content.
@@ -4229,17 +4305,24 @@ function initWebsockets() {
     } else if (currentEncoderMode === 'h264enc-striped') {
       let paintedSomethingThisCycle = false;
       const ready = stripeCompositeBegin();
-      const hadStripes = decodedStripesQueue.length > 0;
+      const drained = stripeDecodesDrained();
+      const settled = drained && stripeClock.settled();
+      // A stripe reaching the last row ends the frame: the server emits a
+      // frame's stripes in ascending order, so with nothing left to decode
+      // there is nothing else to come.
+      let bottomDrawn = false;
       if (ready) {
         for (const stripeData of decodedStripesQueue) {
           const fid = stripeData.frameId;
-          if (stripePendingFrameId !== null && fid !== stripePendingFrameId && stripePendingDirty) {
-            // A newer frame id means the buffered frame is complete.
+          if (!settled && stripePendingFrameId !== null && fid !== stripePendingFrameId && stripePendingDirty) {
+            // Stripes are still arriving: the newer frame id is what proves the
+            // buffered frame complete, so present it before drawing over it.
             stripeCompositePresent();
             stripePendingDirty = false;
             paintedSomethingThisCycle = true;
           }
           stripePendingFrameId = fid;
+          if (stripeData.yPos + stripeData.frame.displayHeight >= canvas.height) bottomDrawn = true;
           stripeCompositeDraw(stripeData.frame, stripeData.yPos);
           stripePendingDirty = true;
         }
@@ -4247,7 +4330,8 @@ function initWebsockets() {
         for (const stripeData of decodedStripesQueue) { try { stripeData.frame.close(); } catch (e) {} }
       }
       decodedStripesQueue = [];
-      if (!hadStripes && stripePendingDirty && canvas.width > 0 && canvas.height > 0) {
+      if (drained && (settled || bottomDrawn) && stripePendingDirty
+          && canvas.width > 0 && canvas.height > 0) {
         stripeCompositePresent();
         stripePendingDirty = false;
         paintedSomethingThisCycle = true;
@@ -4256,10 +4340,19 @@ function initWebsockets() {
         startStream();
       }
     } else if (currentEncoderMode === 'jpeg') {
+      const drained = jpegStripeDecodesPending === 0;
+      const settled = drained && stripeClock.settled();
+      // The last row ends the frame, as in the striped H.264 path above.
+      let bottomDrawn = false;
       if (canvasContext && jpegStripeRenderQueue.length > 0) {
         if ((canvas.width === 0 || canvas.height === 0) || (canvas.width === 300 && canvas.height === 150)) {
           const firstStripe = jpegStripeRenderQueue[0];
-          if (firstStripe && firstStripe.image && (firstStripe.startY + firstStripe.image.height > canvas.height || firstStripe.image.width > canvas.width)) {
+          const firstHeight = firstStripe && firstStripe.image
+            && (firstStripe.image.displayHeight ?? firstStripe.image.height);
+          const firstWidth = firstStripe && firstStripe.image
+            && (firstStripe.image.displayWidth ?? firstStripe.image.width);
+          if (firstStripe && firstStripe.image
+              && (firstStripe.startY + firstHeight > canvas.height || firstWidth > canvas.width)) {
             console.warn(`[paintVideoFrame] Canvas dimensions (${canvas.width}x${canvas.height}) may be too small for JPEG stripes.`);
           }
         }
@@ -4279,12 +4372,14 @@ function initWebsockets() {
             }
             try {
               if (ready) {
-                if (segFrameId !== undefined && stripePendingFrameId !== null &&
+                if (!settled && segFrameId !== undefined && stripePendingFrameId !== null &&
                     segFrameId !== stripePendingFrameId && stripePendingDirty) {
                   stripeCompositePresent();
                   stripePendingDirty = false;
                 }
                 if (segFrameId !== undefined) stripePendingFrameId = segFrameId;
+                const stripeHeight = segment.image.displayHeight ?? segment.image.height;
+                if (segment.startY + stripeHeight >= canvas.height) bottomDrawn = true;
                 stripeCompositeDraw(segment.image, segment.startY);
                 stripePendingDirty = true;
               } else {
@@ -4303,13 +4398,14 @@ function initWebsockets() {
           }
         }
         if (jpegPaintedThisFrame) {
-          frameCount++;
           if (!streamStarted) {
             startStream();
             if (!inputInitialized && !isSharedMode) initializeInput();
           }
         }
-      } else if (stripePendingDirty && canvasContext && canvas.width > 0 && canvas.height > 0) {
+      }
+      if (drained && (settled || bottomDrawn) && stripePendingDirty && canvasContext
+          && canvas.width > 0 && canvas.height > 0) {
         stripeCompositePresent();
         stripePendingDirty = false;
       }
@@ -4658,12 +4754,24 @@ function initWebsockets() {
   websocket = new WebSocket(websocketEndpointURL.href);
   websocket.binaryType = 'arraybuffer';
 
-  /** Acks the newest received video frame id so the server can pace its sends. */
+  /**
+   * Acks the newest video frame the client is done with, so the server can
+   * pace its sends against what this client actually keeps up with. The
+   * striped modes composite on the page and ack what reached the screen; a
+   * client whose rendering falls behind is then throttled instead of being
+   * sent frames it will never show. Full-frame h264enc presents through sinks
+   * the page cannot observe, so there the newest received id is the best the
+   * client knows.
+   */
   const sendBackpressureAck = () => {
     if (websocket && websocket.readyState === WebSocket.OPEN) {
       try {
-        if (lastReceivedVideoFrameId !== -1) {
-          websocket.send(`CLIENT_FRAME_ACK ${lastReceivedVideoFrameId}`);
+        const striped = (currentEncoderMode === 'jpeg' || currentEncoderMode === 'h264enc-striped');
+        const acked = (striped && lastPresentedVideoFrameId !== null)
+          ? lastPresentedVideoFrameId
+          : lastReceivedVideoFrameId;
+        if (acked !== -1 && acked !== null) {
+          websocket.send(`CLIENT_FRAME_ACK ${acked}`);
         }
       } catch (error) {
         console.error('[Backpressure] Error sending frame ACK:', error);
@@ -4673,8 +4781,10 @@ function initWebsockets() {
 
   /**
    * Metrics tick: refreshes the audio buffer depth the backpressure gates
-   * read and publishes `window.fps` (unique striped frame ids, or painted
-   * full frames, per second), independent of whether a dashboard is open.
+   * read and publishes `window.fps` — composites presented per second in the
+   * striped modes, and the wire's frame ids per second for full-frame h264enc,
+   * whose sinks present outside the page — independent of whether a dashboard
+   * is open.
    */
   const sendClientMetrics = () => {
     if (isSharedMode) return;
@@ -4976,6 +5086,7 @@ function initWebsockets() {
         if (arrayBuffer.byteLength < jpegHeaderLength) return;
 
         const jpegFrameId = dataView.getUint16(2, false);
+        stripeClock.note(jpegFrameId);
         if (!isSharedMode) lastReceivedVideoFrameId = jpegFrameId;
         const stripe_y_start = dataView.getUint16(4, false);
         const jpegDataBuffer = arrayBuffer.slice(jpegHeaderLength);
@@ -4995,9 +5106,16 @@ function initWebsockets() {
 
         const video_frame_type_byte = dataView.getUint8(1);
         const vncFrameID = dataView.getUint16(2, false);
+        stripeClock.note(vncFrameID);
         if (!isSharedMode) {
             lastReceivedVideoFrameId = vncFrameID;
-            uniqueStripedFrameIdsThisPeriod.add(lastReceivedVideoFrameId);
+            // Full-frame h264enc presents through sinks the page cannot count
+            // (a <video> fed by a generator, or the worker's canvas), so its
+            // rate is measured off the wire. The striped modes composite here
+            // and count what they actually put on screen.
+            if (currentEncoderMode !== 'h264enc-striped') {
+                uniqueStripedFrameIdsThisPeriod.add(lastReceivedVideoFrameId);
+            }
         }
         const vncStripeYStart = dataView.getUint16(4, false);
         const stripeWidth = dataView.getUint16(6, false);
@@ -5144,6 +5262,10 @@ function initWebsockets() {
                 }
                 if (chunkType === 'key') {
                     decoderInfo.hasReceivedKeyframe = true;
+                } else if (decoderInfo.decoder.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
+                    decoderInfo.hasReceivedKeyframe = false;
+                    requestKeyframe();
+                    return;
                 }
                 // Striped H.264 carries the frame id in the timestamp so the paint
                 // loop can present whole frames; full-frame keeps a monotonic clock.
@@ -6481,6 +6603,8 @@ function stopMicrophoneCapture() {
  * encoder never bakes into the bitstream. Frames are dropped rather than
  * queued while the socket is backed up. Blocked for shared viewers.
  */
+const WEBCAM_QUEUE_MS = 250;
+
 function startWebcamCapture() {
   if (isSharedMode || webcamCapture) {
     return;
@@ -6502,7 +6626,13 @@ function startWebcamCapture() {
         console.error("Error sending webcam frame:", e);
       }
     },
-    canSend: () => !websocket || websocket.bufferedAmount < 4 * 1024 * 1024,
+    // Drop frames rather than build latency when the socket is backed up: what
+    // may sit in the send buffer is a fraction of a second of the uplink's own
+    // bitrate, because a camera frame that old is of no use to the session by
+    // the time it lands. A fixed byte budget is a latency budget in disguise,
+    // and at these rates a generous one is many seconds of it.
+    canSend: () => !websocket
+      || websocket.bufferedAmount < webcamCapture.bitrate / 8 * WEBCAM_QUEUE_MS / 1000,
     onStateChange: (active) => {
       isWebcamActive = active;
       postSidebarButtonUpdate();
@@ -6610,6 +6740,7 @@ function performServerInitiatedVideoReset(reason = "unknown") {
   }
 
   lastReceivedVideoFrameId = -1;
+  lastPresentedVideoFrameId = null;
   console.log(`  Reset lastReceivedVideoFrameId to ${lastReceivedVideoFrameId}.`);
 
   cleanupVideoBuffer();

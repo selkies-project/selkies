@@ -5,8 +5,9 @@ server — over the WebSocket (WebCodecs frames) and over WebRTC (the camera
 track on the reserved sendonly transceiver) — and switch off again. Chromium
 captures a known-colour y4m file as its fake camera, so the device's pixels
 are checked, not just their presence; Firefox's synthetic fake camera proves
-the pinned JPEG rung (its WebSocket uplink is MJPEG by design, since it has
-no ``MediaStreamTrackProcessor``) and the Firefox WebRTC path deliver frames.
+the `<video>` source (it has no ``MediaStreamTrackProcessor``, so its frames
+are sampled from an element and encoded by the codec the worker measured) and
+the Firefox WebRTC path deliver frames.
 The operator lock (``webcam_enabled=false|locked``) must withhold the uplink
 on both transports.
 
@@ -62,6 +63,42 @@ def green_y4m(path: str, width: int = 640, height: int = 480, frames: int = 30) 
         f.write(f"YUV4MPEG2 W{width} H{height} F30:1 Ip A1:1 C420jpeg\n".encode())
         for _ in range(frames):
             f.write(b"FRAME\n" + y + u + v)
+
+
+# Two flat halves in one I420 frame: a turn relayed on the wire has to swap them
+# in the device picture, which a solid clip could never show.
+LEFT_HALF = (150, 44, 21)
+RIGHT_HALF = (80, 200, 120)
+
+
+def split_y4m(path: str, width: int = 640, height: int = 480, frames: int = 30) -> None:
+    """A y4m split down the middle, for Chromium's --use-file-for-fake-video-capture."""
+    def row(values, count):
+        half = count // 2
+        return bytes([values[0]]) * half + bytes([values[1]]) * (count - half)
+    y = row((LEFT_HALF[0], RIGHT_HALF[0]), width) * height
+    u = row((LEFT_HALF[1], RIGHT_HALF[1]), width // 2) * (height // 2)
+    v = row((LEFT_HALF[2], RIGHT_HALF[2]), width // 2) * (height // 2)
+    with open(path, "wb") as f:
+        f.write(f"YUV4MPEG2 W{width} H{height} F30:1 Ip A1:1 C420jpeg\n".encode())
+        for _ in range(frames):
+            f.write(b"FRAME\n" + y + u + v)
+
+
+# A half turn stamped onto every uplink frame's flags byte, which is what a client
+# on an engine that hands the camera's own orientation over sends.
+HALF_TURN_JS = """
+  (() => {
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      if (data instanceof ArrayBuffer && data.byteLength > 3) {
+        const b = new Uint8Array(data);
+        if (b[0] === 0x06) b[2] = (b[2] & ~0x06) | (2 << 1);
+      }
+      return send.apply(this, arguments);
+    };
+  })();
+"""
 
 
 def probe(frames: int, timeout_ms: int = 4000, samples=((320, 240),)) -> dict:
@@ -243,9 +280,9 @@ def transport_block(mode: str) -> "H.Results":
                 r = probe(30, samples=[(640, 360), (20, 20)])
                 res.check(f"{engine}: 30 frames reach /dev/video0", r.get("rc") == 0 and r.get("frames") == "30",
                           f"rc={r.get('rc')} frames={r.get('frames')} err={r.get('error', '')}")
-                # The process-wide camera came up I420 on chromium's encoded uplink and
-                # outlives it; firefox's WebSocket leg (the pinned JPEG rung, since it
-                # has no MediaStreamTrackProcessor) is decoded into that same device.
+                # The process-wide camera came up I420 on chromium's encoded uplink
+                # and outlives it; firefox's WebSocket leg is decoded into the same
+                # device, whichever codec its encode worker measured as keeping up.
                 res.check(f"{engine}: device is the configured 1280x720 I420",
                           (r.get("format"), r.get("width"), r.get("height")) == ("YU12", "1280", "720"),
                           f"{r.get('format')} {r.get('width')}x{r.get('height')}")
@@ -292,10 +329,52 @@ def locked_block() -> "H.Results":
     return res
 
 
+def rotation_block() -> "H.Results":
+    """What the flags byte says about a frame's orientation is what the device shows.
+
+    The client leaves the transform out of the bitstream and relays it, so the
+    picture is only upright if the server bakes it in: the same clip sent with and
+    without a half turn must come out of /dev/video0 mirrored against each other.
+    """
+    res = H.Results("webcam-rotation")
+    y4m = os.path.join(tempfile.mkdtemp(prefix="selkies-cam-"), "split.y4m")
+    split_y4m(y4m)
+    # Well inside each half of the 4:3 picture as it sits pillarboxed in the device.
+    left_at, right_at = (400, 360), (880, 360)
+    H.server_start(mode="websockets", wayland=False, extra_env={"SELKIES_WEBCAM_ENABLED": "false"})
+    try:
+        for label, init_js, want in (("upright", None, (LEFT_HALF, RIGHT_HALF)),
+                                     ("half turn", HALF_TURN_JS, (RIGHT_HALF, LEFT_HALF))):
+            with sync_playwright() as p:
+                browser, page, errors = launch(p, "chromium", y4m, "websockets", init_js=init_js)
+                res.check(f"{label}: stream up", bool(C.wait_ws_video(page)))
+                toggle(page, True)
+                res.check(f"{label}: webcam reports active", wait_status(page, True))
+                deadline = time.time() + 20
+                while time.time() < deadline and probe(2, timeout_ms=1500).get("rc") != 0:
+                    time.sleep(0.5)
+                r = probe(30, samples=[left_at, right_at])
+                res.check(f"{label}: frames reach /dev/video0", r.get("rc") == 0, str(r.get("error", "")))
+                res.check(f"{label}: left of the device picture", near(r["samples"].get(left_at), want[0]),
+                          f"{r['samples'].get(left_at)} want {want[0]}")
+                res.check(f"{label}: right of the device picture", near(r["samples"].get(right_at), want[1]),
+                          f"{r['samples'].get(right_at)} want {want[1]}")
+                res.check(f"{label}: no page errors", not errors, "; ".join(errors)[:200])
+                toggle(page, False)
+                wait_status(page, False)
+                browser.close()
+                time.sleep(1.5)
+    finally:
+        H.server_stop()
+    return res
+
+
 def main() -> int:
     sel = sys.argv[1] if len(sys.argv) > 1 else "websockets"
     build()
-    if sel == "locked":
+    if sel == "rotation":
+        ok = rotation_block().summary()
+    elif sel == "locked":
         ok = locked_block().summary()
     elif sel == "nowebcodecs":
         ok = nowebcodecs_block().summary()

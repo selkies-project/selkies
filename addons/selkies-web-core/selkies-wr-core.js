@@ -229,6 +229,9 @@ export default function webrtc() {
 	let audioBitRate = 128000;
 	let showStart = false;
 	let showDrawer = false;
+	// Gaming mode is fullscreen holding the pointer and the keyboard; a transport
+	// switch rebuilds Input, so the mode it was in is carried over.
+	let gamingModeActive = false;
 	/** Cap of the `window.selkiesLogs` ring buffers; every entry also goes to the console. */
 	const MAX_LOG_ENTRIES = 1000;
 	const pushCapped = (arr, v) => { arr.push(v); if (arr.length > MAX_LOG_ENTRIES) arr.shift(); };
@@ -1497,13 +1500,20 @@ export default function webrtc() {
 				}
 				break;
 			case 'requestFullscreen':
-				// Gaming mode: fullscreen plus pointer and keyboard lock.
-				if (input) {
+			case 'requestGamingMode': {
+				// Parity with the websockets core: plain fullscreen leaves the
+				// pointer and the keyboard to the browser, gaming mode holds both.
+				const gaming = message.type === 'requestGamingMode';
+				gamingModeActive = gaming;
+				if (input && gaming && typeof input.enterGamingMode === 'function') {
+					input.enterGamingMode();
+				} else if (input) {
 					input.enterFullscreen();
 				} else if (document.fullscreenElement === null) {
 					document.documentElement.requestFullscreen().catch(() => {});
 				}
 				break;
+			}
 			case 'setSynth':
 				if (input && typeof input.setSynth === 'function') {
 					input.setSynth(message.value);
@@ -2055,7 +2065,13 @@ export default function webrtc() {
 			overlayInput.type = 'search';
 			overlayInput.readOnly = false;
 			overlayInput.autocomplete = 'off';
+			// Keeps a mobile soft keyboard off the taps this overlay collects for
+			// the stream; #keyboard-input-assist is what deliberately opens one.
 			overlayInput.inputMode = 'none';
+			overlayInput.virtualKeyboardPolicy = 'manual';
+			overlayInput.setAttribute('autocorrect', 'off');
+			overlayInput.setAttribute('autocapitalize', 'off');
+			overlayInput.setAttribute('spellcheck', 'false');
 			overlayInput.id = 'overlayInput';
 
 			videoElement = document.createElement('video');
@@ -2088,7 +2104,7 @@ export default function webrtc() {
 
 			if (!document.getElementById('keyboard-input-assist')) {
 				const keyboardInputAssist = document.createElement('input');
-				keyboardInputAssist.type = 'text';
+				keyboardInputAssist.type = 'search';
 				keyboardInputAssist.id = 'keyboard-input-assist';
 				keyboardInputAssist.style.position = 'absolute';
 				keyboardInputAssist.style.left = '-9999px';
@@ -2363,6 +2379,11 @@ export default function webrtc() {
 			}
 			input.ongamepadhotkey = () => {
 				window.postMessage({ type: 'toggleTouchGamepad' }, window.location.origin);
+			}
+			input.gamingMode = gamingModeActive;
+			input.ongamingmode = (active) => {
+				gamingModeActive = active;
+				window.postMessage({ type: 'gamingModeUpdate', active }, window.location.origin);
 			}
 
 			webrtc.onplaystreamrequired = () => {

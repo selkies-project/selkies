@@ -280,10 +280,13 @@ const CopyIcon = () => (
     <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
   </svg>
 );
+// The crosshair the Wish dashboard marks gaming mode with: one icon names the
+// control in both front ends, and it reads as a target rather than a plus sign.
 const GamingModeIcon = () => (
-  <svg viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none" width="18" height="18">
-    <circle cx="12" cy="12" r="1.5" fill="currentColor" />
-    <path d="M12 5V9M12 15V19M5 12H9M15 12H19" strokeLinecap="round" />
+  <svg className="stroke-icon" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none"
+    width="18" height="18" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10" />
+    <path d="M22 12h-4M6 12H2M12 6V2M12 22v-4" />
   </svg>
 );
 const AppsIcon = () => (
@@ -856,9 +859,10 @@ const clampToggleHandleTopPct = (pct) => {
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
   const [isToggleVisible, setIsToggleVisible] = useState(true);
-  const [isGamingMode, setIsGamingMode] = useState(
-    () => typeof document !== "undefined" && !!document.fullscreenElement && !!window.webrtcInput?.gamingMode
-  );
+  // Gaming mode is the fullscreen that holds the pointer and the keyboard, and
+  // the core announces it however it was entered. Plain fullscreen keeps the
+  // dashboard reachable, so only this one hides the toggle.
+  const [isGamingMode, setIsGamingMode] = useState(false);
   // Viewer-designated clients (shared/player URL modes, or a server-assigned
   // viewer role) must not see server-wide controls like the transport switch.
   const [isViewerRole, setIsViewerRole] = useState(() => {
@@ -879,10 +883,17 @@ function Sidebar() {
    * toggle so pointer lock is not fighting it.
    */
   useEffect(() => {
+    const onGamingMode = (event) => {
+      if (event.source !== window || event.origin !== window.location.origin) return;
+      if (!event.data || event.data.type !== "gamingModeUpdate") return;
+      setIsGamingMode(!!event.data.active);
+    };
+    window.addEventListener("message", onGamingMode);
+    return () => window.removeEventListener("message", onGamingMode);
+  }, []);
+  useEffect(() => {
     const foldOnFullscreen = () => {
-      const fullscreen = !!document.fullscreenElement;
-      setIsGamingMode(fullscreen && !!window.webrtcInput?.gamingMode);
-      if (fullscreen) setIsOpen(false);
+      if (document.fullscreenElement) setIsOpen(false);
     };
     document.addEventListener("fullscreenchange", foldOnFullscreen);
     return () => document.removeEventListener("fullscreenchange", foldOnFullscreen);
@@ -2210,40 +2221,20 @@ function Sidebar() {
       { type: "gamepadControl", enabled: !isGamepadEnabled },
       window.location.origin
     );
-  const handleFullscreenRequest = () => {
-    if (document.fullscreenElement) {
-      if (document.exitFullscreen) {
-        document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
-      }
-    } else {
-      window.postMessage({ type: "requestFullscreen" }, window.location.origin);
-    }
+  // Both buttons hand the request to the core, which owns what each mode locks;
+  // exiting is the browser's own call either way.
+  const exitFullscreen = () => {
+    const exit = document.exitFullscreen || document.mozCancelFullScreen
+      || document.webkitExitFullscreen || document.msExitFullscreen;
+    if (exit) Promise.resolve(exit.call(document)).catch(() => {});
+  };
+  const handleGamingModeRequest = () => {
+    if (document.fullscreenElement) exitFullscreen();
+    else window.postMessage({ type: "requestGamingMode" }, window.location.origin);
   };
   const handleBrowserFullscreen = () => {
-    if (!document.fullscreenElement) {
-      const elem = document.documentElement;
-      if (elem.requestFullscreen) {
-        elem.requestFullscreen().catch(err => {
-          console.error(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
-        });
-      } else if (elem.mozRequestFullScreen) { /* Firefox */
-        elem.mozRequestFullScreen();
-      } else if (elem.webkitRequestFullscreen) { /* Chrome, Safari & Opera */
-        elem.webkitRequestFullscreen();
-      } else if (elem.msRequestFullscreen) { /* IE/Edge */
-        elem.msRequestFullscreen();
-      }
-    } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
-      } else if (document.mozCancelFullScreen) { /* Firefox */
-        document.mozCancelFullScreen();
-      } else if (document.webkitExitFullscreen) { /* Chrome, Safari and Opera */
-        document.webkitExitFullscreen();
-      } else if (document.msExitFullscreen) { /* IE/Edge */
-        document.msExitFullscreen();
-      }
-    }
+    if (document.fullscreenElement) exitFullscreen();
+    else window.postMessage({ type: "requestFullscreen" }, window.location.origin);
   };
   const handleClipboardChange = (event) =>
     setDashboardClipboardContent(event.target.value);
@@ -3009,8 +3000,8 @@ function Sidebar() {
               (renderableSettings.gamingMode ?? true) && (
                 <button
                   className="header-action-button gaming-mode-button"
-                  onClick={handleFullscreenRequest}
-                  title={t("gamingModeTitle", "Gaming Mode")}
+                  onClick={handleGamingModeRequest}
+                  title={`${t("gamingModeTitle", "Gaming Mode")} \u2014 ${t("gamingModeHint", "Fullscreen with the pointer and keyboard locked")}`}
                 >
                   <GamingModeIcon />
                 </button>

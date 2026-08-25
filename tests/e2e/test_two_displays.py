@@ -53,6 +53,27 @@ def wait_secondary_ready(mode: str, secondary_id: str = "display2", timeout: flo
     return C.wait_log("SUCCESS: Capture started for '{}'".format(secondary_id), timeout=timeout)
 
 
+def primary_size(page, mode: str, timeout: float = 20) -> Optional[dict]:
+    """The primary's video size once it matches what the client asked for.
+
+    The first frames can still carry the size the display had before the
+    client's resolution request landed -- a root left large by an earlier
+    session, say -- and WebRTC renegotiates to the requested size a moment
+    later. Sampling once at first frame therefore reads a size the layout no
+    longer has.
+    """
+    want = (page.viewport_size or {}).get("width")
+    deadline = time.time() + timeout
+    info = None
+    while time.time() < deadline:
+        info = (C.wait_wr_video(page, timeout=5) if mode == "webrtc"
+                else C.wait_ws_video(page, timeout=5))
+        if not want or (info and info["w"] == want):
+            return info
+        time.sleep(0.5)
+    return info
+
+
 def server_layout(mode: str, primary_wh: tuple) -> Optional[dict]:
     """The layout the server applied, as `{display_id: rect}`."""
     if mode == "webrtc":
@@ -96,6 +117,7 @@ def run(mode: str, wayland: bool) -> bool:
             res.check("primary video flows", info is not None, info)
             if not info:
                 return res.summary()
+            info = primary_size(page, mode) or info
 
             dpage = C.new_page(browser.contexts[0], mode=mode, url_hash="#display2-right")
             res.check("secondary capture started server-side", wait_secondary_ready(mode), "")

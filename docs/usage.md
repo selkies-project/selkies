@@ -7,19 +7,23 @@ description: Keyboard shortcuts, clipboard behaviour, and the command-line optio
 
 **Fullscreen: `Control + Shift + F` or Fullscreen Button**
 
+**Gaming Mode (fullscreen with the pointer and keyboard held): Gaming Mode Button**
+
 **Remote (Game) Cursor Lock: `Ctrl + Shift + Left Click`**
 
 **Open Side Menu: Ctrl + Shift + M or Side Button**
 
 **On-Screen Touch Gamepad: `Control + Shift + G`**
 
-Fullscreen mode is available with the shortcut `Control + Shift + F`, or by pressing the fullscreen button in the configuration menu. Press `Escape` for at least two seconds to exit fullscreen mode.
+Fullscreen mode is available with the shortcut `Control + Shift + F`, or by pressing the fullscreen button in the configuration menu. It leaves the pointer and the keyboard to the browser, so the side menu and its button stay usable, and `Escape` leaves it.
+
+The gaming mode button fullscreens the session and holds the pointer and the keyboard as well, so a game receives `Escape`, `Alt + Tab` and raw pointer motion instead of the browser. The dashboard folds away for it, and `Escape` held for at least two seconds is what leaves it, because a locked keyboard delivers a short press to the session.
 
 The cursor can be locked into the web interface using `Control + Shift + Left Click` in web browsers supporting the Pointer Lock API. Press `Escape` to exit this remote cursor mode. This remote cursor capability is useful for most games or graphics applications where the cursor must be confined to the remote screen.
 
 Locked movement is relayed to the remote desktop as-is, so the only acceleration applied to it is your own machine's. The client asks the browser for raw mouse movement to leave that curve out, which is what games and 3D applications expect; browsers offer it on Windows and macOS, and refuse it on Linux and Android, where locked movement keeps the local acceleration curve.
 
-The configuration menu is available by clicking the small button on the right side of the interface with the fullscreen turned off, or by using the shortcut `Control + Shift + M`.
+The configuration menu is available by clicking the small button on the right side of the interface, or by using the shortcut `Control + Shift + M`; gaming mode is the one mode that hides both.
 
 `Control + Shift + G` toggles the on-screen touch gamepad overlay (the [Universal Touch Gamepad](component.md#universal-touch-gamepad)), which is also available from the configuration menu.
 

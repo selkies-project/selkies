@@ -1,13 +1,12 @@
 /**
  * Webcam capture for the WebSocket transport.
  *
- * getUserMedia video frames are encoded in the page with WebCodecs (H.264
- * first, VP8 second) and handed to a transport-supplied sender one encoded
- * frame at a time; the server's virtual camera decodes them. Engines without
- * WebCodecs, and engines whose only frame source is a `<video>` element (no
- * MediaStreamTrackProcessor on the page or in a worker: Firefox), fall back
- * to JPEG frames drawn from a canvas, which the server passes on as an MJPEG
- * device or decodes just the same. The WebRTC transport does not use this
+ * getUserMedia video frames are encoded in the page with WebCodecs (the codec
+ * the encode worker measures as keeping up, H.264 or VP8) and handed to a
+ * transport-supplied sender one encoded frame at a time; the server's virtual
+ * camera decodes them. Engines without WebCodecs fall back to JPEG frames
+ * drawn from a canvas, which the server passes on as an MJPEG device or
+ * decodes just the same. The WebRTC transport does not use this
  * class: it attaches the camera track to a sendonly transceiver
  * (lib/webrtc.js `setWebcam`) and the browser's own encoder takes over.
  *
@@ -23,10 +22,10 @@
  * offers: MediaStreamTrackProcessor on the page (Chromium), the standard
  * worker-only MediaStreamTrackProcessor with the track transferred into a
  * DedicatedWorker (Safari 18+), and a `<video>` element sampled with
- * requestVideoFrameCallback (Firefox and anything else). The last rung pins
- * the JPEG path: with no track reader, every sample must be materialized on
- * the page thread, and pushing those through a (software) VideoEncoder loads
- * the page while the encoder drifts ever further behind real time.
+ * requestVideoFrameCallback into VideoFrames (Firefox and anything else). The
+ * last rung encodes like the others: it delivers the camera's own rate, and
+ * the worker drops an input frame rather than queue it when the encoder is
+ * behind, so no encoder drifts behind real time.
  *
  * Encoding runs off the page thread when the engine allows: the encode
  * worker is opened first, and an engine that transfers the camera track into
@@ -47,9 +46,11 @@ export const WEBCAM_CODEC_VP8 = 2;
 export const WEBCAM_CODEC_VP9 = 3;
 
 /**
- * Encoder candidates in preference order; the first one the engine reports
- * as supported (and that actually encodes) wins, the rest are tried on
- * failure.
+ * Encoder candidates in preference order. Reporting support is no promise of
+ * speed, so the worker probe encodes through each and takes the first that
+ * keeps up with the capture rate (Firefox's software H.264 tops out well
+ * under 30 fps at 720p, where its VP8 runs three times faster); the rest are
+ * tried on failure.
  */
 const ENCODER_CANDIDATES = [
   { id: WEBCAM_CODEC_H264, name: "h264", codec: "avc1.42E01F", extra: { avc: { format: "annexb" } } },
@@ -61,6 +62,17 @@ const ENCODER_CANDIDATES = [
  * when no request arrives from the server.
  */
 const KEYFRAME_INTERVAL_MS = 4000;
+
+/**
+ * Frames are admitted by a credit that fills at the configured rate and costs
+ * one frame interval to spend, capped at this many intervals. A camera
+ * delivering at that rate then passes whole however its delivery jitters (and
+ * it always does, down to the compositor quantizing a `<video>` element's
+ * frame callbacks), while a faster source is still thinned to the rate asked
+ * for. Comparing each gap against the interval instead drops every jittered
+ * frame and halves the uplink.
+ */
+const FRAME_CREDIT_INTERVALS = 2;
 
 /**
  * Closes a VideoFrame; the `<video>` element the no-WebCodecs path hands
@@ -79,24 +91,34 @@ const HAS_FRAME_ORIENTATION =
   "rotation" in VideoFrame.prototype;
 
 /**
- * The window orientation at which the camera sensor delivers upright frames:
- * -90 (landscape, camera edge at the bottom) on Apple tablets.
+ * The window orientation at which the camera sensor delivers upright frames on
+ * the engines that hand its own orientation over.
  */
 const SENSOR_UPRIGHT_ORIENTATION = -90;
 
+/** The transform of a frame that is already upright. */
+const UPRIGHT = { rotation: 0, flip: false };
+
 /**
  * Clockwise rotation that makes a sensor-orientation frame upright, from the
- * current window orientation (`screen.orientation.angle` where the legacy
- * property is missing; 270 is that API's spelling of -90).
+ * current window orientation.
  * @returns {number} Degrees, a multiple of 90.
  */
-const deriveRotation = () => {
-  let o = typeof window.orientation === "number"
-    ? window.orientation
-    : (screen.orientation && typeof screen.orientation.angle === "number" ? screen.orientation.angle : 0);
-  if (o === 270) o = -90;
-  return ((o - SENSOR_UPRIGHT_ORIENTATION) % 360 + 360) % 360;
-};
+const deriveRotation = () =>
+  ((window.orientation - SENSOR_UPRIGHT_ORIENTATION) % 360 + 360) % 360;
+
+/**
+ * Whether this page has to derive what the frames do not carry. Only mobile
+ * WebKit needs it: the one engine whose MediaStreamTrackProcessor lives in a
+ * worker alone, and whose camera frames keep the sensor's fixed orientation
+ * with no metadata to read it from. A worker source proves the engine and this
+ * proves the viewport, because a desktop window has no orientation to derive
+ * from and every other engine either pre-rotates the camera or exposes the
+ * transform.
+ * @returns {boolean}
+ */
+const canDeriveOrientation = () =>
+  !HAS_FRAME_ORIENTATION && typeof window.orientation === "number";
 
 /**
  * Source of the frame-reader worker for engines whose
@@ -135,22 +157,32 @@ self.onmessage = async (e) => {
  * never touches the UI thread, and a backgrounded tab throttles the page's
  * event loop but not a worker's, so the encoder keeps pace instead of
  * falling behind and breaking its reference chain into a permanent desync.
- * `probe` confirms a codec encodes here before the page commits; an engine
+ * `probe` measures the candidates here before the page commits; an engine
  * without WebCodecs in workers reports `unsupported` and the page encodes on
  * its own thread instead.
  */
 const ENCODE_WORKER_SRC = `
 const CANDIDATES = ${JSON.stringify(ENCODER_CANDIDATES)};
 const KEYFRAME_INTERVAL_MS = ${KEYFRAME_INTERVAL_MS};
+const HAS_FRAME_ORIENTATION = ${HAS_FRAME_ORIENTATION};
+// Frames one candidate is measured with, and the time that measurement may
+// take: enough to leave the first keyframe behind, little enough that a slow
+// encoder is ranked from what it did finish rather than delaying the camera.
+const PROBE_FRAMES = 8;
+const PROBE_BUDGET_MS = 400;
 let encoder = null, candIndex = 0, cand = null, configuring = false, active = true;
 let fps = 30, bitrate = 2500000, encodedSize = null, forceKeyframe = true, lastKeyframeMs = 0;
 let trackReader = null, trackRef = null;
+// The upright transform every chunk is stamped with, and the one the encoder
+// latched: they differ where the page derives what the frames do not carry, and
+// then no rebuild is owed for a turn the encoder never sees.
+let orientation = { rotation: 0, flip: false }, derived = null;
 
 function encoderConfig(c, w, h) {
   return { codec: c.codec, width: w, height: h, bitrate, framerate: fps, latencyMode: 'realtime', ...c.extra };
 }
 
-async function makeEncoder(w, h) {
+async function makeEncoder(w, h, latched) {
   configuring = true;
   while (candIndex < CANDIDATES.length) {
     cand = CANDIDATES[candIndex];
@@ -164,12 +196,14 @@ async function makeEncoder(w, h) {
           if (!active) return;
           const buf = new ArrayBuffer(chunk.byteLength);
           chunk.copyTo(new Uint8Array(buf));
-          self.postMessage({ type: 'chunk', codecId: cand.id, keyframe: chunk.type === 'key', buffer: buf }, [buf]);
+          self.postMessage({ type: 'chunk', codecId: cand.id, keyframe: chunk.type === 'key', buffer: buf,
+                             rotation: orientation.rotation, flip: orientation.flip }, [buf]);
         },
         error: (err) => { try { encoder && encoder.close(); } catch (x) {} encoder = null; encodedSize = null; candIndex++; },
       });
       enc.configure(support.config || encoderConfig(cand, w, h));
-      encoder = enc; encodedSize = { w: w, h: h }; forceKeyframe = true; configuring = false;
+      encoder = enc; encodedSize = { w: w, h: h, rotation: latched.rotation, flip: latched.flip };
+      forceKeyframe = true; configuring = false;
       self.postMessage({ type: 'ready', codec: cand.name });
       return true;
     } catch (err) { candIndex++; }
@@ -193,21 +227,64 @@ function encodeWith(frame, w, h) {
   frame.close();
 }
 
-function handleFrame(frame) {
+function orientationOf(frame) {
+  return HAS_FRAME_ORIENTATION
+    ? { rotation: frame.rotation || 0, flip: !!frame.flip }
+    : { rotation: 0, flip: false };
+}
+
+function handleFrame(frame, label) {
   if (!active) { frame.close(); return; }
   const w = frame.displayWidth || frame.codedWidth;
   const h = frame.displayHeight || frame.codedHeight;
+  const latched = orientationOf(frame);
+  orientation = label || (HAS_FRAME_ORIENTATION ? latched : (derived || orientation));
   if (configuring) { frame.close(); return; }
-  if (!encoder || (encodedSize && (encodedSize.w !== w || encodedSize.h !== h))) {
-    makeEncoder(w, h).then(() => { if (encoder) encodeWith(frame, w, h); else frame.close(); });
+  if (!encoder || !encodedSize || encodedSize.w !== w || encodedSize.h !== h ||
+      encodedSize.rotation !== latched.rotation || encodedSize.flip !== latched.flip) {
+    makeEncoder(w, h, latched).then(() => { if (encoder) encodeWith(frame, w, h); else frame.close(); });
     return;
   }
   encodeWith(frame, w, h);
 }
 
+// Frames per second one candidate sustains at w x h, or 0 if it cannot encode.
+async function measure(c, w, h) {
+  let support = null;
+  try { support = await VideoEncoder.isConfigSupported(encoderConfig(c, w, h)); } catch (err) { return 0; }
+  if (!support || !support.supported) return 0;
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let encoded = 0, failed = false;
+  const enc = new VideoEncoder({ output: () => { encoded++; }, error: () => { failed = true; } });
+  try { enc.configure(support.config || encoderConfig(c, w, h)); } catch (err) { return 0; }
+  const started = performance.now();
+  for (let i = 0; i <= PROBE_FRAMES && !failed; i++) {
+    ctx.fillStyle = 'hsl(' + (i * 40) + ',70%,50%)';
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect((i * 37) % w, (i * 23) % h, w >> 3, h >> 3);
+    let frame = null;
+    try {
+      frame = new VideoFrame(canvas, { timestamp: Math.round(i * 1e6 / fps) });
+      enc.encode(frame, { keyFrame: i === 0 });
+    } catch (err) { failed = true; }
+    if (frame) frame.close();
+  }
+  await Promise.race([
+    enc.flush().catch(() => { failed = true; }),
+    new Promise((r) => setTimeout(r, PROBE_BUDGET_MS)),
+  ]);
+  const rate = encoded / ((performance.now() - started) / 1000);
+  try { enc.close(); } catch (err) { /* already closed */ }
+  return failed ? 0 : rate;
+}
+
 self.onmessage = async (e) => {
   const m = e.data;
-  if (m.type === 'frame') { handleFrame(m.frame); return; }
+  if (m.type === 'frame') { handleFrame(m.frame, { rotation: m.rotation, flip: m.flip }); return; }
+  // The page derives what a track this worker reads cannot tell it: no window here.
+  if (m.type === 'orientation') { derived = { rotation: m.rotation, flip: m.flip }; return; }
   if (m.type === 'track') {
     // Combined read+encode: read the transferred camera track in this worker, so
     // frames never reach the page thread. Needs a worker MediaStreamTrackProcessor.
@@ -239,13 +316,16 @@ self.onmessage = async (e) => {
   if (m.type === 'probe') {
     fps = m.fps || 30; bitrate = m.bitrate || 2500000;
     if (typeof VideoEncoder === 'undefined') { self.postMessage({ type: 'unsupported' }); return; }
-    while (candIndex < CANDIDATES.length) {
-      let sup = null;
-      try { sup = await VideoEncoder.isConfigSupported(encoderConfig(CANDIDATES[candIndex], m.width || 1280, m.height || 720)); } catch (err) { sup = null; }
-      if (sup && sup.supported) { self.postMessage({ type: 'probed' }); return; }
-      candIndex++;
+    const w = m.width || 1280, h = m.height || 720;
+    let best = -1, bestRate = 0;
+    for (let i = 0; i < CANDIDATES.length; i++) {
+      const rate = await measure(CANDIDATES[i], w, h);
+      if (rate > bestRate) { best = i; bestRate = rate; }
+      if (rate >= fps) break;
     }
-    self.postMessage({ type: 'unsupported' });
+    if (best < 0) { self.postMessage({ type: 'unsupported' }); return; }
+    candIndex = best;
+    self.postMessage({ type: 'probed', codec: CANDIDATES[best].name, rate: Math.round(bestRate) });
   }
 };
 `;
@@ -293,15 +373,19 @@ export class WebcamCapture {
     this._forceKeyframe = true;
     this._chainBroken = false;
     this._lastKeyframeMs = 0;
-    this._lastSendMs = 0;
+    this._lastFrameMs = 0;
+    this._frameCredit = 0;
     this._canvas = null;
     this._ctx = null;
     this._jpegBusy = false;
     this._configuring = false;
     this._deriveOrientation = false;
+    this._orientation = UPRIGHT;
+    this._orientationWatch = null;
     this._active = false;
     this._generation = 0;
     this._encodeWorker = null;
+    this._workerIsSource = false;
     this._encoderCodecName = null;
   }
 
@@ -372,6 +456,8 @@ export class WebcamCapture {
     this._active = true;
     this._forceKeyframe = true;
     this._chainBroken = false;
+    this._lastFrameMs = 0;
+    this._frameCredit = 0;
     const generation = ++this._generation;
     track.addEventListener("ended", () => {
       if (this._generation === generation) {
@@ -427,6 +513,8 @@ export class WebcamCapture {
     }
     this._configuring = false;
     this._deriveOrientation = false;
+    this._orientation = UPRIGHT;
+    this._unwatchOrientation();
     if (this._stream) {
       this._stream.getTracks().forEach((t) => {
         try {
@@ -444,6 +532,8 @@ export class WebcamCapture {
     this._candidateIndex = 0;
     this._encoderCodecName = null;
     this._chainBroken = false;
+    this._lastFrameMs = 0;
+    this._frameCredit = 0;
     this._onStateChange(false);
   }
 
@@ -502,6 +592,9 @@ export class WebcamCapture {
       const onMessage = (e) => {
         const m = e.data;
         if (m.type === "track_reading") {
+          this._workerIsSource = true;
+          this._deriveOrientation = canDeriveOrientation();
+          this._watchOrientation();
           this._logPath("capture+encode: camera read and encoded in a worker");
           finish({ close: () => this._stopEncodeWorker() });
         } else if (m.type === "track_unsupported") {
@@ -552,9 +645,24 @@ export class WebcamCapture {
       const done = () => { if (!settled) { settled = true; resolve(); } };
       const drop = (why) => {
         console.warn("[Webcam] encode-worker unavailable, encoding on the page:", why);
+        const wasSource = this._workerIsSource;
         if (this._encodeWorker === worker) this._encodeWorker = null;
+        this._workerIsSource = false;
         try { worker.terminate(); } catch (e) { /* ignore */ }
         done();
+        // A worker that was reading the camera itself takes the capture with it:
+        // re-open the page's own source so the frames keep coming.
+        if (wasSource && this._active && this._generation === generation) {
+          this._source = null;
+          this._openSource(this._track, generation).then((source) => {
+            if (this._generation !== generation) {
+              if (source) source.close();
+              return;
+            }
+            this._source = source;
+            if (!source) this._onError(new Error("no frame source for the camera track"));
+          });
+        }
       };
       const timer = setTimeout(() => drop("probe timeout"), 3000);
       worker.onmessage = (e) => {
@@ -562,13 +670,15 @@ export class WebcamCapture {
         if (m.type === "probed") {
           clearTimeout(timer);
           this._encodeWorker = worker;
+          this._encoderCodecName = m.codec;
+          this._logPath(`encode: ${m.codec} in a worker, ${m.rate} fps measured against ${this.fps} asked for`);
           done();
           return;
         }
         if (m.type === "ready") { this._encoderCodecName = m.codec; return; }
         if (m.type === "chunk") {
           if (this._active && this._generation === generation) {
-            this._deliverEncoded(m.codecId, m.keyframe, new Uint8Array(m.buffer));
+            this._deliverEncoded(m.codecId, m.keyframe, new Uint8Array(m.buffer), m.rotation, m.flip);
           }
           return;
         }
@@ -588,10 +698,49 @@ export class WebcamCapture {
     });
   }
 
+  /**
+   * Watches the window orientation for a track the encode worker reads itself:
+   * that worker is out of reach of the window the transform is derived from, so
+   * the page pushes it in on every turn.
+   */
+  _watchOrientation() {
+    if (!this._deriveOrientation || this._orientationWatch) return;
+    const push = () => this._pushOrientation();
+    this._orientationWatch = push;
+    window.addEventListener("orientationchange", push);
+    if (screen.orientation && screen.orientation.addEventListener) {
+      screen.orientation.addEventListener("change", push);
+    }
+    push();
+  }
+
+  /** Drops the orientation listeners; idempotent. */
+  _unwatchOrientation() {
+    const push = this._orientationWatch;
+    this._orientationWatch = null;
+    if (!push) return;
+    window.removeEventListener("orientationchange", push);
+    if (screen.orientation && screen.orientation.removeEventListener) {
+      screen.orientation.removeEventListener("change", push);
+    }
+  }
+
+  /** Sends the window's current upright transform to the encode worker. */
+  _pushOrientation() {
+    if (!this._encodeWorker) return;
+    this._orientation = { rotation: deriveRotation(), flip: false };
+    try {
+      this._encodeWorker.postMessage({ type: "orientation", ...this._orientation });
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
   /** Tears down the encode worker (idempotent); the page-thread encoder takes over. */
   _stopEncodeWorker() {
     const worker = this._encodeWorker;
     this._encodeWorker = null;
+    this._workerIsSource = false;
     if (worker) {
       try { worker.postMessage({ type: "stop" }); } catch (e) { /* ignore */ }
       setTimeout(() => { try { worker.terminate(); } catch (e) { /* ignore */ } }, 100);
@@ -620,13 +769,11 @@ export class WebcamCapture {
     }
     const worker = await this._workerSource(track, generation);
     if (worker) {
-      this._deriveOrientation = !HAS_FRAME_ORIENTATION;
+      this._deriveOrientation = canDeriveOrientation();
       this._logPath("capture: MediaStreamTrackProcessor in a worker");
       return worker;
     }
-    this._stopEncodeWorker();
-    this._candidateIndex = ENCODER_CANDIDATES.length;
-    this._logPath("capture: <video> element sampled with requestVideoFrameCallback (JPEG)");
+    this._logPath("capture: <video> element sampled with requestVideoFrameCallback");
     return this._videoSource(track, generation);
   }
 
@@ -752,9 +899,9 @@ export class WebcamCapture {
   /**
    * A `<video>` element sampled with requestVideoFrameCallback (or a timer
    * without it); the element must stay in the DOM, visually inert, or engines
-   * stop decoding for it. The element itself is handed over as the frame:
-   * this source only runs with the JPEG rung pinned, and drawImage both reads
-   * it and bakes any orientation the engine knows.
+   * stop decoding for it. Each sample becomes a VideoFrame the encoder takes,
+   * through a canvas on an engine that refuses the element as a frame source;
+   * with no WebCodecs at all the element itself is handed to the JPEG rung.
    * @param {MediaStreamTrack} track
    * @param {number} generation
    * @returns {{close: function(): void}}
@@ -769,12 +916,40 @@ export class WebcamCapture {
     video.srcObject = new MediaStream([track]);
     let handle = null;
     let timer = null;
+    let canvas = null;
+    let ctx = null;
     const sample = () => {
       if (this._generation !== generation) {
         return;
       }
-      if (video.readyState >= 2 && video.videoWidth > 0) {
+      if (video.readyState >= 2 && video.videoWidth > 0 && typeof VideoFrame === "undefined") {
+        // No WebCodecs at all: the JPEG rung draws the element itself.
         this._handleFrame(video);
+      } else if (video.readyState >= 2 && video.videoWidth > 0) {
+        let frame = null;
+        const timestamp = Math.round(performance.now() * 1000);
+        try {
+          frame = new VideoFrame(video, { timestamp });
+        } catch (error) {
+          // Engines that reject <video> as a VideoFrame source go through a canvas.
+          if (!canvas) {
+            canvas = document.createElement("canvas");
+            ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+          }
+          if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+          }
+          try {
+            ctx.drawImage(video, 0, 0);
+            frame = new VideoFrame(canvas, { timestamp });
+          } catch (e) {
+            frame = null;
+          }
+        }
+        if (frame) {
+          this._handleFrame(frame);
+        }
       }
       if (video.requestVideoFrameCallback) {
         handle = video.requestVideoFrameCallback(sample);
@@ -818,15 +993,14 @@ export class WebcamCapture {
       return;
     }
     const now = performance.now();
-    if (now - this._lastSendMs < 1000 / this.fps - 1) {
+    if (!this._admit(now)) {
       closeFrame(frame);
       return;
     }
     if (this._encodeWorker) {
       try {
-        this._encodeWorker.postMessage({ type: "frame", frame }, [frame]);
-        this._logPath("encode: VideoEncoder in a worker (frames from the page)");
-        this._lastSendMs = now;
+        const label = this._frameOrientation(frame);
+        this._encodeWorker.postMessage({ type: "frame", frame, ...label }, [frame]);
         return;
       } catch (error) {
         this._stopEncodeWorker();
@@ -840,16 +1014,17 @@ export class WebcamCapture {
     }
     const w = frame.displayWidth || frame.codedWidth;
     const h = frame.displayHeight || frame.codedHeight;
-    const rotation = this._deriveOrientation ? deriveRotation() : (frame.rotation || 0);
-    const flip = this._deriveOrientation ? false : !!frame.flip;
+    const latched = { rotation: frame.rotation || 0, flip: !!frame.flip };
+    this._orientation = this._frameOrientation(frame);
     const s = this._encodedSize;
-    if (!this._encoder || !s || s.w !== w || s.h !== h || s.rotation !== rotation || s.flip !== flip) {
+    if (!this._encoder || !s || s.w !== w || s.h !== h ||
+        s.rotation !== latched.rotation || s.flip !== latched.flip) {
       if (this._configuring) {
         frame.close();
         return;
       }
       this._configuring = true;
-      this._configureEncoder(w, h, rotation, flip)
+      this._configureEncoder(w, h, latched.rotation, latched.flip)
         .then(() => this._encodeWith(frame, w, h, now))
         .finally(() => {
           this._configuring = false;
@@ -857,6 +1032,36 @@ export class WebcamCapture {
       return;
     }
     this._encodeWith(frame, w, h, now);
+  }
+
+  /**
+   * Whether one frame arriving now fits the configured rate.
+   * @param {number} now
+   * @returns {boolean}
+   */
+  _admit(now) {
+    const interval = 1000 / this.fps;
+    const elapsed = this._lastFrameMs ? now - this._lastFrameMs : interval;
+    this._lastFrameMs = now;
+    this._frameCredit = Math.min(this._frameCredit + elapsed, interval * FRAME_CREDIT_INTERVALS);
+    if (this._frameCredit < interval) {
+      return false;
+    }
+    this._frameCredit -= interval;
+    return true;
+  }
+
+  /**
+   * The upright transform of one frame: what the engine put on it, or what the
+   * window says where the engine puts nothing.
+   * @param {VideoFrame|HTMLVideoElement} frame
+   * @returns {{rotation: number, flip: boolean}}
+   */
+  _frameOrientation(frame) {
+    if (this._deriveOrientation) {
+      return { rotation: deriveRotation(), flip: false };
+    }
+    return { rotation: frame.rotation || 0, flip: !!frame.flip };
   }
 
   /**
@@ -881,7 +1086,6 @@ export class WebcamCapture {
     const keyFrame = this._forceKeyframe || now - this._lastKeyframeMs >= KEYFRAME_INTERVAL_MS;
     try {
       encoder.encode(frame, { keyFrame });
-      this._lastSendMs = now;
       if (keyFrame) {
         this._lastKeyframeMs = now;
         this._forceKeyframe = false;
@@ -936,7 +1140,7 @@ export class WebcamCapture {
       }
       try {
         const encoder = new VideoEncoder({
-          output: (chunk) => this._onChunk(cand, chunk, generation, rotation, flip),
+          output: (chunk) => this._onChunk(cand, chunk, generation),
           error: (error) => this._onEncoderFailure(error),
         });
         encoder.configure(support.config || config);
@@ -954,49 +1158,48 @@ export class WebcamCapture {
   }
 
   /**
-   * Sends one worker-encoded frame to the transport. When the socket is
-   * backed up the frame is dropped and the next one forced to a keyframe:
-   * the server's decoder must never get a delta built on a frame it never
-   * received. Independent JPEG frames, which carry no such dependency, do
-   * not go through here.
+   * Sends one encoded frame to the transport. A frame dropped because the
+   * socket is backed up breaks the chain the server's decoder follows, so
+   * nothing but a keyframe is sent until one is asked for, and it is only
+   * asked for once the socket can take it: a keyframe encoded into a full
+   * socket is dropped like any other frame. Independent JPEG frames carry no
+   * such dependency and do not come through here.
    * @param {number} codecId
    * @param {boolean} keyframe
    * @param {Uint8Array} bytes
+   * @param {number} [rotation] Clockwise degrees that make the frame upright.
+   * @param {boolean} [flip] Horizontal mirror, applied after the rotation.
    */
-  _deliverEncoded(codecId, keyframe, bytes) {
+  _deliverEncoded(codecId, keyframe, bytes, rotation, flip) {
     if (!this._canSend()) {
-      if (!this._chainBroken) {
-        this._chainBroken = true;
-        this.requestKeyframe();
-      }
+      this._chainBroken = true;
       return;
     }
     if (this._chainBroken && !keyframe) {
       this.requestKeyframe();
       return;
     }
-    this._sendFrame(codecId, keyframe, bytes);
+    this._sendFrame(codecId, keyframe, bytes, rotation, flip);
     if (keyframe) {
       this._chainBroken = false;
     }
   }
 
   /**
-   * Output of the page-thread encoder: copies the chunk out and sends it
-   * with the orientation the encoder was built for.
+   * Output of the page-thread encoder: copies the chunk out and sends it with
+   * the transform of the frame it came from.
    * @param {{id: number}} cand Encoder candidate that produced the chunk.
    * @param {EncodedVideoChunk} chunk
    * @param {number} generation
-   * @param {number} rotation
-   * @param {boolean} flip
    */
-  _onChunk(cand, chunk, generation, rotation, flip) {
+  _onChunk(cand, chunk, generation) {
     if (this._generation !== generation || !this._active) {
       return;
     }
     const buf = new Uint8Array(chunk.byteLength);
     chunk.copyTo(buf);
-    this._sendFrame(cand.id, chunk.type === "key", buf, rotation, flip);
+    this._deliverEncoded(cand.id, chunk.type === "key", buf,
+                         this._orientation.rotation, this._orientation.flip);
   }
 
   /**
@@ -1018,9 +1221,10 @@ export class WebcamCapture {
 
   /**
    * Encodes a frame as JPEG through `OffscreenCanvas.convertToBlob`, one
-   * encode in flight at a time. drawImage applies the frame's orientation
-   * metadata, so the JPEG leaves upright (the canvas swaps its dimensions for
-   * sideways frames) and carries no orientation on the wire.
+   * encode in flight at a time. A JPEG frame always leaves upright and carries
+   * no transform on the wire: drawImage bakes in the one the engine put on the
+   * frame (whose display size already counts the turn), and a derived one is
+   * applied here as a canvas transform.
    * @param {VideoFrame|HTMLVideoElement} frame
    * @param {number} now `performance.now()` at receipt.
    */
@@ -1029,7 +1233,8 @@ export class WebcamCapture {
       closeFrame(frame);
       return;
     }
-    const sideways = ((frame.rotation || 0) % 180) === 90;
+    const turn = this._deriveOrientation ? deriveRotation() : 0;
+    const sideways = turn % 180 === 90;
     const dw = frame.displayWidth || frame.codedWidth || frame.videoWidth;
     const dh = frame.displayHeight || frame.codedHeight || frame.videoHeight;
     const w = sideways ? dh : dw;
@@ -1043,14 +1248,21 @@ export class WebcamCapture {
       this._canvas.height = h;
     }
     try {
-      this._ctx.drawImage(frame, 0, 0, w, h);
+      if (turn) {
+        this._ctx.save();
+        this._ctx.translate(w / 2, h / 2);
+        this._ctx.rotate((turn * Math.PI) / 180);
+        this._ctx.drawImage(frame, -dw / 2, -dh / 2, dw, dh);
+        this._ctx.restore();
+      } else {
+        this._ctx.drawImage(frame, 0, 0, w, h);
+      }
     } catch (error) {
       closeFrame(frame);
       return;
     }
     closeFrame(frame);
     this._jpegBusy = true;
-    this._lastSendMs = now;
     const generation = this._generation;
     this._canvas
       .convertToBlob({ type: "image/jpeg", quality: this.quality })

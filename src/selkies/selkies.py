@@ -3634,8 +3634,13 @@ class DataStreamingServer(BaseStreamingService):
                             if not (0 <= acked_frame_id <= MAX_UINT16_FRAME_ID):
                                 raise ValueError("ACK frame id outside uint16 wire space.")
 
+                            # Only the display's registered client is acking the
+                            # frames the relay stamped: the backpressure loop
+                            # compares these ids against what it sent to THAT
+                            # socket, so a shared viewer's ack would throttle the
+                            # controller against a stream it never received.
                             display_state = self.display_clients.get(target_display_id)
-                            if display_state:
+                            if display_state and display_state.get('ws') is websocket:
                                 display_state['acknowledged_frame_id'] = acked_frame_id
                                 display_state['last_ack_update_time'] = time.monotonic()
                                 

@@ -228,6 +228,34 @@ def clipboard_enabled_block(page: Any, res: "H.Results") -> None:
     res.check("clipboard on: focus gesture reads the local clipboard", reads > 0, reads)
 
 
+def soft_keyboard_block(page: Any, res: "H.Results") -> None:
+    """The overlay collects the stream's taps without opening a soft keyboard.
+
+    It is a real text input laid over the video, so a mobile engine would open its
+    keyboard on every tap of the session -- over the picture, and with no way to
+    dismiss it. Focus, key events and IME composition are unaffected by these two
+    attributes; the off-screen assist input is what deliberately opens one, so it
+    must not carry them.
+    """
+    overlay = page.evaluate(
+        "(() => { const e = document.getElementById('overlayInput');"
+        " return e && { mode: e.getAttribute('inputmode'), policy: e.getAttribute('virtualkeyboardpolicy'),"
+        " type: e.type, readOnly: e.readOnly }; })()")
+    res.check("the stream overlay asks for no virtual keyboard",
+              bool(overlay) and overlay.get("mode") == "none", str(overlay))
+    res.check("the stream overlay keeps the keyboard the page's to open",
+              bool(overlay) and overlay.get("policy") == "manual", str(overlay))
+    res.check("the stream overlay stays editable, for IME composition",
+              bool(overlay) and overlay.get("readOnly") is False, str(overlay))
+    assist = page.evaluate(
+        "(() => { const e = document.getElementById('keyboard-input-assist');"
+        " return e && { mode: e.getAttribute('inputmode'), type: e.type }; })()")
+    res.check("the assist input still opens one on purpose",
+              bool(assist) and assist.get("mode") in (None, "text"), str(assist))
+    res.check("both cores build the assist input the same way",
+              bool(assist) and assist.get("type") == "search", str(assist))
+
+
 def gamepad_block(browser: Any, mode: str, res: "H.Results") -> None:
     """Persisted toggle before channel open, then a disconnect of one pad."""
     toggle_off = f"localStorage.setItem({STORAGE_APP} + '_isGamepadEnabled', 'false');"
@@ -299,6 +327,7 @@ def run(mode: str) -> bool:
                 time.sleep(1.0)
                 resolution_block(page, mode, res)
                 clipboard_enabled_block(page, res)
+                soft_keyboard_block(page, res)
                 page.context.close()
                 gamepad_block(browser, mode, res)
             finally:

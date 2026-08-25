@@ -6,12 +6,20 @@ with the web client's sendFrame, so it is pinned here, and the optional
 ``rotation``/``flip`` arguments of ``VirtualWebcam.push`` must degrade to the
 old four-argument call against a pixelflux build that predates them (announced
 once, never retried per frame).
+
+The client half -- which transform it puts on a frame, on which engines it
+derives one, and what it does with a frame the socket cannot take -- is
+JavaScript, so it is checked by ``tests/tools/webcam_orientation_audit.mjs``,
+run from here so both sides of the same wire field fail together.
 """
 import os
+import shutil
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "src"))
+AUDIT = os.path.join(ROOT, "tests", "tools", "webcam_orientation_audit.mjs")
 
 from selkies.webcam import (  # noqa: E402
     WS_FLAG_HFLIP,
@@ -54,6 +62,7 @@ class NewCam(OldCam):
 
 
 def main() -> int:
+    global passed, failed
     check("flag bits pinned",
           (WS_FLAG_KEYFRAME, WS_FLAG_ROTATION_SHIFT, WS_FLAG_ROTATION_MASK, WS_FLAG_HFLIP)
           == (0x01, 1, 0x06, 0x08))
@@ -83,6 +92,23 @@ def main() -> int:
     check("fallback latched", wc._push_orientation is False)
     wc.push(b"x", 2, False, 3, 270, True)
     check("no per-frame retry", old.calls == [(2, True, 3), (2, False, 3)], str(old.calls))
+
+    node = shutil.which("node")
+    if not node:
+        # A skip rather than a pass: the client half is the other end of the same
+        # wire field, and exiting zero here would announce it as checked.
+        print("SKIP node not found, so the client orientation audit cannot run", flush=True)
+        print(f"\n{passed} passed, {failed} failed")
+        return 77
+    audit = subprocess.run([node, AUDIT], capture_output=True, text=True, timeout=120)
+    lines = [ln for ln in audit.stdout.splitlines() if ln.startswith(("PASS", "FAIL"))]
+    for line in lines:
+        print(line, flush=True)
+    if not lines:
+        check("client audit ran", False, audit.stderr.strip()[:400])
+    else:
+        passed += sum(1 for ln in lines if ln.startswith("PASS"))
+        failed += sum(1 for ln in lines if ln.startswith("FAIL"))
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

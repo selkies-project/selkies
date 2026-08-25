@@ -23,6 +23,7 @@ const en = {
     closeDashboardTitle: "Close Dashboard",
     fullscreenTitle: "Enter Fullscreen",
     gamingModeTitle: "Gaming Mode",
+    gamingModeHint: "Fullscreen with the pointer and keyboard locked",
     trackpadModeTitle: "Trackpad Mode",
     streamingModeTitle: "Streaming Mode",
     buttons: {
@@ -254,6 +255,7 @@ const es = {
     closeDashboardTitle: "Cerrar el panel",
     fullscreenTitle: "Entrar en Pantalla Completa",
     gamingModeTitle: "Modo Juego",
+    gamingModeHint: "Pantalla completa con el puntero y el teclado bloqueados",
     trackpadModeTitle: "Modo Trackpad",
     streamingModeTitle: "Modo Streaming",
     buttons: {
@@ -485,6 +487,7 @@ const zh = {
     closeDashboardTitle: "关闭仪表板",
     fullscreenTitle: "进入全屏",
     gamingModeTitle: "游戏模式",
+    gamingModeHint: "全屏并锁定指针和键盘",
     trackpadModeTitle: "触控板模式",
     streamingModeTitle: "串流模式",
     buttons: {
@@ -716,6 +719,7 @@ const hi = {
     closeDashboardTitle: "डैशबोर्ड बंद करें",
     fullscreenTitle: "फुलस्क्रीन दर्ज करें",
     gamingModeTitle: "गेमिंग मोड",
+    gamingModeHint: "पॉइंटर और कीबोर्ड लॉक के साथ फुलस्क्रीन",
     trackpadModeTitle: "ट्रैकपैड मोड",
     streamingModeTitle: "स्ट्रीमिंग मोड",
     buttons: {
@@ -947,6 +951,7 @@ const pt = {
     closeDashboardTitle: "Fechar o painel",
     fullscreenTitle: "Entrar em Tela Cheia",
     gamingModeTitle: "Modo de Jogo",
+    gamingModeHint: "Tela cheia com o ponteiro e o teclado bloqueados",
     trackpadModeTitle: "Modo Trackpad",
     streamingModeTitle: "Modo Streaming",
     buttons: {
@@ -1178,6 +1183,7 @@ const fr = {
     closeDashboardTitle: "Fermer le tableau de bord",
     fullscreenTitle: "Passer en plein écran",
     gamingModeTitle: "Mode Jeu",
+    gamingModeHint: "Plein écran avec le pointeur et le clavier verrouillés",
     trackpadModeTitle: "Mode Trackpad",
     streamingModeTitle: "Mode Streaming",
     buttons: {
@@ -1410,6 +1416,7 @@ const ru = {
     closeDashboardTitle: "Закрыть панель",
     fullscreenTitle: "Войти в полноэкранный режим",
     gamingModeTitle: "Игровой режим",
+    gamingModeHint: "Полноэкранный режим с блокировкой указателя и клавиатуры",
     trackpadModeTitle: "Режим трекпада",
     streamingModeTitle: "Режим стриминга",
     buttons: {
@@ -1641,6 +1648,7 @@ const de = {
     closeDashboardTitle: "Dashboard schließen",
     fullscreenTitle: "Vollbildmodus aktivieren",
     gamingModeTitle: "Gaming-Modus",
+    gamingModeHint: "Vollbild mit gesperrtem Zeiger und gesperrter Tastatur",
     trackpadModeTitle: "Trackpad-Modus",
     streamingModeTitle: "Streaming-Modus",
     buttons: {
@@ -1872,6 +1880,7 @@ const tr = {
     closeDashboardTitle: "Paneli kapat",
     fullscreenTitle: "Tam Ekrana Gir",
     gamingModeTitle: "Oyun Modu",
+    gamingModeHint: "İşaretçi ve klavye kilitliyken tam ekran",
     trackpadModeTitle: "Dokunmatik Yüzey Modu",
     streamingModeTitle: "Yayın Modu",
     buttons: {
@@ -2103,6 +2112,7 @@ const it = {
     closeDashboardTitle: "Chiudi la dashboard",
     fullscreenTitle: "Entra in Schermo Intero",
     gamingModeTitle: "Modalità Gioco",
+    gamingModeHint: "Schermo intero con puntatore e tastiera bloccati",
     trackpadModeTitle: "Modalità Trackpad",
     streamingModeTitle: "Modalità Streaming",
     buttons: {
@@ -2334,6 +2344,7 @@ const nl = {
     closeDashboardTitle: "Dashboard sluiten",
     fullscreenTitle: "Volledig scherm openen",
     gamingModeTitle: "Gaming Modus",
+    gamingModeHint: "Volledig scherm met vergrendelde aanwijzer en toetsenbord",
     trackpadModeTitle: "Trackpad-modus",
     streamingModeTitle: "Streamingmodus",
     buttons: {
@@ -2565,6 +2576,7 @@ const ar = {
     closeDashboardTitle: "إغلاق لوحة التحكم",
     fullscreenTitle: "الدخول في وضع ملء الشاشة",
     gamingModeTitle: "وضع الألعاب",
+    gamingModeHint: "ملء الشاشة مع قفل المؤشر ولوحة المفاتيح",
     trackpadModeTitle: "وضع لوحة اللمس",
     streamingModeTitle: "وضع البث",
     buttons: {
@@ -2796,6 +2808,7 @@ const ko = {
     closeDashboardTitle: "대시보드 닫기",
     fullscreenTitle: "전체 화면 시작",
     gamingModeTitle: "게임 모드",
+    gamingModeHint: "포인터와 키보드를 고정한 전체 화면",
     trackpadModeTitle: "트랙패드 모드",
     streamingModeTitle: "스트리밍 모드",
     buttons: {
@@ -3027,6 +3040,7 @@ const ja = {
     closeDashboardTitle: "ダッシュボードを閉じる",
     fullscreenTitle: "フルスクリーンに入る",
     gamingModeTitle: "ゲームモード",
+    gamingModeHint: "ポインターとキーボードをロックした全画面",
     trackpadModeTitle: "トラックパッドモード",
     streamingModeTitle: "ストリーミングモード",
     buttons: {
@@ -3258,6 +3272,7 @@ const vi = {
     closeDashboardTitle: "Đóng bảng điều khiển",
     fullscreenTitle: "Vào Toàn màn hình",
     gamingModeTitle: "Chế độ Chơi game",
+    gamingModeHint: "Toàn màn hình với con trỏ và bàn phím bị khóa",
     trackpadModeTitle: "Chế độ Bàn di chuột",
     streamingModeTitle: "Chế độ Truyền phát",
     buttons: {
@@ -3489,6 +3504,7 @@ const th = {
     closeDashboardTitle: "ปิดแดชบอร์ด",
     fullscreenTitle: "เข้าสู่โหมดเต็มหน้าจอ",
     gamingModeTitle: "โหมดเกมมิ่ง",
+    gamingModeHint: "เต็มหน้าจอโดยล็อกตัวชี้และแป้นพิมพ์",
     trackpadModeTitle: "โหมดแทร็คแพด",
     streamingModeTitle: "โหมดสตรีมมิ่ง",
     buttons: {
@@ -3720,6 +3736,7 @@ const fil = {
     closeDashboardTitle: "Isara ang dashboard",
     fullscreenTitle: "Pumasok sa Fullscreen",
     gamingModeTitle: "Modo ng Paglalaro",
+    gamingModeHint: "Fullscreen na naka-lock ang pointer at keyboard",
     trackpadModeTitle: "Modo ng Trackpad",
     streamingModeTitle: "Modo ng Streaming",
     buttons: {
@@ -3951,6 +3968,7 @@ const da = {
     closeDashboardTitle: "Luk dashboardet",
     fullscreenTitle: "Start Fuldskærm",
     gamingModeTitle: "Spiltilstand",
+    gamingModeHint: "Fuldskærm med markør og tastatur låst",
     trackpadModeTitle: "Trackpad-tilstand",
     streamingModeTitle: "Streaming-tilstand",
     buttons: {

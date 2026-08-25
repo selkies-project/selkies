@@ -588,20 +588,26 @@ export function TopMenu({
                     <Gamepad2 className="h-4 w-4" />
                   </Button>
                 </MenubarTrigger>
-                <MenubarContent align="start" className="min-w-[180px]">
+                <MenubarContent align="start" className="min-w-[260px] max-w-[300px]">
                   <MenubarLabel>{t('topMenu.gaming')}</MenubarLabel>
                   {(renderableSettings.gamingMode ?? true) && (
                     <MenubarItem
+                      className="items-start"
                       onClick={() => {
                         if (document.fullscreenElement) {
                           document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
                         } else {
-                          window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
+                          window.postMessage({ type: 'requestGamingMode' }, window.location.origin);
                         }
                       }}
                     >
-                      <Crosshair className="h-4 w-4 mr-2" />
-                      <span className="flex-1">{t('gamingModeTitle')}</span>
+                      <Crosshair className="h-4 w-4 mr-2 mt-0.5" />
+                      <span className="flex-1 min-w-0">
+                        <span className="block">{t('gamingModeTitle')}</span>
+                        <span className="block text-xs text-muted-foreground whitespace-normal">
+                          {t('gamingModeHint')}
+                        </span>
+                      </span>
                     </MenubarItem>
                   )}
                   {!isSecondaryDisplay && (renderableSettings.gamepadToggle ?? true) && (
@@ -930,8 +936,9 @@ export function TopMenu({
                       if (document.fullscreenElement) {
                         document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
                       } else {
-                        document.documentElement.requestFullscreen()
-                          .catch(err => console.error("Fullscreen request failed:", err));
+                        // Plain fullscreen: the core locks neither the pointer nor
+                        // the keyboard, so the bar stays usable.
+                        window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
                       }
                     }}
                   >

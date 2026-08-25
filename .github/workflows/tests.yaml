@@ -232,6 +232,7 @@ jobs:
               exit 1
             fi
             echo "${found}" | xargs python -m pip install --force-reinstall --no-deps
+            echo "${found}" | xargs cp -t dist/
           done
           python -c 'import pixelflux, pcmflux; print("capture stack:", pixelflux.__file__)'
       - name: Build the web client

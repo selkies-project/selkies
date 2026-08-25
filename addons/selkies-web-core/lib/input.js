@@ -1295,6 +1295,7 @@ export class Input {
         this._moveFlushScheduled = false;
         this.onmenuhotkey = null;
         this.gamingMode = false;
+        this.ongamingmode = null;
         this.onfullscreenhotkey = this.enterFullscreen;
         this.ongamepadhotkey = null;
         this.ongamepadconnected = null;
@@ -1695,7 +1696,7 @@ export class Input {
         // exempts plain typing, not the chords.
         if (event.ctrlKey && event.shiftKey) {
             let hotkey = null;
-            if (event.code === 'KeyM' && document.fullscreenElement === null) hotkey = this.onmenuhotkey;
+            if (event.code === 'KeyM' && !this.gamingMode) hotkey = this.onmenuhotkey;
             else if (event.code === 'KeyF' && document.fullscreenElement === null) hotkey = this.onfullscreenhotkey;
             else if (event.code === 'KeyG') hotkey = this.ongamepadhotkey;
             if (hotkey !== null && this._guac_markEvent(event)) {
@@ -3523,7 +3524,7 @@ export class Input {
                 this.requestKeyboardLock();
             }
         } else {
-            this.gamingMode = false;
+            this._setGamingMode(false);
             if (this._isStreamLocked()) document.exitPointerLock();
         }
         this.send("kr");
@@ -3736,33 +3737,73 @@ export class Input {
     }
 
     /**
-     * Enters gaming mode: fullscreen plus pointer and keyboard lock.
-     * `gamingMode` distinguishes it from a plain fullscreen of the same
-     * document, which arms nothing, and clears when fullscreen exits. The
+     * Fullscreen with no lock, leaving the pointer and the keyboard to the
+     * browser: the dashboard button and the Ctrl+Shift+F chord land here. The
      * whole document goes fullscreen, not the stream container: the dashboard
      * overlay is a body-level sibling, which container fullscreen would hide.
-     * A lock requested before the transition would be cancelled by it, so the
-     * fullscreenchange handler arms it once fullscreen lands, still inside the
-     * gesture's transient-activation window.
      */
     enterFullscreen() {
-        this.gamingMode = true;
         if (document.fullscreenElement === null) {
             document.documentElement.requestFullscreen()
                 .catch(err => console.error("Fullscreen request failed:", err));
-        } else {
-            this._armPointerLock();
-            this.requestKeyboardLock();
         }
     }
 
-    /** Locks the system keys the browser would otherwise intercept while fullscreen, where the Keyboard Lock API exists. */
+    /**
+     * Enters gaming mode: fullscreen that also holds the pointer and the
+     * keyboard, so a game sees Escape, Alt+Tab and raw motion instead of the
+     * browser. A locked keyboard delivers a short Escape to the session, so
+     * holding it is what leaves this mode.
+     *
+     * A lock requested before the transition would be cancelled by it, so the
+     * fullscreenchange handler arms both once fullscreen lands, still inside
+     * the gesture's transient-activation window. A refused request takes the
+     * mode back down with it: left set, the next transition from any source
+     * would arm the locks.
+     */
+    enterGamingMode() {
+        this._setGamingMode(true);
+        if (document.fullscreenElement === null) {
+            document.documentElement.requestFullscreen()
+                .catch(err => {
+                    console.error("Fullscreen request failed:", err);
+                    this._setGamingMode(false);
+                });
+            return;
+        }
+        this._armPointerLock();
+        this.requestKeyboardLock();
+    }
+
+    /** Publishes the mode to `ongamingmode`, releasing the keyboard as it ends. */
+    _setGamingMode(active) {
+        if (this.gamingMode === active) return;
+        this.gamingMode = active;
+        if (!active) {
+            this.releaseKeyboardLock();
+        }
+        if (this.ongamingmode) {
+            this.ongamingmode(active);
+        }
+    }
+
+    /** Locks the system keys the browser would otherwise intercept, for gaming mode alone, where the Keyboard Lock API exists. */
     requestKeyboardLock() {
-        if (document.fullscreenElement && 'keyboard' in navigator && (navigator.keyboard && 'lock' in navigator.keyboard)) {
+        if (!this.gamingMode || !document.fullscreenElement) return;
+        if (navigator.keyboard && 'lock' in navigator.keyboard) {
             const keys = [ "AltLeft", "AltRight", "Tab", "Escape", "MetaLeft", "MetaRight", "ContextMenu" ];
-            navigator.keyboard.lock(keys).then(() => {
-            }).catch(err => {
-            });
+            navigator.keyboard.lock(keys).catch(() => {});
+        }
+    }
+
+    /** Hands the system keys back; a browser that never locked them ignores it. */
+    releaseKeyboardLock() {
+        if (navigator.keyboard && 'unlock' in navigator.keyboard) {
+            try {
+                navigator.keyboard.unlock();
+            } catch (e) {
+                /* nothing was locked */
+            }
         }
     }
 }

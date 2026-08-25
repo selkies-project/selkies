@@ -21,6 +21,7 @@ frames pass through untouched and a WebCodecs/WebRTC browser an I420 device.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 from typing import Any, Dict, Optional, Tuple
@@ -121,7 +122,7 @@ class VirtualWebcam:
         self._cam: Optional[Any] = None
         self._lock = asyncio.Lock()
         self._start_failed_logged = False
-        self._push_orientation = True
+        self._push_orientation: Optional[bool] = None
 
     @property
     def camera(self) -> Optional[Any]:
@@ -181,26 +182,44 @@ class VirtualWebcam:
             rotation: Clockwise degrees (0/90/180/270) that make the decoded frame upright.
             flip: Horizontal mirror, applied after the rotation.
 
-        The orientation is forwarded only when the frame carries one, so an installed
-        pixelflux whose ``push`` predates the arguments keeps working (announced once;
-        such frames are published as sent). A camera that is not running yet
-        (``ensure`` pending) drops the frame silently.
+        The orientation is forwarded only when the frame carries one and the installed
+        pixelflux takes it, so a build whose ``push`` predates the arguments keeps
+        working (announced once; such frames are published as sent). A camera that is
+        not running yet (``ensure`` pending) drops the frame silently.
         """
         cam = self._cam
         if cam is None:
             return 0
         try:
-            if (rotation or flip) and self._push_orientation:
-                try:
-                    return int(cam.push(data, codec, keyframe, offset, rotation, flip))
-                except TypeError:
-                    self._push_orientation = False
-                    logger.warning(
-                        "Installed pixelflux takes no webcam orientation; rotated uplinks are published as sent.")
+            if (rotation or flip) and self._orientation_accepted(cam):
+                return int(cam.push(data, codec, keyframe, offset, rotation, flip))
             return int(cam.push(data, codec, keyframe, offset))
         except Exception as exc:
             logger.error("Virtual webcam push failed: %s", exc)
             return 0
+
+    def _orientation_accepted(self, cam: Any) -> bool:
+        """Whether this camera's ``push`` takes the orientation arguments.
+
+        Decided once from the signature the extension publishes, rather than from a
+        ``TypeError`` per frame: that exception is also what a bad argument raises,
+        and mistaking one for an old build silently drops the orientation for the
+        rest of the session. A build that publishes no signature is taken at its
+        word, and a refusal then surfaces through ``push``'s own error path.
+        """
+        if self._push_orientation is not None:
+            return self._push_orientation
+        try:
+            params = inspect.signature(cam.push).parameters
+            accepted = "rotation" in params or any(
+                p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params.values())
+        except (TypeError, ValueError):
+            accepted = True
+        self._push_orientation = accepted
+        if not accepted:
+            logger.warning(
+                "Installed pixelflux takes no webcam orientation; rotated uplinks are published as sent.")
+        return accepted
 
     def keyframe_wanted(self, flags: int) -> bool:
         return bool(flags & getattr(VirtualCamera, "KEYFRAME_WANTED", 1))

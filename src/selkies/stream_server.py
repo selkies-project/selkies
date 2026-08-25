@@ -1303,7 +1303,25 @@ class CentralizedStreamServer:
         request: web.Request,
         handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
     ) -> web.StreamResponse:
-        """Global auth guard for every route on the server.
+        """Global auth guard for every route on the server: see ``_authorize``.
+
+        A refusal is deliberately taken before the request's body is read -- an
+        unauthenticated upload must not be paid for -- so the connection is closed
+        with it. Leaving those bytes unread on a keep-alive connection has the
+        server parse them as the next request's method, which fails that request
+        and every later one on the same connection.
+        """
+        response = await self._authorize(request, handler)
+        if response.status >= 400 and request.body_exists and request.can_read_body:
+            response.force_close()
+        return response
+
+    async def _authorize(
+        self,
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
+        """Authorize one request and hand it to `handler`, or refuse it.
 
         Layered gates, in order: cross-site WebSocket upgrades are rejected by
         Origin; health/liveness endpoints pass without credentials; the token

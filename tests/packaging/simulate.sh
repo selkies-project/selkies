@@ -28,6 +28,15 @@ cp -r "$REPO/infra" "$SB/repo/"
 mkdir -p "$SB/repo/addons"
 cp -r "$REPO/addons/js-interposer" "$REPO/addons/v4l2-interposer" "$SB/repo/addons/"
 cp "$WHEEL_SRC"/selkies-*.whl "$SB/dist/"
+# infra/packaging/mkvenv.sh installs the capture stack out of the same directory
+# when it is there, which is how CI packages the very pixelflux and pcmflux the
+# suites ran against. Without them the wheel's pinned pre-release is resolved
+# from PyPI, where a release that is still pending does not exist.
+for pkg in pixelflux pcmflux; do
+  if ls "$WHEEL_SRC/${pkg}"-*.whl > /dev/null 2>&1; then
+    cp "$WHEEL_SRC/${pkg}"-*.whl "$SB/dist/"
+  fi
+done
 
 # Rebase the container-absolute paths onto the sandbox, using a sentinel so an
 # already-rewritten path is never rewritten a second time.
