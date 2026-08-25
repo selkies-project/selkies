@@ -124,6 +124,35 @@ def probe(frames: int, timeout_ms: int = 4000, samples=((320, 240),)) -> dict:
     return out
 
 
+# Long enough for the floor between the checks that ask whether anything still reads the
+# camera (webcam.REFORMAT_RECHECK_SECONDS) to pass, plus a frame to act on the answer.
+REFORMAT_SETTLE = 8.0
+
+
+def device_format() -> str:
+    """The device's current pixel format, as the interposer reports it."""
+    return str(probe(1, timeout_ms=2000).get("format", ""))
+
+
+def wait_format(fourcc: str, timeout: float = 20) -> bool:
+    """Poll until the device reports `fourcc`. The probe is itself a reader, so the gaps
+    between polls are what leave the server free to re-create the device."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if device_format() == fourcc:
+            return True
+        time.sleep(2)
+    return False
+
+
+def start_reader() -> subprocess.Popen:
+    """An interposer client that holds the device open until it is terminated."""
+    env = dict(os.environ, LD_PRELOAD=INTERPOSER,
+               SELKIES_WEBCAM_SOCKET_PATH=os.environ.get("SELKIES_WEBCAM_SOCKET_PATH", "/tmp"))
+    return subprocess.Popen([PROBE, "--timeout", "60000", "/dev/video0", "100000"],
+                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def near(got, want, tol=12) -> bool:
     return got is not None and all(abs(g - w) <= tol for g, w in zip(got, want))
 
@@ -369,6 +398,56 @@ def rotation_block() -> "H.Results":
     return res
 
 
+def reformat_block() -> "H.Results":
+    """The ``auto`` device follows the uplink that is actually there.
+
+    The camera outlives the session that started it, so an uplink of the other kind finds a
+    device it does not fit: a video uplink in an MJPEG device is decoded and re-encoded per
+    frame, an MJPEG uplink in a raw device decoded where it could have passed through. It is
+    re-created for the newcomer -- but only while nothing reads it, which an attached
+    interposer client proves by keeping the device exactly as it was.
+    """
+    res = H.Results("webcam-reformat")
+    y4m = os.path.join(tempfile.mkdtemp(prefix="selkies-cam-"), "green.y4m")
+    green_y4m(y4m)
+    H.server_start(mode="websockets", wayland=False, extra_env={"SELKIES_WEBCAM_ENABLED": "false"})
+    reader = None
+    try:
+        with sync_playwright() as p:
+            browser, page, _errors = launch(p, "chromium", y4m, "websockets")
+            C.wait_ws_video(page, timeout=30)
+            toggle(page, True)
+            wait_status(page, True)
+            res.check("a video uplink brings the device up raw", wait_format("YU12"), device_format())
+            browser.close()
+
+        # An interposer client that outlives the switch: the device it opened must not change
+        # under it, whatever the next uplink would prefer.
+        reader = start_reader()
+        with sync_playwright() as p:
+            browser, page, _errors = launch(p, "chromium", y4m, "websockets", init_js=NO_WEBCODECS_JS)
+            C.wait_ws_video(page, timeout=30)
+            toggle(page, True)
+            wait_status(page, True)
+            time.sleep(REFORMAT_SETTLE)
+            res.check("a JPEG uplink does not re-create a device being read",
+                      device_format() == "YU12", device_format())
+            reader.terminate()
+            reader.wait(timeout=10)
+            reader = None
+            res.check("and re-creates it once the reader is gone", wait_format("MJPG", timeout=30),
+                      device_format())
+            toggle(page, False)
+            wait_status(page, False)
+            browser.close()
+    finally:
+        if reader is not None:
+            reader.terminate()
+            reader.wait(timeout=10)
+        H.server_stop()
+    return res
+
+
 def main() -> int:
     sel = sys.argv[1] if len(sys.argv) > 1 else "websockets"
     build()
@@ -378,6 +457,8 @@ def main() -> int:
         ok = locked_block().summary()
     elif sel == "nowebcodecs":
         ok = nowebcodecs_block().summary()
+    elif sel == "reformat":
+        ok = reformat_block().summary()
     else:
         ok = transport_block(sel).summary()
     return 0 if ok else 1

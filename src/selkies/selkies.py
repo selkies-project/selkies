@@ -3353,7 +3353,7 @@ class DataStreamingServer(BaseStreamingService):
                         if len(data) <= WS_HEADER_LEN:
                             continue
                         cam = get_shared_webcam()
-                        if cam.camera is None and await cam.ensure(data[1]) is None:
+                        if cam.needs_ensure(data[1]) and await cam.ensure(data[1]) is None:
                             continue
                         cam_rotation, cam_flip = orientation_from_flags(data[2])
                         flags = cam.push(data, data[1], bool(data[2] & WS_FLAG_KEYFRAME),

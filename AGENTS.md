@@ -98,6 +98,7 @@ Each is documented in full where named; read that before changing the subsystem.
 - The sound-server control plane is in-process over pulsectl_asyncio under a never-cancel discipline; `pactl` is
   only the fallback when the bindings are missing (`src/selkies/audio_control.py` module docstring).
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python, the device format
-  follows the first uplink, and the client's JPEG rungs exist for browsers without WebCodecs
+  follows the first uplink and is re-created for a later one of the other kind only while no sink reports a
+  consumer, and the client's JPEG rungs exist for browsers without WebCodecs
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `src/selkies/webcam.py`,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).

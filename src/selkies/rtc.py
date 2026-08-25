@@ -1898,14 +1898,25 @@ class RTCApp:
             codec_id = CODEC_BY_NAME.get(str(getattr(codec, "name", "")).lower())
             if not data or codec_id is None:
                 return
-            if webcam.camera is None:
+            if webcam.needs_ensure(codec_id):
                 # First frame: bring the camera up off the loop; frames until then
                 # are dropped and the decoder's first request for a keyframe
-                # becomes a PLI, so the stream starts clean.
+                # becomes a PLI, so the stream starts clean. A running camera an
+                # uplink of the other kind found is re-created there too, when
+                # nothing is reading it.
                 if not state["starting"]:
                     state["starting"] = True
-                    loop.call_soon_threadsafe(lambda: asyncio.ensure_future(webcam.ensure(codec_id)))
-                return
+
+                    async def start_camera() -> None:
+                        # Latched again only on success: a camera that cannot start must not be
+                        # retried per frame, while one that did leaves the next uplink free to
+                        # ask for its own format.
+                        if await webcam.ensure(codec_id) is not None:
+                            state["starting"] = False
+
+                    loop.call_soon_threadsafe(lambda: asyncio.ensure_future(start_camera()))
+                if webcam.camera is None:
+                    return
             if webcam.keyframe_wanted(webcam.push(data, codec_id)):
                 request_keyframe()
 

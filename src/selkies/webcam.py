@@ -15,15 +15,20 @@ bytes over without copying them.
 Lifetime is process-wide, like the gamepad interposer servers: applications
 open ``/dev/videoN`` once at their own startup and must survive transport-mode
 switches and browser reconnects, so one camera is shared by every client and is
-only stopped with the server. Its format is fixed when it comes up: by default
-it follows the first uplink, so a browser sending JPEG gets an MJPEG device its
-frames pass through untouched and a WebCodecs/WebRTC browser an I420 device.
+only stopped with the server. Its format follows the first uplink, so a browser
+sending JPEG gets an MJPEG device its frames pass through untouched and a
+WebCodecs/WebRTC browser an I420 device. A later uplink of the other kind would
+otherwise be converted for the life of the process, so an ``auto`` device is
+re-created for it — but only while no sink reports a consumer, since an
+application holding the device is exactly what the process-wide lifetime is for
+(``VirtualWebcam.ensure``).
 """
 
 import asyncio
 import inspect
 import logging
 import os
+import time
 from typing import Any, Dict, Optional, Tuple
 
 try:
@@ -111,6 +116,38 @@ def device_pixel_format(setting: str, codec: Optional[int]) -> str:
     return "MJPEG" if codec == CODEC_MJPEG else "I420"
 
 
+# Floor between the checks that ask whether anything still reads the camera. The answer only
+# changes when an application opens or closes the device, while the uplink asks on every frame.
+REFORMAT_RECHECK_SECONDS = 5.0
+
+
+def _device_has_openers(path: str) -> bool:
+    """Whether any other process holds `path` open.
+
+    Only this process's own view of /proc is available, which in a container is every process
+    that matters; a reader it cannot see is why re-creating the device asks the sinks first.
+    """
+    try:
+        target = os.path.realpath(path)
+        me = str(os.getpid())
+    except OSError:
+        return False
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or pid == me:
+            continue
+        fd_dir = f"/proc/{pid}/fd"
+        try:
+            for fd in os.listdir(fd_dir):
+                try:
+                    if os.path.realpath(os.path.join(fd_dir, fd)) == target:
+                        return True
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return False
+
+
 class VirtualWebcam:
     """Lazy owner of the process-wide ``pixelflux.VirtualCamera``.
 
@@ -123,11 +160,63 @@ class VirtualWebcam:
         self._lock = asyncio.Lock()
         self._start_failed_logged = False
         self._push_orientation: Optional[bool] = None
+        self._device_mjpeg = False
+        self._reformat_blocked_logged = False
+        self._reformat_next_check = 0.0
 
     @property
     def camera(self) -> Optional[Any]:
         """The running camera, or None until the first successful start."""
         return self._cam
+
+    def needs_ensure(self, codec: Optional[int]) -> bool:
+        """Whether ``ensure`` has work to do for a frame of this codec.
+
+        The per-frame answer for a running camera whose format already suits the uplink is no,
+        which is the whole of the hot path; the rest is the rare case where an ``auto`` device
+        was shaped by an uplink of the other kind and may be worth re-creating.
+        """
+        if self._cam is None:
+            return True
+        # The kind comparison first: it answers every frame of a running camera, and the
+        # setting lookup below builds a string the hot path has no use for.
+        if codec is None or (codec == CODEC_MJPEG) == self._device_mjpeg:
+            return False
+        if not self._auto_format():
+            return False
+        return time.monotonic() >= self._reformat_next_check
+
+    @staticmethod
+    def _auto_format() -> bool:
+        return str(app_settings.webcam_pixel_format or "auto").strip().lower() == "auto"
+
+    def _consumers(self) -> Optional[str]:
+        """What is reading the camera right now, or None when nothing is.
+
+        Each sink answers for its own: the interposer counts the clients on its socket,
+        PipeWire reports whether a consumer is linked to its node, and a kernel device's
+        openers are found the only way a process can, through /proc.
+        """
+        cam = self._cam
+        if cam is None:
+            return None
+        try:
+            stats = cam.stats()
+        except Exception:
+            return "unknown"
+        if int(stats.get("clients", 0) or 0) > 0:
+            return "interposer client"
+        if "pipewire_streaming" in stats:
+            if stats.get("pipewire_streaming"):
+                return "PipeWire consumer"
+        elif stats.get("pipewire"):
+            # A pixelflux that does not report the node's consumers cannot say there are none,
+            # and a re-created device would take the picture away from one that is watching.
+            return "a PipeWire node whose consumers this pixelflux does not report"
+        device = str(stats.get("device_path") or "")
+        if device and _device_has_openers(device):
+            return f"an application holding {device}"
+        return None
 
     def _settings(self, codec: Optional[int]) -> Any:
         s = VirtualCameraSettings()
@@ -144,12 +233,40 @@ class VirtualWebcam:
     async def ensure(self, codec: Optional[int] = None) -> Optional[Any]:
         """Returns the running camera, starting it on first use (off the event loop).
 
+        An ``auto`` device already running in the other format is re-created for this codec
+        when nothing is reading it, so a session that follows one of the other kind neither
+        transcodes every frame (a video uplink fitted into an MJPEG device) nor decodes one it
+        could have passed through. A device with a consumer is left exactly as it is:
+        applications hold it open across mode switches, and pulling the format out from under
+        one is worse than the transcode.
+
         Args:
-            codec: Codec of the frame that brings the camera up; an ``auto`` device format
-                follows it (see ``device_pixel_format``).
+            codec: Codec of the frame that brings the camera up, or that found the running
+                device in the other format; an ``auto`` device format follows it (see
+                ``device_pixel_format``).
         """
         if self._cam is not None:
-            return self._cam
+            if not self.needs_ensure(codec):
+                return self._cam
+            async with self._lock:
+                if self._cam is None or not self.needs_ensure(codec):
+                    return self._cam
+                reader = await asyncio.to_thread(self._consumers)
+                if reader is not None:
+                    # Rechecked on a floor rather than per frame: the answer only changes when
+                    # an application comes or goes, and the uplink asks on every frame.
+                    self._reformat_next_check = time.monotonic() + REFORMAT_RECHECK_SECONDS
+                    if not self._reformat_blocked_logged:
+                        self._reformat_blocked_logged = True
+                        logger.info(
+                            "Virtual webcam stays %s for %s: %s is reading it. Frames are "
+                            "converted for the device; pin webcam_pixel_format to avoid it.",
+                            "MJPEG" if self._device_mjpeg else "raw",
+                            "an MJPEG uplink" if codec == CODEC_MJPEG else "a video uplink", reader)
+                    return self._cam
+                logger.info("Virtual webcam re-created for the %s uplink now that nothing reads it.",
+                            "MJPEG" if codec == CODEC_MJPEG else "video")
+                await self._stop_locked()
         if not webcam_available():
             if not self._start_failed_logged:
                 self._start_failed_logged = True
@@ -168,6 +285,9 @@ class VirtualWebcam:
                     logger.error("Virtual webcam start failed: %s", exc)
                 return None
             self._cam = cam
+            self._device_mjpeg = str(settings.pixel_format).strip().upper() in ("MJPEG", "MJPG", "JPEG")
+            self._reformat_blocked_logged = False
+            self._reformat_next_check = 0.0
             stats = cam.stats()
             logger.info("Virtual webcam serving %s (%dx%d %s, kernel device: %s, PipeWire node: %s)",
                         cam.socket_path, settings.width, settings.height, settings.pixel_format,
@@ -224,7 +344,8 @@ class VirtualWebcam:
     def keyframe_wanted(self, flags: int) -> bool:
         return bool(flags & getattr(VirtualCamera, "KEYFRAME_WANTED", 1))
 
-    async def stop(self) -> None:
+    async def _stop_locked(self) -> None:
+        """Stops the running camera; the caller holds the lock."""
         cam = self._cam
         self._cam = None
         if cam is not None:
@@ -232,6 +353,10 @@ class VirtualWebcam:
                 await asyncio.to_thread(cam.stop)
             except Exception:
                 pass
+
+    async def stop(self) -> None:
+        async with self._lock:
+            await self._stop_locked()
 
 
 _shared_webcam: Optional[VirtualWebcam] = None

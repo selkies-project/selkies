@@ -910,7 +910,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "webcam_pixel_format",
         "type": "str",
         "default": "auto",
-        "help": 'Pixel format of the virtual webcam device. "auto" follows the first uplink: a browser sending JPEG (no WebCodecs) gets an MJPEG device that carries its frames as received, any other uplink an I420 device. Or pin "I420" (planar 4:2:0, the browsers\' preference), "NV12", "YUYV" or "MJPEG".',
+        "help": 'Pixel format of the virtual webcam device. "auto" follows the uplink: a browser sending JPEG (no WebCodecs) gets an MJPEG device that carries its frames as received, any other uplink an I420 device, and a later uplink of the other kind re-creates the device for itself while no application is reading it. Or pin "I420" (planar 4:2:0, the browsers\' preference), "NV12", "YUYV" or "MJPEG", which is then kept whatever arrives.',
     },
     {
         "name": "webcam_device",
