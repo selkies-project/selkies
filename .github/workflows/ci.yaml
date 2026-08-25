@@ -132,9 +132,11 @@ jobs:
   wheel:
     name: Build wheel
     needs: [python-compat, pixelflux-pcmflux]
-    # Runs after the capture stack so the smoke test installs the sibling wheels
-    # built in this run rather than resolving them from PyPI (the pinned version
-    # is a pre-release there); still runs on PRs, where that job is skipped.
+    # Runs after the capture stack so the smoke test installs the sibling
+    # wheels from this run rather than resolving them from PyPI, where the
+    # pinned version is a pre-release that may not be published yet. On a pull
+    # request that job runs only when no pre-release is there to download, so
+    # the wheel waits for a build exactly when one is needed.
     if: ${{ always() && needs.python-compat.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs['pixelflux-pcmflux'].result) }}
     permissions:
       contents: read
@@ -142,9 +144,39 @@ jobs:
     with:
       wheels_ready: ${{ needs['pixelflux-pcmflux'].result == 'success' }}
 
+  capture-stack:
+    name: Capture stack (locate)
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.probe.outputs.build }}
+    steps:
+      - id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build=false
+          for project in pixelflux pcmflux; do
+            sha="$(gh api "repos/${{ github.repository_owner }}/${project}/commits/main" \
+                   --jq .sha 2>/dev/null || true)"
+            if [ -n "${sha}" ] && gh release view "${sha}" \
+                 --repo "${{ github.repository_owner }}/${project}" >/dev/null 2>&1; then
+              echo "${project}: pre-release ${sha}"
+            else
+              echo "${project}: no pre-release for main (${sha:-unknown})"
+              build=true
+            fi
+          done
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+
   pixelflux-pcmflux:
     name: Build pixelflux and pcmflux wheels (main HEAD)
-    if: github.event_name == 'push'
+    needs: [capture-stack]
+    # A push builds them because the images and packages ship these artifacts.
+    # A pull request builds them only when the sibling has published no
+    # pre-release for its current main HEAD, which is the one case where the
+    # pinned version exists nowhere else -- and building it here rather than
+    # inside each caller keeps it to one build for the wheel and the suites.
+    if: ${{ always() && (github.event_name == 'push' || needs.capture-stack.outputs.build == 'true') }}
     permissions:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml

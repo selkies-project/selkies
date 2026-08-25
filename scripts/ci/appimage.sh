@@ -69,6 +69,10 @@ for project in pixelflux pcmflux; do
     wheel="$(find "${PIXELFLUX_PCMFLUX_WHEELS_DIR}" -maxdepth 1 \
         -name "${project}-*cp312*manylinux*${ARCH}*.whl" | head -n1)"
   fi
+  # Said out loud rather than left to the build log: falling back to PyPI ships
+  # whatever is released there, which is not the build the suites ran against,
+  # and while the pin names a pre-release it is not resolvable at all.
+  [ -n "${wheel}" ] || echo "::warning::No ${project} wheel supplied; the AppImage resolves it from PyPI"
   PIP_REQUIREMENTS="${PIP_REQUIREMENTS} ${wheel:-${project}}"
 done
 

@@ -30,8 +30,53 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  # The pinned pixelflux/pcmflux are a coordinated pre-release, published per
+  # commit rather than to PyPI, so the smoke test can only install them from a
+  # wheel this run has in hand. A caller that already built them says so with
+  # wheels_ready; otherwise they come from the sibling's pre-release for its
+  # current main HEAD, and when that has not been published yet they are built
+  # here. The test suites run under the same contract.
+  capture-stack:
+    name: Capture stack (locate)
+    if: ${{ !inputs.wheels_ready }}
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.probe.outputs.build }}
+      pixelflux: ${{ steps.probe.outputs.pixelflux }}
+      pcmflux: ${{ steps.probe.outputs.pcmflux }}
+    steps:
+      - id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build=false
+          for project in pixelflux pcmflux; do
+            sha="$(gh api "repos/${{ github.repository_owner }}/${project}/commits/main" \
+                   --jq .sha 2>/dev/null || true)"
+            if [ -n "${sha}" ] && gh release view "${sha}" \
+                 --repo "${{ github.repository_owner }}/${project}" >/dev/null 2>&1; then
+              echo "${project}=${sha}" >> "$GITHUB_OUTPUT"
+              echo "${project}: pre-release ${sha}"
+            else
+              echo "${project}=" >> "$GITHUB_OUTPUT"
+              echo "${project}: no pre-release for main (${sha:-unknown}); building from source"
+              build=true
+            fi
+          done
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+
+  wheels:
+    name: Capture stack (main HEAD)
+    needs: [capture-stack]
+    if: ${{ !inputs.wheels_ready && needs.capture-stack.outputs.build == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+
   wheel:
     name: Build wheel (with bundled web client)
+    needs: [capture-stack, wheels]
+    if: ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheels.result) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -77,29 +122,42 @@ jobs:
       # The pinned pixelflux/pcmflux are a coordinated pre-release: not on PyPI
       # yet, so the smoke test resolves them from local wheels. From this run's
       # artifacts when the capture-stack job built them, else from each project's
-      # main-HEAD pre-release.
+      # main-HEAD pre-release. The download is attempted either way: a caller
+      # that built them without saying so still gets the wheels it built, and a
+      # missing artifact leaves the release path below to answer for it.
       - name: Fetch the capture-stack wheels (this run)
-        if: ${{ inputs.wheels_ready }}
         uses: actions/download-artifact@v8
+        continue-on-error: true
         with:
           pattern: "*-wheels-x86_64-manylinux"
           path: sibling-wheels
           merge-multiple: true
       - name: Fetch the capture-stack wheels (main-HEAD pre-release)
-        if: ${{ !inputs.wheels_ready }}
+        if: ${{ needs.capture-stack.outputs.build == 'false' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p sibling-wheels
           for project in pixelflux pcmflux; do
-            sha="$(gh api "repos/${{ github.repository_owner }}/${project}/commits/main" --jq .sha 2>/dev/null || true)"
-            if [ -n "${sha}" ] && gh release view "${sha}" --repo "${{ github.repository_owner }}/${project}" >/dev/null 2>&1; then
-              gh release download "${sha}" --repo "${{ github.repository_owner }}/${project}" \
-                --pattern "*manylinux*x86_64*.whl" --dir sibling-wheels --skip-existing
+            sha="${{ needs.capture-stack.outputs.pixelflux }}"
+            [ "${project}" = "pcmflux" ] && sha="${{ needs.capture-stack.outputs.pcmflux }}"
+            gh release download "${sha}" --repo "${{ github.repository_owner }}/${project}" \
+              --pattern "*manylinux*x86_64*.whl" --dir sibling-wheels --skip-existing
+            echo "${project}: ${sha}"
+          done
+      - name: Check the capture-stack wheels
+        run: |
+          mkdir -p sibling-wheels && ls -la sibling-wheels
+          for project in pixelflux pcmflux; do
+            # Fatal rather than a note: without a local wheel the install below
+            # resolves the pinned pre-release from PyPI, where that version does
+            # not exist, and the run then fails inside pip's resolver instead of
+            # naming the wheel that never arrived.
+            if ! ls "sibling-wheels/${project}"-*.whl > /dev/null 2>&1; then
+              echo "::error::No ${project} wheel for the smoke test; the pinned pre-release cannot resolve from PyPI"
+              exit 1
             fi
           done
-      - name: List the capture-stack wheels
-        run: mkdir -p sibling-wheels && ls -la sibling-wheels
       - name: Install smoke test
         run: |
           python3 -m venv /tmp/selkies-venv

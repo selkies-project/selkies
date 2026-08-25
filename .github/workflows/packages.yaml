@@ -131,6 +131,18 @@ jobs:
           pattern: pcmflux-wheels-*
           path: dist/
           merge-multiple: true
+      - name: Report the capture stack this build carries
+        run: |
+          for project in pixelflux pcmflux; do
+            if ls "dist/${project}"-*.whl > /dev/null 2>&1; then
+              echo "${project}: main-HEAD wheel from this run"
+            else
+              # Not fatal: a standalone dispatch has none to inherit. Said out
+              # loud because what ships is then whatever PyPI resolves, which is
+              # not the build the suites ran against.
+              echo "::warning::No ${project} wheel in dist/; this build resolves it from PyPI instead of the main-HEAD wheel the suites tested"
+            fi
+          done
       - name: Build the package inside the target distro container
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}

@@ -67,21 +67,26 @@ jobs:
             echo "floating_tags=${floating}"
           } >> "${GITHUB_OUTPUT}"
 
-  wheel:
-    name: Build wheel
-    needs: validate
-    permissions:
-      contents: read
-    uses: ./.github/workflows/build-wheel.yaml
-    with:
-      package_version: ${{ needs.validate.outputs.version }}
-
   pixelflux-pcmflux:
     name: Build pixelflux and pcmflux wheels (main HEAD)
     needs: validate
     permissions:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+
+  wheel:
+    name: Build wheel
+    # After the capture stack, and told so: the smoke test then installs the
+    # very pixelflux and pcmflux the images and packages of this release ship,
+    # instead of resolving the pinned pre-release from PyPI, where a release
+    # still being cut does not exist.
+    needs: [validate, pixelflux-pcmflux]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-wheel.yaml
+    with:
+      package_version: ${{ needs.validate.outputs.version }}
+      wheels_ready: true
 
   images:
     name: Build and publish multi-arch images
