@@ -3,6 +3,14 @@ FROM mcr.microsoft.com/devcontainers/base:${IMAGE_TAG}
 
 ARG DEBIAN_FRONTEND="noninteractive"
 
+# Every network fetch in this image is retried, because a rebuild that reaches
+# for the apt index, a signing key or a .deb is one transient failure away from
+# losing the whole run. apt is configured once here so each later invocation
+# inherits it -- including the ones inside install-desktop-environment.sh and
+# the NodeSource setup script; curl and pip carry their own flags at each call.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
+        | sudo tee /etc/apt/apt.conf.d/99-selkies-retries > /dev/null
+
 # Install base Selkies dependencies (X11 capture/input, PulseAudio, Mesa/VA-API, Wayland plumbing)
 RUN sudo apt-get update && sudo apt-get install --no-install-recommends -y \
         ca-certificates \
@@ -55,7 +63,7 @@ RUN sudo apt-get update && sudo apt-get install --no-install-recommends -y \
         jstest-gtk \
         netcat-openbsd && \
     sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
-    sudo python3 -m pip install --no-cache-dir --upgrade build
+    sudo python3 -m pip install --no-cache-dir --retries 5 --timeout 60 --upgrade build
 
 # Install the LXQt desktop environment
 COPY ./features/desktop-selkies/src/install-desktop-environment.sh /tmp/
@@ -63,7 +71,7 @@ RUN /tmp/install-desktop-environment.sh
 
 # Install the Chrome browser (package available for amd64 only)
 RUN if [ "$(uname -m)" = "x86_64" ]; then \
-        cd /tmp && curl -fsSL -o ./google-chrome-stable.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" && \
+        cd /tmp && curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 -o ./google-chrome-stable.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" && \
         sudo apt-get update && sudo apt-get install --no-install-recommends -y xdg-utils ./google-chrome-stable.deb && \
         sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
         sudo rm -f google-chrome-stable.deb && \
@@ -71,6 +79,6 @@ RUN if [ "$(uname -m)" = "x86_64" ]; then \
     fi
 
 # Web client build toolchain (Node.js LTS)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && \
+RUN curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 https://deb.nodesource.com/setup_22.x | sudo bash - && \
     sudo apt-get update && sudo apt-get install --no-install-recommends -y nodejs && \
     sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*

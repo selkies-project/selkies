@@ -22,7 +22,7 @@ if ! ls "${WHEEL_SRC}"/selkies-*.whl >/dev/null 2>&1; then
 fi
 
 chmod -R u+w "$SB/repo" 2>/dev/null
-rm -rf "$SB"; mkdir -p "$SB"/{repo,dist,out,stubs,log,home} "$SB/etc/apk/keys"
+rm -rf "$SB"; mkdir -p "$SB"/{repo,dist,out,stubs,log,home} "$SB/etc/apk/keys" "$SB/etc/apt/apt.conf.d"
 cp -r "$REPO/infra" "$SB/repo/"
 # only what the packaging scripts read: addons/ also holds node_modules
 mkdir -p "$SB/repo/addons"
@@ -42,6 +42,7 @@ done
 # already-rewritten path is never rewritten a second time.
 for f in "$SB"/repo/infra/packaging/*.sh; do
   sed -i -e "s#/etc/apk/keys#@SB@/etc/apk/keys#g" \
+         -e "s#/etc/apt/apt.conf.d#@SB@/etc/apt/apt.conf.d#g" \
          -e "s#/pkg-root/opt/selkies#@PRS@#g" \
          -e "s#/pkg-root#@SB@/pkg-root#g" -e "s#/opt/selkies#@SB@/opt/selkies#g" \
          -e "s#/repo#@SB@/repo#g" -e "s#/dist#@SB@/dist#g" -e "s#/out#@SB@/out#g" \

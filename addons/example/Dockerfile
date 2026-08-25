@@ -44,6 +44,11 @@ FROM ${XVFB_IMAGE} AS xvfb
 # dedicated to containerized environments and are not desktop components)
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS add-ons
 ARG DEBIAN_FRONTEND="noninteractive"
+# The retry configuration the final stage sets further down, repeated here: a
+# separate stage is a separate filesystem, so the drop-in the later apt-get
+# invocations of this stage inherit has to be written in this one.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
+        > /etc/apt/apt.conf.d/99-selkies-retries
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
         build-essential \
         ca-certificates && \

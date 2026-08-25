@@ -9,7 +9,7 @@
 set -eux
 rm -rf /opt/selkies /pkg-root
 python3 -m venv /opt/selkies
-/opt/selkies/bin/pip install --no-cache-dir --upgrade pip
+/opt/selkies/bin/pip install --no-cache-dir --retries 5 --timeout 60 --upgrade pip
 WHEELS="$(ls /dist/selkies-*-py3-none-any.whl)"
 # CI drops pixelflux/pcmflux wheels built from the master HEAD of linuxserver/*
 # into /dist; pick the one matching this distro's Python and platform. Either
@@ -26,7 +26,7 @@ if ls /tmp/picked/*.whl > /dev/null 2>&1; then
 fi
 # Wheel file names never contain spaces; word-splitting is intentional here
 # shellcheck disable=SC2086
-/opt/selkies/bin/pip install --no-cache-dir ${WHEELS}
+/opt/selkies/bin/pip install --no-cache-dir --retries 5 --timeout 60 ${WHEELS}
 # Fails the package build rather than shipping a prefix that cannot start
 /opt/selkies/bin/selkies --help > /dev/null
 mkdir -p /pkg-root/opt /pkg-root/usr/bin

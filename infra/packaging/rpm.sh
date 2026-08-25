@@ -6,21 +6,33 @@
 # container). DISTRO_TAG keeps the Fedora and EL flavors apart once the release
 # job collects every package into a single directory.
 set -eux
+
+# Package managers with no retry option of their own -- apk, dnf, pacman and
+# RubyGems all lack one -- are bounded-retried here. This composes with whatever
+# internal retrying the tool already does rather than replacing it, so it cannot
+# lower a default the way an explicit --setopt could.
+retry() {
+    i=1
+    until "$@"; do
+        [ "${i}" -ge 5 ] && return 1
+        i=$((i + 1)); sleep 5
+    done
+}
 # python3-devel and the compilers: dependencies without a wheel for this
 # distribution's Python are compiled from their sdist. libxkbcommon is loaded
 # with ctypes at runtime and lets mkvenv.sh's smoke test exercise that path
 # pipewire-devel gives the V4L2 interposer its PipeWire frame source (headers
 # only; the library is loaded at runtime when an application uses it)
-dnf install -y \
+retry dnf install -y \
     python3 python3-pip python3-devel \
     libxkbcommon pkgconf-pkg-config pipewire-devel \
     ruby rubygems ruby-devel gcc gcc-c++ make rpm-build ca-certificates
 # The i686 glibc builds the interposer's 32-bit variant, which the Wine and
 # Steam catalog loads through `/usr/$LIB`
 if [ "$(uname -m)" = "x86_64" ]; then
-    dnf install -y glibc-devel.i686 libgcc.i686
+    retry dnf install -y glibc-devel.i686 libgcc.i686
 fi
-gem install --no-document fpm
+retry gem install --no-document fpm
 # shellcheck source=infra/packaging/version.sh
 . /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh

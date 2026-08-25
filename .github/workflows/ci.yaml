@@ -131,16 +131,24 @@ jobs:
 
   wheel:
     name: Build wheel
-    needs: [python-compat, pixelflux-pcmflux]
-    # Runs after the capture stack so the smoke test installs the sibling
-    # wheels from this run rather than resolving them from PyPI, where the
-    # pinned version is a pre-release that may not be published yet. On a pull
-    # request that job runs only when no pre-release is there to download, so
-    # the wheel waits for a build exactly when one is needed.
-    if: ${{ always() && needs.python-compat.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs['pixelflux-pcmflux'].result) }}
+    # Only the smoke test needs the capture stack, so the wheel is built while
+    # those wheels still are: it depends on nothing but the interpreters.
+    needs: [python-compat]
     permissions:
       contents: read
     uses: ./.github/workflows/build-wheel.yaml
+
+  wheel-smoke:
+    name: Smoke test the wheel
+    # Installs the built wheel against the capture stack this run produced,
+    # rather than the pinned pre-release PyPI does not have. On a pull request
+    # that job runs only when no pre-release is there to download, so this
+    # waits for a build exactly when one is needed.
+    needs: [wheel, pixelflux-pcmflux]
+    if: ${{ always() && needs.wheel.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs['pixelflux-pcmflux'].result) }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/smoke-wheel.yaml
     with:
       wheels_ready: ${{ needs['pixelflux-pcmflux'].result == 'success' }}
 
@@ -183,7 +191,7 @@ jobs:
 
   images:
     name: Multi-arch images
-    needs: [wheel, pixelflux-pcmflux]
+    needs: [wheel, wheel-smoke, pixelflux-pcmflux]
     if: github.event_name == 'push'
     # A called workflow can only narrow the caller's token, so the GHCR push
     # scope has to be granted here
@@ -197,7 +205,7 @@ jobs:
 
   packages:
     name: Native packages
-    needs: [wheel, pixelflux-pcmflux]
+    needs: [wheel, wheel-smoke, pixelflux-pcmflux]
     if: github.event_name == 'push'
     permissions:
       contents: read

@@ -4,11 +4,23 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # Build selkies-<ver>-r0.apk (run inside an Alpine container)
 set -eux
+
+# Package managers with no retry option of their own -- apk, dnf, pacman and
+# RubyGems all lack one -- are bounded-retried here. This composes with whatever
+# internal retrying the tool already does rather than replacing it, so it cannot
+# lower a default the way an explicit --setopt could.
+retry() {
+    i=1
+    until "$@"; do
+        [ "${i}" -ge 5 ] && return 1
+        i=$((i + 1)); sleep 5
+    done
+}
 # build-base/python3-dev/linux-headers: musl has no manylinux wheels, so every
 # extension dependency is compiled here (psutil needs the kernel headers).
 # pipewire-dev gives the V4L2 interposer its PipeWire frame source (headers
 # only; the library is loaded at runtime when an application uses it)
-apk add --no-cache \
+retry apk add --no-cache \
     abuild build-base pkgconf linux-headers pipewire-dev \
     python3 python3-dev py3-pip py3-virtualenv \
     ca-certificates
@@ -16,7 +28,7 @@ apk add --no-cache \
 # the venv links them, mkvenv.sh's smoke test loads them, and abuild resolves the
 # sonames it scans against whatever the builder has installed.
 # shellcheck disable=SC2046  # the depends list is deliberately word-split
-apk add --no-cache $(sed -n 's/^depends="\(.*\)"$/\1/p' /repo/infra/packaging/apk/APKBUILD)
+retry apk add --no-cache $(sed -n 's/^depends="\(.*\)"$/\1/p' /repo/infra/packaging/apk/APKBUILD)
 # shellcheck source=infra/packaging/version.sh
 . /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh

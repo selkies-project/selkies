@@ -7,6 +7,21 @@
 # the release job collects every package into a single directory.
 set -eux
 export DEBIAN_FRONTEND="noninteractive"
+
+# Package managers with no retry option of their own -- apk, dnf, pacman and
+# RubyGems all lack one -- are bounded-retried here. This composes with whatever
+# internal retrying the tool already does rather than replacing it, so it cannot
+# lower a default the way an explicit --setopt could.
+retry() {
+    i=1
+    until "$@"; do
+        [ "${i}" -ge 5 ] && return 1
+        i=$((i + 1)); sleep 5
+    done
+}
+# One transient index failure should not cost a package build that is already
+# several minutes in
+printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' > /etc/apt/apt.conf.d/99-selkies-retries
 apt-get clean && apt-get update
 # python3-dev and build-essential: dependencies without a wheel for this
 # distribution's Python are compiled from their sdist. libxkbcommon0 is loaded
@@ -22,7 +37,7 @@ apt-get install --no-install-recommends -y \
 if [ "$(dpkg --print-architecture)" = "amd64" ]; then
     apt-get install --no-install-recommends -y gcc-multilib
 fi
-gem install --no-document fpm
+retry gem install --no-document fpm
 # shellcheck source=infra/packaging/version.sh
 . /repo/infra/packaging/version.sh
 /repo/infra/packaging/mkvenv.sh

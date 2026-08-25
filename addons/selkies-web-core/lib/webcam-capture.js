@@ -1,12 +1,17 @@
 /**
  * Webcam capture for the WebSocket transport.
  *
- * getUserMedia video frames are encoded in the page with WebCodecs (the codec
- * the encode worker measures as keeping up, H.264 or VP8) and handed to a
- * transport-supplied sender one encoded frame at a time; the server's virtual
- * camera decodes them. Engines without WebCodecs fall back to JPEG frames
- * drawn from a canvas, which the server passes on as an MJPEG device or
- * decodes just the same. The WebRTC transport does not use this
+ * getUserMedia video frames are encoded in the page with WebCodecs (H.264,
+ * else VP8) and handed to a transport-supplied sender one encoded frame at a
+ * time; the server's virtual camera decodes them. A codec is kept only while
+ * it encodes the camera in real time: a frame offered to a busy encoder is
+ * dropped rather than queued, so an engine that cannot keep up spends a core
+ * and sends a fraction of the camera, and the share dropped is what moves the
+ * uplink down the ladder (lib/encode-pace.js). Past the last codec -- and on
+ * engines with no WebCodecs at all -- it encodes JPEG frames from a canvas,
+ * which the server passes on as an MJPEG device or decodes just the same:
+ * more bytes on the wire, but the camera's own rate, which is what a browser
+ * whose software encoder cannot reach it needs. The WebRTC transport does not use this
  * class: it attaches the camera track to a sendonly transceiver
  * (lib/webrtc.js `setWebcam`) and the browser's own encoder takes over.
  *
@@ -35,6 +40,8 @@
  * feeds a page-thread encoder through the same source paths.
  * @module
  */
+
+import { PACE_BEHIND_RATIO, PACE_MIN_SAMPLES, createEncodePace } from "./encode-pace.js";
 
 /** Codec id of independent JPEG frames, as the server's webcam module numbers them. */
 export const WEBCAM_CODEC_MJPEG = 0;
@@ -163,6 +170,8 @@ self.onmessage = async (e) => {
  */
 const ENCODE_WORKER_SRC = `
 const CANDIDATES = ${JSON.stringify(ENCODER_CANDIDATES)};
+const PACE_MIN_SAMPLES = ${PACE_MIN_SAMPLES};
+const PACE_BEHIND_RATIO = ${PACE_BEHIND_RATIO};
 const KEYFRAME_INTERVAL_MS = ${KEYFRAME_INTERVAL_MS};
 const HAS_FRAME_ORIENTATION = ${HAS_FRAME_ORIENTATION};
 // Frames one candidate is measured with, and the time that measurement may
@@ -170,9 +179,18 @@ const HAS_FRAME_ORIENTATION = ${HAS_FRAME_ORIENTATION};
 // encoder is ranked from what it did finish rather than delaying the camera.
 const PROBE_FRAMES = 8;
 const PROBE_BUDGET_MS = 400;
+// Share of the asked rate a candidate must reach for the uplink to start on it.
+// Short of this the JPEG rung is the better opening bid, but only clearly short:
+// a few frames either way is measurement noise, and paying eight times the
+// uplink for it would make the rung a coin toss. What the camera then does to
+// the encoder is the watchdog's to judge, on real frames.
+const PROBE_RATE_MARGIN = 0.9;
 let encoder = null, candIndex = 0, cand = null, configuring = false, active = true;
 let fps = 30, bitrate = 2500000, encodedSize = null, forceKeyframe = true, lastKeyframeMs = 0;
 let trackReader = null, trackRef = null;
+// Frames offered to the encoder in this window and those it was too busy to
+// take; see lib/encode-pace.js for why the share is the signal.
+let paceOffered = 0, paceBehind = 0;
 // The upright transform every chunk is stamped with, and the one the encoder
 // latched: they differ where the page derives what the frames do not carry, and
 // then no rebuild is owed for a turn the encoder never sees.
@@ -215,9 +233,28 @@ async function makeEncoder(w, h, latched) {
 
 function encodeWith(frame, w, h) {
   if (!encoder || encoder.state !== 'configured' || !active) { frame.close(); return; }
+  const behind = encoder.encodeQueueSize > 1;
+  paceOffered++;
+  if (behind) paceBehind++;
+  if (paceOffered >= PACE_MIN_SAMPLES) {
+    const slow = paceBehind / paceOffered > PACE_BEHIND_RATIO;
+    paceOffered = 0; paceBehind = 0;
+    // Dropping this much of the camera is what a codec this engine cannot
+    // encode in real time looks like: a core at full tilt and a receiver
+    // falling behind. Take the next rung; the page takes the JPEG one when
+    // this list runs out.
+    if (slow) {
+      self.postMessage({ type: 'slow', codec: cand ? cand.name : '' });
+      try { if (encoder && encoder.state !== 'closed') encoder.close(); } catch (err) {}
+      encoder = null; encodedSize = null; candIndex++;
+      if (candIndex >= CANDIDATES.length) self.postMessage({ type: 'exhausted' });
+      frame.close();
+      return;
+    }
+  }
   // The encoder is behind: drop this input frame (never an encoded output) so no
   // reference chain breaks; a worker rarely reaches this, which is the point.
-  if (encoder.encodeQueueSize > 1) { frame.close(); return; }
+  if (behind) { frame.close(); return; }
   const now = performance.now();
   const keyFrame = forceKeyframe || now - lastKeyframeMs >= KEYFRAME_INTERVAL_MS;
   try {
@@ -259,11 +296,23 @@ async function measure(c, w, h) {
   const enc = new VideoEncoder({ output: () => { encoded++; }, error: () => { failed = true; } });
   try { enc.configure(support.config || encoderConfig(c, w, h)); } catch (err) { return 0; }
   const started = performance.now();
+  // Detail that moves, rather than a flat fill: a frame with nothing in it
+  // costs every codec nothing and ranks them by which handles emptiness best.
+  // It is still only a starting rung -- what the camera is showing decides the
+  // rest, through the pace watchdog in encodeWith.
+  const tile = new OffscreenCanvas(w >> 2, h >> 2);
+  const tctx = tile.getContext('2d', { alpha: false });
+  const noise = tctx.createImageData(tile.width, tile.height);
+  for (let px = 0, n = noise.data.length; px < n; px += 4) {
+    const v = (px * 1103515245) >>> 8 & 255;
+    noise.data[px] = v;
+    noise.data[px + 1] = (v * 3) & 255;
+    noise.data[px + 2] = (v * 5) & 255;
+    noise.data[px + 3] = 255;
+  }
+  tctx.putImageData(noise, 0, 0);
   for (let i = 0; i <= PROBE_FRAMES && !failed; i++) {
-    ctx.fillStyle = 'hsl(' + (i * 40) + ',70%,50%)';
-    ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect((i * 37) % w, (i * 23) % h, w >> 3, h >> 3);
+    ctx.drawImage(tile, -(i * 7) % w, -(i * 5) % h, w * 1.3, h * 1.3);
     let frame = null;
     try {
       frame = new VideoFrame(canvas, { timestamp: Math.round(i * 1e6 / fps) });
@@ -324,6 +373,15 @@ self.onmessage = async (e) => {
       if (rate >= fps) break;
     }
     if (best < 0) { self.postMessage({ type: 'unsupported' }); return; }
+    // Nothing came close to the rate the camera is being asked for. Starting on
+    // the fastest of them anyway spends a core to send a fraction of the
+    // camera, which is what the JPEG rung exists to avoid; a candidate that is
+    // merely near the rate is taken, and the watchdog in encodeWith answers for
+    // it on the frames the camera actually sends.
+    if (bestRate < fps * PROBE_RATE_MARGIN) {
+      self.postMessage({ type: 'exhausted', codec: CANDIDATES[best].name, rate: bestRate.toFixed(1) });
+      return;
+    }
     candIndex = best;
     self.postMessage({ type: 'probed', codec: CANDIDATES[best].name, rate: Math.round(bestRate) });
   }
@@ -378,6 +436,7 @@ export class WebcamCapture {
     this._canvas = null;
     this._ctx = null;
     this._jpegBusy = false;
+    this._pace = createEncodePace();
     this._configuring = false;
     this._deriveOrientation = false;
     this._orientation = UPRIGHT;
@@ -680,6 +739,25 @@ export class WebcamCapture {
           if (this._active && this._generation === generation) {
             this._deliverEncoded(m.codecId, m.keyframe, new Uint8Array(m.buffer), m.rotation, m.flip);
           }
+          return;
+        }
+        if (m.type === "slow") {
+          this._logPath(`encode: ${m.codec} could not keep up with the camera; taking the next rung`);
+          return;
+        }
+        if (m.type === "exhausted") {
+          // No codec this engine offers keeps up with what the camera is
+          // showing. The JPEG rung encodes natively and the server carries its
+          // frames as received, so the uplink holds the camera's rate at the
+          // cost of bytes rather than spending a core to send a fraction of it.
+          clearTimeout(timer);
+          this._logPath(m.rate !== undefined
+            ? `encode: no codec kept up with the camera (${m.codec} reached ${m.rate} fps against ${this.fps} asked for); encoding JPEG instead`
+            : "encode: no codec kept up with the camera; encoding JPEG instead");
+          this._stopEncodeWorker();
+          this._candidateIndex = ENCODER_CANDIDATES.length;
+          this._encoderCodecName = "mjpeg";
+          done();
           return;
         }
         if (m.type === "unsupported" || m.type === "error") {
@@ -1079,7 +1157,14 @@ export class WebcamCapture {
       frame.close();
       return;
     }
-    if (encoder.encodeQueueSize > 1) {
+    const behind = encoder.encodeQueueSize > 1;
+    this._pace.note(behind);
+    if (this._pace.tooSlow()) {
+      this._onEncoderTooSlow();
+      frame.close();
+      return;
+    }
+    if (behind) {
       frame.close();
       return;
     }
@@ -1200,6 +1285,27 @@ export class WebcamCapture {
     chunk.copyTo(buf);
     this._deliverEncoded(cand.id, chunk.type === "key", buf,
                          this._orientation.rotation, this._orientation.flip);
+  }
+
+  /**
+   * Abandons a codec this engine cannot encode in real time for the next
+   * candidate, and past the last of them for the JPEG rung, which encodes
+   * natively. Not a failure: the encoder works, it just cannot keep up with
+   * what the camera is showing, which costs the uplink most of its frames.
+   */
+  _onEncoderTooSlow() {
+    const name = this._encoderCodec ? this._encoderCodec.name : "the encoder";
+    if (this._encoder) {
+      try { this._encoder.close(); } catch (e) { /* ignore */ }
+      this._encoder = null;
+      this._encoderCodec = null;
+    }
+    this._candidateIndex++;
+    this._encodedSize = null;
+    this._pace.reset();
+    this._logPath(this._candidateIndex >= ENCODER_CANDIDATES.length
+      ? `encode: ${name} could not keep up with the camera; encoding JPEG instead`
+      : `encode: ${name} could not keep up with the camera; taking the next rung`);
   }
 
   /**

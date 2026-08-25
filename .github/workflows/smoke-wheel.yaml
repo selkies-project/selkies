@@ -1,0 +1,177 @@
+name: Smoke test the wheel
+
+# Installs the built wheel into clean virtualenvs and proves it runs: the
+# console script answers and the web client is inside the package. Split from
+# the build so the wheel itself never waits on the capture stack -- a caller
+# gates only this on it, and the images and packages start from the wheel as
+# soon as it exists.
+
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        description: Artifact name of the wheel to test
+        type: string
+        default: selkies-wheel
+      wheels_ready:
+        description: The pixelflux/pcmflux wheels for this run are available as artifacts
+        type: boolean
+        default: false
+      capture_stack_published:
+        description: The pinned pixelflux/pcmflux are released on PyPI, so the smoke test resolves them there
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # Away from a release the pinned pixelflux/pcmflux are a coordinated
+  # pre-release, published per commit rather than to PyPI, so the smoke test can
+  # only install them from a wheel this run has in hand: the caller's, when it
+  # says so with wheels_ready; else the sibling's pre-release for its current
+  # main HEAD; else built here. Cutting a release is the other way round -- the
+  # versions the wheel pins are on PyPI by then, and resolving them there is
+  # what proves the artifact users will install. The test suites run under the
+  # same contract.
+  capture-stack:
+    name: Capture stack (locate)
+    if: ${{ !inputs.wheels_ready && !inputs.capture_stack_published }}
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.probe.outputs.build }}
+      pixelflux: ${{ steps.probe.outputs.pixelflux }}
+      pcmflux: ${{ steps.probe.outputs.pcmflux }}
+    steps:
+      - id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build=false
+          for project in pixelflux pcmflux; do
+            sha="$(gh api "repos/${{ github.repository_owner }}/${project}/commits/main" \
+                   --jq .sha 2>/dev/null || true)"
+            if [ -n "${sha}" ] && gh release view "${sha}" \
+                 --repo "${{ github.repository_owner }}/${project}" >/dev/null 2>&1; then
+              echo "${project}=${sha}" >> "$GITHUB_OUTPUT"
+              echo "${project}: pre-release ${sha}"
+            else
+              echo "${project}=" >> "$GITHUB_OUTPUT"
+              echo "${project}: no pre-release for main (${sha:-unknown}); building from source"
+              build=true
+            fi
+          done
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+
+  wheels:
+    name: Capture stack (main HEAD)
+    needs: [capture-stack]
+    if: ${{ !inputs.wheels_ready && !inputs.capture_stack_published && needs.capture-stack.outputs.build == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+
+  smoke:
+    name: Install and run the wheel
+    needs: [capture-stack, wheels]
+    if: ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheels.result) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Download the wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact_name || 'selkies-wheel' }}
+          path: dist/
+      - name: Install smoke-test system packages
+        # Loaded with ctypes for keymap handling, so the smoke test covers that
+        # import path rather than its fallback
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon0
+      # The pinned pixelflux/pcmflux are a coordinated pre-release: not on PyPI
+      # yet, so the smoke test resolves them from local wheels. From this run's
+      # artifacts when the capture-stack job built them, else from each project's
+      # main-HEAD pre-release. The download is attempted either way: a caller
+      # that built them without saying so still gets the wheels it built, and a
+      # missing artifact leaves the release path below to answer for it.
+      - name: Fetch the capture-stack wheels (this run)
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: "*-wheels-x86_64-manylinux-*"
+          path: sibling-wheels
+          merge-multiple: true
+      - name: Fetch the capture-stack wheels (main-HEAD pre-release)
+        if: ${{ needs.capture-stack.outputs.build == 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p sibling-wheels
+          for project in pixelflux pcmflux; do
+            sha="${{ needs.capture-stack.outputs.pixelflux }}"
+            [ "${project}" = "pcmflux" ] && sha="${{ needs.capture-stack.outputs.pcmflux }}"
+            gh release download "${sha}" --repo "${{ github.repository_owner }}/${project}" \
+              --pattern "*manylinux*x86_64*.whl" --dir sibling-wheels --skip-existing
+            echo "${project}: ${sha}"
+          done
+      - name: Check the capture-stack wheels
+        env:
+          PUBLISHED: ${{ inputs.capture_stack_published }}
+        run: |
+          mkdir -p sibling-wheels && ls -la sibling-wheels
+          if [ "${PUBLISHED}" = "true" ]; then
+            echo "capture stack: resolving the pinned releases from PyPI"
+            exit 0
+          fi
+          for project in pixelflux pcmflux; do
+            # Fatal rather than a note: away from a release the pinned version
+            # exists only as this run's wheel, so without one the install below
+            # fails inside pip's resolver instead of naming what never arrived.
+            if ! ls "sibling-wheels/${project}"-*.whl > /dev/null 2>&1; then
+              echo "::error::No main-HEAD ${project} wheel for the smoke test"
+              exit 1
+            fi
+          done
+      - name: Install smoke test
+        env:
+          PUBLISHED: ${{ inputs.capture_stack_published }}
+        run: |
+          python3 -m venv /tmp/selkies-venv
+          # Away from a release the capture stack goes in from this run's wheels
+          # first, so the pin is already satisfied when the index is consulted
+          # and no build can quietly take a different one from PyPI.
+          if [ "${PUBLISHED}" != "true" ]; then
+            /tmp/selkies-venv/bin/pip install --no-index --find-links "$PWD/sibling-wheels" pixelflux pcmflux
+          fi
+          # Every dependency must resolve to a wheel: the images and packages
+          # install this same set without a compiler
+          /tmp/selkies-venv/bin/pip install --find-links "$PWD/sibling-wheels" --only-binary=:all: dist/selkies-*.whl
+          /tmp/selkies-venv/bin/selkies --help >/dev/null && echo "selkies --help OK"
+          /tmp/selkies-venv/bin/python -c "import importlib.resources as r; c = r.files('selkies.selkies_web'); assert (c / 'index.html').is_file(), 'web client missing from wheel'; print('bundled web client OK')"
+      - name: Set up the oldest supported Python
+        id: oldest-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.9"
+          update-environment: false
+      - name: Install smoke test (oldest supported Python)
+        # The same checks on the oldest interpreter the wheel claims: its
+        # importlib.resources cannot read a namespace package, so a bundle that
+        # lost its __init__.py fails here and on no newer interpreter
+        env:
+          PUBLISHED: ${{ inputs.capture_stack_published }}
+        run: |
+          "${{ steps.oldest-python.outputs.python-path }}" -m venv /tmp/selkies-venv-oldest
+          if [ "${PUBLISHED}" != "true" ]; then
+            /tmp/selkies-venv-oldest/bin/pip install --no-index --find-links "$PWD/sibling-wheels" pixelflux pcmflux
+          fi
+          /tmp/selkies-venv-oldest/bin/pip install --find-links "$PWD/sibling-wheels" --only-binary=:all: dist/selkies-*.whl
+          /tmp/selkies-venv-oldest/bin/selkies --help >/dev/null && echo "selkies --help OK"
+          /tmp/selkies-venv-oldest/bin/python -c "import importlib.resources as r; c = r.files('selkies.selkies_web'); assert (c / 'index.html').is_file(), 'web client missing from wheel'; print('bundled web client OK')"

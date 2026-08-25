@@ -51,7 +51,6 @@ jobs:
     uses: ./.github/workflows/build-wheel.yaml
     with:
       package_version: ${{ inputs.package_version }}
-      capture_stack_published: ${{ inputs.capture_stack_published }}
 
   package:
     name: ${{ matrix.kind.name }} (${{ matrix.arch.name }})
@@ -186,6 +185,9 @@ jobs:
         with:
           name: ${{ matrix.kind.name }}-${{ matrix.arch.name }}
           path: out/*
+          # Already-compressed payloads: the artifact is a zip either way, and
+          # re-deflating them spends CPU for a size that does not move.
+          compression-level: 0
           if-no-files-found: error
           retention-days: 14
 
@@ -259,5 +261,8 @@ jobs:
         with:
           name: appimage-${{ matrix.arch.name }}
           path: out/*
+          # Already-compressed payloads: the artifact is a zip either way, and
+          # re-deflating them spends CPU for a size that does not move.
+          compression-level: 0
           if-no-files-found: error
           retention-days: 14

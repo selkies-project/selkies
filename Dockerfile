@@ -32,6 +32,14 @@ LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
 ARG PYPI_PACKAGE="selkies"
 ARG PACKAGE_VERSION="0.0.0.dev0"
 
+# Set through the environment rather than as flags on the install below,
+# because the install is not the only pip this stage runs: `python3 -m build`
+# provisions an isolated environment of its own and pip-installs the build
+# backend into it from PyPI, and that call is reached through the environment
+# or not at all.
+ENV PIP_RETRIES="5" \
+    PIP_TIMEOUT="60"
+
 RUN python3 -m pip install --no-cache-dir --upgrade build
 
 WORKDIR /opt/pypi

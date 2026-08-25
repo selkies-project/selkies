@@ -17,65 +17,44 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.project }} (${{ matrix.arch.name }}, ${{ matrix.arch.platform }})
+    name: ${{ matrix.project }} ${{ matrix.python }} (${{ matrix.arch.name }}, ${{ matrix.arch.platform }})
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
+      # One job per interpreter rather than one per (arch, libc) building the
+      # whole cp39-cp314 ladder in sequence: the ladder is what set the wall
+      # clock, and the interpreters share nothing but the container image.
       matrix:
         project: [pixelflux, pcmflux]
+        python: [cp39, cp310, cp311, cp312, cp313, cp314]
         arch:
           - name: x86_64
             runner: ubuntu-latest
             platform: manylinux
-            build: >-
-              cp39-manylinux_x86_64
-              cp310-manylinux_x86_64
-              cp311-manylinux_x86_64
-              cp312-manylinux_x86_64
-              cp313-manylinux_x86_64
-              cp314-manylinux_x86_64
           - name: x86_64
             runner: ubuntu-latest
             platform: musllinux
-            build: >-
-              cp39-musllinux_x86_64
-              cp310-musllinux_x86_64
-              cp311-musllinux_x86_64
-              cp312-musllinux_x86_64
-              cp313-musllinux_x86_64
-              cp314-musllinux_x86_64
           - name: aarch64
             runner: ubuntu-24.04-arm
             platform: manylinux
-            build: >-
-              cp39-manylinux_aarch64
-              cp310-manylinux_aarch64
-              cp311-manylinux_aarch64
-              cp312-manylinux_aarch64
-              cp313-manylinux_aarch64
-              cp314-manylinux_aarch64
           - name: aarch64
             runner: ubuntu-24.04-arm
             platform: musllinux
-            build: >-
-              cp39-musllinux_aarch64
-              cp310-musllinux_aarch64
-              cp311-musllinux_aarch64
-              cp312-musllinux_aarch64
-              cp313-musllinux_aarch64
-              cp314-musllinux_aarch64
     steps:
       - uses: actions/checkout@v7
         with:
           repository: selkies-project/${{ matrix.project }}
           ref: main
-      - name: Build wheels (${{ matrix.arch.build }})
+      - name: Build the wheel (${{ matrix.python }}-${{ matrix.arch.platform }}_${{ matrix.arch.name }})
         uses: pypa/cibuildwheel@v4.2.0
         env:
-          CIBW_BUILD: ${{ matrix.arch.build }}
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.arch.platform }}_${{ matrix.arch.name }}
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.project }}-wheels-${{ matrix.arch.name }}-${{ matrix.arch.platform }}
+          # Every consumer takes these by pattern (`<project>-wheels-*`, or the
+          # x86_64 manylinux set the wheel smoke test installs), so the
+          # interpreter belongs at the end of the name.
+          name: ${{ matrix.project }}-wheels-${{ matrix.arch.name }}-${{ matrix.arch.platform }}-${{ matrix.python }}
           path: wheelhouse/*.whl
           if-no-files-found: error
           retention-days: 14

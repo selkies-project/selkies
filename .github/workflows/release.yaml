@@ -80,16 +80,24 @@ jobs:
     uses: ./.github/workflows/build-wheel.yaml
     with:
       package_version: ${{ needs.validate.outputs.version }}
+
+  wheel-smoke:
+    name: Smoke test the wheel
+    needs: [validate, wheel]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/smoke-wheel.yaml
+    with:
       # A release is cut once the pinned pixelflux and pcmflux are published, so
       # the smoke test resolves them from PyPI: what it proves installable is
-      # then the artifact users get, not this run's main-HEAD build of the
-      # capture stack. A pin that is not published yet fails here, which is the
-      # release being cut too early.
+      # then the artifact users get, not a main-HEAD build of the capture stack.
+      # A pin that is not published yet fails here, which is the release being
+      # cut too early.
       capture_stack_published: true
 
   images:
     name: Build and publish multi-arch images
-    needs: [validate, wheel]
+    needs: [validate, wheel, wheel-smoke]
     # A called workflow can only narrow the caller's token, so the GHCR push
     # scope has to be granted here
     permissions:
@@ -104,7 +112,7 @@ jobs:
 
   packages:
     name: Build native packages
-    needs: [validate, wheel]
+    needs: [validate, wheel, wheel-smoke]
     permissions:
       contents: read
     uses: ./.github/workflows/packages.yaml
@@ -115,7 +123,7 @@ jobs:
 
   draft-release:
     name: Assemble draft release
-    needs: [validate, wheel, images, packages]
+    needs: [validate, wheel, wheel-smoke, images, packages]
     runs-on: ubuntu-latest
     permissions:
       contents: write

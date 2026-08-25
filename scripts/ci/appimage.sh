@@ -20,12 +20,30 @@ WORK="${PWD}/build/appimage"
 rm -rf "${WORK}" AppDir
 mkdir -p "${WORK}"
 
+# pixi has no retry of its own, and neither does a piped installer script.
+retry() {
+  local i=1
+  until "$@"; do
+    [ "${i}" -ge 5 ] && return 1
+    i=$((i + 1)); sleep 5
+  done
+}
+
 # 1) rattler-build: selkies conda package (noarch) from the repo
 export PATH="${HOME}/.pixi/bin:${PATH}"
+# Both solvers, because the conda plugin invoked further down prefers mamba and
+# mamba does not read the CONDA_* names.
+export MAMBA_REMOTE_MAX_RETRIES="5" MAMBA_REMOTE_BACKOFF_FACTOR="3" \
+    MAMBA_REMOTE_CONNECT_TIMEOUT_SECS="30"
+export CONDA_REMOTE_MAX_RETRIES="5" CONDA_REMOTE_BACKOFF_FACTOR="3" \
+    CONDA_REMOTE_CONNECT_TIMEOUT_SECS="30" CONDA_REMOTE_READ_TIMEOUT_SECS="120"
 if ! command -v pixi >/dev/null; then
-  curl -fsSL https://pixi.sh/install.sh | sh
+  # fetch.sh rather than a bare curl: the installer is a GitHub release asset,
+  # and this is the same rate limit the linuxdeploy download below waits out.
+  scripts/ci/fetch.sh https://pixi.sh/install.sh "${WORK}/pixi-install.sh"
+  sh "${WORK}/pixi-install.sh"
 fi
-pixi global install rattler-build
+retry pixi global install rattler-build
 rattler-build build \
     --recipe infra/appimage/recipe.yaml \
     --output-dir "${WORK}/conda-output" \

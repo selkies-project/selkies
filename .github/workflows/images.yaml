@@ -67,8 +67,6 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/build-wheel.yaml
-    with:
-      capture_stack_published: ${{ inputs.capture_stack_published }}
 
   build:
     name: ${{ matrix.flavor.name }} (${{ matrix.arch.name }})
