@@ -4439,7 +4439,8 @@ class WebRTCInput:
                 if self.uinput_mouse_socket_path: self.__mouse_emit(btn_uinput_or_x11, 0)
                 elif self.mouse: self.mouse.release(btn_uinput_or_x11)
 
-    async def send_x11_keypress(self, keysym: int, down: bool = True) -> None:
+    async def send_x11_keypress(self, keysym: int, down: bool = True,
+                                neutralize: Optional[bool] = None) -> None:
         """Inject one key transition on whichever backend this session uses.
 
         Despite the name this is the shared key injector: Wayland routes
@@ -4448,6 +4449,13 @@ class WebRTCInput:
         with an action modifier are translated to the QWERTY keysym on the
         same physical key so shortcuts (Ctrl+C on a ЙЦУКЕН layout) reach the
         application as the app expects.
+
+        Args:
+            neutralize: Whether a conflicting held Shift/AltGr is lifted around
+                the key; None derives it from the client's held modifiers. A
+                server-synthesized chord passes False, since a Shift it pressed
+                through this injector is not in active_modifiers and would be
+                lifted for the very key it modifies.
         """
         if down:
             if (self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS) and keysym in CYRILLIC_TO_QWERTY_KEYSYM:
@@ -4461,8 +4469,9 @@ class WebRTCInput:
         # A conflicting client-held Shift/AltGr is lifted around plain
         # keystrokes only: while a chord modifier (Ctrl/Alt/Super/...) is down,
         # every held modifier is part of the chord and must pass through.
-        neutralize = (keysym not in self.MODIFIER_KEYSYMS
-                      and not (self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS))
+        if neutralize is None:
+            neutralize = (keysym not in self.MODIFIER_KEYSYMS
+                          and not (self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS))
         held_level_mods = frozenset(self.active_modifiers & self.LEVEL_MODIFIER_KEYSYMS)
 
         if self.is_wayland and self.wayland_input:
@@ -4875,7 +4884,7 @@ class WebRTCInput:
                 # finish fetching the payload before the selection is restored.
                 await asyncio.sleep(0.02)
                 await self.send_x11_keypress(shift_keysym, down=True)
-                await self.send_x11_keypress(insert_keysym, down=True)
+                await self.send_x11_keypress(insert_keysym, down=True, neutralize=False)
                 await self.send_x11_keypress(insert_keysym, down=False)
                 await self.send_x11_keypress(shift_keysym, down=False)
                 await asyncio.sleep(0.05)
