@@ -25,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.probe.outputs.build }}
+      pixelflux: ${{ steps.probe.outputs.pixelflux }}
+      pcmflux: ${{ steps.probe.outputs.pcmflux }}
     steps:
       - id: probe
         env:
@@ -51,39 +53,44 @@ jobs:
             fi
           done
           echo "build=${build}" >> "$GITHUB_OUTPUT"
-      - name: Download the wheels from those pre-releases
-        if: ${{ steps.probe.outputs.build == 'false' }}
+
+  fetch:
+    name: ${{ matrix.project }} pre-release (${{ matrix.target.arch }}, ${{ matrix.platform }})
+    needs: [locate]
+    if: ${{ needs.locate.outputs.build == 'false' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # One job per artifact the build below would have produced, carrying the
+      # same wheels under the same name, so nothing downstream can tell which
+      # of the two put them there.
+      matrix:
+        project: [pixelflux, pcmflux]
+        platform: [manylinux, musllinux]
+        target:
+          - arch: x86_64
+          - arch: aarch64
+    steps:
+      - name: Download the ${{ matrix.platform }}_${{ matrix.target.arch }} wheels
         env:
           GH_TOKEN: ${{ github.token }}
-          PIXELFLUX_TAG: ${{ steps.probe.outputs.pixelflux }}
-          PCMFLUX_TAG: ${{ steps.probe.outputs.pcmflux }}
+          PROJECT: ${{ matrix.project }}
+          TAG: ${{ needs.locate.outputs[matrix.project] }}
+          SLICE: "*${{ matrix.platform }}*${{ matrix.target.arch }}*.whl"
         run: |
-          for project in pixelflux pcmflux; do
-            tag="${PIXELFLUX_TAG}"
-            [ "${project}" = "pcmflux" ] && tag="${PCMFLUX_TAG}"
-            gh release download "${tag}" \
-              --repo "${{ github.repository_owner }}/${project}" \
-              --pattern "*.whl" --dir "wheelhouse/${project}"
-            ls -la "wheelhouse/${project}"
-          done
+          gh release download "${TAG}" \
+            --repo "${{ github.repository_owner }}/${PROJECT}" \
+            --pattern "${SLICE}" --dir wheelhouse
+          ls -la wheelhouse
       - uses: actions/upload-artifact@v7
-        if: ${{ steps.probe.outputs.build == 'false' }}
         with:
-          name: pixelflux-wheels-prerelease
-          path: wheelhouse/pixelflux/*.whl
+          name: ${{ matrix.project }}-wheels-${{ matrix.target.arch }}-${{ matrix.platform }}
+          path: wheelhouse/*.whl
           # An empty one is what the callers cannot recover from, so it fails
           # here rather than in the middle of an image build
           if-no-files-found: error
           retention-days: 14
           # A wheel is a deflated zip already
-          compression-level: 0
-      - uses: actions/upload-artifact@v7
-        if: ${{ steps.probe.outputs.build == 'false' }}
-        with:
-          name: pcmflux-wheels-prerelease
-          path: wheelhouse/pcmflux/*.whl
-          if-no-files-found: error
-          retention-days: 14
           compression-level: 0
 
   build:

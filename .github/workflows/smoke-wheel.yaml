@@ -67,20 +67,11 @@ jobs:
       # Attempted whatever the caller said: one that resolved them without
       # saying so still gets its wheels, and a missing artifact leaves the
       # release path below to answer for it.
-      - name: Fetch the capture-stack wheels (built)
+      - name: Fetch the capture-stack wheels
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: "*-wheels-x86_64-manylinux"
-          path: sibling-wheels
-          merge-multiple: true
-      # Whole matrix in one artifact: the pre-release ships it that way, and
-      # this test installs the one wheel that matches the runner
-      - name: Fetch the capture-stack wheels (published)
-        uses: actions/download-artifact@v8
-        continue-on-error: true
-        with:
-          pattern: "*-wheels-prerelease"
           path: sibling-wheels
           merge-multiple: true
       - name: Check the capture-stack wheels
