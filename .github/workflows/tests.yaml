@@ -106,7 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Free disk space
-        uses: endersonmenezes/free-disk-space@v3
+        uses: endersonmenezes/free-disk-space@v4
         with:
           remove_android: true
           remove_dotnet: true
