@@ -321,3 +321,26 @@ jobs:
           "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" 3 "${PUSH_RETRY_DELAY}" \
             docker buildx imagetools create "${IMGTAGS[@]}" "${SOURCES[@]}"
           echo "pushed: ${IMGTAGS[*]}"
+
+  cleanup:
+    name: Prune untagged images
+    needs: [merge, addons-merge]
+    # Each push moves the `main-*` tags onto new manifests, and the ones they
+    # pointed at before stay in the registry untagged, platform and attestation
+    # children included. Nothing else ever removes them.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # The action is not safe to run against a package twice at once, and a
+    # release build can overlap a push build
+    concurrency:
+      group: cleanup-images
+    # A prune that hits a rate limit must not fail the publish
+    continue-on-error: true
+    steps:
+      - uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          packages: selkies/example,selkies/coturn,selkies/turn-rest
+          delete-untagged: true
+          # A build in flight has its platform images untagged until its
+          # manifest lands, so the window stays well clear of a publish
+          older-than: 1 day
