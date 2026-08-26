@@ -68,7 +68,9 @@ def command_stub(path: str, sentinel: str) -> None:
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as fh:
-        fh.write('#!/bin/sh\necho "$@" > "{}"\n'.format(sentinel))
+        # The server probes the wrapper with `check` before it publishes the
+        # apps panel; only a real command is worth recording.
+        fh.write('#!/bin/sh\n[ "$1" = check ] && exit 0\necho "$@" > "{}"\n'.format(sentinel))
     os.chmod(path, 0o755)
 
 

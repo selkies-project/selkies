@@ -2962,6 +2962,11 @@ _launched_command_pids: set = set()
 X11_APP_TERMINALS = ("st", "xterm -e")
 WAYLAND_APP_TERMINALS = ("foot", "st", "xterm -e")
 
+# The wrapper the apps panel drives, and the argument that asks it whether
+# this session can run apps at all.
+APP_RUNNER = "selkies-proot"
+APP_RUNNER_CHECK_TIMEOUT_S = 10.0
+
 # Session environment a launch from outside must adopt from a session process:
 # the session bus above all (dbus-launch/dbus-run-session addresses live only
 # there), plus the desktop identity toolkits and xdg-desktop-portal read.
@@ -3460,6 +3465,7 @@ class WebRTCInput:
         self.uinput_mouse_socket = None
         self.enable_clipboard = enable_clipboard
         self.enable_binary_clipboard = enable_binary_clipboard
+        self._apps_runner_ok: Optional[bool] = None
         self.enable_cursors = enable_cursors
         self.cursors_running = False
         self.cursor_scale = cursor_scale
@@ -5401,6 +5407,54 @@ class WebRTCInput:
         session = self.app_session()
         return first_installed(WAYLAND_APP_TERMINALS if session["type"] == "wayland"
                                else X11_APP_TERMINALS)
+
+    def apps_available(self) -> bool:
+        """Whether the apps panel can do anything in this session.
+
+        Its buttons are the runner wrapper over the command channel, so all of
+        the channel, the wrapper and an environment the wrapper can work in
+        have to hold; where one does not, dashboards are told to drop the
+        panel rather than offer buttons that cannot succeed. The environment
+        answer comes from probe_apps_runner() and is assumed good until that
+        probe has spoken, so a working session never flickers the panel.
+        """
+        if not settings.command_enabled[0]:
+            return False
+        if shutil.which(APP_RUNNER) is None:
+            return False
+        return self._apps_runner_ok is not False
+
+    async def probe_apps_runner(self) -> None:
+        """Ask the runner whether apps can install and launch here, once.
+
+        proot emulates its chroot by tracing every process it starts, so a
+        host that denies ptrace (Yama restricted, no CAP_SYS_PTRACE) leaves the
+        panel with nothing that can work. Only the wrapper knows how to decide
+        that for the runner it ships, so it is asked rather than reimplemented.
+        """
+        runner = shutil.which(APP_RUNNER)
+        if runner is None:
+            return
+        try:
+            proc = await subprocess.create_subprocess_exec(
+                runner, "check",
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            stdout, _ = await self._communicate_or_kill(
+                proc, APP_RUNNER_CHECK_TIMEOUT_S, f"{APP_RUNNER} check")
+            self._apps_runner_ok = proc.returncode == 0
+        except Exception as e:
+            logger_webrtc_input.warning(f"{APP_RUNNER} check failed to run: {e}")
+            self._apps_runner_ok = False
+            return
+        if self._apps_runner_ok:
+            logger_webrtc_input.info("Apps panel enabled: %s can run here.", APP_RUNNER)
+        else:
+            detail = (stdout or b"").decode("utf-8", "replace").strip().splitlines()
+            logger_webrtc_input.warning(
+                "Apps panel hidden: %s cannot run here. %s",
+                APP_RUNNER, detail[0] if detail else "")
+            for line in detail[1:]:
+                logger_webrtc_input.warning("  %s", line.strip())
 
     def _invalidate_app_wl_display(self) -> None:
         """Drop the cached app-compositor resolution so the next call re-detects

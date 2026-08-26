@@ -7,20 +7,59 @@
 # Dashboard-facing wrapper around proot-apps (linuxserver.io): the apps panel
 # posts `selkies-proot install|remove|update <app>` through the server's
 # command channel. proot-apps runs its whole toolchain (proot, jq, ncat) from
-# ~/.local/bin by absolute path, so the per-user copy is seeded — or refreshed
-# after an image update — from the image's staging directory before
-# delegating; a fresh home directory needs no provisioning step.
+# ~/.local/bin by absolute path, so the image's staging directory is linked
+# there before delegating -- linked rather than copied, because a copy drops
+# the extended attribute the capability-carrying proot below is built on.
 
 set -eu
 
 staging="/opt/proot-apps"
+capable="/opt/proot-apps-cap/proot"
 bin="${HOME}/.local/bin"
 
 if [ -d "${staging}" ]; then
-    if [ ! -x "${bin}/proot-apps" ] || ! diff -q "${staging}/pversion" "${bin}/pversion" > /dev/null 2>&1; then
-        mkdir -p "${bin}"
-        cp "${staging}"/* "${bin}"/
+    mkdir -p "${bin}"
+    for tool in "${staging}"/*; do
+        ln -sfn "${tool}" "${bin}/$(basename "${tool}")"
+    done
+    # proot traces every process it starts, so on a host that restricts ptrace
+    # only the copy carrying CAP_SYS_PTRACE can run anything. That copy cannot
+    # even exec where the container's bounding set lacks the capability, so
+    # which one works is settled by running it.
+    if [ -x "${capable}" ] && "${capable}" -0 /bin/true > /dev/null 2>&1; then
+        ln -sfn "${capable}" "${bin}/proot"
     fi
 fi
+
+# proot traces every process it starts, so a host that denies ptrace leaves
+# nothing for the panel to install or launch.
+proot_runs() {
+    [ -x "${bin}/proot" ] && "${bin}/proot" -0 /bin/true > /dev/null 2>&1
+}
+
+explain_denial() {
+    scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo unknown)"
+    bounding="$(grep CapBnd /proc/self/status 2>/dev/null | cut -f2)"
+    echo "selkies-proot: proot cannot ptrace here, so no app can install or run." >&2
+    echo "  kernel.yama.ptrace_scope=${scope}, container CapBnd=${bounding}" >&2
+    echo "  Grant the container CAP_SYS_PTRACE, or lower the sysctl on the host." >&2
+}
+
+# `check` is what the server asks before telling clients the apps panel is
+# usable; the rest is answered here rather than as a failed unpack several
+# hundred megabytes later.
+case "${1:-}" in
+    check)
+        proot_runs && exit 0
+        explain_denial
+        exit 1
+        ;;
+    install|update|run|get)
+        if ! proot_runs; then
+            explain_denial
+            exit 1
+        fi
+        ;;
+esac
 
 exec "${bin}/proot-apps" "$@"

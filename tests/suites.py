@@ -73,6 +73,7 @@ SUITES: list = [
     {"path": "integration/test_gamepad_switch.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_gamepad_enumeration.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_protocol.py", "tier": "integration", "timeout": 900},
+    {"path": "integration/test_apps_gate.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_relative_injection.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_wayland_session_dpi.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_parity_checks.py", "tier": "integration", "timeout": 600},

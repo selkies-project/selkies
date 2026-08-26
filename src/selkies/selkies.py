@@ -2018,9 +2018,10 @@ class DataStreamingServer(BaseStreamingService):
         format. Also carried: `ws_max_message_bytes` (transport capacity, so
         the client sizes multipart chunks to the whole frame), `app_terminal`
         (the terminal the apps panel launches in, absent when none is
-        installed) and `second_screen` as effective availability — the admin
-        flag and the backend's real capacity — so dashboards never offer a
-        display the server would immediately kill.
+        installed), and `second_screen` and `ui_sidebar_show_apps` as effective
+        availability — the admin flag and what the backend can actually do — so
+        dashboards never offer a display the server would immediately kill, nor
+        an apps panel whose every button would fail.
         """
         payload = build_client_settings_payload()
         live_encoder = (self.display_clients.get(display_id) or {}).get('encoder') or self.app.encoder
@@ -2035,6 +2036,10 @@ class DataStreamingServer(BaseStreamingService):
         entry = payload.get('second_screen')
         if isinstance(entry, dict) and entry.get('value') and not available:
             payload['second_screen'] = dict(entry, value=False)
+        apps = payload.get('ui_sidebar_show_apps')
+        if (isinstance(apps, dict) and apps.get('value')
+                and self.input_handler and not self.input_handler.apps_available()):
+            payload['ui_sidebar_show_apps'] = dict(apps, value=False)
         return payload
 
     async def _broadcast_live_server_settings(self, display_id: str) -> None:
@@ -5255,6 +5260,10 @@ class DataStreamingServer(BaseStreamingService):
         if hasattr(self.input_handler, "start_cursor_monitor"):
             self._tasks_to_run.append(
                 asyncio.create_task(self.input_handler.start_cursor_monitor(), name="CursorMon")
+            )
+        if hasattr(self.input_handler, "probe_apps_runner"):
+            self._tasks_to_run.append(
+                asyncio.create_task(self.input_handler.probe_apps_runner(), name="AppsProbe")
             )
 
         # 96 is unity: no churn when nothing diverges.

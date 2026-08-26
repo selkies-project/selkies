@@ -664,17 +664,22 @@ class WebRTCService(BaseStreamingService):
         return changed
 
     def _server_settings_payload(self) -> Dict[str, Any]:
-        """get_server_settings with second_screen published as EFFECTIVE
-        availability — the admin flag AND the backend's real capacity — so
-        dashboards never offer a second display the server would immediately
-        refuse. Adds the terminal the apps panel launches in, chosen by the
-        session's windowing system (absent when none is installed: the client
-        keeps its default)."""
+        """get_server_settings with second_screen and ui_sidebar_show_apps
+        published as EFFECTIVE availability — the admin flag AND what the
+        backend can actually do — so dashboards never offer a second display
+        the server would immediately refuse, nor an apps panel whose every
+        button would fail. Adds the terminal the apps panel launches in, chosen
+        by the session's windowing system (absent when none is installed: the
+        client keeps its default)."""
         payload = get_server_settings()
         available, _ = self._second_screen_availability()
         entry = payload.get("settings", {}).get("second_screen")
         if isinstance(entry, dict) and entry.get("value") and not available:
             payload["settings"]["second_screen"] = dict(entry, value=False)
+        apps = payload.get("settings", {}).get("ui_sidebar_show_apps")
+        if (isinstance(apps, dict) and apps.get("value")
+                and self.input_handler and not self.input_handler.apps_available()):
+            payload["settings"]["ui_sidebar_show_apps"] = dict(apps, value=False)
         terminal = self.input_handler.app_terminal() if self.input_handler else None
         if terminal:
             payload["settings"]["app_terminal"] = {"value": terminal}
@@ -2287,6 +2292,7 @@ class WebRTCService(BaseStreamingService):
         if self.input_handler:
             self.tasks.append(asyncio.create_task(self.input_handler.connect()))
             self.tasks.append(asyncio.create_task(self.input_handler.start_clipboard()))
+            self.tasks.append(asyncio.create_task(self.input_handler.probe_apps_runner()))
             self.tasks.append(
                 asyncio.create_task(self.input_handler.start_cursor_monitor())
             )
