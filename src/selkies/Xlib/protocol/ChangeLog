@@ -52,7 +52,7 @@
 2002-01-14  Peter Liljenberg  <peter.liljenberg@esdgkonsult.com>
 
 	* display.py (Display.parse_event_response): Fix bug reported by
-	Ilpo Nyyssönen, whereby ReplyRequests which generates events
+	Ilpo NyyssÃ¶nen, whereby ReplyRequests which generates events
 	(e.g. get_property with delete = 1) will get dropped when the
 	event is received.
 
