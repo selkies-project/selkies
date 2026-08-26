@@ -85,59 +85,21 @@ jobs:
         if: ${{ !cancelled() }}
         run: python tests/tools/assert_no_skips.py unit-report.xml
 
-  # pixelflux and pcmflux publish a pre-release per commit, tagged with the commit
-  # itself, carrying the same wheels their own CI builds. Naming main's commit is
-  # therefore enough to fetch exactly the capture stack the artifacts ship, and
-  # building it here is only needed in the window between a commit landing and its
-  # release finishing.
-  capture-stack:
-    name: Capture stack (locate)
-    if: ${{ !inputs.wheels_ready }}
-    runs-on: ubuntu-latest
-    outputs:
-      build: ${{ steps.probe.outputs.build }}
-      pixelflux: ${{ steps.probe.outputs.pixelflux }}
-      pcmflux: ${{ steps.probe.outputs.pcmflux }}
-    steps:
-      - id: probe
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          build=false
-          for project in pixelflux pcmflux; do
-            repo="${{ github.repository_owner }}/${project}"
-            sha="$(gh api "repos/${repo}/commits/main" --jq .sha 2>/dev/null || true)"
-            # Pre-releases are tagged with an abbreviated SHA, so match by prefix
-            tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
-                    --jq '.[].tagName' 2>/dev/null || true)"
-            tag=""
-            for candidate in ${tags}; do
-              case "${sha}" in "${candidate}"*) tag="${candidate}"; break ;; esac
-            done
-            if [ -n "${sha}" ] && [ -n "${tag}" ]; then
-              echo "${project}=${tag}" >> "$GITHUB_OUTPUT"
-              echo "${project}: pre-release ${tag}"
-            else
-              echo "${project}=" >> "$GITHUB_OUTPUT"
-              echo "${project}: no pre-release for main (${sha:-unknown}); building from source"
-              build=true
-            fi
-          done
-          echo "build=${build}" >> "$GITHUB_OUTPUT"
-
-  # Only for the commits whose pre-release has not been published yet: the whole
-  # cp39-cp314 matrix across both libcs costs far more than downloading it.
+  # pixelflux and pcmflux ship as wheels this run has in hand rather than from
+  # PyPI, which carries neither pre-release. The caller passes them in as
+  # artifacts when it has already resolved them; a standalone run resolves them
+  # here, downloading each project's per-commit pre-release or building what
+  # has none yet.
   wheels:
     name: Capture stack (main HEAD)
-    needs: [capture-stack]
-    if: ${{ !inputs.wheels_ready && needs.capture-stack.outputs.build == 'true' }}
+    if: ${{ !inputs.wheels_ready }}
     permissions:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
 
   suites:
     name: Suites (${{ inputs.tiers || 'integration or e2e' }})
-    needs: [capture-stack, wheels]
+    needs: [wheels]
     if: ${{ always() && (needs.wheels.result == 'success' || needs.wheels.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -178,28 +140,8 @@ jobs:
             coturn \
             labwc
       # The suites have to exercise the pixelflux and pcmflux that the images,
-      # packages and AppImages ship, which are built from main HEAD rather than
-      # taken from the last PyPI release. They arrive from one of three places:
-      # each project's per-commit pre-release, the wheels ci.yaml built earlier
-      # in the same run, or the fallback build above.
-      - name: Download the capture stack from its pre-releases
-        if: ${{ needs.capture-stack.outputs.build == 'false' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p main-wheels
-          # Only the interpreter and architecture this runner imports with: the
-          # release carries the whole cp39-cp314 matrix across both libcs.
-          ABI="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
-          for project in pixelflux pcmflux; do
-            tag="${{ needs.capture-stack.outputs.pixelflux }}"
-            [ "${project}" = "pcmflux" ] && tag="${{ needs.capture-stack.outputs.pcmflux }}"
-            gh release download "${tag}" \
-              --repo "${{ github.repository_owner }}/${project}" \
-              --pattern "*${ABI}-*manylinux*$(uname -m)*.whl" \
-              --dir main-wheels --skip-existing
-            echo "${project}: ${tag}"
-          done
+      # packages and AppImages ship, which come from main HEAD rather than the
+      # last PyPI release. Whichever job resolved them left them here.
       - name: Download the pixelflux wheels (main HEAD)
         uses: actions/download-artifact@v8
         continue-on-error: true

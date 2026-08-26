@@ -32,57 +32,20 @@ jobs:
   # Away from a release the pinned pixelflux/pcmflux are a coordinated
   # pre-release, published per commit rather than to PyPI, so the smoke test can
   # only install them from a wheel this run has in hand: the caller's, when it
-  # says so with wheels_ready; else the sibling's pre-release for its current
-  # main HEAD; else built here. Cutting a release is the other way round -- the
-  # versions the wheel pins are on PyPI by then, and resolving them there is
-  # what proves the artifact users will install. The test suites run under the
-  # same contract.
-  capture-stack:
-    name: Capture stack (locate)
-    if: ${{ !inputs.wheels_ready && !inputs.capture_stack_published }}
-    runs-on: ubuntu-latest
-    outputs:
-      build: ${{ steps.probe.outputs.build }}
-      pixelflux: ${{ steps.probe.outputs.pixelflux }}
-      pcmflux: ${{ steps.probe.outputs.pcmflux }}
-    steps:
-      - id: probe
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          build=false
-          for project in pixelflux pcmflux; do
-            repo="${{ github.repository_owner }}/${project}"
-            sha="$(gh api "repos/${repo}/commits/main" --jq .sha 2>/dev/null || true)"
-            # Pre-releases are tagged with an abbreviated SHA, so match by prefix
-            tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
-                    --jq '.[].tagName' 2>/dev/null || true)"
-            tag=""
-            for candidate in ${tags}; do
-              case "${sha}" in "${candidate}"*) tag="${candidate}"; break ;; esac
-            done
-            if [ -n "${sha}" ] && [ -n "${tag}" ]; then
-              echo "${project}=${tag}" >> "$GITHUB_OUTPUT"
-              echo "${project}: pre-release ${tag}"
-            else
-              echo "${project}=" >> "$GITHUB_OUTPUT"
-              echo "${project}: no pre-release for main (${sha:-unknown}); building from source"
-              build=true
-            fi
-          done
-          echo "build=${build}" >> "$GITHUB_OUTPUT"
-
+  # says so with wheels_ready, else this run's own. Cutting a release is the
+  # other way round -- the versions the wheel pins are on PyPI by then, and
+  # resolving them there is what proves the artifact users will install. The
+  # test suites run under the same contract.
   wheels:
     name: Capture stack (main HEAD)
-    needs: [capture-stack]
-    if: ${{ !inputs.wheels_ready && !inputs.capture_stack_published && needs.capture-stack.outputs.build == 'true' }}
+    if: ${{ !inputs.wheels_ready && !inputs.capture_stack_published }}
     permissions:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
 
   smoke:
     name: Install and run the wheel
-    needs: [capture-stack, wheels]
+    needs: [wheels]
     if: ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheels.result) }}
     runs-on: ubuntu-latest
     steps:
@@ -101,32 +64,25 @@ jobs:
         # Loaded with ctypes for keymap handling, so the smoke test covers that
         # import path rather than its fallback
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon0
-      # The pinned pixelflux/pcmflux are a coordinated pre-release: not on PyPI
-      # yet, so the smoke test resolves them from local wheels. From this run's
-      # artifacts when the capture-stack job built them, else from each project's
-      # main-HEAD pre-release. The download is attempted either way: a caller
-      # that built them without saying so still gets the wheels it built, and a
-      # missing artifact leaves the release path below to answer for it.
-      - name: Fetch the capture-stack wheels (this run)
+      # Attempted whatever the caller said: one that resolved them without
+      # saying so still gets its wheels, and a missing artifact leaves the
+      # release path below to answer for it.
+      - name: Fetch the capture-stack wheels (built)
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: "*-wheels-x86_64-manylinux"
           path: sibling-wheels
           merge-multiple: true
-      - name: Fetch the capture-stack wheels (main-HEAD pre-release)
-        if: ${{ needs.capture-stack.outputs.build == 'false' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p sibling-wheels
-          for project in pixelflux pcmflux; do
-            tag="${{ needs.capture-stack.outputs.pixelflux }}"
-            [ "${project}" = "pcmflux" ] && tag="${{ needs.capture-stack.outputs.pcmflux }}"
-            gh release download "${tag}" --repo "${{ github.repository_owner }}/${project}" \
-              --pattern "*manylinux*x86_64*.whl" --dir sibling-wheels --skip-existing
-            echo "${project}: ${tag}"
-          done
+      # Whole matrix in one artifact: the pre-release ships it that way, and
+      # this test installs the one wheel that matches the runner
+      - name: Fetch the capture-stack wheels (published)
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: "*-wheels-prerelease"
+          path: sibling-wheels
+          merge-multiple: true
       - name: Check the capture-stack wheels
         env:
           PUBLISHED: ${{ inputs.capture_stack_published }}

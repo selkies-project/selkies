@@ -1,12 +1,16 @@
-name: Build pixelflux and pcmflux wheels
+name: Capture stack wheels
 
-# Builds pixelflux and pcmflux from the main branch (HEAD) of
-# selkies-project/pixelflux and selkies-project/pcmflux, so that container images,
-# native packages, and AppImages ride the latest code instead of the last
-# PyPI release. Mirrors the two projects' own release workflows: a single
-# pypa/cibuildwheel invocation per (arch, libc), with each repository's own
-# pyproject.toml [tool.cibuildwheel] section driving the native dependency
-# setup and its python_requires the interpreters built.
+# Puts the pixelflux and pcmflux built from the main branch (HEAD) of
+# selkies-project/pixelflux and selkies-project/pcmflux into this run's
+# artifacts, so container images, native packages, AppImages and the suites
+# ride the latest code instead of the last PyPI release. Both projects publish
+# a pre-release per commit carrying the wheels their own CI built, so naming
+# main's commit fetches exactly what ships and a build here is only needed in
+# the window between a commit landing and its release finishing. That build
+# mirrors the two projects' own release workflows: a single pypa/cibuildwheel
+# invocation per (arch, libc), with each repository's own pyproject.toml
+# [tool.cibuildwheel] section driving the native dependency setup and its
+# python_requires the interpreters built.
 
 on:
   workflow_dispatch:
@@ -16,8 +20,80 @@ permissions:
   contents: read
 
 jobs:
+  locate:
+    name: Capture stack (locate)
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.probe.outputs.build }}
+    steps:
+      - id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build=false
+          for project in pixelflux pcmflux; do
+            repo="${{ github.repository_owner }}/${project}"
+            sha="$(gh api "repos/${repo}/commits/main" --jq .sha 2>/dev/null || true)"
+            # Pre-releases are tagged with an abbreviated SHA, so match by prefix
+            tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
+                    --jq '.[].tagName' 2>/dev/null || true)"
+            tag=""
+            for candidate in ${tags}; do
+              case "${sha}" in "${candidate}"*) tag="${candidate}"; break ;; esac
+            done
+            if [ -n "${sha}" ] && [ -n "${tag}" ]; then
+              echo "${project}=${tag}" >> "$GITHUB_OUTPUT"
+              echo "${project}: pre-release ${tag}"
+            else
+              echo "${project}=" >> "$GITHUB_OUTPUT"
+              echo "${project}: no pre-release for main (${sha:-unknown}); building from source"
+              build=true
+            fi
+          done
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+      - name: Download the wheels from those pre-releases
+        if: ${{ steps.probe.outputs.build == 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PIXELFLUX_TAG: ${{ steps.probe.outputs.pixelflux }}
+          PCMFLUX_TAG: ${{ steps.probe.outputs.pcmflux }}
+        run: |
+          for project in pixelflux pcmflux; do
+            tag="${PIXELFLUX_TAG}"
+            [ "${project}" = "pcmflux" ] && tag="${PCMFLUX_TAG}"
+            gh release download "${tag}" \
+              --repo "${{ github.repository_owner }}/${project}" \
+              --pattern "*.whl" --dir "wheelhouse/${project}"
+            ls -la "wheelhouse/${project}"
+          done
+      - uses: actions/upload-artifact@v7
+        if: ${{ steps.probe.outputs.build == 'false' }}
+        with:
+          name: pixelflux-wheels-prerelease
+          path: wheelhouse/pixelflux/*.whl
+          # An empty one is what the callers cannot recover from, so it fails
+          # here rather than in the middle of an image build
+          if-no-files-found: error
+          retention-days: 14
+          # A wheel is a deflated zip already
+          compression-level: 0
+      - uses: actions/upload-artifact@v7
+        if: ${{ steps.probe.outputs.build == 'false' }}
+        with:
+          name: pcmflux-wheels-prerelease
+          path: wheelhouse/pcmflux/*.whl
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
   build:
     name: ${{ matrix.project }} (${{ matrix.target.arch }}, ${{ matrix.platform }})
+    needs: [locate]
+    # Only what no pre-release covers, and everything when the probe could not
+    # answer: what ships has to be the main-HEAD capture stack either way
+    if: >-
+      ${{ always() && (needs.locate.result != 'success'
+                       || needs.locate.outputs.build != 'false') }}
     runs-on: ${{ matrix.target.runner }}
     strategy:
       fail-fast: false
