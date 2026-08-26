@@ -329,6 +329,13 @@ function handleFrame(frame, label) {
   orientation = label || (HAS_FRAME_ORIENTATION ? latched : (derived || orientation));
   if (probing) {
     if (probeFrames.length >= PROBE_SOURCE_FRAMES) { frame.close(); return; }
+    // The window belongs to the camera once it is delivering. A device chosen
+    // from several starts late, and a window spent waiting for it would expire
+    // holding too few frames to measure anything.
+    if (!probeFrames.length && probeTimer !== null) {
+      clearTimeout(probeTimer);
+      probeTimer = setTimeout(() => { if (probing) runProbe(w, h); }, PROBE_WAIT_MS);
+    }
     probeFrames.push(frame);
     if (probeFrames.length >= PROBE_SOURCE_FRAMES) runProbe(w, h);
     return;
@@ -421,18 +428,25 @@ async function runProbe(w, h) {
   if (probeTimer !== null) { clearTimeout(probeTimer); probeTimer = null; }
   const frames = probeFrames;
   probeFrames = [];
+  // Short of the whole set there is no measurement: a rate taken over a few
+  // frames carries the keyframe and the encoder's flush, and reads low enough
+  // to reject a codec that keeps up. Such a camera opens on the first
+  // candidate, as one that delivered nothing does, and the watchdog answers
+  // for it; the JPEG rung is never reached on that evidence.
+  if (frames.length < PROBE_SOURCE_FRAMES) {
+    for (let i = 0; i < frames.length; i++) { try { frames[i].close(); } catch (err) {} }
+    if (!active) return;
+    self.postMessage({ type: 'probed', codec: CANDIDATES[0].name });
+    return;
+  }
   let best = -1, bestRate = 0;
-  for (let i = 0; i < CANDIDATES.length && frames.length; i++) {
+  for (let i = 0; i < CANDIDATES.length; i++) {
     const rate = await measure(CANDIDATES[i], w, h, frames);
     if (rate > bestRate) { best = i; bestRate = rate; }
     if (rate >= fps) break;
   }
   for (let i = 0; i < frames.length; i++) { try { frames[i].close(); } catch (err) {} }
   if (!active) return;
-  if (!frames.length) {
-    self.postMessage({ type: 'probed', codec: CANDIDATES[0].name });
-    return;
-  }
   if (best < 0) { self.postMessage({ type: 'unsupported' }); return; }
   // Nothing came close to the rate the camera is being asked for. Starting on
   // the fastest of them anyway spends a core to send a fraction of the camera,

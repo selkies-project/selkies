@@ -136,9 +136,7 @@ static int g_swc_log_enabled = 0;
 #define SWC_LOG_ERROR "[ERROR]"
 
 static int (*real_open)(const char *pathname, int flags, ...) = NULL;
-static int (*real_open64)(const char *pathname, int flags, ...) = NULL;
 static int (*real_openat)(int dirfd, const char *pathname, int flags, ...) = NULL;
-static int (*real_openat64)(int dirfd, const char *pathname, int flags, ...) = NULL;
 static int (*real_ioctl)(int fd, ioctl_request_t request, ...) = NULL;
 static int (*real_close)(int fd) = NULL;
 static ssize_t (*real_read)(int fd, void *buf, size_t count) = NULL;
@@ -158,6 +156,8 @@ static int (*real_stat)(const char *pathname, struct stat *buf) = NULL;
 static int (*real_lstat)(const char *pathname, struct stat *buf) = NULL;
 static void *(*real_mmap)(void *addr, size_t length, int prot, int flags, int fd, off_t offset) = NULL;
 #ifdef SWC_LFS64
+static int (*real_open64)(const char *pathname, int flags, ...) = NULL;
+static int (*real_openat64)(int dirfd, const char *pathname, int flags, ...) = NULL;
 static struct dirent64 *(*real_readdir64)(DIR *dirp) = NULL;
 static int (*real_stat64)(const char *pathname, struct stat64 *buf) = NULL;
 static int (*real_lstat64)(const char *pathname, struct stat64 *buf) = NULL;
@@ -543,9 +543,7 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
     if (load_real_func((void *)&real_fstat, "fstat") < 0) swc_log_error("CRITICAL: no real 'fstat'.");
     if (load_real_func((void *)&real_stat, "stat") < 0) swc_log_error("CRITICAL: no real 'stat'.");
     if (load_real_func((void *)&real_lstat, "lstat") < 0) swc_log_error("CRITICAL: no real 'lstat'.");
-    load_real_func((void *)&real_open64, "open64");
     load_real_func((void *)&real_openat, "openat");
-    load_real_func((void *)&real_openat64, "openat64");
     load_real_func((void *)&real_dup, "dup");
     load_real_func((void *)&real_dup2, "dup2");
     load_real_func((void *)&real_dup3, "dup3");
@@ -565,6 +563,8 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
     load_real_func((void *)&real___openat64_2, "__openat64_2");
 #endif
 #ifdef SWC_LFS64
+    load_real_func((void *)&real_open64, "open64");
+    load_real_func((void *)&real_openat64, "openat64");
     load_real_func((void *)&real_readdir64, "readdir64");
     load_real_func((void *)&real_mmap64, "mmap64");
     load_real_func((void *)&real_stat64, "stat64");
@@ -1745,9 +1745,7 @@ int open(const char *pathname, int flags, ...) {
     return real_open(pathname, flags);
 }
 
-#ifdef open64
-#undef open64
-#endif
+#ifdef SWC_LFS64
 int open64(const char *pathname, int flags, ...) {
     if (!real_open64 && !real_open) { errno = EFAULT; return -1; }
     int fd = common_open_logic(pathname, flags);
@@ -1761,10 +1759,13 @@ int open64(const char *pathname, int flags, ...) {
     }
     return real_open64 ? real_open64(pathname, flags) : real_open(pathname, flags);
 }
+#endif
 
 /* Stream readers of the sysfs view (C++ ifstream, Python) go through fopen. */
 static FILE *(*real_fopen)(const char *, const char *) = NULL;
+#ifdef SWC_LFS64
 static FILE *(*real_fopen64)(const char *, const char *) = NULL;
+#endif
 
 /* Backed by the same memfd as open(): C++ streams read through fileno(). */
 static FILE *sysfs_virtual_fopen(const char *pathname, const char *mode) {
@@ -1798,6 +1799,7 @@ FILE *fopen(const char *pathname, const char *mode) {
     return real_fopen(pathname, mode);
 }
 
+#ifdef SWC_LFS64
 FILE *fopen64(const char *pathname, const char *mode) {
     if (!real_fopen64 && load_real_func((void *)&real_fopen64, "fopen64") < 0) {
         errno = EFAULT;
@@ -1808,6 +1810,7 @@ FILE *fopen64(const char *pathname, const char *mode) {
     }
     return real_fopen64(pathname, mode);
 }
+#endif
 
 /* Resolve a possibly-relative openat() path against dirfd for the match. */
 static const char *resolve_at(int dirfd, const char *pathname, char *full, size_t full_sz) {
@@ -1841,9 +1844,7 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
     return real_openat(dirfd, pathname, flags);
 }
 
-#ifdef openat64
-#undef openat64
-#endif
+#ifdef SWC_LFS64
 int openat64(int dirfd, const char *pathname, int flags, ...) {
     if (!real_openat64 && !real_openat) { errno = EFAULT; return -1; }
     char full[4096];
@@ -1859,6 +1860,7 @@ int openat64(int dirfd, const char *pathname, int flags, ...) {
     }
     return real_openat64 ? real_openat64(dirfd, pathname, flags) : real_openat(dirfd, pathname, flags);
 }
+#endif
 
 #ifdef __GLIBC__
 int __open_2(const char *file, int oflag) {
