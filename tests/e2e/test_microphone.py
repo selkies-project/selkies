@@ -152,8 +152,10 @@ def transport_block(mode: str) -> "H.Results":
                           str(page.evaluate("window.__micStatus")))
                 res.check("virtual mic provisioned (server log)",
                           C.wait_log(f"Virtual microphone '{VIRTUAL_MIC}' is ready", timeout=20), "")
+                # Either router verdict: already on the monitor, or moved there.
                 res.check("pcmflux capture routing verified in-process",
-                          C.wait_log("pcmflux correctly connected to 'output.monitor'", timeout=10), "")
+                          C.wait_log("pcmflux correctly connected to 'output.monitor'", timeout=20)
+                          or C.wait_log("moving it to 'output.monitor'", timeout=1), "")
                 res.check("virtual mic source appears", wait_for(lambda: bool(virtual_mic_sources()), 10),
                           virtual_mic_sources())
                 res.check("virtual mic is the default source",

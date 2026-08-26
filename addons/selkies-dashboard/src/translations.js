@@ -53,6 +53,7 @@ const en = {
         video: {
             title: "Video Settings",
             encoderLabel: "Encoder:",
+            webcamEncoderLabel: "Webcam Encoder:",
             framerateLabel: "Frames per second ({framerate} FPS):",
             bitrateLabel: "Video Bitrate ({bitrate}):",
             bufferLabelImmediate: "Video Buffer Size (0 (Immediate)):",
@@ -285,6 +286,7 @@ const es = {
         video: {
             title: "Configuración de Vídeo",
             encoderLabel: "Codificador:",
+            webcamEncoderLabel: "Codificador de webcam:",
             framerateLabel: "Fotogramas por segundo ({framerate} FPS):",
             bitrateLabel: "Tasa de bits de vídeo ({bitrate}):",
             bufferLabelImmediate: "Tamaño del Búfer de Vídeo (0 (Inmediato)):",
@@ -517,6 +519,7 @@ const zh = {
         video: {
             title: "视频设置",
             encoderLabel: "编码器:",
+            webcamEncoderLabel: "摄像头编码器:",
             framerateLabel: "帧率 ({framerate} FPS):",
             bitrateLabel: "视频比特率 ({bitrate}):",
             bufferLabelImmediate: "视频缓冲大小 (0 (立即)):",
@@ -749,6 +752,7 @@ const hi = {
         video: {
             title: "वीडियो सेटिंग्स",
             encoderLabel: "एन्कोडर:",
+            webcamEncoderLabel: "वेबकैम एन्कोडर:",
             framerateLabel: "फ्रेम प्रति सेकंड ({framerate} FPS):",
             bitrateLabel: "वीडियो बिटरेट ({bitrate}):",
             bufferLabelImmediate: "वीडियो बफर आकार (0 (तत्काल)):",
@@ -981,6 +985,7 @@ const pt = {
         video: {
             title: "Configurações de Vídeo",
             encoderLabel: "Codificador:",
+            webcamEncoderLabel: "Codificador da webcam:",
             framerateLabel: "Quadros por segundo ({framerate} FPS):",
             bitrateLabel: "Bitrate de Vídeo ({bitrate}):",
             bufferLabelImmediate: "Tamanho do Buffer de Vídeo (0 (Imediato)):",
@@ -1213,6 +1218,7 @@ const fr = {
         video: {
             title: "Paramètres vidéo",
             encoderLabel: "Encodeur :",
+            webcamEncoderLabel: "Encodeur webcam :",
             framerateLabel: "Images par seconde ({framerate} FPS) :",
             bitrateLabel: "Débit vidéo ({bitrate}) :",
             bufferLabelImmediate: "Taille du tampon vidéo (0 (Immédiat)) :",
@@ -1446,6 +1452,7 @@ const ru = {
         video: {
             title: "Настройки видео",
             encoderLabel: "Кодировщик:",
+            webcamEncoderLabel: "Кодировщик веб-камеры:",
             framerateLabel: "Кадров в секунду ({framerate} FPS):",
             bitrateLabel: "Битрейт видео ({bitrate}):",
             bufferLabelImmediate: "Размер буфера видео (0 (Немедленно)):",
@@ -1678,6 +1685,7 @@ const de = {
         video: {
             title: "Videoeinstellungen",
             encoderLabel: "Encoder:",
+            webcamEncoderLabel: "Webcam-Encoder:",
             framerateLabel: "Bilder pro Sekunde ({framerate} FPS):",
             bitrateLabel: "Video-Bitrate ({bitrate}):",
             bufferLabelImmediate: "Video-Puffergröße (0 (Sofort)):",
@@ -1910,6 +1918,7 @@ const tr = {
         video: {
             title: "Video Ayarları",
             encoderLabel: "Kodlayıcı:",
+            webcamEncoderLabel: "Web kamerası kodlayıcısı:",
             framerateLabel: "Saniyedeki Kare Sayısı ({framerate} FPS):",
             bitrateLabel: "Video Bit Hızı ({bitrate}):",
             bufferLabelImmediate: "Video Tampon Boyutu (0 (Anında)):",
@@ -2142,6 +2151,7 @@ const it = {
         video: {
             title: "Impostazioni Video",
             encoderLabel: "Encoder:",
+            webcamEncoderLabel: "Encoder webcam:",
             framerateLabel: "Frame al secondo ({framerate} FPS):",
             bitrateLabel: "Bitrate Video ({bitrate}):",
             bufferLabelImmediate: "Dimensione Buffer Video (0 (Immediato)):",
@@ -2374,6 +2384,7 @@ const nl = {
         video: {
             title: "Video-instellingen",
             encoderLabel: "Encoder:",
+            webcamEncoderLabel: "Webcam-encoder:",
             framerateLabel: "Frames per seconde ({framerate} FPS):",
             bitrateLabel: "Videobitrate ({bitrate}):",
             bufferLabelImmediate: "Video Buffergrootte (0 (Onmiddellijk)):",
@@ -2606,6 +2617,7 @@ const ar = {
         video: {
             title: "إعدادات الفيديو",
             encoderLabel: "المُرمّز:",
+            webcamEncoderLabel: "مُرمّز كاميرا الويب:",
             framerateLabel: "إطارات في الثانية ({framerate} FPS):",
             bitrateLabel: "معدل بت الفيديو ({bitrate}):",
             bufferLabelImmediate: "حجم مخزن الفيديو المؤقت (0 (فوري)):",
@@ -2838,6 +2850,7 @@ const ko = {
         video: {
             title: "비디오 설정",
             encoderLabel: "인코더:",
+            webcamEncoderLabel: "웹캠 인코더:",
             framerateLabel: "초당 프레임 ({framerate} FPS):",
             bitrateLabel: "비디오 비트 전송률 ({bitrate}):",
             bufferLabelImmediate: "비디오 버퍼 크기 (0 (즉시)):",
@@ -3070,6 +3083,7 @@ const ja = {
         video: {
             title: "ビデオ設定",
             encoderLabel: "エンコーダー:",
+            webcamEncoderLabel: "ウェブカメラエンコーダー:",
             framerateLabel: "フレーム/秒 ({framerate} FPS):",
             bitrateLabel: "ビデオビットレート ({bitrate}):",
             bufferLabelImmediate: "ビデオバッファサイズ (0 (即時)):",
@@ -3302,6 +3316,7 @@ const vi = {
         video: {
             title: "Cài đặt Video",
             encoderLabel: "Bộ mã hóa:",
+            webcamEncoderLabel: "Bộ mã hóa webcam:",
             framerateLabel: "Khung hình mỗi giây ({framerate} FPS):",
             bitrateLabel: "Tốc độ bit Video ({bitrate}):",
             bufferLabelImmediate: "Kích thước Bộ đệm Video (0 (Ngay lập tức)):",
@@ -3534,6 +3549,7 @@ const th = {
         video: {
             title: "การตั้งค่าวิดีโอ",
             encoderLabel: "ตัวเข้ารหัส:",
+            webcamEncoderLabel: "ตัวเข้ารหัสเว็บแคม:",
             framerateLabel: "เฟรมต่อวินาที ({framerate} FPS):",
             bitrateLabel: "บิตเรตวิดีโอ ({bitrate}):",
             bufferLabelImmediate: "ขนาดบัฟเฟอร์วิดีโอ (0 (ทันที)):",
@@ -3766,6 +3782,7 @@ const fil = {
         video: {
             title: "Mga Setting ng Video",
             encoderLabel: "Tagapag-encode:",
+            webcamEncoderLabel: "Tagapag-encode ng webcam:",
             framerateLabel: "Mga frame bawat segundo ({framerate} FPS):",
             bitrateLabel: "Bitrate ng Video ({bitrate}):",
             bufferLabelImmediate: "Laki ng Video Buffer (0 (Agad)):",
@@ -3998,6 +4015,7 @@ const da = {
         video: {
             title: "Videoindstillinger",
             encoderLabel: "Encoder:",
+            webcamEncoderLabel: "Webcam-encoder:",
             framerateLabel: "Billeder pr. sekund ({framerate} FPS):",
             bitrateLabel: "Video-bitrate ({bitrate}):",
             bufferLabelImmediate: "Videobufferstørrelse (0 (Øjeblikkelig)):",

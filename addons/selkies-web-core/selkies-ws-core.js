@@ -103,7 +103,7 @@ import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js
 import { storageKeyForServerKey } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder } from './lib/util.js';
 import { createStripeClock } from './lib/stripe-clock.js';
-import { WebcamCapture } from './lib/webcam-capture.js';
+import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -312,6 +312,8 @@ let audioEnabled = true;
 let microphoneEnabled = true;
 let webcamEnabled = true;
 let webcamCapture = null;
+// webcam_encoder: the server default, overridden by the stored choice unless locked.
+let webcamEncoderPreference = 'auto';
 let preferredWebcamDeviceId = null;
 let displayId = 'primary';
 let displayPosition = 'right';
@@ -892,6 +894,7 @@ use_paint_over_quality = getBoolParam('use_paint_over_quality', use_paint_over_q
 audio_bitrate = getIntParam('audio_bitrate', audio_bitrate);
 debug = getBoolParam('debug', debug);
 currentEncoderMode = getStringParam('encoder', 'h264enc');
+webcamEncoderPreference = getStringParam('webcam_encoder', 'auto');
 scaleLocallyManual = getBoolParam('scaleLocallyManual', true);
 window.is_manual_resolution_mode = getBoolParam('is_manual_resolution_mode', false);
 isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
@@ -3706,6 +3709,17 @@ function handleSettingsMessage(settings, fromServer) {
     storeInt('framerate', framerate);
     settingsChanged = true;
   }
+  if (settings.webcam_encoder !== undefined) {
+    const preference = String(settings.webcam_encoder);
+    if (WEBCAM_ENCODER_PREFERENCES.includes(preference) && preference !== webcamEncoderPreference) {
+      webcamEncoderPreference = preference;
+      storeString('webcam_encoder', preference);
+      if (webcamCapture) {
+        stopWebcamCapture();
+        startWebcamCapture();
+      }
+    }
+  }
   if (settings.encoder !== undefined) {
     let newEncoderSetting = settings.encoder;
     if (!canDecodeEncoder(newEncoderSetting)) {
@@ -5595,6 +5609,12 @@ function initWebsockets() {
               if (ebc && typeof ebc.value === 'boolean') {
                 enable_binary_clipboard = ebc.locked ? ebc.value : getBoolParam('enable_binary_clipboard', ebc.value);
               }
+              const wce = obj.settings && obj.settings.webcam_encoder;
+              if (wce && WEBCAM_ENCODER_PREFERENCES.includes(wce.value)) {
+                const stored = getStringParam('webcam_encoder', wce.value);
+                webcamEncoderPreference = wce.locked || !WEBCAM_ENCODER_PREFERENCES.includes(stored)
+                  ? wce.value : stored;
+              }
               // After the gates above, so the one-time initial push honours them.
               maybeSendInitialClipboard();
               window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
@@ -6591,6 +6611,7 @@ function startWebcamCapture() {
     return;
   }
   webcamCapture = new WebcamCapture({
+    encoderPreference: webcamEncoderPreference,
     sendFrame: (codec, keyframe, payload, rotation, flip) => {
       if (!(websocket && websocket.readyState === WebSocket.OPEN && isWebcamActive)) {
         return;

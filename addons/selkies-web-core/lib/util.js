@@ -83,6 +83,10 @@ export const DISPLAY_LABELS = {
     jpeg: "JPEG (Striped Frame)",
     cbr: "CBR (Constant Bitrate)",
     crf: "CRF (Constant Quality)",
+    auto: "Auto",
+    h264: "H.264",
+    vp8: "VP8",
+    mjpeg: "MJPEG",
 };
 
 /**

@@ -305,7 +305,8 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
     except Exception as e:
         print(f"      (download button: {e!r})")
     listing = None
-    deadline = time.time() + 15
+    # The index shares the server's loop with the encoder; starved runners lag it.
+    deadline = time.time() + 30
     while time.time() < deadline and listing is None:
         for frame in page.frames:
             if "/api/files/" in frame.url:

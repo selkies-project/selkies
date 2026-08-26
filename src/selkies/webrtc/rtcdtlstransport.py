@@ -69,6 +69,7 @@ from .rtp import (
     RtcpPsfbPacket,
     RtcpRrPacket,
     RtcpRtpfbPacket,
+    pack_twcc_fci,
     RtcpSrPacket,
     RtpPacket,
     is_rtcp,
@@ -423,6 +424,14 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_seq = 0
         self._twcc_history: dict[int, tuple[int, float]] = {}
         self.twcc_estimate: Optional[dict] = None
+        # Receive side of transport-wide congestion control: a sender that
+        # negotiates transport-cc runs its bandwidth estimation on this
+        # feedback alone and starves at its floor bitrate without it.
+        self._twcc_rx_arrivals: dict[int, float] = {}
+        self._twcc_rx_last_ext: Optional[int] = None
+        self._twcc_rx_next: Optional[int] = None
+        self._twcc_rx_last_fb = 0.0
+        self._twcc_rx_fb_count = 0
 
         # Optional strict-priority packet pacer (SELKIES_WEBRTC_PACER): queues
         # video behind audio/RTCP/data instead of blasting frames to the wire,
@@ -835,6 +844,54 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             await self.transport._send(data)
         self.__tx_bytes += len(data)
         self.__tx_packets += 1
+
+    async def _twcc_received(self, seq: int, arrival_ms: float, media_ssrc: int,
+                             rtcp_ssrc: Optional[int]) -> None:
+        """Record one received packet's transport-wide sequence and answer with
+        feedback at most every 100 ms, built inline on arrival: while packets
+        flow the estimator is fed at the cadence browsers use, and when they
+        stop there is nothing left to report."""
+        last = self._twcc_rx_last_ext
+        if last is None:
+            ext = seq
+        else:
+            delta = (seq - last) & 0xFFFF
+            ext = last + delta - (0x10000 if delta >= 0x8000 else 0)
+        if ext < 0:
+            return
+        if last is None or ext > last:
+            self._twcc_rx_last_ext = ext
+        if self._twcc_rx_next is not None and ext < self._twcc_rx_next:
+            return
+        self._twcc_rx_arrivals[ext] = arrival_ms
+        now = time.time()
+        if now - self._twcc_rx_last_fb < 0.1:
+            return
+        base = self._twcc_rx_next
+        if base is None:
+            base = min(self._twcc_rx_arrivals)
+        end = self._twcc_rx_last_ext
+        if end - base + 1 > 0x7FFF:
+            base = end - 1024
+        arrivals = [self._twcc_rx_arrivals.get(i) for i in range(base, end + 1)]
+        fci = pack_twcc_fci(base, arrivals, self._twcc_rx_fb_count)
+        if not fci:
+            return
+        self._twcc_rx_last_fb = now
+        self._twcc_rx_fb_count = (self._twcc_rx_fb_count + 1) & 0xFF
+        for key in [k for k in self._twcc_rx_arrivals if k <= end]:
+            del self._twcc_rx_arrivals[key]
+        self._twcc_rx_next = end + 1
+        packet = RtcpRtpfbPacket(
+            fmt=rtp.RTCP_RTPFB_TWCC,
+            ssrc=rtcp_ssrc if rtcp_ssrc is not None else 1,
+            media_ssrc=media_ssrc,
+            fci=fci,
+        )
+        try:
+            await self._send_rtp(bytes(packet))
+        except ConnectionError:
+            pass
 
     def _twcc_next(self, size: int) -> int:
         """Allocate the next transport-wide sequence number and record the packet's

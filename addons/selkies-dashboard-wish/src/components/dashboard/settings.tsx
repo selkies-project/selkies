@@ -115,6 +115,9 @@ const encoderOptions = [
  * WebRTC encoders offered until the server payload arrives; its `encoder`
  * allowed list is already filtered to what the webrtc pipeline produces.
  */
+/** `webcam_encoder` values; labels come from `displayLabel`. */
+const webcamEncoderOptions = ["auto", "h264", "vp8", "mjpeg"];
+
 const encoderOptionsRTC = [
     "h264enc",
 ];
@@ -271,6 +274,9 @@ export function Settings() {
     );
     const [encoder, setEncoder] = useState(() =>
         localStorage.getItem(getPrefixedKey("encoder")) || "h264enc"
+    );
+    const [webcamEncoder, setWebcamEncoder] = useState(() =>
+        localStorage.getItem(getPrefixedKey("webcam_encoder")) || "auto"
     );
     const [framerate, setFramerate] = useState(() =>
         parseInt(localStorage.getItem(getPrefixedKey("framerate")) ?? "", 10) || 60
@@ -751,6 +757,19 @@ export function Settings() {
         rederiveRateControl({ activeEncoder: selectedEncoder });
     };
 
+    const handleWebcamEncoderChange = (preference: string) => {
+        setWebcamEncoder(preference);
+        localStorage.setItem(getPrefixedKey("webcam_encoder"), preference);
+        debouncedPostSetting({ webcam_encoder: preference });
+    };
+    // The server default; locked overrides the stored choice.
+    useEffect(() => {
+        const wce = serverSettings?.webcam_encoder;
+        if (!wce || !webcamEncoderOptions.includes(wce.value)) return;
+        const stored = localStorage.getItem(getPrefixedKey("webcam_encoder"));
+        setWebcamEncoder(wce.locked || !webcamEncoderOptions.includes(stored ?? "") ? wce.value : stored!);
+    }, [serverSettings]);
+
     const handleFramerateChange = (selectedFramerate: number) => {
         setFramerate(selectedFramerate);
         localStorage.setItem(getPrefixedKey('framerate'), selectedFramerate.toString());
@@ -988,6 +1007,7 @@ export function Settings() {
         ? rateControlMode
         : (serverSettings?.rate_control_mode?.value ?? rateControlMode);
     const encoderRenderable = renderableSettings.encoder ?? true;
+    const webcamEncoderRenderable = (renderableSettings.webcamEncoder ?? true) && !isWebrtc;
 
     const showVideoTab = renderableSettings.videoSettings !== false;
     const showAudioTab = renderableSettings.audioSettings !== false;
@@ -1244,6 +1264,31 @@ export function Settings() {
                                                 onClick={() => handleEncoderChange(enc)}
                                             >
                                                 {displayLabel(enc)}
+                                            </DropdownMenuItem>
+                                        ))}
+                                    </DropdownMenuContent>
+                                </DropdownMenu>
+                            </div>
+                        )}
+
+                        {webcamEncoderRenderable && (
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">{tl('sections.video.webcamEncoderLabel')}</label>
+                                <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                        <Button variant="outline" className="w-full justify-between"
+                                            disabled={!!serverSettings?.webcam_encoder?.locked}>
+                                            {displayLabel(webcamEncoder)}
+                                            <ChevronUp className="h-4 w-4 rotate-180" />
+                                        </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent className="w-full">
+                                        {webcamEncoderOptions.map(pref => (
+                                            <DropdownMenuItem
+                                                key={pref}
+                                                onClick={() => handleWebcamEncoderChange(pref)}
+                                            >
+                                                {displayLabel(pref)}
                                             </DropdownMenuItem>
                                         ))}
                                     </DropdownMenuContent>

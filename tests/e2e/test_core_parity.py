@@ -174,7 +174,8 @@ def button_reports(page: Any) -> int:
 def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
     """Auto -> preset -> reset -> scale-locally + resize, at dpr 2."""
     phys_w, phys_h = VIEW_W * DPR, VIEW_H * DPR
-    realized = wait_root(phys_w, phys_h)
+    # The first realization rides the whole cold path; loaded runners stretch it.
+    realized = wait_root(phys_w, phys_h, timeout=30)
     res.check("auto mode requests the physical window size",
               root_matches(realized, phys_w, phys_h), f"root={realized}")
     sent = page.evaluate("window.__resSent")

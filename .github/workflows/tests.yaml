@@ -169,6 +169,7 @@ jobs:
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
             libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
+            coturn \
             labwc
       # The suites have to exercise the pixelflux and pcmflux that the images,
       # packages and AppImages ship, which are built from main HEAD rather than

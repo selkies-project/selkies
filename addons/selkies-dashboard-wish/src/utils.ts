@@ -205,6 +205,7 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.microphoneToggle = isSettingRenderable(s.microphone_enabled);
   newRenderable.webcamToggle = isSettingRenderable(s.webcam_enabled)
     && (s.ui_sidebar_show_webcam?.value ?? true);
+  newRenderable.webcamEncoder = isSettingRenderable(s.webcam_encoder) && newRenderable.webcamToggle;
   newRenderable.gamepadToggle = isSettingRenderable(s.gamepad_enabled);
 
   newRenderable.enableRateControl = s.enable_rate_control?.value ?? true;

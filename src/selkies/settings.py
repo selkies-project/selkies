@@ -896,6 +896,13 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'Pixel format of the virtual webcam device. "auto" follows the uplink: a browser sending JPEG (no WebCodecs) gets an MJPEG device that carries its frames as received, any other uplink an I420 device, and a later uplink of the other kind re-creates the device for itself while no application is reading it. Or pin "I420" (planar 4:2:0, the browsers\' preference), "NV12", "YUYV" or "MJPEG", which is then kept whatever arrives.',
     },
     {
+        "name": "webcam_encoder",
+        "type": "enum",
+        "default": "auto",
+        "meta": {"allowed": ["auto", "h264", "vp8", "mjpeg"]},
+        "help": 'Codec WebSocket clients encode the webcam uplink with. "auto" runs the measured ladder (H.264, else VP8, JPEG when neither keeps up) on engines that stream camera frames through MediaStreamTrackProcessor, and JPEG on the `<video>`-element path (Firefox): its software encoders can hold the camera rate while costing a full core, which no client-side probe can price. "h264" or "vp8" run that one codec on every path, trading client CPU for a fraction of the uplink bandwidth, still falling to JPEG where it cannot keep up or encodes the wrong colours; "mjpeg" pins JPEG everywhere. Clients may override per user unless the value is locked; the WebRTC transport encodes in the browser and ignores this.',
+    },
+    {
         "name": "webcam_device",
         "type": "str",
         "default": "auto",

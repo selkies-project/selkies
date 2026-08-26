@@ -101,6 +101,9 @@ const encoderOptionsWR = [
   "h264enc",
 ]
 
+/** `webcam_encoder` values; labels come from `displayLabel`. */
+const webcamEncoderOptions = ["auto", "h264", "vp8", "mjpeg"];
+
 const rateControlOptions = ["cbr", "crf"];
 
 const commonResolutionValues = [
@@ -1011,6 +1014,7 @@ function Sidebar() {
     newRenderable.microphoneToggle = isRenderable('microphone_enabled');
     newRenderable.webcamToggle = isRenderable('webcam_enabled')
       && (s.ui_sidebar_show_webcam?.value ?? true);
+    newRenderable.webcamEncoder = isRenderable('webcam_encoder') && newRenderable.webcamToggle;
     newRenderable.gamepadToggle = isRenderable('gamepad_enabled');
 
     // Absent from the payload means the server default, which is on.
@@ -1194,6 +1198,9 @@ function Sidebar() {
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
   const [encoder, setEncoder] = useState(
     localStorage.getItem(getPrefixedKey("encoder")) || DEFAULT_ENCODER
+  );
+  const [webcamEncoder, setWebcamEncoder] = useState(
+    localStorage.getItem(getPrefixedKey("webcam_encoder")) || "auto"
   );
   const [framerate, setFramerate] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("framerate")), 10) ||
@@ -1957,6 +1964,19 @@ function Sidebar() {
     debouncedPostSetting({ encoder: selectedEncoder });
     rederiveRateControl({ activeEncoder: selectedEncoder });
   };
+  const handleWebcamEncoderChange = (event) => {
+    const preference = event.target.value;
+    setWebcamEncoder(preference);
+    localStorage.setItem(getPrefixedKey("webcam_encoder"), preference);
+    debouncedPostSetting({ webcam_encoder: preference });
+  };
+  // The server default; locked overrides the stored choice.
+  useEffect(() => {
+    const wce = serverSettings?.webcam_encoder;
+    if (!wce || !webcamEncoderOptions.includes(wce.value)) return;
+    const stored = localStorage.getItem(getPrefixedKey("webcam_encoder"));
+    setWebcamEncoder(wce.locked || !webcamEncoderOptions.includes(stored) ? wce.value : stored);
+  }, [serverSettings]);
   const handleFramerateChange = (event) => {
     const selectedFramerate = parseInt(event.target.value, 10);
     setFramerate(selectedFramerate);
@@ -3185,6 +3205,25 @@ function Sidebar() {
                       {dynamicEncoderOptions.map((enc) => (
                         <option key={enc} value={enc}>
                           {displayLabel(enc)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {!isWebrtc && (renderableSettings.webcamEncoder ?? true) && (
+                  <div className="dev-setting-item">
+                    <label htmlFor="webcamEncoderSelect">
+                      {t("sections.video.webcamEncoderLabel")}
+                    </label>
+                    <select
+                      id="webcamEncoderSelect"
+                      value={webcamEncoder}
+                      onChange={handleWebcamEncoderChange}
+                      disabled={!serverSettings || !!serverSettings.webcam_encoder?.locked}
+                    >
+                      {webcamEncoderOptions.map((pref) => (
+                        <option key={pref} value={pref}>
+                          {displayLabel(pref)}
                         </option>
                       ))}
                     </select>

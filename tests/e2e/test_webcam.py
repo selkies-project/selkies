@@ -608,6 +608,57 @@ def detail_block() -> "H.Results":
     return res
 
 
+WIRE_CODEC_JS = """
+  (() => {
+    window.__codecs = {};
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      if (data instanceof ArrayBuffer && data.byteLength > 3) {
+        const b = new Uint8Array(data);
+        if (b[0] === 0x06) window.__codecs[b[1]] = (window.__codecs[b[1]] || 0) + 1;
+      }
+      return send.apply(this, arguments);
+    };
+  })();
+"""
+
+
+def encoderpref_block() -> "H.Results":
+    """The `webcam_encoder` setting, proven by the uplink's codec bytes on the
+    engine whose rung it decides (Firefox, no MediaStreamTrackProcessor): the
+    default keeps it on MJPEG, an explicit codec re-opens the ladder with that
+    codec alone, and a forced codec never yields another codec's id -- though
+    it may degrade to JPEG (Firefox H.264 emits nothing through its plugin's
+    cold start). Every mode lands the same green on the device."""
+    res = H.Results("webcam-encoderpref")
+    cam = PublishedCamera(flat_frames()).start()
+    for pref, want, need in (("auto", {0}, 0), ("vp8", {2}, 2), ("h264", {0, 1}, None)):
+        env = {"SELKIES_WEBCAM_ENABLED": "false", "SELKIES_WEBCAM_PIXEL_FORMAT": "I420"}
+        if pref != "auto":
+            env["SELKIES_WEBCAM_ENCODER"] = pref
+        H.server_start(mode="websockets", wayland=False, extra_env=env)
+        try:
+            with sync_playwright() as p:
+                browser, page, errors = launch(p, "firefox", cam.sock_dir, "websockets", init_js=WIRE_CODEC_JS)
+                res.check(f"{pref}: stream up", bool(C.wait_ws_video(page)), "")
+                toggle(page, True)
+                res.check(f"{pref}: webcam reports active", wait_status(page, True),
+                          str(page.evaluate("window.__camStatus")))
+                r = wait_for_picture([((640, 360), GREEN)])
+                res.check(f"{pref}: device shows the camera's green",
+                          near(r["samples"].get((640, 360)), GREEN), str(r.get("samples")))
+                codecs = page.evaluate("window.__codecs") or {}
+                got = {int(k) for k, v in codecs.items() if v > 5}
+                res.check(f"{pref}: wire codecs within {sorted(want)}",
+                          bool(got) and got <= want and (need is None or need in got), str(codecs))
+                res.check(f"{pref}: no page errors", not errors, "; ".join(errors)[:200])
+                browser.close()
+        finally:
+            H.server_stop()
+    cam.stop()
+    return res
+
+
 def main() -> int:
     sel = sys.argv[1] if len(sys.argv) > 1 else "websockets"
     build()
@@ -621,6 +672,8 @@ def main() -> int:
         ok = reformat_block().summary()
     elif sel == "detail":
         ok = detail_block().summary()
+    elif sel == "encoderpref":
+        ok = encoderpref_block().summary()
     else:
         ok = transport_block(sel).summary()
     return 0 if ok else 1

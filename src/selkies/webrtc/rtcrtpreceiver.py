@@ -471,6 +471,15 @@ class RTCRtpReceiver:
         if not self._enabled:
             return
 
+        # answer transport-wide congestion control
+        if packet.extensions.transport_sequence_number is not None:
+            await self.transport._twcc_received(
+                packet.extensions.transport_sequence_number,
+                arrival_time_ms,
+                packet.ssrc,
+                self.__rtcp_ssrc,
+            )
+
         # feed bitrate estimator
         if self.__remote_bitrate_estimator is not None:
             if packet.extensions.abs_send_time is not None:

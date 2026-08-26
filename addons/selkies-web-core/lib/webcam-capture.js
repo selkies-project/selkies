@@ -1,43 +1,36 @@
 /**
  * Webcam capture for the WebSocket transport.
  *
- * getUserMedia video frames are encoded in the page with WebCodecs (H.264,
- * else VP8) and handed to a transport-supplied sender one encoded frame at a
- * time; the server's virtual camera decodes them. A codec is kept only while
- * it encodes the camera in real time: a frame offered to a busy encoder is
- * dropped rather than queued, so an engine that cannot keep up spends a core
- * and sends a fraction of the camera, and the share dropped is what moves the
- * uplink down the ladder (`createEncodePace`). Past the last codec, and on
- * engines with no WebCodecs or no frame source but a `<video>` element, it
- * encodes JPEG frames from a canvas, which the server passes on as an MJPEG
- * device or decodes just the same: more bytes on the wire at the camera's
- * own rate. The WebRTC transport does not use this class: it attaches the
- * camera track to a sendonly transceiver (lib/webrtc.js `setWebcam`) and the
- * browser's own encoder takes over.
+ * getUserMedia frames are encoded in the page with WebCodecs (H.264, else
+ * VP8) and handed to a transport-supplied sender one encoded frame at a
+ * time; the server's virtual camera decodes them. Codecs earn their place
+ * empirically: the probe ranks candidates on the camera's own frames and
+ * rejects one whose output decodes to the wrong picture
+ * (`PROBE_COLOUR_TOLERANCE`); after it, a frame offered to a busy encoder is
+ * dropped rather than queued, a frame the encoder sits on counts the same
+ * way (`createLagGauge`), and the share behind moves the uplink down the
+ * ladder (`createEncodePace`). Past the last codec, and with no WebCodecs at
+ * all, JPEG frames from a canvas: more bytes at the camera's own rate. The
+ * WebRTC transport instead attaches the track to a sendonly transceiver
+ * (lib/webrtc.js `setWebcam`).
  *
- * Frame orientation: the upright transform is relayed with every encoded
- * frame instead of being drawn into the pixels. It is read from VideoFrame
- * rotation/flip where the engine exposes them, and derived from the window
- * orientation where it does not (Safari, whose camera frames keep the
- * sensor's fixed orientation). VideoEncoder rejects a mid-stream orientation
- * change, so the encoder is rebuilt whenever the value moves. The JPEG rung
- * relays nothing: drawImage bakes the orientation the engine knows.
+ * Orientation is relayed with each encoded frame, never drawn into the
+ * pixels: read from VideoFrame rotation/flip where exposed, derived from the
+ * window orientation where not (Safari's sensor-fixed frames). VideoEncoder
+ * rejects a mid-stream orientation change, so a turn rebuilds the encoder;
+ * the JPEG rung relays nothing, drawImage bakes what the engine knows.
  *
- * Frames are read off the track through the first of these that the engine
- * offers: MediaStreamTrackProcessor on the page (Chromium), the standard
- * worker-only MediaStreamTrackProcessor with the track transferred into a
- * DedicatedWorker (Safari 18+), and a `<video>` element sampled with
- * requestVideoFrameCallback (Firefox and anything else). The last rung pins
- * the JPEG path: every sample is materialized on the page thread, and a
- * software VideoEncoder fed that way drifts behind real time where a native
- * JPEG encode holds the camera's rate.
- *
- * Encoding runs off the page thread when the engine allows: the encode
- * worker is opened first, and an engine that transfers the camera track into
- * it (Safari, and Firefox as it ships transferable tracks) reads and encodes
- * there so frames never touch the page; otherwise the page reads frames its
- * own way and transfers each to the worker, and without a worker at all it
- * feeds a page-thread encoder through the same source paths.
+ * Frames come off the track through the first source the engine offers:
+ * MediaStreamTrackProcessor on the page (Chromium), the worker-only
+ * processor with the track transferred in (Safari 18+), or a `<video>`
+ * element sampled with requestVideoFrameCallback (Firefox and the rest).
+ * That last source feeds the ladder only when `webcam_encoder` names a
+ * codec -- an engine landing there can hold the camera rate on a software
+ * encoder at the cost of a whole core, which no probe can price -- so `auto`
+ * sends its samples to the JPEG rung. Encoding runs in a worker when the
+ * engine allows (a transferable track never touches the page; otherwise
+ * each frame is transferred), else on the page thread through the same
+ * sources.
  * @module
  */
 
@@ -51,11 +44,9 @@ export const WEBCAM_CODEC_VP8 = 2;
 export const WEBCAM_CODEC_VP9 = 3;
 
 /**
- * Encoder candidates in preference order. Reporting support is no promise of
- * speed, so the worker probe encodes through each and takes the first that
- * keeps up with the capture rate (Firefox's software H.264 tops out well
- * under 30 fps at 720p, where its VP8 runs three times faster); the rest are
- * tried on failure.
+ * Candidates in preference order; support reports are no promise of speed,
+ * so the probe measures each on real frames (Firefox's software H.264 tops
+ * out under 30 fps at 720p where its VP8 runs three times faster).
  */
 const ENCODER_CANDIDATES = [
   { id: WEBCAM_CODEC_H264, name: "h264", codec: "avc1.42E01F", extra: { avc: { format: "annexb" } } },
@@ -69,25 +60,42 @@ const ENCODER_CANDIDATES = [
 const KEYFRAME_INTERVAL_MS = 4000;
 
 /**
- * Frames are admitted by a credit that fills at the configured rate and costs
- * one frame interval to spend, capped at this many intervals. A camera
- * delivering at that rate then passes whole however its delivery jitters (and
- * it always does, down to the compositor quantizing a `<video>` element's
- * frame callbacks), while a faster source is still thinned to the rate asked
- * for. Comparing each gap against the interval instead drops every jittered
- * frame and halves the uplink.
+ * Frame admission credit: fills at the configured rate, one interval per
+ * frame, capped here. Delivery always jitters (compositors quantize
+ * `<video>` callbacks), so a per-gap limiter would drop every jittered frame
+ * and halve the uplink; the credit passes a camera at rate whole.
  */
 const FRAME_CREDIT_INTERVALS = 2;
+
+/**
+ * `webcam_encoder` values: `auto` = the ladder on MediaStreamTrackProcessor
+ * sources and JPEG on the `<video>` rung, `h264`/`vp8` = that codec alone
+ * everywhere (JPEG still the floor), `mjpeg` = JPEG everywhere.
+ */
+export const WEBCAM_ENCODER_PREFERENCES = ["auto", "h264", "vp8", "mjpeg"];
 
 /** Frames the encode pace is measured over before it can be believed. */
 export const PACE_MIN_SAMPLES = 60;
 /** Share of offered frames the encoder may drop before it counts as too slow. */
 export const PACE_BEHIND_RATIO = 1 / 6;
+/**
+ * Capture intervals the oldest unanswered frame may age before the encoder
+ * counts as behind: some encoders hold frames in a pipeline `encodeQueueSize`
+ * never shows (Firefox H.264 runs tens of seconds stale at a queue of two).
+ * Half a second at 30 fps.
+ */
+export const PACE_LAG_INTERVALS = 15;
+/**
+ * Region-mean colour error between a probe frame and its own decoded output,
+ * past which the candidate encodes the wrong picture (some Firefox GPU
+ * stacks hand their encoder false chroma). Honest lossy encoding stays under
+ * a third of this.
+ */
+export const PROBE_COLOUR_TOLERANCE = 48;
 
 /**
- * Whether the encoder keeps up with the camera. A frame offered to a busy
- * encoder is dropped rather than queued, so the share dropped, measured on
- * live camera frames, is the signal that a codec is too slow.
+ * Share of offered frames the encoder was behind for, measured on live
+ * camera frames: the signal that a codec is too slow.
  * @returns {{note: function(boolean): void, tooSlow: function(): boolean,
  *   behindRatio: function(): number, reset: function(): void}}
  */
@@ -95,19 +103,12 @@ export function createEncodePace() {
   let offered = 0;
   let behind = 0;
   return {
-    /**
-     * Records one frame offered to the encoder.
-     * @param {boolean} wasBehind Whether it was dropped for a busy encoder.
-     */
+    /** @param {boolean} wasBehind The frame was dropped for a busy encoder. */
     note(wasBehind) {
       offered++;
       if (wasBehind) behind++;
     },
-    /**
-     * Whether the encoder fell behind over a whole window; true starts a
-     * fresh window so the next codec is measured alone.
-     * @returns {boolean}
-     */
+    /** @returns {boolean} A whole window fell behind; true starts a fresh one. */
     tooSlow() {
       if (offered < PACE_MIN_SAMPLES) return false;
       const slow = behind / offered > PACE_BEHIND_RATIO;
@@ -128,8 +129,48 @@ export function createEncodePace() {
 }
 
 /**
- * Closes a VideoFrame; the `<video>` element the pinned JPEG rung hands over
- * has nothing to close.
+ * Staleness of the oldest frame sent to the encoder and not yet answered by
+ * a chunk; answering settles everything up to its timestamp, so an encoder
+ * that quietly discards inputs is not held to them. Stringified into the
+ * encode worker: keep it self-contained apart from `PACE_LAG_INTERVALS`.
+ * @param {number} fps Capture rate the budget is scaled by.
+ * @returns {{budgetMs: number, sent: function(number, number): void,
+ *   answered: function(number): void, lagMs: function(number): number,
+ *   reset: function(): void}}
+ */
+export function createLagGauge(fps) {
+  const budgetMs = (PACE_LAG_INTERVALS * 1000) / (fps > 0 ? fps : 30);
+  let pending = [];
+  return {
+    budgetMs,
+    /**
+     * @param {number} timestamp Frame timestamp in microseconds.
+     * @param {number} wall Wallclock milliseconds at hand-over.
+     */
+    sent(timestamp, wall) {
+      pending.push({ timestamp, wall });
+    },
+    /** @param {number} timestamp Chunk timestamp settling every frame up to it. */
+    answered(timestamp) {
+      while (pending.length && pending[0].timestamp <= timestamp) pending.shift();
+    },
+    /**
+     * @param {number} now Wallclock milliseconds.
+     * @returns {number} Milliseconds the oldest unanswered frame has waited.
+     */
+    lagMs(now) {
+      return pending.length ? now - pending[0].wall : 0;
+    },
+    /** Forgets every outstanding frame. */
+    reset() {
+      pending = [];
+    },
+  };
+}
+
+/**
+ * Closes a VideoFrame; the `<video>` element the JPEG rung hands over has
+ * nothing to close.
  * @param {VideoFrame|HTMLVideoElement} frame
  */
 const closeFrame = (frame) => {
@@ -161,23 +202,18 @@ const deriveRotation = () =>
   ((window.orientation - SENSOR_UPRIGHT_ORIENTATION) % 360 + 360) % 360;
 
 /**
- * Whether this page has to derive what the frames do not carry. Only mobile
- * WebKit needs it: the one engine whose MediaStreamTrackProcessor lives in a
- * worker alone, and whose camera frames keep the sensor's fixed orientation
- * with no metadata to read it from. A worker source proves the engine and this
- * proves the viewport, because a desktop window has no orientation to derive
- * from and every other engine either pre-rotates the camera or exposes the
- * transform.
+ * Only mobile WebKit derives orientation: the one engine with a worker-only
+ * MediaStreamTrackProcessor and sensor-fixed frames carrying no transform.
+ * The worker source proves the engine, `window.orientation` the viewport.
  * @returns {boolean}
  */
 const canDeriveOrientation = () =>
   !HAS_FRAME_ORIENTATION && typeof window.orientation === "number";
 
 /**
- * Source of the frame-reader worker for engines whose
- * MediaStreamTrackProcessor exists only in workers: the transferred track is
- * read there and each VideoFrame transferred to the page, at most
- * `WORKER_MAX_IN_FLIGHT` unacknowledged at a time.
+ * Frame-reader worker for engines whose MediaStreamTrackProcessor exists
+ * only in workers: reads the transferred track, transfers each VideoFrame
+ * back, at most `WORKER_MAX_IN_FLIGHT` unacknowledged.
  */
 const MEDIA_WORKER_SRC = `
 let reader = null, track = null, inFlight = 0;
@@ -203,21 +239,20 @@ self.onmessage = async (e) => {
 `;
 
 /**
- * Source of the worker that runs the WebCodecs encoder off the page thread.
- * The page hands it VideoFrames (transferable, unlike a whole track), or an
- * engine that allows it transfers the camera track itself, and the worker
- * posts back only the encoded chunks for the page to send. The heavy encode
- * never touches the UI thread, and a backgrounded tab throttles the page's
- * event loop but not a worker's, so the encoder keeps pace instead of
- * falling behind and breaking its reference chain into a permanent desync.
- * `probe` measures the candidates here before the page commits; an engine
- * without WebCodecs in workers reports `unsupported` and the page encodes on
- * its own thread instead.
+ * Worker running the WebCodecs encoder off the page thread: the page hands
+ * it VideoFrames (or transfers the whole track where allowed) and gets back
+ * encoded chunks. A backgrounded tab throttles the page's loop but not a
+ * worker's, so the encoder keeps pace instead of breaking its reference
+ * chain into a desync. `probe` measures the candidates before the page
+ * commits; no WebCodecs in workers reports `unsupported`.
  */
 const ENCODE_WORKER_SRC = `
-const CANDIDATES = ${JSON.stringify(ENCODER_CANDIDATES)};
+let CANDIDATES = ${JSON.stringify(ENCODER_CANDIDATES)};
 const PACE_MIN_SAMPLES = ${PACE_MIN_SAMPLES};
 const PACE_BEHIND_RATIO = ${PACE_BEHIND_RATIO};
+const PACE_LAG_INTERVALS = ${PACE_LAG_INTERVALS};
+const PROBE_COLOUR_TOLERANCE = ${PROBE_COLOUR_TOLERANCE};
+const createLagGauge = ${createLagGauge.toString()};
 const KEYFRAME_INTERVAL_MS = ${KEYFRAME_INTERVAL_MS};
 const HAS_FRAME_ORIENTATION = ${HAS_FRAME_ORIENTATION};
 // Frames taken from the camera to measure the candidates with, how long to wait
@@ -227,21 +262,19 @@ const HAS_FRAME_ORIENTATION = ${HAS_FRAME_ORIENTATION};
 const PROBE_SOURCE_FRAMES = 8;
 const PROBE_WAIT_MS = 2500;
 const PROBE_BUDGET_MS = 400;
-// Share of the asked rate a candidate must reach for the uplink to start on it.
-// Short of this the JPEG rung is the better opening bid, but only clearly short:
-// a few frames either way is measurement noise, and paying eight times the
-// uplink for it would make the rung a coin toss. What the camera then does to
-// the encoder is the watchdog's to judge, on real frames.
+// Share of the asked rate a candidate must clearly reach to start on: a few
+// frames either way is noise, and the watchdog judges what the camera then
+// does to it on real frames.
 const PROBE_RATE_MARGIN = 0.9;
 let encoder = null, candIndex = 0, cand = null, configuring = false, active = true;
-// While probing, camera frames are held here rather than encoded, and the
-// candidates are measured on them once there are enough.
-let probing = false, probeFrames = [], probeTimer = null;
+// Camera frames held while probing; during the measurement itself further
+// frames are dropped, so nothing reaches the wire unvetted.
+let probing = false, measuring = false, probeFrames = [], probeTimer = null;
 let fps = 30, bitrate = 2500000, encodedSize = null, forceKeyframe = true, lastKeyframeMs = 0;
 let trackReader = null, trackRef = null;
-// Frames offered to the encoder in this window and those it was too busy to
-// take; see createEncodePace for why the share is the signal.
-let paceOffered = 0, paceBehind = 0;
+// The pace window (see createEncodePace) and the staleness gauge that
+// catches an encoder holding frames off-queue.
+let paceOffered = 0, paceBehind = 0, lag = null;
 // The upright transform every chunk is stamped with, and the one the encoder
 // latched: they differ where the page derives what the frames do not carry, and
 // then no rebuild is owed for a turn the encoder never sees.
@@ -262,16 +295,18 @@ async function makeEncoder(w, h, latched) {
     try {
       const enc = new VideoEncoder({
         output: (chunk) => {
+          if (lag) lag.answered(chunk.timestamp);
           if (!active) return;
           const buf = new ArrayBuffer(chunk.byteLength);
           chunk.copyTo(new Uint8Array(buf));
           self.postMessage({ type: 'chunk', codecId: cand.id, keyframe: chunk.type === 'key', buffer: buf,
                              rotation: orientation.rotation, flip: orientation.flip }, [buf]);
         },
-        error: (err) => { try { encoder && encoder.close(); } catch (x) {} encoder = null; encodedSize = null; candIndex++; },
+        error: (err) => { try { encoder && encoder.close(); } catch (x) {} encoder = null; encodedSize = null; lag = null; candIndex++; },
       });
       enc.configure(support.config || encoderConfig(cand, w, h));
       encoder = enc; encodedSize = { w: w, h: h, rotation: latched.rotation, flip: latched.flip };
+      lag = createLagGauge(fps);
       forceKeyframe = true; configuring = false;
       self.postMessage({ type: 'ready', codec: cand.name });
       return true;
@@ -284,20 +319,22 @@ async function makeEncoder(w, h, latched) {
 
 function encodeWith(frame, w, h) {
   if (!encoder || encoder.state !== 'configured' || !active) { frame.close(); return; }
-  const behind = encoder.encodeQueueSize > 1;
+  const now = performance.now();
+  // A visible queue and stale output both count as behind.
+  const behind = encoder.encodeQueueSize > 1 || (lag !== null && lag.lagMs(now) > lag.budgetMs);
   paceOffered++;
   if (behind) paceBehind++;
   if (paceOffered >= PACE_MIN_SAMPLES) {
     const slow = paceBehind / paceOffered > PACE_BEHIND_RATIO;
     paceOffered = 0; paceBehind = 0;
-    // Dropping this much of the camera is what a codec this engine cannot
-    // encode in real time looks like: a core at full tilt and a receiver
-    // falling behind. Take the next rung; the page takes the JPEG one when
-    // this list runs out.
+    // Dropping or delaying this much of the camera is what a codec this
+    // engine cannot encode in real time looks like: a core at full tilt and
+    // a receiver falling behind. Take the next rung; the page takes the JPEG
+    // one when this list runs out.
     if (slow) {
       self.postMessage({ type: 'slow', codec: cand ? cand.name : '' });
       try { if (encoder && encoder.state !== 'closed') encoder.close(); } catch (err) {}
-      encoder = null; encodedSize = null; candIndex++;
+      encoder = null; encodedSize = null; lag = null; candIndex++;
       if (candIndex >= CANDIDATES.length) self.postMessage({ type: 'exhausted' });
       frame.close();
       return;
@@ -306,12 +343,12 @@ function encodeWith(frame, w, h) {
   // The encoder is behind: drop this input frame (never an encoded output) so no
   // reference chain breaks; a worker rarely reaches this, which is the point.
   if (behind) { frame.close(); return; }
-  const now = performance.now();
   const keyFrame = forceKeyframe || now - lastKeyframeMs >= KEYFRAME_INTERVAL_MS;
   try {
     encoder.encode(frame, { keyFrame: keyFrame });
+    if (lag) lag.sent(frame.timestamp, now);
     if (keyFrame) { lastKeyframeMs = now; forceKeyframe = false; }
-  } catch (err) { try { encoder.close(); } catch (x) {} encoder = null; encodedSize = null; candIndex++; }
+  } catch (err) { try { encoder.close(); } catch (x) {} encoder = null; encodedSize = null; lag = null; candIndex++; }
   frame.close();
 }
 
@@ -328,7 +365,7 @@ function handleFrame(frame, label) {
   const latched = orientationOf(frame);
   orientation = label || (HAS_FRAME_ORIENTATION ? latched : (derived || orientation));
   if (probing) {
-    if (probeFrames.length >= PROBE_SOURCE_FRAMES) { frame.close(); return; }
+    if (measuring || probeFrames.length >= PROBE_SOURCE_FRAMES) { frame.close(); return; }
     // The window belongs to the camera once it is delivering. A device chosen
     // from several starts late, and a window spent waiting for it would expire
     // holding too few frames to measure anything.
@@ -341,6 +378,8 @@ function handleFrame(frame, label) {
     return;
   }
   if (configuring) { frame.close(); return; }
+  // A spent ladder was announced once; later frames are not a fresh verdict.
+  if (!encoder && candIndex >= CANDIDATES.length) { frame.close(); return; }
   if (!encoder || !encodedSize || encodedSize.w !== w || encodedSize.h !== h ||
       encodedSize.rotation !== latched.rotation || encodedSize.flip !== latched.flip) {
     makeEncoder(w, h, latched).then(() => { if (encoder) encodeWith(frame, w, h); else frame.close(); });
@@ -352,12 +391,22 @@ function handleFrame(frame, label) {
 // Frames per second one candidate sustains on the camera's own frames, or 0 if
 // it cannot encode them.
 async function measure(c, w, h, frames) {
+  const out = { rate: 0, colErr: -1 };
   let support = null;
-  try { support = await VideoEncoder.isConfigSupported(encoderConfig(c, w, h)); } catch (err) { return 0; }
-  if (!support || !support.supported) return 0;
+  try { support = await VideoEncoder.isConfigSupported(encoderConfig(c, w, h)); } catch (err) { return out; }
+  if (!support || !support.supported) return out;
   let encoded = 0, failed = false;
-  const enc = new VideoEncoder({ output: () => { encoded++; }, error: () => { failed = true; } });
-  try { enc.configure(support.config || encoderConfig(c, w, h)); } catch (err) { return 0; }
+  const chunks = [];
+  const enc = new VideoEncoder({
+    output: (chunk) => {
+      encoded++;
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      chunks.push({ key: chunk.type === 'key', ts: chunk.timestamp, data });
+    },
+    error: () => { failed = true; },
+  });
+  try { enc.configure(support.config || encoderConfig(c, w, h)); } catch (err) { return out; }
   const started = performance.now();
   // The frames stay open: each candidate encodes the same ones, and the probe
   // closes them once the last candidate has had its turn.
@@ -370,7 +419,71 @@ async function measure(c, w, h, frames) {
   ]);
   const rate = encoded / ((performance.now() - started) / 1000);
   try { enc.close(); } catch (err) { /* already closed */ }
-  return failed ? 0 : rate;
+  if (failed) return out;
+  out.rate = rate;
+  out.colErr = await colourError(frames[0], chunks, c);
+  return out;
+}
+
+// Largest per-channel difference between region means of the first probe
+// frame and its own decoded output, or -1 (an unjudged candidate passes)
+// when there is nothing to judge with. Drawn unscaled and averaged over a
+// coarse grid: means converge however lossily grain encodes while false
+// chroma moves whole regions, and drawImage downscaling point-samples on
+// some engines, so two samplings of grain disagree.
+async function colourError(frame, chunks, c) {
+  if (typeof OffscreenCanvas === 'undefined' || typeof VideoDecoder === 'undefined' || !chunks.length) return -1;
+  const cells = 4;
+  const regionMeans = (source, w, h) => {
+    const canvas = new OffscreenCanvas(w, h);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(source, 0, 0);
+    const d = ctx.getImageData(0, 0, w, h).data;
+    const sums = new Float64Array(cells * cells * 3);
+    const counts = new Float64Array(cells * cells);
+    for (let y = 0; y < h; y++) {
+      const rowCell = (((y * cells) / h) | 0) * cells;
+      for (let x = 0; x < w; x++) {
+        const cell = rowCell + (((x * cells) / w) | 0);
+        const i = (y * w + x) * 4;
+        sums[cell * 3] += d[i];
+        sums[cell * 3 + 1] += d[i + 1];
+        sums[cell * 3 + 2] += d[i + 2];
+        counts[cell]++;
+      }
+    }
+    for (let cell = 0; cell < counts.length; cell++) {
+      sums[cell * 3] /= counts[cell];
+      sums[cell * 3 + 1] /= counts[cell];
+      sums[cell * 3 + 2] /= counts[cell];
+    }
+    return sums;
+  };
+  const decoded = [];
+  try {
+    const w = frame.displayWidth || frame.codedWidth;
+    const h = frame.displayHeight || frame.codedHeight;
+    const want = regionMeans(frame, w, h);
+    let failed = false;
+    const dec = new VideoDecoder({ output: (f) => decoded.push(f), error: () => { failed = true; } });
+    dec.configure({ codec: c.codec });
+    for (let i = 0; i < chunks.length; i++) {
+      dec.decode(new EncodedVideoChunk({ type: chunks[i].key ? 'key' : 'delta', timestamp: chunks[i].ts, data: chunks[i].data }));
+    }
+    await dec.flush();
+    let err = -1;
+    if (decoded.length && !failed) {
+      const got = regionMeans(decoded[decoded.length - 1], w, h);
+      err = 0;
+      for (let i = 0; i < want.length; i++) err = Math.max(err, Math.abs(want[i] - got[i]));
+    }
+    try { dec.close(); } catch (e2) { /* already closed */ }
+    for (let i = 0; i < decoded.length; i++) { try { decoded[i].close(); } catch (e2) {} }
+    return err;
+  } catch (err) {
+    for (let i = 0; i < decoded.length; i++) { try { decoded[i].close(); } catch (e2) {} }
+    return -1;
+  }
 }
 
 self.onmessage = async (e) => {
@@ -408,6 +521,7 @@ self.onmessage = async (e) => {
   }
   if (m.type === 'probe') {
     fps = m.fps || 30; bitrate = m.bitrate || 2500000;
+    if (Array.isArray(m.candidates) && m.candidates.length) CANDIDATES = m.candidates;
     if (typeof VideoEncoder === 'undefined') { self.postMessage({ type: 'unsupported' }); return; }
     probing = true; probeFrames = [];
     // A camera that never delivers must not hold the uplink: rank on whatever
@@ -423,37 +537,47 @@ self.onmessage = async (e) => {
 // the page the JPEG rung when none of them keeps up with what the lens is
 // showing at the size it is showing it.
 async function runProbe(w, h) {
-  if (!probing) return;
-  probing = false;
+  if (!probing || measuring) return;
+  measuring = true;
   if (probeTimer !== null) { clearTimeout(probeTimer); probeTimer = null; }
   const frames = probeFrames;
   probeFrames = [];
-  // Short of the whole set there is no measurement: a rate taken over a few
-  // frames carries the keyframe and the encoder's flush, and reads low enough
-  // to reject a codec that keeps up. Such a camera opens on the first
-  // candidate, as one that delivered nothing does, and the watchdog answers
-  // for it; the JPEG rung is never reached on that evidence.
+  // A partial set is no measurement: a few frames carry the keyframe and the
+  // flush and read low enough to reject a codec that keeps up, so open on
+  // the first candidate and let the watchdog answer for it.
   if (frames.length < PROBE_SOURCE_FRAMES) {
+    probing = false; measuring = false;
     for (let i = 0; i < frames.length; i++) { try { frames[i].close(); } catch (err) {} }
     if (!active) return;
     self.postMessage({ type: 'probed', codec: CANDIDATES[0].name });
     return;
   }
-  let best = -1, bestRate = 0;
+  let best = -1, bestRate = 0, wrongColour = false;
   for (let i = 0; i < CANDIDATES.length; i++) {
-    const rate = await measure(CANDIDATES[i], w, h, frames);
-    if (rate > bestRate) { best = i; bestRate = rate; }
-    if (rate >= fps) break;
+    const m = await measure(CANDIDATES[i], w, h, frames);
+    // Wrong colours are out however fast; the JPEG rung draws through the
+    // reference's own path.
+    if (m.colErr > PROBE_COLOUR_TOLERANCE) {
+      wrongColour = true;
+      self.postMessage({ type: 'wrongcolour', codec: CANDIDATES[i].name, colErr: Math.round(m.colErr) });
+      continue;
+    }
+    if (m.rate > bestRate) { best = i; bestRate = m.rate; }
+    if (m.rate >= fps) break;
   }
+  probing = false; measuring = false;
   for (let i = 0; i < frames.length; i++) { try { frames[i].close(); } catch (err) {} }
   if (!active) return;
-  if (best < 0) { self.postMessage({ type: 'unsupported' }); return; }
-  // Nothing came close to the rate the camera is being asked for. Starting on
-  // the fastest of them anyway spends a core to send a fraction of the camera,
-  // which is what the JPEG rung exists to avoid; a candidate that is merely
-  // near the rate is taken, and the watchdog in encodeWith answers for it on
-  // the frames that follow.
+  if (best < 0) {
+    candIndex = CANDIDATES.length;
+    self.postMessage({ type: wrongColour ? 'exhausted' : 'unsupported' });
+    return;
+  }
+  // Nothing near the asked rate: starting anyway spends a core to send a
+  // fraction of the camera, which the JPEG rung exists to avoid. Merely-near
+  // is taken; the watchdog answers for it.
   if (bestRate < fps * PROBE_RATE_MARGIN) {
+    candIndex = CANDIDATES.length;
     self.postMessage({ type: 'exhausted', codec: CANDIDATES[best].name, rate: bestRate.toFixed(1) });
     return;
   }
@@ -476,6 +600,8 @@ async function runProbe(w, h) {
  * @property {number} [fps] Frame rate hint and send cadence cap, 30 by default.
  * @property {number} [bitrate] Encoder bitrate in bits per second, 2500000 by default.
  * @property {number} [quality] JPEG quality on the fallback rung, 0.8 by default.
+ * @property {string} [encoderPreference] A `WEBCAM_ENCODER_PREFERENCES` value
+ *     (the `webcam_encoder` setting); `auto` by default.
  */
 
 /**
@@ -494,6 +620,11 @@ export class WebcamCapture {
     this.fps = opts.fps || 30;
     this.bitrate = opts.bitrate || 2500000;
     this.quality = opts.quality || 0.8;
+    this.encoderPreference = WEBCAM_ENCODER_PREFERENCES.indexOf(opts.encoderPreference) >= 0
+      ? opts.encoderPreference : "auto";
+    this._encoderCandidates = this.encoderPreference === "h264" || this.encoderPreference === "vp8"
+      ? ENCODER_CANDIDATES.filter((c) => c.name === this.encoderPreference)
+      : ENCODER_CANDIDATES;
 
     this._stream = null;
     this._track = null;
@@ -675,17 +806,21 @@ export class WebcamCapture {
   /**
    * Opens the encode worker, then the frame source: the combined
    * read-and-encode worker when the engine transfers the track, else a page
-   * source that feeds the worker or the page-thread encoder. The worker ranks
-   * the candidates on the camera's own frames, so a source has to be feeding
-   * it while it decides and its verdict is awaited after; a worker that was
-   * reading the camera itself and then dropped out took its clone of the
-   * track with it, so the page reads the track instead.
+   * source feeding the worker or the page-thread encoder. The probe ranks on
+   * live frames, so a source must feed it while it decides; a combined
+   * worker that dropped out took its track clone with it, so the page then
+   * opens its own source.
    * @param {MediaStreamTrack} track
    * @param {number} generation Capture generation; a later one cancels this.
    * @returns {Promise<?{close: function(): void}>} Source handle, or null with no source.
    */
   async _openCapture(track, generation) {
     this._establishing = true;
+    if (this.encoderPreference === "mjpeg") {
+      this._candidateIndex = this._encoderCandidates.length;
+      this._encoderCodecName = "mjpeg";
+      this._logPath("encode: JPEG (webcam_encoder is mjpeg)");
+    }
     const decided = this._openEncodeWorker(generation);
     try {
       let source = null;
@@ -722,13 +857,11 @@ export class WebcamCapture {
   }
 
   /**
-   * Tries to hand the whole camera track to the encode worker for combined
-   * read-and-encode. Resolves to a source handle when the worker takes it
-   * (the engine transfers tracks and the worker has a
-   * MediaStreamTrackProcessor), else null so the page reads frames and feeds
-   * the worker one at a time. A clone is transferred, so a refusal
-   * (DataCloneError on Chromium) leaves the original track intact for that
-   * fallback.
+   * Hands the whole camera track to the encode worker for combined
+   * read-and-encode; null when the engine cannot transfer tracks or the
+   * worker lacks a MediaStreamTrackProcessor. A clone is transferred, so a
+   * refusal (DataCloneError on Chromium) leaves the original for the
+   * page-read fallback.
    * @param {MediaStreamTrack} track
    * @param {number} generation
    * @returns {Promise<?{close: function(): void}>}
@@ -779,20 +912,18 @@ export class WebcamCapture {
   }
 
   /**
-   * Stands up the worker that encodes the VideoFrames the page hands it
-   * (transferred, zero-copy) and posts back encoded chunks. Resolves once
-   * `probe` confirms a codec encodes in the worker (`_handleFrame` then
-   * routes frames to it), or leaves `_encodeWorker` null so the page encodes
-   * on its own thread. A worker that reports `unsupported` or an error
-   * before the page commits is dropped for page encoding, and one that does
-   * so mid-stream (a codec dropped out) is dropped the same way, the next
-   * frame re-routing to the page; one that was reading the camera itself
-   * takes the capture with it, so the page's own source is re-opened.
+   * Stands up the encode worker and resolves once its probe commits a codec
+   * (`_handleFrame` then routes frames to it), or leaves `_encodeWorker`
+   * null for page-thread encoding. `unsupported` or an error drops it the
+   * same way mid-stream, the next frame re-routing to the page; a worker
+   * that was reading the camera takes the capture with it, so the page's own
+   * source is re-opened.
    * @param {number} generation
    * @returns {Promise<void>}
    */
   _openEncodeWorker(generation) {
-    if (typeof VideoEncoder === "undefined" || typeof Worker === "undefined") {
+    if (typeof VideoEncoder === "undefined" || typeof Worker === "undefined" ||
+        this._candidateIndex >= this._encoderCandidates.length) {
       return Promise.resolve();
     }
     let worker;
@@ -856,13 +987,17 @@ export class WebcamCapture {
           this._logPath(`encode: ${m.codec} could not keep up with the camera; taking the next rung`);
           return;
         }
+        if (m.type === "wrongcolour") {
+          this._logPath(`encode: ${m.codec} decodes to the wrong colours on this engine (mean channel error ${m.colErr}); skipping it`);
+          return;
+        }
         if (m.type === "exhausted") {
           clearTimeout(timer);
           this._logPath(m.rate !== undefined
             ? `encode: no codec kept up with the camera (${m.codec} reached ${m.rate} fps against ${this.fps} asked for); encoding JPEG instead`
             : "encode: no codec kept up with the camera; encoding JPEG instead");
           this._stopEncodeWorker();
-          this._candidateIndex = ENCODER_CANDIDATES.length;
+          this._candidateIndex = this._encoderCandidates.length;
           this._encoderCodecName = "mjpeg";
           done();
           return;
@@ -876,7 +1011,8 @@ export class WebcamCapture {
       this._encodeWorker = worker;
       this._settleEncodeWorker = settle;
       try {
-        worker.postMessage({ type: "probe", width: this.width, height: this.height, fps: this.fps, bitrate: this.bitrate });
+        worker.postMessage({ type: "probe", width: this.width, height: this.height, fps: this.fps,
+                             bitrate: this.bitrate, candidates: this._encoderCandidates });
       } catch (error) {
         clearTimeout(timer);
         drop("probe postMessage threw: " + error);
@@ -938,11 +1074,11 @@ export class WebcamCapture {
   }
 
   /**
-   * Opens the first page frame source the engine offers, in the order the
-   * module docblock gives. The worker-only MediaStreamTrackProcessor means
-   * Safari, whose raw sensor frames carry no readable orientation, so their
-   * rotation is derived per frame. The `<video>` element pins the JPEG rung:
-   * the encode worker is dropped and every encoder candidate skipped.
+   * Opens the first page frame source the engine offers, in the module
+   * docblock's order. A worker-only MediaStreamTrackProcessor means Safari,
+   * whose sensor frames carry no readable orientation, so it is derived per
+   * frame; the `<video>` element feeds the ladder only when `webcam_encoder`
+   * names a codec and VideoFrames can be built from it, else the JPEG rung.
    * @param {MediaStreamTrack} track
    * @param {number} generation
    * @returns {Promise<?{close: function(): void}>}
@@ -963,11 +1099,26 @@ export class WebcamCapture {
       this._logPath("capture: MediaStreamTrackProcessor in a worker");
       return worker;
     }
-    this._stopEncodeWorker();
-    this._candidateIndex = ENCODER_CANDIDATES.length;
-    this._encoderCodecName = "mjpeg";
-    this._logPath("capture: <video> element sampled with requestVideoFrameCallback (JPEG)");
+    if (typeof VideoFrame === "undefined") {
+      this._pinJpegRung("no VideoFrame constructor");
+    } else if (this.encoderPreference === "auto" || this.encoderPreference === "mjpeg") {
+      this._pinJpegRung(`webcam_encoder is ${this.encoderPreference}`);
+    } else {
+      this._logPath("capture: <video> element sampled with requestVideoFrameCallback");
+    }
     return this._videoSource(track, generation);
+  }
+
+  /**
+   * Sends every later frame to the JPEG rung: the encode worker is dropped
+   * and every encoder candidate skipped.
+   * @param {string} why One clause for the path log.
+   */
+  _pinJpegRung(why) {
+    this._stopEncodeWorker();
+    this._candidateIndex = this._encoderCandidates.length;
+    this._encoderCodecName = "mjpeg";
+    this._logPath(`capture: <video> element sampled with requestVideoFrameCallback (JPEG: ${why})`);
   }
 
   /**
@@ -1006,9 +1157,9 @@ export class WebcamCapture {
   }
 
   /**
-   * Standard mediacapture-transform: the processor only exists in workers,
-   * so a clone of the track is transferred in and VideoFrames are
-   * transferred back. Resolves null when the worker cannot read the track.
+   * Standard mediacapture-transform: the processor exists only in workers,
+   * so a track clone is transferred in and VideoFrames transferred back;
+   * null when the worker cannot read the track.
    * @param {MediaStreamTrack} track
    * @param {number} generation
    * @returns {Promise<?{close: function(): void}>}
@@ -1091,9 +1242,12 @@ export class WebcamCapture {
 
   /**
    * A `<video>` element sampled with requestVideoFrameCallback (or a timer
-   * without it); the element must stay in the DOM, visually inert, or engines
-   * stop decoding for it. The element itself is handed to the pinned JPEG
-   * rung, whose drawImage bakes in any orientation the engine knows.
+   * without it); the element must stay in the DOM, visually inert, or
+   * engines stop decoding for it. While candidates remain each sample
+   * becomes a VideoFrame (from the element, else through a canvas); past the
+   * ladder, or after a second of failed frame building, the element itself
+   * goes to the JPEG rung so a source that cannot build frames never starves
+   * the uplink.
    * @param {MediaStreamTrack} track
    * @param {number} generation
    * @returns {{close: function(): void}}
@@ -1108,12 +1262,47 @@ export class WebcamCapture {
     video.srcObject = new MediaStream([track]);
     let handle = null;
     let timer = null;
+    let canvas = null;
+    let ctx = null;
+    let buildFailures = 0;
+    const buildFrame = () => {
+      const timestamp = Math.round(performance.now() * 1000);
+      try {
+        return new VideoFrame(video, { timestamp });
+      } catch (error) {
+        /* fall through to the canvas */
+      }
+      try {
+        if (!canvas) {
+          canvas = document.createElement("canvas");
+          ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+        }
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+        }
+        ctx.drawImage(video, 0, 0);
+        return new VideoFrame(canvas, { timestamp });
+      } catch (error) {
+        return null;
+      }
+    };
     const sample = () => {
       if (this._generation !== generation) {
         return;
       }
       if (video.readyState >= 2 && video.videoWidth > 0) {
-        this._handleFrame(video);
+        if (typeof VideoFrame !== "undefined" && this._candidateIndex < this._encoderCandidates.length) {
+          const frame = buildFrame();
+          if (frame) {
+            buildFailures = 0;
+            this._handleFrame(frame);
+          } else if (++buildFailures > this.fps) {
+            this._pinJpegRung("VideoFrames cannot be built from the element");
+          }
+        } else {
+          this._handleFrame(video);
+        }
       }
       if (video.requestVideoFrameCallback) {
         handle = video.requestVideoFrameCallback(sample);
@@ -1139,15 +1328,13 @@ export class WebcamCapture {
   }
 
   /**
-   * Receives one frame from whichever source is open: a VideoFrame this
-   * method now owns, or the `<video>` element on the pinned JPEG rung. A
-   * frame is always closed. Frames arriving faster than `fps` or while
-   * `canSend` refuses are dropped. With an encode worker the frame is
-   * transferred to it, zero-copy; a dead worker throws and encoding drops
-   * back to this thread from then on. On the page-thread encoder a changed size
-   * or orientation rebuilds the encoder, since a VideoEncoder latches the
-   * orientation of its first frame and rejects any other; one rebuild runs
-   * at a time and frames racing it are dropped, never queued.
+   * Receives one frame from whichever source is open (a VideoFrame this
+   * method now owns, or the `<video>` element on the JPEG rung) and always
+   * closes it; frames beyond `fps` or while `canSend` refuses are dropped.
+   * With an encode worker the frame is transferred zero-copy, a dead worker
+   * dropping encoding back to this thread; the page-thread encoder is
+   * rebuilt on a changed size or orientation, one rebuild at a time, racing
+   * frames dropped.
    * @param {VideoFrame|HTMLVideoElement} frame
    */
   _handleFrame(frame) {
@@ -1171,7 +1358,7 @@ export class WebcamCapture {
         return;
       }
     }
-    if (typeof VideoEncoder === "undefined" || this._candidateIndex >= ENCODER_CANDIDATES.length) {
+    if (typeof VideoEncoder === "undefined" || this._candidateIndex >= this._encoderCandidates.length) {
       this._encodeJpeg(frame, now);
       return;
     }
@@ -1228,9 +1415,8 @@ export class WebcamCapture {
   }
 
   /**
-   * Encodes one frame on the page-thread encoder. An encoder that is behind
-   * (more than one frame queued) drops the frame rather than queueing
-   * latency; one that throws moves on to the next candidate.
+   * Encodes one frame on the page-thread encoder, dropped when more than one
+   * is already queued; a throw moves to the next candidate.
    * @param {VideoFrame} frame
    * @param {number} w
    * @param {number} h
@@ -1267,10 +1453,9 @@ export class WebcamCapture {
   }
 
   /**
-   * Builds the encoder for the first candidate the engine supports at the
-   * given size, stamping the orientation its frames carry onto every chunk it
-   * emits. Resolves when an encoder is configured or every candidate was
-   * rejected, after which frames take the JPEG path.
+   * Builds the encoder for the first supported candidate at the given size,
+   * stamping the frames' orientation onto every chunk. Resolves once
+   * configured or every candidate was rejected (frames then take JPEG).
    * @param {number} w
    * @param {number} h
    * @param {number} rotation Clockwise degrees.
@@ -1284,8 +1469,8 @@ export class WebcamCapture {
       this._encoder = null;
       this._encoderCodec = null;
     }
-    while (this._candidateIndex < ENCODER_CANDIDATES.length) {
-      const cand = ENCODER_CANDIDATES[this._candidateIndex];
+    while (this._candidateIndex < this._encoderCandidates.length) {
+      const cand = this._encoderCandidates[this._candidateIndex];
       const config = {
         codec: cand.codec,
         width: w,
@@ -1328,12 +1513,10 @@ export class WebcamCapture {
   }
 
   /**
-   * Sends one encoded frame to the transport. A frame dropped because the
-   * socket is backed up breaks the chain the server's decoder follows, so
-   * nothing but a keyframe is sent until one is asked for, and it is only
-   * asked for once the socket can take it: a keyframe encoded into a full
-   * socket is dropped like any other frame. Independent JPEG frames carry no
-   * such dependency and do not come through here.
+   * Sends one encoded frame. A frame dropped on a backed-up socket breaks
+   * the chain the server's decoder follows, so nothing but a keyframe goes
+   * out until one is asked for -- and only once the socket can take it.
+   * Independent JPEG frames do not come through here.
    * @param {number} codecId
    * @param {boolean} keyframe
    * @param {Uint8Array} bytes
@@ -1373,10 +1556,9 @@ export class WebcamCapture {
   }
 
   /**
-   * Abandons a codec this engine cannot encode in real time for the next
-   * candidate, and past the last of them for the JPEG rung, which encodes
-   * natively. Not a failure: the encoder works, it just cannot keep up with
-   * what the camera is showing, which costs the uplink most of its frames.
+   * Abandons a codec that cannot keep up for the next candidate, past the
+   * last for the JPEG rung. Not a failure: it just cannot hold what the
+   * camera is showing.
    */
   _onEncoderTooSlow() {
     const name = this._encoderCodec ? this._encoderCodec.name : "the encoder";
@@ -1388,15 +1570,14 @@ export class WebcamCapture {
     this._candidateIndex++;
     this._encodedSize = null;
     this._pace.reset();
-    this._logPath(this._candidateIndex >= ENCODER_CANDIDATES.length
+    this._logPath(this._candidateIndex >= this._encoderCandidates.length
       ? `encode: ${name} could not keep up with the camera; encoding JPEG instead`
       : `encode: ${name} could not keep up with the camera; taking the next rung`);
   }
 
   /**
-   * Abandons an encoder that failed after reporting support (Firefox does
-   * this for H.264) for the next candidate; the JPEG path is the final
-   * fallback.
+   * Abandons an encoder that failed after reporting support (Firefox H.264
+   * does) for the next candidate; JPEG is the final fallback.
    * @param {Error} error
    */
   _onEncoderFailure(error) {
@@ -1411,11 +1592,10 @@ export class WebcamCapture {
   }
 
   /**
-   * Encodes a frame as JPEG through `OffscreenCanvas.convertToBlob`, one
-   * encode in flight at a time. A JPEG frame always leaves upright and carries
-   * no transform on the wire: drawImage bakes in the one the engine put on the
-   * frame (whose display size already counts the turn), and a derived one is
-   * applied here as a canvas transform.
+   * Encodes a frame as JPEG through `OffscreenCanvas.convertToBlob`, one in
+   * flight at a time. A JPEG leaves upright with no transform on the wire:
+   * drawImage bakes in the engine's, a derived one is applied as a canvas
+   * transform.
    * @param {VideoFrame|HTMLVideoElement} frame
    * @param {number} now `performance.now()` at receipt.
    */

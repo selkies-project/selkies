@@ -269,6 +269,60 @@ def pack_remb_fci(bitrate: int, ssrcs: list[int]) -> bytes:
     return data
 
 
+def pack_twcc_fci(base_seq: int, arrivals: list, fb_pkt_count: int) -> bytes:
+    """Encode one transport-wide congestion control feedback FCI
+    (draft-holmer-rmcat-transport-wide-cc-extensions-01).
+
+    `arrivals[i]` is the arrival time in milliseconds of transport-wide
+    sequence `base_seq + i`, or None for one not received. Statuses are all
+    two-bit status-vector chunks (one encoding, correct by inspection);
+    deltas accumulate in quantized 0.25 ms steps so rounding never drifts.
+
+    Returns:
+        The FCI padded to a 32-bit boundary.
+    """
+    first = next((t for t in arrivals if t is not None), None)
+    if first is None:
+        return b""
+    # Mask only the wire field: masked-epoch deltas overflow into "not received".
+    ref_units = int(first // 64)
+    prev = ref_units * 64.0
+    symbols = []
+    deltas = b""
+    for t in arrivals:
+        if t is None:
+            symbols.append(0)
+            continue
+        du = round((t - prev) * 4)
+        if 0 <= du <= 0xFF:
+            symbols.append(1)
+            deltas += pack("!B", du)
+        elif -0x8000 <= du <= 0x7FFF:
+            symbols.append(2)
+            deltas += pack("!h", du)
+        else:
+            symbols.append(0)
+            continue
+        prev += du / 4.0
+    chunks = b""
+    for i in range(0, len(symbols), 7):
+        group = symbols[i : i + 7]
+        group += [0] * (7 - len(group))
+        value = 0xC000
+        for j, symbol in enumerate(group):
+            value |= symbol << (12 - 2 * j)
+        chunks += pack("!H", value)
+    fci = (
+        pack("!HH", base_seq & 0xFFFF, len(arrivals))
+        + pack("!I", ((ref_units & 0xFFFFFF) << 8) | (fb_pkt_count & 0xFF))
+        + chunks
+        + deltas
+    )
+    while len(fci) % 4:
+        fci += b"\x00"
+    return fci
+
+
 def unpack_remb_fci(data: bytes) -> tuple[int, list[int]]:
     """
     Unpack the FCI for a Receiver Estimated Maximum Bitrate report.
@@ -579,6 +633,7 @@ class RtcpRtpfbPacket:
                     pid = p
                     blp = 0
             payload += pack("!HH", pid, blp)
+        payload += self.fci
         return pack_rtcp_packet(RTCP_RTPFB, self.fmt, payload)
 
     @classmethod
