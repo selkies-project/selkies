@@ -3,9 +3,9 @@
  *
  * The UI applies install and remove results optimistically, so every posted
  * command is tracked here until the server's command watch settles it: a
- * failure comes back as a `command_error` system action whose message ends
- * with the echoed command string, and matching it rolls the optimistic update
- * back. Commands run through a shell on the server, in the environment of
+ * clean exit comes back as `command_done` and only clears the running state,
+ * a failure as a `command_error` system action whose message ends with the
+ * echoed command string, and matching that rolls the optimistic update back. Commands run through a shell on the server, in the environment of
  * the session the applications use, so `~` in a launch command is the
  * session user's home; the launch terminal is the one the server publishes as
  * `app_terminal` for the session's windowing system (`foot` on Wayland, `st`
@@ -17,6 +17,9 @@ const INSTALLED_APPS_STORAGE_KEY = "prootInstalledApps";
 
 /** Window event dispatched when a failed install or remove is rolled back. */
 export const INSTALLED_APPS_ROLLBACK_EVENT = "installedAppsRollback";
+
+/** Window event dispatched whenever the set of running commands changes. */
+export const APP_COMMAND_STATE_EVENT = "appCommandState";
 
 const PENDING_COMMAND_TTL_MS = 10 * 60 * 1000;
 const LAUNCH_FAILURE_WINDOW_MS = 15 * 1000;
@@ -36,6 +39,41 @@ const appCommandBuilders = {
 
 const pendingAppCommands = new Map();
 
+const announceState = () =>
+    window.dispatchEvent(new CustomEvent(APP_COMMAND_STATE_EVENT));
+
+/**
+ * The action running for an app, so a list can show it and hold its buttons.
+ * @param {string} app The app name.
+ * @returns {'install'|'remove'|'update'|'launch'|null}
+ */
+export function pendingAppAction(app) {
+    for (const entry of pendingAppCommands.values()) {
+        if (entry.app === app) return entry.action;
+    }
+    return null;
+}
+
+/**
+ * Settles a command the server reported finishing cleanly. The optimistic
+ * update already holds, so this only stops it reading as still running.
+ * @param {string} command The echoed command string.
+ */
+export function resolveFinishedAppCommand(command) {
+    if (!pendingAppCommands.delete(command)) return;
+    announceState();
+}
+
+if (typeof window !== "undefined") {
+    window.addEventListener("message", (event) => {
+        if (event.source !== window || event.origin !== window.location.origin) return;
+        const data = event.data;
+        if (data && data.type === "commandDone" && typeof data.command === "string") {
+            resolveFinishedAppCommand(data.command);
+        }
+    });
+}
+
 /**
  * Posts an app command to the core and records it as pending.
  * @param {'install'|'remove'|'update'|'launch'} action The command to build.
@@ -49,6 +87,7 @@ export function postAppCommand(action, app) {
     }
     pendingAppCommands.set(command, { app, action, at: now });
     window.postMessage({ type: "command", value: command }, window.location.origin);
+    announceState();
 }
 
 /**
@@ -96,6 +135,7 @@ export function resolveFailedAppCommand(errMsg) {
         ) {
             return false;
         }
+        announceState();
         if (entry.action === "install" || entry.action === "remove") {
             const apps = readInstalledApps();
             const rolledBack =

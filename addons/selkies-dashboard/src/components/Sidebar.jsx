@@ -58,7 +58,9 @@ import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
 import GamepadVisualizer from "./GamepadVisualizer";
 import { getTranslator } from "../translations";
 import {
+  APP_COMMAND_STATE_EVENT,
   INSTALLED_APPS_ROLLBACK_EVENT,
+  pendingAppAction,
   postAppCommand,
   readInstalledApps,
   resolveFailedAppCommand,
@@ -502,10 +504,19 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown }) {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedApp, setSelectedApp] = useState(null);
   const [installedApps, setInstalledApps] = useState(readInstalledApps);
+  const [commandTick, setCommandTick] = useState(0);
 
   useEffect(() => {
     writeInstalledApps(installedApps);
   }, [installedApps]);
+
+  /* The running set lives in app-commands.js; this only re-reads it. */
+  useEffect(() => {
+    const onCommandState = () => setCommandTick((tick) => tick + 1);
+    window.addEventListener(APP_COMMAND_STATE_EVENT, onCommandState);
+    return () =>
+      window.removeEventListener(APP_COMMAND_STATE_EVENT, onCommandState);
+  }, []);
 
   /**
    * A failed install or remove already rolled the stored list back; mirror
@@ -682,43 +693,50 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown }) {
                   {selectedApp.description}
                 </p>
                 <div className="app-action-buttons">
-                  {isAppInstalled(selectedApp.name) ? (
+                  {(() => {
+                    const running =
+                      commandTick >= 0 && pendingAppAction(selectedApp.name);
+                    const held = !commandsAvailable || !!running;
+                    const mark = (action) =>
+                      `app-action-button ${action}${running === action ? " running" : ""}`;
+                    return isAppInstalled(selectedApp.name) ? (
                     <>
                       <button
                         onClick={() => handleLaunch(selectedApp.name)}
-                        disabled={!commandsAvailable}
-                        className="app-action-button install"
+                        disabled={held}
+                        className={mark("install")}
                       >
                         {t("appsModal.launchButton", "Launch")}{" "}
                         {selectedApp.name}
                       </button>
                       <button
                         onClick={() => handleUpdate(selectedApp.name)}
-                        disabled={!commandsAvailable}
-                        className="app-action-button update"
+                        disabled={held}
+                        className={mark("update")}
                       >
                         {t("appsModal.updateButton", "Update")}{" "}
                         {selectedApp.name}
                       </button>
                       <button
                         onClick={() => handleRemove(selectedApp.name)}
-                        disabled={!commandsAvailable}
-                        className="app-action-button remove"
+                        disabled={held}
+                        className={mark("remove")}
                       >
                         {t("appsModal.removeButton", "Remove")}{" "}
                         {selectedApp.name}
                       </button>
                     </>
-                  ) : (
-                    <button
-                      onClick={() => handleInstall(selectedApp.name)}
-                      disabled={!commandsAvailable}
-                      className="app-action-button install"
-                    >
-                      {t("appsModal.installButton", "Install")}{" "}
-                      {selectedApp.name}
-                    </button>
-                  )}
+                    ) : (
+                      <button
+                        onClick={() => handleInstall(selectedApp.name)}
+                        disabled={held}
+                        className={mark("install")}
+                      >
+                        {t("appsModal.installButton", "Install")}{" "}
+                        {selectedApp.name}
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
             ) : (

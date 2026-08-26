@@ -5905,6 +5905,15 @@ function initWebsockets() {
                 },
               }, window.location.origin);
             }
+            else if (typeof systemMsg.action === 'string' &&
+                systemMsg.action.startsWith('command_done,') && !isSharedMode) {
+              // Settles what the apps panel shows as running; a failure arrives
+              // on the channel above instead.
+              window.postMessage({
+                type: 'commandDone',
+                command: systemMsg.action.slice('command_done,'.length),
+              }, window.location.origin);
+            }
           } catch (e) {
             console.error('Error parsing system data:', e);
           }

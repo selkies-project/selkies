@@ -2527,6 +2527,13 @@ export default function webrtc() {
 							code: 'commandFailed',
 						},
 					}, window.location.origin);
+				} else if (action.startsWith('command_done,') && !isSharedMode) {
+					// Settles what the apps panel shows as running; a failure
+					// arrives on the channel above instead.
+					window.postMessage({
+						type: 'commandDone',
+						command: action.slice('command_done,'.length),
+					}, window.location.origin);
 				} else if (action.startsWith('auth_success,') || action.startsWith('role_update,')) {
 					const verdict = action.slice(action.indexOf(',') + 1);
 					let perms;

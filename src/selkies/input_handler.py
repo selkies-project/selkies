@@ -62,6 +62,7 @@ stalls behind a slow display server.
 
 import ctypes
 import fcntl
+from collections import deque
 import functools
 import logging
 import select
@@ -3148,28 +3149,73 @@ def first_installed(commands: Iterable[str]) -> Optional[str]:
     return None
 
 
+# What a client command's output leaves behind: the last lines, one line's
+# worth of an unterminated write, and the slice of the chosen line that a
+# failure notice carries. Bounded because a launched application writes for as
+# long as it runs.
+COMMAND_TAIL_LINES = 20
+COMMAND_LINE_CHARS = 4096
+COMMAND_REASON_CHARS = 200
+
+
+async def _drain_command_output(stream, tail: deque) -> None:
+    """Read a command's output to EOF, keeping the last lines.
+
+    Read rather than discarded so a failure can say why, and read continuously
+    so a chatty application never blocks on a full pipe. Progress meters
+    rewrite their line with a carriage return, so both terminators end one.
+    """
+    buf = ""
+    while True:
+        try:
+            chunk = await stream.read(COMMAND_LINE_CHARS)
+        except Exception:
+            return
+        if not chunk:
+            break
+        try:
+            parts = re.split(r"[\r\n]+", buf + chunk.decode("utf-8", "replace"))
+            buf = parts.pop()[-COMMAND_LINE_CHARS:]
+            tail.extend(part.strip() for part in parts if part.strip())
+        except Exception:
+            buf = ""
+    if buf.strip():
+        tail.append(buf.strip())
+
+
+def _command_failure_reason(tail: deque) -> str:
+    """The line a reader would quote from failed output: the first that names
+    a failure, else the last thing written."""
+    for line in tail:
+        if re.search(r"error|fail|denied|not permitted|no such", line, re.I):
+            return line[:COMMAND_REASON_CHARS]
+    return tail[-1][:COMMAND_REASON_CHARS] if tail else ""
+
+
 async def run_client_command(command_to_run: str, logger: logging.Logger,
                              notify: Optional[Callable[[str], Any]] = None,
-                             env: Optional[dict] = None) -> None:
+                             env: Optional[dict] = None,
+                             done: Optional[Callable[[str], Any]] = None) -> None:
     """Launch a client-requested command and watch it to completion.
 
     ``env`` is the environment the command runs in — the session's (see
     WebRTCInput.app_launch_env), so a launched application lands on the
     display and session bus the desktop uses; None inherits the server's.
-    Output stays discarded (a long-running app must never block on a full
-    pipe), but a launch failure or any nonzero exit — above all 127, the
+    A launch failure or any nonzero exit — above all 127, the
     command-not-installed case — is reported through ``notify`` (async, one
-    text argument) with the runtime and the echoed command, because the
-    dashboards' apps UI marks the action done optimistically and needs a
-    counter-signal to roll back. A clean exit stays unreported, and the
-    dashboards decide relevance by age: a long-lived app quitting nonzero
-    hours later is application lifecycle, not a launch failure.
+    text argument) with the runtime, the reason its output gives and the
+    echoed command, because the dashboards' apps UI marks the action done
+    optimistically and needs a counter-signal to roll back. A clean exit
+    reaches ``done`` (async, the echoed command), which is what settles a
+    pending install; the dashboards decide relevance by age, since a
+    long-lived app quitting nonzero hours later is application lifecycle
+    rather than a launch failure.
     """
     try:
         process = await subprocess.create_subprocess_shell(
             command_to_run,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             cwd=os.path.expanduser("~"),
             env=env,
         )
@@ -3187,22 +3233,34 @@ async def run_client_command(command_to_run: str, logger: logging.Logger,
     started = time.monotonic()
 
     async def _watch():
+        tail: deque = deque(maxlen=COMMAND_TAIL_LINES)
         try:
+            if process.stdout is not None:
+                await _drain_command_output(process.stdout, tail)
             code = await process.wait()
         except Exception:
             return
         finally:
             _launched_command_pids.discard(process.pid)
-        if not code:
-            return
         runtime = time.monotonic() - started
+        if not code:
+            if done:
+                try:
+                    await done(command_to_run)
+                except Exception:
+                    pass
+            return
         hint = " (command not found)" if code in (126, 127) else ""
+        reason = _command_failure_reason(tail)
+        detail = f" -- {reason}" if reason else ""
         logger.warning(
-            f"Command '{command_to_run}' exited with status {code}{hint} after {runtime:.1f}s")
+            f"Command '{command_to_run}' exited with status {code}{hint} after "
+            f"{runtime:.1f}s{detail}")
         if notify:
             try:
                 await notify(
-                    f"exited with status {code}{hint} after {runtime:.1f}s: {command_to_run}")
+                    f"exited with status {code}{hint} after {runtime:.1f}s{detail}: "
+                    f"{command_to_run}")
             except Exception:
                 pass
 
@@ -3557,8 +3615,9 @@ class WebRTCInput:
     def send_cursor_data(self, data: dict) -> None:
         if self._ws_transport(): self.rtc_app.send_ws_cursor_data(data)
         else: self.rtc_app.send_cursor_data(data)
-    def send_command_error(self, text: str, conn_id: Optional[str] = None) -> None:
-        """Route a command failure notice to the transport (see send_cursor_data).
+    def send_command_status(self, action: str, conn_id: Optional[str] = None) -> None:
+        """Route a command notice (``command_error``/``command_done``) to the
+        transport (see send_cursor_data).
 
         Each transport carries the system action on its own wire format. Over
         WebRTC ``conn_id`` is the requesting peer's id, so the notice targets
@@ -3567,11 +3626,11 @@ class WebRTCInput:
         """
         try:
             if self._ws_transport():
-                self.rtc_app.send_system_action(f"command_error,{text}")
+                self.rtc_app.send_system_action(action)
             else:
-                self.rtc_app.send_system_action(f"command_error,{text}", peer_id=conn_id)
+                self.rtc_app.send_system_action(action, peer_id=conn_id)
         except Exception:
-            logger_webrtc_input.debug("command_error notify failed", exc_info=True)
+            logger_webrtc_input.debug("command status notify failed", exc_info=True)
 
     def __keyboard_connect(self) -> None: self.keyboard = _XTestKeyboard(self.xdisplay) if self.xdisplay else None
 
@@ -7055,11 +7114,14 @@ class WebRTCInput:
                 logger_webrtc_input.info(f"Attempting to execute command: '{command_to_run}'")
 
                 async def _notify_cmd_error(text, conn_id=conn_id):
-                    self.send_command_error(text, conn_id)
+                    self.send_command_status(f"command_error,{text}", conn_id)
+
+                async def _notify_cmd_done(cmd, conn_id=conn_id):
+                    self.send_command_status(f"command_done,{cmd}", conn_id)
 
                 await run_client_command(
                     command_to_run, logger_webrtc_input, notify=_notify_cmd_error,
-                    env=self.app_launch_env())
+                    env=self.app_launch_env(), done=_notify_cmd_done)
             else:
                 logger_webrtc_input.warning("Received 'cmd' message without a command string.")
         elif msg_type == "_arg_fps":

@@ -1497,6 +1497,26 @@ a.cite-link:active {
     min-width: 120px;
 }
 
+/* The command is with the server: the row holds until it answers. */
+.app-action-button.running::after {
+    content: "";
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-left: 8px;
+    vertical-align: -2px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: app-action-spin 0.8s linear infinite;
+}
+@keyframes app-action-spin {
+    to { transform: rotate(1turn); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .app-action-button.running::after { animation: none; }
+}
+
 /* Install: the primary action, solid accent. */
 .app-action-button.install {
     background-color: var(--button-bg);

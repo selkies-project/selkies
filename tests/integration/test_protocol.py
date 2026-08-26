@@ -172,6 +172,41 @@ def run() -> "H.Results":
                       err.endswith(": selkies-proot-absent install demo-app")
                       and "127" in err, err)
 
+            # What the command printed is the only thing that says why, and the
+            # apps panel shows the notice verbatim.
+            failing = "sh -c 'echo proot error: ptrace denied >&2; exit 3'"
+            await ws.send(f"cmd,{failing}")
+            err = ""
+            deadline = time.time() + 10
+            while time.time() < deadline and not err:
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    continue
+                if isinstance(msg, str) and msg.startswith("system,"):
+                    action = json.loads(msg[len("system,"):]).get("action", "")
+                    if action.startswith("command_error,"):
+                        err = action
+            res.check("cmd: a failure carries the reason its output gave",
+                      "proot error: ptrace denied" in err and err.endswith(f": {failing}"),
+                      err)
+
+            # A clean exit settles the pending action the panel shows running.
+            done = ""
+            await ws.send("cmd,true")
+            deadline = time.time() + 10
+            while time.time() < deadline and not done:
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    continue
+                if isinstance(msg, str) and msg.startswith("system,"):
+                    action = json.loads(msg[len("system,"):]).get("action", "")
+                    if action.startswith("command_done,"):
+                        done = action
+            res.check("cmd: a clean exit reports command_done with the command",
+                      done == "command_done,true", done)
+
             # A bystander that receives a fetch reply reads it as its own and
             # caches the content unwritten, suppressing the next real change. It
             # joins as a viewer: a second controller would take the display over.

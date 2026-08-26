@@ -6,7 +6,7 @@
 
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { ChevronLeft, X } from "lucide-react";
+import { ChevronLeft, Loader2, X } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -15,7 +15,9 @@ import * as yaml from "js-yaml";
 import { t } from "@/i18n";
 import { getLastServerSettings } from "@/utils";
 import {
+    APP_COMMAND_STATE_EVENT,
     INSTALLED_APPS_ROLLBACK_EVENT,
+    pendingAppAction,
     postAppCommand,
     readInstalledApps,
     writeInstalledApps,
@@ -83,10 +85,18 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedApp, setSelectedApp] = useState<App | null>(null);
     const [installedApps, setInstalledApps] = useState<string[]>(readInstalledApps);
+    const [commandTick, setCommandTick] = useState(0);
 
     useEffect(() => {
         writeInstalledApps(installedApps);
     }, [installedApps]);
+
+    // The running set lives in app-commands.js; this only re-reads it.
+    useEffect(() => {
+        const onCommandState = () => setCommandTick((tick) => tick + 1);
+        window.addEventListener(APP_COMMAND_STATE_EVENT, onCommandState);
+        return () => window.removeEventListener(APP_COMMAND_STATE_EVENT, onCommandState);
+    }, []);
 
     // A failed command already rolled the stored list back; mirror it here so
     // the badge flips without a remount.
@@ -302,30 +312,38 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                                 </section>
                                             </CardHeader>
                                             <CardFooter className="flex gap-2 justify-end">
-                                                {isAppInstalled(selectedApp.name) ? (
+                                                {(() => {
+                                                const running = commandTick >= 0 && pendingAppAction(selectedApp.name);
+                                                const held = !commandsAvailable || !!running;
+                                                const spin = (action: string) =>
+                                                    running === action ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null;
+                                                return isAppInstalled(selectedApp.name) ? (
                                                     <>
                                                         <Button
                                                             variant="default"
                                                             onClick={() => handleLaunch(selectedApp.name)}
-                                                            disabled={!commandsAvailable}
+                                                            disabled={held}
                                                             className="w-auto"
                                                         >
+                                                            {spin('launch')}
                                                             {t('apps.launchApp', { name: selectedApp.name })}
                                                         </Button>
                                                         <Button
                                                             variant="outline"
                                                             onClick={() => handleUpdate(selectedApp.name)}
-                                                            disabled={!commandsAvailable}
+                                                            disabled={held}
                                                             className="w-auto"
                                                         >
+                                                            {spin('update')}
                                                             {t('apps.updateApp', { name: selectedApp.name })}
                                                         </Button>
                                                         <Button
                                                             variant="destructive"
                                                             onClick={() => handleRemove(selectedApp.name)}
-                                                            disabled={!commandsAvailable}
+                                                            disabled={held}
                                                             className="w-auto"
                                                         >
+                                                            {spin('remove')}
                                                             {t('apps.removeApp', { name: selectedApp.name })}
                                                         </Button>
                                                     </>
@@ -333,12 +351,14 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                                     <Button
                                                         variant="default"
                                                         onClick={() => handleInstall(selectedApp.name)}
-                                                        disabled={!commandsAvailable}
+                                                        disabled={held}
                                                         className="w-auto"
                                                     >
+                                                        {spin('install')}
                                                         {t('apps.installApp', { name: selectedApp.name })}
                                                     </Button>
-                                                )}
+                                                );
+                                                })()}
                                             </CardFooter>
                                         </Card>
                                     </div>

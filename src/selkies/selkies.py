@@ -3884,17 +3884,23 @@ class DataStreamingServer(BaseStreamingService):
                             command_to_run = ",".join(toks[1:])
                             data_logger.info(f"Attempting to execute command: '{command_to_run}'")
 
-                            async def _notify_cmd_error(text, ws=websocket):
+                            async def _send_cmd_status(action, ws=websocket):
                                 try:
                                     await ws.send_str(
-                                        "system,"
-                                        + json.dumps({"action": f"command_error,{text}"}))
+                                        "system," + json.dumps({"action": action}))
                                 except Exception:
                                     pass
 
+                            async def _notify_cmd_error(text):
+                                await _send_cmd_status(f"command_error,{text}")
+
+                            async def _notify_cmd_done(cmd):
+                                await _send_cmd_status(f"command_done,{cmd}")
+
                             await run_client_command(
                                 command_to_run, data_logger, notify=_notify_cmd_error,
-                                env=self.input_handler.app_launch_env() if self.input_handler else None)
+                                env=self.input_handler.app_launch_env() if self.input_handler else None,
+                                done=_notify_cmd_done)
                         else:
                             data_logger.warning("Received 'cmd' message without a command string.")
 
