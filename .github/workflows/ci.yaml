@@ -6,6 +6,10 @@ name: CI
 # devcontainer files skip CI (their own workflows cover them).
 
 on:
+  # Manual as well as automatic: a push whose run GitHub does not create leaves
+  # no other way to get one, and a branch can be put through the same pipeline
+  # without opening a pull request.
+  workflow_dispatch:
   push:
     branches: [main]
     paths-ignore:

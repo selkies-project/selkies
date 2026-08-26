@@ -7,6 +7,16 @@ name: Smoke test the wheel
 # soon as it exists.
 
 on:
+  workflow_dispatch:
+    inputs:
+      artifact_name:
+        description: Artifact name of a prebuilt wheel (builds one when empty)
+        type: string
+        default: ""
+      capture_stack_published:
+        description: The pinned pixelflux/pcmflux are released on PyPI, so the smoke test resolves them there
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       artifact_name:
@@ -29,6 +39,15 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  # Only a standalone dispatch reaches this: a caller has already built the
+  # wheel and names its artifact.
+  wheel:
+    name: Build wheel for the smoke test
+    if: ${{ inputs.artifact_name == '' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-wheel.yaml
+
   # Away from a release the pinned pixelflux/pcmflux are a coordinated
   # pre-release, published per commit rather than to PyPI, so the smoke test can
   # only install them from a wheel this run has in hand: the caller's, when it
@@ -45,8 +64,10 @@ jobs:
 
   smoke:
     name: Install and run the wheel
-    needs: [wheels]
-    if: ${{ always() && contains(fromJSON('["success", "skipped"]'), needs.wheels.result) }}
+    needs: [wheel, wheels]
+    if: ${{ always()
+      && contains(fromJSON('["success", "skipped"]'), needs.wheel.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.wheels.result) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
