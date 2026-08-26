@@ -164,11 +164,17 @@ jobs:
         run: |
           build=false
           for project in pixelflux pcmflux; do
-            sha="$(gh api "repos/${{ github.repository_owner }}/${project}/commits/main" \
-                   --jq .sha 2>/dev/null || true)"
-            if [ -n "${sha}" ] && gh release view "${sha}" \
-                 --repo "${{ github.repository_owner }}/${project}" >/dev/null 2>&1; then
-              echo "${project}: pre-release ${sha}"
+            repo="${{ github.repository_owner }}/${project}"
+            sha="$(gh api "repos/${repo}/commits/main" --jq .sha 2>/dev/null || true)"
+            # Pre-releases are tagged with an abbreviated SHA, so match by prefix
+            tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
+                    --jq '.[].tagName' 2>/dev/null || true)"
+            tag=""
+            for candidate in ${tags}; do
+              case "${sha}" in "${candidate}"*) tag="${candidate}"; break ;; esac
+            done
+            if [ -n "${sha}" ] && [ -n "${tag}" ]; then
+              echo "${project}: pre-release ${tag}"
             else
               echo "${project}: no pre-release for main (${sha:-unknown})"
               build=true

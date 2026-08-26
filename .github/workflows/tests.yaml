@@ -105,12 +105,18 @@ jobs:
         run: |
           build=false
           for project in pixelflux pcmflux; do
-            sha="$(gh api "repos/${{ github.repository_owner }}/${project}/commits/main" \
-                   --jq .sha 2>/dev/null || true)"
-            if [ -n "${sha}" ] && gh release view "${sha}" \
-                 --repo "${{ github.repository_owner }}/${project}" >/dev/null 2>&1; then
-              echo "${project}=${sha}" >> "$GITHUB_OUTPUT"
-              echo "${project}: pre-release ${sha}"
+            repo="${{ github.repository_owner }}/${project}"
+            sha="$(gh api "repos/${repo}/commits/main" --jq .sha 2>/dev/null || true)"
+            # Pre-releases are tagged with an abbreviated SHA, so match by prefix
+            tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
+                    --jq '.[].tagName' 2>/dev/null || true)"
+            tag=""
+            for candidate in ${tags}; do
+              case "${sha}" in "${candidate}"*) tag="${candidate}"; break ;; esac
+            done
+            if [ -n "${sha}" ] && [ -n "${tag}" ]; then
+              echo "${project}=${tag}" >> "$GITHUB_OUTPUT"
+              echo "${project}: pre-release ${tag}"
             else
               echo "${project}=" >> "$GITHUB_OUTPUT"
               echo "${project}: no pre-release for main (${sha:-unknown}); building from source"
@@ -184,15 +190,15 @@ jobs:
           mkdir -p main-wheels
           # Only the interpreter and architecture this runner imports with: the
           # release carries the whole cp39-cp314 matrix across both libcs.
-          TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
+          ABI="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
           for project in pixelflux pcmflux; do
-            sha="${{ needs.capture-stack.outputs.pixelflux }}"
-            [ "${project}" = "pcmflux" ] && sha="${{ needs.capture-stack.outputs.pcmflux }}"
-            gh release download "${sha}" \
+            tag="${{ needs.capture-stack.outputs.pixelflux }}"
+            [ "${project}" = "pcmflux" ] && tag="${{ needs.capture-stack.outputs.pcmflux }}"
+            gh release download "${tag}" \
               --repo "${{ github.repository_owner }}/${project}" \
-              --pattern "*${TAG}-*manylinux*$(uname -m)*.whl" \
+              --pattern "*${ABI}-*manylinux*$(uname -m)*.whl" \
               --dir main-wheels --skip-existing
-            echo "${project}: ${sha}"
+            echo "${project}: ${tag}"
           done
       - name: Download the pixelflux wheels (main HEAD)
         uses: actions/download-artifact@v8
@@ -222,8 +228,8 @@ jobs:
           mkdir -p main-wheels
           wheel="$(ls dist/selkies-*.whl)"
           python -m pip install --find-links "$PWD/main-wheels" "${wheel}[test]"
-          TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
-          WHEEL_GLOB="*${TAG}-*manylinux*$(uname -m)*.whl"
+          ABI="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
+          WHEEL_GLOB="*${ABI}-*manylinux*$(uname -m)*.whl"
           # Fatal rather than a note: a run that quietly drops to PyPI tests a
           # capture stack nothing ships, and reports it as a pass.
           for project in pixelflux pcmflux; do
