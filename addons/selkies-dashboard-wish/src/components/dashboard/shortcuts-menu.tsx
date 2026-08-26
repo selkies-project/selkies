@@ -16,6 +16,7 @@ import { t } from "@/i18n";
 
 const shortcuts = [
 	{ label: t('sections.shortcuts.fullscreen'), combo: "Ctrl + Shift + F" },
+	{ label: t('sections.shortcuts.gamingMode'), combo: "Ctrl + Shift + X" },
 	{ label: t('sections.shortcuts.openMenu'), combo: "Ctrl + Shift + M" },
 	{ label: t('sections.shortcuts.toggleGamepad'), combo: "Ctrl + Shift + G" },
 	{ label: t('sections.shortcuts.pointerLock'), combo: "Ctrl + Shift + Left Click" },

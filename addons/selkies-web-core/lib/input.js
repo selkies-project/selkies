@@ -1242,8 +1242,9 @@ const _stopEvent = function (e) {
  *
  * One instance is live per page: `attach` detaches any previous one. Hotkeys:
  * Ctrl+Shift+M opens the dashboard menu (`onmenuhotkey`), Ctrl+Shift+F enters
- * gaming mode (`onfullscreenhotkey`, `enterFullscreen` by default),
- * Ctrl+Shift+G toggles the gamepad overlay (`ongamepadhotkey`), and
+ * plain fullscreen (`onfullscreenhotkey`, `enterFullscreen` by default),
+ * Ctrl+Shift+X toggles gaming mode (`ongaminghotkey`, `toggleGamingMode` by
+ * default), Ctrl+Shift+G toggles the gamepad overlay (`ongamepadhotkey`), and
  * Ctrl+Shift+Click takes pointer lock. Elements carrying the
  * `allow-native-input` class keep native keyboard and touch handling.
  */
@@ -1294,6 +1295,7 @@ export class Input {
         this.gamingMode = false;
         this.ongamingmode = null;
         this.onfullscreenhotkey = this.enterFullscreen;
+        this.ongaminghotkey = this.toggleGamingMode;
         this.ongamepadhotkey = null;
         this.ongamepadconnected = null;
         this.ongamepaddisconnected = null;
@@ -1724,6 +1726,7 @@ export class Input {
             let hotkey = null;
             if (event.code === 'KeyM' && !this.gamingMode) hotkey = this.onmenuhotkey;
             else if (event.code === 'KeyF' && document.fullscreenElement === null) hotkey = this.onfullscreenhotkey;
+            else if (event.code === 'KeyX') hotkey = this.ongaminghotkey;
             else if (event.code === 'KeyG') hotkey = this.ongamepadhotkey;
             if (hotkey !== null && this._guac_markEvent(event)) {
                 // call() keeps `this` for the method-style default (enterFullscreen).
@@ -3732,6 +3735,24 @@ export class Input {
         if (document.fullscreenElement === null) {
             document.documentElement.requestFullscreen()
                 .catch(err => console.error("Fullscreen request failed:", err));
+        }
+    }
+
+    /**
+     * Gaming mode on the Ctrl+Shift+X chord. Leaving it drops fullscreen,
+     * which is what releases both locks through the fullscreenchange handler;
+     * a mode left set without fullscreen (a refused request) is cleared
+     * directly.
+     */
+    toggleGamingMode() {
+        if (!this.gamingMode) {
+            this.enterGamingMode();
+            return;
+        }
+        if (document.fullscreenElement !== null) {
+            document.exitFullscreen().catch(err => console.error("Fullscreen exit failed:", err));
+        } else {
+            this._setGamingMode(false);
         }
     }
 

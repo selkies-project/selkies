@@ -3034,7 +3034,8 @@ function Sidebar() {
                 <FullscreenIcon />
               </button>
             )}
-            {((isMobile || hasDetectedTouch) && isKeyboardButtonVisible) ? (
+            {(isMobile || hasDetectedTouch) &&
+              isKeyboardButtonVisible &&
               (renderableSettings.trackpad ?? true) && (
                 <button
                   className={`header-action-button trackpad-mode-button ${isTrackpadModeActive ? "active" : ""}`}
@@ -3043,17 +3044,15 @@ function Sidebar() {
                 >
                   <TrackpadIcon />
                 </button>
-              )
-            ) : (
-              (renderableSettings.gamingMode ?? true) && (
-                <button
-                  className="header-action-button gaming-mode-button"
-                  onClick={handleGamingModeRequest}
-                  title={`${t("gamingModeTitle", "Gaming Mode")} \u2014 ${t("gamingModeHint", "Fullscreen with the pointer and keyboard locked")}`}
-                >
-                  <GamingModeIcon />
-                </button>
-              )
+              )}
+            {(renderableSettings.gamingMode ?? true) && (
+              <button
+                className="header-action-button gaming-mode-button"
+                onClick={handleGamingModeRequest}
+                title={`${t("gamingModeTitle", "Gaming Mode")} \u2014 ${t("gamingModeHint", "Fullscreen with the pointer and keyboard locked")}`}
+              >
+                <GamingModeIcon />
+              </button>
             )}
           </div>
         </div>
@@ -4572,6 +4571,7 @@ function Sidebar() {
                   <div className="sidebar-section-content" id="shortcuts-content">
                     {[
                       { combo: "Ctrl + Shift + F", label: t("sections.shortcuts.fullscreen", "Toggle fullscreen") },
+                      { combo: "Ctrl + Shift + X", label: t("sections.shortcuts.gamingMode", "Toggle gaming mode") },
                       { combo: "Ctrl + Shift + M", label: t("sections.shortcuts.openMenu", "Open or close the dashboard") },
                       { combo: "Ctrl + Shift + G", label: t("sections.shortcuts.toggleGamepad", "Toggle the virtual gamepad") },
                       { combo: "Ctrl + Shift + Left Click", label: t("sections.shortcuts.pointerLock", "Lock the pointer to the stream") },

@@ -145,6 +145,53 @@ def classic_viewer_check(page, res: "H.Results") -> None:
     res.check("Ctrl+Shift+M does not open the sidebar for a viewer", not reopened, reopened)
 
 
+def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
+    """Gaming mode stays reachable on a touch client, and by its chord.
+
+    A 2-in-1 reports touch alongside its keyboard and mouse, which is where
+    the trackpad button used to take the gaming-mode button's place; both
+    belong there. The Ctrl+Shift+X chord is the core's own, so it works
+    whatever the dashboard shows.
+    """
+    if dashboard == "classic":
+        present = lambda: page.evaluate("""() => ({
+            gaming: !!document.querySelector('.gaming-mode-button'),
+            trackpad: !!document.querySelector('.trackpad-mode-button'),
+        })""")
+    else:
+        present = lambda: page.evaluate("""() => ({
+            gaming: !!document.querySelector('button:has(svg.lucide-crosshair)'),
+            trackpad: !!document.querySelector('button:has(svg.lucide-touchpad)'),
+        })""")
+    before = present()
+    page.evaluate("window.dispatchEvent(new TouchEvent('touchstart', {bubbles: true}))")
+    time.sleep(1.0)
+    after = present()
+    res.check("gaming mode button shown without touch", before["gaming"], before)
+    res.check("gaming mode button survives touch detection", after["gaming"], after)
+    res.check("trackpad button appears with touch", after["trackpad"], after)
+
+    # requestFullscreen needs a real display; the mode the input handler
+    # publishes is what the chord has to move.
+    page.evaluate("""() => {
+      Element.prototype.requestFullscreen = function () { return Promise.resolve(); };
+      Document.prototype.requestFullscreen = function () { return Promise.resolve(); };
+      window.__gaming = [];
+      window.addEventListener('message', (e) => {
+        if (e.data && e.data.type === 'gamingModeUpdate') window.__gaming.push(e.data.active);
+      });
+    }""")
+    page.keyboard.press("Control+Shift+X")
+    time.sleep(1.0)
+    entered = page.evaluate("!!(window.webrtcInput && window.webrtcInput.gamingMode)")
+    page.keyboard.press("Control+Shift+X")
+    time.sleep(1.0)
+    left = page.evaluate("!!(window.webrtcInput && window.webrtcInput.gamingMode)")
+    posted = page.evaluate("window.__gaming")
+    res.check("Ctrl+Shift+X enters gaming mode", entered, posted)
+    res.check("Ctrl+Shift+X leaves gaming mode", entered and not left, posted)
+
+
 def dash_block(dashboard: str, dist: str) -> "H.Results":
     """Exercise one dashboard's settings loop and mode-switch round trip.
 
@@ -160,8 +207,10 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
     # Fixed viewport width keeps the sidebar content deterministic.
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
+        # has_touch stands in for a 2-in-1, whose touchscreen sits alongside a
+        # keyboard and mouse: the header still has to offer gaming mode there.
         ctx = browser.new_context(viewport={"width": 1440, "height": 900},
-                                  device_scale_factor=1)
+                                  device_scale_factor=1, has_touch=True)
         ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
         # Records the core's clipboard postMessages so a check can tell that a
         # server push arrived before a panel was opened.
@@ -200,6 +249,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
 
         if dashboard == "wish":
             wish_clipboard_seed_check(page, res)
+        gaming_mode_check(page, res, dashboard)
 
         st = len(H.server_log())
         changed = False

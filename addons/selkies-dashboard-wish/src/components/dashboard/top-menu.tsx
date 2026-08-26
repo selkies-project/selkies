@@ -940,6 +940,28 @@ export function TopMenu({
               </Tooltip>
             )}
 
+            {(renderableSettings.gamingMode ?? true) && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="secondary"
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={() => {
+                      if (document.fullscreenElement) {
+                        document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
+                      } else {
+                        window.postMessage({ type: 'requestGamingMode' }, window.location.origin);
+                      }
+                    }}
+                  >
+                    <Crosshair className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{t('gamingModeTitle')}</TooltipContent>
+              </Tooltip>
+            )}
+
             {(isMobile || hasDetectedTouch) && (renderableSettings.trackpad ?? true) && (
               <Tooltip>
                 <TooltipTrigger asChild>
