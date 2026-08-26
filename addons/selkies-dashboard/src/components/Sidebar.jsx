@@ -1199,8 +1199,8 @@ function Sidebar() {
   const [encoder, setEncoder] = useState(
     localStorage.getItem(getPrefixedKey("encoder")) || DEFAULT_ENCODER
   );
-  const [webcamEncoder, setWebcamEncoder] = useState(
-    localStorage.getItem(getPrefixedKey("webcam_encoder")) || "auto"
+  const [webcamEncoderChoice, setWebcamEncoderChoice] = useState(
+    localStorage.getItem(getPrefixedKey("webcam_encoder"))
   );
   const [framerate, setFramerate] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("framerate")), 10) ||
@@ -1966,17 +1966,16 @@ function Sidebar() {
   };
   const handleWebcamEncoderChange = (event) => {
     const preference = event.target.value;
-    setWebcamEncoder(preference);
+    setWebcamEncoderChoice(preference);
     localStorage.setItem(getPrefixedKey("webcam_encoder"), preference);
     debouncedPostSetting({ webcam_encoder: preference });
   };
-  // The server default; locked overrides the stored choice.
-  useEffect(() => {
-    const wce = serverSettings?.webcam_encoder;
-    if (!wce || !webcamEncoderOptions.includes(wce.value)) return;
-    const stored = localStorage.getItem(getPrefixedKey("webcam_encoder"));
-    setWebcamEncoder(wce.locked || !webcamEncoderOptions.includes(stored) ? wce.value : stored);
-  }, [serverSettings]);
+  // Derived, not synced: the server default stands in for a missing choice,
+  // locked overrides it.
+  const wceServer = serverSettings?.webcam_encoder;
+  const wceServerValue = webcamEncoderOptions.includes(wceServer?.value) ? wceServer.value : null;
+  const wceChoice = webcamEncoderOptions.includes(webcamEncoderChoice) ? webcamEncoderChoice : null;
+  const webcamEncoder = (wceServer?.locked && wceServerValue) || wceChoice || wceServerValue || "auto";
   const handleFramerateChange = (event) => {
     const selectedFramerate = parseInt(event.target.value, 10);
     setFramerate(selectedFramerate);
