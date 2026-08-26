@@ -52,6 +52,7 @@ from typing import Awaitable, Callable, Dict, Set, Optional, Any, Tuple, List
 from .webrtc_utils import _is_trusted_config_file
 from .settings import settings as app_settings
 from .selkies import _lookup_session_token
+from .stream_server import note_pong
 
 logger = logging.getLogger("signaling")
 
@@ -423,7 +424,15 @@ class WebRTCPeerManagement:
                 elif msg_obj.type == WSMsgType.ERROR:
                     logger.error("Peer Connection error")
                     raise Exception(f"Peer Connection error: {uid!r}")
-                
+
+                # autoping is off: answer PING here, feed PONG to the uplink gauge.
+                if msg_obj.type == WSMsgType.PING:
+                    await ws.pong(msg_obj.data)
+                    continue
+                if msg_obj.type == WSMsgType.PONG:
+                    note_pong(ws, msg_obj.data)
+                    continue
+
                 if msg_obj.type != WSMsgType.TEXT:
                     logger.warning(f"Ignoring non-text message from peer {uid!r}")
                     continue
@@ -679,7 +688,15 @@ class WebRTCPeerManagement:
             Exception: Protocol validation failed or the peer was rejected;
                 the socket is closed with a reason before raising.
         """
-        msg_obj = await ws.receive()
+        # With autoping off, a PING/PONG racing the handshake is not an invalid HELLO.
+        while True:
+            msg_obj = await ws.receive()
+            if msg_obj.type == WSMsgType.PING:
+                await ws.pong(msg_obj.data)
+                continue
+            if msg_obj.type == WSMsgType.PONG:
+                continue
+            break
         if msg_obj.type != WSMsgType.TEXT or not isinstance(msg_obj.data, str):
             await ws.close(code=1002, message=b"invalid protocol")
             raise Exception("Invalid hello message type from {!r}".format(raddr))

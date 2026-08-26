@@ -5,10 +5,14 @@ ceiling once per epoch and probe multiplicatively only before the first
 congestion, a connection with no usable gauge must not be throttled blindly,
 and the file_transfer_limit_mbps setting must neutralize unusable values.
 
-Uploads have their own allowance, which nothing on this side can gauge: it
-measures what the client sends when nothing holds it back and then holds the
-transfer below that, so the first hop's queue drains and the session's own
-traffic is not stuck behind the file.
+Uploads are gauged end to end over the uploader's session socket
+(`UplinkGauge`): the gauge times its own pings against their pongs, and a
+round trip inflating past a per-session floor is the congestion verdict the
+upload pacer backs off on, so a transfer takes what the uplink has spare and
+yields the moment the session's own delay rises. The floor is a minute-
+bucketed minimum so a route change re-baselines instead of reading as
+permanent congestion, and a session socket that dies mid-transfer takes the
+gauge with it — nothing is left to protect.
 """
 import asyncio
 import os
@@ -21,8 +25,12 @@ TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 
+from collections import deque  # noqa: E402
+
 from selkies import stream_server  # noqa: E402
-from selkies.stream_server import TransferPacer, UplinkAllowance  # noqa: E402
+from selkies.stream_server import (  # noqa: E402
+    TransferPacer, UplinkGauge, _observe_rtt_floor,
+)
 
 passed = failed = 0
 
@@ -183,50 +191,94 @@ check("negative limit clamps to 0 (pacing off)", probe_limit("-5") == "0.0",
 check("nan limit clamps to 0 (pacing off)", probe_limit("nan") == "0.0",
       probe_limit("nan"))
 
-async def drive_uplink(rate_bps: float, seconds: float,
-                       chunk: int = 64 * 1024) -> tuple:
-    """Feed an allowance from a client whose link delivers `rate_bps`.
+# The upload leg: an externally supplied verdict drives the same AIMD, and a
+# read with no fresh sample must hold the rate rather than growing or cutting
+# on stale information.
+pacer = TransferPacer(adaptive=True)
+r0 = pacer.rate_bps
+asyncio.run(pacer.pace_verdict(1024, None))
+check("a sampleless verdict holds the rate", pacer.rate_bps == r0,
+      f"{r0} -> {pacer.rate_bps}")
+asyncio.run(pacer.pace_verdict(1024, False))
+check("a clear verdict grows the rate", pacer.rate_bps > r0,
+      f"{r0} -> {pacer.rate_bps}")
+before = pacer.rate_bps
+asyncio.run(pacer.pace_verdict(1024, True))
+check("a congested verdict cuts the rate", pacer.rate_bps < before,
+      f"{before} -> {pacer.rate_bps}")
 
-    Bytes become available at that rate and bank up while the allowance reads
-    more slowly, so a read waits only once the allowance has asked for more
-    than the link can carry — which is the signal the allowance settles on.
-    """
-    up = UplinkAllowance()
-    state = up.transfer()
+# The verdict leg still drains the token bucket: with the rate pinned (no
+# fresh samples), delivery must match it, not bypass it.
+rate = 2 * 1024 * 1024
+pacer = TransferPacer(static_bps=rate, adaptive=False)
+sent = 3 * 1024 * 1024
+expected = (sent - rate * 0.5) / rate
+
+
+async def timed_verdict(pacer: TransferPacer, total_bytes: int) -> float:
     start = time.monotonic()
-    ready_at = start
-    delivered = 0
-    while time.monotonic() - start < seconds:
-        before = time.monotonic()
-        if ready_at > before:
-            await asyncio.sleep(ready_at - before)
-        waited = time.monotonic() - before
-        ready_at += chunk / rate_bps
-        await up.pace(chunk, state, waited)
-        delivered += chunk
-    return state, delivered
+    done = 0
+    while done < total_bytes:
+        n = min(TransferPacer._CHUNK, total_bytes - done)
+        await pacer.pace_verdict(n, None)
+        done += n
+    return time.monotonic() - start
 
 
-LINK_BPS = 3 * 1024 * 1024
-state, delivered = asyncio.run(drive_uplink(LINK_BPS, 9.0))
-check("the ramp finds the rate the client's link carries",
-      state["phase"] == "steady"
-      and abs(state["capacity_bps"] - LINK_BPS) / LINK_BPS < 0.25,
-      f"{state['capacity_bps']/125000:.2f} Mbit/s of {LINK_BPS/125000:.2f}"
-      f" (phase={state['phase']})")
-want = state["capacity_bps"] * UplinkAllowance.SHARE
-check("and settles at its share of that once the queue has drained",
-      abs(state["rate_bps"] - want) < want * 0.05,
-      f"{state['rate_bps']/125000:.2f} Mbit/s")
-check("which leaves the client's link room for the session",
-      state["rate_bps"] < LINK_BPS * 0.75,
-      f"{state['rate_bps']:.0f} of {LINK_BPS}")
+elapsed = asyncio.run(timed_verdict(pacer, sent))
+check("the verdict leg delivers the bucket's rate",
+      expected * 0.85 <= elapsed <= expected * 1.4,
+      f"elapsed={elapsed:.2f}s expected~{expected:.2f}s")
 
-# A client slower than the floor must not be paced below it into a stall.
-slow, _ = asyncio.run(drive_uplink(32 * 1024, 6.0, chunk=4096))
-check("a client slower than the floor is not paced below it",
-      slow["rate_bps"] >= UplinkAllowance.FLOOR_BPS,
-      f"{slow['rate_bps']:.0f}")
+# UplinkGauge: verdicts come from timing the gauge's own pings against their
+# pongs. No pong yet is no verdict, a prompt pong reads clear, a round trip
+# inflated past the floor reads congested, a pong the clock never sent is
+# ignored, and a session socket whose ping fails takes the gauge with it.
+class FakeSessionWS:
+    def __init__(self):
+        self.pings = []
+        self.fail = False
+
+    async def ping(self, payload=b""):
+        if self.fail:
+            raise ConnectionResetError()
+        self.pings.append(payload)
+
+
+ws = FakeSessionWS()
+state = stream_server._uplink_session_state(ws)
+gauge = UplinkGauge([[ws, state, state["seq"]]])
+check("no pong yet gives no verdict", asyncio.run(gauge.sample()) is None, "")
+stream_server.note_pong(ws, ws.pings[-1])
+check("a prompt pong reads clear", asyncio.run(gauge.sample()) is False, "")
+gauge._last_ping = 0.0
+asyncio.run(gauge.sample())
+late = ws.pings[-1]
+state["pending"][late] = time.monotonic() - (
+    UplinkGauge.INFLATION_US + 10_000) / 1e6
+stream_server.note_pong(ws, late)
+check("an inflated round trip reads congested",
+      asyncio.run(gauge.sample()) is True, "")
+seq_before = state["seq"]
+stream_server.note_pong(ws, b"never-sent")
+check("a pong the clock never sent is ignored",
+      state["seq"] == seq_before and asyncio.run(gauge.sample()) is None, "")
+ws.fail = True
+gauge._last_ping = 0.0
+asyncio.run(gauge.sample())
+check("a dead session socket takes the gauge with it", not gauge.alive, "")
+
+# The RTT floor is the minimum over a bounded history of minute buckets: it
+# must hold through jitter, and a route change onto a longer path must age
+# out of it rather than reading as permanent congestion.
+floor_state = {"buckets": deque(maxlen=UplinkGauge.FLOOR_BUCKETS)}
+_observe_rtt_floor(floor_state, 5_000, now=0.0)
+floor = _observe_rtt_floor(floor_state, 9_000, now=1.0)
+check("the floor holds through higher samples", floor == 5_000, f"{floor}")
+for i in range(1, UplinkGauge.FLOOR_BUCKETS + 1):
+    floor = _observe_rtt_floor(
+        floor_state, 20_000, now=i * UplinkGauge.FLOOR_BUCKET_SECONDS)
+check("a route change re-baselines the floor", floor == 20_000, f"{floor}")
 
 print(f"[pacer] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

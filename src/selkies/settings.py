@@ -164,13 +164,13 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "float",
         "default": 0.0,
         "min": 0.0,
-        "help": 'Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. Without it the congestion-control pacing still protects the video stream from downloads; uploads have no server-side congestion gauge and are paced by this cap alone.',
+        "help": 'Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. The congestion-control pacing protects the video stream without it; the cap is chiefly for links its gauges cannot see, e.g. behind a reverse proxy.',
     },
     {
         "name": "file_transfer_cc",
         "type": "bool",
         "default": True,
-        "help": 'Congestion-control pacing for file transfers: a greedy transfer otherwise queues ahead of the video stream (bufferbloat) and the session stalls. Downloads are held inside a shared allowance that adapts from kernel queue depth (and RTT off-Linux); uploads, which no gauge on this side can see, are held to a share of the rate the client demonstrates. Neither needs a link estimate. Behind a reverse proxy the download gauge measures the hop to the proxy rather than the client\'s link, so a static cap is the lever there.',
+        "help": 'Congestion-control pacing for file transfers: a greedy transfer otherwise queues ahead of the video stream (bufferbloat) and the session stalls. Downloads are held inside a shared allowance that adapts from kernel queue depth (and RTT off-Linux); uploads back off the moment the uploader\'s own session round trip inflates past its floor, so they take whatever the uplink has spare and yield to the stream. Neither needs a link estimate. Behind a reverse proxy the download gauge measures only the hop to the proxy, so the static cap is the download lever there; the upload gauge times the client end to end and keeps working.',
     },
     {
         "name": "framerate",
@@ -1887,6 +1887,11 @@ def sanitize_client_setting(name: str, client_value: Any, source: Any,
 if settings.debug[0]:
     logging.getLogger().setLevel(logging.DEBUG)
     logging.getLogger("websockets").setLevel(logging.WARNING)
+    # These log per RTP packet / SCTP chunk, burying the debug run.
+    for _packet_logger in ("selkies.webrtc.rtcrtpsender",
+                           "selkies.webrtc.rtcrtpreceiver",
+                           "selkies.webrtc.rtcsctptransport"):
+        logging.getLogger(_packet_logger).setLevel(logging.INFO)
 else:
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("websockets").setLevel(logging.WARNING)

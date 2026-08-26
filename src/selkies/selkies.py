@@ -104,7 +104,7 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
-from .stream_server import BaseStreamingService
+from .stream_server import BaseStreamingService, note_pong
 from .webrtc_utils import Metrics
 
 BACKPRESSURE_ALLOWED_DESYNC_MS = 2000
@@ -3104,6 +3104,13 @@ class DataStreamingServer(BaseStreamingService):
                     mic_error = True
 
             async for msg in websocket:
+                # autoping is off: answer PING here, feed PONG to the uplink gauge.
+                if msg.type == WSMsgType.PING:
+                    await websocket.pong(msg.data)
+                    continue
+                if msg.type == WSMsgType.PONG:
+                    note_pong(websocket, msg.data)
+                    continue
                 # A 0x05 frame is gzip-wrapped control text: inflated into a TEXT
                 # message so the dispatch below (permission checks included) sees it as such.
                 if (msg.type == WSMsgType.BINARY and msg.data
@@ -5449,8 +5456,9 @@ class DataStreamingServer(BaseStreamingService):
                 return web.Response(status=401, text="Token missing in secure mode")
 
         # compress=False: the frames are already H.264/JPEG/Opus. heartbeat:
-        # protocol pings reap a silently dead peer, as the signaling sockets' probes do.
-        ws = web.WebSocketResponse(compress=False, max_msg_size=WS_MAX_MESSAGE_BYTES, heartbeat=30)
+        # protocol pings reap a silently dead peer, as the signaling sockets' probes
+        # do. autoping=False: the loop answers PING and feeds PONG to the uplink gauge.
+        ws = web.WebSocketResponse(compress=False, max_msg_size=WS_MAX_MESSAGE_BYTES, heartbeat=30, autoping=False)
         await ws.prepare(request)
 
         peername = request.transport.get_extra_info('peername')
@@ -5465,6 +5473,16 @@ class DataStreamingServer(BaseStreamingService):
         finally:
             self._report_client_presence()
         return ws
+
+    def uplink_session_conns(self) -> list[tuple[Any, Optional[str], Optional[str]]]:
+        """``(websocket, session token, peer ip)`` per connected data socket,
+        for the supervisor's upload uplink gauge."""
+        conns = []
+        for ws in list(self.clients):
+            perms = client_permissions.get(ws) or {}
+            addr = perms.get("remote_address")
+            conns.append((ws, perms.get("token"), addr[0] if addr else None))
+        return conns
 
 
 async def _collect_system_stats_ws(shared_data: dict, interval_seconds: float = 1) -> None:

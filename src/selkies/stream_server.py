@@ -39,6 +39,8 @@ import logging
 import socket
 import urllib.parse
 import tempfile
+import weakref
+from collections import deque
 
 try:
     import fcntl
@@ -166,117 +168,163 @@ def _scan_directory(path: str, include_parent: bool) -> List[Dict[str, Any]]:
     return items
 
 
-class UplinkAllowance:
-    """Read pacing for a client upload, sized from what that client can send.
+# A gauged read is sized to what the current rate drains in this fraction of
+# a second, so its receive-window burst stays under the gauge's own inflation
+# threshold on any link rate (rationale in `_stream_upload_body`).
+UPLOAD_READ_DELAY_BUDGET: float = 0.0125
+UPLOAD_READ_MIN_BYTES: int = 8 * 1024
+UPLOAD_READ_MAX_BYTES: int = 1 << 20
 
-    An upload allowed to run at the client's full uplink rate stands a queue
-    in the first hop, and everything else the session sends — input, feedback,
-    the acknowledgements the video stream's own delivery depends on — waits
-    behind it. That wait is what a user reports as the session breaking down
-    mid-transfer, and it is bounded by the buffer rather than by the file, so
-    it does not improve as the transfer proceeds.
+# Below this a transfer is over before an uplink queue could matter, and
+# gauging it would only make a small file feel slow.
+UPLOAD_MIN_GAUGED_BYTES: int = 4 * 1024 * 1024
 
-    Nothing on this side can measure the client's uplink directly, and reading
-    flat out to find it would fill the very queue this exists to keep empty —
-    and would measure the buffers it drained rather than the link. So the
-    allowance steps up instead, and watches for the one moment the arithmetic
-    is honest: while a transfer is paced below the client's rate its data
-    banks up here and reads never wait, so a read that DOES wait means the
-    backlog is gone and what arrives from then on is arriving at the link's
-    own rate. That window is the measurement, and the transfer settles below
-    it — the link keeps an idle share, the queue drains, and the session's
-    traffic crosses at its unloaded delay.
 
-    Reads are what apply the rate, since a paused read closes the receive
-    window and the data waits in the client's kernel, so no client
-    cooperation is needed.
+# Session websocket to its uplink gauge state (ping clock + RTT floor).
+# Module-level so the transports' loops reach it from `note_pong` without a
+# supervisor reference; weak keys tie each entry to its socket's life.
+_UPLINK_SESSIONS: "weakref.WeakKeyDictionary[Any, Dict[str, Any]]" = (
+    weakref.WeakKeyDictionary())
 
-    Attributes:
-        SHARE: Settled share of the client's link, half. On a modeled 6 Mbit/s
-            uplink behind a 1 MiB first-hop buffer with a session streaming
-            beside the transfer, a small request took 1421 ms unpaced, 1116 ms
-            at a three-quarter share and 2 ms (its unloaded time) at a half,
-            for 60% of the unpaced transfer rate.
-        STARVED_FRACTION: Share of a window spent waiting for the client before
-            the backlog counts as gone and the window's rate as the link's own.
-        DRAIN_SHARE: Share held for `DRAIN_SECONDS` after the measurement to
-            empty the queue the ramp left standing, before settling at `SHARE`.
-        MIN_PACED_BYTES: Below this a transfer is over before a queue could
-            matter, and pacing it would only make a small file feel slow.
-        READ_BYTES: One read's worth of receive window, and so the burst the
-            client answers with: small enough that it cannot itself become the queue.
+
+def _uplink_session_state(ws: Any) -> Dict[str, Any]:
+    """The uplink gauge state for one session websocket, created on first use."""
+    state = _UPLINK_SESSIONS.get(ws)
+    if state is None:
+        state = {"pending": {}, "rtt_us": None, "seq": 0, "next_ping": 0,
+                 "buckets": deque(maxlen=UplinkGauge.FLOOR_BUCKETS)}
+        _UPLINK_SESSIONS[ws] = state
+    return state
+
+
+def note_pong(ws: Any, data: Any) -> None:
+    """Resolve a received PONG frame against ``ws``'s uplink ping clock.
+
+    The transports' message loops call this for every `WSMsgType.PONG` (their
+    sockets run with autoping off so the frames reach them). A payload the
+    clock did not send — an answer to an aiohttp heartbeat ping, or a peer's
+    unsolicited pong — misses the pending map and is ignored.
+    """
+    state = _UPLINK_SESSIONS.get(ws)
+    if state is None:
+        return
+    try:
+        sent = state["pending"].pop(bytes(data or b""), None)
+    except (TypeError, ValueError):
+        return
+    if sent is None:
+        return
+    state["rtt_us"] = int((time.monotonic() - sent) * 1e6)
+    state["seq"] += 1
+
+
+def _observe_rtt_floor(state: Dict[str, Any], rtt_us: int, now: float) -> int:
+    """Fold one RTT sample into a session's floor history and return the
+    current floor.
+
+    The floor is the minimum over the last `UplinkGauge.FLOOR_BUCKETS` minute
+    buckets (LEDBAT's base-delay history): a floor kept forever turns a route
+    change onto a longer path into permanent congestion, while one re-measured
+    from scratch mid-transfer would read the standing queue as the base and
+    never see congestion again.
+    """
+    bucket = int(now // UplinkGauge.FLOOR_BUCKET_SECONDS)
+    buckets = state["buckets"]
+    if buckets and buckets[-1][0] == bucket:
+        if rtt_us < buckets[-1][1]:
+            buckets[-1][1] = rtt_us
+    else:
+        buckets.append([bucket, rtt_us])
+    return min(b[1] for b in buckets)
+
+
+class UplinkGauge:
+    """Congestion verdicts for one client upload, timed end to end over the
+    uploader's own session websocket(s).
+
+    Nothing on this side can see the client's uplink queue — it stands in the
+    client's kernel and first hop — but every session connection from that
+    client (the data WebSocket, or the WebRTC signaling socket) crosses the
+    same uplink bottleneck as the upload. So the gauge sends a protocol ping
+    every ``PING_INTERVAL`` on each session socket and times the pong: the
+    reply rides back through the standing queue, and its round trip inflating
+    past a per-session floor by more than ``INFLATION_US`` is the verdict a
+    delay-based scavenger backs off on (LEDBAT's discipline: take what the
+    link has spare, yield the moment anything else waits). Browsers answer
+    pings in the network process, so no page or client-code cooperation is
+    needed. The rejected alternative — reading flat out to measure the
+    client's rate, then settling on a fixed share of it — filled the very
+    queue it existed to prevent, latched a one-shot estimate, and held
+    idle-screen uploads to half the link. Kernel srtt (TCP_INFO) was rejected
+    too: it times the first hop's ACK, so any relaying middlebox — a reverse
+    proxy, a tunnel — blinds it, where the pong crosses end to end.
+
+    The end-to-end trip also spans both event loops, so a server too loaded
+    to serve the stream reads as congestion and sheds the upload first —
+    load protection for free. ``INFLATION_US`` sits above scheduler jitter
+    and below what a session feels: the queue the sawtooth sustains stays
+    imperceptible.
+
+    Ping payloads are per-session counters; the pong echoes its ping's
+    payload (RFC 6455), so `note_pong` matches replies to send times through
+    `_UPLINK_SESSIONS` and stray pongs — aiohttp's own heartbeat's among
+    them — fall through unmatched. A ping failure drops that socket; a gauge
+    with no sockets left reports not ``alive`` and the caller stops pacing —
+    a vanished session leaves nothing to protect.
     """
 
-    SHARE: float = 0.5
-    WINDOW_SECONDS: float = 0.5
-    GROWTH: float = 1.5
-    START_BPS: int = 256 * 1024
-    STARVED_FRACTION: float = 0.15
-    DRAIN_SHARE: float = 0.45
-    DRAIN_SECONDS: float = 2.5
-    FLOOR_BPS: int = 64 * 1024
-    MIN_PACED_BYTES: int = 4 * 1024 * 1024
-    READ_BYTES: int = 64 * 1024
+    PING_INTERVAL: float = 0.2
+    INFLATION_US: int = 25_000
+    FLOOR_BUCKET_SECONDS: float = 60.0
+    FLOOR_BUCKETS: int = 10
+    _PENDING_MAX: int = 25
 
-    def transfer(self) -> Dict[str, Any]:
-        """State for one upload: its own ramp, its own bucket."""
-        return {"rate_bps": float(self.START_BPS), "seen": 0, "window_start": None,
-                "phase": "ramp", "starved": 0.0, "tokens": 0.0, "ts": 0.0,
-                "drain_until": 0.0, "capacity_bps": 0.0}
+    def __init__(self, conns: List[List[Any]]) -> None:
+        """``conns``: ``[websocket, session state, last-consumed seq]`` per
+        session connection sharing the uploader's uplink."""
+        self._conns = conns
+        self._last_ping = 0.0
 
-    def _step(self, state: Dict[str, Any], now: float) -> None:
-        """Close one window: step up while data is banked, settle when it runs out.
+    @property
+    def alive(self) -> bool:
+        """Whether any session socket is left to gauge."""
+        return bool(self._conns)
 
-        A ramp window that starved still counted buffered bytes, so the next
-        window is the measurement. Measuring leaves the link's queue standing,
-        and at the steady share it would take most of a transfer to come back
-        out, so a wider drain share clears it first.
-        """
-        elapsed = now - state["window_start"]
-        observed = state["seen"] / elapsed if elapsed > 0 else 0.0
-        starved = state["starved"]
-        state["window_start"] = now
-        state["seen"] = 0
-        state["starved"] = 0.0
-        if state["phase"] == "ramp":
-            if starved < elapsed * self.STARVED_FRACTION:
-                state["rate_bps"] *= self.GROWTH
-                return
-            state["phase"] = "measure"
-            return
-        if state["phase"] == "measure":
-            state["capacity_bps"] = observed
-            state["phase"] = "drain"
-            state["drain_until"] = now + self.DRAIN_SECONDS
-            state["rate_bps"] = max(self.FLOOR_BPS, observed * self.DRAIN_SHARE)
-            return
-        if state["phase"] == "drain" and now >= state["drain_until"]:
-            state["phase"] = "steady"
-            state["rate_bps"] = max(self.FLOOR_BPS,
-                                    state["capacity_bps"] * self.SHARE)
+    async def sample(self) -> Optional[bool]:
+        """Ping on cadence and return one verdict across the gauged sockets.
 
-    async def pace(self, nbytes: int, state: Dict[str, Any],
-                   waited: float = 0.0) -> None:
-        """Account one read of `nbytes` that spent `waited` seconds arriving.
-
-        The deficit is slept off here and repaid by the next call's
-        elapsed-time refill, as in `TransferPacer`.
+        Returns:
+            True when any session's round trip stands above its floor by more
+            than `INFLATION_US`, False when at least one session answered
+            fresh and none congested, None when no fresh pong arrived since
+            the last call (the caller holds its rate).
         """
         now = time.monotonic()
-        if state["window_start"] is None:
-            state["window_start"] = now
-            state["ts"] = now
-        state["seen"] += nbytes
-        state["starved"] += waited
-        if now - state["window_start"] >= self.WINDOW_SECONDS:
-            self._step(state, now)
-        rate = state["rate_bps"]
-        state["tokens"] = min(rate * 0.25,
-                              state["tokens"] + (now - state["ts"]) * rate)
-        state["ts"] = now
-        state["tokens"] -= nbytes
-        if state["tokens"] < 0:
-            await asyncio.sleep(-state["tokens"] / rate)
+        if now - self._last_ping >= self.PING_INTERVAL:
+            self._last_ping = now
+            for conn in list(self._conns):
+                ws, state, _last = conn
+                payload = state["next_ping"].to_bytes(8, "big")
+                state["next_ping"] += 1
+                pending = state["pending"]
+                pending[payload] = now
+                while len(pending) > self._PENDING_MAX:
+                    pending.pop(next(iter(pending)))
+                try:
+                    await ws.ping(payload)
+                except Exception:
+                    self._conns.remove(conn)
+        verdict: Optional[bool] = None
+        for conn in self._conns:
+            _ws, state, last = conn
+            if state["seq"] == last or state["rtt_us"] is None:
+                continue
+            conn[2] = state["seq"]
+            rtt = state["rtt_us"]
+            floor = _observe_rtt_floor(state, rtt, now)
+            congested = rtt > floor + self.INFLATION_US
+            verdict = congested if verdict is None else (verdict or congested)
+        return verdict
 
 
 class TransferPacer:
@@ -294,9 +342,11 @@ class TransferPacer:
 
     Transfers share ONE rate across concurrent downloads and uploads on
     purpose: the link sees one source regardless of how many sockets a
-    browser opens. Upload reads have no usable gauge at all — the client's
-    uplink queue stands in the client's kernel, invisible to this side — so
-    they ride only the static-cap leg, ungauged (see connection_state).
+    browser opens. Upload reads have no usable gauge on their own socket —
+    the client's uplink queue stands in the client's kernel, invisible to
+    this side — so on this shared pacer they ride only the static-cap leg,
+    ungauged (see connection_state); their congestion control is a second,
+    upload-only pacer fed `UplinkGauge` verdicts through `pace_verdict`.
     """
 
     _CHUNK = 256 * 1024
@@ -362,6 +412,34 @@ class TransferPacer:
                     conn["gauged"] = False
         if self.adaptive and not conn["gauged"] and not self.static_bps:
             return
+        await self._bucket(nbytes)
+
+    async def pace_verdict(self, nbytes: int, congested: Optional[bool]) -> None:
+        """Adaptive leg for a transfer gauged by its caller.
+
+        Uploads use this: their congestion lives on the client's uplink,
+        readable only over the session socket (`UplinkGauge`), so the caller
+        supplies the verdict this side's probes cannot. ``congested=None``
+        (no fresh sample) holds the rate and still drains the bucket;
+        True/False are one `_gauge_backoff` step. The cut is gentler than the
+        socket gauges' — a delay verdict fires at a bounded queue where a
+        loss-like signal means one already overflowed — and the growth step
+        is proportional rather than the fixed 8 KiB: verdicts arrive at the
+        gauge's ping cadence, a few per second where the download gauges
+        sample per chunk, and a fixed step at that cadence would take minutes
+        to recover a fast link's post-cut rate. Together they hold the AIMD
+        sawtooth's duty cycle near the line instead of near half of it.
+        """
+        if not self.active:
+            return
+        if self.adaptive and congested is not None:
+            step = max(8 * 1024, int(self.rate_bps * 0.03))
+            self._gauge_backoff(
+                congested=congested, clear=not congested, cut=0.65, step=step)
+        await self._bucket(nbytes)
+
+    async def _bucket(self, nbytes: int) -> None:
+        """Drain `nbytes` from the token bucket, sleeping off any overdraw."""
         now = time.monotonic()
         if self.adaptive and now - self._ts > 10:
             self._slow_start = True
@@ -372,12 +450,14 @@ class TransferPacer:
         if self._tokens < 0:
             await asyncio.sleep(-self._tokens / limit)
 
-    def _gauge_backoff(self, congested: bool, clear: bool, cut: float) -> None:
+    def _gauge_backoff(self, congested: bool, clear: bool, cut: float,
+                       step: int = 8 * 1024) -> None:
         """One congestion-control step on the shared allowance: a congested
         sample multiplies the rate down; a clear one probes upward —
         multiplicatively while no congestion has ever been seen (the initial
-        ramp toward an unknown link rate), additively after (fine-grained
-        probing near the working point, TCP's post-ssthresh split).
+        ramp toward an unknown link rate), additively by ``step`` after
+        (fine-grained probing near the working point, TCP's post-ssthresh
+        split; the caller sizes the step to its sample cadence).
 
         The recovery ceiling arms ONCE per congestion epoch, from the rate at
         the epoch's first congested sample (ssthresh semantics): arming it per
@@ -417,7 +497,7 @@ class TransferPacer:
         if self._slow_start:
             self.rate_bps = min(self.rate_bps * 2, bound)
         else:
-            self.rate_bps = min(self.rate_bps + 8 * 1024, bound)
+            self.rate_bps = min(self.rate_bps + step, bound)
 
 
 def _upload_staging_path(dest: str, token: str) -> str:
@@ -872,6 +952,18 @@ class BaseStreamingService(metaclass=ABCMeta):
         """
         pass
 
+    def uplink_session_conns(self) -> List[Tuple[Any, Optional[str], Optional[str]]]:
+        """``(websocket, session token, peer ip)`` per connected client
+        session, for upload uplink gauging (`UplinkGauge`).
+
+        The websocket must send ``ping()`` frames, and the service's message
+        loop must run with autoping off, answer PING itself, and hand every
+        PONG to `note_pong` — the gauge's clock is dead without that. Both
+        transports implement this; an upload gauged on one side but not the
+        other is a parity bug. Default: nothing to gauge.
+        """
+        return []
+
 
 class CentralizedStreamServer:
     """Supervisor that owns the aiohttp application and the streaming services.
@@ -891,9 +983,10 @@ class CentralizedStreamServer:
         transfer_pacer: Download pacing, congestion-controlled by default; a
             static cap only when the operator knows the link rate. A zero limit
             with adaptive off leaves downloads on the unthrottled FileResponse path.
-        uplink_allowance: Holds uploads, which have no congestion gauge on this
-            side, below the rate the client demonstrates; None when congestion
-            control is off or a static cap already answers the question.
+        upload_pacer: The uploads' adaptive allowance, fed per-read verdicts
+            from an `UplinkGauge` over the uploader's own session socket; None
+            when congestion control is off. The static cap reaches uploads
+            through `transfer_pacer`'s shared bucket, as ever.
         _chunked_uploads: In-flight chunked uploads by destination path: transfer
             id, next expected offset, `.part` path, last-activity stamp, and a
             busy flag that refuses interleaved writes to the same destination.
@@ -926,9 +1019,9 @@ class CentralizedStreamServer:
             static_bps=int(limit_mbps * 125000),
             adaptive=bool(self.settings.file_transfer_cc[0]),
         )
-        self.uplink_allowance = (
-            UplinkAllowance()
-            if self.settings.file_transfer_cc[0] and not limit_mbps else None)
+        self.upload_pacer = (
+            TransferPacer(adaptive=True)
+            if self.settings.file_transfer_cc[0] else None)
         self.upload_dir = pathlib.Path(
             os.path.expanduser(self.settings.file_manager_path)
         ).resolve()
@@ -1609,6 +1702,45 @@ class CentralizedStreamServer:
         except Exception as e:
             return web.json_response({"status": "error", "message": str(e)}, status=400)
 
+    def _uplink_gauge(self, request: web.Request) -> Optional[UplinkGauge]:
+        """The `UplinkGauge` for one upload request, or None when nothing can
+        be gauged (the transfer then must not be throttled blindly).
+
+        The gauge wants the uploader's own session connections — another
+        client's socket crosses a different uplink, and its jitter would
+        throttle a transfer that cannot be queuing there. The active service
+        lists every client session; the requester's are narrowed by session
+        token when the upload carries one, else by peer address, and when
+        neither discriminates the whole list is gauged: with a floor per
+        session, a foreign session can only ever add false congestion, which
+        slows the upload and never harms a stream.
+
+        Gauge state (ping clock and floor history) lives in
+        `_UPLINK_SESSIONS`, keyed weakly by session websocket, so the separate
+        requests of a chunked transfer's slices share one floor and a
+        mid-transfer slice never re-baselines against its own standing queue.
+        """
+        service = self.services.get(self.current_mode) if self.current_mode else None
+        if service is None:
+            return None
+        conns = service.uplink_session_conns()
+        if not conns:
+            return None
+        tokens = {token for _source, token in self._session_token_carriers(request)}
+        if tokens:
+            matched = [c for c in conns if c[1] and c[1] in tokens]
+            if matched:
+                conns = matched
+        if len(conns) > 1 and request.remote:
+            matched = [c for c in conns if c[2] == request.remote]
+            if matched:
+                conns = matched
+        entries = []
+        for ws, _token, _ip in conns:
+            state = _uplink_session_state(ws)
+            entries.append([ws, state, state["seq"]])
+        return UplinkGauge(entries) if entries else None
+
     async def _stream_upload_body(self, request: web.Request, path: str, append: bool) -> int:
         """Stream a request body to ``path`` with executor-thread writes.
 
@@ -1616,17 +1748,22 @@ class CentralizedStreamServer:
         O_NOFOLLOW blocks a planted symlink either way. Enforces the declared
         Content-Length.
 
-        Reads pace against the shared transfer allowance: a paused read fills
-        aiohttp's flow-control buffer, the TCP window closes, and the client's
-        uplink is freed for the input/feedback traffic the stream depends on.
-        That allowance has no gauge in this direction, so the operator's
-        static cap is all of it; the uplink allowance beside it holds an
-        unconfigured session below the client's own rate, skipped for a
-        transfer too small to stand a queue. Read granularity is what the
-        client is handed back as receive window, and it sends every byte of
-        it at once, so a paced transfer is read in small steps: a megabyte at
-        a time would refill the link's queue in one burst however slowly the
-        average is paced.
+        Reads pace against two allowances: a paused read fills aiohttp's
+        flow-control buffer, the TCP window closes, and the client's uplink is
+        freed for the input/feedback traffic the stream depends on. The
+        operator's static cap rides the shared transfer bucket, ungauged as
+        ever; congestion control is `upload_pacer` fed one `UplinkGauge`
+        verdict per read, so the transfer takes whatever the uplink has spare
+        and backs off the moment the session's own delay inflates. A transfer
+        below `UPLOAD_MIN_GAUGED_BYTES` is over before a queue could matter
+        and skips the gauge, as does one with no gauge-able session socket;
+        a gauge whose sockets all vanish mid-transfer stops pacing — the
+        session it protected is gone. Read granularity is what the client is
+        handed back as receive window, and it sends every byte of it at once,
+        so a gauged transfer's reads are sized to the current rate
+        (`UPLOAD_READ_DELAY_BUDGET`): a fixed size would burst several times
+        the gauge's delay budget onto a slow link however slowly the average
+        is paced, and the gauge would read its own bursts as congestion.
 
         Returns:
             The byte count written.
@@ -1639,29 +1776,36 @@ class CentralizedStreamServer:
         loop = asyncio.get_running_loop()
         pacer = self.transfer_pacer
         pace_conn = pacer.connection_state(gauged=False) if pacer.active else None
-        uplink = self.uplink_allowance
-        uplink_state = (
-            uplink.transfer()
-            if uplink is not None and (declared or 0) >= uplink.MIN_PACED_BYTES
+        gauge = (
+            self._uplink_gauge(request)
+            if self.upload_pacer is not None
+            and (declared or 0) >= UPLOAD_MIN_GAUGED_BYTES
             else None)
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_TRUNC)
         fd = os.open(path, flags, 0o644)
         fh = os.fdopen(fd, "wb")
         written = 0
         try:
-            read_size = (uplink.READ_BYTES if uplink_state is not None else 1 << 20)
             while True:
-                waited = time.monotonic()
+                if gauge is not None:
+                    read_size = max(UPLOAD_READ_MIN_BYTES, min(
+                        int(self.upload_pacer.rate_bps * UPLOAD_READ_DELAY_BUDGET),
+                        UPLOAD_READ_MAX_BYTES))
+                else:
+                    read_size = 1 << 20
                 chunk = await request.content.read(read_size)
-                waited = time.monotonic() - waited
                 if not chunk:
                     break
                 if declared is not None and written + len(chunk) > declared:
                     raise ValueError("body exceeds declared Content-Length")
                 if pace_conn is not None:
                     await pacer.pace(None, len(chunk), pace_conn)
-                if uplink_state is not None:
-                    await uplink.pace(len(chunk), uplink_state, waited)
+                if gauge is not None:
+                    verdict = await gauge.sample()
+                    if gauge.alive:
+                        await self.upload_pacer.pace_verdict(len(chunk), verdict)
+                    else:
+                        gauge = None
                 await loop.run_in_executor(None, fh.write, chunk)
                 written += len(chunk)
             await loop.run_in_executor(None, fh.close)

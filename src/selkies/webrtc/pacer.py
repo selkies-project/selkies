@@ -28,12 +28,15 @@
 #     than thinning arbitrary packet tails; a timeout resurrects video if no
 #     keyframe arrives, so an unbound keyframe callback or a stuck encoder
 #     cannot kill the class permanently (natural IDR cadence can be minutes).
-#   * Rate control is AIMD driven solely by internal queue overflow: a full
-#     queue means injection > wire, so it is the only congestion signal not
-#     contaminated by this pacer's own output. Brake to (goodput estimate -
-#     BYPASS_RESERVE_BPS) when an estimate exists, else halve, floored at
-#     AIMD_FLOOR_FACTOR x the encoder target; recover +25%/s while overflow
-#     stays quiet, ceilinged at PACE_FACTOR x the encoder target.
+#   * Rate control is AIMD on wire evidence: an internal overflow only proves
+#     injection > drain, and with UDP sends the drain is the pace setting, not
+#     the wire — once one brake drops the pace below the encoder rate, every
+#     further overflow is self-inflicted. So an overflow resets the GOP but
+#     sizes a brake only from a fresh goodput estimate (estimate -
+#     BYPASS_RESERVE_BPS, floored at AIMD_FLOOR_FACTOR x the encoder target),
+#     at most one brake per BRAKE_HOLD_S; recovery is +25%/s toward
+#     PACE_FACTOR x the encoder target, and only a brake resets its clock, so
+#     reset churn cannot hold the pace at the floor.
 import asyncio
 import logging
 import os
@@ -88,6 +91,12 @@ DRAIN_MAX_SLEEP_S = 0.05
 # Post-enable grace: ignore goodput braking so the first (audio-only/startup)
 # feedback windows cannot slam the pace before video even ramps.
 GOODPUT_WARMUP_S = 5.0
+# At most one brake per hold: while the pace sits below the encoder rate the
+# queue refills from injection alone, and those overflows carry no wire signal.
+BRAKE_HOLD_S = 1.0
+# A brake only trusts an estimate this fresh; one bad feedback window (an
+# upload delaying feedback, a WiFi hiccup) must not size every later brake.
+GOODPUT_MAX_AGE_S = 2.0
 # If no keyframe resurrects a dead GOP within this of the last keyreq,
 # resurrect on queue-drain anyway.
 RESURRECT_TIMEOUT_S = 1.0
@@ -166,6 +175,8 @@ class RtpPacer:
     ) -> None:
         self._encoder_bps = max(int(encoder_bps), 100_000)
         self._goodput_bps: Optional[int] = None
+        self._goodput_at = 0.0
+        self._brake_hold_until = 0.0
         self._send_now = send_now
         self._send_now_data = send_now_data or send_now
         self._request_keyframe = request_keyframe
@@ -246,7 +257,8 @@ class RtpPacer:
         # injection). AIMD: estimates merely size the step taken on overflow.
         if bps is None:
             return
-        if time.monotonic() - self._enabled_at < GOODPUT_WARMUP_S:
+        now = time.monotonic()
+        if now - self._enabled_at < GOODPUT_WARMUP_S:
             # The first feedback windows after enabling carry audio-only (or
             # no) traffic: their throughput measures the offered load, not the
             # link, and would size an early brake far below capacity.
@@ -254,33 +266,44 @@ class RtpPacer:
         bps = int(bps)
         if bps > 0:
             self._goodput_bps = bps
+            self._goodput_at = now
 
     def _on_overflow(self) -> None:
-        """AIMD brake, fired by internal queue overflow — the ONLY trustworthy
-        congestion signal: a full queue means injection > wire, so the last
-        measured wire rate bounds capacity. Without an estimate yet, halve
-        (classic TCP-style response to a loss event)."""
+        """Brake on queue overflow, sized by wire evidence alone.
+
+        The overflow itself only proves injection > drain, and with UDP sends
+        the drain is the pace setting, not the wire — after one brake drops
+        the pace below the encoder rate, every further overflow is
+        self-inflicted. So a brake needs a fresh goodput estimate and runs at
+        most once per BRAKE_HOLD_S; without an estimate the GOP reset stands
+        alone. The rejected alternative — halve on every overflow — re-braked
+        on the self-inflicted ones faster than recovery could climb and
+        latched the pace at the floor until the page reloaded.
+        """
         now = time.monotonic()
-        self._ever_overflowed = True
-        self._last_pace_update_at = now
-        est = self._goodput_bps
-        if est:
-            target = max(MIN_PACE_BPS, est - BYPASS_RESERVE_BPS)
-        else:
-            target = max(MIN_PACE_BPS, self._pace_bps // 2)
+        if now < self._brake_hold_until:
+            return
+        est = (self._goodput_bps
+               if now - self._goodput_at <= GOODPUT_MAX_AGE_S else None)
+        if not est:
+            return
+        target = max(MIN_PACE_BPS, est - BYPASS_RESERVE_BPS)
         # Depth floor: never crater below a usable video share of the user's
         # encoder target (starvation valleys take seconds to recover from).
         target = max(target, int(AIMD_FLOOR_FACTOR * self._encoder_bps))
         if target < self._pace_bps:
+            self._ever_overflowed = True
+            self._brake_hold_until = now + BRAKE_HOLD_S
+            self._last_pace_update_at = now
             self._pace_bps = target
             self._apply_pace()
 
     def _maybe_recover_pace(self) -> None:
-        # +25%/s multiplicative recovery toward the encoder ceiling,
-        # accumulating only while overflow stays quiet.
+        # +25%/s multiplicative recovery toward the encoder ceiling; only a
+        # brake resets the clock, so reset churn cannot stall the climb.
         now = time.monotonic()
         dt = now - self._last_pace_update_at
-        if dt < 1.0:
+        if dt < 0.25:
             return
         ceiling = PACE_FACTOR * self._encoder_bps
         self._last_pace_update_at = now
@@ -310,7 +333,7 @@ class RtpPacer:
 
     def _refresh_windows(self) -> None:
         ceiling = PACE_FACTOR * self._encoder_bps
-        # Until the first overflow the encoder setting owns the pace (config
+        # Until the first brake the encoder setting owns the pace (config
         # tracking); afterwards it can only CLAMP the AIMD-controlled pace.
         if not self._ever_overflowed:
             self._pace_bps = int(ceiling)

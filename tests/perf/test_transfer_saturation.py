@@ -17,10 +17,11 @@ Scenarios:
   upload-static    6 Mbit/s uplink, 3 Mbit/s cap — upload reads pace the
                    client down to the cap.
   upload-auto      6 Mbit/s uplink behind a fat first-hop buffer, no cap —
-                   the uplink allowance holds the upload to a share of what
-                   the client can send, so a small request beside it crosses
-                   at its unloaded latency (2 ms measured) instead of waiting
-                   out the buffer (1421 ms unpaced).
+                   the uplink gauge backs the upload off as soon as the
+                   session's own round trip inflates, so the transfer takes
+                   the link's spare capacity while a small request beside it
+                   crosses near its unloaded latency (2 ms measured)
+                   instead of waiting out the buffer (1421 ms unpaced).
 """
 import os
 import statistics
@@ -187,8 +188,8 @@ def main() -> int:
     mbps, dt = result
     clean = sorted(v for v in lat if v == v)
     median_ms = statistics.median(clean) if clean else float("nan")
-    check("upload-auto: the upload takes its share of the uplink and no more",
-          2.5 <= mbps <= 4.5, f"{mbps:.2f} Mbit/s")
+    check("upload-auto: the upload uses the uplink's spare capacity",
+          2.5 <= mbps <= 6.5, f"{mbps:.2f} Mbit/s")
     check("upload-auto: a small request beside it is not stuck behind the queue",
           median_ms < 250, f"median={median_ms:.0f}ms samples={len(clean)}")
 

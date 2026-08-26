@@ -2596,7 +2596,9 @@ class WebRTCService(BaseStreamingService):
         if self.peer_manager is None:
             return web.Response(status=503, headers={"Retry-After": "1"},
                                 text="WebRTC service is still starting")
-        ws = web.WebSocketResponse()
+        # autoping=False so the signaling loop sees PONG frames and can feed
+        # the upload uplink gauge's clock; the loop answers PING itself.
+        ws = web.WebSocketResponse(autoping=False)
         await ws.prepare(request)
 
         peername = request.transport.get_extra_info("peername")
@@ -2605,6 +2607,22 @@ class WebRTCService(BaseStreamingService):
             ws, remote_address, auth_role_ceiling=request.get("auth_role_ceiling")
         )
         return ws
+
+    def uplink_session_conns(self) -> List[Tuple[Any, Optional[str], Optional[str]]]:
+        """``(websocket, session token, peer ip)`` per connected browser
+        signaling peer, for the supervisor's upload uplink gauge. The
+        signaling socket stays open for the session's life, so it is the
+        WebRTC transport's window onto the client's uplink."""
+        if self.peer_manager is None:
+            return []
+        conns = []
+        for peer in list(self.peer_manager.peers.values()):
+            if peer.peer_type != "client":
+                continue
+            raddr = peer.raddr
+            ip = raddr[0] if isinstance(raddr, (tuple, list)) and raddr else None
+            conns.append((peer.ws, peer.client_token, ip))
+        return conns
 
     async def handle_turn_req(self, request: web.Request) -> web.Response:
         """Serve a TURN credential request via the peer manager, refusing with
