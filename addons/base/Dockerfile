@@ -21,8 +21,8 @@
 #     with SELKIES_WAYLAND=true, whose nested labwc supplies window management,
 #     decorations and XWayland
 #   - s6 service supervision, running as PID 1 or below a foreign init
-#   - Joystick interposer + fake-udev (container-only gamepad plumbing) built
-#     in-tree and wired with LD_PRELOAD
+#   - Joystick interposer + fake-udev (container-only gamepad plumbing) and the
+#     V4L2 webcam interposer, all built in-tree and wired with LD_PRELOAD
 #   - GPU wiring: NVIDIA/VA-API/Vulkan runtime, Zink for hardware OpenGL
 #   - Audio: PipeWire with the PulseAudio interface pcmflux records through
 #   - Embedded coTURN for WebRTC firewall traversal
@@ -43,8 +43,9 @@ ARG XVFB_IMAGE="lscr.io/linuxserver/xvfb:debianbookworm"
 
 FROM ${XVFB_IMAGE} AS xvfb
 
-# Build the joystick interposer and fake-udev inside this repository (they are
-# dedicated to containerized environments and are not desktop components)
+# Build the joystick and webcam interposers and fake-udev inside this
+# repository (they are dedicated to containerized environments and are not
+# desktop components)
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS add-ons
 ARG DEBIAN_FRONTEND="noninteractive"
 # The retry configuration the final stage sets further down, repeated here: a
@@ -52,25 +53,35 @@ ARG DEBIAN_FRONTEND="noninteractive"
 # invocations of this stage inherit has to be written in this one.
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
         > /etc/apt/apt.conf.d/99-selkies-retries
+# libpipewire headers compile the webcam interposer's PipeWire frame source;
+# the library itself is dlopen'ed at runtime, so no -dev package is needed in
+# the final image.
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
         build-essential \
-        ca-certificates && \
+        ca-certificates \
+        libpipewire-0.3-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 COPY addons/js-interposer /build/js-interposer
 COPY addons/fake-udev /build/fake-udev
+COPY addons/v4l2-interposer /build/v4l2-interposer
 RUN set -e; \
     LIBDIR="$(gcc -print-multiarch)"; \
     mkdir -p "/opt/add-ons/lib/${LIBDIR}"; \
     gcc -shared -fPIC -o /opt/add-ons/lib/${LIBDIR}/selkies_joystick_interposer.so /build/js-interposer/joystick_interposer.c -ldl -pthread; \
+    make -C /build/v4l2-interposer; \
+    cp /build/v4l2-interposer/selkies_v4l2_interposer.so "/opt/add-ons/lib/${LIBDIR}/"; \
     make -C /build/fake-udev; \
     cp /build/fake-udev/libudev.so.1.0.0-fake /build/fake-udev/libudev.so.1 /build/fake-udev/libudev.so "/opt/add-ons/lib/${LIBDIR}/"; \
     # Also build the 32-bit variants so 32-bit (Wine-era) applications see the
-    # virtual gamepads too (`/usr/$LIB` expands per process bitness); amd64 only
+    # virtual gamepads and webcam too (`/usr/$LIB` expands per process
+    # bitness); amd64 only
     if [ "$(uname -m)" = "x86_64" ]; then \
         apt-get update && apt-get install --no-install-recommends -y gcc-multilib; \
         LIB32DIR="$(gcc -m32 -print-multiarch)"; \
         mkdir -p "/opt/add-ons/lib/${LIB32DIR}"; \
         gcc -m32 -shared -fPIC -o /opt/add-ons/lib/${LIB32DIR}/selkies_joystick_interposer.so /build/js-interposer/joystick_interposer.c -ldl -pthread; \
+        make -C /build/v4l2-interposer all32; \
+        cp /build/v4l2-interposer/selkies_v4l2_interposer_x86.so "/opt/add-ons/lib/${LIB32DIR}/selkies_v4l2_interposer.so"; \
         make -C /build/fake-udev all32; \
         cp /build/fake-udev/libudev_x86.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so.1.0.0-fake"; \
         ln -sf libudev.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so.1"; \
@@ -316,7 +327,7 @@ RUN set -e; \
 # still write under /usr after the copy
 COPY --from=xvfb --chown=1000:1000 / /
 
-# Install the joystick interposer and fake-udev libraries (container-only)
+# Install the joystick and webcam interposers and fake-udev (container-only)
 COPY --from=add-ons --chown=1000:1000 /opt/add-ons/lib/ /usr/lib/
 
 # Makes the session look like the Openbox one: floating windows with their usual

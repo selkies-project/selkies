@@ -13,6 +13,21 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 # shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
 [ -f "${XDG_RUNTIME_DIR}/container-env" ] && . "${XDG_RUNTIME_DIR}/container-env"
 
+# The webcam interposer is for the session's applications: it answers for
+# /dev/video0, which the capture side has to keep seeing as the kernel reports
+# it. Dropped by value, so an operator-supplied LD_PRELOAD survives.
+if [ -n "${SELKIES_WEBCAM_INTERPOSER:-}" ] && [ -n "${LD_PRELOAD:-}" ]; then
+  kept=""
+  rest="${LD_PRELOAD}"
+  while [ -n "${rest}" ]; do
+    entry="${rest%%:*}"
+    case "${rest}" in *:*) rest="${rest#*:}" ;; *) rest="" ;; esac
+    [ "${entry}" = "${SELKIES_WEBCAM_INTERPOSER}" ] && continue
+    kept="${kept:+${kept}:}${entry}"
+  done
+  export LD_PRELOAD="${kept}"
+fi
+
 # Backend toggle, resolved the way settings.py resolves it: SELKIES_WAYLAND when
 # set (blank included, which means the default), else the legacy PIXELFLUX_WAYLAND;
 # "true" or "1", in any case and ahead of a "|locked" suffix, selects Wayland.

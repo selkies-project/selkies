@@ -4,7 +4,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # PID-agnostic container init for the Selkies example container. It prepares the
-# runtime environment (joystick interposer + fake-udev LD_PRELOAD, device nodes,
+# runtime environment (joystick, webcam and fake-udev LD_PRELOAD, device nodes,
 # TURN defaults), derives the service set from the environment toggles, and then
 # hands service supervision to s6 (`s6-svscan /etc/service`): one `s6-supervise`
 # per service directory, restarts crashed services, and is controlled with
@@ -49,7 +49,12 @@ export SELKIES_INTERPOSER="${LIB_PREFIX}/selkies_joystick_interposer.so"
 export LIBUDEV_PACKAGE="${LIBUDEV_PACKAGE:-libudev}"
 export LIBUDEV_PKG_VERSION="${LIBUDEV_PKG_VERSION:-1.0.0}"
 export FAKE_UDEV_LIB="${LIB_PREFIX}/${LIBUDEV_PACKAGE}.so.${LIBUDEV_PKG_VERSION}-fake"
-export LD_PRELOAD="${SELKIES_INTERPOSER}:${FAKE_UDEV_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
+# The webcam interposer serves the client's camera as /dev/video0 to session
+# applications, with no kernel device and no privilege. The Selkies backend
+# feeds it and must keep seeing real device nodes, so selkies-entrypoint.sh
+# drops this entry again for its own process.
+export SELKIES_WEBCAM_INTERPOSER="${LIB_PREFIX}/selkies_v4l2_interposer.so"
+export LD_PRELOAD="${SELKIES_INTERPOSER}:${FAKE_UDEV_LIB}:${SELKIES_WEBCAM_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
 # No SDL_JOYSTICK_DEVICE: fake-udev enumerates all four slots as their evdev
 # nodes, so a /dev/input/js0 hint would show slot 0 a second time.
 # Only when the container has no /dev/input of its own: a real one passed in
