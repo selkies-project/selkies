@@ -24,7 +24,7 @@ import { resolveFailedAppCommand } from "../../../../selkies-web-core/lib/app-co
  * closed, and these arrive while the user is somewhere else in the
  * interface: an app install that failed has to settle its optimistic badge
  * wherever the notice lands. A warning carries an optional translation code
- * (`clipboardSkip*`, `commandFailed`); the translator returns the key itself
+ * (`clipboard*`, `commandFailed`); the translator returns the key itself
  * for an unknown code, since a future core may ship new ones, so the raw
  * message is the fallback, as in the classic dashboard.
  */
@@ -61,7 +61,7 @@ export function UploadNotifications() {
                 // not a notice.
                 if (code === 'commandFailed' && !resolveFailedAppCommand(errMsg)) return;
                 const codeKey = (typeof code === 'string' &&
-                    (code.startsWith('clipboardSkip') || code === 'commandFailed'))
+                    (code.startsWith('clipboard') || code === 'commandFailed'))
                     ? `notifications.${code}` : null;
                 const codeMsg = codeKey ? t(codeKey, { detail: errMsg }) : null;
                 const warnMsg = (codeMsg && codeMsg !== codeKey)

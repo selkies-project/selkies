@@ -115,10 +115,12 @@ export function Clipboard() {
 			return;
 		}
 		// An object URL previews the file without reading a multi-megabyte
-		// image through base64 on the main thread.
+		// image through base64 on the main thread. Only a blob: URL is kept, so
+		// nothing else can reach the preview's src.
+		const objectUrl = URL.createObjectURL(file);
 		setClipboardImageUrl(previous => {
 			if (previous) URL.revokeObjectURL(previous);
-			return URL.createObjectURL(file);
+			return objectUrl.startsWith('blob:') ? objectUrl : null;
 		});
 		window.postMessage({
 			type: 'clipboardImageUpdate',

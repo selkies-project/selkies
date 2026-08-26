@@ -90,6 +90,7 @@ import {
   createMultipartClipboardState,
   createTaggedClipboardFetch,
   writeImageToLocalClipboard,
+  localClipboardBlocker,
   createDeferredClipboardWriter,
   clipboardPreviewMessage
 } from './lib/clipboard-sync.js';
@@ -3630,6 +3631,25 @@ function notifyClipboardImageSkip(reason, code) {
 }
 
 /**
+ * Tells the dashboard that a server image never reached the local clipboard.
+ *
+ * The panel shows nothing of an inbound image but this notice, so a write the
+ * browser refuses would otherwise read as the feature not working at all.
+ * @param {*} error What the write threw.
+ */
+function notifyClipboardImageWriteFailed(error) {
+  const reason = localClipboardBlocker() || (error && error.message) || String(error);
+  console.error('Failed to write the session image to the local clipboard:', error);
+  window.postMessage({
+    type: 'fileUpload',
+    payload: {
+      status: 'warning', fileName: 'clipboard-image', message: reason,
+      code: 'clipboardImageWriteFailed',
+    },
+  }, window.location.origin);
+}
+
+/**
  * Sends local clipboard content to the server as a chunked transfer
  * (lib/clipboard-worker-bridge.js, the same wire protocol and worker offload
  * as the WebRTC core), gated on the clipboard-in setting and the change-only
@@ -3642,8 +3662,16 @@ function notifyClipboardImageSkip(reason, code) {
  */
 async function sendClipboardData(data, mimeType = 'text/plain', onSkip = null) {
     const skip = (reason, code) => { if (onSkip) onSkip(reason, code); };
-    if (!window.clipboard_enabled || !clipboard_in_enabled) {
-        skip('clipboard-in disabled', 'clipboardSkipInDisabled');
+    if (window.clipboard_enabled === undefined) {
+        skip('the session has not reported its clipboard policy yet', 'clipboardSkipNotConnected');
+        return;
+    }
+    if (!window.clipboard_enabled) {
+        skip('the server has the clipboard turned off', 'clipboardSkipDisabled');
+        return;
+    }
+    if (!clipboard_in_enabled) {
+        skip('the client-to-session clipboard is turned off', 'clipboardSkipInDisabled');
         return;
     }
     if (!websocket || websocket.readyState !== WebSocket.OPEN) {
@@ -5815,7 +5843,7 @@ function initWebsockets() {
                                             const uiText = `Image (${mpMime}) received from session and copied to clipboard.`;
                                             window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
                                         },
-                                        onFailure: (err) => console.error('Failed to write multi-part image to clipboard:', err),
+                                        onFailure: notifyClipboardImageWriteFailed,
                                     });
                             }
                         }
@@ -5858,7 +5886,7 @@ function initWebsockets() {
                                 const uiText = `Image (${mimeType}) received from session and copied to clipboard.`;
                                 window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
                             },
-                            onFailure: (err) => console.error('Failed to write image to clipboard:', err),
+                            onFailure: notifyClipboardImageWriteFailed,
                         });
                 }).catch((e) => {
                     console.error('Error processing binary clipboard data from server:', e);

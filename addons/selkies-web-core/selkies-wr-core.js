@@ -75,7 +75,7 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng } from "./lib/clipboard-sync.js";
+import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
@@ -1911,6 +1911,25 @@ export default function webrtc() {
 	}
 
 	/**
+	 * Tells the dashboard that a server image never reached the local
+	 * clipboard. The panel shows nothing of an inbound image but this notice,
+	 * so a write the browser refuses would otherwise read as the feature not
+	 * working at all.
+	 * @param {*} error What the write threw.
+	 */
+	function notifyClipboardImageWriteFailed(error) {
+		const reason = localClipboardBlocker() || (error && error.message) || String(error);
+		console.error('Failed to write the session image to the local clipboard:', error);
+		window.postMessage({
+			type: 'fileUpload',
+			payload: {
+				status: 'warning', fileName: 'clipboard-image', message: reason,
+				code: 'clipboardImageWriteFailed',
+			},
+		}, window.location.origin);
+	}
+
+	/**
 	 * Sends clipboard content to the server in chunks.
 	 *
 	 * Uses the chunked transfer of `lib/clipboard-worker-bridge.js`, the same
@@ -1926,8 +1945,20 @@ export default function webrtc() {
 	 */
 	async function sendClipboardData(data, mimeType = 'text/plain', onSkip = null) {
 		const skip = (reason, code) => { if (onSkip) onSkip(reason, code); };
-		if (clipboardStatus !== "enabled" || !window.clipboard_enabled || !clipboard_in_enabled || data == null) {
-			skip('clipboard-in disabled', 'clipboardSkipInDisabled');
+		if (data == null) {
+			skip('nothing to send', 'clipboardSkipNoImage');
+			return;
+		}
+		if (clipboardStatus !== "enabled" || window.clipboard_enabled === undefined) {
+			skip('the session has not reported its clipboard policy yet', 'clipboardSkipNotConnected');
+			return;
+		}
+		if (!window.clipboard_enabled) {
+			skip('the server has the clipboard turned off', 'clipboardSkipDisabled');
+			return;
+		}
+		if (!clipboard_in_enabled) {
+			skip('the client-to-session clipboard is turned off', 'clipboardSkipInDisabled');
 			return;
 		}
 		if (!webrtc || !webrtc.dataChannelOpen()) {
@@ -2461,15 +2492,21 @@ export default function webrtc() {
 						deferredClipboardWriter.write(
 							() => navigator.clipboard.write([content]), {
 								onSuccess: () => {
-									window.postMessage({
-										type: 'clipboardContentUpdate',
-										text: "received an image from server",
-									}, window.location.origin);
 									console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
 									clipboardSync.captureLocalImageSig();
+									window.postMessage({
+										type: 'clipboardContentUpdate',
+										text: `Image (${mimeType}) received from session and copied to clipboard.`,
+									}, window.location.origin);
 								},
-								onFailure: (err) => console.error('Failed to write image to clipboard: ', err),
+								onFailure: notifyClipboardImageWriteFailed,
 							});
+					} else if (isFreshImage && !isInitClipboardFetch && clipboard_out_enabled) {
+						// Everything but the browser allows the write, so this is
+						// a page with no clipboard to write to. An image has no
+						// other way of showing up, and silence reads as the
+						// session never having sent one.
+						notifyClipboardImageWriteFailed(new Error('the local clipboard is unavailable'));
 					}
 				}
 			}

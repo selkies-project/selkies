@@ -2670,13 +2670,14 @@ function Sidebar() {
           // match is lifecycle noise, not a notice.
           if (code === "commandFailed" && !resolveFailedAppCommand(errMsg))
             return;
-          // An unknown or absent code keeps the raw message for third-party consumers.
-          const localizedMsg =
-            typeof code === "string" && code.startsWith("clipboardSkip")
-              ? t(`notifications.${code}`, errMsg)
-              : code === "commandFailed"
-                ? t("notifications.commandFailed", { detail: errMsg })
-                : errMsg;
+          // An unknown or absent code keeps the raw message for third-party
+          // consumers: the translator answers a miss with the key itself.
+          const codeKey =
+            typeof code === "string" && (code.startsWith("clipboard") || code === "commandFailed")
+              ? `notifications.${code}`
+              : null;
+          const codeMsg = codeKey ? t(codeKey, { detail: errMsg }) : null;
+          const localizedMsg = codeMsg && codeMsg !== codeKey ? codeMsg : errMsg;
           const id = fileName;
           setNotifications((prev) => {
             const exIdx = prev.findIndex((n) => n.id === id);

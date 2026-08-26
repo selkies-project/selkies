@@ -237,6 +237,8 @@ const en = {
         clipboardSkipInDisabled: "Sending to the remote clipboard is disabled",
         clipboardSkipNotConnected: "Not connected to the remote session",
         clipboardSkipUnchanged: "The clipboard is already up to date",
+        clipboardSkipDisabled: "The server has the clipboard turned off",
+        clipboardImageWriteFailed: "The image could not be written to your clipboard: {detail}",
     },
     alerts: {
         invalidResolution: "Please enter valid positive integers for Width and Height.",
@@ -471,6 +473,8 @@ const es = {
         clipboardSkipInDisabled: "El envío al portapapeles remoto está desactivado",
         clipboardSkipNotConnected: "Sin conexión a la sesión remota",
         clipboardSkipUnchanged: "El portapapeles ya está actualizado",
+        clipboardSkipDisabled: "El servidor tiene el portapapeles desactivado",
+        clipboardImageWriteFailed: "No se pudo escribir la imagen en tu portapapeles: {detail}",
     },
     alerts: {
         invalidResolution: "Por favor, introduzca números enteros positivos válidos para Ancho y Alto.",
@@ -705,6 +709,8 @@ const zh = {
         clipboardSkipInDisabled: "已禁用发送到远程剪贴板",
         clipboardSkipNotConnected: "未连接到远程会话",
         clipboardSkipUnchanged: "剪贴板已是最新内容",
+        clipboardSkipDisabled: "服务器已关闭剪贴板",
+        clipboardImageWriteFailed: "无法将图像写入你的剪贴板：{detail}",
     },
     alerts: {
         invalidResolution: "请输入有效的正整数作为宽度和高度。",
@@ -939,6 +945,8 @@ const hi = {
         clipboardSkipInDisabled: "दूरस्थ क्लिपबोर्ड पर भेजना अक्षम है",
         clipboardSkipNotConnected: "दूरस्थ सत्र से कनेक्ट नहीं है",
         clipboardSkipUnchanged: "क्लिपबोर्ड पहले से अद्यतित है",
+        clipboardSkipDisabled: "सर्वर पर क्लिपबोर्ड बंद है",
+        clipboardImageWriteFailed: "छवि आपके क्लिपबोर्ड में नहीं लिखी जा सकी: {detail}",
     },
     alerts: {
         invalidResolution: "कृपया चौड़ाई और ऊंचाई के लिए मान्य धनात्मक पूर्णांक दर्ज करें।",
@@ -1173,6 +1181,8 @@ const pt = {
         clipboardSkipInDisabled: "O envio para a área de transferência remota está desativado",
         clipboardSkipNotConnected: "Não conectado à sessão remota",
         clipboardSkipUnchanged: "A área de transferência já está atualizada",
+        clipboardSkipDisabled: "O servidor está com a área de transferência desativada",
+        clipboardImageWriteFailed: "Não foi possível gravar a imagem na sua área de transferência: {detail}",
     },
     alerts: {
         invalidResolution: "Por favor, insira inteiros positivos válidos para Largura e Altura.",
@@ -1407,6 +1417,8 @@ const fr = {
         clipboardSkipInDisabled: "L'envoi vers le presse-papiers distant est désactivé",
         clipboardSkipNotConnected: "Non connecté à la session distante",
         clipboardSkipUnchanged: "Le presse-papiers est déjà à jour",
+        clipboardSkipDisabled: "Le serveur a désactivé le presse-papiers",
+        clipboardImageWriteFailed: "L'image n'a pas pu être écrite dans votre presse-papiers : {detail}",
     },
     alerts: {
         invalidResolution: "Veuillez entrer des entiers positifs valides pour la Largeur et la Hauteur.",
@@ -1642,6 +1654,8 @@ const ru = {
         clipboardSkipInDisabled: "Отправка в удалённый буфер обмена отключена",
         clipboardSkipNotConnected: "Нет подключения к удалённому сеансу",
         clipboardSkipUnchanged: "Буфер обмена уже актуален",
+        clipboardSkipDisabled: "На сервере буфер обмена отключён",
+        clipboardImageWriteFailed: "Не удалось записать изображение в буфер обмена: {detail}",
     },
     alerts: {
         invalidResolution: "Пожалуйста, введите действительные положительные целые числа для Ширины и Высоты.",
@@ -1876,6 +1890,8 @@ const de = {
         clipboardSkipInDisabled: "Das Senden an die Remote-Zwischenablage ist deaktiviert",
         clipboardSkipNotConnected: "Keine Verbindung zur Remote-Sitzung",
         clipboardSkipUnchanged: "Die Zwischenablage ist bereits aktuell",
+        clipboardSkipDisabled: "Die Zwischenablage ist auf dem Server deaktiviert",
+        clipboardImageWriteFailed: "Das Bild konnte nicht in Ihre Zwischenablage geschrieben werden: {detail}",
     },
     alerts: {
         invalidResolution: "Bitte geben Sie gültige positive ganze Zahlen für Breite und Höhe ein.",
@@ -2110,6 +2126,8 @@ const tr = {
         clipboardSkipInDisabled: "Uzak panoya gönderme devre dışı",
         clipboardSkipNotConnected: "Uzak oturuma bağlı değil",
         clipboardSkipUnchanged: "Pano zaten güncel",
+        clipboardSkipDisabled: "Sunucuda pano kapalı",
+        clipboardImageWriteFailed: "Görüntü panonuza yazılamadı: {detail}",
     },
     alerts: {
         invalidResolution: "Lütfen Genişlik ve Yükseklik için geçerli pozitif tam sayılar girin.",
@@ -2344,6 +2362,8 @@ const it = {
         clipboardSkipInDisabled: "L'invio agli appunti remoti è disabilitato",
         clipboardSkipNotConnected: "Nessuna connessione alla sessione remota",
         clipboardSkipUnchanged: "Gli appunti sono già aggiornati",
+        clipboardSkipDisabled: "Il server ha gli appunti disattivati",
+        clipboardImageWriteFailed: "Impossibile scrivere l'immagine negli appunti: {detail}",
     },
     alerts: {
         invalidResolution: "Inserisci numeri interi positivi validi per Larghezza e Altezza.",
@@ -2578,6 +2598,8 @@ const nl = {
         clipboardSkipInDisabled: "Verzenden naar het externe klembord is uitgeschakeld",
         clipboardSkipNotConnected: "Niet verbonden met de externe sessie",
         clipboardSkipUnchanged: "Het klembord is al up-to-date",
+        clipboardSkipDisabled: "Het klembord staat uit op de server",
+        clipboardImageWriteFailed: "De afbeelding kon niet naar je klembord worden geschreven: {detail}",
     },
     alerts: {
         invalidResolution: "Voer geldige positieve gehele getallen in voor Breedte en Hoogte.",
@@ -2812,6 +2834,8 @@ const ar = {
         clipboardSkipInDisabled: "الإرسال إلى الحافظة البعيدة معطّل",
         clipboardSkipNotConnected: "غير متصل بالجلسة البعيدة",
         clipboardSkipUnchanged: "الحافظة محدَّثة مسبقاً",
+        clipboardSkipDisabled: "الحافظة معطّلة على الخادم",
+        clipboardImageWriteFailed: "تعذّرت كتابة الصورة في الحافظة لديك: {detail}",
     },
     alerts: {
         invalidResolution: "الرجاء إدخال أعداد صحيحة موجبة صالحة للعرض والارتفاع.",
@@ -3046,6 +3070,8 @@ const ko = {
         clipboardSkipInDisabled: "원격 클립보드로 전송이 비활성화되어 있습니다",
         clipboardSkipNotConnected: "원격 세션에 연결되어 있지 않습니다",
         clipboardSkipUnchanged: "클립보드가 이미 최신 상태입니다",
+        clipboardSkipDisabled: "서버에서 클립보드가 꺼져 있습니다",
+        clipboardImageWriteFailed: "이미지를 클립보드에 쓸 수 없습니다: {detail}",
     },
     alerts: {
         invalidResolution: "너비와 높이에 유효한 양의 정수를 입력하십시오.",
@@ -3280,6 +3306,8 @@ const ja = {
         clipboardSkipInDisabled: "リモートクリップボードへの送信が無効です",
         clipboardSkipNotConnected: "リモートセッションに接続されていません",
         clipboardSkipUnchanged: "クリップボードはすでに最新です",
+        clipboardSkipDisabled: "サーバーでクリップボードが無効になっています",
+        clipboardImageWriteFailed: "画像をクリップボードに書き込めませんでした: {detail}",
     },
     alerts: {
         invalidResolution: "幅と高さに有効な正の整数を入力してください。",
@@ -3514,6 +3542,8 @@ const vi = {
         clipboardSkipInDisabled: "Đã tắt gửi tới clipboard từ xa",
         clipboardSkipNotConnected: "Chưa kết nối với phiên từ xa",
         clipboardSkipUnchanged: "Clipboard đã được cập nhật từ trước",
+        clipboardSkipDisabled: "Máy chủ đã tắt bảng nhớ tạm",
+        clipboardImageWriteFailed: "Không thể ghi hình ảnh vào bảng nhớ tạm của bạn: {detail}",
     },
     alerts: {
         invalidResolution: "Vui lòng nhập số nguyên dương hợp lệ cho Chiều rộng và Chiều cao.",
@@ -3748,6 +3778,8 @@ const th = {
         clipboardSkipInDisabled: "ปิดการส่งไปยังคลิปบอร์ดระยะไกล",
         clipboardSkipNotConnected: "ไม่ได้เชื่อมต่อกับเซสชันระยะไกล",
         clipboardSkipUnchanged: "คลิปบอร์ดเป็นปัจจุบันอยู่แล้ว",
+        clipboardSkipDisabled: "เซิร์ฟเวอร์ปิดคลิปบอร์ดไว้",
+        clipboardImageWriteFailed: "ไม่สามารถเขียนรูปภาพลงคลิปบอร์ดของคุณได้: {detail}",
     },
     alerts: {
         invalidResolution: "โปรดป้อนจำนวนเต็มบวกที่ถูกต้องสำหรับความกว้างและความสูง",
@@ -3982,6 +4014,8 @@ const fil = {
         clipboardSkipInDisabled: "Naka-disable ang pagpapadala sa remote clipboard",
         clipboardSkipNotConnected: "Hindi konektado sa remote session",
         clipboardSkipUnchanged: "Ang clipboard ay napapanahon na",
+        clipboardSkipDisabled: "Naka-off ang clipboard sa server",
+        clipboardImageWriteFailed: "Hindi maisulat ang larawan sa iyong clipboard: {detail}",
     },
     alerts: {
         invalidResolution: "Mangyaring maglagay ng mga wastong positibong integer para sa Lapad at Taas.",
@@ -4216,6 +4250,8 @@ const da = {
         clipboardSkipInDisabled: "Afsendelse til den eksterne udklipsholder er deaktiveret",
         clipboardSkipNotConnected: "Ikke forbundet til den eksterne session",
         clipboardSkipUnchanged: "Udklipsholderen er allerede opdateret",
+        clipboardSkipDisabled: "Serveren har udklipsholderen slået fra",
+        clipboardImageWriteFailed: "Billedet kunne ikke skrives til din udklipsholder: {detail}",
     },
     alerts: {
         invalidResolution: "Indtast venligst gyldige positive heltal for Bredde og Højde.",

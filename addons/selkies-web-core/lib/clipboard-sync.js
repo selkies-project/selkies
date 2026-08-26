@@ -14,8 +14,8 @@
  * connect-time cache-only fetch, `createLocalClipboardSender` is the
  * focus-driven local-to-server path, `createDeferredClipboardWriter` lands
  * server pushes on engines that reject clipboard writes outside a user
- * activation, and `createClipboardGestures` wires the copy and paste
- * keystrokes. The transports differ only in the hooks they inject: how a
+ * activation, `localClipboardBlocker` names what stops a local write at all,
+ * and `createClipboardGestures` wires the copy and paste keystrokes. The transports differ only in the hooks they inject: how a
  * request or payload is sent and the enablement gates, which are closures
  * re-read per event so runtime settings changes apply immediately.
  * @module
@@ -47,6 +47,23 @@ export async function reencodeBlobAsPng(blob) {
     } finally {
         bmp.close();
     }
+}
+
+/**
+ * Why the browser cannot be asked to write the local clipboard, or `null`
+ * when it can.
+ *
+ * Both engines expose `navigator.clipboard` in a secure context only, so a
+ * deployment served over http:// on anything but localhost has no clipboard
+ * API at all: a server image then lands nowhere, and saying so is the
+ * difference between a bug report and a certificate.
+ * @returns {string|null} The reason, ready to show.
+ */
+export function localClipboardBlocker() {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) return null;
+    return (typeof window !== 'undefined' && window.isSecureContext === false)
+        ? 'this page is not a secure context, so the browser exposes no clipboard (serve it over https, or from localhost)'
+        : 'this browser exposes no clipboard API';
 }
 
 /**
@@ -379,9 +396,14 @@ export function createDeferredClipboardWriter() {
      * Runs one write. An activation rejection (a synthetic event, or a
      * blurred tab) stashes it for the next gesture unless something newer
      * replaced it; any other error reaches `onFailure`.
+     *
+     * The attempt is started inside a promise chain so that a caller passing
+     * a plain expression -- `navigator.clipboard.write(...)`, which throws
+     * outright where the browser exposes no clipboard -- fails the same way
+     * an async one does, instead of throwing past `onFailure`.
      */
     function attemptOnce(w) {
-        return w.attempt().then(
+        return Promise.resolve().then(() => w.attempt()).then(
             () => { if (w.onSuccess) w.onSuccess(); return true; },
             (err) => {
                 if (isActivationError(err)) {
