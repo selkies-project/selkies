@@ -284,14 +284,15 @@
     -webkit-text-fill-color: transparent;
 }
 
-/* Sidebar section titles: uppercase micro-labels. */
+/* Sidebar section titles. Full-strength text rather than the muted grey the
+   labels under them carry: the title is what collapses the section. */
 .sidebar h3 {
     margin: 0 0 10px;
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 13px;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
+    letter-spacing: 0.04em;
+    color: var(--text);
 }
 
 /* --- Theme Toggle Button --- */
@@ -454,19 +455,8 @@
     background-color: var(--item-bg-hover);
 }
 
-/* Section title as an uppercase micro-label. */
 .sidebar-section-header h3 {
     margin: 0;
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-    transition: color 0.15s ease;
-}
-
-.sidebar-section-header:hover h3 {
-    color: var(--text);
 }
 
 /* Toggle icon (caret) for collapsible sections. */
@@ -498,13 +488,23 @@
     background-color: transparent;
 }
 
-/* Micro-labels for settings and gauges. */
-.dev-setting-item label,
-.gauge-label {
-    font-weight: 500;
+/* Labels for settings. */
+.dev-setting-item label {
+    font-weight: 600;
     font-size: 13px;
     letter-spacing: 0.01em;
-    color: var(--text-muted);
+    color: var(--text);
+}
+
+/* Tracking breaks the joins in Arabic and pulls Han and Hangul apart, and those
+   glyphs carry enough strokes that 13px reads a size smaller than Latin does. */
+:is(.sidebar h3, .dev-setting-item label, .gauge-label):is(
+    :lang(ar), :lang(hi), :lang(ja), :lang(ko), :lang(th), :lang(zh)) {
+    letter-spacing: normal;
+}
+:is(.sidebar h3, .dev-setting-item label):is(
+    :lang(ar), :lang(hi), :lang(ja), :lang(ko), :lang(th), :lang(zh)) {
+    font-size: 14px;
 }
 
 /* Toggle rows (e.g., Full Color 4:4:4): label left, switch right. */
@@ -518,7 +518,6 @@
 .dev-setting-item.toggle-item label {
   text-align: left;
   margin-right: 10px;
-  color: var(--text);
 }
 
 /* Select elements within setting items, with a themed custom arrow. */
@@ -653,11 +652,11 @@
 /* Label displayed below the gauge. */
 .gauge-label {
     margin-top: 6px;
-    font-weight: 500;
+    font-weight: 600;
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--text-muted);
+    color: var(--text);
     text-align: center;
     pointer-events: none;
 }
@@ -743,9 +742,9 @@ body {
 }
 
 .dashboard-clipboard-item label {
-    font-weight: 500;
+    font-weight: 600;
     font-size: 13px;
-    color: var(--text-muted);
+    color: var(--text);
 }
 
 /* The clipboard textarea itself. */
@@ -796,8 +795,8 @@ body {
     margin-top: 0;
     margin-bottom: 10px;
     font-size: 13px;
-    color: var(--text-muted);
-    font-weight: 500;
+    color: var(--text);
+    font-weight: 600;
 }
 
 /* The main SVG container for gamepad visualization. */
