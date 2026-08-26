@@ -231,11 +231,15 @@ sudo mkdir -pm1777 /dev/input
 # Replace with your wanted resolution if using without resize, DO NOT USE if there is a physical display
 # selkies-resize 1920x1080
 
-# Starts the remote desktop process
+# Starts the remote desktop process, with the interposers unloaded: they are
+# for the session's applications, and they hook read/ioctl/epoll_ctl for every
+# file descriptor in whatever process they are preloaded into, which under
+# Selkies' asyncio loop can stop the server answering. SELKIES_INTERPOSER stays
+# set, which is what tells Selkies applications reach gamepads through it.
 # In the default WebSocket mode, change `--encoder=` to `h264enc-striped` or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
 # For the WebRTC transport instead, add `--mode=webrtc` (`--encoder=h264enc` is the only WebRTC encoder)
 # DO NOT set `--enable-resize=true` if there is a physical display
-selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
+env -u LD_PRELOAD selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
 ```
 
 The default username (set with `--basic-auth-user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is taken from the `CUSTOM_USER`, then `USERNAME`, then `USER` environment variable, and is `ubuntu` when none of them is set. The password has no default: set it with `--basic-auth-password=`, `SELKIES_BASIC_AUTH_PASSWORD`, `PASSWORD`, or `PASSWD`, or pass `--enable-basic-auth=false` to serve without a login. Selkies refuses to start with basic authentication enabled and no password, so a login is never served that nobody chose a password for.

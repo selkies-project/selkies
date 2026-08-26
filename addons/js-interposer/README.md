@@ -26,12 +26,19 @@ sudo mkdir -pm1777 /dev/input
 
 Each of the four gamepad slots is interposed as both a joydev node (`js0`-`js3`) and an evdev node (`event1000`-`event1003`). An application opening one of those paths by name is intercepted whether or not the file exists, so no placeholder files are needed for that. An application that instead scans `/dev/input` is served too: the interposer adds the evdev node of every bound slot to `opendir`/`readdir` and `scandir`, so a directory scan lists them the way it lists a real device (character device, major 13), and an unbound slot is left out so a scan never trips over a node with no server behind it.
 
-3. Use the below command before running your target application as well as Selkies for the interposer library to intercept joystick/gamepad events (the single quotes are required in the first line).
+3. Use the below command before running your target application, so the interposer library intercepts its joystick/gamepad calls (the single quotes are required in the first line).
 
 ```bash
 export SELKIES_INTERPOSER='/usr/$LIB/selkies_joystick_interposer.so'
 export LD_PRELOAD="${SELKIES_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
 ```
+
+Do **not** preload this into the Selkies backend process itself. It hooks
+`read`, `close`, `ioctl` and `epoll_ctl` for every file descriptor in the
+process, and its blocking device reads are exactly what an asyncio event loop
+must never do: a hook that blocks there stops the server answering anything.
+The backend is the other end of these sockets and needs no preload;
+`SELKIES_INTERPOSER` alone tells it that applications have one.
 
 Otherwise, if you only need one architecture, the below is an equivalent command.
 

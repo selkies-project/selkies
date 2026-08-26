@@ -122,6 +122,41 @@ for service in ("pipewire", "pipewire-pulse", "wireplumber"):
     check(f"{service} takes the audio latency an operator set",
           "${PIPEWIRE_LATENCY:-" in body, os.path.relpath(path, REPO))
 
+# The interposers answer for /dev/video0 and /dev/input in the session's
+# applications. Preloaded into the backend as well they hide the real device
+# nodes the capture and gamepad sides need, and they hook read/ioctl/epoll_ctl
+# process-wide, where one blocking hook is the asyncio loop blocking, so the
+# backend's entrypoint has to drop them again. Run rather than grepped: what
+# matters is the value the backend is exec'd with.
+check("the session preloads both interposers",
+      "SELKIES_WEBCAM_INTERPOSER" in entrypoint
+      and all(v in entrypoint.split("LD_PRELOAD=")[1][:250]
+              for v in ("${SELKIES_INTERPOSER}", "${SELKIES_WEBCAM_INTERPOSER}")),
+      "container-entrypoint.sh")
+
+with tempfile.TemporaryDirectory() as tmp:
+    stub_bin = os.path.join(tmp, "bin")
+    os.makedirs(stub_bin)
+    with open(os.path.join(stub_bin, "selkies"), "w") as fh:
+        fh.write('#!/bin/sh\nprintf %s "${LD_PRELOAD-unset}"\n')
+    os.chmod(os.path.join(stub_bin, "selkies"), 0o755)
+    shims = {
+        "SELKIES_INTERPOSER": "/usr/$LIB/selkies_joystick_interposer.so",
+        "FAKE_UDEV_LIB": "/usr/$LIB/libudev.so.1.0.0-fake",
+        "SELKIES_WEBCAM_INTERPOSER": "/usr/$LIB/selkies_v4l2_interposer.so",
+    }
+    preload = ":".join([shims["SELKIES_INTERPOSER"], "/opt/operator.so",
+                        shims["FAKE_UDEV_LIB"], shims["SELKIES_WEBCAM_INTERPOSER"]])
+    r = subprocess.run(
+        [bash, os.path.join(BASE, "selkies-entrypoint.sh")],
+        capture_output=True, text=True,
+        env={"PATH": stub_bin + os.pathsep + os.environ.get("PATH", ""),
+             "XDG_RUNTIME_DIR": tmp,
+             "SELKIES_WAYLAND": "true",
+             "LD_PRELOAD": preload, **shims})
+    check("the backend runs with no Selkies interposer preloaded",
+          r.stdout == "/opt/operator.so", repr(r.stdout)[:200])
+
 # Xft resources reach a toolkit only at start, so on X11 the DPI ladder's reload
 # signal needs an XSETTINGS manager to signal, or running apps keep their density.
 ladder = open(os.path.join(REPO, "src", "selkies", "display_utils.py")).read()

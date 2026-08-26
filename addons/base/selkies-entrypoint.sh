@@ -13,16 +13,23 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 # shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
 [ -f "${XDG_RUNTIME_DIR}/container-env" ] && . "${XDG_RUNTIME_DIR}/container-env"
 
-# The webcam interposer is for the session's applications: it answers for
-# /dev/video0, which the capture side has to keep seeing as the kernel reports
-# it. Dropped by value, so an operator-supplied LD_PRELOAD survives.
-if [ -n "${SELKIES_WEBCAM_INTERPOSER:-}" ] && [ -n "${LD_PRELOAD:-}" ]; then
+# The interposers belong to the session's applications, never to the backend
+# that serves them: they answer for /dev/video0 and /dev/input, which the
+# capture and gamepad sides have to keep seeing as the kernel reports them,
+# and they hook read/close/ioctl/epoll_ctl process-wide -- one of those hooks
+# blocking is the asyncio loop blocking, and a frozen loop answers nothing.
+# SELKIES_INTERPOSER stays exported, which is what tells the backend gamepads
+# reach applications through the preload. Dropped by value, so an
+# operator-supplied LD_PRELOAD survives.
+if [ -n "${LD_PRELOAD:-}" ]; then
   kept=""
   rest="${LD_PRELOAD}"
   while [ -n "${rest}" ]; do
     entry="${rest%%:*}"
     case "${rest}" in *:*) rest="${rest#*:}" ;; *) rest="" ;; esac
-    [ "${entry}" = "${SELKIES_WEBCAM_INTERPOSER}" ] && continue
+    case "${entry}" in
+      "${SELKIES_INTERPOSER:-$}"|"${SELKIES_WEBCAM_INTERPOSER:-$}"|"${FAKE_UDEV_LIB:-$}") continue ;;
+    esac
     kept="${kept:+${kept}:}${entry}"
   done
   export LD_PRELOAD="${kept}"
