@@ -17,7 +17,7 @@ import tempfile
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
-ENTRYPOINT = os.path.join(REPO, "addons", "example", "container-entrypoint.sh")
+ENTRYPOINT = os.path.join(REPO, "addons", "base", "container-entrypoint.sh")
 
 sys.path.insert(0, os.path.join(REPO, "src"))
 from selkies.settings import parse_bool  # noqa: E402

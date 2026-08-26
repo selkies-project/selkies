@@ -19,7 +19,7 @@ import tempfile
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
-ENTRYPOINT = os.path.join(REPO, "addons", "example", "container-entrypoint.sh")
+ENTRYPOINT = os.path.join(REPO, "addons", "base", "container-entrypoint.sh")
 # The end marker stops before the assignment, so the value's quoting is
 # not part of what this suite pins.
 BEGIN, END = "public_address() {", "export SELKIES_ENABLE_INTERNAL_TURN"

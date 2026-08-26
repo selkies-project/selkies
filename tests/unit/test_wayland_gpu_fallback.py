@@ -20,7 +20,7 @@ import tempfile
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
-ENTRYPOINT = os.path.join(REPO, "addons", "example", "container-entrypoint.sh")
+ENTRYPOINT = os.path.join(REPO, "addons", "base", "container-entrypoint.sh")
 # Everything the services read is in the environment file by this line, so the
 # copy under test stops here and never hands over to s6 or touches /etc/service.
 STOP_AT = "# Derive the service set from the environment toggles"
