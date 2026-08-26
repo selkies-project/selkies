@@ -15,16 +15,22 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
+# The session runtime lives in the base container; the example adds the
+# desktop on top of it, so both directories carry scripts a session depends on.
+BASE = os.path.join(REPO, "addons", "base")
 EXAMPLE = os.path.join(REPO, "addons", "example")
 
 SCRIPTS = sorted(
-    glob.glob(os.path.join(EXAMPLE, "*.sh"))
-    + glob.glob(os.path.join(EXAMPLE, "services", "*", "run"))
-    + glob.glob(os.path.join(EXAMPLE, "services", "*", "finish"))
-    + glob.glob(os.path.join(EXAMPLE, "services", "*", "*.sh"))
+    p
+    for root in (BASE, EXAMPLE)
+    for p in (glob.glob(os.path.join(root, "*.sh"))
+              + glob.glob(os.path.join(root, "services", "*", "run"))
+              + glob.glob(os.path.join(root, "services", "*", "finish"))
+              + glob.glob(os.path.join(root, "services", "*", "*.sh")))
 )
 
 passed = failed = 0
@@ -42,7 +48,7 @@ if not bash:
     sys.exit(77)
 
 if not SCRIPTS:
-    print("FAIL  [example-shell] scripts found  none matched under addons/example", flush=True)
+    print("FAIL  [example-shell] scripts found  none matched under addons/base or addons/example", flush=True)
     sys.exit(1)
 
 for path in SCRIPTS:
@@ -96,7 +102,8 @@ for dockerfile in DOCKERFILES:
     loose = unquoted_settings(dockerfile)
     check(f"{rel} quotes every ARG/ENV value", not loose, "; ".join(loose)[:200])
 
-PY_HELPERS = sorted(glob.glob(os.path.join(EXAMPLE, "services", "*", "*.py")))
+PY_HELPERS = sorted(glob.glob(os.path.join(BASE, "services", "*", "*.py"))
+                    + glob.glob(os.path.join(EXAMPLE, "services", "*", "*.py")))
 for path in PY_HELPERS:
     rel = os.path.relpath(path, REPO)
     r = subprocess.run([sys.executable, "-m", "py_compile", path],
@@ -105,12 +112,12 @@ for path in PY_HELPERS:
 
 # Two absences invisible until a desktop is in front of someone: no menu prefix
 # is an empty application menu, and a raised latency must reach the daemons.
-entrypoint = open(os.path.join(EXAMPLE, "container-entrypoint.sh")).read()
+entrypoint = open(os.path.join(BASE, "container-entrypoint.sh")).read()
 check("the shared environment carries the menu prefix",
       "XDG_MENU_PREFIX" in entrypoint,
       "container-entrypoint.sh")
 for service in ("pipewire", "pipewire-pulse", "wireplumber"):
-    path = os.path.join(EXAMPLE, "services", service, "run")
+    path = os.path.join(BASE, "services", service, "run")
     body = open(path).read()
     check(f"{service} takes the audio latency an operator set",
           "${PIPEWIRE_LATENCY:-" in body, os.path.relpath(path, REPO))
@@ -118,7 +125,7 @@ for service in ("pipewire", "pipewire-pulse", "wireplumber"):
 # Xft resources reach a toolkit only at start, so on X11 the DPI ladder's reload
 # signal needs an XSETTINGS manager to signal, or running apps keep their density.
 ladder = open(os.path.join(REPO, "src", "selkies", "display_utils.py")).read()
-xsettingsd_service = os.path.join(EXAMPLE, "services", "xsettingsd", "run")
+xsettingsd_service = os.path.join(BASE, "services", "xsettingsd", "run")
 check("the DPI ladder's XSETTINGS manager is a service",
       "xsettingsd" not in ladder or os.path.isfile(xsettingsd_service),
       os.path.relpath(xsettingsd_service, REPO))

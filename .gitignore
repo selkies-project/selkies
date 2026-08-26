@@ -7,7 +7,7 @@ NOTES.md
 **/__pycache__/
 src/**/.ruff_cache
 src/selkies/selkies_web/
-addons/example/wheels/*.whl
+addons/base/wheels/*.whl
 build/appimage/
 out/
 release-artifacts/

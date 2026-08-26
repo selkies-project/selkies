@@ -110,11 +110,12 @@ This section is a knowledge base for code contributions and development.
 
 ```bash
 docker compose build dist                    # the wheel, web client included
+docker compose build base example            # the session, then the desktop on top of it
 docker compose up example                    # the Example Container on http://localhost:8080
 docker compose --profile gpu up example-gpu  # the same container with a GPU attached
 ```
 
-`example` bind-mounts `src/selkies` over the installed package, so server-side edits take effect on a restart rather than a rebuild. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. To run a wheel built from this tree instead of the latest PyPI release, copy it out of the `selkies-py-build` image into `addons/example/wheels/` before building.
+`example` bind-mounts `src/selkies` over the installed package, so server-side edits take effect on a restart rather than a rebuild. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. To run a wheel built from this tree instead of the latest PyPI release, copy it out of the `selkies-py-build` image into `addons/base/wheels/` before building.
 
 ## Documentation
 
@@ -170,7 +171,7 @@ The comment conventions each language follows are in [`AGENTS.md`](https://githu
 
 ## Container Customization
 
-The reference container images (the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) and the LXQt desktop images built by CI) use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor, installed from the distribution's package registry (`s6` package): `s6-svscan /etc/service` starts one `s6-supervise` per service directory — the X11 display server (or the headless Wayland compositor), the desktop session, the audio stack (`pipewire`/`wireplumber`/`pipewire-pulse`), `dbus`, and `selkies`, restarting any that crash. Services are controlled with `s6-svc` and inspected with `s6-svstat`, the `supervisord`/`supervisorctl` equivalents, without any Python dependency (`s6-overlay` is deliberately NOT used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init or launcher).
+The reference container images (the [Base Container](https://github.com/selkies-project/selkies/tree/main/addons/base), the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) built on it, and the LXQt desktop images built by CI) use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor, installed from the distribution's package registry (`s6` package): `s6-svscan /etc/service` starts one `s6-supervise` per service directory — the X11 display server (or the headless Wayland compositor), the desktop session, the audio stack (`pipewire`/`wireplumber`/`pipewire-pulse`), `dbus`, and `selkies`, restarting any that crash. Services are controlled with `s6-svc` and inspected with `s6-svstat`, the `supervisord`/`supervisorctl` equivalents, without any Python dependency (`s6-overlay` is deliberately NOT used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init or launcher).
 
 **If you want to change the image behavior, use the original container as a base image and only replace the entrypoint script(s) and/or the s6 service files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu26.04` for the [Example Container](component.md#example-container)) to preserve a specific container build.**
 

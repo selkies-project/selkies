@@ -3,12 +3,17 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # Development stack for this repository. `dist` builds the wheel (web client
-# included), `example` runs the reference container from addons/example, and
-# `example-gpu` is the same container with a GPU attached.
+# included), `base` builds the desktop-less session container from addons/base,
+# `example` layers the reference LXQt desktop on it, and `example-gpu` is the
+# same container with a GPU attached.
 #
 #   docker compose build dist                      # wheel image
+#   docker compose build base example              # session, then the desktop
 #   docker compose up example                      # http://localhost:8080
 #   docker compose --profile gpu up example-gpu    # NVIDIA
+#
+# `example` builds FROM the image `base` produces, so the two are built in that
+# order; Compose has no build-time dependency to express it with.
 #
 # Compose V2 is required (no `version:` key, `extends`, `develop`).
 
@@ -22,25 +27,33 @@ services:
         PYPI_PACKAGE: selkies
         PACKAGE_VERSION: ${PACKAGE_VERSION:-0.0.0.dev0}
 
-  example:
+  base:
     ###
     # NOTE: export DISTRIB_IMAGE and DISTRIB_RELEASE to change the base image.
     # To test an unreleased wheel, build it with the `dist` service, then copy it
-    # from the `selkies-py-build` image into `addons/example/wheels/` before
+    # from the `selkies-py-build` image into `addons/base/wheels/` before
     # building this service; otherwise the latest PyPI release is installed.
     ###
-    image: selkies-example:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
+    image: selkies-base:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
     build:
-      # Repository root: the Dockerfile also pulls in addons/js-interposer and
-      # addons/fake-udev
+      # Repository root: the Dockerfile also pulls in addons/js-interposer,
+      # addons/fake-udev and addons/v4l2-interposer
       context: .
-      dockerfile: addons/example/Dockerfile
+      dockerfile: addons/base/Dockerfile
       args:
         DISTRIB_IMAGE: ${DISTRIB_IMAGE:-ubuntu}
         DISTRIB_RELEASE: ${DISTRIB_RELEASE:-26.04}
         PYPI_PACKAGE: selkies
         # DRI3-capable Xvfb; see the Dockerfile for what overriding this costs
         XVFB_IMAGE: ${XVFB_IMAGE:-lscr.io/linuxserver/xvfb:debianbookworm}
+
+  example:
+    image: selkies-example:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
+    build:
+      context: .
+      dockerfile: addons/example/Dockerfile
+      args:
+        BASE_IMAGE: selkies-base:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
     environment:
       # Streaming mode: websockets, webrtc, or both with dual mode
       SELKIES_MODE: ${SELKIES_MODE:-websockets}

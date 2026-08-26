@@ -31,7 +31,7 @@ updates:
 
   # Base images of the wheel builder, the devcontainer, and the published images
   - package-ecosystem: docker
-    directories: ["/", "/.devcontainer", "/addons/coturn", "/addons/example", "/addons/turn-rest"]
+    directories: ["/", "/.devcontainer", "/addons/base", "/addons/coturn", "/addons/example", "/addons/turn-rest"]
     schedule:
       interval: weekly
     groups:
