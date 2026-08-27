@@ -139,7 +139,7 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
                 deadline = time.time() + 12
                 frames = 0
                 while time.time() < deadline:
-                    frames = page.evaluate("window.__wsFrames") or 0
+                    frames = page.evaluate("window.videoChunksReceived || window.__wsFrames") or 0
                     if frames >= 24:
                         break
                     time.sleep(0.5)

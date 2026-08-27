@@ -60,7 +60,7 @@ def run_block(mode: str, wayland: bool, block: str = "",
                 deadline = time.time() + 10
                 frames = 0
                 while time.time() < deadline:
-                    frames = page.evaluate("window.__wsFrames") or 0
+                    frames = page.evaluate("window.videoChunksReceived || window.__wsFrames") or 0
                     if frames >= 24:
                         break
                     time.sleep(0.5)
@@ -177,6 +177,17 @@ def run_block(mode: str, wayland: bool, block: str = "",
             time.sleep(4.0)
             vinfo = C.wait_ws_video(vpage, timeout=12) if mode == "websockets" else C.wait_wr_video(vpage, timeout=40)
             res.check("roles: shared viewer gets video", vinfo is not None, vinfo)
+            if mode == "websockets":
+                # Audio rides the primary connection, shared viewers included;
+                # the worklet's polled depth proves packets reach playback.
+                deadline = time.time() + 10
+                depth = 0
+                while time.time() < deadline:
+                    depth = vpage.evaluate("window.currentAudioBufferSize || 0") or 0
+                    if depth > 0:
+                        break
+                    time.sleep(0.5)
+                res.check("roles: shared viewer plays audio", depth > 0, depth)
             if not wayland:
                 vpage.mouse.move(400, 300)
                 time.sleep(0.5)

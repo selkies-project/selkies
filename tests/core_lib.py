@@ -95,20 +95,36 @@ def launch_chrome(pw: Any, url_hash: str = "", mode: Optional[str] = None,
       // client's fps counter read 0 even while the stream flows.
       window.__wsFrames = 0;
       (() => {
+        const tap = (e) => {
+          if (e.data instanceof ArrayBuffer) window.__wsFrames++;
+          else if (typeof e.data === 'string') {
+            window.__wsTexts = window.__wsTexts || [];
+            if (e.data.includes('DISPLAY_CONFIG_UPDATE')) window.__wsTexts.push(e.data);
+          }
+        };
         const WS = window.WebSocket;
         window.WebSocket = function(...a) {
           const s = a.length === 1 ? new WS(a[0]) : new WS(a[0], a[1]);
-          s.addEventListener('message', (e) => {
-            if (e.data instanceof ArrayBuffer) window.__wsFrames++;
-            else if (typeof e.data === 'string') {
-              window.__wsTexts = window.__wsTexts || [];
-              if (e.data.includes('DISPLAY_CONFIG_UPDATE')) window.__wsTexts.push(e.data);
-            }
-          });
+          s.__rxTapped = true;
+          s.addEventListener('message', tap);
           return s;
         };
         window.WebSocket.prototype = WS.prototype;
         Object.setPrototypeOf(window.WebSocket, WS);
+        // The websockets transport runs its socket in a worker; its receive
+        // side is observed through the page handle, which never passes above.
+        let transport = null;
+        Object.defineProperty(window, 'selkiesTransport', {
+          configurable: true,
+          get: () => transport,
+          set: (v) => {
+            transport = v;
+            if (v && v.addEventListener && !v.__rxTapped) {
+              v.__rxTapped = true;
+              v.addEventListener('message', tap);
+            }
+          },
+        });
       })();
       window.__clipMsgs = [];
       window.__displayCfg = [];

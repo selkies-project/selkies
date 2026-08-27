@@ -49,6 +49,21 @@ WIRE_TAP = """
     else if (d.startsWith('js,')) window.__padSent.push(d.split(',')[1]);
     else if (d.startsWith('cw') || d.startsWith('cb')) window.__clipSent++;
   };
+  // The websockets transport runs its socket in a worker, so its sends are
+  // observed through the page-side handle rather than WebSocket.prototype.
+  let transport = null;
+  Object.defineProperty(window, 'selkiesTransport', {
+    configurable: true,
+    get: () => transport,
+    set: (v) => {
+      transport = v;
+      if (v && typeof v.send === 'function' && !v.__tapped) {
+        const orig = v.send.bind(v);
+        v.send = (d) => { tap(d); return orig(d); };
+        v.__tapped = true;
+      }
+    },
+  });
   const protos = [window.RTCDataChannel && RTCDataChannel.prototype,
                   window.WebSocket && WebSocket.prototype];
   for (const proto of protos) {
