@@ -9,7 +9,7 @@ Selkies has two authentication modes. Without a master token it is in **legacy m
 
 The master token is the administrative credential. It is never sent to clients and authenticates two control-plane requests as an `Authorization: Bearer <master token>` header:
 
-- `POST /api/tokens` replaces the session token table. The body is a JSON object keyed by token; each entry carries the client's `role` (`controller` or `viewer`), its gamepad `slot` (`1`-`4` or `null`), and optionally `mk_control: true` to hand keyboard and mouse authority to that one token (everyone else becomes read-only until the next table drops it). No client streams until the first table arrives (the WebSocket transport holds the handshake, WebRTC refuses it). A new table is reconciled against the connected clients at once: a token that disappeared is disconnected, a changed role reconnects the client, a slot change is pushed live, and the input verdict is re-announced on both transports.
+- `POST /api/tokens` replaces the session token table. The body is a JSON object keyed by token; each entry carries the client's `role` (`controller` or `viewer`), its gamepad `slot` (`1`-`4` or `null`), and optionally `mk_control: true` to hand keyboard and mouse authority to that one token (everyone else becomes read-only until the next table drops it). A viewer holding it becomes a read-write collaborator only while `--enable-collab` is on, which is the switch that keeps a deployment view-only whatever the table says; `cmd` and every settings-mutating message stay controller-only either way. No client streams until the first table arrives (the WebSocket transport holds the handshake, WebRTC refuses it). A new table is reconciled against the connected clients at once: a token that disappeared is disconnected, a changed role reconnects the client, a slot change is pushed live, and the input verdict is re-announced on both transports.
 - `POST /api/switch` changes the streaming transport (when dual mode is enabled). The dashboards prompt for the master token when they need it.
 
 The master token is also accepted as a Bearer credential on every other API route below, so an operator can upload, download, or scrape metrics with it.
@@ -56,6 +56,10 @@ scrape_configs:
 
 Both can be on. Basic authentication then guards the page load and anything that presents no token; a request that carries a valid session token is accepted on the API routes without Basic credentials (a script's own `Authorization` header replaces the browser's cached ones, so this is what lets the tokened page work behind a login). The WebSocket handshakes skip Basic in secure mode and rely on the token, since a browser cannot attach fresh credentials to an upgrade. The mode switch still takes the master token or the Basic login, not a session token.
 
+## Origin Checks
+
+Independent of the mode: `--allowed-origins` (`SELKIES_ALLOWED_ORIGINS`) is the cross-site WebSocket-hijacking guard on the streaming socket. Empty, the default, admits same-origin browsers and non-browser clients that send no `Origin` at all; a comma-separated list admits exactly those origins, which is what an embedding page on another host needs, and `*` admits any.
+
 ## Without a Master Token
 
-Nothing on this page applies. The routes are open, or Basic-gated when `--enable-basic-auth` is on: the main password authenticates a controller and the optional `--basic-auth-viewonly-password` a viewer, which is refused the same uploads and mode switches as a viewer token. Bearer headers and the token cookie are ignored.
+Nothing above applies but the origin check. The routes are open, or Basic-gated when `--enable-basic-auth` is on: the main password authenticates a controller and the optional `--basic-auth-viewonly-password` a viewer, which is refused the same uploads and mode switches as a viewer token. Bearer headers and the token cookie are ignored, and the roles a client can take are the [sharing links](usage.md#session-sharing) instead of provisioned tokens.

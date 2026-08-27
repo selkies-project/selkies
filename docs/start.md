@@ -79,9 +79,9 @@ Dynamic resizing (`--enable-resize`, **on by default**) fits the remote resoluti
 selkies-resize 1920x1080
 ```
 
-**6. Check the [**Joystick Interposer**](component.md#joystick-interposer) section if you need to use joystick/gamepad devices from your web browser client.**
+**6. Check the [**Joystick Interposer**](component.md#joystick-interposer) section if you need to use joystick/gamepad devices from your web browser client, and the [**V4L2 Interposer**](component.md#v4l2-interposer) section for the webcam.**
 
-You can install `selkies_joystick_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` at it.
+You can install `selkies_joystick_interposer.so` and `selkies_v4l2_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` and `SELKIES_WEBCAM_INTERPOSER` at them.
 
 **7. (WebRTC mode only) If you switched to `--mode=webrtc` and the HTML5 web interface loads and the signaling connection works, but the WebRTC connection fails or the remote desktop does not start:**
 
@@ -101,7 +101,7 @@ The [`selkies-vdi`](https://github.com/selkies-project/selkies-vdi) or [`selkies
 
 ## Minimal Container
 
-The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
+The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox and Google Chrome, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
 
 Instructions are available in the [Example Container](component.md#example-container) section.
 
@@ -131,7 +131,7 @@ The [All-In-One Desktop Containers](#desktop-container) support unprivileged sel
 
 ### Install from a native package or the AppImage
 
-Each release also carries the same build as a native package for the distributions below, all attached to the [Releases](https://github.com/selkies-project/selkies/releases) page for `x86_64` and `aarch64` (Arch Linux for `x86_64` alone). A native package installs a private Python environment at `/opt/selkies`, the web client and the `pixelflux`/`pcmflux` extensions included, puts the `selkies`, `selkies-resize`, and `selkies-gpu-probe` commands on `PATH`, and carries the [Joystick Interposer](component.md#joystick-interposer), so steps 2 and 3 below are already done and only the display and audio servers are left to set up:
+Each release also carries the same build as a native package for the distributions below, all attached to the [Releases](https://github.com/selkies-project/selkies/releases) page for `x86_64` and `aarch64` (Arch Linux for `x86_64` alone). A native package installs a private Python environment at `/opt/selkies`, the web client and the `pixelflux`/`pcmflux` extensions included, puts the `selkies`, `selkies-resize`, and `selkies-gpu-probe` commands on `PATH`, and carries the [Joystick Interposer](component.md#joystick-interposer) and the [V4L2 Interposer](component.md#v4l2-interposer), so steps 2 and 3 below are already done and only the display and audio servers are left to set up:
 
 ```bash
 # The suffix on the .deb and .rpm names the distribution it was built in:
@@ -203,7 +203,7 @@ On `x86_64`, add `apt-get install -y gcc-multilib && make -C addons/js-interpose
 
 More information can be found in [Joystick Interposer](component.md#joystick-interposer).
 
-You can install `selkies_joystick_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` at it.
+You can install `selkies_joystick_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` at it. The webcam uplink has a matching library built the same way, `make -C addons/v4l2-interposer && PREFIX=/usr make -C addons/v4l2-interposer install`; see [V4L2 Interposer](component.md#v4l2-interposer).
 
 SDL2 applications discover the four pads through `fake-udev`. Where discovery through `libudev` is unavailable — `SDL_JOYSTICK_DISABLE_UDEV=1`, an SDL sandbox build, or an SDL built without udev — export `SDL_JOYSTICK_DEVICE=/dev/input/event1000:/dev/input/event1001:/dev/input/event1002:/dev/input/event1003` instead, which needs no placeholder files. Never name the joydev nodes there: with `fake-udev` active, a `/dev/input/js0` hint is a second, different node for the slot SDL already enumerated as `event1000`, so the pad shows up twice.
 

@@ -256,9 +256,8 @@ const createLagGauge = ${createLagGauge.toString()};
 const KEYFRAME_INTERVAL_MS = ${KEYFRAME_INTERVAL_MS};
 const HAS_FRAME_ORIENTATION = ${HAS_FRAME_ORIENTATION};
 // Frames taken from the camera to measure the candidates with, how long to wait
-// for the camera to produce them, and the time one candidate may spend on them.
-// Synthetic content cannot stand in here: what a codec costs is what the lens is
-// showing, and the resolution it is shown at.
+// for them, and the time one candidate may spend on them. Synthetic content
+// cannot stand in: a codec costs what the lens shows, at the size it shows it.
 const PROBE_SOURCE_FRAMES = 8;
 const PROBE_WAIT_MS = 2500;
 const PROBE_BUDGET_MS = 400;
@@ -425,12 +424,11 @@ async function measure(c, w, h, frames) {
   return out;
 }
 
-// Largest per-channel difference between region means of the first probe
-// frame and its own decoded output, or -1 (an unjudged candidate passes)
-// when there is nothing to judge with. Drawn unscaled and averaged over a
-// coarse grid: means converge however lossily grain encodes while false
-// chroma moves whole regions, and drawImage downscaling point-samples on
-// some engines, so two samplings of grain disagree.
+// Largest per-channel difference between region means of the first probe frame
+// and its own decoded output, or -1 when there is nothing to judge with (an
+// unjudged candidate passes). Drawn unscaled over a coarse grid: means converge
+// however lossily grain encodes while false chroma moves whole regions, and
+// drawImage downscaling point-samples on some engines.
 async function colourError(frame, chunks, c) {
   if (typeof OffscreenCanvas === 'undefined' || typeof VideoDecoder === 'undefined' || !chunks.length) return -1;
   const cells = 4;

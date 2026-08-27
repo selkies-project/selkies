@@ -115,6 +115,8 @@ docker compose up example                    # the Example Container on http://l
 docker compose --profile gpu up example-gpu  # the same container with a GPU attached
 ```
 
+Each service names the `Dockerfile` that builds it, and those files are also the reference build procedure for a host without Docker®: the commands run in a shell as they stand.
+
 `example` bind-mounts `src/selkies` over the installed package, so server-side edits take effect on a restart rather than a rebuild. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. To run a wheel built from this tree instead of the latest PyPI release, copy it out of the `selkies-py-build` image into `addons/base/wheels/` before building.
 
 ## Documentation
@@ -134,7 +136,7 @@ description: One sentence, shown under the title and in search results.
 
 Links between pages are written the way GitHub resolves them (`start.md`, or `component.md#encoders`) and are rewritten to site URLs during the build. Images live in `docs/assets` and are referenced relative to the file.
 
-### Logo assets
+### Logo Assets
 
 Every image in the repository is the Selkies logo, and all of them are generated from two hand-authored sources: `docs/assets/logo/selkies.svg` (the mark) and `wordmark.svg` (the lettering). Everything else is composed from those — the two lockups that set the mark beside or above the wordmark, the favicons, the PWA and touch icons, the dashboards' copies of the mark, and the PNG lockups. Edit a source and regenerate; do not edit the outputs:
 
@@ -210,15 +212,16 @@ The entrypoint script of the base images launches `s6-svscan /etc/service` itsel
 
 ## Container Guide
 
-The [`docker-nvidia-glx-desktop`](https://github.com/selkies-project/docker-nvidia-glx-desktop)/[`docker-nvidia-egl-desktop`](https://github.com/selkies-project/docker-nvidia-egl-desktop) desktop container repositories (referenced as Desktop Containers here), and the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) share various components between each other:
+The [`docker-nvidia-glx-desktop`](https://github.com/selkies-project/docker-nvidia-glx-desktop) and [`docker-nvidia-egl-desktop`](https://github.com/selkies-project/docker-nvidia-egl-desktop) repositories (the Desktop Containers here) share components with the [Example Container](component.md#example-container), which is the reference they follow: `container-entrypoint.sh` prepares the session and launches `s6-svscan /etc/service`, the `selkies` service runs `selkies-entrypoint.sh`, and every other daemon is a `run` script under `services/`. There is no `supervisord.conf` and no nginx, since Selkies serves the web client and every endpoint on its single port.
 
-`LICENSE`, the entrypoint script, and the service definitions are always identical in both Desktop Containers (copy and paste between each container). The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) in this repository is the reference they follow: `container-entrypoint.sh` prepares the session and launches `s6-svscan /etc/service`, the `selkies` service runs `selkies-entrypoint.sh`, and every other daemon is a `run` script under `services/`; there is no `supervisord.conf` and no nginx, since Selkies serves the web client and every endpoint on its single port. **You need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and at least two Pull Requests for both Desktop Containers.**
+**A change to any shared component is three Pull Requests — the Example Container and both Desktop Containers — and a change confined to the Desktop Containers is two.** What is shared, and how closely:
 
-The `Dockerfile` is always identical below and above the lines that say `Anything above/below this line should always be kept the same...` in both Desktop Containers. This component is not shared with the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and installation procedures for Selkies should be updated to the desktop containers on every release, so **you need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example), and at least two Pull Requests for both Desktop Containers.**
-
-The entrypoint scripts of both Desktop Containers are always identical from the start until the line containing `export PULSE_SERVER=..."`. The script for installing NVIDIA userspace driver components is always identical except for the outermost `if` condition. Other script sections require manual assessment when updating, so **you need to do three Pull Requests including the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) if relevant lines changed in both Desktop Containers and the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example).**
-
-`README.md` and `egl.yml`/`xgl.yml` files in both Desktop Containers are similar but have different components, thus requiring manual assessment for both Desktop Containers when updating.
+| Component | Shared between | When updating |
+| --- | --- | --- |
+| `LICENSE`, entrypoint script, service definitions | both Desktop Containers, following the Example Container | identical; copy between them |
+| Entrypoint script, start to the `export PULSE_SERVER=...` line | both Desktop Containers | identical; the NVIDIA userspace driver install differs only in its outermost `if` |
+| `Dockerfile`, outside the `Anything above/below this line should always be kept the same...` markers | both Desktop Containers | identical, and the Selkies install procedure follows every release |
+| Remaining entrypoint sections, `README.md`, `egl.yml`/`xgl.yml` | both Desktop Containers | similar but not identical; assess by hand |
 
 ## Style Guide
 

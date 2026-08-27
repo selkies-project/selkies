@@ -18,7 +18,7 @@ export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-proje
 export DISTRIB_FLAVOR="ubuntu26.04"
 ```
 
-When instructed to install [binfmt](https://github.com/tonistiigi/binfmt), use the following command with Docker/Podman:
+When instructed to install [binfmt](https://github.com/tonistiigi/binfmt), use the following command with Docker®/Podman:
 
 ```bash
 docker run --rm --privileged tonistiigi/binfmt:latest --install all
@@ -28,7 +28,7 @@ docker run --rm --privileged tonistiigi/binfmt:latest --install all
 
 At runtime, Selkies is a **single Python application** — the `selkies` wheel. The HTML5 web client is bundled into it, and screen/audio capture and encoding are provided by the `pixelflux` and `pcmflux` extensions, which are installed automatically as dependencies of the wheel.
 
-Every release carries the same build in each medium below. The [Releases](https://github.com/selkies-project/selkies/releases) page holds the architecture-independent wheel, a `.deb` for Ubuntu 24.04 and 26.04 and for Debian bookworm and trixie, an `.rpm` for Fedora and Enterprise Linux 9, an Alpine `.apk`, an Arch `.pkg.tar.zst`, a self-contained AppImage, and the `noarch` conda package the AppImage environment is built from (`pixelflux`, `pcmflux`, `pulsectl-asyncio`, and `aitop` have no conda-forge builds, so a conda install of it still needs those from pip). Each of those is built for both `x86_64` and `aarch64`, except the Arch package, which Arch Linux publishes for `x86_64` alone. The container images below are published to `ghcr.io` instead: the example image as `v${SELKIES_VERSION}-${DISTRIB_FLAVOR}`, the coTURN and TURN-REST addons as `v${SELKIES_VERSION}`, each beside its floating `latest` tag.
+Every release carries the same build in each medium below. The [Releases](https://github.com/selkies-project/selkies/releases) page holds the architecture-independent wheel, a `.deb` for Ubuntu 24.04 and 26.04 and for Debian bookworm and trixie, an `.rpm` for Fedora and Enterprise Linux 9, an Alpine `.apk`, an Arch `.pkg.tar.zst`, a self-contained AppImage, and the `noarch` conda package the AppImage environment is built from (`pixelflux`, `pcmflux`, `pulsectl-asyncio`, and `aitop` have no conda-forge builds, so a conda install of it still needs those from pip). Each of those is built for both `x86_64` and `aarch64`, except the Arch package, which Arch Linux publishes for `x86_64` alone. The container images below are published to `ghcr.io` instead: the base and example images as `v${SELKIES_VERSION}-${DISTRIB_FLAVOR}`, the coTURN and TURN-REST addons as `v${SELKIES_VERSION}`, each beside its floating `latest` tag.
 
 A pre-release ships the same media under a tag such as `2.0.0rc0` and is marked as a pre-release: the floating `latest` image tags stay on the last full release by default, the `releases/latest` API keeps pointing at it, and `pip` resolves the pre-release only when asked with `--pre` or an exact version.
 
@@ -75,6 +75,8 @@ The web client is a WebCodecs-based HTML5 application (with the core `selkies-co
 It decodes the incoming H.264 stream using the browser [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) API with a low-latency zero-copy rendering path (a browser without WebCodecs is served the striped JPEG stream instead, painted through `createImageBitmap`), plays Opus audio, and detects keyboard, mouse, gamepad, and clipboard input from the user, then sends them to the host server backend. It also handles remote cursors with the Pointer Lock API so that you can correctly control interactive applications and games.
 
 The web client source lives at [`addons/selkies-web-core`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-web-core) and is built and bundled into the Python wheel automatically (installed at `src/selkies/selkies_web`), so **there is no separate web package to download or install**. A source checkout builds that bundle with `scripts/ci/build-web.sh` (requires `npm`), the one script the wheel build, the conda recipe, the root `Dockerfile`, and the devcontainer all run, so every channel ships the same files. To serve your own copy of the web files, point `--web-root=` (or the `SELKIES_WEB_ROOT` environment variable) at a built web directory containing an `index.html`. Rebranding (name, icons, manifest) is done at build time in the `addons/selkies-web-core` source tree, not by editing the shipped artifacts.
+
+What the shipped interface *shows* is a server setting rather than a build: `--ui-title` and `--ui-show-logo` name and brand the sidebar header, `--ui-show-sidebar` and `--ui-show-core-buttons` drop the sidebar or its device toggles entirely, and one `--ui-sidebar-show-<section>` flag per section — video, screen and audio settings, stats, shortcuts, clipboard, files, apps, sharing, gamepads, webcam, fullscreen, gaming mode, trackpad, keyboard button, soft buttons — hides just that one. These govern the page only: the capability behind a hidden control keeps working, so the feature's own setting (`--webcam-enabled`, `--file-transfers`, `--enable-sharing`) is what actually turns it off.
 
 #### Media Capture and Encoding (`pixelflux` and `pcmflux`)
 
@@ -167,6 +169,41 @@ sudo modprobe uinput
 sudo usermod -aG input "$(whoami)"
 ```
 
+#### V4L2 Interposer
+
+The [V4L2 Interposer](https://github.com/selkies-project/selkies/tree/main/addons/v4l2-interposer) is the webcam counterpart of the [Joystick Interposer](#joystick-interposer): an `LD_PRELOAD` library that presents the client's camera to applications as a V4L2 capture device (`/dev/video0`), with no `v4l2loopback` kernel module, no `/dev/video*` node, and no elevated privilege. Unmodified consumers pick it up — Chromium, Firefox, `ffmpeg`, GStreamer, `v4l2-ctl` and libv4l2-based applications. Turn the uplink on with `--webcam-enabled=true` (`SELKIES_WEBCAM_ENABLED`); it is off by default.
+
+The browser encodes its camera (H.264 or VP8 where the engine can, JPEG otherwise) and Selkies hands each encoded frame to `pixelflux`'s virtual camera, which decodes it, fits it to the device format and publishes it to every sink on its own thread. One camera is shared by every client and lives as long as the server, so an application that opened the device keeps it across transport switches and browser reconnects.
+
+Applications reach the camera through whichever sink the deployment can offer, and the interposer socket is always served:
+
+| Sink | Reached by | Requires |
+| --- | --- | --- |
+| Interposer socket | applications started with the library preloaded | nothing beyond the library |
+| v4l2loopback device (`--webcam-device`, `auto` by default) | every application, with nothing preloaded | the `v4l2loopback` module and a writable output device: a desktop host or a privileged container |
+| PipeWire node (`--webcam-pipewire`, on by default) | PipeWire-native applications and the `pipewire-v4l2` wrapper | a reachable PipeWire daemon |
+
+The device advertises one fixed format, as a fixed-function webcam does: `--webcam-width` and `--webcam-height` size it (client frames are scaled and letterboxed to fit), and `--webcam-pixel-format` pins the format or, left at `auto`, follows the first uplink — a browser sending JPEG gets an MJPEG device its frames pass through untouched, any other uplink an I420 one. `--webcam-encoder` chooses what clients encode with.
+
+The [Example Container](#example-container) and the desktop containers build and wire the library automatically, every native Selkies package ships it under `/usr/$LIB` (the `.deb` and `.rpm` carry the 32-bit variant too), and the AppImage carries it at `usr/lib/selkies_v4l2_interposer.so`, whose path its `AppRun` exports as `SELKIES_WEBCAM_INTERPOSER`. Elsewhere, build it from the source in this repository and preload it in the environment each application runs in:
+
+```bash
+git clone https://github.com/selkies-project/selkies.git && cd selkies
+apt-get update && apt-get install --no-install-recommends -y build-essential
+make -C addons/v4l2-interposer && PREFIX=/usr make -C addons/v4l2-interposer install
+```
+
+```bash
+export SELKIES_WEBCAM_INTERPOSER='/usr/$LIB/selkies_v4l2_interposer.so'
+export LD_PRELOAD="${SELKIES_WEBCAM_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
+```
+
+On `x86_64`, `make -C addons/v4l2-interposer all32 install32` (with `gcc-multilib`) adds the 32-bit variant for 32-bit applications, since `/usr/$LIB` resolves per process bitness.
+
+**Never preload the interposer into the Selkies process itself.** It answers for `/dev/video0` in whatever process it is loaded into, so the capture side would stop seeing the real device nodes; the container entrypoints drop every Selkies preload before starting the backend for the same reason.
+
+Check the [V4L2 Interposer README.md](https://github.com/selkies-project/selkies/tree/main/addons/v4l2-interposer/README.md) for the device surface it emulates, the `SELKIES_WEBCAM_SOURCE` frame-source selector, and a test server that stands in for a browser.
+
 #### Universal Touch Gamepad
 
 The [Universal Touch Gamepad](https://github.com/selkies-project/selkies/tree/main/addons/universal-touch-gamepad) is a JavaScript library that adds a customizable on-screen touch gamepad overlay to the web interface. It intercepts `navigator.getGamepads()` to inject a virtual gamepad, making touch devices compatible with applications and games that expect the browser Gamepad API.
@@ -177,7 +214,7 @@ The [Selkies Dashboard](https://github.com/selkies-project/selkies/tree/main/add
 
 #### Example Container
 
-The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal. The container defaults to an X11 (Xvfb) session; set `SELKIES_WAYLAND=true` to switch it to the headless Wayland backend instead.
+The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox and Google Chrome, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal. The container defaults to an X11 (Xvfb) session; set `SELKIES_WAYLAND=true` to switch it to the headless Wayland backend instead.
 
 It is built on the [Base Container](https://github.com/selkies-project/selkies/tree/main/addons/base) (`ghcr.io/selkies-project/selkies/base:main-${DISTRIB_FLAVOR}`), which is the same session with no desktop environment in it: the X11 display server and the headless Wayland backend with its nested `labwc`, PipeWire audio, the GPU runtime, s6, the embedded coTURN, and Selkies itself. Build a desktop of your own on that image the way `addons/example/Dockerfile` builds LXQt on it, and everything below applies unchanged. Under the Wayland backend the LXQt session runs natively on the nested compositor, anchoring its panel and desktop through layer-shell and controlling its windows through wlr-foreign-toplevel.
 
@@ -190,6 +227,8 @@ Neither applies with `SELKIES_WAYLAND_COMPOSITOR=none`: applications sit on the 
 A Wayland session asked for on a GPU it cannot reach starts as X11 instead. The compositor needs a working GBM/EGL stack on a DRM render node; where there is none — no `/dev/dri` in the container, an NVIDIA runtime without the `graphics` driver capability, a node with no allocator behind it — it composites in software and hands its clients no dmabuf either, while the same container under Xvfb still reaches the GPU. Because device paths do not answer whether that stack works, the container runs the compositor's own renderer bring-up at startup and switches backend on what it finds. With no GPU present at all both backends render in software, so Wayland stays. The check ships as `selkies-gpu-probe`, which prints the backend it recommends and why, so any container can make the same decision (and you can ask it yourself with `docker exec <container> selkies-gpu-probe`).
 
 `-e SELKIES_WAYLAND_X11_FALLBACK=false` keeps Wayland regardless. The session then renders in software throughout: a compositor without a GPU shares no dmabuf, so applications pointed at the GPU's driver produce buffers it cannot accept and draw nothing at all.
+
+The dashboards' apps panel is backed by [proot-apps](https://github.com/linuxserver/proot-apps): portable per-user applications installed into the home directory rather than the image, so they survive a container replacement and need no root. proot works by tracing every process it starts, so on a host that denies `ptrace` nothing can be installed or launched — Selkies runs the check at startup and the panel is hidden rather than shown failing. `--ui-sidebar-show-apps=false` hides it regardless.
 
 Read the [Development](development.md) section for customizing this container for your own usage.
 
@@ -263,7 +302,7 @@ Other authentication methods such as TURN-REST over various types of REST API au
 
 The TURN-REST Container (or similarly, Kubernetes Pod) should be triggered with the Docker®/Podman options `-e TURN_SHARED_SECRET=`, `-e TURN_HOST=`, `-e TURN_PORT=`, `-e TURN_PROTOCOL=`, `-e TURN_TLS=`, `-e STUN_HOST=`, `-e STUN_PORT=`, where the options are dependent on the TURN server configuration of [coTURN](#coturn) or other TURN server implementations.
 
-Run the Docker®/Podman container built from the [`TURN-REST Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/turn-rest/Dockerfile) (replace `main` to `latest` for the latest stable release**):
+Run the Docker®/Podman container built from the [`TURN-REST Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/turn-rest/Dockerfile) (**replace `main` to `latest` for the latest stable release**):
 
 ```bash
 docker run --name turn-rest -it -d --rm -e TURN_SHARED_SECRET=n0TaRealCoTURNAuthSecretThatIsSixtyFourLengthsLongPlaceholdPlace -e TURN_HOST=turn.myinfrastructure.io -e TURN_PORT=3478 -e TURN_PROTOCOL=udp -e TURN_TLS=false -p 8008:8008 ghcr.io/selkies-project/selkies/turn-rest:main
@@ -319,6 +358,15 @@ Opus is currently the only adequate full-band audio codec supported in web brows
 | Interface | Device Selector | Operating Systems | Notes |
 |---|---|---|---|
 | PulseAudio or PipeWire-Pulse (via `pcmflux`) | `PULSE_SERVER` or `PULSE_RUNTIME_PATH` environment, `--audio-device-name` | Linux | Default capture device is `output.monitor` |
+
+### Client Uplinks
+
+Both are off by default and need a secure context in the browser; see [Usage](usage.md#microphone-and-webcam).
+
+| Uplink | Selected with | Codec | Delivered to the session as |
+|---|---|---|---|
+| Microphone | `--microphone-enabled` | Opus (WebRTC) or Opus over the WebSocket | a PulseAudio source, through the same sound server the capture reads |
+| Webcam | `--webcam-enabled` | H.264, VP8 or MJPEG, chosen by `--webcam-encoder` (`auto` measures the client) | a V4L2 device: the [V4L2 Interposer](#v4l2-interposer) socket, a v4l2loopback device, or a PipeWire `Video/Source` node |
 
 ### Transport Protocols
 

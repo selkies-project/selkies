@@ -52,10 +52,9 @@ rattler-build build \
 PKG="$(find "${WORK}/conda-output" \( -name 'selkies-*.tar.bz2' -o -name 'selkies-*.conda' \) | head -n1)"
 test -f "${PKG}"
 
-# 2) linuxdeploy (latest published build) and the conda plugin. The plugin is
-#    the one in infra/appimage: upstream publishes no release artifacts, and
-#    this one installs Miniforge rather than Miniconda3, keeping the AppImage
-#    on conda-forge alone.
+# 2) linuxdeploy (latest published build) and the conda plugin from
+#    infra/appimage: upstream publishes no release artifacts, and this one
+#    installs Miniforge, keeping the AppImage on conda-forge alone.
 scripts/ci/fetch.sh \
     "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${ARCH}.AppImage" \
     "${WORK}/linuxdeploy.AppImage"
@@ -87,20 +86,18 @@ for project in pixelflux pcmflux; do
     wheel="$(find "${PIXELFLUX_PCMFLUX_WHEELS_DIR}" -maxdepth 1 \
         -name "${project}-*cp312*manylinux*${ARCH}*.whl" | head -n1)"
   fi
-  # A wheels directory that yielded nothing is worth saying out loud: the
-  # AppImage then carries whatever PyPI resolves rather than the build that was
-  # meant to ride along. No directory at all is the release path, where the
-  # pinned version is published and PyPI is the right answer.
+  # A wheels directory that yielded nothing means the AppImage carries whatever
+  # PyPI resolves rather than the build meant to ride along, so say so. No
+  # directory at all is the release path, where PyPI is the right answer.
   if [ -z "${wheel}" ] && [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then
     echo "::warning::No ${project} wheel in ${PIXELFLUX_PCMFLUX_WHEELS_DIR}; the AppImage resolves it from PyPI"
   fi
   PIP_REQUIREMENTS="${PIP_REQUIREMENTS} ${wheel:-${project}}"
 done
 
-# conda and pip take configuration from CONDA_*/PIP_* names of their own, where a
-# ';'-separated channel list parses as one channel. These four address the plugin,
-# so they reach linuxdeploy alone and the toolchain solve below stays on
-# conda-forge.
+# conda and pip read CONDA_*/PIP_* names of their own, where a ';'-separated
+# channel list parses as one channel. These four address the plugin, so they
+# reach linuxdeploy alone and the toolchain solve below stays on conda-forge.
 env CONDA_CHANNELS="${CONDA_CHANNELS}" \
     CONDA_PYTHON_VERSION="${CONDA_PYTHON_VERSION}" \
     CONDA_PACKAGES="${CONDA_PACKAGES}" \
@@ -112,12 +109,12 @@ env CONDA_CHANNELS="${CONDA_CHANNELS}" \
 # Fails the build rather than shipping an AppImage that cannot start
 AppDir/usr/conda/bin/selkies --help > /dev/null
 
-# 3b) Joystick Interposer, for containers with no reachable /dev/uinput. It is
-#     compiled with the conda-forge toolchain instead of the runner's gcc: the
-#     runner links against a glibc far newer than the rest of the AppImage
-#     needs, while the sysroot pinned here keeps the library loadable on every
-#     distribution the bundled environment already runs on. The 2.28 sysroot is
-#     the oldest that still carries the kernel input headers.
+# 3b) The interposers, for containers with no reachable /dev/uinput or
+#     /dev/video*. Compiled with the conda-forge toolchain rather than the
+#     runner's gcc, whose glibc is far newer than the rest of the AppImage
+#     needs; 2.28 is the oldest sysroot still carrying the kernel input
+#     headers. The V4L2 interposer is built without its PipeWire frame source,
+#     which needs headers this toolchain has no reason to carry.
 CC_ENV="${WORK}/cc-env"
 # conda names its sysroot packages after its own subdir (linux-64,
 # linux-aarch64, ...), which no `uname -m` mapping reproduces
@@ -132,17 +129,22 @@ mkdir -p AppDir/usr/lib
 "${CONDA_CC}" --sysroot="${CONDA_SYSROOT}" -shared -fPIC -O2 \
     -o AppDir/usr/lib/selkies_joystick_interposer.so \
     addons/js-interposer/joystick_interposer.c -ldl -lpthread
+"${CONDA_CC}" --sysroot="${CONDA_SYSROOT}" -shared -fPIC -O2 \
+    -o AppDir/usr/lib/selkies_v4l2_interposer.so \
+    addons/v4l2-interposer/v4l2_interposer.c -ldl -lpthread
 rm -rf "${CC_ENV}"
 
-# The floor is the whole point of compiling this with conda, and the fallback
-# above would raise it silently, so the result is checked rather than assumed
-INTERPOSER_FLOOR="$(objdump -T AppDir/usr/lib/selkies_joystick_interposer.so \
-    | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)"
-echo "interposer requires at most ${INTERPOSER_FLOOR}"
-if [ "$(printf '%s\n%s\n' "${INTERPOSER_FLOOR}" "GLIBC_2.28" | sort -uV | tail -n1)" != "GLIBC_2.28" ]; then
-    echo "interposer needs ${INTERPOSER_FLOOR}, newer than the pinned sysroot provides" >&2
-    exit 1
-fi
+# The floor is the whole point of compiling these with conda, and the fallback
+# above would raise it silently, so each result is checked rather than assumed
+for lib in selkies_joystick_interposer selkies_v4l2_interposer; do
+    floor="$(objdump -T "AppDir/usr/lib/${lib}.so" \
+        | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)"
+    echo "${lib} requires at most ${floor}"
+    if [ "$(printf '%s\n%s\n' "${floor}" "GLIBC_2.28" | sort -uV | tail -n1)" != "GLIBC_2.28" ]; then
+        echo "${lib} needs ${floor}, newer than the pinned sysroot provides" >&2
+        exit 1
+    fi
+done
 
 # 4) Custom AppRun + desktop integration. No desktop session is bundled: the
 #    AppImage streams an existing X display/Xvfb or a Wayland compositor.
@@ -167,10 +169,12 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR}/pulse/native}"
 export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-256/48000}"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
-# Path to the bundled Joystick Interposer, for LD_PRELOADing into an application
-# that needs gamepads where /dev/uinput is unreachable. Deliberately not added to
-# LD_PRELOAD here: selkies itself must keep seeing the real device nodes.
+# Paths to the bundled interposers, for LD_PRELOADing into an application that
+# needs gamepads where /dev/uinput is unreachable, or the webcam where no
+# v4l2loopback device is. Deliberately not added to LD_PRELOAD here: selkies
+# itself must keep seeing the real device nodes.
 export SELKIES_INTERPOSER="${HERE}/usr/lib/selkies_joystick_interposer.so"
+export SELKIES_WEBCAM_INTERPOSER="${HERE}/usr/lib/selkies_v4l2_interposer.so"
 
 # A help or version query prints and exits, so it starts no display or audio server
 for arg in "$@"; do
@@ -179,10 +183,9 @@ for arg in "$@"; do
     esac
 done
 
-# Backend toggle, resolved the way selkies resolves it: SELKIES_WAYLAND when
-# set (blank included, which means the default), else the legacy
-# PIXELFLUX_WAYLAND; "true" or "1", in any case and ahead of a "|locked"
-# suffix, selects Wayland.
+# Backend toggle, resolved as selkies resolves it: SELKIES_WAYLAND when set
+# (blank included), else the legacy PIXELFLUX_WAYLAND, with "true" or "1" in
+# any case ahead of a "|locked" suffix.
 wayland="${SELKIES_WAYLAND-${PIXELFLUX_WAYLAND-}}"
 wayland="$(printf '%s' "${wayland%%|*}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
 

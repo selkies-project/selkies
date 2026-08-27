@@ -13,13 +13,10 @@ set -eux
 test -f pyproject.toml
 
 npm_install() {
-    # Lockfiles are gitignored in this repository, so `npm ci` has nothing to
-    # install from.
-    #
-    # npm gives a failed registry fetch two retries and no more, and this pulls
-    # a large dependency tree three times over. The flags go here rather than on
-    # an image because two of this script's four callers -- the wheel and test
-    # workflows -- run it on a bare runner with no Dockerfile in the picture.
+    # `npm ci` has nothing to install from: lockfiles are gitignored here. The
+    # retry flags belong on the command because two of this script's four callers
+    # run on a bare runner with no image to configure, and npm's own two retries
+    # do not carry a dependency tree this size fetched three times over.
     npm install --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000
 }
 
@@ -28,14 +25,10 @@ npm_install() {
 # build steps.
 (cd addons/selkies-web-core && npm_install && npm run build)
 
-# The Wish dashboard is an alternative front end: it is not what the wheel
-# ships, but it is built here so a break in it fails the build, and so the
-# dashboard e2e tier has a bundle to serve.
-#
-# Installs run in turn, so two npm processes never write the same cache entry;
-# the builds themselves share nothing but the core's dist, which is already
-# there, so they run at the same time and the step costs the slower of the two
-# rather than their sum. Their output interleaves in the log.
+# The Wish dashboard is an alternative front end the wheel does not ship, built
+# here so a break in it fails the build and the dashboard e2e tier has a bundle.
+# Installs run in turn so two npm processes never write one cache entry; the
+# builds share only the core's dist, already there, so they run together.
 (cd addons/selkies-dashboard && npm_install)
 (cd addons/selkies-dashboard-wish && npm_install)
 (cd addons/selkies-dashboard && SELKIES_INJECT=1 npm run build) &

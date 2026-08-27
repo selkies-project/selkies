@@ -849,10 +849,9 @@ FILE_INDEX_FOOTER: str = """    </div> <!-- closes .page-container -->
 
         function processDirectoryListing() {
             // Shared with the nginx fancyindex footer (addons/selkies-web-core/
-            // nginx/footer.html): the listing is mounted at /api/files/ (the
-            // scheme the dashboards iframe) or the legacy /files/, optionally
-            // behind a deployment subfolder or fronting proxy — derive the
-            // mount from the pathname rather than assuming a fixed prefix.
+            // nginx/footer.html). The mount is derived from the pathname rather
+            // than assumed: /api/files/ or the legacy /files/, either of them
+            // possibly behind a deployment subfolder or a fronting proxy.
             const path = window.location.pathname;
             let webPathPrefix = '/api/files/';
             let idx = path.indexOf(webPathPrefix);
@@ -873,14 +872,11 @@ FILE_INDEX_FOOTER: str = """    </div> <!-- closes .page-container -->
                 }
             }
 
-            // The listing exists to download files: force file links to save
-            // (directories keep navigating and the thead sort links keep
-            // sorting). nginx-served listings send no Content-Disposition
-            // header, so without this a click inside the dashboard's
-            // file-browser iframe renders the file inline instead.
-            // A secure-mode session token in the query (the dashboards open
-            // the listing with the page's token) rides every link, so the
-            // listing stays navigable where the token cookie cannot follow.
+            // File links are forced to save (directories and sort links keep
+            // their behavior): nginx-served listings send no Content-Disposition,
+            // so a click in the dashboard's iframe would render inline. A
+            // secure-mode token in the query rides every link, keeping the
+            // listing navigable where the token cookie cannot follow.
             const sessionToken = new URLSearchParams(window.location.search).get('token');
             document.querySelectorAll('table#list td a').forEach(function(a) {
                 const href = a.getAttribute('href') || '';

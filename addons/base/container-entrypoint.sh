@@ -83,12 +83,9 @@ else
   echo 'Skipping joystick interposer device files creation since /dev/input is unavailable'
 fi
 
-# Backend switch. Selkies resolves SELKIES_WAYLAND first and falls back to
-# PIXELFLUX_WAYLAND, so the service set below has to follow the same order or
-# the container would start an X11 session for a Wayland capture. A variable
-# that is set but blank counts as set — it neutralizes to the default rather
-# than falling through to the legacy spelling, exactly as settings.py
-# resolves it.
+# Backend switch, in settings.py's own order: SELKIES_WAYLAND first, the legacy
+# PIXELFLUX_WAYLAND after, and a set-but-blank variable counting as set. The
+# service set below would otherwise start an X11 session for a Wayland capture.
 if is_true "${SELKIES_WAYLAND-${PIXELFLUX_WAYLAND-false}}"; then
   export SELKIES_WAYLAND="true"
 else
@@ -105,11 +102,10 @@ if [ -n "${SELKIES_MODE}" ]; then
 fi
 
 # Hardware OpenGL. On NVIDIA, Zink routes GL through the Vulkan driver; other
-# vendors reach the GPU through the display server's render node instead (see
-# services/xvfb/run). Both signals are required: the device nodes prove a GPU was
-# passed in, and a working nvidia-smi proves the driver stack matches it. Set
-# DISABLE_ZINK=true for llvmpipe. Settled before the backend is, so the probe
-# below sees the GL environment the session will actually run with.
+# vendors go through the display server's render node (services/xvfb/run). Both
+# signals are needed: the device nodes prove a GPU was passed in, nvidia-smi that
+# the driver stack matches it. DISABLE_ZINK=true forces llvmpipe. Settled ahead of
+# the backend, so the probe below sees the GL environment the session will have.
 if ! is_true "${DISABLE_ZINK-false}" && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   export LIBGL_KOPPER_DRI2="1"
   export MESA_LOADER_DRIVER_OVERRIDE="zink"
@@ -117,12 +113,10 @@ if ! is_true "${DISABLE_ZINK-false}" && ls /dev/nvidia* >/dev/null 2>&1 && nvidi
   echo 'NVIDIA GPU detected: OpenGL runs through Zink on the NVIDIA Vulkan driver'
 fi
 
-# A GPU the Wayland session cannot reach is a reason to run X11 instead: under Xvfb the
-# session still gets it (through Zink on NVIDIA, or the server's own render node
-# elsewhere), while a compositor with no working GBM/EGL stack composites in software.
-# selkies-gpu-probe weighs that up and names the backend, printing its reason; it stays
-# silent about the backend when no report can be had (an older pixelflux, a driver that
-# refuses to answer), which leaves the session exactly as it was asked for.
+# A GPU the compositor cannot reach is a reason to run X11 instead, where the
+# session still gets it through Zink or the server's render node. selkies-gpu-probe
+# weighs that and names the backend; it names none when no report can be had, which
+# leaves the session as it was asked for.
 if [ "${SELKIES_WAYLAND}" = "true" ]; then
   case "$(timeout 60 selkies-gpu-probe || true)" in
     x11) export SELKIES_WAYLAND=false ;;
@@ -132,13 +126,10 @@ if [ "${SELKIES_WAYLAND}" = "true" ]; then
   esac
 fi
 
-# A session compositing in software (no DRM render node) takes XWayland down
-# with it at startup: the NVIDIA EGL/GBM vendor library the container runtime
-# injects segfaults inside Xwayland's EGL init when there is no device behind
-# it, and glamor has nothing to accelerate with anyway. wlroots honors
-# WLR_XWAYLAND, so the nested compositor gets a wrapper that pins EGL to the
-# Mesa vendor library and keeps XWayland on shared-memory buffers — which is
-# what a software session renders from anyway.
+# With no DRM render node, the NVIDIA EGL/GBM vendor library the container
+# runtime injects segfaults inside Xwayland's EGL init, and glamor would have
+# nothing to accelerate anyway. wlroots honors WLR_XWAYLAND, so XWayland is
+# started through a wrapper pinning EGL to Mesa and shared-memory buffers.
 if [ "${SELKIES_WAYLAND}" = "true" ] && ! ls /dev/dri/renderD* > /dev/null 2>&1; then
   printf '#!/bin/sh\nexport __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json\nexec /usr/bin/Xwayland -shm "$@"\n' > /tmp/selkies-xwayland
   chmod 755 /tmp/selkies-xwayland
@@ -150,25 +141,18 @@ fi
 if [ "${SELKIES_WAYLAND}" = "true" ]; then
   export DISPLAY="${DISPLAY:-:0}"
   # Session compositor for the Wayland backend: it nests inside the capture
-  # compositor to add window management and XWayland, neither of which the
-  # capture compositor provides. "none" keeps applications on the capture
-  # compositor alone — Wayland clients only, unmanaged.
-  # Lowercased so the value reads the same however it was typed: every compositor
-  # binary and the "none" sentinel are spelled in lower case.
+  # compositor, which provides neither window management nor XWayland. "none"
+  # leaves applications on the capture compositor — Wayland clients only,
+  # unmanaged. Lowercased because every value, "none" included, is lower case.
   SELKIES_WAYLAND_COMPOSITOR="$(setting_value "${SELKIES_WAYLAND_COMPOSITOR-}")"
   SELKIES_WAYLAND_COMPOSITOR="${SELKIES_WAYLAND_COMPOSITOR,,}"
   if [ -z "${SELKIES_WAYLAND_COMPOSITOR}" ]; then
-    # Autodetect an operator-started compositor: a WAYLAND_DISPLAY set before
-    # this script ran (the entrypoint exports its own capture display only
-    # later) names a running session — capture it directly instead of nesting
-    # ours. The socket is connect-probed so a stale file from a dead run
-    # counts as absent. Otherwise fall back to labwc, which decorates windows
-    # the way a desktop session does and performs the maximize and minimize
-    # requests a Wayland taskbar sends; another compositor can be named, and
-    # is then run as it is installed.
-    # An absolute WAYLAND_DISPLAY is legal (the runtime dir is only the
-    # default place clients look); prefixing it would build a bogus path and
-    # the live compositor would count as absent.
+    # A WAYLAND_DISPLAY set before this script ran names an operator's own
+    # session (the capture display is exported later), so capture it rather
+    # than nest in it; connect-probed, since a stale socket file outlives its
+    # compositor. Otherwise labwc, which decorates windows and honors the
+    # maximize and minimize a Wayland taskbar sends. An absolute
+    # WAYLAND_DISPLAY is legal, and prefixing it would build a bogus path.
     case "${WAYLAND_DISPLAY-}" in
       /*) _wl_sock="${WAYLAND_DISPLAY}" ;;
       *)  _wl_sock="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY-}" ;;
@@ -219,10 +203,9 @@ export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
 ENV_FILE="${XDG_RUNTIME_DIR}/container-env"
 : > "${ENV_FILE}"
 
-# The address a browser outside this container would reach it on. Asked of a public
-# resolver, which is the only party that can see it; an IPv6 answer is bracketed for
-# use in a URL. Falls back to the container's own address, which is right for a LAN
-# and at least routable for a local test.
+# The address a browser outside this container would reach it on, asked of a
+# public resolver as the only party that can see it; an IPv6 answer is bracketed
+# for a URL. Falls back to the container's own address, which serves a LAN.
 public_address() {
   local answer
   for family in -4 -6; do
@@ -248,10 +231,9 @@ resolved_address() {
   echo "${answer}"
 }
 
-# Whether an external TURN server is configured well enough to be used: a REST service
-# to fetch credentials from, or a host and port together with credentials — a username
-# and password, or a shared secret to derive them from. Anything short of that and the
-# container runs its own, since a half-configured TURN server is no TURN server.
+# Whether an external TURN server is configured well enough to be used at all: a
+# REST service, or a host and port with either credentials or a shared secret.
+# Anything short of that and the container runs its own.
 external_turn_configured() {
   [ -n "${SELKIES_TURN_REST_URI}" ] && return 0
   [ -n "${SELKIES_TURN_HOST}" ] && [ -n "${SELKIES_TURN_PORT}" ] || return 1
@@ -282,12 +264,10 @@ env | sort | while IFS= read -r kv; do
   printf 'export %s=%q\n' "${kv%%=*}" "${kv#*=}"
 done > "${ENV_FILE}"
 
-# Derive the service set from the environment toggles
-# Held down rather than deleted, and every service is released first, so the set is
-# derived from the environment on each start. A container that is stopped and started
-# again keeps its filesystem: a service removed here would be gone from the image copy
-# for good, and no later change of SELKIES_WAYLAND or of which compositors are installed
-# could bring it back.
+# Derive the service set from the environment toggles, holding services down
+# rather than deleting them and releasing every one first. A restarted container
+# keeps its filesystem, so a deleted service would be gone from the image copy for
+# good, past any later change of SELKIES_WAYLAND or of what is installed.
 drop_service() {
   [ -d "/etc/service/$1" ] || return 0
   { : > "/etc/service/$1/down"; } 2>/dev/null ||

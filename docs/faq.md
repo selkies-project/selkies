@@ -22,7 +22,7 @@ Moreover, if using HTTP but not HTTPS on a remote host that is not `localhost`, 
 
 If you created the TURN server or the example container inside a VPN-enabled environment or virtual machine and the WebRTC connection fails, then you may need to add the `SELKIES_TURN_HOST` environment variable to the private VPN IP of the TURN server host, such as `192.168.0.2` (IPv4) or `[fe80::2]` (IPv6, including the square brackets).
 
-Make sure to also check that you enabled automatic login with your display manager, as the remote desktop cannot access the initial login screen after boot without login. 
+Make sure to also check that you enabled automatic login with your display manager, as the remote desktop cannot access the initial login screen after boot without login.
 
 </details>
 
@@ -62,7 +62,7 @@ However, it might be that the parameters for the transport, the video encoder (`
 
 This is very likely a web browser constraint that is applied because you are using HTTP for an address to the web interface that is not localhost. The clipboard only works when you use HTTPS (with a valid or self-signed certificate), or when accessing localhost (some browsers do not support this as well). You could use port forwarding to access through localhost or obtain an HTTPS certificate.
 
-Copy (`Ctrl/Cmd + C`) and paste (`Ctrl/Cmd + V`) work on Chromium, Firefox, and Safari over a secure context. On browsers that block the asynchronous clipboard API, copy-from-session falls back to a synchronous copy automatically, so no browser configuration is needed.
+Copy (`Control/Command + C`) and paste (`Control/Command + V`) work on Chromium, Firefox, and Safari over a secure context. On browsers that block the asynchronous clipboard API, copy-from-session falls back to a synchronous copy automatically, so no browser configuration is needed.
 
 </details>
 
@@ -107,6 +107,19 @@ Also note that the browser Gamepad API only reports controllers in a [secure con
 
 </details>
 
+## The webcam shows as streaming in Selkies, but an application inside the remote desktop does not list it.
+
+<details>
+  <summary>Open Answer</summary>
+
+First check that the uplink is on at all: `--webcam-enabled` (`SELKIES_WEBCAM_ENABLED`) is off by default, and the browser only hands over a camera in a [secure context](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia), so open Selkies over HTTPS or `localhost`.
+
+With the uplink running, how an application finds the camera depends on which sink serves it, exactly as it does for gamepads. The [V4L2 Interposer](component.md#v4l2-interposer) socket is always served, but only to applications started with the library preloaded — which is why an application launched from outside the session's environment does not see the device. Where the `v4l2loopback` module is loaded and an output device is writable, `--webcam-device` mirrors the same frames into a real `/dev/video*` node that every application enumerates normally, and where a PipeWire daemon is reachable, `--webcam-pipewire` publishes the camera as a `Video/Source` node for PipeWire-native applications and the `pipewire-v4l2` wrapper.
+
+An application that opened the device before the first client connected keeps working: the camera is process-wide and outlives browser reconnects and transport switches.
+
+</details>
+
 ## The web interface refuses to start up in the terminal after rebooting my computer or restarting my desktop in a standalone instance.
 
 <details>
@@ -126,7 +139,7 @@ In order to use the web interface when this is not possible (or when you are usi
 Selkies never inhibits idle for you: on either backend it makes no `xset`/`XResetScreenSaver` call and holds no Wayland idle inhibitor, so whatever screen saver, power management, or screen locker the captured session runs takes its normal course. Input sent through the stream does count as activity — X11 input arrives through XTEST, Wayland input reaches the session compositor as ordinary seat input, and both reset the idle timers — so a timer only runs down while nobody is interacting with the desktop. What happens then depends on which layer it belongs to:
 
 - **The capture layer Selkies owns never blanks or locks.** The [Example Container](component.md#example-container) and the AppImage start their `Xvfb` with `-s 0 -dpms` (screen saver and DPMS off at the server) and ship no locker, and the headless Wayland capture compositor has no screen saver, DPMS, idle notifier, or locker at all. A session Selkies brings up goes dark only if something running *inside* it does so.
-- **An existing X11 desktop** (the report in [issue #174](https://github.com/selkies-project/selkies/issues/174)) brings the X server's own screen saver and DPMS plus the desktop's locker, and the locker decides whether you can recover from the stream. One that hands over to the display manager's greeter — `light-locker` under LightDM, which starts the greeter on a second X server, `:1` — takes the desktop off the captured display entirely: the stream goes black or freezes, nothing typed through Selkies reaches a greeter on another X server (running Selkies as root or changing `DISPLAY` does not help), and only unlocking at the console brings it back. One that draws on the captured display itself (`xscreensaver`, `xfce4-screensaver`, `xsecurelock`, GNOME Shell's lock screen under GDM) stays in the stream, so the password can be typed through Selkies, but the desktop is hidden until then. Whether the screen saver or DPMS also takes the picture with it depends on the driver; turning both off costs nothing. To tell them apart, lock the session by hand: black at once is the locker, black only after the idle timeout with nothing locked is the screen saver or DPMS.
+- **An existing X11 desktop** brings the X server's own screen saver and DPMS plus the desktop's locker, and the locker decides whether you can recover from the stream. One that hands over to the display manager's greeter — `light-locker` under LightDM, which starts the greeter on a second X server, `:1` — takes the desktop off the captured display entirely: the stream goes black or freezes, nothing typed through Selkies reaches a greeter on another X server (running Selkies as root or changing `DISPLAY` does not help), and only unlocking at the console brings it back. One that draws on the captured display itself (`xscreensaver`, `xfce4-screensaver`, `xsecurelock`, GNOME Shell's lock screen under GDM) stays in the stream, so the password can be typed through Selkies, but the desktop is hidden until then. Whether the screen saver or DPMS also takes the picture with it depends on the driver; turning both off costs nothing. To tell them apart, lock the session by hand: black at once is the locker, black only after the idle timeout with nothing locked is the screen saver or DPMS.
 - **A session compositor on the Wayland backend** — the nested `labwc` of the example container (or whatever `SELKIES_WAYLAND_COMPOSITOR` names there) and an external compositor captured through `SELKIES_WAYLAND_HOST_DISPLAY` — keeps its own idle machinery while the capture underneath keeps running. wlroots compositors such as labwc and sway do nothing on idle unless an idle daemon (`swayidle`, `hypridle`) tells them to; KDE's `powerdevil` dims and switches off the screen and `kscreenlocker` locks; GNOME blanks and locks after its `idle-delay`. A locked nested session shows its lock screen in the stream and is unlocked by typing into it; a dimmed or switched-off output keeps the stream connected but dark. The example container installs no idle daemon and no locker on either backend, so this arises only in a session you assemble yourself.
 
 The remedy is to stop the captured session from idling or locking. Each of these applies where it is meaningful and is harmless elsewhere:

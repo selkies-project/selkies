@@ -13,14 +13,12 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 # shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
 [ -f "${XDG_RUNTIME_DIR}/container-env" ] && . "${XDG_RUNTIME_DIR}/container-env"
 
-# The interposers belong to the session's applications, never to the backend
-# that serves them: they answer for /dev/video0 and /dev/input, which the
-# capture and gamepad sides have to keep seeing as the kernel reports them,
-# and they hook read/close/ioctl/epoll_ctl process-wide -- one of those hooks
-# blocking is the asyncio loop blocking, and a frozen loop answers nothing.
-# SELKIES_INTERPOSER stays exported, which is what tells the backend gamepads
-# reach applications through the preload. Dropped by value, so an
-# operator-supplied LD_PRELOAD survives.
+# The interposers belong to the session's applications, never to the backend that
+# serves them: they answer for /dev/video0 and /dev/input, which capture and
+# gamepads must keep seeing as the kernel reports them, and their process-wide
+# read/close/ioctl/epoll_ctl hooks block the asyncio loop. SELKIES_INTERPOSER
+# stays exported, telling the backend applications reach gamepads through the
+# preload. Dropped by value, so an operator-supplied LD_PRELOAD survives.
 if [ -n "${LD_PRELOAD:-}" ]; then
   kept=""
   rest="${LD_PRELOAD}"
@@ -35,11 +33,10 @@ if [ -n "${LD_PRELOAD:-}" ]; then
   export LD_PRELOAD="${kept}"
 fi
 
-# Backend toggle, resolved the way settings.py resolves it: SELKIES_WAYLAND when
-# set (blank included, which means the default), else the legacy PIXELFLUX_WAYLAND;
-# "true" or "1", in any case and ahead of a "|locked" suffix, selects Wayland.
-# container-entrypoint.sh has already canonicalized the variable for the service;
-# the resolution here is for running this script on its own.
+# Backend toggle, resolved as settings.py resolves it: SELKIES_WAYLAND when set
+# (blank included), else the legacy PIXELFLUX_WAYLAND, with "true" or "1" in any
+# case ahead of a "|locked" suffix. Repeated here for running this script alone;
+# container-entrypoint.sh has already canonicalized it for the service.
 wayland="${SELKIES_WAYLAND-${PIXELFLUX_WAYLAND-}}"
 wayland="${wayland%%|*}"
 wayland="${wayland#"${wayland%%[![:space:]]*}"}"

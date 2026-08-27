@@ -98,5 +98,21 @@ appimage = open(APPIMAGE, encoding="utf-8").read()
 for name in sorted(PIP_ONLY):
     check(f"the AppImage pip-installs {name}", name in appimage, "scripts/ci/appimage.sh")
 
+# Every medium builds the interposers from its own script, so one added to the
+# packagers alone reaches no AppImage user, and one whose path is exported
+# nowhere reaches no application at all.
+for packager in ("deb.sh", "rpm.sh", "apk.sh", "arch.sh"):
+    body = open(os.path.join(REPO, "infra", "packaging", packager), encoding="utf-8").read()
+    for addon in ("interposer.sh", "v4l2-interposer.sh"):
+        check(f"{packager} stages the {addon.rsplit('.', 1)[0]}",
+              f"/{addon}" in body, f"infra/packaging/{packager}")
+
+for source, env in (("js-interposer/joystick_interposer.c", "SELKIES_INTERPOSER"),
+                    ("v4l2-interposer/v4l2_interposer.c", "SELKIES_WEBCAM_INTERPOSER")):
+    check(f"the AppImage compiles {os.path.basename(source)}", source in appimage,
+          "scripts/ci/appimage.sh")
+    check(f"the AppImage exports {env}", f"export {env}=" in appimage,
+          "scripts/ci/appimage.sh")
+
 print(f"[package-deps] {passed}/{passed + failed} passed", flush=True)
 sys.exit(1 if failed else 0)

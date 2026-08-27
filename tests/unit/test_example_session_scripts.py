@@ -123,11 +123,9 @@ for service in ("pipewire", "pipewire-pulse", "wireplumber"):
           "${PIPEWIRE_LATENCY:-" in body, os.path.relpath(path, REPO))
 
 # The interposers answer for /dev/video0 and /dev/input in the session's
-# applications. Preloaded into the backend as well they hide the real device
-# nodes the capture and gamepad sides need, and they hook read/ioctl/epoll_ctl
-# process-wide, where one blocking hook is the asyncio loop blocking, so the
-# backend's entrypoint has to drop them again. Run rather than grepped: what
-# matters is the value the backend is exec'd with.
+# applications; preloaded into the backend they would hide the real device nodes
+# capture and gamepads need, and their process-wide hooks block the asyncio loop.
+# Run rather than grepped: what matters is the value the backend is exec'd with.
 check("the session preloads both interposers",
       "SELKIES_WEBCAM_INTERPOSER" in entrypoint
       and all(v in entrypoint.split("LD_PRELOAD=")[1][:250]

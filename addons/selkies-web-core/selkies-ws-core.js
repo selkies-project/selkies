@@ -1061,12 +1061,10 @@ let workerDecoderCodec = null, workerDecoderW = 0, workerDecoderH = 0;
 let workerKeyframeCodec = null;
 let workerDecodeFailed = false;
 const VIDEO_WORKER_SRC = `
-// Video sink + optional in-worker decoder. The sink is the standard worker-only
-// VideoTrackGenerator (its MediaStreamTrack is transferred to the page for <video>.srcObject)
-// or a transferred OffscreenCanvas. When the page sends encoded H.264 chunks the worker also
-// DECODES them here, so decode and present stay off the main thread and no decoded frame ever
-// crosses the thread boundary. A main-thread-decoded frame transferred in (m.frame) is still
-// supported as a fallback during decoder warm-up.
+// Video sink and optional in-worker decoder. The sink is a worker-only
+// VideoTrackGenerator (its track transferred to the page for <video>.srcObject) or a
+// transferred OffscreenCanvas. Encoded chunks are decoded here so no decoded frame
+// crosses the thread boundary; a frame transferred in (m.frame) is the warm-up path.
 let mode = null, oc = null, ctx = null, writer = null, closed = false, presented = false;
 let dec = null, decKey = false, decNeedKey = false;
 // Consecutive backpressure drops; a stalled consumer never resumes on its own.
@@ -1131,10 +1129,9 @@ self.onmessage = (e) => {
     closeDecoder();
     try {
       dec = new VideoDecoder({ output: present, error: () => { closeDecoder(); self.postMessage({ type: 'decoderError' }); } });
-      // configure() is synchronous (state becomes 'configured' immediately), so the next
-      // chunk decodes without an async gap; an unsupported config surfaces via error().
-      // The page owns the acceleration preference; unset, the UA default picks a
-      // hardware decoder when available (much lower CPU on power-constrained clients)
+      // configure() is synchronous, so the next chunk decodes without an async gap and
+      // an unsupported config surfaces via error(). The page owns the acceleration
+      // preference; unset, the UA default takes a hardware decoder where there is one,
       // and the pinned SPS level keeps it from re-initializing mid-stream.
       const cfg = { codec: m.codec, codedWidth: m.codedWidth, codedHeight: m.codedHeight, optimizeForLatency: true };
       if (m.software) cfg.hardwareAcceleration = 'prefer-software';

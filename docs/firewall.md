@@ -75,7 +75,7 @@ There are currently four different supported TURN server authentication methods,
 
 - Using the JSON configuration file authentication method with the `selkies --rtc-config-json=` option or the `SELKIES_RTC_CONFIG_JSON` environment variable. Selkies probes this file periodically, so it will automatically update the TURN authentication credentials if the JSON file is updated. **All other STUN/TURN credentials are overridden if this file exists.**
 
-- Using the TURN REST API authentication method with the the `selkies --turn-rest-uri=` option or the `SELKIES_TURN_REST_URI` environment variable. Selkies probes this REST API endpoint periodically, so it will automatically update the TURN authentication credentials. Consult the **[TURN-REST](component.md#turn-rest)** section for more details of this authentication method. **All other STUN/TURN credentials below are overridden if this option is provided and is valid.**
+- Using the TURN REST API authentication method with the `selkies --turn-rest-uri=` option or the `SELKIES_TURN_REST_URI` environment variable. Selkies probes this REST API endpoint periodically, so it will automatically update the TURN authentication credentials. Consult the **[TURN-REST](component.md#turn-rest)** section for more details of this authentication method. **All other STUN/TURN credentials below are overridden if this option is provided and is valid.**
 
 - **Note that the below two methods are only safe when the Selkies user also has legitimate control of the TURN server. Otherwise, if you maintain a multi-user environment, you are looking for the TURN REST API authentication method, right above.**
 
@@ -224,7 +224,7 @@ In both types of containers, the `--cert=` and `--pkey=` options are required fo
 
 Provide the certificate and private files to the coTURN container with `-v /my_local_path/coturncert.crt:/etc/coturn_tls.crt -v /my_local_path/coturnkey.key:/etc/coturn_tls.key` (specified paths are an example), then add the options `-e TURN_EXTRA_ARGS="--cert=/etc/coturn_tls.crt --pkey=/etc/coturn_tls.key"` for the Selkies [coTURN Container](https://github.com/selkies-project/selkies/tree/main/addons/coturn) and use the options `--cert=/etc/coturn_tls.crt --pkey=/etc/coturn_tls.key` for the official coTURN container.
 
-### Deploy coTURN With Kubernetes
+### Deploy coTURN with Kubernetes
 
 Before you continue, [STUNner](https://github.com/l7mp/stunner) is a pretty good method to deploy a TURN or STUN server on Kubernetes if you are able to use Helm.
 
