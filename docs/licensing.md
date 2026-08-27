@@ -27,10 +27,9 @@ GPL-licensed libraries into an installation made from PyPI wheels:
 | Source | GPL component | How it gets in | How to leave it out |
 | --- | --- | --- | --- |
 | `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), the striped software H.264 encoder | the default `gpl` Cargo feature of pixelflux; the published wheels are built with it and bundle `libx264.so` | build pixelflux with `PIXELFLUX_ENABLE_GPL=0` (`--no-default-features --features openh264`): BSD-licensed Cisco OpenH264 takes the place of libx264. The inventory and the check that keeps that build copyleft-free live in [pixelflux's LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md); pixelflux's musllinux wheels additionally bundle Alpine's GPL-built FFmpeg, see there. |
-The WebRTC stack no longer pulls PyAV (and the GPL FFmpeg its wheels bundle):
-video and audio are encoded and decoded by pixelflux and pcmflux, and the RTP
-layer packetizes their output through a libav-free `EncodedPacket` container.
-PyAV is not a dependency of Selkies.
+The WebRTC stack adds no FFmpeg of its own: pixelflux and pcmflux encode and
+decode the video and audio, and the RTP layer packetizes their output through
+a libav-free `EncodedPacket` container.
 
 Everything else a Selkies installation links or loads is LGPL or permissive.
 The container images also install the distribution's `ffmpeg` and `x264`
@@ -122,8 +121,8 @@ With pixelflux built with `PIXELFLUX_ENABLE_GPL=0`: Selkies (MPL-2.0), the
 permissive Python packages above, the LGPL libraries they load (libpulse
 through pcmflux and pulsectl, python-xlib, glibc, FFmpeg as an LGPL build
 through pixelflux) and the permissive web client. Nothing GPL. The WebRTC
-stack adds no FFmpeg of its own — it packetizes pixelflux/pcmflux output and
-no longer depends on PyAV.
+stack packetizes pixelflux/pcmflux output and brings in no media library of
+its own.
 
 ## What the default (GPL-enabled) deployment adds
 

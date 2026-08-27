@@ -7,7 +7,7 @@ description: Keyboard shortcuts, clipboard behaviour, and the command-line optio
 
 **Fullscreen: `Control + Shift + F` or Fullscreen Button**
 
-**Gaming Mode (fullscreen with the pointer and keyboard held): Gaming Mode Button**
+**Gaming Mode (fullscreen with the pointer and keyboard held): `Control + Shift + X` or Gaming Mode Button**
 
 **Remote (Game) Cursor Lock: `Ctrl + Shift + Left Click`**
 
@@ -17,7 +17,7 @@ description: Keyboard shortcuts, clipboard behaviour, and the command-line optio
 
 Fullscreen mode is available with the shortcut `Control + Shift + F`, or by pressing the fullscreen button in the configuration menu. It leaves the pointer and the keyboard to the browser, so the side menu and its button stay usable, and `Escape` leaves it.
 
-The gaming mode button fullscreens the session and holds the pointer and the keyboard as well, so a game receives `Escape`, `Alt + Tab` and raw pointer motion instead of the browser. The dashboard folds away for it, and `Escape` held for at least two seconds is what leaves it, because a locked keyboard delivers a short press to the session.
+Gaming mode, on `Control + Shift + X` or the gaming mode button, fullscreens the session and holds the pointer and the keyboard as well, so a game receives `Escape`, `Alt + Tab` and raw pointer motion instead of the browser. The dashboard folds away for it. The same chord leaves it, as does `Escape` held for at least two seconds, because a locked keyboard delivers a short press to the session instead.
 
 The cursor can be locked into the web interface using `Control + Shift + Left Click` in web browsers supporting the Pointer Lock API. Press `Escape` to exit this remote cursor mode. This remote cursor capability is useful for most games or graphics applications where the cursor must be confined to the remote screen.
 
