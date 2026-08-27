@@ -62,9 +62,12 @@ fpm -s dir -t deb \
     --depends libxkbcommon0 \
     --depends libx11-xcb1 \
     --depends libva2 \
+    --depends libva-drm2 \
+    --depends libva-x11-2 \
     --depends libdrm2 \
     --depends libgbm1 \
     --depends libegl1 \
+    --depends libwayland-server0 \
     --depends libglib2.0-0 \
     --depends libpixman-1-0 \
     --depends libxcb-render0 \
@@ -72,5 +75,7 @@ fpm -s dir -t deb \
     --depends libxcb-dri3-0 \
     --depends libxfixes3 \
     --depends libxext6 \
+    --depends libice6 \
+    --depends libsm6 \
     -C /pkg-root opt usr
 ls -la /out

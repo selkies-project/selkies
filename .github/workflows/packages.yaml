@@ -70,32 +70,40 @@ jobs:
             tag: ubuntu24.04
             image: ubuntu:24.04
             script: infra/packaging/deb.sh
+            install: apt-get update -qq && apt-get install -y -qq /out/*.deb
           - name: deb-ubuntu26.04
             tag: ubuntu26.04
             image: ubuntu:26.04
             script: infra/packaging/deb.sh
+            install: apt-get update -qq && apt-get install -y -qq /out/*.deb
           - name: deb-bookworm
             tag: bookworm
             image: debian:bookworm
             script: infra/packaging/deb.sh
+            install: apt-get update -qq && apt-get install -y -qq /out/*.deb
           - name: deb-trixie
             tag: trixie
             image: debian:trixie
             script: infra/packaging/deb.sh
+            install: apt-get update -qq && apt-get install -y -qq /out/*.deb
           - name: rpm-fedora
             tag: fc
             image: fedora:latest
             script: infra/packaging/rpm.sh
+            install: dnf install -y -q /out/*.rpm
           - name: rpm-el9
             tag: el9
             image: almalinux:9
             script: infra/packaging/rpm.sh
+            install: dnf install -y -q /out/*.rpm
           - name: apk
             image: alpine:3
             script: infra/packaging/apk.sh
+            install: apk add --quiet --allow-untrusted /out/*.apk
           - name: arch
             image: archlinux:base-devel
             script: infra/packaging/arch.sh
+            install: pacman -Sy --noconfirm > /dev/null && pacman -U --noconfirm /out/*.pkg.tar.zst
         exclude:
           # Arch Linux publishes an x86_64-only image
           - arch:
@@ -181,6 +189,19 @@ jobs:
             "${IMAGE}" \
             sh "/repo/${SCRIPT}"
           ls -la out/
+      - name: Install the package in a pristine container of the same distro
+        env:
+          IMAGE: ${{ matrix.kind.image }}
+          INSTALL: ${{ matrix.kind.install }}
+        run: |
+          set -e
+          # Nothing but what the package itself declares: an undeclared
+          # runtime library shows up here and nowhere else, because the build
+          # container has the whole toolchain installed.
+          docker run --rm -v "${GITHUB_WORKSPACE}/out:/out:ro" \
+            -e INSTALL -e SELKIES_PACKAGE_VERIFY=1 \
+            -v "${GITHUB_WORKSPACE}/scripts/ci/verify-package.sh:/verify.sh:ro" \
+            "${IMAGE}" sh /verify.sh
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.kind.name }}-${{ matrix.arch.name }}

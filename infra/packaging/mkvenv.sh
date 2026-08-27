@@ -11,14 +11,20 @@ rm -rf /opt/selkies /pkg-root
 python3 -m venv /opt/selkies
 /opt/selkies/bin/pip install --no-cache-dir --retries 5 --timeout 60 --upgrade pip
 WHEELS="$(ls /dist/selkies-*-py3-none-any.whl)"
-# CI drops pixelflux/pcmflux wheels built from the master HEAD of linuxserver/*
-# into /dist; pick the one matching this distro's Python and platform. Either
-# one that is absent resolves from PyPI as a dependency of the selkies wheel.
+# CI drops the pixelflux/pcmflux wheels this run pinned into /dist; pick the
+# one matching this distro's Python and platform. A project with no wheel at
+# all resolves from PyPI as a dependency of the selkies wheel, but one whose
+# wheels are present without a build for this interpreter is a gap in the
+# matrix, and naming that interpreter beats pip's resolver error.
 mkdir -p /tmp/picked
 for pkg in pixelflux pcmflux; do
-  if ls "/dist/${pkg}"-*.whl > /dev/null 2>&1; then
-    /opt/selkies/bin/pip download --no-cache-dir --no-deps --no-index \
-        --find-links /dist --dest /tmp/picked "${pkg}"
+  if ! ls "/dist/${pkg}"-*.whl > /dev/null 2>&1; then
+    continue
+  fi
+  if ! /opt/selkies/bin/pip download --no-cache-dir --no-deps --no-index \
+      --find-links /dist --dest /tmp/picked "${pkg}"; then
+    echo "no ${pkg} wheel in /dist for $(/opt/selkies/bin/python3 -V 2>&1) on $(uname -m)" >&2
+    exit 1
   fi
 done
 if ls /tmp/picked/*.whl > /dev/null 2>&1; then

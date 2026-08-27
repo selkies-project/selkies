@@ -9,7 +9,7 @@ arch=("x86_64" "aarch64")
 url="https://github.com/selkies-project/selkies"
 license=("MPL-2.0")
 depends=("python" "libpulse" "libxcb" "libxkbcommon" "libx11" "libxext" "libxfixes"
-         "libva" "libdrm" "mesa" "glib2" "pixman")
+         "libva" "libdrm" "libice" "libsm" "mesa" "wayland" "glib2" "pixman")
 # The payload (/opt/selkies venv staged by infra/packaging/arch.sh) is packed here.
 source=()
 sha256sums=()

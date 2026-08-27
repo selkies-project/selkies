@@ -58,10 +58,13 @@ fpm -s dir -t rpm \
     --depends libdrm \
     --depends mesa-libgbm \
     --depends mesa-libEGL \
+    --depends libwayland-server \
     --depends glib2 \
     --depends pixman \
     --depends libXfixes \
     --depends libXext \
+    --depends libICE \
+    --depends libSM \
     --rpm-os linux \
     -C /pkg-root opt usr
 ls -la /out
