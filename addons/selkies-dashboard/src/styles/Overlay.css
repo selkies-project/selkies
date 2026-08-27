@@ -376,7 +376,9 @@
 /* --- Sidebar Action Buttons (e.g., Video, Audio, Mic, Gamepad) --- */
 .sidebar-action-buttons {
     display: flex;
-    justify-content: space-between;
+    /* Touch clients add the keyboard and trackpad tiles to this row; they
+       wrap below the first five at the same size. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     margin-bottom: 16px;
@@ -384,12 +386,13 @@
     border-bottom: 1px solid var(--sidebar-border);
 }
 
-/* Individual action button: square icon tile. */
+/* Individual action button: square icon tile, a fifth of the row less its
+   gaps, held fixed so a wrapped tile keeps the same footprint. */
 .action-button {
     display: flex;
     align-items: center;
     justify-content: center;
-    flex: 1;
+    flex: 0 0 calc((100% - 32px) / 5);
     height: 40px;
     padding: 0;
     border: 1px solid var(--item-border);
@@ -1674,10 +1677,7 @@ a.cite-link:active {
 /* --- Mobile Key Action Buttons --- */
 .sidebar-mobile-key-actions {
     display: flex;
-    /* Wrapped and evenly spread: the row grows by one button whenever the
-       operator leaves trackpad mode on, and the sidebar has no width for it. */
-    flex-wrap: wrap;
-    justify-content: space-evenly;
+    justify-content: space-between;
     align-items: center;
     gap: 6px;
     padding-bottom: 16px;
@@ -1687,11 +1687,7 @@ a.cite-link:active {
 
 /* Base style for individual keyboard action buttons. */
 .mobile-key-button {
-    /* Shares the row evenly but never stretches to fill one on its own, which
-       is what a wrapped last button would otherwise do. */
-    flex: 1 1 0;
-    min-width: 36px;
-    max-width: 25%;
+    flex: 1;
     padding: 8px 4px;
     border: 1px solid var(--item-border);
     border-radius: var(--radius-sm);
@@ -1728,13 +1724,3 @@ a.cite-link:active {
     border-color: var(--accent);
 }
 
-.mobile-key-button.icon-button {
-    padding: 6px;
-}
-
-.mobile-key-button.icon-button svg {
-    fill: currentColor;
-    width: 18px;
-    height: 18px;
-    pointer-events: none;
-}

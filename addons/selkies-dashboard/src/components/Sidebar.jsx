@@ -290,12 +290,14 @@ const CopyIcon = () => (
 /**
  * Crosshair marking gaming mode, the wish dashboard's icon for it: one glyph
  * names the control in both front ends and reads as a target, not a plus sign.
+ * Drawn to the ink span of the fullscreen brackets beside it, which cover only
+ * the middle of their box, so the header pair reads as one size.
  */
 const GamingModeIcon = () => (
   <svg className="stroke-icon" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none"
     width="18" height="18" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="10" />
-    <path d="M22 12h-4M6 12H2M12 6V2M12 22v-4" />
+    <circle cx="12" cy="12" r="6" />
+    <path d="M18 12h-2.4M8.4 12H6M12 8.4V6M12 18v-2.4" />
   </svg>
 );
 const AppsIcon = () => (
@@ -303,10 +305,12 @@ const AppsIcon = () => (
     <path d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z" />
   </svg>
 );
+/* Padded viewBox: the glyph inks its full box where its row neighbours ink
+   about four fifths, and drawn as-is it reads as the larger tile. */
 const KeyboardIcon = () => (
   <svg 
     xmlns="http://www.w3.org/2000/svg" 
-    viewBox="0 0 490 490" 
+    viewBox="-65 -65 620 620" 
     fill="currentColor" 
     width="24" 
     height="24"
@@ -348,10 +352,8 @@ const TrackpadIcon = () => (
     <path d="M13 16H21V19C21 20.1046 20.1046 21 19 21H13V16Z"/>
   </svg>
 );
-/* Cropped viewBox: the glyph inks only the middle 14 units, so at the full 24 it
-   draws two thirds the size of the crosshair beside it. */
 const FullscreenIcon = () => (
-  <svg viewBox="4 4 16 16" fill="currentColor" width="18" height="18">
+  <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
     <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" />
   </svg>
 );
@@ -2911,6 +2913,13 @@ function Sidebar() {
     return null;
   }
   const sidebarClasses = `sidebar ${isOpen ? "is-open" : ""} theme-${theme}`;
+  const showCoreButtons = !isSecondaryDisplay && (renderableSettings.coreButtons ?? true);
+  // Touch-only tiles sharing the action row: they wrap below the core five at
+  // the same size instead of forming a differently sized bar of their own.
+  const showKeyboardTile =
+    (isMobile || hasDetectedTouch) && (renderableSettings.softButtons ?? true);
+  const showTrackpadTile =
+    (isMobile || hasDetectedTouch) && (renderableSettings.trackpad ?? true);
   const filteredSharingLinks = sharingLinks.filter(link => {
     if (link.id === 'shared') return renderableSettings.enableShared ?? true;
     if (link.id === 'player2') return renderableSettings.enablePlayer2 ?? true;
@@ -3047,9 +3056,9 @@ function Sidebar() {
           </div>
         </div>
 
-        {!isSecondaryDisplay && (renderableSettings.coreButtons ?? true) && (
+        {(showCoreButtons || showKeyboardTile || showTrackpadTile) && (
           <div className="sidebar-action-buttons">
-            {(renderableSettings.videoToggle ?? true) && (
+            {showCoreButtons && (renderableSettings.videoToggle ?? true) && (
               <button
                 className={`action-button ${isVideoActive ? "active" : ""}`}
                 onClick={handleVideoToggle}
@@ -3062,7 +3071,7 @@ function Sidebar() {
                 <ScreenIcon />
               </button>
             )}
-            {(renderableSettings.audioToggle ?? true) && (
+            {showCoreButtons && (renderableSettings.audioToggle ?? true) && (
               <button
                 className={`action-button ${isAudioActive ? "active" : ""}`}
                 onClick={handleAudioToggle}
@@ -3075,7 +3084,7 @@ function Sidebar() {
                 <SpeakerIcon />
               </button>
             )}
-            {(renderableSettings.microphoneToggle ?? true) && (
+            {showCoreButtons && (renderableSettings.microphoneToggle ?? true) && (
               <button
                 className={`action-button ${isMicrophoneActive ? "active" : ""}`}
                 onClick={handleMicrophoneToggle}
@@ -3088,7 +3097,7 @@ function Sidebar() {
                 <MicrophoneIcon />
               </button>
             )}
-            {(renderableSettings.webcamToggle ?? true) && (
+            {showCoreButtons && (renderableSettings.webcamToggle ?? true) && (
               <button
                 className={`action-button ${isWebcamActive ? "active" : ""}`}
                 onClick={handleWebcamToggle}
@@ -3101,7 +3110,7 @@ function Sidebar() {
                 <WebcamIcon />
               </button>
             )}
-            {(renderableSettings.gamepadToggle ?? true) && (
+            {showCoreButtons && (renderableSettings.gamepadToggle ?? true) && (
               <button
                 className={`action-button ${isGamepadEnabled ? "active" : ""}`}
                 onClick={handleGamepadToggle}
@@ -3114,14 +3123,29 @@ function Sidebar() {
                 <GamepadIcon />
               </button>
             )}
+            {showKeyboardTile && (
+              <button
+                className={`action-button keyboard-toggle-button ${isKeyboardButtonVisible ? "active" : ""}`}
+                onClick={toggleKeyboardButtonVisibility}
+                title={t("keyboardButtonToggleTitle", "Keyboard Button")}
+              >
+                <KeyboardIcon />
+              </button>
+            )}
+            {showTrackpadTile && (
+              <button
+                className={`action-button trackpad-mode-button ${isTrackpadModeActive ? "active" : ""}`}
+                onClick={handleToggleTrackpadMode}
+                title={t("trackpadModeTitle", "Trackpad Mode")}
+              >
+                <TrackpadIcon />
+              </button>
+            )}
           </div>
         )}
         
-        {(isMobile || hasDetectedTouch) &&
-          ((renderableSettings.softButtons ?? true) || (renderableSettings.trackpad ?? true)) && (
+        {(isMobile || hasDetectedTouch) && (renderableSettings.softButtons ?? true) && (
             <div className="sidebar-mobile-key-actions">
-              {(renderableSettings.softButtons ?? true) && (
-                <>
               <button
                 className={`mobile-key-button ${heldKeys.Control ? "active" : ""}`}
                 onClick={() => handleHoldKeyClick('Control', 'ControlLeft')}
@@ -3157,23 +3181,6 @@ function Sidebar() {
               >
                 ESC
               </button>
-              <button
-                className={`mobile-key-button icon-button ${isKeyboardButtonVisible ? "active" : ""}`}
-                onClick={toggleKeyboardButtonVisibility}
-              >
-                <KeyboardIcon />
-              </button>
-                </>
-              )}
-              {(renderableSettings.trackpad ?? true) && (
-                <button
-                  className={`mobile-key-button icon-button ${isTrackpadModeActive ? "active" : ""}`}
-                  onClick={handleToggleTrackpadMode}
-                  title={t("trackpadModeTitle", "Trackpad Mode")}
-                >
-                  <TrackpadIcon />
-                </button>
-              )}
             </div>
         )}
 

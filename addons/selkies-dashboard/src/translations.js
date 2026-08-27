@@ -25,6 +25,7 @@ const en = {
     gamingModeTitle: "Gaming Mode",
     gamingModeHint: "Fullscreen with the pointer and keyboard locked",
     trackpadModeTitle: "Trackpad Mode",
+    keyboardButtonToggleTitle: "Keyboard Button",
     streamingModeTitle: "Streaming Mode",
     buttons: {
         videoStreamEnableTitle: "Enable Video Stream",
@@ -261,6 +262,7 @@ const es = {
     gamingModeTitle: "Modo Juego",
     gamingModeHint: "Pantalla completa con el puntero y el teclado bloqueados",
     trackpadModeTitle: "Modo Trackpad",
+    keyboardButtonToggleTitle: "Botón de teclado",
     streamingModeTitle: "Modo Streaming",
     buttons: {
         videoStreamEnableTitle: "Activar Stream de Vídeo",
@@ -497,6 +499,7 @@ const zh = {
     gamingModeTitle: "游戏模式",
     gamingModeHint: "全屏并锁定指针和键盘",
     trackpadModeTitle: "触控板模式",
+    keyboardButtonToggleTitle: "键盘按钮",
     streamingModeTitle: "串流模式",
     buttons: {
         videoStreamEnableTitle: "启用视频流",
@@ -733,6 +736,7 @@ const hi = {
     gamingModeTitle: "गेमिंग मोड",
     gamingModeHint: "पॉइंटर और कीबोर्ड लॉक के साथ फुलस्क्रीन",
     trackpadModeTitle: "ट्रैकपैड मोड",
+    keyboardButtonToggleTitle: "कीबोर्ड बटन",
     streamingModeTitle: "स्ट्रीमिंग मोड",
     buttons: {
         videoStreamEnableTitle: "वीडियो स्ट्रीम सक्षम करें",
@@ -969,6 +973,7 @@ const pt = {
     gamingModeTitle: "Modo de Jogo",
     gamingModeHint: "Tela cheia com o ponteiro e o teclado bloqueados",
     trackpadModeTitle: "Modo Trackpad",
+    keyboardButtonToggleTitle: "Botão do teclado",
     streamingModeTitle: "Modo Streaming",
     buttons: {
         videoStreamEnableTitle: "Ativar Stream de Vídeo",
@@ -1205,6 +1210,7 @@ const fr = {
     gamingModeTitle: "Mode Jeu",
     gamingModeHint: "Plein écran avec le pointeur et le clavier verrouillés",
     trackpadModeTitle: "Mode Trackpad",
+    keyboardButtonToggleTitle: "Bouton clavier",
     streamingModeTitle: "Mode Streaming",
     buttons: {
         videoStreamEnableTitle: "Activer le flux vidéo",
@@ -1442,6 +1448,7 @@ const ru = {
     gamingModeTitle: "Игровой режим",
     gamingModeHint: "Полноэкранный режим с блокировкой указателя и клавиатуры",
     trackpadModeTitle: "Режим трекпада",
+    keyboardButtonToggleTitle: "Кнопка клавиатуры",
     streamingModeTitle: "Режим стриминга",
     buttons: {
         videoStreamEnableTitle: "Включить видеопоток",
@@ -1678,6 +1685,7 @@ const de = {
     gamingModeTitle: "Gaming-Modus",
     gamingModeHint: "Vollbild mit gesperrtem Zeiger und gesperrter Tastatur",
     trackpadModeTitle: "Trackpad-Modus",
+    keyboardButtonToggleTitle: "Tastatur-Schaltfläche",
     streamingModeTitle: "Streaming-Modus",
     buttons: {
         videoStreamEnableTitle: "Videostream aktivieren",
@@ -1914,6 +1922,7 @@ const tr = {
     gamingModeTitle: "Oyun Modu",
     gamingModeHint: "İşaretçi ve klavye kilitliyken tam ekran",
     trackpadModeTitle: "Dokunmatik Yüzey Modu",
+    keyboardButtonToggleTitle: "Klavye Düğmesi",
     streamingModeTitle: "Yayın Modu",
     buttons: {
         videoStreamEnableTitle: "Video Akışını Etkinleştir",
@@ -2150,6 +2159,7 @@ const it = {
     gamingModeTitle: "Modalità Gioco",
     gamingModeHint: "Schermo intero con puntatore e tastiera bloccati",
     trackpadModeTitle: "Modalità Trackpad",
+    keyboardButtonToggleTitle: "Pulsante tastiera",
     streamingModeTitle: "Modalità Streaming",
     buttons: {
         videoStreamEnableTitle: "Abilita Stream Video",
@@ -2386,6 +2396,7 @@ const nl = {
     gamingModeTitle: "Gaming Modus",
     gamingModeHint: "Volledig scherm met vergrendelde aanwijzer en toetsenbord",
     trackpadModeTitle: "Trackpad-modus",
+    keyboardButtonToggleTitle: "Toetsenbordknop",
     streamingModeTitle: "Streamingmodus",
     buttons: {
         videoStreamEnableTitle: "Videostream inschakelen",
@@ -2622,6 +2633,7 @@ const ar = {
     gamingModeTitle: "وضع الألعاب",
     gamingModeHint: "ملء الشاشة مع قفل المؤشر ولوحة المفاتيح",
     trackpadModeTitle: "وضع لوحة اللمس",
+    keyboardButtonToggleTitle: "زر لوحة المفاتيح",
     streamingModeTitle: "وضع البث",
     buttons: {
         videoStreamEnableTitle: "تمكين بث الفيديو",
@@ -2858,6 +2870,7 @@ const ko = {
     gamingModeTitle: "게임 모드",
     gamingModeHint: "포인터와 키보드를 고정한 전체 화면",
     trackpadModeTitle: "트랙패드 모드",
+    keyboardButtonToggleTitle: "키보드 버튼",
     streamingModeTitle: "스트리밍 모드",
     buttons: {
         videoStreamEnableTitle: "비디오 스트림 활성화",
@@ -3094,6 +3107,7 @@ const ja = {
     gamingModeTitle: "ゲームモード",
     gamingModeHint: "ポインターとキーボードをロックした全画面",
     trackpadModeTitle: "トラックパッドモード",
+    keyboardButtonToggleTitle: "キーボードボタン",
     streamingModeTitle: "ストリーミングモード",
     buttons: {
         videoStreamEnableTitle: "ビデオストリームを有効にする",
@@ -3330,6 +3344,7 @@ const vi = {
     gamingModeTitle: "Chế độ Chơi game",
     gamingModeHint: "Toàn màn hình với con trỏ và bàn phím bị khóa",
     trackpadModeTitle: "Chế độ Bàn di chuột",
+    keyboardButtonToggleTitle: "Nút bàn phím",
     streamingModeTitle: "Chế độ Truyền phát",
     buttons: {
         videoStreamEnableTitle: "Bật Luồng Video",
@@ -3566,6 +3581,7 @@ const th = {
     gamingModeTitle: "โหมดเกมมิ่ง",
     gamingModeHint: "เต็มหน้าจอโดยล็อกตัวชี้และแป้นพิมพ์",
     trackpadModeTitle: "โหมดแทร็คแพด",
+    keyboardButtonToggleTitle: "ปุ่มแป้นพิมพ์",
     streamingModeTitle: "โหมดสตรีมมิ่ง",
     buttons: {
         videoStreamEnableTitle: "เปิดใช้งานสตรีมวิดีโอ",
@@ -3802,6 +3818,7 @@ const fil = {
     gamingModeTitle: "Modo ng Paglalaro",
     gamingModeHint: "Fullscreen na naka-lock ang pointer at keyboard",
     trackpadModeTitle: "Modo ng Trackpad",
+    keyboardButtonToggleTitle: "Button ng Keyboard",
     streamingModeTitle: "Modo ng Streaming",
     buttons: {
         videoStreamEnableTitle: "Paganahin ang Video Stream",
@@ -4038,6 +4055,7 @@ const da = {
     gamingModeTitle: "Spiltilstand",
     gamingModeHint: "Fuldskærm med markør og tastatur låst",
     trackpadModeTitle: "Trackpad-tilstand",
+    keyboardButtonToggleTitle: "Tastaturknap",
     streamingModeTitle: "Streaming-tilstand",
     buttons: {
         videoStreamEnableTitle: "Aktiver videostream",
