@@ -69,9 +69,10 @@ Then go to [Run a session](#run-a-session).
 Runs from wherever you put it, on any distribution, without touching the system. Every Python and native dependency is inside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
 
 ```bash
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-x86_64.AppImage"
-chmod +x "./selkies-${SELKIES_VERSION}-x86_64.AppImage"
-"./selkies-${SELKIES_VERSION}-x86_64.AppImage" --addr=0.0.0.0 --port=8080 --basic-auth-user=user --basic-auth-password=mypasswd
+APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${APP}"
+chmod +x "./${APP}"
+"./${APP}" --addr=0.0.0.0 --port=8080 --basic-auth-user=user --basic-auth-password=mypasswd
 ```
 
 What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL` and the GPU's own driver have to be the host's for the GPU to be reachable at all, an X11 session needs the host's X server (or `Xvfb`), and the headless Wayland backend needs the host's `libwayland-server`. Everything above them travels with the AppImage.
@@ -135,9 +136,9 @@ Full desktop containers that can be used out-of-the-box are available in separat
 
 ## Minimal Container
 
-The [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox and Google Chrome, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
+The [Desktop Container](https://github.com/selkies-project/selkies/tree/main/addons/desktop) is the reference minimal-functionality container developers can base upon, or test Selkies quickly. The bare minimum LXQt desktop (Openbox window manager) is installed together with Firefox and Google Chrome, as well as an embedded TURN server inside the container for quick WebRTC firewall traversal.
 
-Instructions are available in the [Example Container](component.md#example-container) section.
+Instructions are available in the [Desktop Container](component.md#desktop-container) section.
 
 **With the default WebSocket transport, a single exposed port is all you need.** A TURN server only becomes relevant if you opt into the WebRTC transport (`--mode=webrtc`) inside a Docker® or Kubernetes container without `--network=host` or `hostNetwork: true`, or in other cases where the HTML5 web interface loads but the WebRTC connection fails. In that case, follow the instructions from [WebRTC and Firewall Issues](firewall.md) to make the container or self-hosted standalone instance use an external TURN server. This is required for all self-hosted WebRTC applications, unlike proprietary services which provide a TURN server for you.
 
@@ -177,7 +178,7 @@ The steps below use the release version, so put it in the environment first:
 export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/^v//')"
 ```
 
-**2. Build the Joystick Interposer to process gamepad input**, if you need to use joystick/gamepad devices from your web browser client in an environment without `/dev/uinput` — typically an unprivileged container. Where `/dev/uinput` is writable, Selkies registers gamepads as [kernel devices](component.md#kernel-gamepads) instead and this step, along with the `LD_PRELOAD` exports below, is unnecessary. Otherwise applications receive gamepad input only when they are started with the interposer preloaded, and `fake-udev` is additionally required for applications that discover devices through `libudev`. Both are built and wired automatically in the [Example Container](component.md#example-container) and the desktop containers. Elsewhere, build them from source (they are small, dependency-free `LD_PRELOAD` libraries):
+**2. Build the Joystick Interposer to process gamepad input**, if you need to use joystick/gamepad devices from your web browser client in an environment without `/dev/uinput` — typically an unprivileged container. Where `/dev/uinput` is writable, Selkies registers gamepads as [kernel devices](component.md#kernel-gamepads) instead and this step, along with the `LD_PRELOAD` exports below, is unnecessary. Otherwise applications receive gamepad input only when they are started with the interposer preloaded, and `fake-udev` is additionally required for applications that discover devices through `libudev`. Both are built and wired automatically in the [Desktop Container](component.md#desktop-container) and the desktop containers. Elsewhere, build them from source (they are small, dependency-free `LD_PRELOAD` libraries):
 
 ```bash
 git clone https://github.com/selkies-project/selkies.git && cd selkies
@@ -268,4 +269,4 @@ Please read [**WebRTC and Firewall Issues**](firewall.md).
 
 Every push to `main` builds the same media a release does, so an unreleased commit installs exactly like the released one above. **Nothing here needs Docker®.** Log in to GitHub, open that commit's `CI` run in [Actions](https://github.com/selkies-project/selkies/actions), and take its Build Artifacts: the `selkies-wheel` artifact holds the wheel, and the package jobs attach the `.deb`, `.rpm`, `.apk`, `.pkg.tar.zst` and the AppImage. [`gh run download`](https://cli.github.com/manual/gh_run_download) fetches them from a shell instead.
 
-The container images are published to `ghcr.io` rather than attached to the run, as `ghcr.io/selkies-project/selkies/base:main-ubuntu26.04` and `example:main-ubuntu26.04` (and the `debiantrixie` flavor of each), which every push moves onto the new build. Run one as the [Example Container](component.md#example-container) shows, or name it in a `FROM` line to build your own desktop on it — [Container Customization](development.md#container-customization) covers that. Replace `main` with `latest` in any of these tags for the newest release instead of the newest commit.
+The container images are published to `ghcr.io` rather than attached to the run, as `ghcr.io/selkies-project/selkies/base:main-ubuntu26.04` and `example:main-ubuntu26.04` (and the `debiantrixie` flavor of each), which every push moves onto the new build. Run one as the [Desktop Container](component.md#desktop-container) shows, or name it in a `FROM` line to build your own desktop on it — [Container Customization](development.md#container-customization) covers that. Replace `main` with `latest` in any of these tags for the newest release instead of the newest commit.
