@@ -9,7 +9,7 @@ description: How to cite Selkies in academic publications, and why citations kee
 
 **To be available in the near future.**
 
-An academic publication describing this project is currently under review. Once it is available, the citation entry will be published on this page. Until then, please link to this page from your documentation.
+An academic publication describing this project is currently under preparation. Once it is available, the citation entry will be published on this page. Until then, please link to this page from your documentation.
 
 **Citations are the currency of scientific research. Citing in your publications is the main driver of keeping this project alive.**
 
