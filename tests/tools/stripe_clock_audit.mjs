@@ -13,11 +13,13 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-import {
-    createStripeClock,
-    STRIPE_SETTLE_FLOOR_MS,
-    STRIPE_WAVE_DECAY,
-} from '../../addons/selkies-web-core/lib/stripe-clock.js';
+import { createStripeClock } from '../../addons/selkies-web-core/lib/stripe-clock.js';
+
+// The factory's floor and decay are locals there (the video worker embeds the
+// factory by toString, so it exports nothing else); pinned here so the audit
+// fails when they drift, and bound to the API by the first check below.
+const STRIPE_SETTLE_FLOOR_MS = 2;
+const STRIPE_WAVE_DECAY = 0.9;
 
 let failed = 0;
 
@@ -32,6 +34,10 @@ function fake() {
     const clock = createStripeClock(() => state.t);
     return { clock, at: (t) => { state.t = t; }, advance: (dt) => { state.t += dt; } };
 }
+
+check('settleWaitMs starts at the pinned floor',
+    createStripeClock(() => 0).settleWaitMs() === STRIPE_SETTLE_FLOOR_MS,
+    createStripeClock(() => 0).settleWaitMs());
 
 /** Feeds one frame's stripes at the given arrival offsets. */
 function frame(f, id, offsets) {

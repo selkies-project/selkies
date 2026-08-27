@@ -11,10 +11,12 @@
  * One socket at `<route prefix>/api/websockets` carries the whole session. It
  * is read in a worker (`SOCKET_WORKER_SRC`, reached through
  * `WorkerWebSocket`), which passes audio straight to the decoder and the
- * playback worklet, routes full-frame video straight to the video worker
- * while that worker decodes (acking received frames itself), and carries the
- * microphone and webcam encoders' frames out over their own ports: nothing
- * occupying the page's thread can interrupt any of them.
+ * playback worklet, routes video straight to the video worker while it
+ * decodes -- full frames through one decoder, the striped modes decoded per
+ * row and composited there, acked from the socket worker (received id for
+ * full frames, presented id for stripes) -- and carries the microphone and
+ * webcam encoders' frames out over their own ports: nothing occupying the
+ * page's thread can interrupt any of them.
  * Binary messages are typed by their first byte. From the server: `0x01`
  * audio (Opus, with the RED redundancy layout documented on
  * extractOpusFrames), `0x03` a JPEG stripe (`u8 reserved`, `u16 frame id`,
@@ -41,7 +43,8 @@
  * `gpu_stats` and `network_stats`.
  *
  * Video is decoded with WebCodecs: a JPEG stripe through ImageDecoder, an
- * H.264 stripe through a VideoDecoder per row offset, and a full frame --
+ * H.264 stripe through a VideoDecoder per row offset -- in the video worker
+ * while the divert holds, on the page as the fallback -- and a full frame --
  * controller or shared viewer alike -- in the video worker or through the
  * row-0 stripe decoder. Decoded frames reach the
  * screen through the first sink available: a track generator feeding a
@@ -65,7 +68,8 @@
  * the clipboard preview of lib/clipboard-sync.js, `fileUpload`,
  * `toggleDashboard` and `toggleTouchGamepad`. The `window` globals it
  * publishes for the dashboards and the tests are `webrtcInput` (the Input
- * handler), `fps`, `videoChunksReceived`, `system_stats`, `gpu_stats`,
+ * handler), `fps`, `videoChunksReceived`, `videoDivertOn`, `videoStripeRows`
+ * (the row layout the video worker is decoding), `system_stats`, `gpu_stats`,
  * `network_stats`, `currentAudioBufferSize`,
  * `currentAudioBufferDuration`, `currentAudioLevel`,
  * `currentAudioUnderrunSamples`, `currentAudioWorkletDropped`,
@@ -367,6 +371,13 @@ let vncStripeDecoders = {};
  * The video worker holds its full-frame decoder to the same contract.
  */
 const STRIPE_DECODE_QUEUE_LIMIT = 8;
+/**
+ * A stripe is stale only when it trails the last drawn id by at most this
+ * many frames. The id is a uint16, so a larger modular gap means the row sat
+ * static for a long time or the id wrapped; drawing such a stripe avoids
+ * wedging the row for up to half the id space.
+ */
+const JPEG_STRIPE_REORDER_WINDOW = 256;
 let stripeDecodeSoftErrors = {};
 let wakeLockSentinel = null;
 let currentEncoderMode = 'h264enc-striped';
@@ -682,6 +693,9 @@ let inputInitialized = false;
 let scaleLocallyManual;
 window.fps = 0;
 window.videoChunksReceived = 0;
+window.videoDivertOn = false;
+/** Stripe row layout the video worker is decoding while the divert holds. */
+window.videoStripeRows = {};
 let frameCount = 0;
 let uniqueStripedFrameIdsThisPeriod = new Set();
 let lastStripedFpsUpdateTime = performance.now();
@@ -1055,10 +1069,43 @@ let decodeInWorker = false;
 let workerDecoderCodec = null, workerDecoderW = 0, workerDecoderH = 0;
 let workerKeyframeCodec = null;
 let workerDecodeFailed = false;
-// Whether 0x04 currently bypasses the page (see updateVideoDivert), and the
-// wire frames the video worker counted since the last metrics tick.
+// Whether 0x03/0x04 currently bypass the page (see updateVideoDivert), and
+// the wire frames the video worker counted since the last metrics tick.
 let videoDivertOn = false;
+/** Whether the running divert is the striped one, which acks presented ids. */
+let videoDivertStriped = false;
 let divertedWireFramesThisPeriod = 0;
+/** What the worker reported it can decode, for the striped divert gates. */
+let videoWorkerStripedDecode = false, videoWorkerJpegDecode = false;
+/** Worker spawns attempted, capping respawn churn where Worker() cannot run. */
+let videoWorkerSpawnAttempts = 0;
+/**
+ * A transferred canvas whose element never mirrors the worker's committed
+ * size is a placeholder nothing will ever display (Playwright's WebKit);
+ * latched after a grace period so presentation returns to the page canvas.
+ */
+let videoWorkerSinkInert = false;
+let workerSinkInertSince = 0;
+
+/**
+ * Watches the canvas-mode placeholder actually take committed frames: its
+ * element mirrors the worker-side size on the first commit everywhere the
+ * sink works, so one that stays at the default size while the worker reports
+ * presenting is inert, and presentation falls back to the page canvas.
+ * @returns {void}
+ */
+function checkWorkerSinkAlive() {
+  const inertNow = videoWorkerMode === 'canvas' && videoWorkerRendered &&
+    videoWorkerCanvas && canvas && canvas.width >= 640 && videoWorkerCanvas.width < 640;
+  if (!inertNow) { workerSinkInertSince = 0; return; }
+  const now = performance.now();
+  if (!workerSinkInertSince) { workerSinkInertSince = now; return; }
+  if (now - workerSinkInertSince > 1500) {
+    videoWorkerSinkInert = true;
+    console.info('[Selkies] worker canvas placeholder never took a committed frame; presenting on the page canvas instead.');
+    deactivateVideoWorker();
+  }
+}
 /**
  * Reads the codec string from a keyframe's SPS: scans the Annex-B payload for
  * the first SPS NAL and builds `avc1.PPCCLL` from it.
@@ -1185,17 +1232,255 @@ function decodeChunk(key, data, timestamp) {
   catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); }
 }
 
-// Raw full-frame stripes routed straight from the socket worker, so decode and
+// Raw stripes routed straight from the socket worker, so decode and
 // presentation never touch the page. The header is parsed here and the codec
 // is derived from each keyframe's SPS; hints carry the page's fallback guess
 // and acceleration preference. Wire stats go up once a second for the page's
-// counters, watchdogs and fps.
+// counters, watchdogs and fps, with the row layout this side is decoding.
 let wireCodec = null, wireW = 0, wireH = 0, wireHint = null, wireSoftware = false;
 let wireChunks = 0, wireFrames = 0, wireLastId = -1, wireStatsTimer = null;
 const parseAvcCodecFromAnnexB = ${parseAvcCodecFromAnnexB.toString()};
 
+// The striped modes (h264enc-striped, jpeg) decode, composite and present in
+// here: a VideoDecoder per row offset or an in-worker JPEG decode, drawn onto
+// a persistent back-buffer so undamaged rows survive, presented by the page's
+// rule -- last row landed, or the socket and decoders proven quiet (the
+// stripe clock), else at the frame-id boundary -- with the presented id going
+// back over the wire port so the server paces against what reached the screen.
+const createStripeClock = ${createStripeClock.toString()};
+const STRIPE_DECODE_QUEUE_LIMIT = ${STRIPE_DECODE_QUEUE_LIMIT};
+const JPEG_STRIPE_REORDER_WINDOW = ${JPEG_STRIPE_REORDER_WINDOW};
+let stripedOn = false, wirePort = null;
+let stripeDecs = {}, jpegLastRowId = {}, jpegRowHeights = {}, jpegPending = 0;
+let stripeBack = null, stripeBackCtx = null;
+let stripeGeomW = 0, stripeGeomH = 0, stripeGeomKnown = false;
+let stripePendingId = null, stripeDirty = false, stripeBottom = false;
+let stripeSoftErrors = 0, stripeSoftWindowStart = 0, settleTimer = null;
+let presentedFrames = 0, wireDimsW = 0, wireDimsH = 0;
+const stripeClock = createStripeClock();
+
+function closeStripeState() {
+  for (const y in stripeDecs) {
+    const info = stripeDecs[y];
+    try { if (info.dec.state !== 'closed') info.dec.close(); } catch (err) {}
+  }
+  stripeDecs = {}; jpegLastRowId = {}; jpegRowHeights = {}; jpegPending = 0;
+  stripePendingId = null; stripeDirty = false; stripeBottom = false;
+  if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+}
+
+// Grows to cover every stripe seen; an explicit geometry change rebuilds it.
+function stripeEnsureBack(minW, minH) {
+  const w = Math.max(stripeGeomW, minW), h = Math.max(stripeGeomH, minH);
+  if (!(w > 0) || !(h > 0)) return false;
+  if (!stripeBack) {
+    stripeBack = new OffscreenCanvas(w, h);
+    stripeBackCtx = stripeBack.getContext('2d', { desynchronized: true, alpha: false });
+  } else if (stripeBack.width < w || stripeBack.height < h) {
+    const old = stripeBack;
+    stripeBack = new OffscreenCanvas(Math.max(old.width, w), Math.max(old.height, h));
+    stripeBackCtx = stripeBack.getContext('2d', { desynchronized: true, alpha: false });
+    try { stripeBackCtx.drawImage(old, 0, 0); } catch (err) {}
+  }
+  return true;
+}
+
+function stripeDrained() {
+  if (jpegPending > 0) return false;
+  for (const y in stripeDecs) { if (stripeDecs[y].meta.length > 0) return false; }
+  return true;
+}
+
+function stripePresent() {
+  if (!stripeBack || !stripeDirty) return;
+  stripeDirty = false; stripeBottom = false;
+  presentedFrames++;
+  if (stripePendingId !== null && wirePort) {
+    try { wirePort.postMessage({ presentedId: stripePendingId }); } catch (err) {}
+  }
+  // A shared viewer learns striped geometry from the composite itself.
+  if (!stripeGeomKnown && (stripeBack.width !== wireDimsW || stripeBack.height !== wireDimsH)) {
+    wireDimsW = stripeBack.width; wireDimsH = stripeBack.height;
+    self.postMessage({ type: 'wireDims', w: wireDimsW, h: wireDimsH });
+  }
+  if (mode === 'vtg' && writer && !closed) {
+    let f = null;
+    try { f = new VideoFrame(stripeBack, { timestamp: performance.now() * 1000 }); }
+    catch (err) { return; }
+    present(f);
+    return;
+  }
+  if (ctx) {
+    if (oc.width !== stripeBack.width || oc.height !== stripeBack.height) {
+      oc.width = stripeBack.width; oc.height = stripeBack.height;
+    }
+    try { ctx.drawImage(stripeBack, 0, 0); } catch (err) {}
+    if (!presented) { presented = true; self.postMessage({ type: 'presented' }); }
+  }
+}
+
+function stripeScheduleSettle() {
+  if (settleTimer) return;
+  const wait = Math.max(1, Math.ceil(stripeClock.settleWaitMs()));
+  settleTimer = setTimeout(() => {
+    settleTimer = null;
+    if (!stripeDirty) return;
+    if (stripeDrained() && stripeClock.settled()) { stripePresent(); return; }
+    stripeScheduleSettle();
+  }, wait);
+}
+
+// A new frame id proves the previous frame complete, so it goes up first
+// unless quiet already presented it.
+function stripeBoundary(frameId) {
+  if (stripePendingId !== null && frameId !== stripePendingId && stripeDirty &&
+      !(stripeDrained() && stripeClock.settled())) {
+    stripePresent();
+  }
+  stripePendingId = frameId;
+}
+
+function stripeMaybePresent() {
+  if (!stripeDirty) return;
+  if (stripeDrained() && (stripeBottom || stripeClock.settled())) { stripePresent(); return; }
+  stripeScheduleSettle();
+}
+
+// Draws one decoded stripe at its row offset; always consumes the image.
+function stripeCompose(image, y, h, frameId) {
+  const w = image.displayWidth !== undefined ? image.displayWidth : image.width;
+  if (!stripeEnsureBack(w, y + h)) { try { image.close(); } catch (err) {} return; }
+  stripeBoundary(frameId);
+  try { stripeBackCtx.drawImage(image, 0, y); stripeDirty = true; } catch (err) {}
+  try { image.close(); } catch (err) {}
+  if (stripeGeomKnown && y + h >= stripeGeomH) stripeBottom = true;
+  stripeMaybePresent();
+}
+
+function onStripeError(y) {
+  const info = stripeDecs[y];
+  if (info) {
+    try { if (info.dec.state !== 'closed') info.dec.close(); } catch (err) {}
+    delete stripeDecs[y];
+  }
+  const now = Date.now();
+  if (now - stripeSoftWindowStart > 10000) { stripeSoftWindowStart = now; stripeSoftErrors = 0; }
+  // A burst of failures says decode should leave the worker for the page ladder.
+  if (++stripeSoftErrors > 12) { self.postMessage({ type: 'decoderError' }); return; }
+  sendNeedKey('stripe_error');
+}
+
+function onH264Stripe(buffer) {
+  if (buffer.byteLength < 11) return;
+  const head = new Uint8Array(buffer, 0, 10);
+  const key = head[1] === 0x01;
+  const frameId = (head[2] << 8) | head[3];
+  const y = (head[4] << 8) | head[5];
+  const w = (head[6] << 8) | head[7];
+  const h = (head[8] << 8) | head[9];
+  wireChunks++;
+  if (frameId !== wireLastId) { wireFrames++; wireLastId = frameId; }
+  stripeClock.note(frameId);
+  const payload = buffer.slice(10);
+  if (payload.byteLength === 0) return;
+  let info = stripeDecs[y];
+  let codec = info ? info.codec : null;
+  if (key) {
+    const parsed = parseAvcCodecFromAnnexB(new Uint8Array(payload));
+    if (parsed) codec = parsed;
+    else if (!codec) codec = wireHint;
+  }
+  if (!codec) { sendNeedKey('no_codec'); return; }
+  if (!info || info.dec.state !== 'configured' || info.w !== w || info.h !== h || info.codec !== codec) {
+    // Only a keyframe may (re)configure a row: deltas against a lost state are noise.
+    if (!key) { sendNeedKey('no_key'); return; }
+    if (info) { try { if (info.dec.state !== 'closed') info.dec.close(); } catch (err) {} }
+    const rowY = y;
+    const dec = new VideoDecoder({
+      output: (f) => {
+        const rowInfo = stripeDecs[rowY];
+        const meta = rowInfo && rowInfo.meta.length ? rowInfo.meta.shift() : null;
+        stripeCompose(f, rowY, f.displayHeight, meta ? meta.frameId : wireLastId);
+      },
+      error: () => onStripeError(rowY),
+    });
+    try {
+      const cfg = { codec: codec, codedWidth: w, codedHeight: h, optimizeForLatency: true };
+      if (wireSoftware) cfg.hardwareAcceleration = 'prefer-software';
+      dec.configure(cfg);
+    } catch (err) {
+      try { if (dec.state !== 'closed') dec.close(); } catch (e2) {}
+      onStripeError(y);
+      return;
+    }
+    info = stripeDecs[y] = { dec: dec, w: w, h: h, codec: codec, gotKey: false, meta: [] };
+  }
+  if (!key && !info.gotKey) { sendNeedKey('no_key'); return; }
+  if (!key && info.dec.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
+    // Deltas behind a backlog only deepen it; the row is gated until its next IDR.
+    info.gotKey = false;
+    sendNeedKey('overload');
+    return;
+  }
+  try {
+    info.meta.push({ frameId: frameId });
+    info.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: performance.now() * 1000, data: payload }));
+    if (key) info.gotKey = true;
+  } catch (err) {
+    info.meta.pop();
+    onStripeError(y);
+  }
+}
+
+function onJpegStripe(buffer) {
+  if (buffer.byteLength < 7) return;
+  const head = new Uint8Array(buffer, 0, 6);
+  const frameId = (head[2] << 8) | head[3];
+  const y = (head[4] << 8) | head[5];
+  wireChunks++;
+  if (frameId !== wireLastId) { wireFrames++; wireLastId = frameId; }
+  stripeClock.note(frameId);
+  const data = buffer.slice(6);
+  if (data.byteLength === 0) return;
+  const done = (image) => {
+    jpegPending--;
+    if (!image) { stripeMaybePresent(); return; }
+    const last = jpegLastRowId[y];
+    if (last !== undefined) {
+      const behindBy = (last - frameId) & 0xFFFF;
+      if (behindBy > 0 && behindBy <= JPEG_STRIPE_REORDER_WINDOW) {
+        try { image.close(); } catch (err) {}
+        stripeMaybePresent();
+        return;
+      }
+    }
+    jpegLastRowId[y] = frameId;
+    const h = image.displayHeight !== undefined ? image.displayHeight : image.height;
+    jpegRowHeights[y] = h;
+    stripeCompose(image, y, h, frameId);
+  };
+  if (typeof ImageDecoder !== 'undefined') {
+    let d = null;
+    try { d = new ImageDecoder({ data: data, type: 'image/jpeg' }); }
+    catch (err) { return; }
+    jpegPending++;
+    d.decode().then((r) => { try { d.close(); } catch (err) {} done(r.image); })
+      .catch(() => { try { d.close(); } catch (err) {} done(null); });
+  } else if (typeof createImageBitmap === 'function') {
+    jpegPending++;
+    createImageBitmap(new Blob([data], { type: 'image/jpeg' })).then(done).catch(() => done(null));
+  }
+}
+
 function onWire(buffer) {
-  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 11) return;
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 1) return;
+  if (stripedOn) {
+    const type = new Uint8Array(buffer, 0, 1)[0];
+    if (type === 0x03) onJpegStripe(buffer);
+    else if (type === 0x04) onH264Stripe(buffer);
+    return;
+  }
+  if (buffer.byteLength < 11) return;
   const head = new Uint8Array(buffer, 0, 10);
   const key = head[1] === 0x01;
   const frameId = (head[2] << 8) | head[3];
@@ -1221,15 +1506,19 @@ function onWire(buffer) {
   decodeChunk(key, payload, performance.now() * 1000);
 }
 
+const stripedCaps = {
+  stripedDecode: typeof VideoDecoder !== 'undefined',
+  jpegDecode: typeof ImageDecoder !== 'undefined' || typeof createImageBitmap === 'function',
+};
 if (typeof VideoTrackGenerator !== 'undefined') {
   try {
     const g = new VideoTrackGenerator();
     writer = g.writable.getWriter();
     mode = 'vtg';
-    self.postMessage({ type: 'mode', mode: 'vtg', track: g.track }, [g.track]);
-  } catch (e) { self.postMessage({ type: 'mode', mode: 'canvas' }); }
+    self.postMessage(Object.assign({ type: 'mode', mode: 'vtg', track: g.track }, stripedCaps), [g.track]);
+  } catch (e) { self.postMessage(Object.assign({ type: 'mode', mode: 'canvas' }, stripedCaps)); }
 } else {
-  self.postMessage({ type: 'mode', mode: 'canvas' });
+  self.postMessage(Object.assign({ type: 'mode', mode: 'canvas' }, stripedCaps));
 }
 
 self.onmessage = (e) => {
@@ -1245,14 +1534,47 @@ self.onmessage = (e) => {
   if (m.type === 'wireIn') {
     if (m.codecHint) wireHint = m.codecHint;
     wireSoftware = !!m.software;
+    wirePort = m.port;
     m.port.onmessage = (ev) => onWire(ev.data);
     if (!wireStatsTimer) {
       wireStatsTimer = setInterval(() => {
-        if (!wireChunks) return;
-        self.postMessage({ type: 'wireStats', chunks: wireChunks, frames: wireFrames, lastId: wireLastId });
-        wireChunks = 0; wireFrames = 0;
+        if (!wireChunks && !presentedFrames) return;
+        const rows = {};
+        if (stripedOn) {
+          for (const y in stripeDecs) rows[y] = stripeDecs[y].h;
+          for (const y in jpegRowHeights) if (!(y in rows)) rows[y] = jpegRowHeights[y];
+        } else if (dec && wireH > 0) {
+          rows[0] = wireH;
+        }
+        self.postMessage({ type: 'wireStats', chunks: wireChunks, frames: wireFrames, lastId: wireLastId, presents: presentedFrames, rows: rows });
+        wireChunks = 0; wireFrames = 0; presentedFrames = 0;
       }, 1000);
     }
+    return;
+  }
+  if (m.type === 'wireMode') {
+    const striped = !!m.striped;
+    if (striped !== stripedOn) {
+      stripedOn = striped;
+      // The sink re-announces in the new mode, so the page re-hides its
+      // canvas even when the old mode had already consumed 'presented'.
+      presented = false;
+      if (striped) closeDecoder(); else closeStripeState();
+    }
+    return;
+  }
+  if (m.type === 'wireGeom') {
+    const know = m.w > 0 && m.h > 0;
+    if (know && (m.w !== stripeGeomW || m.h !== stripeGeomH)) {
+      stripeGeomW = m.w; stripeGeomH = m.h;
+      if (stripeBack && (stripeBack.width !== m.w || stripeBack.height !== m.h)) {
+        // A real geometry change; the server keyframes it, so stale rows go.
+        stripeBack = null; stripeBackCtx = null;
+        stripeDirty = false; stripePendingId = null;
+        jpegLastRowId = {}; jpegRowHeights = {};
+      }
+    }
+    stripeGeomKnown = stripeGeomKnown || know;
     return;
   }
   if (m.type === 'wireHints') {
@@ -1384,10 +1706,22 @@ function presentFrameToVideo(frame) {
 }
 
 /**
- * Connects the socket worker to the video worker, so full-frame stripes can
- * reach decode without the page's thread on them; a fresh channel per call,
- * for a restarted transport or video worker. The divert itself stays off
- * until updateVideoDivert turns it on.
+ * Tells the video worker the display geometry, which sizes the back-buffer
+ * its striped composite persists on; the canvas buffer is stream-resolution
+ * physical pixels, exactly the space stripe offsets address.
+ * @returns {void}
+ */
+function syncWireGeom() {
+  if (!videoWorker || !canvas || !(canvas.width > 0) || !(canvas.height > 0)) return;
+  try { videoWorker.postMessage({ type: 'wireGeom', w: canvas.width, h: canvas.height }); }
+  catch (e) { /* respawns fresh */ }
+}
+
+/**
+ * Connects the socket worker to the video worker, so diverted stripes reach
+ * decode without the page's thread on them; a fresh channel per call, for a
+ * restarted transport or video worker. The divert itself stays off until
+ * updateVideoDivert turns it on.
  * @returns {void}
  */
 function wireSocketToVideoWorker() {
@@ -1402,25 +1736,48 @@ function wireSocketToVideoWorker() {
   } catch (e) {
     console.warn('Could not connect the socket worker to the video worker:', e);
   }
+  syncWireGeom();
   updateVideoDivert(true);
 }
 
 /**
- * Points the socket worker's full-frame divert at the current truth: on only
- * while the video worker is the decoder for `h264enc` and healthy. Called
- * wherever any input flips -- the worker's mode reply, its deactivation or
- * decoder failure, an encoder switch, a rebuilt transport.
+ * Points the socket worker's divert at the current truth: on while the video
+ * worker is the decoder for `h264enc` and healthy, or, in the striped modes,
+ * while it can decode and composite them (any sink; gated off with the
+ * worker escape hatch). Called wherever any input flips -- the worker's mode
+ * reply, its deactivation or decoder failure, an encoder switch, a rebuilt
+ * transport. Striped acks report the presented id, so a client that cannot
+ * render sheds load exactly as the page path does.
  * @param {boolean} [force] Resend even when the value is unchanged, for a
  *     transport whose worker started fresh and holds the default.
  * @returns {void}
  */
 function updateVideoDivert(force) {
+  const striped = currentEncoderMode === 'h264enc-striped' || currentEncoderMode === 'jpeg';
+  const stripedReady = USE_OFFSCREEN_WORKER && videoWorkerReady &&
+    (currentEncoderMode === 'jpeg' ? videoWorkerJpegDecode : videoWorkerStripedDecode);
   const on = !!(websocket && typeof websocket.setVideoDivert === 'function' &&
-    videoWorkerReady && decodeInWorker && !workerDecodeFailed &&
-    currentEncoderMode === 'h264enc');
-  if (on === videoDivertOn && !force) return;
+    videoWorkerReady && !workerDecodeFailed &&
+    (striped ? stripedReady : (decodeInWorker && currentEncoderMode === 'h264enc')));
+  if (videoWorker) {
+    try { videoWorker.postMessage({ type: 'wireMode', striped }); } catch (e) { /* respawns fresh */ }
+  }
+  // The striped flag is part of the state: a full-frame divert rolling into a
+  // striped one keeps `on` but changes the ack source and the sink upkeep.
+  if (on === videoDivertOn && striped === videoDivertStriped && !force) return;
   videoDivertOn = on;
-  if (websocket && typeof websocket.setVideoDivert === 'function') websocket.setVideoDivert(on);
+  videoDivertStriped = striped;
+  window.videoDivertOn = on;
+  if (!on) window.videoStripeRows = {};
+  if (websocket && typeof websocket.setVideoDivert === 'function') {
+    websocket.setVideoDivert(on, striped ? 'present' : 'receive');
+  }
+  // The diverted wire feeds the worker sink directly, so the page-side present
+  // helpers that would normally reveal it never run; shown from here instead.
+  if (on) {
+    syncWireGeom();
+    activateWorkerSinkDisplay();
+  }
 }
 
 /**
@@ -1437,17 +1794,19 @@ function updateVideoDivert(force) {
  *     the main canvas.
  */
 function ensureVideoWorker() {
+  if (videoWorkerSinkInert) return false;
   if (videoWorkerReady) return true;
   if (videoWorker) return false;
   try {
     // The Worker keeps its own reference to the script, so the object URL is
     // revoked at once rather than living until the page unloads.
     const workerURL = URL.createObjectURL(new Blob([VIDEO_WORKER_SRC], { type: 'text/javascript' }));
+    videoWorkerSpawnAttempts++;
     videoWorker = new Worker(workerURL);
     URL.revokeObjectURL(workerURL);
     videoWorkerInFlight = 0;
     wireSocketToVideoWorker();
-    videoWorker.onerror = () => deactivateVideoWorker();
+    videoWorker.onerror = (e) => { console.warn('video worker error:', e && e.message); deactivateVideoWorker(); };
     videoWorker.onmessage = (e) => {
       const m = e.data;
       if (!m) return;
@@ -1472,9 +1831,19 @@ function ensureVideoWorker() {
       }
       if (m.type === 'wireStats') {
         window.videoChunksReceived += m.chunks;
-        divertedWireFramesThisPeriod += m.frames;
+        const stripedNow = currentEncoderMode === 'h264enc-striped' || currentEncoderMode === 'jpeg';
+        // Striped fps means composites presented, exactly as on the page path;
+        // full-frame rate stays a wire measure.
+        if (stripedNow) frameCount += (m.presents || 0);
+        else divertedWireFramesThisPeriod += m.frames;
         if (m.lastId >= 0) lastReceivedVideoFrameId = m.lastId;
+        if (m.rows) window.videoStripeRows = m.rows;
         if (isSharedMode && m.chunks > 0) lastSharedVideoChunkTime = performance.now();
+        if (!streamStarted && (m.frames > 0 || (m.presents || 0) > 0)) startStream();
+        if (videoDivertOn) {
+          activateWorkerSinkDisplay();
+          checkWorkerSinkAlive();
+        }
         return;
       }
       if (m.type === 'wireDims') {
@@ -1490,6 +1859,8 @@ function ensureVideoWorker() {
         return;
       }
       if (m.type === 'mode') {
+        videoWorkerStripedDecode = !!m.stripedDecode;
+        videoWorkerJpegDecode = !!m.jpegDecode;
         if (m.mode === 'vtg' && m.track) {
           if (!videoElement) { deactivateVideoWorker(); return; }
           videoWorkerMode = 'vtg';
@@ -1501,8 +1872,10 @@ function ensureVideoWorker() {
           console.info('[Selkies] video sink: VideoTrackGenerator in the video worker.');
           decodeInWorker = true;
           videoWorkerReady = true;
+          syncWireGeom();
           updateVideoDivert();
-        } else if (supportsWindowMSTG) {
+        } else if (supportsWindowMSTG &&
+            currentEncoderMode !== 'h264enc-striped' && currentEncoderMode !== 'jpeg') {
           // No worker generator, but the page has one: it feeds a <video>
           // element, which beats compositing a canvas by hand.
           console.info('[Selkies] video sink: MediaStreamTrackGenerator on the page — '
@@ -1511,18 +1884,24 @@ function ensureVideoWorker() {
           return;
         } else {
           videoWorkerMode = 'canvas';
-          console.info('[Selkies] video sink: OffscreenCanvas in the video worker — '
-            + 'this browser exposes no VideoTrackGenerator to a worker and no '
-            + 'MediaStreamTrackGenerator on the page, so frames are composited rather '
-            + 'than handed to a <video> element.');
+          console.info(supportsWindowMSTG
+            ? '[Selkies] video sink: OffscreenCanvas in the video worker for the striped '
+              + 'codecs; full-frame H.264 presents through the page MediaStreamTrackGenerator.'
+            : '[Selkies] video sink: OffscreenCanvas in the video worker — '
+              + 'this browser exposes no VideoTrackGenerator to a worker and no '
+              + 'MediaStreamTrackGenerator on the page, so frames are composited rather '
+              + 'than handed to a <video> element.');
           if (!videoWorkerCanvas) { deactivateVideoWorker(); return; }
           try {
             const off = videoWorkerCanvas.transferControlToOffscreen();
             videoWorkerCanvasTransferred = true;
             videoWorker.postMessage({ canvas: off }, [off]);
           } catch (err) { console.warn('OffscreenCanvas transfer failed:', err); deactivateVideoWorker(); return; }
-          decodeInWorker = true;
+          // With a page generator the worker serves only the striped divert;
+          // full-frame decode stays on the page feeding that generator.
+          decodeInWorker = !supportsWindowMSTG;
           videoWorkerReady = true;
+          syncWireGeom();
           updateVideoDivert();
         }
       }
@@ -1546,6 +1925,8 @@ function deactivateVideoWorker() {
   const wasTransferred = videoWorkerCanvasTransferred;
   videoWorkerActive = false; videoWorkerReady = false; videoWorkerMode = null;
   decodeInWorker = false;
+  videoWorkerStripedDecode = false; videoWorkerJpegDecode = false;
+  workerSinkInertSince = 0;
   updateVideoDivert();
   videoWorkerInFlight = 0; videoWorkerCanvasTransferred = false;
   videoWorkerRendered = false; sinkRevealGen++;
@@ -1622,6 +2003,8 @@ function activateWorkerSinkDisplay() {
 function presentFrameToWorker(frame) {
   if (!ensureVideoWorker()) return false;
   if (!activateWorkerSinkDisplay()) return false;
+  checkWorkerSinkAlive();
+  if (videoWorkerSinkInert) return false;
   if (videoWorkerInFlight >= VIDEO_WORKER_MAX_IN_FLIGHT) {
     try { frame.close(); } catch (_) {}
     return true;
@@ -2095,6 +2478,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     canvas.width = internalBufferWidth;
     canvas.height = internalBufferHeight;
     console.log(`Canvas internal buffer set to: ${internalBufferWidth}x${internalBufferHeight}`);
+    syncWireGeom();
   }
   const container = canvas.parentElement;
   const containerWidth = container.clientWidth;
@@ -2186,6 +2570,7 @@ function resetCanvasStyle(streamWidth, streamHeight) {
     canvas.width = internalBufferWidth;
     canvas.height = internalBufferHeight;
     console.log(`Canvas internal buffer reset to: ${internalBufferWidth}x${internalBufferHeight}`);
+    syncWireGeom();
   }
 
   const cssWidth = `${streamWidth}px`;
@@ -2718,13 +3103,6 @@ function stripeCompositePresent() {
 }
 /** Newest JPEG-stripe frame id drawn per row offset, so older out-of-order stripes are skipped. */
 let lastDrawnJpegStripeFrameId = {};
-/**
- * A stripe is stale only when it trails the last drawn id by at most this
- * many frames. The id is a uint16, so a larger modular gap means the row sat
- * static for a long time or the id wrapped; drawing such a stripe avoids
- * wedging the row for up to half the id space.
- */
-const JPEG_STRIPE_REORDER_WINDOW = 256;
 
 /** Disarms the START_VIDEO watchdog. */
 function clearStartVideoWatchdog() {
@@ -4251,7 +4629,9 @@ function initWebsockets() {
     if (mstgActive || videoWorkerActive) {
       const fullFrameMode = (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc-striped');
       if (mstgActive && !fullFrameMode) deactivateMstg();
-      if (videoWorkerActive && !fullFrameMode) deactivateVideoWorker();
+      // Diverted striped modes present through the worker sink; only an
+      // undiverted striped mode reclaims the page canvas from it.
+      if (videoWorkerActive && !fullFrameMode && !videoDivertOn) deactivateVideoWorker();
     }
 
     const dpr = (isSharedMode) ? 1 : (window.devicePixelRatio || 1);
@@ -4295,6 +4675,9 @@ function initWebsockets() {
         startStream();
       }
     } else if (currentEncoderMode === 'h264enc-striped') {
+      if (USE_OFFSCREEN_WORKER && !videoWorker && !workerDecodeFailed && videoWorkerSpawnAttempts < 3) {
+        ensureVideoWorker();
+      }
       let paintedSomethingThisCycle = false;
       const ready = stripeCompositeBegin();
       const drained = stripeDecodesDrained();
@@ -4327,6 +4710,9 @@ function initWebsockets() {
         startStream();
       }
     } else if (currentEncoderMode === 'jpeg') {
+      if (USE_OFFSCREEN_WORKER && !videoWorker && !workerDecodeFailed && videoWorkerSpawnAttempts < 3) {
+        ensureVideoWorker();
+      }
       const drained = jpegStripeDecodesPending === 0;
       const settled = drained && stripeClock.settled();
       let bottomDrawn = false;
@@ -4462,10 +4848,12 @@ let lastTick = 0;
 // Encoded webcam frames sent while the socket was down would corrupt the
 // server's decoder as deltas; held back until a keyframe restores the chain.
 let webcamChainBroken = false;
-// Full-frame video divert: 0x04 goes straight to the video worker while the
-// page keeps this on, and the newest frame id is acked from here on the same
+// Video divert: 0x03/0x04 go straight to the video worker while the page
+// keeps this on, and the newest frame id is acked from here on the same
 // cadence the page would use, so pacing and RTT stay honest through a stall.
-let videoPort = null, videoDivert = false, videoAck = false;
+// Full frames ack on receipt; the striped modes ack the id the video worker
+// reports presented, so a client that cannot render sheds load.
+let videoPort = null, videoDivert = false, videoAck = false, videoAckSource = 'receive';
 let videoLastId = -1, videoAckedId = -1, videoAckTimer = null;
 
 function syncVideoAckTimer() {
@@ -4486,10 +4874,18 @@ self.onmessage = (e) => {
   const m = e.data;
   if (m.type === 'audioPort') { audioPort = m.port; return; }
   if (m.type === 'audioState') { audioOn = !!m.active; return; }
-  if (m.type === 'videoPort') { videoPort = m.port; return; }
+  if (m.type === 'videoPort') {
+    videoPort = m.port;
+    videoPort.onmessage = (ev) => {
+      const pm = ev.data;
+      if (pm && pm.presentedId !== undefined) videoLastId = pm.presentedId;
+    };
+    return;
+  }
   if (m.type === 'videoState') {
     videoDivert = !!m.divert;
     videoAck = !!m.ack;
+    videoAckSource = m.ackSource || 'receive';
     syncVideoAckTimer();
     return;
   }
@@ -4542,12 +4938,16 @@ self.onmessage = (e) => {
         audioPort.postMessage({ buffer: d }, [d]);
         return;
       }
-      if (videoPort && videoDivert && d instanceof ArrayBuffer && d.byteLength > 10 &&
-          new Uint8Array(d, 0, 1)[0] === 0x04) {
-        const head = new Uint8Array(d, 2, 2);
-        videoLastId = (head[0] << 8) | head[1];
-        videoPort.postMessage(d, [d]);
-        return;
+      if (videoPort && videoDivert && d instanceof ArrayBuffer && d.byteLength > 6) {
+        const t = new Uint8Array(d, 0, 1)[0];
+        if (t === 0x03 || (t === 0x04 && d.byteLength > 10)) {
+          if (videoAckSource === 'receive') {
+            const head = new Uint8Array(d, 2, 2);
+            videoLastId = (head[0] << 8) | head[1];
+          }
+          videoPort.postMessage(d, [d]);
+          return;
+        }
       }
       if (d instanceof ArrayBuffer) self.postMessage({ type: 'message', data: d }, [d]);
       else self.postMessage({ type: 'message', data: d });
@@ -4713,15 +5113,17 @@ class WorkerWebSocket {
   }
 
   /**
-   * Turns the full-frame video divert on or off; while on, the worker also
-   * acks the newest frame id itself unless this page is a shared viewer,
-   * whose acks the server ignores.
+   * Turns the video divert on or off; while on, the worker also acks the
+   * newest frame id itself unless this page is a shared viewer, whose acks
+   * the server ignores. Full frames ack on receipt; the striped modes ack
+   * what the video worker reports presented.
    * @param {boolean} divert
+   * @param {string} [ackSource] `receive` (default) or `present`.
    * @returns {void}
    */
-  setVideoDivert(divert) {
+  setVideoDivert(divert, ackSource) {
     const ack = !!divert && displayId === 'primary' && !isSharedMode;
-    try { this._worker.postMessage({ type: 'videoState', divert: !!divert, ack }); } catch (e) { /* closing */ }
+    try { this._worker.postMessage({ type: 'videoState', divert: !!divert, ack, ackSource: ackSource || 'receive' }); } catch (e) { /* closing */ }
   }
 
   /**

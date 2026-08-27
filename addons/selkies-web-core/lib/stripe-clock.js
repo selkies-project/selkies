@@ -19,18 +19,20 @@
  * @module
  */
 
-/** Quiet a frame must show on top of the tracked wave gap, in milliseconds. */
-export const STRIPE_SETTLE_FLOOR_MS = 2;
-/** Per-frame decay of the remembered wave gap. */
-export const STRIPE_WAVE_DECAY = 0.9;
-
 /**
+ * Self-contained by design: the video worker embeds this factory by
+ * `toString()`, so a reference to anything in module scope would arrive
+ * there minified and unbound.
  * @param {function(): number} [clock] Millisecond clock; defaults to
  *   `performance.now`.
  * @returns {{note: function(number): void, settled: function(): boolean,
- *   waveGapMs: function(): number}}
+ *   waveGapMs: function(): number, settleWaitMs: function(): number}}
  */
 export function createStripeClock(clock) {
+  // Quiet a frame must show on top of the tracked wave gap, in milliseconds,
+  // and the per-frame decay of that remembered gap.
+  const SETTLE_FLOOR_MS = 2;
+  const WAVE_DECAY = 0.9;
   const now = clock || (() => performance.now());
   let lastArrival = -Infinity;
   let lastFrameId = -1;
@@ -53,14 +55,16 @@ export function createStripeClock(clock) {
         const gap = t - lastArrival;
         if (gap > framePeak) framePeak = gap;
       } else {
-        waveGap = Math.max(framePeak, waveGap * STRIPE_WAVE_DECAY);
+        waveGap = Math.max(framePeak, waveGap * WAVE_DECAY);
         framePeak = 0;
         lastFrameId = frameId;
       }
       lastArrival = t;
     },
     /** @returns {boolean} Whether the composite holds a whole frame. */
-    settled: () => (now() - lastArrival) >= (STRIPE_SETTLE_FLOOR_MS + waveGapMs()),
+    settled: () => (now() - lastArrival) >= (SETTLE_FLOOR_MS + waveGapMs()),
     waveGapMs,
+    /** @returns {number} Quiet to wait for before checking settled again. */
+    settleWaitMs: () => SETTLE_FLOOR_MS + waveGapMs(),
   };
 }
