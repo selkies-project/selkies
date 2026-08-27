@@ -2,10 +2,12 @@
 """The apps panel is published only where its runner can work.
 
 Its buttons are `selkies-proot` calls over the command channel, so a session
-whose runner is missing, refuses the environment (proot cannot ptrace there)
-or has no command channel at all can offer nothing that succeeds. The server
-answers that by publishing ui_sidebar_show_apps as effective availability,
-which is what both dashboards gate the panel on.
+whose runner is missing or refuses the environment (proot cannot ptrace
+there) can offer nothing that succeeds; the server publishes
+ui_sidebar_show_apps as that effective availability, which is what both
+dashboards gate the panel on. A disabled command channel is permission, not
+availability: the panel still publishes and the client explains why its
+actions are off.
 """
 import asyncio
 import json
@@ -76,7 +78,9 @@ def run() -> "H.Results":
           SELKIES_COMMAND_ENABLED="true", PATH=bin_bad + os.pathsep + base_path)
     probe(res, "no runner installed", False,
           SELKIES_COMMAND_ENABLED="true", PATH=empty)
-    probe(res, "command channel disabled", False,
+    # Permission is not availability: with commands disabled the panel still
+    # publishes and the client explains why its actions are off.
+    probe(res, "command channel disabled but runner present", True,
           SELKIES_COMMAND_ENABLED="false", PATH=bin_ok + os.pathsep + base_path)
     res.summary()
     return res

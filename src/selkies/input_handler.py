@@ -5409,17 +5409,18 @@ class WebRTCInput:
                                else X11_APP_TERMINALS)
 
     def apps_available(self) -> bool:
-        """Whether the apps panel can do anything in this session.
+        """Whether the apps panel has a runner it could work through here.
 
-        Its buttons are the runner wrapper over the command channel, so all of
-        the channel, the wrapper and an environment the wrapper can work in
-        have to hold; where one does not, dashboards are told to drop the
-        panel rather than offer buttons that cannot succeed. The environment
-        answer comes from probe_apps_runner() and is assumed good until that
-        probe has spoken, so a working session never flickers the panel.
+        Availability is the wrapper plus an environment it can work in; where
+        either is missing, dashboards are told to drop the panel rather than
+        offer buttons that can never succeed. `command_enabled` is permission,
+        not availability: with it off the panel still shows and the client
+        explains why its actions are disabled, so an operator flipping the
+        flag does not make the panel itself appear and vanish. The
+        environment answer comes from probe_apps_runner() and is assumed good
+        until that probe has spoken, so a working session never flickers the
+        panel.
         """
-        if not settings.command_enabled[0]:
-            return False
         if shutil.which(APP_RUNNER) is None:
             return False
         return self._apps_runner_ok is not False

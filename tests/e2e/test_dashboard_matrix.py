@@ -125,12 +125,26 @@ def encoder_menu_button(page: Any) -> Any:
     return None
 
 
+def app_runner_stub_path() -> str:
+    """A PATH dir with a `selkies-proot` that answers `check`, so the apps
+    panel publishes while remote commands stay disabled (the default here)."""
+    stub_dir = os.path.join(H.WORKDIR, "dash-cmd-stub")
+    os.makedirs(stub_dir, exist_ok=True)
+    stub = os.path.join(stub_dir, "selkies-proot")
+    with open(stub, "w") as fh:
+        fh.write('#!/bin/sh\n[ "$1" = check ] && exit 0\nexit 1\n')
+    os.chmod(stub, 0o755)
+    return stub_dir
+
+
 def wish_block(cell: str) -> "H.Results":
     """One Wish cell: stream, clipboard panel both ways, settings applied
     server-side, apps panel, gamepad card."""
     mode, wayland = cell_parts(cell)
     res = H.Results(cell)
-    H.server_start(mode=mode, wayland=wayland, web_root=H.WISH_DIST)
+    H.server_start(mode=mode, wayland=wayland, web_root=H.WISH_DIST,
+                   extra_env={"PATH": app_runner_stub_path() + os.pathsep
+                              + os.environ.get("PATH", "")})
     with sync_playwright() as pw:
         browser = C.chromium_launch(pw)
         ctx = browser.new_context(viewport={"width": 1440, "height": 900}, device_scale_factor=1)
