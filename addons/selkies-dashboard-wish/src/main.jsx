@@ -12,8 +12,8 @@
  * `window.__SELKIES_DUAL_MODE__`, waits for the runtime-served core script to
  * expose `window.selkiesCoreInitialize` and starts it, then mounts the
  * dashboard: the full `App` under `#root` for the primary display, only the
- * floating gamepad button for the `#player2`..`#player4` hashes, and nothing
- * for `#shared`.
+ * floating gamepad button for the `#player2`..`#player4` hashes, and the same
+ * button once touch is detected for `#shared`.
  * @module
  */
 import React from 'react';
@@ -107,16 +107,14 @@ const playerClientModes = ['#player2', '#player3', '#player4'];
       console.error("CRITICAL: Dashboard mount point #root not found. Primary dashboard will not render.");
     }
   } else {
-    console.log(`Dashboard UI rendering skipped for mode: ${currentHash}`);
-    if (playerClientModes.includes(currentHash)) {
-      const playerUIRootElement = document.createElement('div');
-      playerUIRootElement.id = 'player-ui-root';
-      document.body.appendChild(playerUIRootElement);
-      ReactDOM.createRoot(playerUIRootElement).render(
-        <React.StrictMode>
-          <PlayerGamepadButton />
-        </React.StrictMode>,
-      );
-    }
+    console.log(`Dashboard UI rendering skipped for mode: ${currentHash}; mounting the touch gamepad toggle.`);
+    const playerUIRootElement = document.createElement('div');
+    playerUIRootElement.id = 'player-ui-root';
+    document.body.appendChild(playerUIRootElement);
+    ReactDOM.createRoot(playerUIRootElement).render(
+      <React.StrictMode>
+        <PlayerGamepadButton touchOnly={!playerClientModes.includes(currentHash)} />
+      </React.StrictMode>,
+    );
   }
 })();

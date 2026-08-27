@@ -24,7 +24,9 @@
  * @module
  */
 
-import { getRoutePrefix, getStorageAppName } from "../../selkies-web-core/lib/util.js";
+import { getRoutePrefix, getStorageAppName, isMobileClient } from "../../selkies-web-core/lib/util.js";
+
+export { isMobileClient };
 
 export { getRoutePrefix, getStorageAppName };
 
@@ -57,15 +59,6 @@ export const isSecondaryDisplay = displayId === 'display2';
  */
 export const isViewerUrlMode =
   urlHash.toLowerCase().startsWith('#shared') || /^#player[234]$/.test(urlHash.toLowerCase());
-
-/**
- * Whether this is a mobile browser; the form factor is fixed for the life of
- * the document, so it is resolved once and available to the first render.
- */
-export const isMobileClient = typeof window !== 'undefined' && !!(
-  (navigator as any).userAgentData?.mobile ||
-  /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
-);
 
 const storageAppName = getStorageAppName();
 

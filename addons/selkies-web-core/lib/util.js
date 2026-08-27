@@ -138,3 +138,14 @@ export function getStorageAppName() {
     const urlForKey = window.location.origin + window.location.pathname;
     return urlForKey.replace(/[^a-zA-Z0-9._-]/g, '_');
 }
+
+/**
+ * Whether this is a mobile browser, by the UA client hint when present and
+ * the user-agent string otherwise. The form factor is fixed for the life of
+ * the document, so it is resolved once and available to every first render.
+ * @type {boolean}
+ */
+export const isMobileClient =
+    typeof window !== 'undefined' &&
+    !!((navigator.userAgentData && navigator.userAgentData.mobile) ||
+        /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));

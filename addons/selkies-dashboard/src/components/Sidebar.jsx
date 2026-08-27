@@ -50,12 +50,13 @@
  * @module
  */
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
-import { displayLabel, decodableEncoders, getRoutePrefix, getStorageAppName } from "../../../selkies-web-core/lib/util.js";
+import { displayLabel, decodableEncoders, getRoutePrefix, getStorageAppName, isMobileClient } from "../../../selkies-web-core/lib/util.js";
 import { withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
+import PlayerGamepadButton from "./PlayerGamepadButton.jsx";
 import { getTranslator } from "../translations";
 import {
   APP_COMMAND_STATE_EVENT,
@@ -143,13 +144,6 @@ const BROWSER_LANG_TAG =
   (typeof navigator !== "undefined" &&
     (navigator.language || navigator.userLanguage)) || "en";
 const BROWSER_PRIMARY_LANG = BROWSER_LANG_TAG.split("-")[0].toLowerCase();
-
-const IS_MOBILE_CLIENT =
-  typeof window !== "undefined" &&
-  !!((navigator.userAgentData && navigator.userAgentData.mobile) ||
-    /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-      navigator.userAgent
-    ));
 
 /**
  * The `scaling_dpi` default derived from the local display scaling
@@ -894,7 +888,9 @@ function Sidebar() {
   const [isGamingMode, setIsGamingMode] = useState(false);
   /**
    * Viewer-designated clients (shared/player URL modes, or a server-assigned
-   * viewer role) get no server-wide controls such as the transport switch.
+   * viewer role) get no server-wide controls such as the transport switch,
+   * and no keyboard pop: whether the token grants keyboard input is not known
+   * on this side, so the touch affordance for them is the gamepad toggle alone.
    */
   const [isViewerRole, setIsViewerRole] = useState(() => {
     const h = (typeof window !== "undefined" ? window.location.hash : "").toLowerCase();
@@ -935,7 +931,7 @@ function Sidebar() {
     return () => document.removeEventListener("fullscreenchange", foldOnFullscreen);
   }, []);
   const currentDeviceDpi = DEVICE_DPI;
-  const isMobile = IS_MOBILE_CLIENT;
+  const isMobile = isMobileClient;
   const [isTrackpadModeActive, setIsTrackpadModeActive] = useState(false);
   const [hasDetectedTouch, setHasDetectedTouch] = useState(false);
   const [heldKeys, setHeldKeys] = useState({
@@ -1367,7 +1363,7 @@ function Sidebar() {
     stats: false,
     clipboard: false,
     // A phone lands on gamepads: the reason to open the dashboard on touch at all.
-    gamepads: IS_MOBILE_CLIENT,
+    gamepads: isMobileClient,
     files: false,
     apps: false,
     sharing: false,
@@ -4748,7 +4744,10 @@ function Sidebar() {
           commandsKnown={serverSettings != null} />
       )}
 
-      {(isMobile || hasDetectedTouch) && isKeyboardButtonVisible && (renderableSettings.keyboardButton ?? true) && (
+      {isViewerRole && (
+        <PlayerGamepadButton touchOnly isActive={isTouchGamepadActive} onToggle={handleToggleTouchGamepad} />
+      )}
+      {!isViewerRole && (isMobile || hasDetectedTouch) && isKeyboardButtonVisible && (renderableSettings.keyboardButton ?? true) && (
         <button
           className={`virtual-keyboard-button theme-${theme} allow-native-input`}
           onClick={onKeyboardButtonClick}

@@ -8,6 +8,7 @@ import React, { useState } from 'react';
 import ReactDOM from 'react-dom';
 import { TopMenu } from './dashboard/top-menu';
 import { Gamepad } from './dashboard/gamepad';
+import PlayerGamepadButton from './dashboard/PlayerGamepadButton';
 import { TooltipProvider } from './ui/tooltip';
 import { isSecondaryDisplay, isViewerUrlMode, getLastServerSettings } from '../utils';
 import '../styles/Overlay.css';
@@ -21,7 +22,8 @@ import '../styles/Overlay.css';
  * `pipelineControl` or `gamepadControl` request is posted to `window`, and
  * `pipelineStatusUpdate` / `sidebarButtonStatusUpdate` flip the state once
  * whichever core is active has applied the change. Also listens for
- * `clientRoleUpdate` (viewers get no control UI), `serverSettings`
+ * `clientRoleUpdate` (viewers get no control UI, only the floating
+ * touch-gamepad toggle on a touch client), `serverSettings`
  * (`ui_show_sidebar` hides the whole chrome, `ui_sidebar_show_gamepads` the
  * card alone), and the core-owned hotkey messages `toggleDashboard` and
  * `toggleTouchGamepad`. The touch overlay is driven with
@@ -199,6 +201,10 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
             onToggleTouchGamepad={handleToggleTouchGamepad}
             toggleStats={() => setShowStats(false)}
           />
+        )}
+
+        {isViewer && (
+          <PlayerGamepadButton touchOnly isActive={isTouchGamepadActive} onToggle={handleToggleTouchGamepad} />
         )}
 
         {/* Input is owned by the primary display, so the card follows the

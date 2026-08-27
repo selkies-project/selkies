@@ -12,10 +12,11 @@
  * `window.__SELKIES_DUAL_MODE__`, then loads selkies-core with
  * `window.__SELKIES_DEFER_INITIALIZATION` set and starts it through
  * `window.selkiesCoreInitialize()` so the core comes up in the detected mode.
- * The `#shared` and `#player2` to `#player4` hashes render no dashboard; the
- * player hashes mount only the floating touch-gamepad toggle. The touch
- * gamepad is bundled straight from the universal-touch-gamepad addon, so a
- * fresh checkout builds without a vendored copy.
+ * The `#shared` and `#player2` to `#player4` hashes render no dashboard and
+ * mount only the floating touch-gamepad toggle: always for the player slots,
+ * and once touch is detected for the shared viewer. The touch gamepad is
+ * bundled straight from the universal-touch-gamepad addon, so a fresh
+ * checkout builds without a vendored copy.
  * @module
  */
 import React from 'react';
@@ -84,17 +85,14 @@ const playerClientModes = ['#player2', '#player3', '#player4'];
       console.error("CRITICAL: Dashboard mount point #root not found. Primary dashboard will not render.");
     }
   } else {
-    console.log(`Dashboard UI rendering skipped for mode: ${currentHash}`);
-    if (playerClientModes.includes(currentHash)) {
-      console.log(`Player client mode detected. Initializing gamepad button UI for ${currentHash}.`);
-      const playerUIRootElement = document.createElement('div');
-      playerUIRootElement.id = 'player-ui-root';
-      document.body.appendChild(playerUIRootElement);
-      ReactDOM.createRoot(playerUIRootElement).render(
-        <React.StrictMode>
-          <PlayerGamepadButton />
-        </React.StrictMode>,
-      );
-    }
+    console.log(`Dashboard UI rendering skipped for mode: ${currentHash}; mounting the touch gamepad toggle.`);
+    const playerUIRootElement = document.createElement('div');
+    playerUIRootElement.id = 'player-ui-root';
+    document.body.appendChild(playerUIRootElement);
+    ReactDOM.createRoot(playerUIRootElement).render(
+      <React.StrictMode>
+        <PlayerGamepadButton touchOnly={!playerClientModes.includes(currentHash)} />
+      </React.StrictMode>,
+    );
   }
 })();

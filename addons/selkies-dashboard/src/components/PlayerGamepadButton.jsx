@@ -10,6 +10,7 @@
  */
 import React from "react";
 import { getTranslator } from "../translations";
+import { isMobileClient } from "../../../selkies-web-core/lib/util.js";
 
 /** Id of the element the touch gamepad overlay is mounted in. */
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
@@ -27,18 +28,39 @@ const GamepadIcon = () => (
 );
 
 /**
- * Draggable button that shows and hides the touch gamepad for the `#player2`
- * to `#player4` clients, which render no dashboard.
+ * Draggable button that shows and hides the touch gamepad for every client
+ * that is not the primary controller: the `#player2` to `#player4` and
+ * `#shared` hashes, which render no dashboard, and a token-authenticated
+ * viewer, whose sidebar is withdrawn once the server assigns the role.
  *
- * Always visible rather than gated on touch detection: these slots exist to
- * contribute gamepad input, so the toggle must be reachable on any device.
- * The first activation posts `TOUCH_GAMEPAD_SETUP` to the window, later
- * toggles post `TOUCH_GAMEPAD_VISIBILITY`; a press that travels further than
+ * The player slots exist to contribute gamepad input, so their toggle stays
+ * reachable on any device; a shared viewer only sees it once the client
+ * looks like a touch device (`touchOnly`: a mobile user agent or a first
+ * `touchstart`), the same gate the sidebar applies to its own touch tiles.
+ * Uncontrolled, the button owns the overlay state: the first activation posts
+ * `TOUCH_GAMEPAD_SETUP` to the window, later toggles post
+ * `TOUCH_GAMEPAD_VISIBILITY`. A host that already owns that state (the
+ * sidebar, whose Ctrl+Shift+G handler must agree with the button) passes
+ * `isActive` and `onToggle` instead. A press that travels further than
  * `DRAG_THRESHOLD` moves the button instead of toggling.
+ * @param {object} props
+ * @param {boolean} [props.touchOnly=false] Render only on a mobile or touch-detected client.
+ * @param {boolean} [props.isActive] Overlay state when controlled by the host.
+ * @param {() => void} [props.onToggle] Host toggle, replacing the internal one.
  */
-function PlayerGamepadButton() {
-    const [isTouchGamepadActive, setIsTouchGamepadActive] = React.useState(false);
+function PlayerGamepadButton({ touchOnly = false, isActive, onToggle }) {
+    const [ownActive, setOwnActive] = React.useState(false);
     const [isTouchGamepadSetup, setIsTouchGamepadSetup] = React.useState(false);
+    const [hasDetectedTouch, setHasDetectedTouch] = React.useState(isMobileClient);
+    const isControlled = typeof onToggle === "function";
+    const isTouchGamepadActive = isControlled ? !!isActive : ownActive;
+
+    React.useEffect(() => {
+        if (hasDetectedTouch) return undefined;
+        const detectTouch = () => setHasDetectedTouch(true);
+        window.addEventListener("touchstart", detectTouch, { once: true, passive: true });
+        return () => window.removeEventListener("touchstart", detectTouch);
+    }, [hasDetectedTouch]);
 
     const [buttonPosition, setButtonPosition] = React.useState({ bottom: 20, right: 20 });
     const dragInfo = React.useRef({
@@ -52,8 +74,12 @@ function PlayerGamepadButton() {
     });
 
     const handleToggleTouchGamepad = React.useCallback(() => {
+        if (isControlled) {
+            onToggle();
+            return;
+        }
         const newActiveState = !isTouchGamepadActive;
-        setIsTouchGamepadActive(newActiveState);
+        setOwnActive(newActiveState);
 
         if (newActiveState && !isTouchGamepadSetup) {
             window.postMessage({
@@ -67,7 +93,7 @@ function PlayerGamepadButton() {
                 payload: { visible: newActiveState, targetDivId: TOUCH_GAMEPAD_HOST_DIV_ID },
             }, window.location.origin);
         }
-    }, [isTouchGamepadActive, isTouchGamepadSetup]);
+    }, [isControlled, onToggle, isTouchGamepadActive, isTouchGamepadSetup]);
 
     const handlePointerDown = (e) => {
         dragInfo.current = {
@@ -117,6 +143,8 @@ function PlayerGamepadButton() {
         }
         handleToggleTouchGamepad();
     };
+
+    if (touchOnly && !hasDetectedTouch) return null;
 
     const title = t(isTouchGamepadActive
         ? "sections.gamepads.touchDisableTitle"

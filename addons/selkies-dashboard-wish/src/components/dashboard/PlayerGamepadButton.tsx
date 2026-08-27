@@ -6,14 +6,27 @@
 
 import React from "react";
 import { t } from "@/i18n";
+import { isMobileClient } from "@/utils";
 
 /**
- * The floating, draggable touch-gamepad toggle for the `#player2` to
- * `#player4` clients, which render no dashboard. It drives the touch overlay
- * with the same `TOUCH_GAMEPAD_SETUP` and `TOUCH_GAMEPAD_VISIBILITY` messages
- * DashboardOverlay posts on the primary display.
+ * The floating, draggable touch-gamepad toggle for every client that is not
+ * the primary controller: the `#player2` to `#player4` and `#shared` hashes,
+ * which render no dashboard, and a token-authenticated viewer, whose menu
+ * DashboardOverlay withdraws. Uncontrolled it drives the touch overlay with
+ * the same `TOUCH_GAMEPAD_SETUP` and `TOUCH_GAMEPAD_VISIBILITY` messages
+ * DashboardOverlay posts on the primary display; controlled, the overlay
+ * keeps that state so the Ctrl+Shift+G hotkey and the button agree.
  * @module
  */
+
+interface PlayerGamepadButtonProps {
+    /** Render only on a mobile or touch-detected client. */
+    touchOnly?: boolean;
+    /** Overlay state when controlled by the host. */
+    isActive?: boolean;
+    /** Host toggle, replacing the internal one. */
+    onToggle?: () => void;
+}
 
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
 /** Pointer travel in pixels before a press counts as a drag rather than a click. */
@@ -26,14 +39,29 @@ const GamepadIcon = () => (
 );
 
 /**
- * Renders the toggle. Always visible: these slots exist to contribute
- * gamepad input, so the toggle must be reachable on any device without
- * depending on touch detection. The title names the action a click performs,
- * with the same wording as the classic sidebar's touch-gamepad button.
+ * Renders the toggle. The player slots exist to contribute gamepad input, so
+ * their toggle is reachable on any device; a shared viewer only sees it once
+ * the client looks like a touch device (`touchOnly`: a mobile user agent or
+ * a first `touchstart`), the same gate the top menu applies to its touch
+ * entries. The title names the action a click performs, with the same
+ * wording as the classic sidebar's touch-gamepad button.
+ * @param touchOnly Render only on a mobile or touch-detected client.
+ * @param isActive Overlay state when controlled by the host.
+ * @param onToggle Host toggle, replacing the internal one.
  */
-export default function PlayerGamepadButton() {
-    const [isTouchGamepadActive, setIsTouchGamepadActive] = React.useState(false);
+export default function PlayerGamepadButton({ touchOnly = false, isActive, onToggle }: PlayerGamepadButtonProps) {
+    const [ownActive, setOwnActive] = React.useState(false);
     const [isTouchGamepadSetup, setIsTouchGamepadSetup] = React.useState(false);
+    const [hasDetectedTouch, setHasDetectedTouch] = React.useState(isMobileClient);
+    const isControlled = typeof onToggle === "function";
+    const isTouchGamepadActive = isControlled ? !!isActive : ownActive;
+
+    React.useEffect(() => {
+        if (hasDetectedTouch) return undefined;
+        const detectTouch = () => setHasDetectedTouch(true);
+        window.addEventListener("touchstart", detectTouch, { once: true, passive: true });
+        return () => window.removeEventListener("touchstart", detectTouch);
+    }, [hasDetectedTouch]);
 
     const [buttonPosition, setButtonPosition] = React.useState({ bottom: 20, right: 20 });
     const dragInfo = React.useRef({
@@ -47,8 +75,12 @@ export default function PlayerGamepadButton() {
     });
 
     const handleToggleTouchGamepad = React.useCallback(() => {
+        if (isControlled) {
+            onToggle();
+            return;
+        }
         const newActiveState = !isTouchGamepadActive;
-        setIsTouchGamepadActive(newActiveState);
+        setOwnActive(newActiveState);
 
         if (newActiveState && !isTouchGamepadSetup) {
             window.postMessage({
@@ -62,7 +94,7 @@ export default function PlayerGamepadButton() {
                 payload: { visible: newActiveState, targetDivId: TOUCH_GAMEPAD_HOST_DIV_ID },
             }, window.location.origin);
         }
-    }, [isTouchGamepadActive, isTouchGamepadSetup]);
+    }, [isControlled, onToggle, isTouchGamepadActive, isTouchGamepadSetup]);
 
     const handlePointerDown = (e: React.PointerEvent) => {
         dragInfo.current = {
@@ -113,6 +145,8 @@ export default function PlayerGamepadButton() {
         }
         handleToggleTouchGamepad();
     };
+
+    if (touchOnly && !hasDetectedTouch) return null;
 
     const title = t(isTouchGamepadActive
         ? "sections.gamepads.touchDisableTitle"
