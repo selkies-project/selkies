@@ -148,7 +148,7 @@ export const Sharing = ({ show }: SharingProps) => {
 						const fullUrl = `${baseUrl}${link.hash}`;
 						return (
 							<div key={link.id} className="flex flex-col items-start justify-between bg-muted/60 rounded-md p-3 gap-2 shadow-sm">
-								<span className="font-medium text-xs text-foreground text-left w-full">{link.label}</span>
+								<span className="font-semibold text-xs text-foreground text-left w-full">{link.label}</span>
 								<Badge variant="green" className="text-[10px] px-2 py-0.5 mb-1">{link.badge}</Badge>
 								<div className="flex w-full justify-end">
 									<Button

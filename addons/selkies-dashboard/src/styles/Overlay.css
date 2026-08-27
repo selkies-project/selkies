@@ -846,7 +846,7 @@ body {
 /* Message displayed when no gamepads are detected. */
 .no-gamepads-message {
     font-style: italic;
-    color: var(--text-muted);
+    color: var(--text);
     text-align: center;
     margin-top: 10px;
     font-size: 14px;
@@ -979,7 +979,7 @@ body {
 /* Notice style used in Audio Settings (e.g., device support). */
 .device-support-notice {
     font-size: 13px;
-    color: var(--text-muted);
+    color: var(--text);
     margin-top: 5px;
     margin-bottom: 0;
     text-align: center;
@@ -1089,7 +1089,7 @@ body {
 
 .notification-status-text {
     font-size: 13px;
-    color: var(--text-muted);
+    color: var(--text);
 }
 
 .notification-progress-bar-outer {
@@ -1472,7 +1472,7 @@ a.cite-link:active {
 .app-detail-description {
     font-size: 14px;
     line-height: 1.6;
-    color: var(--text-muted);
+    color: var(--text);
     margin-bottom: 20px;
     max-width: 600px;
 }
@@ -1575,9 +1575,9 @@ a.cite-link:active {
 }
 
 .sharing-link-label {
-    font-weight: 500;
+    font-weight: 600;
     font-size: 13px;
-    color: var(--text-muted);
+    color: var(--text);
 }
 
 .sharing-link-actions {
