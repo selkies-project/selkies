@@ -108,7 +108,7 @@ ENCODER_JS = """
 
 
 def open_client(pw, fail_mode: str = "none", seed_preference: bool = False,
-                encoder: Optional[str] = None):
+                encoder: Optional[str] = None, query: str = ""):
     """Launch Chromium with the decode-failure shim installed.
 
     Args:
@@ -116,6 +116,7 @@ def open_client(pw, fail_mode: str = "none", seed_preference: bool = False,
         fail_mode: ``none``, ``hardware``, or ``all`` decode failure injection.
         seed_preference: Pre-store the software-decode preference key.
         encoder: Optional encoder to pin in localStorage before load.
+        query: Optional query string appended to the stream URL.
 
     Returns:
         Tuple of (browser, page) with the stream page loaded.
@@ -130,7 +131,7 @@ def open_client(pw, fail_mode: str = "none", seed_preference: bool = False,
         ctx.add_init_script(ENCODER_JS % encoder)
     ctx.add_init_script(shim_js(fail_mode))
     page = ctx.new_page()
-    page.goto(H.BASE_URL + "/", wait_until="load")
+    page.goto(H.BASE_URL + "/" + (f"?{query}" if query else ""), wait_until="load")
     return browser, page
 
 
@@ -279,13 +280,18 @@ def block_healthy(r: "H.Results") -> None:
 def block_striped(r: "H.Results") -> None:
     """The striped encoder runs a decoder per stripe and they fail together, so
     the errors still in flight when the switch happens must not reach the
-    ladder."""
+    ladder.
+
+    The failure shim only reaches page-scope decoders, so the video worker is
+    disabled with its own escape hatch and the page striped ladder — still the
+    fallback whenever the worker cannot divert — is what is exercised."""
     from playwright.sync_api import sync_playwright
     H.server_start(mode="websockets")
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, fail_mode="hardware",
-                                        encoder="h264enc-striped")
+                                        encoder="h264enc-striped",
+                                        query="offscreen_worker=false")
             try:
                 state = wait_for(page, lambda s: s["decoded"] > 0
                                  and "prefer-software" in s["cfgs"], timeout=40)

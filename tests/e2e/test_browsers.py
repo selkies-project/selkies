@@ -227,6 +227,69 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
     return res
 
 
+def striped_block(engine: str) -> "H.Results":
+    """The striped encoder on one engine: the video worker decodes, composites
+    and presents it off the page where the engine allows.
+
+    chromium and firefox take the divert (fps counts the worker's composites,
+    the worker canvas is the visible sink). Playwright's WebKit claims support
+    for striped decoder configs but every decode fails (`EncodingError`), in
+    the worker and on the page ladder alike and unchanged from before the
+    divert, leaving its software-decode retry cycling; so there the checks
+    stop at the wire flowing without page errors, and real Safari cannot be
+    exercised in this harness.
+    """
+    tag = f"{engine}-striped"
+    res = H.Results(tag)
+    H.server_start(mode="websockets", wayland=False,
+                   extra_env={"SELKIES_ENCODER": "h264enc-striped"})
+    with sync_playwright() as p:
+        browser, ctx = engine_launch(p, engine)
+        ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+        page = ctx.pages[0] if (engine == "firefox" and ctx.pages) else ctx.new_page()
+        page_errors = []
+        page.on("pageerror", lambda e: page_errors.append(str(e)))
+        page.goto(H.BASE_URL, wait_until="load")
+        time.sleep(12.0)
+        try:
+            state = page.evaluate("""({
+              divert: !!window.videoDivertOn,
+              rows: Object.keys(window.videoStripeRows || {}).length,
+              chunks: window.videoChunksReceived || 0,
+              fps: window.fps || 0,
+              enc: window.encoder,
+              workerCanvas: (() => {
+                const c = document.getElementById('videoWorkerCanvas');
+                return c ? {w: c.width, shown: c.style.display !== 'none'} : null;
+              })(),
+              mainShown: (() => {
+                const c = document.getElementById('videoCanvas');
+                return c ? c.style.display !== 'none' : null;
+              })(),
+            })""")
+            res.check("striped stream reaches the client",
+                      state["enc"] == "h264enc-striped" and state["chunks"] > 0, state)
+            if engine == "webkit":
+                res.skip("worker decode assertions",
+                         "Playwright WebKit fails decoding stripe streams outright")
+            else:
+                res.check("the video worker takes the striped divert",
+                          state["divert"] and state["rows"] > 1, state)
+                res.check("the worker presents (fps counts its composites)",
+                          state["fps"] > 0, state)
+                res.check("the worker canvas is the visible sink",
+                          bool(state["workerCanvas"]) and state["workerCanvas"]["shown"]
+                          and state["workerCanvas"]["w"] >= 640 and not state["mainShown"], state)
+            res.check("no page errors", not page_errors, "; ".join(page_errors)[:160])
+        finally:
+            if browser:
+                browser.close()
+            else:
+                ctx.close()
+    res.summary()
+    return res
+
+
 def main() -> None:
     """Run the engine blocks named on argv (default: all available)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -238,6 +301,10 @@ def main() -> None:
             blocks.append(engine_block("firefox", "websockets"))
         if which in ("all", "webkit-ws"):
             blocks.append(engine_block("webkit", "websockets"))
+        if which in ("all", "striped"):
+            blocks.append(striped_block("chromium"))
+            blocks.append(striped_block("firefox"))
+            blocks.append(striped_block("webkit"))
         if which in ("all", "chromium-wr"):
             blocks.append(engine_block("chromium", "webrtc"))
         if which in ("all", "firefox-wr"):

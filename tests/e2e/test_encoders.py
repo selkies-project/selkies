@@ -45,22 +45,38 @@ INSIDE, OUTSIDE = (250, 200), (900, 600)
 
 # Every 0x04 frame on the WebSocket carries its stripe's Y start and height in
 # the header; a striped stream has several starts, a full-frame one only 0.
+# Undiverted frames are read off the worker-socket handle (and a plain page
+# socket, should the worker fall back); frames diverted straight to the video
+# worker never surface here and are reported by window.videoStripeRows instead.
 STRIPE_TAP = """
 (() => {
   window.__stripes = {};
+  const tap = (e) => {
+    if (!(e.data instanceof ArrayBuffer) || e.data.byteLength < 10) return;
+    const v = new DataView(e.data);
+    if (v.getUint8(0) !== 0x04) return;
+    window.__stripes[v.getUint16(4, false)] = v.getUint16(8, false);
+  };
   const WS = window.WebSocket;
   window.WebSocket = function(...a) {
     const s = a.length === 1 ? new WS(a[0]) : new WS(a[0], a[1]);
-    s.addEventListener('message', (e) => {
-      if (!(e.data instanceof ArrayBuffer) || e.data.byteLength < 10) return;
-      const v = new DataView(e.data);
-      if (v.getUint8(0) !== 0x04) return;
-      window.__stripes[v.getUint16(4, false)] = v.getUint16(8, false);
-    });
+    s.addEventListener('message', tap);
     return s;
   };
   window.WebSocket.prototype = WS.prototype;
   Object.setPrototypeOf(window.WebSocket, WS);
+  let transport = null;
+  Object.defineProperty(window, 'selkiesTransport', {
+    configurable: true,
+    get: () => transport,
+    set: (v) => {
+      transport = v;
+      if (v && v.addEventListener && !v.__stripeTapped) {
+        v.__stripeTapped = true;
+        v.addEventListener('message', tap);
+      }
+    },
+  });
 })();
 """
 
@@ -130,8 +146,12 @@ class Picture:
             self.handle.close()
         self.handle = None
 
-    def sample(self, page: Any) -> Optional[dict]:
+    @staticmethod
+    def sample_page(page: Any) -> Optional[dict]:
         return page.evaluate(SAMPLE_JS, [*INSIDE, *OUTSIDE])
+
+    def sample(self, page: Any) -> Optional[dict]:
+        return Picture.sample_page(page)
 
     def matches(self, sample: Optional[dict]) -> bool:
         if not sample:
@@ -165,9 +185,28 @@ def wait_video(page: Any, mode: str) -> Optional[dict]:
     return C.wait_ws_video(page, timeout=30) if mode == "websockets" else C.wait_wr_video(page)
 
 
+def wait_divert(page: Any, want: bool, timeout: float = 15) -> dict:
+    """Poll the divert state the core publishes until it matches, or time out."""
+    deadline = time.time() + timeout
+    state = {}
+    while time.time() < deadline:
+        state = page.evaluate("""({
+          on: !!window.videoDivertOn,
+          rows: Object.keys(window.videoStripeRows || {}).length,
+          fps: window.fps || 0,
+        })""")
+        if state["on"] == want and (not want or state["rows"] > 0):
+            return state
+        time.sleep(0.5)
+    return state
+
+
 def stripes(page: Any) -> dict:
-    """Stripe Y start -> height seen on the wire so far."""
-    return {int(k): v for k, v in page.evaluate("window.__stripes").items()}
+    """Stripe Y start -> height seen on the wire so far: the page tap merged
+    with the row layout the video worker reports while the divert holds."""
+    seen = page.evaluate(
+        "Object.assign({}, window.videoStripeRows || {}, window.__stripes)")
+    return {int(k): v for k, v in seen.items()}
 
 
 def wait_stripes(page: Any, striped: bool, timeout: float = 15) -> dict:
@@ -175,8 +214,8 @@ def wait_stripes(page: Any, striped: bool, timeout: float = 15) -> dict:
     deadline = time.time() + timeout
     seen = {}
     while time.time() < deadline:
-        page.evaluate("window.__stripes = {}")
-        time.sleep(1.0)
+        page.evaluate("window.__stripes = {}; window.videoStripeRows = {};")
+        time.sleep(1.2)
         seen = stripes(page)
         if seen and (len(seen) > 1) == striped:
             return seen
@@ -240,6 +279,21 @@ def block_striped(mode: str, wayland: bool, res: "H.Results") -> None:
                     res.check("striped: several H.264 stripes per frame on the wire",
                               video and is_striped(seen, video["h"]), seen)
                     res.check("striped: encoded in software", cpu_encoder(line), encoder_field(line))
+                    divert = wait_divert(page, True)
+                    res.check("striped: the video worker decodes and presents it",
+                              divert["on"] and divert["rows"] > 1 and divert["fps"] > 0, divert)
+                    page.evaluate("window.__stripes = {}")
+                    time.sleep(1.5)
+                    leaked = page.evaluate("Object.keys(window.__stripes).length")
+                    res.check("striped: no stripe reaches the page while diverted", leaked == 0, leaked)
+                    vpage = C.new_page(page.context, url_hash="#shared")
+                    time.sleep(6.0)
+                    vinfo = C.wait_ws_video(vpage, timeout=20)
+                    res.check("striped: a shared viewer gets the stream", vinfo is not None, vinfo)
+                    vsample = Picture.sample_page(vpage)
+                    res.check("striped: the shared picture decodes at inferred geometry",
+                              vsample is not None and near(vsample["inside"], PAINT), vsample)
+                    vpage.close()
                 else:
                     res.check("striped: refused for WebRTC, h264enc used instead",
                               C.wait_log("not available for WebRTC", timeout=5)
@@ -311,6 +365,20 @@ def block_switch(mode: str, wayland: bool, res: "H.Results") -> None:
                 res.check("switch: stripes on the wire after the switch", video and is_striped(seen, video["h"]), seen)
                 sample = picture.wait(page)
                 res.check("switch: the picture decodes striped", picture.matches(sample), sample)
+                divert = wait_divert(page, True)
+                res.check("switch: the striped stream diverts to the video worker",
+                          divert["on"] and divert["rows"] > 1, divert)
+                before = H.server_log().count("Stream settings active")
+                page.select_option("#encoderSelect", "jpeg")
+                line = wait_stream_line(before)
+                res.check("switch: capture restarted on jpeg", bool(line), encoder_field(line))
+                seen = wait_stripes(page, striped=True)
+                res.check("switch: jpeg stripes on the wire", video and is_striped(seen, video["h"]), seen)
+                divert = wait_divert(page, True)
+                res.check("switch: jpeg decodes in the video worker",
+                          divert["on"] and divert["rows"] > 1, divert)
+                sample = picture.wait(page)
+                res.check("switch: the picture decodes as jpeg", picture.matches(sample), sample)
                 before = H.server_log().count("Stream settings active")
                 page.select_option("#encoderSelect", "h264enc")
                 line = wait_stream_line(before)
