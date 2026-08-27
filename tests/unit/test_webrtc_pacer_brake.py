@@ -82,8 +82,10 @@ async def main_async(res: H.Results) -> None:
                   pacer._pace_bps == 4_000_000 - 500_000
                   and pacer._pace_bps < before,
                   pacer._pace_bps)
-        res.check("that brake re-arms the hold",
-                  pacer._brake_hold_until > time.monotonic(), "")
+        now = time.monotonic()
+        res.check("that brake re-arms the hold for BRAKE_HOLD_S",
+                  now < pacer._brake_hold_until <= now + BRAKE_HOLD_S,
+                  pacer._brake_hold_until - now)
     finally:
         await pacer.close()
 
