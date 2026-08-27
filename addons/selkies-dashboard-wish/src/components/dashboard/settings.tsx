@@ -294,7 +294,7 @@ export function Settings() {
      * (client choice, else the server's) feed the rate-control default.
      */
     const conditionalCtx = {
-        manualActive: !!readStored("manual_width") || serverSettings?.is_manual_resolution_mode?.value === true,
+        manualActive: !!readStored("manual_width") || serverSettings?.manual_resolution?.value === true,
         streamMode,
         activeEncoder: readStored("encoder") || encoder,
         softwareH264Encoder: serverSettings?.software_h264_encoder?.value,
@@ -1119,7 +1119,7 @@ export function Settings() {
                             </>
                         )}
 
-                        {!serverSettings?.is_manual_resolution_mode?.locked && (
+                        {!serverSettings?.manual_resolution?.locked && (
                             <>
                                 <div className="space-y-2">
                                     <label className="text-sm font-medium">{tl('sections.screen.presetLabel')}</label>

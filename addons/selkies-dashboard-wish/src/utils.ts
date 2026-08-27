@@ -40,7 +40,7 @@ const PER_DISPLAY_SETTINGS = [
   'framerate', 'video_crf', 'video_fullcolor',
   'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
   'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
-  'is_manual_resolution_mode', 'manual_width', 'manual_height',
+  'manual_resolution', 'manual_width', 'manual_height',
   'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
   'video_bitrate', 'force_aligned_resolution',
 ];

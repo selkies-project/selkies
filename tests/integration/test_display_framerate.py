@@ -22,7 +22,7 @@ def _settings(display_id: str, **over) -> dict:
     """
     base = {
         "displayId": display_id, "initialClientWidth": 1280, "initialClientHeight": 720,
-        "is_manual_resolution_mode": False, "encoder": "h264enc",
+        "manual_resolution": False, "encoder": "h264enc",
         "video_crf": 25, "video_bitrate": 6000, "audio_bitrate": 128000,
         "scaling_dpi": 96, "displayPosition": "right",
     }

@@ -123,7 +123,7 @@ async def stream_over_unix(seconds: float = 8.0) -> dict:
     display's settings and count the video frames that come back."""
     out = {"mode": None, "video_frames": 0, "error": None}
     settings = {"displayId": "primary", "initialClientWidth": 1280, "initialClientHeight": 720,
-                "is_manual_resolution_mode": False, "framerate": 60, "encoder": "h264enc",
+                "manual_resolution": False, "framerate": 60, "encoder": "h264enc",
                 "video_crf": 25, "video_bitrate": 6000, "audio_bitrate": 128000,
                 "scaling_dpi": 96, "displayPosition": "right"}
     try:

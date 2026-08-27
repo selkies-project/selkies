@@ -58,6 +58,7 @@ jobs:
           pre-commit run --all-files --show-diff-on-failure ruff-check
           pre-commit run --all-files --show-diff-on-failure codespell
           pre-commit run --all-files --show-diff-on-failure settings-doc
+          pre-commit run --all-files --show-diff-on-failure file-index
       - name: Install shellcheck
         # actionlint runs shellcheck over every `run:` block, and the same
         # pinned build the shell suite gates on decides what it reports

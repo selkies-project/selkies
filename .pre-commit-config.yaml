@@ -44,3 +44,13 @@ repos:
         language: script
         pass_filenames: false
         files: ^(src/selkies/settings\.py|docs/settings\.md|scripts/generate-settings-doc\.py)$
+
+      - id: file-index
+        name: nginx fancyindex fragments
+        # The fragments are the served file index's own two halves; a change to
+        # one side without regenerating them fails here
+        entry: scripts/generate-file-index.py
+        args: [--check]
+        language: script
+        pass_filenames: false
+        files: ^(src/selkies/stream_server\.py|addons/selkies-web-core/nginx/.*\.html|scripts/generate-file-index\.py)$

@@ -59,6 +59,9 @@ services:
       SELKIES_MODE: ${SELKIES_MODE:-websockets}
       SELKIES_ENABLE_DUAL_MODE: ${SELKIES_ENABLE_DUAL_MODE:-false}
       SELKIES_PORT: ${SELKIES_PORT:-8080}
+      # One switch: Selkies mints a self-signed certificate when the configured
+      # one is absent, so nothing else has to be prepared for it
+      SELKIES_ENABLE_HTTPS: ${SELKIES_ENABLE_HTTPS:-false}
       SELKIES_ENABLE_BASIC_AUTH: ${SELKIES_ENABLE_BASIC_AUTH:-}
       SELKIES_BASIC_AUTH_USER: ${SELKIES_BASIC_AUTH_USER:-}
       SELKIES_BASIC_AUTH_PASSWORD: ${SELKIES_BASIC_AUTH_PASSWORD:-}

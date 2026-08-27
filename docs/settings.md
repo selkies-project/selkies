@@ -53,7 +53,7 @@ Every setting below is one entry of `SETTING_DEFINITIONS` in [`src/selkies/setti
 | `--audio-bitrate` | `SELKIES_AUDIO_BITRATE` | enum: one of `32000`, `48000`, `64000`, `96000`, `128000`, `192000`, `256000`, `320000`, `384000`, `510000`, or any value from 6000 to 510000 | `128000` | The default audio bitrate. |
 | `--audio-redundancy` | `SELKIES_AUDIO_REDUNDANCY` | bool | `true` | Enable Opus RED (RFC 2198) audio redundancy to cut dropouts/concealment under packet loss. On by default; carries prior frames as redundancy on WebRTC (browsers de-RED natively, plain-opus fallback for peers that decline) and, on WebSocket, is gated on every client supporting it. |
 | `--audio-redundancy-distance` | `SELKIES_AUDIO_REDUNDANCY_DISTANCE` | int, 0 to 4 | `2` | Number of prior Opus frames carried as RED redundancy when audio_redundancy is enabled (0-4; higher survives longer loss bursts at proportionally more bandwidth). |
-| `--is-manual-resolution-mode` | `SELKIES_IS_MANUAL_RESOLUTION_MODE` | bool | `false` | Lock the resolution to the manual width/height values. |
+| `--manual-resolution` | `SELKIES_MANUAL_RESOLUTION` | bool | `false` | Lock the resolution to the manual width/height values. |
 | `--manual-width` | `SELKIES_MANUAL_WIDTH` | int | `0` | Lock width to a fixed value. Setting this forces manual resolution mode. |
 | `--manual-height` | `SELKIES_MANUAL_HEIGHT` | int | `0` | Lock height to a fixed value. Setting this forces manual resolution mode. |
 | `--scaling-dpi` | `SELKIES_SCALING_DPI` | enum: one of `96`, `120`, `144`, `168`, `192`, `216`, `240`, `264`, `288` | `96` | The default DPI for UI scaling. |

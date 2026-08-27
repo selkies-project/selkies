@@ -34,7 +34,7 @@ def settings_for(display_id: str, position: str = "right") -> dict:
     """Build a jpeg-encoder SETTINGS payload for the display."""
     return {
         "displayId": display_id, "initialClientWidth": 1280, "initialClientHeight": 720,
-        "is_manual_resolution_mode": False, "framerate": 30, "encoder": "jpeg",
+        "manual_resolution": False, "framerate": 30, "encoder": "jpeg",
         "video_crf": 25, "video_bitrate": 6000, "audio_bitrate": 128000,
         "scaling_dpi": 96, "displayPosition": position,
     }

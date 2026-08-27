@@ -42,29 +42,10 @@ The Python components are responsible for the host server backend: capturing and
 
 In the default WebSocket mode, encoded screen frames, audio, input, and other data are multiplexed over WebSocket connections to a WebCodecs-based web client. In the opt-in WebRTC mode (`--mode=webrtc`), host screen video and audio are transported using the WebRTC `MediaStream` interface (through a vendored fork of [`aiortc`](https://github.com/aiortc/aiortc) under `src/selkies/webrtc/`), and other data are transported using the WebRTC `DataChannel` interface.
 
-The architecture-independent wheel is available with the name **`selkies-${SELKIES_VERSION}-py3-none-any.whl`** for download in the [Releases](https://github.com/selkies-project/selkies/releases) for the latest stable version.
+Every distribution medium carries this one application: the `.deb`, `.rpm`, `.apk` and `.pkg.tar.zst` packages install it into a private environment at `/opt/selkies`, the AppImage runs it out of a conda-forge prefix of its own, and the container images have it already. Each of them puts the `selkies`, `selkies-resize`, and `selkies-gpu-probe` commands on `PATH`. [Getting Started](start.md#quick-start) has the command for each.
 
-**Instructions from [Advanced Install](start.md#advanced-install) still apply below.**
+For the most recent unreleased commit, take the same media from the `CI` workflow run of that commit in the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions) — Build Artifacts download from the page, or through the [GitHub CLI](https://cli.github.com) command [`gh run download`](https://cli.github.com/manual/gh_run_download) — and install them exactly as the released ones. The container images need no download at all: every push republishes them as `ghcr.io/selkies-project/selkies/example:main-ubuntu26.04` and the other flavors.
 
-For the most recent unreleased commit, download the **`selkies-wheel`** artifact from the `CI` workflow run of that commit in the [GitHub Actions Workflow Runs](https://github.com/selkies-project/selkies/actions), then install it with pip (Build Artifacts can also be downloaded using the [GitHub CLI](https://cli.github.com) command [`gh run download`](https://cli.github.com/manual/gh_run_download)):
-
-```bash
-sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall selkies-0.0.0.dev0-py3-none-any.whl
-# Run the Selkies Python executable after all components are installed
-selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
-```
-
-One other alternative way to install the Python application components from the most recent unreleased commit:
-
-```bash
-git clone https://github.com/selkies-project/selkies.git
-cd selkies
-sudo PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --force-reinstall .
-# Run the Selkies Python executable after all components are installed
-selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
-```
-
-Installing the wheel also installs the `selkies`, `selkies-resize`, and `selkies-gpu-probe` console commands.
 
 #### Web Client
 
@@ -232,10 +213,25 @@ The dashboards' apps panel is backed by [proot-apps](https://github.com/linuxser
 
 Read the [Development](development.md) section for customizing this container for your own usage.
 
-Run the Docker®/Podman container built from the [`Example Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/example/Dockerfile), then connect to port **8080** of your Docker®/Podman host to access the web interface (Username: **`ubuntu`**, Password: **`mypasswd`**, **set `DISTRIB_FLAVOR` to `ubuntu26.04` or `debiantrixie`, and replace `main` to `latest` for the latest stable release**):
+Start it and connect to <http://localhost:8080>, logging in as **`ubuntu`** / **`mypasswd`**. The default WebSocket transport carries everything on that one port, so that is the whole command:
 
 ```bash
-docker run --name selkies -it -d --rm -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 -p 8080:8080 -p 3478:3478 -p 3478:3478/udp -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp ghcr.io/selkies-project/selkies/example:main-${DISTRIB_FLAVOR}
+docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
+    ghcr.io/selkies-project/selkies/example:main-ubuntu26.04
+```
+
+`--shm-size` matters because the browsers inside the desktop crash on Docker's 64 MB default. The image tag chooses the distribution in the image — `ubuntu26.04` or `debiantrixie`, a free choice unrelated to your host — and `main` is the newest commit, `latest` the newest release. `-e SELKIES_BASIC_AUTH_USER=` and `-e SELKIES_BASIC_AUTH_PASSWORD=` replace the default login, `-e SELKIES_ENABLE_HTTPS=true` serves it over TLS (Selkies writes a self-signed certificate when none is configured), and `-e SELKIES_WAYLAND=true` runs the same desktop on the headless Wayland backend.
+
+**Only the opt-in WebRTC transport needs more than that.** It uses the embedded TURN server, whose listening and relay ports have to be published as well:
+
+```bash
+docker run --name selkies -it -d --rm --shm-size=2g \
+    -e SELKIES_MODE=webrtc \
+    -e SELKIES_TURN_PROTOCOL=udp -e SELKIES_TURN_PORT=3478 \
+    -e TURN_MIN_PORT=65532 -e TURN_MAX_PORT=65535 \
+    -p 8080:8080 -p 3478:3478 -p 3478:3478/udp \
+    -p 65532-65535:65532-65535 -p 65532-65535:65532-65535/udp \
+    ghcr.io/selkies-project/selkies/example:main-ubuntu26.04
 ```
 
 Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs, or `--device /dev/dri` for Intel and AMD.

@@ -2,24 +2,43 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta http-equiv="x-ua-compatible" content="IE=edge">
     <title>Desktop Files</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
+        /* The dashboards' palette and type scale, so the file browser reads as
+           part of the same session rather than a page from somewhere else.
+           This page carries no theme toggle of its own, so it follows the
+           system preference; the tokens are otherwise the ones in the
+           dashboard stylesheet. */
         :root {
-            --page-bg: #282c34;
-            --text-color: #abb2bf;
-            --header-color: #F59DC4;
-            --border-color: #3a3f47;
-            --table-header-bg: #3a3f47;
-            --table-row-hover-bg: #454b54;
-            --link-color: #F59DC4;
-            --link-hover-color: #F5AECE;
-            --shadow-color: rgba(0, 0, 0, 0.5);
+            --accent: #a82a69;
+            --accent-text: #a82a69;
+            --accent-soft: rgba(168, 42, 105, 0.1);
+            --bg: #f4f5f8;
+            --surface: #ffffff;
+            --surface-alt: #f6f7f9;
+            --border-soft: #dfe2ea;
+            --text: #23272f;
+            --text-muted: #5b6478;
+            --shadow: 0 1px 2px rgba(16, 20, 28, 0.06), 0 8px 24px rgba(16, 20, 28, 0.08);
 
             --container-max-width: 960px;
-            --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            --border-radius: 8px;
+            --font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            --border-radius: 10px;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --accent: #ec4899;
+                --accent-text: #f9a8d4;
+                --accent-soft: rgba(236, 72, 153, 0.14);
+                --bg: #12161d;
+                --surface: #181d26;
+                --surface-alt: #1f2530;
+                --border-soft: #2b3441;
+                --text: #e6ebf3;
+                --text-muted: #aeb9c9;
+                --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+            }
         }
         * {
             margin: 0;
@@ -28,11 +47,10 @@
         }
         body {
             font-family: var(--font-family);
-            background-color: var(--page-bg);
-            color: var(--text-color);
-            line-height: 1.6;
-            padding-top: 20px;
-            padding-bottom: 60px;
+            background-color: var(--bg);
+            color: var(--text);
+            line-height: 1.55;
+            padding: 24px 0 60px;
         }
         .page-container {
             max-width: var(--container-max-width);
@@ -41,144 +59,164 @@
             position: relative;
         }
         h1 {
-            color: var(--header-color);
-            font-size: 2em;
-            font-weight: 300;
-            margin-bottom: 15px;
-            padding-bottom: 15px;
-            border-bottom: 1px solid var(--border-color);
-            padding-right: 50px;
+            color: var(--text);
+            font-size: 1.4rem;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            margin-bottom: 16px;
+            padding: 0 52px 16px 0;
+            border-bottom: 1px solid var(--border-soft);
+            word-break: break-all;
+        }
+        h1 a {
+            color: var(--accent-text);
+            text-decoration: none;
+        }
+        h1 a:hover {
+            text-decoration: underline;
         }
         hr {
             display: none;
         }
         table {
             width: 100%;
-            border-collapse: collapse;
-            margin-top: 25px;
-            font-size: 0.95em;
+            border-collapse: separate;
+            border-spacing: 0;
+            margin-top: 20px;
+            font-size: 0.9rem;
+            background-color: var(--surface);
+            border: 1px solid var(--border-soft);
             border-radius: var(--border-radius);
             overflow: hidden;
-            box-shadow: 0 4px 10px var(--shadow-color);
+            box-shadow: var(--shadow);
         }
         thead {
-            background-color: var(--table-header-bg);
+            background-color: var(--surface-alt);
         }
         th {
-            color: var(--header-color);
+            color: var(--text-muted);
             font-weight: 600;
+            font-size: 0.75rem;
             text-transform: uppercase;
-            font-size: 0.85em;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.04em;
         }
         th, td {
-            padding: 12px 15px;
+            padding: 11px 16px;
             text-align: left;
-            border-bottom: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border-soft);
         }
         tbody tr {
-            transition: background-color 0.2s ease-in-out;
+            transition: background-color 0.15s ease-in-out;
         }
         tbody tr:hover {
-            background-color: var(--table-row-hover-bg);
+            background-color: var(--accent-soft);
         }
         tbody tr:last-child td {
             border-bottom: none;
         }
+        td {
+            color: var(--text-muted);
+        }
         td a {
-            color: var(--link-color);
+            color: var(--text);
             text-decoration: none;
             display: inline-flex;
             align-items: center;
-            transition: color 0.2s ease-in-out;
+            font-weight: 500;
         }
         td a:hover {
-            color: var(--link-hover-color);
+            color: var(--accent-text);
             text-decoration: underline;
         }
-        th a {
-            color: var(--link-color);
+        th a, th a:visited {
+            color: var(--text-muted);
             text-decoration: none;
-            transition: color 0.2s ease-in-out;
         }
         th a:hover {
-            color: var(--link-hover-color);
+            color: var(--accent-text);
             text-decoration: underline;
-        }
-        th a:visited {
-            color: var(--link-color);
-        }
-        th a:visited:hover {
-            color: var(--link-hover-color);
         }
         #reload-page-button {
             position: absolute;
-            top: 0;
-            right: 0;
-            background-color: transparent;
-            color: var(--text-color);
-            border: none;
+            top: -2px;
+            right: 20px;
+            background-color: var(--surface);
+            color: var(--text-muted);
+            border: 1px solid var(--border-soft);
             border-radius: var(--border-radius);
-            padding: 8px;
+            width: 34px;
+            height: 34px;
             cursor: pointer;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            transition: color 0.2s ease-in-out, transform 0.2s ease-in-out;
+            transition: color 0.15s ease-in-out, border-color 0.15s ease-in-out;
             z-index: 10;
         }
         #reload-page-button:hover {
-            color: var(--link-hover-color);
-            transform: rotate(45deg);
+            color: var(--accent-text);
+            border-color: var(--accent);
+        }
+        #reload-page-button:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px var(--accent-soft);
         }
         #reload-page-button svg {
-            width: 20px;
-            height: 20px;
+            width: 18px;
+            height: 18px;
             fill: currentColor;
         }
         td:nth-child(1) {
             word-break: break-all;
         }
-
         td:nth-child(2), th:nth-child(2) {
             white-space: nowrap;
             width: 180px;
         }
-
         td:nth-child(3), th:nth-child(3) {
             text-align: right;
             white-space: nowrap;
             width: 100px;
         }
+        /* Masked rather than painted, so one glyph follows the theme's text
+           colour instead of needing a copy per palette. */
         td a::before {
             display: inline-block;
             content: '';
-            width: 1.1em;
-            height: 1.1em;
-            margin-right: 0.75em;
-            vertical-align: middle;
-            background-repeat: no-repeat;
-            background-size: contain;
-            background-position: center;
+            width: 1.05em;
+            height: 1.05em;
+            margin-right: 0.7em;
             flex-shrink: 0;
+            background-color: var(--text-muted);
+            mask-repeat: no-repeat;
+            mask-size: contain;
+            mask-position: center;
+            -webkit-mask-repeat: no-repeat;
+            -webkit-mask-size: contain;
+            -webkit-mask-position: center;
+        }
+        td a:hover::before {
+            background-color: var(--accent-text);
         }
         td a[href="../"]::before {
-            background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>');
+            mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>');
+            -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>');
         }
         td a[href$="/"]:not([href="../"])::before {
-            background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>');
+            mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>');
+            -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>');
         }
         td a:not([href$="/"]):not([href="../"])::before {
-            background-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23abb2bf"><path d="M14 2H6c-1.11 0-2 .9-2 2v16c0 1.1.89 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>');
+            mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M14 2H6c-1.11 0-2 .9-2 2v16c0 1.1.89 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>');
+            -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M14 2H6c-1.11 0-2 .9-2 2v16c0 1.1.89 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>');
         }
         footer {
             text-align: center;
-            margin-top: 40px;
-            padding-top: 20px;
-            border-top: 1px solid var(--border-color);
-            font-size: 0.85em;
-            color: var(--text-color);
-            opacity: 0.7;
+            margin-top: 32px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border-soft);
+            font-size: 0.8rem;
+            color: var(--text-muted);
         }
         footer p {
             margin: 0;
@@ -186,34 +224,25 @@
         @media (max-width: 768px) {
             body {
                 font-size: 14px;
-                padding-top: 10px;
-                padding-bottom: 40px;
+                padding: 12px 0 40px;
             }
             .page-container {
-                padding: 0 10px;
+                padding: 0 12px;
             }
             h1 {
-                font-size: 1.6em;
-                padding-right: 40px;
+                font-size: 1.15rem;
+                padding-right: 46px;
             }
             #reload-page-button {
-                top: -2px;
-                right: 0px;
-            }
-            #reload-page-button svg {
-                width: 18px;
-                height: 18px;
-            }
-            th, td {
-                padding: 10px 8px;
+                right: 12px;
             }
             table {
                 display: block;
                 overflow-x: auto;
-                white-space: nowrap;
                 -webkit-overflow-scrolling: touch;
             }
             th, td {
+                padding: 10px 12px;
                 white-space: nowrap;
             }
             td:nth-child(1) {

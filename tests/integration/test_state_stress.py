@@ -18,7 +18,7 @@ def _settings_payload(**over) -> dict:
     """Build a primary-display SETTINGS payload with overrides applied on top."""
     base = {
         "displayId": "primary", "initialClientWidth": 1280, "initialClientHeight": 720,
-        "is_manual_resolution_mode": False, "framerate": 60, "encoder": "h264enc",
+        "manual_resolution": False, "framerate": 60, "encoder": "h264enc",
         "video_crf": 25, "video_bitrate": 6000, "audio_bitrate": 128000,
         "scaling_dpi": 96, "displayPosition": "right",
     }

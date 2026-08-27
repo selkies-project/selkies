@@ -198,7 +198,7 @@ def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
     realized = wait_root(phys_w, phys_h)
     res.check("reset-to-window realized on the server",
               root_matches(realized, phys_w, phys_h), f"root={realized}")
-    manual = page.evaluate("window.isManualResolutionMode || window.is_manual_resolution_mode || false")
+    manual = page.evaluate("window.manualResolution || window.manual_resolution || false")
     res.check("reset-to-window leaves manual mode", manual is False, manual)
 
     seen = len(sent)

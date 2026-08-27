@@ -285,7 +285,7 @@ class WebRTCService(BaseStreamingService):
             logger.error(f"Error initializing default settings: {e}", exc_info=True)
 
         self._manual_dims: Optional[Tuple[int, int]] = None
-        if getattr(self.args, "is_manual_resolution_mode", False):
+        if getattr(self.args, "manual_resolution", False):
             width = int(getattr(self.args, "manual_width", 0) or 0)
             height = int(getattr(self.args, "manual_height", 0) or 0)
             if width > 0 and height > 0:
@@ -847,7 +847,7 @@ class WebRTCService(BaseStreamingService):
         guarantees positive manual dimensions while the lock is on; its own
         defaults stand in should one be unusable, so a locked server never
         falls back to honoring the client's request."""
-        server_is_manual, _ = self.settings.is_manual_resolution_mode
+        server_is_manual, _ = self.settings.manual_resolution
         if not server_is_manual:
             return None
         if self._manual_dims:
@@ -2044,7 +2044,7 @@ class WebRTCService(BaseStreamingService):
             "framerate",
             "use_cpu",
             "enable_binary_clipboard",
-            "is_manual_resolution_mode",
+            "manual_resolution",
             "manual_width",
             "manual_height",
             "force_aligned_resolution",
@@ -2056,7 +2056,7 @@ class WebRTCService(BaseStreamingService):
             "video_paintover_burst_frames",
         ]
         # Startup resolution policy, not a per-stream tunable.
-        primary_only_keys = ("is_manual_resolution_mode", "manual_width", "manual_height")
+        primary_only_keys = ("manual_resolution", "manual_width", "manual_height")
 
         display_id = display_id or "primary"
         if display_id != "primary" and display_id not in self.display_clients:

@@ -71,7 +71,7 @@ These people make structural decisions for this project and press the `Merge Pul
 
 ### Past Maintainers
 
-[Jan Van Bruggen](https://github.com/JanCVanB): Project Co-Founder, ex-Google, ex-NASA, ex-itopia, current Verily
+[Jan Van Bruggen](https://github.com/kili-ilo): Project Co-Founder, ex-Google, ex-NASA, ex-itopia, current Verily
 
 [Carlos Ruiz](https://github.com/cruizba): [OpenVidu](https://openvidu.io) Team, provided various proposals for fixing the X11 input protocol
 
@@ -214,7 +214,7 @@ The entrypoint script of the base images launches `s6-svscan /etc/service` itsel
 
 ## Container Guide
 
-The [`docker-nvidia-glx-desktop`](https://github.com/selkies-project/docker-nvidia-glx-desktop) and [`docker-nvidia-egl-desktop`](https://github.com/selkies-project/docker-nvidia-egl-desktop) repositories (the Desktop Containers here) share components with the [Example Container](component.md#example-container), which is the reference they follow: `container-entrypoint.sh` prepares the session and launches `s6-svscan /etc/service`, the `selkies` service runs `selkies-entrypoint.sh`, and every other daemon is a `run` script under `services/`. There is no `supervisord.conf` and no nginx, since Selkies serves the web client and every endpoint on its single port.
+The [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) and [`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) repositories (the Desktop Containers here) share components with the [Example Container](component.md#example-container), which is the reference they follow: `container-entrypoint.sh` prepares the session and launches `s6-svscan /etc/service`, the `selkies` service runs `selkies-entrypoint.sh`, and every other daemon is a `run` script under `services/`. There is no `supervisord.conf` and no nginx, since Selkies serves the web client and every endpoint on its single port.
 
 **A change to any shared component is three Pull Requests — the Example Container and both Desktop Containers — and a change confined to the Desktop Containers is two.** What is shared, and how closely:
 
@@ -245,7 +245,6 @@ The [`docker-nvidia-glx-desktop`](https://github.com/selkies-project/docker-nvid
 
 - For example, assume that we are writing a new component that receives WebRTC Metrics from the web interface and writes them into multiple CSV files in the host ([#141](https://github.com/selkies-project/selkies/pull/141)). Because a data-channel (WebRTC) or WebSocket message carries the metrics, receiving them is handled in [`input_handler.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/input_handler.py). But this does not mean that everything should be implemented in this file. Instead, they should be implemented in the `Metrics` class of [`webrtc_utils.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/webrtc_utils.py), and be initialized in [`webrtc_mode.py`](https://github.com/selkies-project/selkies/tree/main/src/selkies/webrtc_mode.py). This way, relevant code stays in appropriate files and is initialized only when the capabilities are needed.
 
-- Some code components have `CAPITALIZED_COMMENT:` comment sections such as `OPUS_FRAME:`. These sections indicate that locations with the `CAPITALIZED_COMMENT:` must be edited or added simultaneously.
 
 ## Tests
 

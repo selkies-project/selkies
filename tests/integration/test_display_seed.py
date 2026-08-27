@@ -17,7 +17,7 @@ def _settings_payload(display_id: str, framerate: int, bitrate: int) -> dict:
     """Build a SETTINGS payload for a display at the given rate and bitrate."""
     return {
         "displayId": display_id, "initialClientWidth": 1280, "initialClientHeight": 720,
-        "is_manual_resolution_mode": False, "framerate": framerate, "encoder": "h264enc",
+        "manual_resolution": False, "framerate": framerate, "encoder": "h264enc",
         "video_crf": 25, "video_bitrate": bitrate, "audio_bitrate": 128000,
         "scaling_dpi": 96, "displayPosition": "right",
     }

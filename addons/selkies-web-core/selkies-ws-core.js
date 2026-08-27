@@ -63,7 +63,7 @@
  * `network_stats`, `selkiesVideoStats`, `currentAudioBufferSize`,
  * `currentAudioBufferDuration`, `currentAudioLevel`,
  * `currentAudioUnderrunSamples`, `currentAudioWorkletDropped`,
- * `currentAudioDropped`, `is_manual_resolution_mode`, `enable_resize`,
+ * `currentAudioDropped`, `manual_resolution`, `enable_resize`,
  * `streamResolutionDiverged`, `isAudioInitializing`, `isFallingBack`,
  * `isCleaningUp` and `applyTimestamp`, plus one `window[key]` per server
  * setting mirrored by sanitizeAndStoreSettings.
@@ -322,7 +322,7 @@ const PER_DISPLAY_SETTINGS = [
     'framerate', 'video_crf', 'video_fullcolor',
     'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
     'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
-    'is_manual_resolution_mode', 'manual_width', 'manual_height',
+    'manual_resolution', 'manual_width', 'manual_height',
     'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
     'video_bitrate', 'force_aligned_resolution'
 ];
@@ -382,7 +382,7 @@ const applyWsMessageBudget = (bytes) => {
   wsMaxMessageBytes = bytes;
   CLIPBOARD_CHUNK_SIZE = ((wsMaxMessageBytes - 4096) * 3) >> 2;
 };
-window.is_manual_resolution_mode = false;
+window.manual_resolution = false;
 let manual_width = null;
 let manual_height = null;
 let originalWindowResizeHandler = null;
@@ -897,7 +897,7 @@ debug = getBoolParam('debug', debug);
 currentEncoderMode = getStringParam('encoder', 'h264enc');
 webcamEncoderPreference = getStringParam('webcam_encoder', 'auto');
 scaleLocallyManual = getBoolParam('scaleLocallyManual', true);
-window.is_manual_resolution_mode = getBoolParam('is_manual_resolution_mode', false);
+window.manual_resolution = getBoolParam('manual_resolution', false);
 isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
 useCssScaling = getBoolParam('useCssScaling', false);
 trackpadMode = getBoolParam('trackpadMode', false);
@@ -1664,7 +1664,7 @@ const updateCanvasImageRendering = () => {
     return;
   }
   const dpr = window.devicePixelRatio || 1;
-  if (isSharedMode || window.is_manual_resolution_mode || (useCssScaling && dpr > 1)) {
+  if (isSharedMode || window.manual_resolution || (useCssScaling && dpr > 1)) {
     if (canvas.style.imageRendering !== 'auto') {
       console.log("Smoothing enabled for manual resolution, high-DPR scaling, or shared mode.");
       canvas.style.imageRendering = 'auto';
@@ -1821,7 +1821,7 @@ function getCurrentSettingsPayload() {
         ['framerate', () => getIntParam('framerate', 60)],
         ['video_crf', () => getIntParam('video_crf', 25)],
         ['encoder', () => getStringParam('encoder', 'h264enc')],
-        ['is_manual_resolution_mode', () => getBoolParam('is_manual_resolution_mode', false)],
+        ['manual_resolution', () => getBoolParam('manual_resolution', false)],
         ['audio_bitrate', () => getIntParam('audio_bitrate', 320000)],
         ['video_fullcolor', () => getBoolParam('video_fullcolor', false)],
         ['video_streaming_mode', () => getBoolParam('video_streaming_mode', false)],
@@ -1844,14 +1844,14 @@ function getCurrentSettingsPayload() {
     if (detectedKeyboardLayout) {
         settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
     }
-    if (window.is_manual_resolution_mode && manual_width != null && manual_height != null) {
-        settingsToSend['is_manual_resolution_mode'] = true;
+    if (window.manual_resolution && manual_width != null && manual_height != null) {
+        settingsToSend['manual_resolution'] = true;
         settingsToSend['manual_width'] = alignResolution(manual_width);
         settingsToSend['manual_height'] = alignResolution(manual_height);
     } else {
         const videoContainer = document.querySelector('.video-container');
         const rect = videoContainer ? videoContainer.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
-        settingsToSend['is_manual_resolution_mode'] = false;
+        settingsToSend['manual_resolution'] = false;
         
         let initW = alignResolution(rect.width * dpr);
         let initH = alignResolution(rect.height * dpr);
@@ -1908,7 +1908,7 @@ function sendResolutionToServer(width, height) {
   let realWidth, realHeight;
   let dprUsed = 1;
 
-  if (window.is_manual_resolution_mode) {
+  if (window.manual_resolution) {
     realWidth = alignResolution(width);
     realHeight = alignResolution(height);
   } else {
@@ -1921,7 +1921,7 @@ function sendResolutionToServer(width, height) {
   if (realHeight > 4080) realHeight = 4080;
 
   const resString = `${realWidth}x${realHeight}`;
-  console.log(`Sending resolution to server: ${resString}, DisplayID: ${displayId}, Manual Mode: ${window.is_manual_resolution_mode}, Pixel Ratio Used: ${dprUsed}, useCssScaling: ${useCssScaling}`);
+  console.log(`Sending resolution to server: ${resString}, DisplayID: ${displayId}, Manual Mode: ${window.manual_resolution}, Pixel Ratio Used: ${dprUsed}, useCssScaling: ${useCssScaling}`);
 
   if (websocket && websocket.readyState === WebSocket.OPEN) {
     websocket.send(`r,${resString},${displayId}`);
@@ -1983,7 +1983,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
   canvasGeomDirty = true;
   lastDrawnJpegStripeFrameId = {};
 
-  const dpr = (isSharedMode || window.is_manual_resolution_mode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+  const dpr = (isSharedMode || window.manual_resolution || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
   const internalBufferWidth = alignResolution(targetWidth * dpr);
   const internalBufferHeight = alignResolution(targetHeight * dpr);
 
@@ -2159,7 +2159,7 @@ function enableAutoResize() {
 
 /** Resize listener for manual resolution: restyles the canvas box without touching the stream size. */
 const directManualLocalScalingHandler = () => {
-  if (window.is_manual_resolution_mode && !isSharedMode && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
+  if (window.manual_resolution && !isSharedMode && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
     applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
   }
 };
@@ -2173,7 +2173,7 @@ function disableAutoResize() {
   console.log("Switching to Manual Mode Local Scaling: Adding direct manual scaling listener.");
   window.removeEventListener('resize', directManualLocalScalingHandler);
   window.addEventListener('resize', directManualLocalScalingHandler);
-  if (window.is_manual_resolution_mode && !isSharedMode && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
+  if (window.manual_resolution && !isSharedMode && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
     console.log("Applying current manual canvas style after enabling direct manual resize handler.");
     applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
   }
@@ -2298,7 +2298,7 @@ const initializeUI = () => {
           }
       });
       console.log(`Initialized UI in Shared Mode: Canvas buffer target ${manual_width}x${manual_height} (logical), will scale to fit viewport.`);
-  } else if (is_manual_resolution_mode && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
+  } else if (manual_resolution && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
     applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
     disableAutoResize();
     console.log(`Initialized UI in Manual Resolution Mode: ${manual_width}x${manual_height} (logical), ScaleLocally: ${scaleLocallyManual}`);
@@ -2955,7 +2955,7 @@ const initializeInput = () => {
         }
         return;
     }
-    if (window.is_manual_resolution_mode) {
+    if (window.manual_resolution) {
       console.log("handleResizeUI: Auto-resize skipped, manual resolution mode is active.");
       return;
     }
@@ -3020,7 +3020,7 @@ const initializeInput = () => {
 
   if (isSharedMode) {
     console.log("Shared mode: Auto-resize event listener (originalWindowResizeHandler) NOT attached.");
-  } else if (!window.is_manual_resolution_mode) {
+  } else if (!window.manual_resolution) {
     console.log("initializeInput: Auto-resolution mode. Attaching 'resize' event listener for subsequent changes.");
     window.addEventListener('resize', originalWindowResizeHandler);
     const videoContainer = document.querySelector('.video-container');
@@ -3185,7 +3185,7 @@ function receiveMessage(event) {
         scaleLocallyManual = message.value;
         setBoolParam('scaleLocallyManual', scaleLocallyManual);
         console.log(`Set scaleLocallyManual to ${scaleLocallyManual} and persisted.`);
-        if (window.is_manual_resolution_mode && manual_width !== null && manual_height !== null) {
+        if (window.manual_resolution && manual_width !== null && manual_height !== null) {
           console.log("Applying new scaling style in manual mode.");
           applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
         }
@@ -3239,7 +3239,7 @@ function receiveMessage(event) {
         }
         if (changed) {
           updateCanvasImageRendering();
-          if (window.is_manual_resolution_mode && manual_width != null && manual_height != null) {
+          if (window.manual_resolution && manual_width != null && manual_height != null) {
             sendResolutionToServer(manual_width, manual_height);
             applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
           } else if (!isSharedMode) {
@@ -3295,13 +3295,13 @@ function receiveMessage(event) {
         break;
       }
       console.log(`Setting manual resolution: ${width}x${height} (logical)`);
-      window.is_manual_resolution_mode = true;
+      window.manual_resolution = true;
       manual_width = alignResolution(width);
       manual_height = alignResolution(height);
       console.log(`Rounded logical resolution to even numbers: ${manual_width}x${manual_height}`);
       setIntParam('manual_width', manual_width);
       setIntParam('manual_height', manual_height);
-      setBoolParam('is_manual_resolution_mode', true);
+      setBoolParam('manual_resolution', true);
       disableAutoResize();
       sendResolutionToServer(manual_width, manual_height);
       applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
@@ -3318,12 +3318,12 @@ function receiveMessage(event) {
         break;
       }
       console.log("Resetting resolution to window size.");
-      window.is_manual_resolution_mode = false;
+      window.manual_resolution = false;
       manual_width = null;
       manual_height = null;
       setIntParam('manual_width', null);
       setIntParam('manual_height', null);
-      setBoolParam('is_manual_resolution_mode', false);
+      setBoolParam('manual_resolution', false);
       if (window.enable_resize !== false || displayId === 'display2') {
         const currentWindowRes = window.webrtcInput ? window.webrtcInput.getWindowResolution() : [window.innerWidth, window.innerHeight];
         const autoWidth = alignResolution(currentWindowRes[0]);
@@ -3965,7 +3965,7 @@ function initWebsockets() {
     if (isSharedMode) {
         targetWidth = manual_width > 0 ? manual_width : 1024;
         targetHeight = manual_height > 0 ? manual_height : 768;
-    } else if (window.is_manual_resolution_mode && manual_width != null && manual_height != null) {
+    } else if (window.manual_resolution && manual_width != null && manual_height != null) {
       targetWidth = manual_width;
       targetHeight = manual_height;
     } else if (window.webrtcInput && typeof window.webrtcInput.getWindowResolution === 'function') {
@@ -4885,7 +4885,7 @@ function initWebsockets() {
       const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
 
       const knownSettings = [
-        'framerate', 'video_crf', 'encoder', 'is_manual_resolution_mode',
+        'framerate', 'video_crf', 'encoder', 'manual_resolution',
         'audio_bitrate', 'video_fullcolor', 'video_streaming_mode',
         'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'video_paintover_crf',
         'video_paintover_burst_frames', 'use_paint_over_quality', 'scaling_dpi',
@@ -4893,7 +4893,7 @@ function initWebsockets() {
         'force_aligned_resolution'
       ];
       const booleanSettingKeys = [
-        'is_manual_resolution_mode', 'video_fullcolor', 'video_streaming_mode',
+        'manual_resolution', 'video_fullcolor', 'video_streaming_mode',
         'use_cpu', 'use_paint_over_quality', 'enable_binary_clipboard',
         'force_aligned_resolution'
       ];
@@ -4926,8 +4926,8 @@ function initWebsockets() {
         }
       }
 
-      if (is_manual_resolution_mode && manual_width != null && manual_height != null) {
-        settingsToSend['is_manual_resolution_mode'] = true;
+      if (manual_resolution && manual_width != null && manual_height != null) {
+        settingsToSend['manual_resolution'] = true;
         settingsToSend['manual_width'] = alignResolution(manual_width);
         settingsToSend['manual_height'] = alignResolution(manual_height);
       } else {
@@ -4936,7 +4936,7 @@ function initWebsockets() {
           width: window.innerWidth,
           height: window.innerHeight
         };
-        settingsToSend['is_manual_resolution_mode'] = false;
+        settingsToSend['manual_resolution'] = false;
         settingsToSend['initialClientWidth'] = alignResolution(rect.width * dpr);
         settingsToSend['initialClientHeight'] = alignResolution(rect.height * dpr);
       }
@@ -5647,16 +5647,16 @@ function initWebsockets() {
                   console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
                   handleSettingsMessage(changes, true);
               }
-              const serverForcesManual = obj.settings && obj.settings.is_manual_resolution_mode && obj.settings.is_manual_resolution_mode.value === true;
+              const serverForcesManual = obj.settings && obj.settings.manual_resolution && obj.settings.manual_resolution.value === true;
 
-              if (serverForcesManual || window.is_manual_resolution_mode) {
-                  console.log(`Manual resolution mode active (Server forced: ${serverForcesManual}, Client pref: ${window.is_manual_resolution_mode}). Switching to manual resize handlers.`);
+              if (serverForcesManual || window.manual_resolution) {
+                  console.log(`Manual resolution mode active (Server forced: ${serverForcesManual}, Client pref: ${window.manual_resolution}). Switching to manual resize handlers.`);
                   if (serverForcesManual) {
                       const serverWidth = obj.settings.manual_width ? parseInt(obj.settings.manual_width.value, 10) : 0;
                       const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value, 10) : 0;
                       if (serverWidth > 0 && serverHeight > 0) {
                           console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
-                          window.is_manual_resolution_mode = true;
+                          window.manual_resolution = true;
                           manual_width = serverWidth;
                           manual_height = serverHeight;
                           applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
@@ -5751,7 +5751,7 @@ function initWebsockets() {
                // The realized resolution can differ from the request (encoder
                // alignment, RandR cell snapping, a rejected mode-set); canvas,
                // stripe decoders and input mapping follow it.
-               const dprUsed = (window.is_manual_resolution_mode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+               const dprUsed = (window.manual_resolution || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
                const bufferWidth = alignResolution(appliedWidth);
                const bufferHeight = alignResolution(appliedHeight);
                if (canvas && bufferWidth > 0 && bufferHeight > 0 &&
@@ -5760,7 +5760,7 @@ function initWebsockets() {
                  clearAllVncStripeDecoders();
                  // CSS times DPR no longer equals server pixels: input routes through the canvas box.
                  window.streamResolutionDiverged = true;
-                 if (window.is_manual_resolution_mode) {
+                 if (window.manual_resolution) {
                    manual_width = bufferWidth;
                    manual_height = bufferHeight;
                    applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
@@ -6911,7 +6911,7 @@ function initiateFallback(error, context) {
         setBoolParam('video_fullcolor', false);
         setIntParam('framerate', 60);
         setIntParam('video_crf', 25);
-        setBoolParam('is_manual_resolution_mode', false);
+        setBoolParam('manual_resolution', false);
         setIntParam('manual_width', null);
         setIntParam('manual_height', null);
         

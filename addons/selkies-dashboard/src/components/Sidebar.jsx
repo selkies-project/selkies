@@ -83,7 +83,7 @@ const PER_DISPLAY_SETTINGS = [
     'framerate', 'video_crf', 'video_fullcolor',
     'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
     'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
-    'is_manual_resolution_mode', 'manual_width', 'manual_height', 'encoder',
+    'manual_resolution', 'manual_width', 'manual_height', 'encoder',
     'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
     'video_bitrate', 'force_aligned_resolution'
 ];
@@ -1271,7 +1271,7 @@ function Sidebar() {
    * rate-control default.
    */
   const conditionalCtx = {
-    manualActive: !!readStored("manual_width") || serverSettings?.is_manual_resolution_mode?.value === true,
+    manualActive: !!readStored("manual_width") || serverSettings?.manual_resolution?.value === true,
     streamMode,
     activeEncoder: readStored("encoder") || encoder,
     softwareH264Encoder: serverSettings?.software_h264_encoder?.value,
@@ -3626,7 +3626,7 @@ function Sidebar() {
                     )}
                   </>
                 )}
-                {(!serverSettings?.is_manual_resolution_mode?.locked) && (
+                {(!serverSettings?.manual_resolution?.locked) && (
                   <>
                     <div className="dev-setting-item">
                       <label htmlFor="resolutionPresetSelect">

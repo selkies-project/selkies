@@ -23,7 +23,7 @@ import websockets
 def settings_for(display_id: str, width: int, height: int, position: str = "right") -> dict:
     return {
         "displayId": display_id, "initialClientWidth": width, "initialClientHeight": height,
-        "is_manual_resolution_mode": False, "framerate": 30, "encoder": "jpeg",
+        "manual_resolution": False, "framerate": 30, "encoder": "jpeg",
         "video_crf": 25, "video_bitrate": 6000, "audio_bitrate": 128000,
         "scaling_dpi": 96, "displayPosition": position,
     }

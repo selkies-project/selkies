@@ -48,8 +48,8 @@ const steps = (n, delta) => new Array(n).fill(delta);
 function makeInput({ dpr = 1, sink = null } = {}) {
     globalThis.window = {
         devicePixelRatio: dpr,
-        is_manual_resolution_mode: !!sink,
-        isManualResolutionMode: !!sink,
+        manual_resolution: !!sink,
+        manualResolution: !!sink,
         requestAnimationFrame: (cb) => frames.push(cb),
     };
     globalThis.document = {

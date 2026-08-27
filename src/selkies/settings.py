@@ -266,7 +266,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Number of prior Opus frames carried as RED redundancy when audio_redundancy is enabled (0-4; higher survives longer loss bursts at proportionally more bandwidth).",
     },
     {
-        "name": "is_manual_resolution_mode",
+        "name": "manual_resolution",
         "type": "bool",
         "default": False,
         "help": "Lock the resolution to the manual width/height values.",
@@ -1237,7 +1237,7 @@ class AppSettings:
         server accepts more than the UI offers.
 
         Manual-resolution mode follows a positive manual width or height
-        override, or an explicit `is_manual_resolution_mode`: 0 is both the
+        override, or an explicit `manual_resolution`: 0 is both the
         built-in default and the no-manual-width sentinel, so a templated
         launcher emitting `--manual-width 0` for an unset field must not lock
         the display to 1024x768.
@@ -1426,7 +1426,7 @@ class AppSettings:
         width_overridden = overrides.get("manual_width", False) and processed.get("manual_width", 0) > 0
         height_overridden = overrides.get("manual_height", False) and processed.get("manual_height", 0) > 0
         manual_mode_bool_is_set = processed.get(
-            "is_manual_resolution_mode", (False, False)
+            "manual_resolution", (False, False)
         )[0]
         should_be_in_manual_mode = (
             width_overridden or height_overridden or manual_mode_bool_is_set
@@ -1435,7 +1435,7 @@ class AppSettings:
             logging.info(
                 "A manual resolution setting was activated; locking to manual mode."
             )
-            processed["is_manual_resolution_mode"] = (True, True)
+            processed["manual_resolution"] = (True, True)
             if processed.get("manual_width", 0) <= 0:
                 processed["manual_width"] = 1024
                 logging.info("Manual width not set or invalid, defaulting to 1024.")

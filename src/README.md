@@ -158,10 +158,10 @@ Range settings define a minimum and maximum for a value (e.g., framerate).
     ```
 
 #### Manual Resolution Mode
-The server can be forced to use a single, fixed resolution for all connecting clients. This mode is automatically activated if `manual_width`, `manual_height`, or `is_manual_resolution_mode` is set.
+The server can be forced to use a single, fixed resolution for all connecting clients. This mode is automatically activated if `manual_width`, `manual_height`, or `manual_resolution` is set.
 
 *   If `manual_width` and/or `manual_height` are set, the resolution is locked to those values.
-*   If `is_manual_resolution_mode` is set to `true` without specifying width or height, the resolution defaults to **1024x768**.
+*   If `manual_resolution` is set to `true` without specifying width or height, the resolution defaults to **1024x768**.
 *   When this mode is active, the client UI for changing resolution is disabled.
 
 ### Available Settings
@@ -210,7 +210,7 @@ The table below lists all available server settings.
 | `SELKIES_VIDEO_PAINTOVER_BURST_FRAMES` | `--video-paintover-burst-frames` | `'1-30'` | Allowed H.264 paint-over burst frames range or a fixed value. |
 | `SELKIES_SECOND_SCREEN` | `--second-screen` | `True` | Enable support for a second monitor/display. |
 | `SELKIES_AUDIO_BITRATE` | `--audio-bitrate` | `'320000'` | The default audio bitrate. |
-| `SELKIES_IS_MANUAL_RESOLUTION_MODE` | `--is-manual-resolution-mode` | `False` | Lock the resolution to the manual width/height values. |
+| `SELKIES_MANUAL_RESOLUTION` | `--manual-resolution` | `False` | Lock the resolution to the manual width/height values. |
 | `SELKIES_MANUAL_WIDTH` | `--manual-width` | `0` | Lock width to a fixed value. Setting this forces manual resolution mode. |
 | `SELKIES_MANUAL_HEIGHT` | `--manual-height` | `0` | Lock height to a fixed value. Setting this forces manual resolution mode. |
 | `SELKIES_SCALING_DPI` | `--scaling-dpi` | `'96'` | The default DPI for UI scaling. |

@@ -53,7 +53,7 @@
  *
  * Contract with the dashboards. Globals published on `window`: `selkiesLogs`
  * (capped log ring buffers), `fps`, `network_stats`, `gpu_stats`,
- * `system_stats`, `currentAudioBufferSize`, `isManualResolutionMode`,
+ * `system_stats`, `currentAudioBufferSize`, `manualResolution`,
  * `enable_resize`, `streamResolutionDiverged`, `webrtcInput`, and every server
  * setting as `window[key]`. Window messages handled (same origin):
  * `setScaleLocally`, `resetResolutionToWindow`, `setManualResolution`,
@@ -305,7 +305,7 @@ export default function webrtc() {
 	let rdelta = 500;
 	let rtimeout = false;
 	let manualWidth, manualHeight = 0;
-	window.isManualResolutionMode = false;
+	window.manualResolution = false;
 	window.fps = 0;
 	window.currentAudioBufferSize = 0;
 	let enableWebrtcStatics = false;
@@ -454,7 +454,7 @@ export default function webrtc() {
 		'framerate', 'video_crf', 'video_fullcolor',
 		'video_streaming_mode', 'use_cpu',
 		'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
-		'is_manual_resolution_mode', 'manual_width', 'manual_height',
+		'manual_resolution', 'manual_width', 'manual_height',
 		'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
 		'video_bitrate', 'force_aligned_resolution'
 	];
@@ -870,14 +870,14 @@ export default function webrtc() {
 		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
 
 		const knownSettings = [
-			'framerate', 'encoder', 'is_manual_resolution_mode',
+			'framerate', 'encoder', 'manual_resolution',
 			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
 			'rate_control_mode', 'video_crf', 'use_cpu', 'force_aligned_resolution',
 			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality',
 			'video_paintover_crf', 'video_paintover_burst_frames'
 		];
 		const booleanSettingKeys = [
-			'is_manual_resolution_mode', 'enable_binary_clipboard', 'use_cpu',
+			'manual_resolution', 'enable_binary_clipboard', 'use_cpu',
 			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality',
 			'force_aligned_resolution'
 		];
@@ -909,8 +909,8 @@ export default function webrtc() {
 			}
 		}
 
-		if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
-			settingsToSend['is_manual_resolution_mode'] = true;
+		if (window.manualResolution && manualWidth != null && manualHeight != null) {
+			settingsToSend['manual_resolution'] = true;
 			settingsToSend['manual_width'] = alignResolution(manualWidth);
 			settingsToSend['manual_height'] = alignResolution(manualHeight);
 		}
@@ -945,7 +945,7 @@ export default function webrtc() {
 			return;
 		}
 
-		const dpr = (window.isManualResolutionMode || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+		const dpr = (window.manualResolution || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
 		const logicalWidth = alignResolution(targetWidth * dpr);
 		const logicalHeight = alignResolution(targetHeight * dpr);
 		console.log(`applyManualStyle logicalWidth: ${logicalWidth} logicalHeight: ${logicalHeight}`)
@@ -1055,7 +1055,7 @@ export default function webrtc() {
 			return;
 		}
 		let realWidth, realHeight, dpr;
-		if (window.isManualResolutionMode) {
+		if (window.manualResolution) {
 			dpr = 1;
 			realWidth = alignResolution(width);
 			realHeight = alignResolution(height);
@@ -1089,7 +1089,7 @@ export default function webrtc() {
 	 * listener gates itself and is registered once.
 	 */
 	window.addEventListener('resize', () => {
-		if (window.isManualResolutionMode && !isSharedMode
+		if (window.manualResolution && !isSharedMode
 			&& manualWidth > 0 && manualHeight > 0 && videoElement && videoElement.parentElement) {
 			applyManualStyle(manualWidth, manualHeight, scaleLocal);
 		}
@@ -1128,7 +1128,7 @@ export default function webrtc() {
 	 * matches what the server realizes.
 	 */
 	function handleResizeUI() {
-		if (window.isManualResolutionMode) {
+		if (window.manualResolution) {
 			return;
 		}
 		if (window.enable_resize === false && storageDisplayId !== 'display2') {
@@ -1152,7 +1152,7 @@ export default function webrtc() {
 	const watchDevicePixelRatio = () => {
 		let mql = null;
 		const onDprChange = () => {
-			if (!window.isManualResolutionMode && !isSharedMode) { resizeStart(); }
+			if (!window.manualResolution && !isSharedMode) { resizeStart(); }
 			arm();
 		};
 		const arm = () => {
@@ -1185,7 +1185,7 @@ export default function webrtc() {
 		if (trackpadMode && webrtc) {
 			try { webrtc.sendDataChannelMessage('SET_NATIVE_CURSOR_RENDERING,1'); } catch (_) {}
 		}
-		if (window.isManualResolutionMode && manualWidth && manualHeight) {
+		if (window.manualResolution && manualWidth && manualHeight) {
 			console.log(`Applying manual resolution: ${manualWidth}x${manualHeight}`);
 			applyManualStyle(manualWidth, manualHeight, scaleLocal);
 			if (window.location.hash.startsWith('#display2')) {
@@ -1307,7 +1307,7 @@ export default function webrtc() {
 					scaleLocal = message.value;
 					setBoolParam("scaleLocallyManual", scaleLocal);
 					console.log(`Set scaleLocallyManual to ${scaleLocal} and persisted.`);
-					if (window.isManualResolutionMode && manualWidth && manualHeight) {
+					if (window.manualResolution && manualWidth && manualHeight) {
 						applyManualStyle(manualWidth, manualHeight, scaleLocal);
 					}
 				} else {
@@ -1318,11 +1318,11 @@ export default function webrtc() {
 				if (isSharedMode) { break; }
 				console.log("Resetting to window size");
 				// The flag drops first so the re-send takes the auto path (window size times dpr).
-				window.isManualResolutionMode = false;
+				window.manualResolution = false;
 				manualHeight = manualWidth = 0;
 				setIntParam('manual_width', null);
 				setIntParam('manual_height', null);
-				setBoolParam('is_manual_resolution_mode', false);
+				setBoolParam('manual_resolution', false);
 				enableAutoResize();
 				handleResizeUI();
 				break;
@@ -1337,12 +1337,12 @@ export default function webrtc() {
 				console.log(`Setting manual resolution: ${width}x${height}`);
 				// The flag rises before the send: a preset is exact framebuffer pixels, which the
 				// auto path would multiply by dpr.
-				window.isManualResolutionMode = true;
+				window.manualResolution = true;
 				manualWidth = width;
 				manualHeight = height;
 				setIntParam('manual_width', manualWidth);
 				setIntParam('manual_height', manualHeight);
-				setBoolParam('is_manual_resolution_mode', true);
+				setBoolParam('manual_resolution', true);
 				disableAutoResize();
 				sendResolutionToServer(manualWidth, manualHeight);
 				applyManualStyle(manualWidth, manualHeight, scaleLocal);
@@ -1363,7 +1363,7 @@ export default function webrtc() {
 					}
 					if (changed) {
 						updateVideoImageRendering();
-						if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
+						if (window.manualResolution && manualWidth != null && manualHeight != null) {
 							sendResolutionToServer(manualWidth, manualHeight);
 							applyManualStyle(manualWidth, manualHeight, scaleLocal);
 						} else if (!isSharedMode && input &&
@@ -1700,7 +1700,7 @@ export default function webrtc() {
 			force_aligned_resolution = !!settings.force_aligned_resolution;
 			storeBool('force_aligned_resolution', force_aligned_resolution);
 			// Re-sent so the stream snaps to the new alignment; a pinned primary is left alone.
-			if (window.isManualResolutionMode && manualWidth != null && manualHeight != null) {
+			if (window.manualResolution && manualWidth != null && manualHeight != null) {
 				sendResolutionToServer(manualWidth, manualHeight);
 			} else if (!isSharedMode && input &&
 				(window.enable_resize !== false || storageDisplayId === 'display2')) {
@@ -2179,7 +2179,7 @@ export default function webrtc() {
 			videoBitRate = getIntParam('video_bitrate', videoBitRate);
 			videoFramerate = getIntParam('framerate', videoFramerate);
 			audioBitRate = getIntParam('audio_bitrate', audioBitRate);
-			window.isManualResolutionMode = getBoolParam('is_manual_resolution_mode', false);
+			window.manualResolution = getBoolParam('manual_resolution', false);
 			isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
 			manualWidth = getIntParam('manual_width', null);
 			manualHeight = getIntParam('manual_height', null);
@@ -2604,7 +2604,7 @@ export default function webrtc() {
 					const dims = action.slice('resolution,'.length).split('x');
 					const rw = parseInt(dims[0], 10);
 					const rh = parseInt(dims[1], 10);
-					if (rw > 0 && rh > 0 && window.isManualResolutionMode &&
+					if (rw > 0 && rh > 0 && window.manualResolution &&
 						(manualWidth !== rw || manualHeight !== rh)) {
 						manualWidth = rw;
 						manualHeight = rh;
@@ -2658,13 +2658,13 @@ export default function webrtc() {
 					console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
 					handleSettingsMessage(changes, true);
 				}
-				if (obj.settings.is_manual_resolution_mode && obj.settings.is_manual_resolution_mode.value === true) {
+				if (obj.settings.manual_resolution && obj.settings.manual_resolution.value === true) {
 					console.log("Server settings payload confirms manual mode. Switching to manual resize handlers.");
 					const serverWidth = obj.settings.manual_width ? parseInt(obj.settings.manual_width.value, 10) : 0;
 					const serverHeight = obj.settings.manual_height ? parseInt(obj.settings.manual_height.value, 10) : 0;
 					if (serverWidth > 0 && serverHeight > 0) {
 						console.log(`Applying server-enforced manual resolution: ${serverWidth}x${serverHeight}`);
-						window.isManualResolutionMode = true;
+						window.manualResolution = true;
 						manualWidth = serverWidth;
 						manualHeight = serverHeight;
 						applyManualStyle(manualWidth, manualHeight, scaleLocal);
@@ -2741,7 +2741,7 @@ export default function webrtc() {
 		},
 		/** Tears the session down: listeners, timers, the worker, and every session-scoped value back to its default. */
 		cleanup() {
-			window.isManualResolutionMode = false;
+			window.manualResolution = false;
 			window.fps = 0;
 			stopWebcamCapture();
 

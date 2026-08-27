@@ -127,7 +127,7 @@ its own.
 
 ## What the default (GPL-enabled) deployment adds
 
-`pip install selkies` adds libx264 through the published pixelflux wheels; the
+An installed Selkies adds libx264 through the pixelflux wheel inside it; the
 container images add the distribution's FFmpeg and x264 packages. libx264 is
 GPL-2.0-or-later, and an FFmpeg configured with `--enable-gpl
 --enable-version3` (Debian, Ubuntu, Alpine) is GPL-3.0-or-later, so a

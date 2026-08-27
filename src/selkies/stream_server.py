@@ -48,7 +48,7 @@ except ImportError:
     fcntl = None
 from aiohttp import web
 from aiohttp.abc import AbstractAccessLogger
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from prometheus_client import generate_latest
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 try:
@@ -1124,6 +1124,81 @@ class CentralizedStreamServer:
         )
         return cert_pem, key_pem
 
+    def _make_self_signed_cert(self) -> Tuple[str, str]:
+        """Write a self-signed certificate and key, and return their paths.
+
+        Turning HTTPS on is otherwise a two-step job — make a certificate, then
+        point at it — and browsers gate the clipboard, gamepads, pointer lock
+        and the camera on a secure context, so the step is in everyone's way.
+        The configured paths are used when their directory is writable, which
+        for the default `ssl-cert-snakeoil` pair means running as root; a user
+        install falls back to its own state directory. Either way the pair
+        persists, so the exception a browser is told to make survives a
+        restart.
+
+        Returns:
+            The certificate and key paths, both absolute.
+
+        Raises:
+            OSError: No candidate directory could be written to.
+        """
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        state = os.path.join(
+            os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+            "selkies")
+        candidates = []
+        configured = getattr(self.settings, "https_cert", None)
+        if configured:
+            candidates.append((os.path.abspath(configured),
+                               os.path.abspath(getattr(self.settings, "https_key", "") or "")))
+        candidates.append((os.path.join(state, "selkies.pem"), os.path.join(state, "selkies.key")))
+
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "localhost")])
+        now = datetime.now(tz=timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=3650))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .sign(key, hashes.SHA256())
+        )
+        errors = []
+        for cert_path, key_path in candidates:
+            if not cert_path or not key_path:
+                continue
+            try:
+                os.makedirs(os.path.dirname(cert_path), exist_ok=True)
+                os.makedirs(os.path.dirname(key_path), exist_ok=True)
+                with open(cert_path, "wb") as handle:
+                    handle.write(cert.public_bytes(serialization.Encoding.PEM))
+                fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(key.private_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PrivateFormat.PKCS8,
+                        encryption_algorithm=serialization.NoEncryption()))
+                # Set after the write: O_CREAT leaves an existing file's mode alone.
+                os.chmod(key_path, 0o600)
+            except OSError as error:
+                errors.append(f"{cert_path}: {error}")
+                continue
+            logger.warning(
+                "No certificate at the configured path, so HTTPS runs on a self-signed one "
+                "written to %s. Browsers will warn once until it is trusted; a certificate "
+                "from an authority, or a reverse proxy terminating TLS, avoids that.",
+                cert_path)
+            return cert_path, key_path
+        raise OSError("could not write a self-signed certificate: " + "; ".join(errors))
+
     def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Build the server TLS context from the configured cert/key.
 
@@ -1139,10 +1214,7 @@ class CentralizedStreamServer:
 
         cert_pem, key_pem = self._get_https_certs()
         if not cert_pem:
-            raise FileNotFoundError(
-                f"HTTPS enabled but certificate file not found at "
-                f"{getattr(self.settings, 'https_cert', '<unset>')}"
-            )
+            cert_pem, key_pem = self._make_self_signed_cert()
 
         logger.info(
             "Creating TLS context with certificate=%s key=%s", cert_pem, key_pem

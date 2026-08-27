@@ -727,7 +727,7 @@ class SelkiesStreamingApp:
         self.mode = mode
         self.display_width = 1024
         self.display_height = 768
-        if settings.is_manual_resolution_mode[0]:
+        if settings.manual_resolution[0]:
             manual_w = int(settings.manual_width or 0)
             manual_h = int(settings.manual_height or 0)
             if manual_w > 0 and manual_h > 0:
@@ -2452,8 +2452,8 @@ class DataStreamingServer(BaseStreamingService):
         parsed["encoder"] = get_str("encoder")
         parsed["video_fullcolor"] = get_bool("video_fullcolor")
         parsed["video_streaming_mode"] = get_bool("video_streaming_mode")
-        parsed["is_manual_resolution_mode"] = get_bool(
-            "is_manual_resolution_mode"
+        parsed["manual_resolution"] = get_bool(
+            "manual_resolution"
         )
         parsed["manual_width"] = get_int(
             "manual_width"
@@ -2542,8 +2542,8 @@ class DataStreamingServer(BaseStreamingService):
                 target_w = None
                 target_h = None
                 keeps_current_geometry = False
-                server_is_manual, _ = self.cli_args.is_manual_resolution_mode
-                client_wants_manual = sanitize_value("is_manual_resolution_mode", settings.get("is_manual_resolution_mode"))
+                server_is_manual, _ = self.cli_args.manual_resolution
+                client_wants_manual = sanitize_value("manual_resolution", settings.get("manual_resolution"))
                 if server_is_manual:
                     data_logger.info(f"Server override is active. Forcing manual resolution from server configuration for display '{display_id}'.")
                     try:
@@ -5685,7 +5685,7 @@ async def on_resize_handler(
         logger_app_resize.warning(f"Primary resize to {res_str} ignored: dynamic resizing disabled.")
         return
     if data_server_instance:
-        server_is_manual, _ = data_server_instance.cli_args.is_manual_resolution_mode
+        server_is_manual, _ = data_server_instance.cli_args.manual_resolution
         if server_is_manual:
             logger_app_resize.warning(
                 f"Client attempted to resize to {res_str} but server is in manual resolution mode. Request ignored."

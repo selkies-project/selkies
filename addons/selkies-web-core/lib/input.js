@@ -2581,9 +2581,9 @@ export class Input {
      * @returns {{boxLeft: number, boxTop: number, boxW: number, boxH: number, sinkW: number, sinkH: number}|null}
      */
     _sinkBox(canvas, videoEle) {
-        const sink = ((window.is_manual_resolution_mode || this.isSharedMode || window.streamResolutionDiverged) && canvas)
+        const sink = ((window.manual_resolution || this.isSharedMode || window.streamResolutionDiverged) && canvas)
             ? canvas
-            : ((window.isManualResolutionMode || window.streamResolutionDiverged) && videoEle) ? videoEle : null;
+            : ((window.manualResolution || window.streamResolutionDiverged) && videoEle) ? videoEle : null;
         if (!sink) {
             return null;
         }
@@ -2647,8 +2647,8 @@ export class Input {
      * is already realized in CSS pixels and the sink box carries the scale.
      */
     _inputDpr() {
-        if (this.useCssScaling || window.is_manual_resolution_mode ||
-            window.isManualResolutionMode || this.isSharedMode) {
+        if (this.useCssScaling || window.manual_resolution ||
+            window.manualResolution || this.isSharedMode) {
             return 1;
         }
         return window.devicePixelRatio || 1;
