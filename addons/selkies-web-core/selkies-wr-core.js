@@ -1038,6 +1038,27 @@ export default function webrtc() {
 			Math.abs(cur - target) < Math.abs(prev - target) ? cur : prev);
 	}
 
+	let lastFollowedDpr = window.devicePixelRatio || 1;
+	/**
+	 * Follows a live devicePixelRatio change while `scaling_dpi` sits on its
+	 * automatic default, re-deriving and pushing it so the remote UI density
+	 * matches the display the window is on. Called from both the resize
+	 * handler and the matchMedia density watcher: an OS scaling change can
+	 * surface as either, and emulated density changes fire only the resize.
+	 */
+	function maybeFollowDpr() {
+		const dpr = window.devicePixelRatio || 1;
+		if (dpr === lastFollowedDpr) return;
+		lastFollowedDpr = dpr;
+		if (isSharedMode) return;
+		if (getStringParam('scaling_dpi', null) !== null) return;
+		const derived = autoDeriveDpi();
+		if (derived === scalingDPI) return;
+		scalingDPI = derived;
+		console.log(`DPI follows devicePixelRatio: scaling_dpi -> ${derived}.`);
+		try { webrtc.sendDataChannelMessage(`s,${derived}`); } catch (_) { /* reconnect reseeds */ }
+	}
+
 	/**
 	 * Requests a stream resolution with the `r,WxH` message.
 	 *
@@ -1097,6 +1118,7 @@ export default function webrtc() {
 
 	/** Debounces window resizes into handleResizeUI. */
 	function resizeStart() {
+		maybeFollowDpr();
 		rtime = new Date();
 		if (rtimeout === false) {
 			rtimeout = true;
@@ -1146,12 +1168,15 @@ export default function webrtc() {
 	 * Re-runs the auto-resize path when the device pixel ratio changes: a
 	 * window dragged to a monitor of another density, or an OS scaling change,
 	 * fires no resize event, and the stream would stay at the old density
-	 * until the next one. A matchMedia resolution query is one-shot at a given
-	 * dppx, so it is re-armed after each change.
+	 * until the next one. While `scaling_dpi` sits on its automatic default
+	 * it is re-derived and pushed too, so the remote UI density follows the
+	 * display the window is on. A matchMedia resolution query is one-shot at
+	 * a given dppx, so it is re-armed after each change.
 	 */
 	const watchDevicePixelRatio = () => {
 		let mql = null;
 		const onDprChange = () => {
+			maybeFollowDpr();
 			if (!window.manualResolution && !isSharedMode) { resizeStart(); }
 			arm();
 		};
@@ -1162,6 +1187,9 @@ export default function webrtc() {
 			mql.addEventListener('change', onDprChange, { once: true });
 		};
 		arm();
+		// An emulated density change fires neither the query nor a resize;
+		// a slow poll of the live value catches those too.
+		setInterval(maybeFollowDpr, 1000);
 	};
 	watchDevicePixelRatio();
 

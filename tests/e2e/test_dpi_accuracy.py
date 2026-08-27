@@ -66,6 +66,25 @@ def run() -> int:
                 res.check(f"dpr {dpr} applies Xft.dpi {want}", got == want,
                           f"got {got}")
                 ctx.close()
+
+            # A live density change (the window dragged to another monitor, an
+            # OS scaling change) must follow without a reload: the DPR watcher
+            # re-derives the automatic scaling_dpi and pushes it.
+            ctx = browser.new_context(viewport={"width": 1000, "height": 700},
+                                      device_scale_factor=1.0)
+            page = ctx.new_page()
+            page.goto(f"{H.BASE_URL}/", wait_until="load", timeout=60000)
+            page.wait_for_timeout(9000)
+            res.check("live dpr: starts at Xft.dpi 96", xft_dpi() == 96,
+                      f"got {xft_dpi()}")
+            cdp = ctx.new_cdp_session(page)
+            cdp.send("Emulation.setDeviceMetricsOverride", {
+                "width": 1000, "height": 700, "deviceScaleFactor": 2.0,
+                "mobile": False})
+            page.wait_for_timeout(9000)
+            res.check("live dpr: 2.0 applies Xft.dpi 192 without reload",
+                      xft_dpi() == 192, f"got {xft_dpi()}")
+            ctx.close()
         finally:
             browser.close()
     H.server_stop()
