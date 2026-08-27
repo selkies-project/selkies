@@ -34,7 +34,7 @@ env:
   NODE_VERSION: "26"
   # Linters are pinned to a minor line so a new rule in a released version
   # cannot turn a green branch red without a deliberate bump here
-  PRE_COMMIT_VERSION: "4.4.*"
+  PRE_COMMIT_VERSION: "4.6.*"
   ACTIONLINT_VERSION: "1.7.12"
 
 jobs:

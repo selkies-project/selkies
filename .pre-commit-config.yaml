@@ -10,7 +10,7 @@
 # workflow files, which is left to CI because it needs its own download.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.1
+    rev: v0.16.4
     hooks:
       # Rule selection lives in pyproject.toml
       - id: ruff-check
