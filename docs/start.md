@@ -14,8 +14,17 @@ Read [Python Application](component.md#python-application) for more details of t
 **1. Install required dependencies, for Ubuntu or Debian-based distributions, run this command:**
 
 ```bash
-sudo apt-get update && sudo apt-get install --no-install-recommends -y python3 python3-pip python3-dev jq ca-certificates curl xserver-xorg-core xvfb x11-utils x11-xkb-utils x11-xserver-utils libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 libxtst6 libxext6 libpulse0 pulseaudio
+sudo apt-get update && sudo apt-get install --no-install-recommends -y python3 python3-pip python3-dev jq ca-certificates curl xserver-xorg-core xvfb x11-utils x11-xkb-utils x11-xserver-utils libx11-xcb1 libxcb1 libxcb-dri3-0 libxcb-render0 libxcb-shm0 libxkbcommon0 libxdamage1 libxfixes3 libxtst6 libxext6 libva2 libdrm2 libgbm1 libegl1 libglib2.0-0 libpixman-1-0 libwayland-server0 libpulse0 pulseaudio
 ```
+
+This is the runtime set the native packages declare, so a `pip` install needs
+the same libraries. `xserver-xorg-core`, `xvfb` and the `x11-*` tools are for
+the X11 backend; the headless Wayland backend (`--wayland=true` /
+`SELKIES_WAYLAND=true`) starts its own compositor and needs `libwayland-server0`
+from the same list, plus `xwayland` and a nested compositor such as `labwc` if
+the session's applications are X11 ones or want window management. Neither
+backend is installed by the Python package: Selkies attaches to the display
+server you provide, or brings up its own Wayland compositor.
 
 For hardware-accelerated H.264 encoding, additionally install the relevant GPU drivers: NVENC is provided by the NVIDIA GPU driver (`libnvidia-encode`), while Intel and AMD GPUs use VA-API (install `libva2` and your vendor's VA-API driver, such as `intel-media-va-driver-non-free` for Intel or the AMDGPU driver for AMD). Optionally install `vainfo`, `intel-gpu-tools`, `radeontop`, or `nvtop` for GPU monitoring.
 
@@ -133,12 +142,25 @@ sudo apk add --allow-untrusted "./selkies-${SELKIES_VERSION}-r0-x86_64.apk"  # A
 sudo pacman -U "./selkies-${SELKIES_VERSION}-1-x86_64.pkg.tar.zst"           # Arch Linux
 ```
 
-The AppImage installs nothing and runs from wherever you put it. It carries its own Python environment and the interposer, starts a virtual display with the host's `Xvfb` when the display it is pointed at is not up, and starts its own bundled PulseAudio server when none is listening:
+The AppImage installs nothing and runs from wherever you put it. Every Python and
+native dependency Selkies has is inside it: a conda-forge environment for
+everything conda-forge publishes, and the four that it does not
+(`pixelflux`, `pcmflux`, `pulsectl-asyncio`, `aitop`) pip-installed into that
+same prefix, so nothing resolves against — or collides with — the host's
+Python or libraries. It starts a virtual display with the host's `Xvfb` when
+the display it is pointed at is not up, and starts its own bundled PulseAudio
+server when none is listening:
 
 ```bash
 chmod +x "./selkies-${SELKIES_VERSION}-x86_64.AppImage"
 "./selkies-${SELKIES_VERSION}-x86_64.AppImage" --addr=0.0.0.0 --port=8080 --enable-basic-auth=true --basic-auth-user=user --basic-auth-password=mypasswd
 ```
+
+What the AppImage deliberately takes from the host is the graphics stack and
+the display server: `libgbm`, `libEGL` and the GPU's own driver have to be the
+host's for the GPU to be reachable at all, an X11 session needs the host's X
+server (or `Xvfb`), and the headless Wayland backend needs the host's
+`libwayland-server`. Everything above them travels with the AppImage.
 
 ### Install the packaged version on self-hosted standalone machines, cloud instances, or virtual machines
 
@@ -149,7 +171,7 @@ While this instruction assumes that you are installing this project systemwide, 
 **1. Install the dependencies, for Ubuntu or Debian-based distributions, run this command:**
 
 ```bash
-sudo apt-get update && sudo apt-get install --no-install-recommends -y python3 python3-pip python3-dev jq ca-certificates curl xserver-xorg-core xvfb wmctrl x11-utils x11-xkb-utils x11-xserver-utils libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 libxtst6 libxext6 libpulse0 pulseaudio
+sudo apt-get update && sudo apt-get install --no-install-recommends -y python3 python3-pip python3-dev jq ca-certificates curl xserver-xorg-core xvfb wmctrl x11-utils x11-xkb-utils x11-xserver-utils libx11-xcb1 libxcb1 libxcb-dri3-0 libxcb-render0 libxcb-shm0 libxkbcommon0 libxdamage1 libxfixes3 libxtst6 libxext6 libva2 libdrm2 libgbm1 libegl1 libglib2.0-0 libpixman-1-0 libwayland-server0 libpulse0 pulseaudio
 ```
 
 If using supported NVIDIA GPUs, NVENC is bundled with the GPU driver (`libnvidia-encode`). If using AMD or Intel GPUs, install its graphics and VA-API drivers, as well as `libva2`. The `intel-media-va-driver-non-free` package (or `i965-va-driver-shaders` depending on your Intel GPU generation) is recommended for Intel GPUs, and the bundled VA-API driver in the AMDGPU driver is recommended for AMD GPUs. Optionally install `vainfo`, `intel-gpu-tools`, `radeontop`, or `nvtop` for GPU monitoring.
