@@ -36,27 +36,28 @@ requirements:
     - nodejs 26.*
   run:
     - python >=3.9
-    # Mirrors [project.dependencies] in pyproject.toml; `pip install --no-deps`
-    # above deliberately leaves resolution to conda. pixelflux, pcmflux,
-    # pulsectl-asyncio and aitop have no conda-forge packages and are
-    # pip-installed into the environment by scripts/ci/appimage.sh.
+    # Mirrors [project.dependencies] in pyproject.toml, which
+    # tests/unit/test_package_deps.py holds this list to; `pip install
+    # --no-deps` above deliberately leaves resolution to conda. pixelflux,
+    # pcmflux, pulsectl-asyncio and aitop have no conda-forge packages and are
+    # pip-installed into the same environment by scripts/ci/appimage.sh.
     - prometheus_client
     - msgpack-python
     - psutil
     - watchdog
     - pillow
-    - dnspython >=2.0.0
+    - dnspython >=2.6.1
     - ifaddr >=0.2.0
-    - av
     - cffi >=1.0.0
-    - cryptography >=44.0.0
-    - google-crc32c >=1.1
+    - cryptography >=50.0.0
+    - google-crc32c >=1.1.0
     - pyee >=13.0.0
     - pylibsrtp >=0.10.0
-    - pyopenssl >=25.0.0
-    - aiohttp >=3.7.0
+    - pyopenssl >=26.0.0
+    - aiohttp >=3.14.1
     - aiofiles >=25.1.0
     - uvloop >=0.19.0
+    - importlib_resources >=5.10.0
     - nvidia-ml-py
 
 tests:
