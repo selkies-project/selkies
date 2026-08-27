@@ -266,6 +266,7 @@ const PROBE_BUDGET_MS = 400;
 // does to it on real frames.
 const PROBE_RATE_MARGIN = 0.9;
 let encoder = null, candIndex = 0, cand = null, configuring = false, active = true;
+let wirePort = null;
 // Camera frames held while probing; during the measurement itself further
 // frames are dropped, so nothing reaches the wire unvetted.
 let probing = false, measuring = false, probeFrames = [], probeTimer = null;
@@ -298,8 +299,10 @@ async function makeEncoder(w, h, latched) {
           if (!active) return;
           const buf = new ArrayBuffer(chunk.byteLength);
           chunk.copyTo(new Uint8Array(buf));
-          self.postMessage({ type: 'chunk', codecId: cand.id, keyframe: chunk.type === 'key', buffer: buf,
-                             rotation: orientation.rotation, flip: orientation.flip }, [buf]);
+          const framed = { codecId: cand.id, keyframe: chunk.type === 'key', buffer: buf,
+                           rotation: orientation.rotation, flip: orientation.flip };
+          if (wirePort) wirePort.postMessage(framed, [buf]);
+          else self.postMessage({ type: 'chunk', ...framed }, [buf]);
         },
         error: (err) => { try { encoder && encoder.close(); } catch (x) {} encoder = null; encodedSize = null; lag = null; candIndex++; },
       });
@@ -508,6 +511,13 @@ self.onmessage = async (e) => {
     return;
   }
   if (m.type === 'keyframe') { forceKeyframe = true; return; }
+  if (m.type === 'wirePort') {
+    // Encoded frames then go straight to the transport; the receiver answers
+    // {needKeyframe:true} when a send gap broke the delta chain.
+    wirePort = m.port;
+    wirePort.onmessage = (ev) => { if (ev.data && ev.data.needKeyframe) forceKeyframe = true; };
+    return;
+  }
   if (m.type === 'config') { if (m.fps) fps = m.fps; if (m.bitrate) bitrate = m.bitrate; return; }
   if (m.type === 'stop') {
     active = false;
@@ -648,6 +658,10 @@ export class WebcamCapture {
     this._active = false;
     this._generation = 0;
     this._encodeWorker = null;
+    this._wireProvider = null;
+    // Set once a worker has reported it cannot read a track, so the ladder
+    // stops offering the worker rung for the rest of the session.
+    this._workerTrackUnsupported = false;
     this._settleEncodeWorker = null;
     this._workerIsSource = false;
     this._encoderCodecName = null;
@@ -891,6 +905,9 @@ export class WebcamCapture {
           this._logPath("capture+encode: camera read and encoded in a worker");
           finish({ close: () => this._stopEncodeWorker() });
         } else if (m.type === "track_unsupported") {
+          // No worker MediaStreamTrackProcessor here, so a second worker would
+          // fail the same way: _openSource skips straight to the page's.
+          this._workerTrackUnsupported = true;
           try { clone.stop(); } catch (error) { /* ignore */ }
           finish(null);
         }
@@ -907,6 +924,18 @@ export class WebcamCapture {
         finish(null);
       }
     });
+  }
+
+  /**
+   * Supplies a fresh `MessagePort` to each encode worker this capture spawns,
+   * giving encoded frames a line to the transport that skips the page thread;
+   * the far end may post `{needKeyframe: true}` back to force a resync. Only
+   * the worker encoder uses it -- the page-thread rungs keep `sendFrame`.
+   * @param {?function(): ?MessagePort} provider Called per worker; null clears.
+   * @returns {void}
+   */
+  setWireProvider(provider) {
+    this._wireProvider = provider;
   }
 
   /**
@@ -967,6 +996,12 @@ export class WebcamCapture {
         if (m.type === "probed") {
           clearTimeout(timer);
           this._encodeWorker = worker;
+          if (this._wireProvider) {
+            try {
+              const port = this._wireProvider();
+              if (port) worker.postMessage({ type: "wirePort", port }, [port]);
+            } catch (error) { /* the page relay stands in */ }
+          }
           this._encoderCodecName = m.codec;
           this._logPath(m.rate !== undefined
             ? `encode: ${m.codec} in a worker, ${m.rate} fps measured against ${this.fps} asked for`
@@ -1082,6 +1117,17 @@ export class WebcamCapture {
    * @returns {Promise<?{close: function(): void}>}
    */
   async _openSource(track, generation) {
+    // A worker reader keeps every frame off the page's thread, so it is tried
+    // first; the page's own processor is the rung below it, not above.
+    if (!this._workerTrackUnsupported) {
+      const worker = await this._workerSource(track, generation);
+      if (worker) {
+        this._deriveOrientation = canDeriveOrientation();
+        this._logPath("capture: MediaStreamTrackProcessor in a worker");
+        return worker;
+      }
+      if (this._generation !== generation) return null;
+    }
     if (typeof MediaStreamTrackProcessor !== "undefined") {
       try {
         const processor = new MediaStreamTrackProcessor({ track });
@@ -1090,12 +1136,6 @@ export class WebcamCapture {
       } catch (error) {
         /* fall through to the other sources */
       }
-    }
-    const worker = await this._workerSource(track, generation);
-    if (worker) {
-      this._deriveOrientation = canDeriveOrientation();
-      this._logPath("capture: MediaStreamTrackProcessor in a worker");
-      return worker;
     }
     if (typeof VideoFrame === "undefined") {
       this._pinJpegRung("no VideoFrame constructor");
