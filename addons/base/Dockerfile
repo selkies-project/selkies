@@ -14,7 +14,7 @@
 #
 # Everything a Selkies session needs and nothing that decides what the session
 # looks like: no window manager, no panel, no file manager, no applications.
-# addons/example builds the reference LXQt desktop on top of this, and any
+# addons/desktop builds the reference LXQt desktop on top of this, and any
 # other desktop can be built the same way.
 #
 #   - X11 display server (a DRI3-capable Xvfb) and the headless Wayland backend

@@ -19,38 +19,45 @@ Nothing to install, and the only route that brings its own desktop, browser and 
 
 ```bash
 docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
-    ghcr.io/selkies-project/selkies/example:main-ubuntu26.04
+    ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04
 ```
 
-`debiantrixie` is the other flavor, and the flavor only names the distribution inside the image — it is a free choice, not a property of your host. Add `--gpus 1 --runtime nvidia` for an NVIDIA GPU, or `--device /dev/dri` for Intel and AMD. [Example Container](component.md#example-container) covers the rest, including the Wayland backend and the embedded TURN server.
+`debiantrixie` is the other flavor, and the flavor only names the distribution inside the image — it is a free choice, not a property of your host. Add `--gpus 1 --runtime nvidia` for an NVIDIA GPU, or `--device /dev/dri` for Intel and AMD. [Desktop Container](component.md#desktop-container) covers the rest, including the Wayland backend and the embedded TURN server.
 
 ### A native package, on a machine you already have a desktop on
 
 Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkies-resize` and `selkies-gpu-probe` on `PATH`, carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line:
 
 ```bash
-# Ubuntu and Debian: the suffix names the distribution the package was built in
-# (ubuntu24.04, ubuntu26.04, bookworm, trixie), and amd64 or arm64
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies_${SELKIES_VERSION}-1~trixie_amd64.deb"
-sudo apt-get install -y "./selkies_${SELKIES_VERSION}-1~trixie_amd64.deb"
+# Ubuntu and Debian. The suffix names the distribution the package was built in
+# (ubuntu24.04, ubuntu26.04, bookworm, trixie); this reads yours from os-release
+. /etc/os-release
+DISTRO="$([ "${ID}" = "ubuntu" ] && echo "ubuntu${VERSION_ID}" || echo "${VERSION_CODENAME}")"
+PKG="selkies_${SELKIES_VERSION}-1~${DISTRO}_$(dpkg --print-architecture).deb"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${PKG}"
+sudo apt-get install -y "./${PKG}"
 ```
 
 ```bash
-# Fedora and Enterprise Linux: fc or el9, and x86_64 or aarch64
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-1.fc.x86_64.rpm"
-sudo dnf install -y "./selkies-${SELKIES_VERSION}-1.fc.x86_64.rpm"
+# Fedora and Enterprise Linux
+. /etc/os-release
+PKG="selkies-${SELKIES_VERSION}-1.$([ "${ID}" = "fedora" ] && echo fc || echo el9).$(uname -m).rpm"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${PKG}"
+sudo dnf install -y "./${PKG}"
 ```
 
 ```bash
 # Alpine
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-r0-x86_64.apk"
-sudo apk add --allow-untrusted "./selkies-${SELKIES_VERSION}-r0-x86_64.apk"
+PKG="selkies-${SELKIES_VERSION}-r0-$(uname -m).apk"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${PKG}"
+sudo apk add --allow-untrusted "./${PKG}"
 ```
 
 ```bash
-# Arch Linux, published for x86_64 alone
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-1-x86_64.pkg.tar.zst"
-sudo pacman -U "./selkies-${SELKIES_VERSION}-1-x86_64.pkg.tar.zst"
+# Arch Linux, which Arch publishes for x86_64 alone
+PKG="selkies-${SELKIES_VERSION}-1-$(uname -m).pkg.tar.zst"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${PKG}"
+sudo pacman -U "./${PKG}"
 ```
 
 For hardware-accelerated H.264, add your GPU's driver: NVENC comes with the NVIDIA driver (`libnvidia-encode`), and Intel and AMD encode through VA-API (`libva2` plus your vendor's driver — `intel-media-va-driver-non-free` for Intel, or `i965-va-driver-shaders` for older generations, and the AMDGPU driver's own for AMD). `vainfo`, `intel-gpu-tools`, `radeontop` and `nvtop` are optional monitors.

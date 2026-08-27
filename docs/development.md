@@ -175,15 +175,15 @@ The comment conventions each language follows are in [`AGENTS.md`](https://githu
 
 ## Container Customization
 
-The reference container images (the [Base Container](https://github.com/selkies-project/selkies/tree/main/addons/base), the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/example) built on it, and the LXQt desktop images built by CI) use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor, installed from the distribution's package registry (`s6` package): `s6-svscan /etc/service` starts one `s6-supervise` per service directory — the X11 display server (or the headless Wayland compositor), the desktop session, the audio stack (`pipewire`/`wireplumber`/`pipewire-pulse`), `dbus`, and `selkies`, restarting any that crash. Services are controlled with `s6-svc` and inspected with `s6-svstat`, the `supervisord`/`supervisorctl` equivalents, without any Python dependency (`s6-overlay` is deliberately NOT used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init or launcher).
+The reference container images (the [Base Container](https://github.com/selkies-project/selkies/tree/main/addons/base), the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/desktop) built on it, and the LXQt desktop images built by CI) use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor, installed from the distribution's package registry (`s6` package): `s6-svscan /etc/service` starts one `s6-supervise` per service directory — the X11 display server (or the headless Wayland compositor), the desktop session, the audio stack (`pipewire`/`wireplumber`/`pipewire-pulse`), `dbus`, and `selkies`, restarting any that crash. Services are controlled with `s6-svc` and inspected with `s6-svstat`, the `supervisord`/`supervisorctl` equivalents, without any Python dependency (`s6-overlay` is deliberately NOT used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init or launcher).
 
-**If you want to change the image behavior, use the original container as a base image and only replace the entrypoint script(s) and/or the s6 service files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu26.04` for the [Example Container](component.md#example-container)) to preserve a specific container build.**
+**If you want to change the image behavior, use the original container as a base image and only replace the entrypoint script(s) and/or the s6 service files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu26.04` for the [Desktop Container](component.md#desktop-container)) to preserve a specific container build.**
 
-Start with the below sample `Dockerfile` example and place your modified `container-entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/example:main-${DISTRIB_FLAVOR}` for the [Example Container](component.md#example-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
+Start with the below sample `Dockerfile` example and place your modified `container-entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/desktop:main-${DISTRIB_FLAVOR}` for the [Desktop Container](component.md#desktop-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
 
 ```dockerfile
 ARG DISTRIB_FLAVOR=ubuntu26.04
-FROM ghcr.io/selkies-project/selkies/example:main-${DISTRIB_FLAVOR}
+FROM ghcr.io/selkies-project/selkies/desktop:main-${DISTRIB_FLAVOR}
 ARG DISTRIB_FLAVOR
 
 USER 0
@@ -214,7 +214,7 @@ The entrypoint script of the base images launches `s6-svscan /etc/service` itsel
 
 ## Container Guide
 
-The [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) and [`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) repositories (the Desktop Containers here) share components with the [Example Container](component.md#example-container), which is the reference they follow: `container-entrypoint.sh` prepares the session and launches `s6-svscan /etc/service`, the `selkies` service runs `selkies-entrypoint.sh`, and every other daemon is a `run` script under `services/`. There is no `supervisord.conf` and no nginx, since Selkies serves the web client and every endpoint on its single port.
+The [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) and [`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) repositories (the Desktop Containers here) share components with the [Desktop Container](component.md#desktop-container), which is the reference they follow: `container-entrypoint.sh` prepares the session and launches `s6-svscan /etc/service`, the `selkies` service runs `selkies-entrypoint.sh`, and every other daemon is a `run` script under `services/`. There is no `supervisord.conf` and no nginx, since Selkies serves the web client and every endpoint on its single port.
 
 **A change to any shared component is three Pull Requests — the Example Container and both Desktop Containers — and a change confined to the Desktop Containers is two.** What is shared, and how closely:
 

@@ -54,7 +54,7 @@ permissions:
 env:
   REGISTRY_NAMESPACE: ghcr.io/selkies-project/selkies
   BASE_IMAGE_NAME: ghcr.io/selkies-project/selkies/base
-  IMAGE_NAME: ghcr.io/selkies-project/selkies/example
+  IMAGE_NAME: ghcr.io/selkies-project/selkies/desktop
   # ghcr answers a secondary rate limit with 403 on the push itself. buildx
   # reports that as a build failure rather than a response this can read a
   # Retry-After from, so the pause is the minute GitHub asks for when it names
@@ -160,8 +160,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # The session without a desktop, which the example is then built on. Both
-      # images are built in this one job so the example can name the base it was
+      # The session without a desktop, which the desktop image is then built
+      # on. Both are built in this one job so the desktop image can name the base it was
       # just given by digest: an exact, single-architecture reference, months
       # before any manifest for it exists.
       - name: Build and push the base by digest
@@ -177,26 +177,26 @@ jobs:
           outputs: type=image,"name=${{ env.BASE_IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: base-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
-      - name: Build and push the example by digest
+      - name: Build and push the desktop image by digest
         id: build
         uses: ./.github/actions/build-push
         with:
           context: .
-          file: addons/example/Dockerfile
+          file: addons/desktop/Dockerfile
           platforms: ${{ matrix.arch.platform }}
           build-args: |
             BASE_IMAGE=${{ env.BASE_IMAGE_NAME }}@${{ steps.base.outputs.digest }}
           outputs: type=image,"name=${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
-          cache-scope: example-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
+          cache-scope: desktop-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
       - name: Export digests
         env:
           BASE_DIGEST: ${{ steps.base.outputs.digest }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          mkdir -p /tmp/digests/base /tmp/digests/example
+          mkdir -p /tmp/digests/base /tmp/digests/desktop
           touch "/tmp/digests/base/${BASE_DIGEST#sha256:}"
-          touch "/tmp/digests/example/${DIGEST#sha256:}"
+          touch "/tmp/digests/desktop/${DIGEST#sha256:}"
       - uses: actions/upload-artifact@v7
         with:
           name: digest-base-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
@@ -206,12 +206,12 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
-          path: /tmp/digests/example/*
+          path: /tmp/digests/desktop/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Merge base and example manifests (${{ matrix.flavor }})
+    name: Merge base and desktop manifests (${{ matrix.flavor }})
     needs: build
     # Stated rather than left to the default: `wheel` is skipped whenever the
     # caller supplies the artifact, and the images stay untagged if that skip
@@ -236,11 +236,11 @@ jobs:
           pattern: digest-base-${{ matrix.flavor }}-*
           path: /tmp/digests/base
           merge-multiple: true
-      - name: Download the example digests for this flavor
+      - name: Download the desktop digests for this flavor
         uses: actions/download-artifact@v8
         with:
           pattern: digest-${{ matrix.flavor }}-*
-          path: /tmp/digests/example
+          path: /tmp/digests/desktop
           merge-multiple: true
       - name: Create and push the multi-arch manifests
         env:
@@ -266,7 +266,7 @@ jobs:
             echo "pushed: ${tags[*]}"
           }
           publish "${BASE_IMAGE_NAME}" /tmp/digests/base
-          publish "${IMAGE_NAME}" /tmp/digests/example
+          publish "${IMAGE_NAME}" /tmp/digests/desktop
 
   addons:
     name: ${{ matrix.addon }} (${{ matrix.arch.name }})
@@ -375,7 +375,7 @@ jobs:
     steps:
       - uses: dataaxiom/ghcr-cleanup-action@v1
         with:
-          packages: selkies/base,selkies/example,selkies/coturn,selkies/turn-rest
+          packages: selkies/base,selkies/desktop,selkies/coturn,selkies/turn-rest
           delete-untagged: true
           # A build in flight has its platform images untagged until its
           # manifest lands, so the window stays well clear of a publish

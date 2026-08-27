@@ -4,15 +4,15 @@
 
 # Development stack for this repository. `dist` builds the wheel (web client
 # included), `base` builds the desktop-less session container from addons/base,
-# `example` layers the reference LXQt desktop on it, and `example-gpu` is the
+# `desktop` layers the reference LXQt desktop on it, and `desktop-gpu` is the
 # same container with a GPU attached.
 #
 #   docker compose build dist                      # wheel image
-#   docker compose build base example              # session, then the desktop
-#   docker compose up example                      # http://localhost:8080
-#   docker compose --profile gpu up example-gpu    # NVIDIA
+#   docker compose build base desktop              # session, then the desktop
+#   docker compose up desktop                      # http://localhost:8080
+#   docker compose --profile gpu up desktop-gpu    # NVIDIA
 #
-# `example` builds FROM the image `base` produces, so the two are built in that
+# `desktop` builds FROM the image `base` produces, so the two are built in that
 # order; Compose has no build-time dependency to express it with.
 #
 # Compose V2 is required (no `version:` key, `extends`, `develop`).
@@ -47,11 +47,11 @@ services:
         # DRI3-capable Xvfb; see the Dockerfile for what overriding this costs
         XVFB_IMAGE: ${XVFB_IMAGE:-lscr.io/linuxserver/xvfb:debianbookworm}
 
-  example:
-    image: selkies-example:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
+  desktop:
+    image: selkies-desktop:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
     build:
       context: .
-      dockerfile: addons/example/Dockerfile
+      dockerfile: addons/desktop/Dockerfile
       args:
         BASE_IMAGE: selkies-base:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
     environment:
@@ -109,8 +109,8 @@ services:
   # Same container with a GPU. NVIDIA needs the container toolkit on the host
   # and drives OpenGL through Zink; AMD and Intel need nothing beyond the render
   # nodes, which the display server opens directly.
-  example-gpu:
-    extends: example
+  desktop-gpu:
+    extends: desktop
     profiles: ["gpu"]
     devices:
       - /dev/dri:/dev/dri

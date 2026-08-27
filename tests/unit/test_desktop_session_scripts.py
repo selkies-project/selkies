@@ -19,14 +19,14 @@ import tempfile
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
-# The session runtime lives in the base container; the example adds the
+# The session runtime lives in the base container; the desktop image adds the
 # desktop on top of it, so both directories carry scripts a session depends on.
 BASE = os.path.join(REPO, "addons", "base")
-EXAMPLE = os.path.join(REPO, "addons", "example")
+DESKTOP = os.path.join(REPO, "addons", "desktop")
 
 SCRIPTS = sorted(
     p
-    for root in (BASE, EXAMPLE)
+    for root in (BASE, DESKTOP)
     for p in (glob.glob(os.path.join(root, "*.sh"))
               + glob.glob(os.path.join(root, "services", "*", "run"))
               + glob.glob(os.path.join(root, "services", "*", "finish"))
@@ -39,7 +39,7 @@ passed = failed = 0
 def check(label: str, ok, detail="") -> None:
     global passed, failed
     passed, failed = passed + int(ok), failed + int(not ok)
-    print(f"{'PASS' if ok else 'FAIL'}  [example-shell] {label}  {detail}", flush=True)
+    print(f"{'PASS' if ok else 'FAIL'}  [desktop-shell] {label}  {detail}", flush=True)
 
 
 bash = shutil.which("bash")
@@ -48,7 +48,7 @@ if not bash:
     sys.exit(77)
 
 if not SCRIPTS:
-    print("FAIL  [example-shell] scripts found  none matched under addons/base or addons/example", flush=True)
+    print("FAIL  [desktop-shell] scripts found  none matched under addons/base or addons/desktop", flush=True)
     sys.exit(1)
 
 for path in SCRIPTS:
@@ -103,7 +103,7 @@ for dockerfile in DOCKERFILES:
     check(f"{rel} quotes every ARG/ENV value", not loose, "; ".join(loose)[:200])
 
 PY_HELPERS = sorted(glob.glob(os.path.join(BASE, "services", "*", "*.py"))
-                    + glob.glob(os.path.join(EXAMPLE, "services", "*", "*.py")))
+                    + glob.glob(os.path.join(DESKTOP, "services", "*", "*.py")))
 for path in PY_HELPERS:
     rel = os.path.relpath(path, REPO)
     r = subprocess.run([sys.executable, "-m", "py_compile", path],
@@ -164,7 +164,7 @@ check("the DPI ladder's XSETTINGS manager is a service",
       os.path.relpath(xsettingsd_service, REPO))
 # The platform theme is what carries the session's fonts and icons into Qt, and
 # it is the wrapper this service replaces that would otherwise export it.
-lxqt_run = open(os.path.join(EXAMPLE, "services", "lxqt", "run")).read()
+lxqt_run = open(os.path.join(DESKTOP, "services", "lxqt", "run")).read()
 for var in ("QT_QPA_PLATFORMTHEME", "QT_AUTO_SCREEN_SCALE_FACTOR"):
     check(f"the session exports {var} on both backends",
           len(re.findall(rf'^export {var}=', lxqt_run, re.M)) == 1,
@@ -218,5 +218,5 @@ if shellcheck:
 else:
     print("SKIP shellcheck not installed; parsed with bash -n only", flush=True)
 
-print(f"[example-shell] {passed}/{passed + failed} passed", flush=True)
+print(f"[desktop-shell] {passed}/{passed + failed} passed", flush=True)
 sys.exit(1 if failed else 0)

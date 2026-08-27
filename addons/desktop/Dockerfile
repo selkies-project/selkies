@@ -2,7 +2,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# Reference minimal example container for Selkies: the desktop environment on
+# Reference minimal desktop container for Selkies: the desktop environment on
 # top of the Selkies base container.
 #
 # The base (addons/base) is the whole session apart from what it looks like —
@@ -181,7 +181,7 @@ RUN mkdir -pm755 /opt/proot-apps && \
     mkdir -pm755 /opt/proot-apps-cap && \
     cp /opt/proot-apps/proot /opt/proot-apps-cap/proot && \
     setcap cap_sys_ptrace+ep /opt/proot-apps-cap/proot
-COPY --chown=1000:1000 addons/example/selkies-proot /usr/local/bin/selkies-proot
+COPY --chown=1000:1000 addons/desktop/selkies-proot /usr/local/bin/selkies-proot
 RUN chmod -f 755 /usr/local/bin/selkies-proot
 
 # Titlebar buttons for applications that draw their own client-side decoration.
@@ -208,7 +208,7 @@ RUN set -eu; \
     fi
 
 # The session's own s6 service, supervised beside the base container's
-COPY --chown=1000:1000 addons/example/services/ /etc/service/
+COPY --chown=1000:1000 addons/desktop/services/ /etc/service/
 RUN find /etc/service \( -name run -o -name finish \) -exec chmod -f 755 {} +
 
 RUN printf "==============================================\n=         Selkies Example Container          =\n==============================================\n" > /etc/motd
@@ -233,7 +233,7 @@ USER 1000
 # The dashboards' apps panel drives proot-apps through the command channel;
 # without this the server tells clients the panel is unusable and they drop it.
 # Commands run as the session user, whom the streamed desktop already hands a
-# terminal, so the example enables the channel; disable with
+# terminal, so the desktop image enables the channel; disable with
 # -e SELKIES_COMMAND_ENABLED=false.
 ENV SELKIES_COMMAND_ENABLED="true"
 # Start the LXQt session (set to false to run only the display server)
