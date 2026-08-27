@@ -3,7 +3,7 @@ export const siteName = 'Selkies';
 export const siteDescription =
   'Open-Source Low-Latency Accelerated Linux WebSocket and WebRTC HTML5 Remote Desktop Streaming Platform for Self-Hosting, Containers, Kubernetes, or Cloud/HPC';
 
-export const siteUrl = 'https://selkies-project.github.io/selkies';
+export const siteUrl = 'https://docs.selkies.io';
 
 export const discordUrl = 'https://discord.gg/wDNGDeSW5F';
 
@@ -18,8 +18,9 @@ export const gitConfig = {
 
 export const repoUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
 
-// next.config.mjs applies this to routed URLs; anything assembled by hand here
-// has to add it back.
+// Empty for the published site, which is served from a domain root; a fork on
+// a GitHub Pages project path sets it. next.config.mjs applies it to routed
+// URLs, so anything assembled by hand here has to add it back.
 export const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
 export function withBasePath(path: string): string {

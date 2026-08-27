@@ -2,9 +2,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createMDX } from 'fumadocs-mdx/next';
 
-// GitHub Pages serves this project site under /selkies, and every emitted URL
-// has to carry that prefix. It comes from the environment so that a local run,
-// or a fork serving from a domain root, can leave it empty.
+// Empty for the published site and for a local run, both served from a root.
+// A fork serving from a GitHub Pages project path sets this to that path, which
+// every emitted URL then carries.
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
 const withMDX = createMDX();

@@ -29,7 +29,7 @@ Please join our [Discord](https://discord.gg/wDNGDeSW5F) server, then start out 
 
 **Linux X11/Wayland/Container/Conda experience:** Please report issues with the capture interface and provide improvements for our reference containers, the AppImage, and the `noarch` conda package that every release builds from [`infra/appimage/recipe.yaml`](https://github.com/selkies-project/selkies/tree/main/infra/appimage/recipe.yaml). `pixelflux`, `pcmflux`, `pulsectl-asyncio`, and `aitop` have no conda-forge feedstocks yet; contributing and maintaining them would let Selkies install from conda alone. A protocol and interface can never be great without a great environment it runs in. If you want to bring Selkies to MacOSX or Windows, check our issues!
 
-**C/Rust experience:** Selkies delegates its media encoding to the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) Rust extensions, and its opt-in WebRTC transport to a vendored fork of `aiortc`. We need you to fix bugs and implement new capabilities in these components or any other upstream dependencies. This will not only benefit Selkies but also help the broader communities around those projects.
+**C/Rust experience:** Selkies delegates its media encoding to the [`pixelflux`](https://github.com/selkies-project/pixelflux) (screen capture with H.264/JPEG encoding) and [`pcmflux`](https://github.com/selkies-project/pcmflux) (PulseAudio capture with Opus encoding) Rust extensions, whose crate APIs are published at <https://pixelflux.selkies.io> and <https://pcmflux.selkies.io>, and its opt-in WebRTC transport to a vendored fork of `aiortc`. We need you to fix bugs and implement new capabilities in these components or any other upstream dependencies. This will not only benefit Selkies but also help the broader communities around those projects.
 
 **Any type of multimedia networking experience:** While relevant experience is not necessary to contribute, we still feel great to have you as our companions. Please consider stepping up as a maintainer in addition to contributing! Development for commercial purposes are always fine as well as (our weak copyleft) license terms are complied with. Shape Selkies so that it fits your project as a first-class citizen, while keeping it accessible to many other people.
 
@@ -94,7 +94,9 @@ This section is a knowledge base for code contributions and development.
 
 - **Our [Documentation](README.md) and [Issues](https://github.com/selkies-project/selkies/issues)/[Pull Requests](https://github.com/selkies-project/selkies/pulls)** (including closed Issues/Pull Requests) and <https://github.com/m1k1o/neko/issues/371>
 
-- Upstream projects behind the current media stack: [`aiortc`](https://github.com/aiortc/aiortc) (the WebRTC transport is a vendored fork), `pixelflux` (screen capture with H.264/JPEG encoding), and `pcmflux` (PulseAudio capture with Opus encoding)
+- Upstream projects behind the current media stack: [`aiortc`](https://github.com/aiortc/aiortc) (the WebRTC transport is a vendored fork), [`pixelflux`](https://github.com/selkies-project/pixelflux) (screen capture with H.264/JPEG encoding), and [`pcmflux`](https://github.com/selkies-project/pcmflux) (PulseAudio capture with Opus encoding)
+
+- The Rust references those two generate: <https://pixelflux.selkies.io> and <https://pcmflux.selkies.io>
 
 - WebRTC for the Curious: <https://webrtcforthecurious.com>
 
@@ -121,7 +123,7 @@ Each service names the `Dockerfile` that builds it, and those files are also the
 
 ## Documentation
 
-The pages under [`docs/`](https://github.com/selkies-project/selkies/tree/main/docs) are plain Markdown and are what <https://selkies-project.github.io/selkies> publishes. Editing one through GitHub's web editor is enough to change the site: either the pencil icon in the repository, or the **Edit on GitHub** button beside every page, opens the file it was built from.
+The pages under [`docs/`](https://github.com/selkies-project/selkies/tree/main/docs) are plain Markdown and are what <https://docs.selkies.io> publishes. Editing one through GitHub's web editor is enough to change the site: either the pencil icon in the repository, or the **Edit on GitHub** button beside every page, opens the file it was built from.
 
 A page begins with front matter naming it:
 

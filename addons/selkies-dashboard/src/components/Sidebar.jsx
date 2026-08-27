@@ -4612,7 +4612,7 @@ function Sidebar() {
                     <div style={{ marginTop: "8px", textAlign: "center" }}>
                       <a
                         className="cite-link"
-                        href="https://selkies-project.github.io/selkies/citation/"
+                        href="https://docs.selkies.io/citation/"
                         target="_blank"
                         rel="noopener noreferrer"
                       >

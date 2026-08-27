@@ -2,7 +2,7 @@
 
 [![Build](https://github.com/selkies-project/selkies/actions/workflows/ci.yaml/badge.svg)](https://github.com/selkies-project/selkies/actions/workflows/ci.yaml)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL%202.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
-[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://selkies-project.github.io/selkies/)
+[![Docs](https://img.shields.io/badge/docs-docs.selkies.io-blue)](https://docs.selkies.io/)
 [![Discord](https://img.shields.io/badge/dynamic/json?logo=discord&label=Discord%20Members&query=approximate_member_count&url=https%3A%2F%2Fdiscordapp.com%2Fapi%2Finvites%2FwDNGDeSW5F%3Fwith_counts%3Dtrue)](https://discord.gg/wDNGDeSW5F)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/selkies-project/selkies)
 
@@ -18,4 +18,4 @@ While designed for clustered or unprivileged containerized environments, Selkies
 
 The HTML5 client runs on Chromium, Firefox, and Safari, with two-way clipboard (text and images), low-latency zero-copy video rendering, automatic GPU selection, resilient keyboard, mouse, and gamepad input, and microphone and webcam forwarding into the session.
 
-**[Read the Documentation](https://selkies-project.github.io/selkies/) to get started.** The [Settings Reference](https://selkies-project.github.io/selkies/settings) lists every current setting. [Licensing](docs/licensing.md) inventories the third-party components of an installation, with their licenses and where the GPL pieces come from.
+**[Read the Documentation](https://docs.selkies.io/) to get started.** The [Settings Reference](https://docs.selkies.io/settings) lists every current setting. [Licensing](https://docs.selkies.io/licensing) inventories the third-party components of an installation, with their licenses and where the GPL pieces come from.

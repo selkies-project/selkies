@@ -80,11 +80,11 @@ What the shipped interface *shows* is a server setting rather than a build: `--u
 
 #### Media Capture and Encoding (`pixelflux` and `pcmflux`)
 
-Screen capture and video encoding are performed by [`pixelflux`](https://pypi.org/project/pixelflux/), a Rust (PyO3) extension. It encodes H.264 with hardware NVENC (NVIDIA) or VA-API (Intel/AMD) when a supported GPU is available, and otherwise falls back to software H.264 — `x264`, or the BSD-licensed OpenH264 in a `pixelflux` built without GPL components — or encodes Motion JPEG. H.265 and AV1 in the capture path are planned but not yet implemented.
+Screen capture and video encoding are performed by [`pixelflux`](https://github.com/selkies-project/pixelflux), a Rust (PyO3) extension. It encodes H.264 with hardware NVENC (NVIDIA) or VA-API (Intel/AMD) when a supported GPU is available, and otherwise falls back to software H.264 — `x264`, or the BSD-licensed OpenH264 in a `pixelflux` built without GPL components — or encodes Motion JPEG. H.265 and AV1 in the capture path are planned but not yet implemented.
 
-Audio capture and encoding are performed by [`pcmflux`](https://pypi.org/project/pcmflux/), a companion Rust (PyO3) extension that captures from PulseAudio (or PipeWire-Pulse) and encodes to Opus.
+Audio capture and encoding are performed by [`pcmflux`](https://github.com/selkies-project/pcmflux), a companion Rust (PyO3) extension that captures from PulseAudio (or PipeWire-Pulse) and encodes to Opus.
 
-Both are pulled in automatically as dependencies of the `selkies` wheel, so you normally do not install them separately.
+Both are pulled in automatically as dependencies of the `selkies` wheel, so you normally do not install them separately. Their Rust references are published at <https://pixelflux.selkies.io> and <https://pcmflux.selkies.io>.
 
 **Licensing note (GPL toggle):** the software H.264 encoder of `pixelflux` is chosen when `pixelflux` is built, never by a Selkies setting: the default build uses GPL-2.0+ `libx264` (with an install-time notice), and a build made with `PIXELFLUX_ENABLE_GPL=0` excludes every GPL-licensed component and uses the BSD-licensed OpenH264 instead, behind the same `h264enc` / `h264enc-striped` encoders. Selkies reads `pixelflux.SOFTWARE_H264_ENCODER` to name the encoder in its logs and to default a session known to run on OpenH264 to CBR rate control (OpenH264 targets a bandwidth rather than a quality level); OpenH264 encodes 4:2:0 only, so `--video-fullcolor` has no effect on its software path. [Licensing](licensing.md) lists every third-party component of an installation with its license and where the GPL pieces come from.
 

@@ -51,7 +51,7 @@ export function ShortcutsMenu() {
 								className="text-violet-600 hover:text-violet-800 dark:text-violet-400 dark:hover:text-violet-300"
 								target="_blank"
 								rel="noopener noreferrer"
-								href="https://selkies-project.github.io/selkies/citation/"
+								href="https://docs.selkies.io/citation/"
 							>
 								<b>{t('shortcuts.citeNotice')}{" ↗"}</b>
 							</a>
