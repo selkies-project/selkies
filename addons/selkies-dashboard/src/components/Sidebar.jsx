@@ -4729,14 +4729,16 @@ function Sidebar() {
       </div>
 
       {isFilesModalOpen && (
-        <div className="files-modal">
-          <button
-            className="files-modal-close"
-            onClick={toggleFilesModal}
-            aria-label={t("filesModal.closeAlt")}
-          >
-            &times;
-          </button>
+        <div className={`files-modal theme-${theme}`}>
+          <div className="files-modal-header">
+            <button
+              className="files-modal-close"
+              onClick={toggleFilesModal}
+              aria-label={t("filesModal.closeAlt")}
+            >
+              &times;
+            </button>
+          </div>
           <iframe src={withSessionToken("./api/files/")} title={t("filesModal.iframeTitle")} />
         </div>
       )}

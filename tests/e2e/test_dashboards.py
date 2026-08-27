@@ -149,14 +149,14 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     """Gaming mode stays reachable on a touch client, and by its chord.
 
     The header carries the fullscreen and gaming-mode pair on every client;
-    the trackpad toggle belongs with the keyboard button in the touch row, and
+    the trackpad toggle joins the keyboard tile in the action-button row, and
     appears only once touch is seen. The Ctrl+Shift+X chord is the core's own,
     so it works whatever the dashboard shows.
     """
     if dashboard == "classic":
         present = lambda: page.evaluate("""() => ({
             gaming: !!document.querySelector('.header-controls .gaming-mode-button'),
-            trackpad: !!document.querySelector('.sidebar-mobile-key-actions .icon-button + .icon-button'),
+            trackpad: !!document.querySelector('.sidebar-action-buttons .trackpad-mode-button'),
             headerTrackpad: !!document.querySelector('.header-controls .trackpad-mode-button'),
         })""")
     else:
@@ -171,7 +171,7 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     after = present()
     res.check("gaming mode button shown without touch", before["gaming"], before)
     res.check("gaming mode button survives touch detection", after["gaming"], after)
-    res.check("trackpad button appears with touch, in the touch row", after["trackpad"], after)
+    res.check("trackpad button appears with touch, in the action row", after["trackpad"], after)
     res.check("the header carries no trackpad button", not after["headerTrackpad"], after)
 
     # requestFullscreen needs a real display; the mode the input handler
@@ -193,6 +193,116 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     posted = page.evaluate("window.__gaming")
     res.check("Ctrl+Shift+X enters gaming mode", entered, posted)
     res.check("Ctrl+Shift+X leaves gaming mode", entered and not left, posted)
+
+
+def classic_layout_check(page, res: "H.Results") -> None:
+    """Pin the classic sidebar layout: header icon parity, uniform tiles,
+    and a files modal whose close control sits inside the panel.
+
+    Runs after gaming_mode_check: the touchstart it dispatches is what makes
+    the keyboard and trackpad tiles render, so the action row is at its
+    fullest seven here and has to wrap without resizing any tile.
+    """
+    if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
+        page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+        time.sleep(0.8)
+
+    icons = page.evaluate("""() => {
+      const ink = (svg, strokeUnits) => {
+        const b = svg.getBBox();
+        const scale = svg.clientWidth / svg.viewBox.baseVal.width;
+        return {
+          box: svg.clientWidth,
+          w: (b.width + strokeUnits) * scale,
+          h: (b.height + strokeUnits) * scale,
+        };
+      };
+      const fs = document.querySelector('.fullscreen-button svg');
+      const gm = document.querySelector('.gaming-mode-button svg');
+      if (!fs || !gm) return null;
+      return { fs: ink(fs, 0), gm: ink(gm, 2) };
+    }""")
+    same = (icons and icons["fs"]["box"] == icons["gm"]["box"]
+            and abs(icons["fs"]["w"] - icons["gm"]["w"]) <= 1.0
+            and abs(icons["fs"]["h"] - icons["gm"]["h"]) <= 1.0)
+    res.check("fullscreen and gaming icons draw at one size", same, icons)
+
+    tiles = page.evaluate("""() => {
+      const els = [...document.querySelectorAll('.sidebar-action-buttons .action-button')];
+      const r = els.map(e => e.getBoundingClientRect());
+      return {
+        n: els.length,
+        widths: r.map(x => Math.round(x.width * 10) / 10),
+        rows: [...new Set(r.map(x => Math.round(x.top)))].length,
+        keyRow: [...document.querySelectorAll('.sidebar-mobile-key-actions .mobile-key-button')].length,
+        keyRowIcons: document.querySelectorAll('.sidebar-mobile-key-actions svg').length,
+      };
+    }""")
+    uniform = (tiles["n"] == 7 and tiles["rows"] == 2
+               and max(tiles["widths"]) - min(tiles["widths"]) <= 1.0)
+    res.check("seven action tiles wrap onto two rows at one width", uniform, tiles)
+    res.check("the key row holds the five soft keys and no icon buttons",
+              tiles["keyRow"] == 5 and tiles["keyRowIcons"] == 0, tiles)
+
+    opened = False
+    try:
+        page.locator('.sidebar-section-header:has-text("Files")').first.click()
+        time.sleep(0.6)
+        page.locator('button[title="Download Files"]').first.click()
+        time.sleep(2.5)
+        opened = page.locator('.files-modal').count() > 0
+    except Exception:
+        pass
+    if not opened:
+        res.check("files modal opens", False, "no .files-modal")
+        return
+    modal = page.evaluate("""() => {
+      const m = document.querySelector('.files-modal').getBoundingClientRect();
+      const c = document.querySelector('.files-modal-close').getBoundingClientRect();
+      const f = document.querySelector('.files-modal iframe').getBoundingClientRect();
+      let iframeBg = null, iframeTheme = null;
+      try {
+        const doc = document.querySelector('.files-modal iframe').contentDocument;
+        iframeBg = doc && doc.body ? getComputedStyle(doc.body).backgroundColor : null;
+        iframeTheme = doc ? doc.documentElement.dataset.theme || null : null;
+      } catch (e) { iframeBg = 'err:' + e; }
+      return {
+        clear: c.right <= m.right - 4 && c.top >= m.top + 2 && c.bottom <= f.top,
+        iframeBg, iframeTheme,
+        dashTheme: document.querySelector('.sidebar').className.includes('theme-dark') ? 'dark' : 'light',
+      };
+    }""")
+    res.check("files close button sits inside the panel above the frame",
+              modal["clear"], modal)
+    palettes = {"dark": "rgb(18, 22, 29)", "light": "rgb(244, 245, 248)"}
+    res.check("file index follows the dashboard theme",
+              modal["iframeTheme"] == modal["dashTheme"]
+              and modal["iframeBg"] == palettes.get(modal["dashTheme"]), modal)
+
+    # The mirror is live: the dashboard's own toggle re-renders the modal
+    # frame while its storage write restyles the page inside the frame.
+    page.locator('.theme-toggle').click()
+    time.sleep(0.6)
+    flipped = page.evaluate("""() => {
+      const out = {modalBg: getComputedStyle(document.querySelector('.files-modal')).backgroundColor};
+      try {
+        const doc = document.querySelector('.files-modal iframe').contentDocument;
+        out.theme = doc.documentElement.dataset.theme;
+        out.bg = getComputedStyle(doc.body).backgroundColor;
+      } catch (e) { out.theme = 'err'; out.bg = '' + e; }
+      return out;
+    }""")
+    res.check("frame and file index follow a live theme flip",
+              flipped["theme"] == "light" and flipped["bg"] == palettes["light"]
+              and flipped["modalBg"] == "rgb(255, 255, 255)", flipped)
+    page.locator('.theme-toggle').click()
+    time.sleep(0.4)
+    page.locator('.files-modal-close').click()
+    time.sleep(0.4)
+    # Leave the sidebar as found: the blocks after this one open it themselves.
+    if page.evaluate("!!document.querySelector('.sidebar.is-open')"):
+        page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+        time.sleep(0.6)
 
 
 def dash_block(dashboard: str, dist: str) -> "H.Results":
@@ -253,6 +363,8 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         if dashboard == "wish":
             wish_clipboard_seed_check(page, res)
         gaming_mode_check(page, res, dashboard)
+        if dashboard == "classic":
+            classic_layout_check(page, res)
 
         st = len(H.server_log())
         changed = False

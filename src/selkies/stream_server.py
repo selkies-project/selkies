@@ -568,12 +568,28 @@ FILE_INDEX_HEADER: str = """<!DOCTYPE html>
     <meta charset="utf-8">
     <title>Desktop Files</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script>
+        /* Mirror the dashboard's stored theme (both front ends are same
+           origin, classic under "theme", wish under "vite-ui-theme"); wish's
+           "system" and denied storage leave the pick to the media query. */
+        (function () {
+            var apply = function () {
+                var v = null;
+                try {
+                    v = localStorage.getItem('theme') || localStorage.getItem('vite-ui-theme');
+                } catch (e) { return; }
+                if (v === 'system') { delete document.documentElement.dataset.theme; }
+                else { document.documentElement.dataset.theme = v || 'dark'; }
+            };
+            apply();
+            window.addEventListener('storage', apply);
+        })();
+    </script>
     <style>
         /* The dashboards' palette and type scale, so the file browser reads as
            part of the same session rather than a page from somewhere else.
-           This page carries no theme toggle of its own, so it follows the
-           system preference; the tokens are otherwise the ones in the
-           dashboard stylesheet. */
+           The script above stamps the dashboard's stored theme choice; with
+           nothing stored it stamps the dark both dashboards default to. */
         :root {
             --accent: #a82a69;
             --accent-text: #a82a69;
@@ -591,7 +607,7 @@ FILE_INDEX_HEADER: str = """<!DOCTYPE html>
             --border-radius: 10px;
         }
         @media (prefers-color-scheme: dark) {
-            :root {
+            :root:not([data-theme="light"]) {
                 --accent: #ec4899;
                 --accent-text: #f9a8d4;
                 --accent-soft: rgba(236, 72, 153, 0.14);
@@ -603,6 +619,18 @@ FILE_INDEX_HEADER: str = """<!DOCTYPE html>
                 --text-muted: #aeb9c9;
                 --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
             }
+        }
+        :root[data-theme="dark"] {
+            --accent: #ec4899;
+            --accent-text: #f9a8d4;
+            --accent-soft: rgba(236, 72, 153, 0.14);
+            --bg: #12161d;
+            --surface: #181d26;
+            --surface-alt: #1f2530;
+            --border-soft: #2b3441;
+            --text: #e6ebf3;
+            --text-muted: #aeb9c9;
+            --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
         }
         * {
             margin: 0;

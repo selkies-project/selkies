@@ -1175,26 +1175,36 @@ a.cite-link:active {
     border-radius: var(--radius-lg);
     box-shadow: 0 24px 60px var(--sidebar-shadow);
     z-index: 1060;
-    padding: 20px;
+    padding: 0 16px 16px;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
 }
 
+/* Band above the frame keeping the close control clear of the panel border
+   and of the page's own header inside the frame. */
+.files-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex: 0 0 44px;
+}
+
 .files-modal-close {
-    position: absolute;
-    top: 10px;
-    right: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
     background: transparent;
     border: none;
-    font-size: 1.6rem;
+    font-size: 1.5rem;
     font-weight: 400;
     color: var(--text-muted);
     cursor: pointer;
-    padding: 2px 8px;
+    padding: 0;
     line-height: 1;
     border-radius: var(--radius-sm);
-    z-index: 1061;
     transition: color 0.15s ease, background-color 0.15s ease;
 }
 
