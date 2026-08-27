@@ -3035,17 +3035,6 @@ function Sidebar() {
                 <FullscreenIcon />
               </button>
             )}
-            {(isMobile || hasDetectedTouch) &&
-              isKeyboardButtonVisible &&
-              (renderableSettings.trackpad ?? true) && (
-                <button
-                  className={`header-action-button trackpad-mode-button ${isTrackpadModeActive ? "active" : ""}`}
-                  onClick={handleToggleTrackpadMode}
-                  title={t("trackpadModeTitle", "Trackpad Mode")}
-                >
-                  <TrackpadIcon />
-                </button>
-              )}
             {(renderableSettings.gamingMode ?? true) && (
               <button
                 className="header-action-button gaming-mode-button"
@@ -3128,8 +3117,11 @@ function Sidebar() {
           </div>
         )}
         
-        {(isMobile || hasDetectedTouch) && (renderableSettings.softButtons ?? true) && (
+        {(isMobile || hasDetectedTouch) &&
+          ((renderableSettings.softButtons ?? true) || (renderableSettings.trackpad ?? true)) && (
             <div className="sidebar-mobile-key-actions">
+              {(renderableSettings.softButtons ?? true) && (
+                <>
               <button
                 className={`mobile-key-button ${heldKeys.Control ? "active" : ""}`}
                 onClick={() => handleHoldKeyClick('Control', 'ControlLeft')}
@@ -3171,6 +3163,17 @@ function Sidebar() {
               >
                 <KeyboardIcon />
               </button>
+                </>
+              )}
+              {(renderableSettings.trackpad ?? true) && (
+                <button
+                  className={`mobile-key-button icon-button ${isTrackpadModeActive ? "active" : ""}`}
+                  onClick={handleToggleTrackpadMode}
+                  title={t("trackpadModeTitle", "Trackpad Mode")}
+                >
+                  <TrackpadIcon />
+                </button>
+              )}
             </div>
         )}
 

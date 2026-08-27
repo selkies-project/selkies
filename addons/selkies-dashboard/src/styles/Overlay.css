@@ -1674,7 +1674,10 @@ a.cite-link:active {
 /* --- Mobile Key Action Buttons --- */
 .sidebar-mobile-key-actions {
     display: flex;
-    justify-content: space-between;
+    /* Wrapped and evenly spread: the row grows by one button whenever the
+       operator leaves trackpad mode on, and the sidebar has no width for it. */
+    flex-wrap: wrap;
+    justify-content: space-evenly;
     align-items: center;
     gap: 6px;
     padding-bottom: 16px;
@@ -1684,12 +1687,16 @@ a.cite-link:active {
 
 /* Base style for individual keyboard action buttons. */
 .mobile-key-button {
-    flex: 1;
+    /* Shares the row evenly but never stretches to fill one on its own, which
+       is what a wrapped last button would otherwise do. */
+    flex: 1 1 0;
+    min-width: 36px;
+    max-width: 25%;
     padding: 8px 4px;
     border: 1px solid var(--item-border);
     border-radius: var(--radius-sm);
     background-color: var(--surface-alt);
-    color: var(--text-muted);
+    color: var(--text);
     font: inherit;
     font-size: 13px;
     font-weight: 600;

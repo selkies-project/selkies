@@ -962,22 +962,6 @@ export function TopMenu({
               </Tooltip>
             )}
 
-            {(isMobile || hasDetectedTouch) && (renderableSettings.trackpad ?? true) && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant={isTrackpadModeActive ? "default" : "secondary"}
-                    size="icon"
-                    className="h-6 w-6"
-                    onClick={handleToggleTrackpadMode}
-                  >
-                    <Touchpad className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{t('trackpadModeTitle')}</TooltipContent>
-              </Tooltip>
-            )}
-
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -1036,12 +1020,14 @@ export function TopMenu({
         )}
       </AnimatePresence>
 
-      {(isMobile || hasDetectedTouch) && (renderableSettings.softButtons ?? true) && (
+      {(isMobile || hasDetectedTouch) &&
+        ((renderableSettings.softButtons ?? true) || (renderableSettings.trackpad ?? true)) && (
         <motion.div
           className="fixed bottom-4 left-4 z-40 flex flex-wrap gap-2 p-2 rounded-lg border bg-card/95 backdrop-blur-sm shadow-lg"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
         >
+          {(renderableSettings.softButtons ?? true) && (<>
           <Button
             variant={heldKeys.Control ? "default" : "secondary"}
             size="sm"
@@ -1089,6 +1075,17 @@ export function TopMenu({
               onClick={handleShowVirtualKeyboard}
             >
               <Keyboard className="h-4 w-4" />
+            </Button>
+          )}
+          </>)}
+          {(renderableSettings.trackpad ?? true) && (
+            <Button
+              variant={isTrackpadModeActive ? "default" : "secondary"}
+              size="sm"
+              onClick={handleToggleTrackpadMode}
+              title={t('trackpadModeTitle')}
+            >
+              <Touchpad className="h-4 w-4" />
             </Button>
           )}
         </motion.div>

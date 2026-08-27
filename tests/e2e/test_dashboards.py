@@ -148,20 +148,22 @@ def classic_viewer_check(page, res: "H.Results") -> None:
 def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     """Gaming mode stays reachable on a touch client, and by its chord.
 
-    A 2-in-1 reports touch alongside its keyboard and mouse, which is where
-    the trackpad button used to take the gaming-mode button's place; both
-    belong there. The Ctrl+Shift+X chord is the core's own, so it works
-    whatever the dashboard shows.
+    The header carries the fullscreen and gaming-mode pair on every client;
+    the trackpad toggle belongs with the keyboard button in the touch row, and
+    appears only once touch is seen. The Ctrl+Shift+X chord is the core's own,
+    so it works whatever the dashboard shows.
     """
     if dashboard == "classic":
         present = lambda: page.evaluate("""() => ({
-            gaming: !!document.querySelector('.gaming-mode-button'),
-            trackpad: !!document.querySelector('.trackpad-mode-button'),
+            gaming: !!document.querySelector('.header-controls .gaming-mode-button'),
+            trackpad: !!document.querySelector('.sidebar-mobile-key-actions .icon-button + .icon-button'),
+            headerTrackpad: !!document.querySelector('.header-controls .trackpad-mode-button'),
         })""")
     else:
         present = lambda: page.evaluate("""() => ({
             gaming: !!document.querySelector('button:has(svg.lucide-crosshair)'),
-            trackpad: !!document.querySelector('button:has(svg.lucide-touchpad)'),
+            trackpad: !!document.querySelector('.fixed.bottom-4 button:has(svg.lucide-touchpad)'),
+            headerTrackpad: !!document.querySelector('[data-slot="tooltip-trigger"] button:has(svg.lucide-touchpad)'),
         })""")
     before = present()
     page.evaluate("window.dispatchEvent(new TouchEvent('touchstart', {bubbles: true}))")
@@ -169,7 +171,8 @@ def gaming_mode_check(page, res: "H.Results", dashboard: str) -> None:
     after = present()
     res.check("gaming mode button shown without touch", before["gaming"], before)
     res.check("gaming mode button survives touch detection", after["gaming"], after)
-    res.check("trackpad button appears with touch", after["trackpad"], after)
+    res.check("trackpad button appears with touch, in the touch row", after["trackpad"], after)
+    res.check("the header carries no trackpad button", not after["headerTrackpad"], after)
 
     # requestFullscreen needs a real display; the mode the input handler
     # publishes is what the chord has to move.
