@@ -308,9 +308,12 @@ RUN install -d /var/log/apt
 # latest PyPI release when `wheels/` is empty. When fresh pixelflux/pcmflux
 # wheels (built from the main HEAD of selkies-project/pixelflux and
 # selkies-project/pcmflux) ride along, pip selects the ones matching this image's
-# Python and platform; everything else still resolves from PyPI
-COPY --chown=1000:1000 addons/base/wheels/ /tmp/wheels/
-RUN set -e; \
+# Python and platform; everything else still resolves from PyPI.
+# `wheels/` is bind-mounted rather than copied: it holds every interpreter and
+# platform variant while this image installs only the matching ones, so a copy
+# would commit the whole set to a layer no later removal can reclaim.
+RUN --mount=type=bind,source=addons/base/wheels,target=/tmp/wheels \
+    set -e; \
     SELKIES_WHL="$(ls /tmp/wheels/selkies-*.whl 2>/dev/null || true)"; \
     if [ -z "${SELKIES_WHL}" ]; then \
       PKGS="${PYPI_PACKAGE}"; \
@@ -322,7 +325,7 @@ RUN set -e; \
       fi; \
     fi; \
     PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --force-reinstall ${PKGS}; \
-    rm -rf /tmp/wheels /tmp/picked
+    rm -rf /tmp/picked
 
 # The DRI3-capable server replaces the distribution's /usr/bin/Xvfb; chowned
 # to the session user like the rest of the image so fakeroot-sudo apt can
