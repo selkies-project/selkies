@@ -352,6 +352,8 @@ const SHARED_STALL_TIMEOUT_MS = 3000;
 const SHARED_STALL_MAX_BACKOFF_MS = 30000;
 const METRICS_INTERVAL_MS = 500;
 const BACKPRESSURE_INTERVAL_MS = 50;
+/** How often the socket worker re-reports a draining send buffer. */
+const BUFFERED_DRAIN_MS = 20;
 /**
  * The server's WebSocket receive ceiling; aiohttp's stock 4 MiB until the
  * `ws_max_message_bytes` server setting advertises the real one.
@@ -4907,6 +4909,24 @@ let webcamChainBroken = false;
 let videoPort = null, videoDivert = false, videoAck = false, videoAckSource = 'receive';
 let videoLastId = -1, videoLastIdAt = 0, videoAckedId = -1, videoAckTimer = null;
 
+// The page gates its own sends on what this reports, so a socket left holding
+// bytes has to be reported as it drains: reporting only on send would freeze
+// the page's view at the moment of a message too big for its gate, and nothing
+// would ever send again to correct it.
+let bufferedTimer = null;
+function reportBuffered() {
+  self.postMessage({ type: 'buffered', amount: ws ? ws.bufferedAmount : 0 });
+  if (!ws || ws.bufferedAmount === 0) {
+    if (bufferedTimer) { clearInterval(bufferedTimer); bufferedTimer = null; }
+    return;
+  }
+  if (bufferedTimer) return;
+  bufferedTimer = setInterval(() => {
+    self.postMessage({ type: 'buffered', amount: ws ? ws.bufferedAmount : 0 });
+    if (!ws || ws.bufferedAmount === 0) { clearInterval(bufferedTimer); bufferedTimer = null; }
+  }, ${BUFFERED_DRAIN_MS});
+}
+
 function syncVideoAckTimer() {
   const want = videoDivert && videoAck;
   if (want && !videoAckTimer) {
@@ -5013,7 +5033,7 @@ self.onmessage = (e) => {
   if (!ws) return;
   if (m.type === 'send') {
     try { ws.send(m.data); } catch (err) { /* a closing socket reports through onclose */ }
-    self.postMessage({ type: 'buffered', amount: ws.bufferedAmount });
+    reportBuffered();
     return;
   }
   if (m.type === 'close') { try { ws.close(m.code, m.reason); } catch (err) {} return; }
@@ -7502,6 +7522,14 @@ function stopMicrophoneCapture() {
  * latency budget in disguise that at these rates spans many seconds.
  */
 const WEBCAM_QUEUE_MS = 250;
+/**
+ * Payload of the last frame sent, so the budget above can never fall below one
+ * frame. The rungs that are not rate-controlled (JPEG is quality-driven) put
+ * frames far larger than a nominal bitrate implies, and a budget under one
+ * frame admits nothing until each send has fully drained -- half the camera's
+ * rate, or a stall on a slow link.
+ */
+let webcamLastFrameBytes = 0;
 
 /**
  * Starts the webcam uplink (lib/webcam-capture.js): each encoded frame is
@@ -7530,13 +7558,15 @@ function startWebcamCapture() {
       bytes[2] = (keyframe ? 0x01 : 0x00) | ((((rotation || 0) / 90) & 0x03) << 1) | (flip ? 0x08 : 0x00);
       bytes.set(payload, 3);
       try {
+        webcamLastFrameBytes = messageBuffer.byteLength;
         websocket.send(messageBuffer);
       } catch (e) {
         console.error("Error sending webcam frame:", e);
       }
     },
     canSend: () => !websocket
-      || websocket.bufferedAmount < webcamCapture.bitrate / 8 * WEBCAM_QUEUE_MS / 1000,
+      || websocket.bufferedAmount <= Math.max(
+        webcamCapture.bitrate / 8 * WEBCAM_QUEUE_MS / 1000, webcamLastFrameBytes),
     onStateChange: (active) => {
       isWebcamActive = active;
       postSidebarButtonUpdate();
