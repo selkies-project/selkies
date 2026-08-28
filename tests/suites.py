@@ -70,6 +70,7 @@ SUITES: list = [
     {"path": "unit/test_session_xwayland.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_typed_keysyms.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_backend_verdict.py", "tier": "unit", "timeout": 180},
+    {"path": "unit/test_wm_swap.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_secure_routes.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_clipboard_rearm.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_audio_control.py", "tier": "unit", "timeout": 120},

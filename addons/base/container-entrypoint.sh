@@ -101,6 +101,12 @@ if [ -n "${SELKIES_MODE}" ]; then
   export SELKIES_MODE
 fi
 
+# This session is the container's to manage, so a desktop that tiles maximized
+# windows across the whole framebuffer may have its window manager swapped when
+# a second display opens. A session running on somebody's own desktop is not,
+# which is why selkies leaves this off by default.
+export SELKIES_MULTI_MONITOR_WM_SWAP="${SELKIES_MULTI_MONITOR_WM_SWAP:-true}"
+
 # What GPU this session has. selkies-gpu-probe resolves the render node from
 # --render-dri and the --auto-gpu token exactly as the capture will, and carries
 # the compositor's own renderer bring-up through on it, so the GL stack and the

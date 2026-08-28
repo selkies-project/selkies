@@ -952,6 +952,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Enable passing remote cursors to client",
     },
     {
+        "name": "multi_monitor_wm_swap",
+        "type": "bool",
+        "default": False,
+        "help": "Hand X11 window management to Openbox the first time a session extends onto a second display. XFCE and Plasma tile a maximized window across the whole framebuffer instead of the per-display regions, which this works around; it restarts window management, so it belongs to a session the deployment owns rather than a desktop somebody is using.",
+    },
+    {
         "name": "debug_cursors",
         "type": "bool",
         "default": False,
@@ -1144,6 +1150,7 @@ class AppSettings:
     enable_cursors: tuple[bool, bool]
     debug_cursors: tuple[bool, bool]
     enable_resize: tuple[bool, bool]
+    multi_monitor_wm_swap: tuple[bool, bool]
     audio_bitrate: str
     wayland: tuple[bool, bool]
     cursor_size: int

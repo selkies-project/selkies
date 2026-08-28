@@ -918,11 +918,13 @@ class MultiMonitorWindowManager:
 
     XFCE and Plasma tile a maximized window across the whole framebuffer rather
     than against the per-display regions an extended layout defines, so a
-    session running one of them swaps to Openbox the first time it extends.
-    Both transports share this state: the swap is attempted once per session
-    either way, since a second one would restart window management under
-    whoever is using it. Wayland sessions manage their own windows and never
-    swap.
+    session running one of them can swap to Openbox the first time it extends.
+    Restarting window management is only ever right where the session is the
+    deployment's to manage, never on a desktop somebody is using, so it is off
+    unless `--multi-monitor-wm-swap` asks for it. Both transports share this
+    state: the swap is attempted once per session either way, since a second one
+    would restart window management under whoever is using it. Wayland sessions
+    manage their own windows and never swap.
     """
 
     def __init__(self) -> None:
@@ -939,6 +941,9 @@ class MultiMonitorWindowManager:
         compiled-in defaults do not cover, leaving presses on decorations dead.
         """
         if is_wayland or self._swapped or display_count <= 1:
+            return
+        from .settings import settings as _s
+        if not bool(getattr(_s, "multi_monitor_wm_swap", (False, False))[0]):
             return
         if self._supported is None:
             self._supported = bool(

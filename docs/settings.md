@@ -162,6 +162,7 @@ Every setting below is one entry of `SETTING_DEFINITIONS` in [`src/selkies/setti
 | `--audio-channels` | `SELKIES_AUDIO_CHANNELS` | int, from 1 | `2` | Number of audio channels, defaults to stereo (2 channels) |
 | `--enable-resize` | `SELKIES_ENABLE_RESIZE` | bool | `true` | Enable dynamic resizing to match browser size |
 | `--enable-cursors` | `SELKIES_ENABLE_CURSORS` | bool | `true` | Enable passing remote cursors to client |
+| `--multi-monitor-wm-swap` | `SELKIES_MULTI_MONITOR_WM_SWAP` | bool | `false` | Hand X11 window management to Openbox the first time a session extends onto a second display. XFCE and Plasma tile a maximized window across the whole framebuffer instead of the per-display regions, which this works around; it restarts window management, so it belongs to a session the deployment owns rather than a desktop somebody is using. |
 | `--debug-cursors` | `SELKIES_DEBUG_CURSORS` | bool | `false` | Enable cursor debug logging |
 | `--cursor-size` | `SELKIES_CURSOR_SIZE`, `XCURSOR_SIZE` | int | `-1` | Cursor size in points at 96 DPI (scaled with the session DPI). Applies to the X11 server cursor, the Wayland compositor cursor theme, and the remote-cursor capture cap on both transports; -1 uses the platform default (32 on X11, 24 on Wayland). |
 | `--enable-webrtc-statistics` | `SELKIES_ENABLE_WEBRTC_STATISTICS` | bool | `false` | Enable WebRTC Statistics CSV dumping to the directory --webrtc-statistics-dir with filenames selkies-stats-video-[timestamp].csv and selkies-stats-audio-[timestamp].csv |
