@@ -1112,12 +1112,13 @@ class _XTestKeyboard:
         _pressed_kc: Keysym to the keycode injected at press; release replays
             it and never re-resolves (matching neko's XKeyEntryGet: the layout
             may shift mid-keystroke).
-        _dirty_spares: Reclaimed keycodes whose first bind needs a settle.
     """
 
-    # Settle after rebinding a recycled keycode: xcb toolkits refetch keymaps
-    # asynchronously and could translate the queued press with the old symbol.
-    _RECYCLE_SETTLE_S = 0.01
+    # Settle after binding a keycode, before pressing it: toolkits refetch the
+    # keymap asynchronously, and one that has not caught up reads the keycode by
+    # its previous symbol -- NoSymbol on a spare, which drops the key outright.
+    # 10 ms did not cover a Chrome whose main thread was starved of its core.
+    _BIND_SETTLE_S = 0.025
     # A group lock outlives the last key that needed it by this long: one switch
     # per run of keystrokes, and the desktop's layout indicator stays put.
     _GROUP_LINGER_S = 0.5
@@ -1139,7 +1140,6 @@ class _XTestKeyboard:
         self._overlay_value_kc = {}
         self._overlay_order = []
         self._pressed_kc = {}
-        self._dirty_spares = set()
 
     def _find_spare_keycodes(self) -> list:
         """Every keycode free to repurpose for the overlay.
@@ -1174,10 +1174,8 @@ class _XTestKeyboard:
             elif len(bound) == 1:
                 sym = next(iter(bound))
                 if (sym & 0xFF000000) == 0x01000000:
-                    # Clients may translate it by its old value until the
-                    # rebind's MappingNotify lands: first bind settles like a recycle.
+                    # An overlay bind, this handler's or a previous one's.
                     spares.append(kc)
-                    self._dirty_spares.add(kc)
         self._spare_set = frozenset(spares)
         return spares
 
@@ -1206,31 +1204,23 @@ class _XTestKeyboard:
                 return self._overlay_value_kc.get(keysym, 0)
         return kc
 
-    def _alloc_overlay_keycode(self, keysym: int) -> tuple:
+    def _alloc_overlay_keycode(self, keysym: int) -> int:
         """Reserve a spare keycode for keysym and record the binding.
 
         Recycles the oldest binding when the pool is full. The mapping request
         itself is the caller's (single vs batched).
-
-        Returns:
-            (keycode, needs_settle) — needs_settle is True when clients may
-            still hold a previous mapping for the keycode (an in-process
-            recycle, or a reclaimed spare's first bind).
         """
         free = self._free_spares()
         if free:
             kc = free[0]
-            needs_settle = kc in self._dirty_spares
-            self._dirty_spares.discard(kc)
         else:
             oldest = self._overlay_order.pop(0)
             kc = self._overlay.pop(oldest)
             self._overlay_value_kc.pop(overlay_bind_keysym(oldest), None)
-            needs_settle = True
         self._overlay[keysym] = kc
         self._overlay_value_kc[overlay_bind_keysym(keysym)] = kc
         self._overlay_order.append(keysym)
-        return kc, needs_settle
+        return kc
 
     def _overlay_keycode(self, keysym: int) -> Optional[int]:
         """Bind an unmapped keysym to a spare keycode (recycling the least
@@ -1250,13 +1240,12 @@ class _XTestKeyboard:
             self._spare_keycodes = self._find_spare_keycodes()
         if not self._spare_keycodes:
             return None
-        kc, needs_settle = self._alloc_overlay_keycode(keysym)
+        kc = self._alloc_overlay_keycode(keysym)
         # Bound at levels 0 and 1 so an accidental Shift cannot change it.
         bind_value = overlay_bind_keysym(keysym)
         self._d.change_keyboard_mapping(kc, [[bind_value, bind_value]])
         self._d.sync()
-        if needs_settle:
-            time.sleep(self._RECYCLE_SETTLE_S)
+        time.sleep(self._BIND_SETTLE_S)
         return kc
 
     def prebind(self, keysyms: Iterable[int]) -> bool:
@@ -1299,13 +1288,10 @@ class _XTestKeyboard:
             if len(picked) >= len(missing):
                 break
             picked.extend(run[:len(missing) - len(picked)])
-        recycled_any = any(kc in self._dirty_spares for kc in picked)
-        self._dirty_spares.difference_update(picked)
         while len(picked) < len(missing):
             oldest = self._overlay_order.pop(0)
             picked.append(self._overlay.pop(oldest))
             self._overlay_value_kc.pop(overlay_bind_keysym(oldest), None)
-            recycled_any = True
         assigns = []
         for ks, kc in zip(missing, picked):
             self._overlay[ks] = kc
@@ -1323,8 +1309,8 @@ class _XTestKeyboard:
                 [[overlay_bind_keysym(ks)] * 2 for _kc, ks in assigns[i:j + 1]])
             i = j + 1
         d.sync()
-        if recycled_any:
-            time.sleep(self._RECYCLE_SETTLE_S)
+        # One settle for the whole batch, since one sync covers every bind.
+        time.sleep(self._BIND_SETTLE_S)
         return True
 
     def bindings_intact(self) -> bool:
@@ -1380,7 +1366,6 @@ class _XTestKeyboard:
         self._overlay_order.clear()
         self._spare_keycodes = None
         self._spare_set = frozenset()
-        self._dirty_spares.clear()
         if self._xkb is not None:
             self._xkb.invalidate()
         self.refresh_modifier_keycodes()
