@@ -83,7 +83,7 @@ import msgpack
 from PIL import Image
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Container, Iterable, Optional, Tuple, Union
+from typing import Any, Callable, Container, Iterable, List, Optional, Tuple, Union
 from .display_utils import (
     pixelflux_x11_cursor,
     unpremultiply_rgba,
@@ -473,8 +473,9 @@ class _WaylandKeymapOwner:
         for ch in text:
             ks = character_to_layout_keysym(ch)
             if ks not in self._map:
-                cp = ord(ch)
-                ks = cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp)
+                ks = universal_text_keysym(ch)
+                if ks is None:
+                    continue
             keysyms.append(ks)
         missing = [ks for ks in dict.fromkeys(keysyms) if ks not in self._map]
         overlay = self._overlay_bind_many(missing) if missing else {}
@@ -1930,25 +1931,49 @@ def overlay_bind_keysym(keysym: int) -> int:
     return keysym
 
 
-def text_to_wayland_keysyms(text: str) -> list:
+@functools.lru_cache(maxsize=4096)
+def universal_text_keysym(char: str) -> Optional[int]:
+    """The keysym that types `char` on a key no layout carries, or None when
+    the character is not typeable at all.
+
+    Latin-1 keeps its own keysym and only codepoints above it ride the Unicode
+    plane. Encoding Latin-1 in that plane as well (`0x010000E9` for e-acute) is
+    the more uniform rule and xkbcommon does read it back, but X clients that
+    look keys up through an input context get the bare Latin-1 byte out of
+    `XmbLookupString`, which a UTF-8 client drops — so XWayland apps would lose
+    exactly the accented characters. C0 and C1 controls have no typeable keysym
+    beyond the Return and Tab bindings.
+
+    Args:
+        char: A single character.
+
+    Returns:
+        Its keysym, or None for a character that types nothing.
+    """
+    if char in ('\n', '\r'):
+        return 0xFF0D
+    if char == '\t':
+        return 0xFF09
+    codepoint = ord(char)
+    if codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
+        return None
+    return codepoint if codepoint <= 0xFF else (0x01000000 | codepoint)
+
+
+def text_to_wayland_keysyms(text: str) -> List[int]:
     """One keysym per typeable char for the virtual-keyboard typer, in the same
     universal Latin-1/Unicode-plane forms overlay binds carry. This is the
     policy half of vk typing — pixelflux's type_keysyms_wayland taps whatever
     it is given — so which keysym spells a character is decided (and tweaked)
-    here, never in the transport."""
-    out = []
-    for char in text:
-        if char in ('\n', '\r'):
-            out.append(0xFF0D)
-        elif char == '\t':
-            out.append(0xFF09)
-        else:
-            codepoint = ord(char)
-            if 0x20 <= codepoint <= 0xFF:
-                out.append(codepoint)
-            elif codepoint >= 0x100:
-                out.append(0x01000000 | codepoint)
-    return out
+    here, never in the transport.
+
+    Args:
+        text: The text to type.
+
+    Returns:
+        The keysyms to tap, untypeable characters dropped.
+    """
+    return [ks for ks in map(universal_text_keysym, text) if ks is not None]
 
 
 class JsConfigCtypes(ctypes.Structure):
@@ -4600,8 +4625,9 @@ class WebRTCInput:
         for ch in text:
             ks = character_to_layout_keysym(ch)
             if not self.keyboard.layout_carries(ks):
-                cp = ord(ch)
-                ks = cp if 0x20 <= cp <= 0xFF else (0x01000000 | cp)
+                ks = universal_text_keysym(ch)
+                if ks is None:
+                    continue
             keysyms.append(ks)
         try:
             if not self.keyboard.prebind(keysyms):
