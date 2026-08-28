@@ -21,27 +21,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
 
-# Counts decoded VideoFrames and records every decoder configuration, so the
-# checks can tell a full-frame session (one decoder) from a striped one (one
-# decoder per stripe) and prove the bytes actually decode rather than merely
-# arrive. Headless rAF throttling zeroes the client's own fps counter, so the
-# WebSocket binary frames are counted as well.
+# Counts decoded VideoFrames and records every decoder configuration on the
+# page, which is where a full-frame session decodes. The striped modes decode
+# and composite in the video worker, so their evidence is what the client
+# publishes about it -- the wire counter, the row layout the worker reports and
+# which sink element is on screen.
 INSTRUMENT_JS = """
-  window.__wsFrames = 0;
   window.__decoded = 0;
   window.__cfgs = [];
   window.__decodeErrors = [];
   (() => {
-    const WS = window.WebSocket;
-    window.WebSocket = function(...a) {
-      const s = a.length === 1 ? new WS(a[0]) : new WS(a[0], a[1]);
-      s.addEventListener('message', (e) => {
-        if (e.data instanceof ArrayBuffer) window.__wsFrames++;
-      });
-      return s;
-    };
-    window.WebSocket.prototype = WS.prototype;
-    Object.setPrototypeOf(window.WebSocket, WS);
     const Real = window.VideoDecoder;
     if (!Real) return;
     const proto = Real.prototype;
@@ -74,14 +63,36 @@ def server_software_encoder() -> Optional[str]:
     return name or None
 
 
+SINK_IDS = ("videoCanvas", "videoWorkerCanvas", "videoStream")
+
+
 def read_state(page) -> dict:
-    """The instrumentation counters: WS frames, decoded frames, decoder configs, errors."""
+    """Page decode counters plus what the client publishes about the worker: the
+    wire chunk count, the stripe rows it is decoding, and the sinks on screen."""
     return page.evaluate("""(() => ({
-      frames: window.__wsFrames || 0,
       decoded: window.__decoded || 0,
       cfgs: window.__cfgs || [],
       errors: window.__decodeErrors || [],
+      chunks: window.videoChunksReceived || 0,
+      divert: !!window.videoDivertOn,
+      rows: Object.keys(window.videoStripeRows || {}).length,
+      sinks: ['videoCanvas', 'videoWorkerCanvas', 'videoStream'].filter((id) => {
+        const el = document.getElementById(id);
+        return el && getComputedStyle(el).display !== 'none';
+      }),
     }))()""")
+
+
+def wait_sinks(page, want: Optional[list] = None, timeout: float = 25) -> list:
+    """The sinks on screen once one is left, and once it is `want` if given; a
+    second shows during warm-up, while the canvas still covers a sink that has
+    yet to render, and the outgoing sink stays up until the new one does."""
+    deadline = time.time() + timeout
+    sinks = read_state(page)["sinks"]
+    while time.time() < deadline and not (len(sinks) == 1 and (want is None or sinks == want)):
+        time.sleep(0.5)
+        sinks = read_state(page)["sinks"]
+    return sinks
 
 
 def wait_state(page, predicate, timeout: float = 30) -> dict:
@@ -127,13 +138,18 @@ def run_block(r: "H.Results", wayland: bool) -> None:
             try:
                 info = C.wait_ws_video(page, timeout=30)
                 r.check("h264enc: canvas painted", info is not None, info)
-                state = wait_state(page, lambda s: s["frames"] >= 24 and s["decoded"] >= 12)
-                r.check("h264enc: frames flow", state["frames"] >= 24, state["frames"])
+                start = read_state(page)
+                state = wait_state(page, lambda s: s["chunks"] >= start["chunks"] + 24
+                                   and s["decoded"] >= 12)
+                r.check("h264enc: frames flow", state["chunks"] >= start["chunks"] + 24,
+                        (start["chunks"], state["chunks"]))
                 r.check("h264enc: frames decode", state["decoded"] >= 12, state["decoded"])
                 r.check("h264enc: no decoder errors", not state["errors"], state["errors"][:3])
                 heights = sorted({c["h"] for c in state["cfgs"] if c.get("h")})
                 r.check("h264enc: one full-frame decoder geometry", len(heights) == 1, heights)
                 full_h = heights[0] if heights else 0
+                full_sinks = wait_sinks(page)
+                r.check("h264enc: one video sink on screen", len(full_sinks) == 1, full_sinks)
                 log = H.server_log()
                 r.check("server names the software encoder for the session",
                         f"encodes H.264 in software ({encoder})" in log, encoder)
@@ -147,23 +163,36 @@ def run_block(r: "H.Results", wayland: bool) -> None:
                 restarted = wait_log_after(mark, "Capture started", timeout=20)
                 r.check("h264enc-striped: capture restarted", restarted, "")
 
-                def stripe_decoders(s: dict) -> list:
-                    return [c for c in s["cfgs"][len(before["cfgs"]):]
-                            if c.get("h") and c["h"] < full_h]
                 state = wait_state(
                     page,
-                    lambda s: s["decoded"] >= before["decoded"] + 24 and len(stripe_decoders(s)) >= 2,
+                    lambda s: s["chunks"] >= before["chunks"] + 24 and s["rows"] >= 2,
                     timeout=40)
-                r.check("h264enc-striped: frames keep decoding",
-                        state["decoded"] >= before["decoded"] + 24,
-                        (before["decoded"], state["decoded"]))
-                r.check("h264enc-striped: a decoder per stripe",
-                        len(stripe_decoders(state)) >= 2,
-                        sorted({c["h"] for c in stripe_decoders(state)}))
+                r.check("h264enc-striped: frames keep flowing",
+                        state["chunks"] >= before["chunks"] + 24,
+                        (before["chunks"], state["chunks"]))
+                r.check("h264enc-striped: a decoder per stripe", state["rows"] >= 2,
+                        state["rows"])
                 r.check("h264enc-striped: no decoder errors", not state["errors"], state["errors"][:3])
+                striped_sinks = wait_sinks(page)
+                r.check("h264enc-striped: one video sink on screen",
+                        len(striped_sinks) == 1, striped_sinks)
                 tail = H.server_log()[mark:]
                 r.check("h264enc-striped: the session is the build's software encoder",
                         f"encodes H.264 in software ({encoder})" in tail, encoder)
+
+                # Back to full frames: the sink the striped mode presented on has
+                # to give way, or its last composite covers the live one until a
+                # reload -- the picture looks wedged while the wire keeps running.
+                before = read_state(page)
+                C.settings_change(page, {"encoder": "h264enc"})
+                state = wait_state(page, lambda s: s["chunks"] >= before["chunks"] + 24,
+                                   timeout=40)
+                r.check("back to h264enc: frames keep flowing",
+                        state["chunks"] >= before["chunks"] + 24,
+                        (before["chunks"], state["chunks"]))
+                back_sinks = wait_sinks(page, want=full_sinks)
+                r.check("back to h264enc: the striped sink gave way",
+                        back_sinks == full_sinks, (striped_sinks, back_sinks, full_sinks))
             finally:
                 browser.close()
     finally:

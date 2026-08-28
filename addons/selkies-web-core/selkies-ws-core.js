@@ -1659,6 +1659,13 @@ function presentFrameToVideo(frame) {
     mstgActive = true;
     mstgLastGeom = null;
     mstgRendered = false;
+    // Only one sink may be shown. The worker canvas holds the last composite of
+    // the striped mode just left, and it would cover this <video> until a reload.
+    if (videoWorkerActive && videoWorkerMode !== 'vtg' && videoWorkerCanvas) {
+      videoWorkerActive = false;
+      videoWorkerRendered = false;
+      videoWorkerCanvas.style.display = 'none';
+    }
     if (videoElement) {
       videoElement.style.display = 'block';
       videoElement.style.objectFit = 'fill';
@@ -1964,6 +1971,12 @@ function activateWorkerSinkDisplay() {
   if (!videoWorkerActive) {
     videoWorkerActive = true; videoWorkerLastGeom = null;
     videoWorkerRendered = false;
+    // The page generator's <video> is the other sink; shown, it would cover
+    // this canvas with the last frame of the mode just left.
+    if (target !== videoElement) {
+      if (mstgActive) deactivateMstg();
+      else if (videoElement) videoElement.style.display = 'none';
+    }
     target.style.display = 'block'; target.style.objectFit = 'fill';
     if (videoWorkerMode === 'vtg') {
       if (typeof target.requestVideoFrameCallback === 'function') {
