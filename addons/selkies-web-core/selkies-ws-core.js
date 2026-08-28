@@ -283,6 +283,8 @@ let isMicrophoneActive = false;
 let isWebcamActive = false;
 let isGamepadEnabled;
 let lastReceivedVideoFrameId = -1;
+/** When that id arrived, so an ack can report how long it was held. */
+let lastReceivedVideoFrameAt = 0;
 let initializationComplete = false;
 let audioEnabled = true;
 let microphoneEnabled = true;
@@ -1868,7 +1870,7 @@ function ensureVideoWorker() {
         // full-frame rate stays a wire measure.
         if (stripedNow) frameCount += (m.presents || 0);
         else divertedWireFramesThisPeriod += m.frames;
-        if (m.lastId >= 0) lastReceivedVideoFrameId = m.lastId;
+        if (m.lastId >= 0) { lastReceivedVideoFrameId = m.lastId; lastReceivedVideoFrameAt = performance.now(); }
         if (m.rows) window.videoStripeRows = m.rows;
         if (isSharedMode && m.chunks > 0) lastSharedVideoChunkTime = performance.now();
         if (!streamStarted && (m.frames > 0 || (m.presents || 0) > 0)) startStream();
@@ -2997,6 +2999,8 @@ let stripePendingFrameId = null;
 let stripePendingDirty = false;
 /** Newest frame id the striped composite has put on screen. */
 let lastPresentedVideoFrameId = null;
+/** When that id was presented, for the same reason as `lastReceivedVideoFrameAt`. */
+let lastPresentedVideoFrameAt = 0;
 /** When the striped composite holds a whole frame; see lib/stripe-clock.js. */
 const stripeClock = createStripeClock();
 /**
@@ -3133,6 +3137,7 @@ function stripeCompositeDraw(stripe, yPos) {
 function stripeCompositePresent() {
   frameCount++;
   lastPresentedVideoFrameId = stripePendingFrameId;
+  lastPresentedVideoFrameAt = performance.now();
   if (stripeWorkerActive && stripeWorker) {
     try { stripeWorker.postMessage({ type: 'commit' }); } catch (e) { /* ignore */ }
   } else if (canvasContext && canvas.width > 0 && canvas.height > 0) {
@@ -4892,7 +4897,7 @@ let webcamChainBroken = false;
 // Full frames ack on receipt; the striped modes ack the id the video worker
 // reports presented, so a client that cannot render sheds load.
 let videoPort = null, videoDivert = false, videoAck = false, videoAckSource = 'receive';
-let videoLastId = -1, videoAckedId = -1, videoAckTimer = null;
+let videoLastId = -1, videoLastIdAt = 0, videoAckedId = -1, videoAckTimer = null;
 
 function syncVideoAckTimer() {
   const want = videoDivert && videoAck;
@@ -4900,7 +4905,11 @@ function syncVideoAckTimer() {
     videoAckTimer = setInterval(() => {
       if (videoLastId < 0 || videoLastId === videoAckedId) return;
       if (!ws || ws.readyState !== 1) return;
-      try { ws.send('CLIENT_FRAME_ACK ' + videoLastId); videoAckedId = videoLastId; } catch (err) {}
+      // The hold: how long the id waited on this tick, which a backgrounded
+      // tab clamps to a second. The server subtracts it, so the round trip it
+      // reports stays the path's rather than this timer's.
+      const held = Math.max(0, Math.round(performance.now() - videoLastIdAt));
+      try { ws.send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held); videoAckedId = videoLastId; } catch (err) {}
     }, ${BACKPRESSURE_INTERVAL_MS});
   } else if (!want && videoAckTimer) {
     clearInterval(videoAckTimer);
@@ -4916,7 +4925,7 @@ self.onmessage = (e) => {
     videoPort = m.port;
     videoPort.onmessage = (ev) => {
       const pm = ev.data;
-      if (pm && pm.presentedId !== undefined) videoLastId = pm.presentedId;
+      if (pm && pm.presentedId !== undefined) { videoLastId = pm.presentedId; videoLastIdAt = performance.now(); }
     };
     return;
   }
@@ -4982,6 +4991,7 @@ self.onmessage = (e) => {
           if (videoAckSource === 'receive') {
             const head = new Uint8Array(d, 2, 2);
             videoLastId = (head[0] << 8) | head[1];
+            videoLastIdAt = performance.now();
           }
           videoPort.postMessage(d, [d]);
           return;
@@ -5606,11 +5616,14 @@ class WorkerWebSocket {
     if (websocket && websocket.readyState === WebSocket.OPEN) {
       try {
         const striped = (currentEncoderMode === 'jpeg' || currentEncoderMode === 'h264enc-striped');
-        const acked = (striped && lastPresentedVideoFrameId !== null)
-          ? lastPresentedVideoFrameId
-          : lastReceivedVideoFrameId;
+        const fromPresent = striped && lastPresentedVideoFrameId !== null;
+        const acked = fromPresent ? lastPresentedVideoFrameId : lastReceivedVideoFrameId;
+        const at = fromPresent ? lastPresentedVideoFrameAt : lastReceivedVideoFrameAt;
         if (acked !== -1 && acked !== null) {
-          websocket.send(`CLIENT_FRAME_ACK ${acked}`);
+          // How long this id waited for the tick; the server subtracts it so a
+          // throttled ack cadence is not reported as network latency.
+          const held = Math.max(0, Math.round(performance.now() - at));
+          websocket.send(`CLIENT_FRAME_ACK ${acked} ${held}`);
         }
       } catch (error) {
         console.error('[Backpressure] Error sending frame ACK:', error);
@@ -5924,7 +5937,7 @@ class WorkerWebSocket {
 
         const jpegFrameId = dataView.getUint16(2, false);
         stripeClock.note(jpegFrameId);
-        if (!isSharedMode) lastReceivedVideoFrameId = jpegFrameId;
+        if (!isSharedMode) { lastReceivedVideoFrameId = jpegFrameId; lastReceivedVideoFrameAt = performance.now(); }
         const stripe_y_start = dataView.getUint16(4, false);
         const jpegDataBuffer = arrayBuffer.slice(jpegHeaderLength);
 
@@ -5946,6 +5959,7 @@ class WorkerWebSocket {
         stripeClock.note(vncFrameID);
         if (!isSharedMode) {
             lastReceivedVideoFrameId = vncFrameID;
+            lastReceivedVideoFrameAt = performance.now();
             // Full-frame h264enc presents through sinks the page cannot count, so its
             // rate is measured off the wire; the striped modes count what they composite.
             if (currentEncoderMode !== 'h264enc-striped') {

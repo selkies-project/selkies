@@ -3483,15 +3483,21 @@ class DataStreamingServer(BaseStreamingService):
 
                     elif message.startswith("CLIENT_FRAME_ACK"):
                         try:
-                            parts = message.split(" ", 2)
+                            parts = message.split(" ")
                             acked_frame_id = -1
                             target_display_id = client_display_id
                             if not target_display_id:
                                 continue
                             if len(parts) >= 2:
-                                acked_frame_id = int(parts[-1])
+                                acked_frame_id = int(parts[1])
                             else:
                                 raise ValueError("ACK message has too few parts.")
+                            # Optional: how long the client held the id before its
+                            # ack tick fired. A backgrounded tab's timers clamp to a
+                            # second, and that second is the client's, not the link's.
+                            held_ms = 0.0
+                            if len(parts) >= 3:
+                                held_ms = max(0.0, float(parts[2]))
                             # The -1 sentinel is server-internal: accepted from the wire it
                             # would disable backpressure and the stall detector.
                             if not (0 <= acked_frame_id <= MAX_UINT16_FRAME_ID):
@@ -3508,7 +3514,9 @@ class DataStreamingServer(BaseStreamingService):
                                 sent_ts = display_state.get('sent_timestamps')
                                 if sent_ts and acked_frame_id in sent_ts:
                                     send_time = sent_ts.pop(acked_frame_id)
-                                    rtt_sample_ms = (time.monotonic() - send_time) * 1000.0
+                                    rtt_sample_ms = max(
+                                        0.0,
+                                        (time.monotonic() - send_time) * 1000.0 - held_ms)
                                     # An id collision (uint16, reset on restarts) is not a
                                     # round trip.
                                     if 0 <= rtt_sample_ms <= RTT_SAMPLE_SANE_MAX_MS:
