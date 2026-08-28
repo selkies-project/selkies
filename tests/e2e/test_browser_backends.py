@@ -180,7 +180,9 @@ def cell_block(cell: str) -> "H.Results":
                 deadline = time.time() + 12
                 frames = 0
                 while time.time() < deadline:
-                    frames = page.evaluate("window.__wsFrames") or 0
+                    # The socket runs in a worker, where the page tap cannot see it;
+                    # the client publishes its own count.
+                    frames = page.evaluate("window.videoChunksReceived || window.__wsFrames") or 0
                     if frames >= 24:
                         break
                     time.sleep(0.5)

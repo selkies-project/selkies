@@ -69,7 +69,8 @@
  * `toggleDashboard` and `toggleTouchGamepad`. The `window` globals it
  * publishes for the dashboards and the tests are `webrtcInput` (the Input
  * handler), `fps`, `videoChunksReceived`, `videoDivertOn`, `videoStripeRows`
- * (the row layout the video worker is decoding), `system_stats`, `gpu_stats`,
+ * (the row layout the video worker is decoding), `webcamCodec`,
+ * `system_stats`, `gpu_stats`,
  * `network_stats`, `currentAudioBufferSize`,
  * `currentAudioBufferDuration`, `currentAudioLevel`,
  * `currentAudioUnderrunSamples`, `currentAudioWorkletDropped`,
@@ -290,6 +291,13 @@ let audioEnabled = true;
 let microphoneEnabled = true;
 let webcamEnabled = true;
 let webcamCapture = null;
+/** Codec the webcam uplink is encoding with, or null while idle. The frames
+ * themselves go worker to worker over a port, so this is the only place the
+ * page can say what they are. */
+Object.defineProperty(window, 'webcamCodec', {
+  configurable: true,
+  get: () => (webcamCapture ? webcamCapture.codec : null),
+});
 // webcam_encoder: the server default, overridden by the stored choice unless locked.
 let webcamEncoderPreference = 'auto';
 let preferredWebcamDeviceId = null;

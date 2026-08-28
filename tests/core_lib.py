@@ -21,6 +21,57 @@ CHROME_PATH: Optional[str] = os.environ.get("E2E_CHROME") or None
 FIREFOX_PATH: Optional[str] = os.environ.get("E2E_FIREFOX") or None
 
 
+# The socket lives in a worker on the websockets transport, so wrapping
+# `WebSocket.prototype.send` on the page sees nothing of the wire. Every
+# page-side send goes through the transport handle the core publishes as
+# `window.selkiesTransport`, whichever thread owns the socket, so a hook is
+# installed on that handle as well as on the prototypes (the WebRTC data
+# channel, and a socket the page still owns). An existing accessor is chained
+# rather than replaced, so this composes with `launch_client`'s receive tap.
+def wire_hook_js(body: str) -> str:
+    """An init script running `body` on every page-side send, with the payload
+    in `data`; mutating an ArrayBuffer in place changes what goes out.
+
+    Args:
+        body: JavaScript statements, evaluated with `data` in scope.
+
+    Returns:
+        The script, for `context.add_init_script`.
+    """
+    return """
+(() => {
+  const hook = (data) => { %s };
+  for (const proto of [window.RTCDataChannel && RTCDataChannel.prototype,
+                       window.WebSocket && WebSocket.prototype]) {
+    if (!proto || typeof proto.send !== 'function') continue;
+    const orig = proto.send;
+    proto.send = function (d) { try { hook(d); } catch (e) {} return orig.call(this, d); };
+  }
+  const wrap = (t) => {
+    if (!t || t.__wireHooked || typeof t.send !== 'function') return t;
+    t.__wireHooked = true;
+    const orig = t.send.bind(t);
+    t.send = (d) => { try { hook(d); } catch (e) {} return orig(d); };
+    return t;
+  };
+  const prev = Object.getOwnPropertyDescriptor(window, 'selkiesTransport');
+  let held = null;
+  Object.defineProperty(window, 'selkiesTransport', {
+    configurable: true,
+    get: () => (prev && prev.get ? prev.get() : held),
+    set: (v) => { const w = wrap(v); held = w; if (prev && prev.set) prev.set(w); },
+  });
+})();
+""" % body
+
+
+# Text messages the page sent, in `window.__wireSent`. Only strings are kept:
+# a binary payload is transferred to the socket worker and detached, so a
+# reference held here would read as empty.
+WIRE_TAP_JS = ("window.__wireSent = [];\n" + wire_hook_js(
+    "if (typeof data === 'string') window.__wireSent.push(data);"))
+
+
 def chromium_launch(pw: Any) -> Any:
     """Launch headless Chromium (or the system Chrome named by E2E_CHROME)."""
     kwargs = {"headless": True, "args": BROWSER_ARGS}

@@ -170,18 +170,12 @@ class PublishedCamera:
 
 # A half turn stamped onto every uplink frame's flags byte, which is what a client
 # on an engine that hands the camera's own orientation over sends.
-HALF_TURN_JS = """
-  (() => {
-    const send = WebSocket.prototype.send;
-    WebSocket.prototype.send = function (data) {
-      if (data instanceof ArrayBuffer && data.byteLength > 3) {
-        const b = new Uint8Array(data);
-        if (b[0] === 0x06) b[2] = (b[2] & ~0x06) | (2 << 1);
-      }
-      return send.apply(this, arguments);
-    };
-  })();
-"""
+HALF_TURN_JS = C.wire_hook_js("""
+  if (data instanceof ArrayBuffer && data.byteLength > 3) {
+    const b = new Uint8Array(data);
+    if (b[0] === 0x06) b[2] = (b[2] & ~0x06) | (2 << 1);
+  }
+""")
 
 
 def probe(frames: int, timeout_ms: int = 4000, samples=((320, 240),)) -> dict:
@@ -496,9 +490,14 @@ def rotation_block() -> "H.Results":
     cam = PublishedCamera(split_frames()).start()
     # Well inside each half of the 4:3 picture as the server letterboxes it.
     left_at, right_at = (400, 360), (880, 360)
+    # Pinned to JPEG so the frames pass through the page, which is where the
+    # flags byte can be stamped: a video codec is encoded in a worker and handed
+    # straight to the socket worker. The server's handling of the flag is the
+    # subject, not the codec that carries it.
     H.server_start(mode="websockets", wayland=False,
                    extra_env={"SELKIES_WEBCAM_ENABLED": "false",
-                              "SELKIES_WEBCAM_PIXEL_FORMAT": "I420"})
+                              "SELKIES_WEBCAM_PIXEL_FORMAT": "I420",
+                              "SELKIES_WEBCAM_ENCODER": "mjpeg"})
     try:
         for label, init_js, want in (("upright", None, (LEFT_HALF, RIGHT_HALF)),
                                      ("half turn", HALF_TURN_JS, (RIGHT_HALF, LEFT_HALF))):
@@ -608,19 +607,15 @@ def detail_block() -> "H.Results":
     return res
 
 
-WIRE_CODEC_JS = """
-  (() => {
-    window.__codecs = {};
-    const send = WebSocket.prototype.send;
-    WebSocket.prototype.send = function (data) {
-      if (data instanceof ArrayBuffer && data.byteLength > 3) {
-        const b = new Uint8Array(data);
-        if (b[0] === 0x06) window.__codecs[b[1]] = (window.__codecs[b[1]] || 0) + 1;
-      }
-      return send.apply(this, arguments);
-    };
-  })();
-"""
+# Uplink codec ids, as the frame header carries them.
+CODEC_IDS = {"mjpeg": 0, "jpeg": 0, "h264": 1, "avc": 1, "vp8": 2}
+
+WIRE_CODEC_JS = "window.__codecs = {};\n" + C.wire_hook_js("""
+  if (data instanceof ArrayBuffer && data.byteLength > 3) {
+    const b = new Uint8Array(data);
+    if (b[0] === 0x06) window.__codecs[b[1]] = (window.__codecs[b[1]] || 0) + 1;
+  }
+""")
 
 
 def encoderpref_block() -> "H.Results":
@@ -647,10 +642,17 @@ def encoderpref_block() -> "H.Results":
                 r = wait_for_picture([((640, 360), GREEN)])
                 res.check(f"{pref}: device shows the camera's green",
                           near(r["samples"].get((640, 360)), GREEN), str(r.get("samples")))
+                # JPEG frames go out through the page, so their codec byte is on
+                # the wire here; a video codec is encoded in a worker and handed
+                # to the socket worker over a port, which the page never sees, so
+                # the client's own name for it stands in.
                 codecs = page.evaluate("window.__codecs") or {}
                 got = {int(k) for k, v in codecs.items() if v > 5}
+                if not got:
+                    got = {CODEC_IDS.get(page.evaluate("window.webcamCodec"))} - {None}
                 res.check(f"{pref}: wire codecs within {sorted(want)}",
-                          bool(got) and got <= want and (need is None or need in got), str(codecs))
+                          bool(got) and got <= want and (need is None or need in got),
+                          str(codecs) or str(page.evaluate("window.webcamCodec")))
                 res.check(f"{pref}: no page errors", not errors, "; ".join(errors)[:200])
                 browser.close()
         finally:

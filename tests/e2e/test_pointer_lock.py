@@ -36,20 +36,9 @@ START = (640, 360)
 # (dx, dy, repeat): one plain move, a run of small ones, and a move back.
 MOVES = ((60, 40, 1), (5, -3, 10), (-200, 100, 1))
 
-WIRE_TAP = """
-(() => {
-  window.__moves = [];
-  const tap = (d) => {
-    if (typeof d === 'string' && (d.startsWith('m,') || d.startsWith('m2,'))) window.__moves.push(d);
-  };
-  for (const proto of [window.RTCDataChannel && RTCDataChannel.prototype,
-                       window.WebSocket && WebSocket.prototype]) {
-    if (!proto || typeof proto.send !== 'function') continue;
-    const orig = proto.send;
-    proto.send = function(d) { tap(d); return orig.call(this, d); };
-  }
-})();
-"""
+# Motion messages off the shared wire tap, whichever thread owns the socket.
+MOVES_JS = ("window.__wireSent.filter(d => typeof d === 'string' && "
+            "(d.startsWith('m,') || d.startsWith('m2,')))")
 
 
 def launch(p: Any, mode: str) -> tuple:
@@ -62,7 +51,7 @@ def launch(p: Any, mode: str) -> tuple:
     browser = p.chromium.launch(**kw)
     ctx = browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
-    ctx.add_init_script(WIRE_TAP)
+    ctx.add_init_script(C.WIRE_TAP_JS)
     page = ctx.new_page()
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
@@ -112,7 +101,7 @@ def wait_stream_size(page: Any, mode: str, size: tuple, timeout: float = 8) -> O
 
 
 def moves_since(page: Any, start: int) -> list:
-    return page.evaluate("window.__moves")[start:]
+    return page.evaluate(MOVES_JS)[start:]
 
 
 def relative_sum(messages: list) -> tuple:
@@ -170,7 +159,7 @@ def run(mode: str, wayland: bool, res: "H.Results") -> None:
                 x, y = START
                 cursor = (x, y)
                 for dx, dy, repeat in MOVES:
-                    mark = len(page.evaluate("window.__moves"))
+                    mark = len(page.evaluate(MOVES_JS))
                     for _ in range(repeat):
                         cursor = (cursor[0] + dx, cursor[1] + dy)
                         page.mouse.move(*cursor)
@@ -186,7 +175,7 @@ def run(mode: str, wayland: bool, res: "H.Results") -> None:
                     res.check(f"locked move {label} deltas add up on the wire",
                               relative_sum(sent) == server((dx * repeat, dy * repeat)), relative_sum(sent))
 
-                mark = len(page.evaluate("window.__moves"))
+                mark = len(page.evaluate(MOVES_JS))
                 page.evaluate("document.exitPointerLock()")
                 deadline = time.time() + 5
                 while time.time() < deadline and page.evaluate("document.pointerLockElement !== null"):

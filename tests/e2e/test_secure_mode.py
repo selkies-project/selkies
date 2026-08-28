@@ -324,7 +324,8 @@ def run_websockets() -> "H.Results":
             res.check("an upload forced from the viewer page is refused by the server",
                       status == 403 and not os.path.exists(os.path.join(FILES_DIR, "viewer-upload.txt")), status)
             res.check("the refusal did not reload the page",
-                      page.evaluate("window.__wsFrames") > 0 and page.url.endswith(f"?token={VIEW_TOKEN}"), page.url)
+                      page.evaluate("window.videoChunksReceived || window.__wsFrames") > 0
+                      and page.url.endswith(f"?token={VIEW_TOKEN}"), page.url)
         finally:
             browser.close()
     res.summary()
