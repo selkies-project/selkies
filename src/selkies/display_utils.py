@@ -30,7 +30,6 @@ import base64
 import io
 import re
 import os
-import shutil
 import signal
 import stat
 import struct
