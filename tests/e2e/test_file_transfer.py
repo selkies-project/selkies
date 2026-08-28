@@ -319,26 +319,35 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
     res.check(f"{dashboard}: the upload landed in file_manager_path byte for byte",
               wait_file(on_disk(name), 5) and file_sha(on_disk(name)) == sha(payload))
 
-    if dashboard == "wish":
-        # The submenu may have closed with the chooser; reopen it for the
-        # second button.
-        open_files_ui(page, dashboard)
-    try:
-        page.locator('button:has-text("Download Files")').first.click()
-    except Exception as e:
-        print(f"      (download button: {e!r})")
+    def listing_frame(seconds: float):
+        """The modal's index frame once it lists `name`, or None."""
+        # The index shares the server's loop with the encoder; starved runners lag it.
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            for frame in page.frames:
+                if "/api/files/" in frame.url:
+                    try:
+                        if name in frame.content():
+                            return frame
+                    except Exception:
+                        pass
+            time.sleep(0.5)
+        return None
+
     listing = None
-    # The index shares the server's loop with the encoder; starved runners lag it.
-    deadline = time.time() + 30
-    while time.time() < deadline and listing is None:
-        for frame in page.frames:
-            if "/api/files/" in frame.url:
-                try:
-                    if name in frame.content():
-                        listing = frame
-                except Exception:
-                    pass
-        time.sleep(0.5)
+    # The chooser takes the focus, which folds the classic sidebar and closes
+    # the Wish submenu the button sits in, so the controls are reopened before
+    # reaching for the second button — and again if the click found nothing.
+    for attempt in (0, 1):
+        if attempt or dashboard == "wish":
+            open_files_ui(page, dashboard)
+        try:
+            page.locator('button:has-text("Download Files")').first.click()
+        except Exception as e:
+            print(f"      (download button: {e!r})")
+        listing = listing_frame(30 if attempt == 0 else 15)
+        if listing is not None:
+            break
     res.check(f"{dashboard}: the Download Files modal lists the upload", listing is not None,
               [f.url for f in page.frames])
     fetched = None
