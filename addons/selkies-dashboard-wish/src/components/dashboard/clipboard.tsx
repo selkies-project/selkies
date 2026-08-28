@@ -114,19 +114,26 @@ export function Clipboard() {
 			}, window.location.origin);
 			return;
 		}
-		// An object URL previews the file without reading a multi-megabyte
-		// image through base64 on the main thread. Only a blob: URL is kept, so
-		// nothing else can reach the preview's src.
+		// An object URL previews the file without reading a multi-megabyte image
+		// through base64 on the main thread; the one it replaces is revoked as
+		// it goes, and the preview checks the scheme where it uses it.
 		const objectUrl = URL.createObjectURL(file);
 		setClipboardImageUrl(previous => {
 			if (previous) URL.revokeObjectURL(previous);
-			return objectUrl.startsWith('blob:') ? objectUrl : null;
+			return objectUrl;
 		});
 		window.postMessage({
 			type: 'clipboardImageUpdate',
 			imageBlob: file,
 		}, window.location.origin);
 	};
+
+	// The preview shows nothing but a URL this component minted from the picked
+	// file: createObjectURL only ever returns a blob:, and testing the scheme
+	// where it is used keeps any other kind of URL out of the img, whatever put
+	// it in the state.
+	const previewUrl = clipboardImageUrl && clipboardImageUrl.startsWith('blob:')
+		? clipboardImageUrl : null;
 
 	const handleImageButtonClick = () => {
 		fileInputRef.current?.click();
@@ -198,10 +205,10 @@ export function Clipboard() {
 					className="hidden"
 				/>
 
-				{clipboardImageUrl && (
+				{previewUrl && (
 					<div className="mt-2">
 						<img
-							src={clipboardImageUrl}
+							src={previewUrl}
 							alt={t('clipboard.previewAlt')}
 							className="max-w-full max-h-32 object-contain rounded border"
 						/>

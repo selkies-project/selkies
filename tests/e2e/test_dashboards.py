@@ -305,6 +305,78 @@ def classic_layout_check(page, res: "H.Results") -> None:
         time.sleep(0.6)
 
 
+# A 1x1 PNG, the smallest thing the image path accepts.
+CLIPBOARD_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+    "01f15c4890000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082")
+
+
+def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
+    """A picked image reaches the core as a blob, and anything else is refused.
+
+    The upload button is the only way binary clipboard content leaves the
+    client, and Wish previews what was picked: a preview showing anything but
+    the `blob:` URL the dashboard minted would be rendering a URL from
+    somewhere else entirely.
+    """
+    page.evaluate("""() => {
+      window.__clipImages = [];
+      window.__clipRefusals = [];
+      window.addEventListener('message', (e) => {
+        const d = e.data;
+        if (!d || typeof d !== 'object') return;
+        if (d.type === 'clipboardImageUpdate') {
+          window.__clipImages.push(d.imageBlob ? d.imageBlob.size : 0);
+        }
+        if (d.type === 'fileUpload' && d.payload && d.payload.status === 'warning') {
+          window.__clipRefusals.push(d.payload.fileName || '');
+        }
+      });
+    }""")
+    was_open = page.evaluate("!!document.querySelector('.sidebar.is-open')")
+    if dashboard == "classic":
+        if not was_open:
+            page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+            time.sleep(0.8)
+        page.locator('.sidebar-section-header:has-text("Clipboard")').first.click()
+        time.sleep(0.6)
+    elif not wish_open_menu_item(page, "Clipboard"):
+        res.skip(f"{dashboard}: the clipboard image path", "no clipboard panel opened")
+        return
+
+    picker = page.locator('input[type="file"][accept="image/*"]').first
+    if picker.count() == 0:
+        res.skip(f"{dashboard}: the clipboard image path", "no image picker in the panel")
+        return
+    picker.set_input_files({"name": "clip.png", "mimeType": "image/png", "buffer": CLIPBOARD_PNG})
+    time.sleep(0.8)
+    res.check(f"{dashboard}: a picked image reaches the core whole",
+              page.evaluate("window.__clipImages") == [len(CLIPBOARD_PNG)],
+              page.evaluate("window.__clipImages"))
+    previews = page.locator('img[src^="blob:"]').count()
+    if dashboard == "wish":
+        res.check("wish: the preview shows the blob it minted", previews == 1, previews)
+    else:
+        res.check("classic: the panel previews nothing to mint a URL for", previews == 0, previews)
+
+    picker.set_input_files({"name": "clip.txt", "mimeType": "text/plain", "buffer": b"not an image"})
+    time.sleep(0.8)
+    res.check(f"{dashboard}: anything but an image is refused, not sent",
+              page.evaluate("window.__clipImages") == [len(CLIPBOARD_PNG)]
+              and page.evaluate("window.__clipRefusals.length") == 1,
+              page.evaluate("[window.__clipImages, window.__clipRefusals]"))
+    if dashboard == "classic":
+        # Leave the sidebar as found: the checks after this one open it themselves.
+        page.locator('.sidebar-section-header:has-text("Clipboard")').first.click()
+        time.sleep(0.4)
+        if not was_open and page.evaluate("!!document.querySelector('.sidebar.is-open')"):
+            page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+            time.sleep(0.6)
+    else:
+        page.keyboard.press("Escape")
+        time.sleep(0.3)
+
+
 def touch_gamepad_layer_check(page, res: "H.Results", dashboard: str) -> None:
     """The touch gamepad is drawn over the whole viewport, so the dashboard's own
     panels have to sit above it: two controls stacked on the same pixels compete
@@ -452,6 +524,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         if dashboard == "classic":
             classic_layout_check(page, res)
         touch_gamepad_layer_check(page, res, dashboard)
+        clipboard_image_check(page, res, dashboard)
 
         st = len(H.server_log())
         changed = False
