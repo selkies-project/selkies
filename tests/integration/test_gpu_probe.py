@@ -10,7 +10,9 @@ was provisioned with. So the shape is pinned here, along with the answers that
 do not depend on what hardware the test machine has.
 """
 import os
+import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
@@ -66,6 +68,25 @@ def main() -> bool:
     # is what lets the container tell "no GPU here" from "GPU it cannot reach".
     res.check("GPU presence is reported separately from acceleration",
               report["gpu"] or not report["accelerated"], report)
+
+    # Run by hand against a live container the probe inherits none of the
+    # session's environment, and would answer for a GPU stack the session does
+    # not use. The recorded environment is what it reads instead.
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as runtime:
+        with open(os.path.join(runtime, "container-env"), "w") as fh:
+            fh.write("export DRINODE=/dev/dri/renderD999\n")
+        env = dict(os.environ, XDG_RUNTIME_DIR=runtime,
+                   PYTHONPATH=os.path.join(repo, "src"))
+        recorded = subprocess.run([sys.executable, "-m", "selkies.gpu_probe"],
+                                  capture_output=True, text=True, timeout=120, env=env)
+        res.check("a probe run by hand reads the session's recorded environment",
+                  "/dev/dri/renderD999" in recorded.stderr, recorded.stderr.strip()[:120])
+        given = subprocess.run([sys.executable, "-m", "selkies.gpu_probe"],
+                               capture_output=True, text=True, timeout=120,
+                               env=dict(env, DRINODE="/dev/null"))
+        res.check("what the probe is actually given still wins",
+                  "/dev/null" in given.stderr, given.stderr.strip()[:120])
     return res.summary()
 
 

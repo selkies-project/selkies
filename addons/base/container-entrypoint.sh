@@ -38,6 +38,10 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 # and a runtime directory left over from a previous run would keep whatever it
 # had. The spec requires 0700 and dbus and PipeWire refuse anything wider.
 mkdir -p "${XDG_RUNTIME_DIR}"
+# The session environment for the s6 services, emptied before anything can read
+# it: the file outlives a container restart, and a probe run by hand loads it.
+ENV_FILE="${XDG_RUNTIME_DIR}/container-env"
+: > "${ENV_FILE}"
 # Not fatal: a runtime directory bind-mounted from elsewhere may not be ours
 # to re-mode, and that is no reason to refuse to start the container.
 chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
@@ -118,7 +122,21 @@ fi
 # weighs that and names the backend; it names none when no report can be had, which
 # leaves the session as it was asked for.
 if [ "${SELKIES_WAYLAND}" = "true" ]; then
-  case "$(timeout 60 selkies-gpu-probe || true)" in
+  probe_status=0
+  probe_backend="$(timeout 60 selkies-gpu-probe)" || probe_status=$?
+  # The probe brings up the compositor's own renderer, so a status of 124 or
+  # above — timeout's, or a signal's — is that bring-up wedging or dying on
+  # this driver stack, which the session would then do on every restart. A
+  # report that merely could not be had exits 1 and still leaves the ask alone.
+  if [ -z "${probe_backend}" ] && [ "${probe_status}" -ge 124 ]; then
+    if is_true "${SELKIES_WAYLAND_X11_FALLBACK-true}"; then
+      probe_backend="x11"
+    else
+      probe_backend="wayland-software"
+    fi
+    echo "Wayland backend: the compositor's renderer bring-up did not survive this GPU stack (status ${probe_status}); starting ${probe_backend} instead"
+  fi
+  case "${probe_backend}" in
     x11) export SELKIES_WAYLAND=false ;;
     # A compositor rendering in software shares no dmabuf, so a GL client aimed at
     # the Vulkan driver produces buffers it cannot accept and draws nothing.
@@ -200,8 +218,6 @@ export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
 
 # Compute the shared session environment, including embedded coTURN defaults
-ENV_FILE="${XDG_RUNTIME_DIR}/container-env"
-: > "${ENV_FILE}"
 
 # The address a browser outside this container would reach it on, asked of a
 # public resolver as the only party that can see it; an IPv6 answer is bracketed
