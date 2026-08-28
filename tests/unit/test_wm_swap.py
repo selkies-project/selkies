@@ -15,6 +15,7 @@ import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
+DESKTOP_IMAGE = os.path.join(REPO, "addons", "desktop", "Dockerfile")
 ENTRYPOINT = os.path.join(REPO, "addons", "base", "container-entrypoint.sh")
 sys.path.insert(0, TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
@@ -72,9 +73,12 @@ res.check("Wayland manages its own windows", swap_attempt(is_wayland=True) == []
 res.check("no window manager is named unless something names one",
           settings.multi_monitor_wm == "", repr(settings.multi_monitor_wm))
 
-# The image assembles the session it runs, so it is the one that asks.
-entrypoint = open(ENTRYPOINT, encoding="utf-8").read()
-res.check("the container image names the one it ships",
-          'SELKIES_MULTI_MONITOR_WM="${SELKIES_MULTI_MONITOR_WM:-openbox --replace}"' in entrypoint)
+# The image that ships a window manager is the one that names it: the base
+# image has no desktop in it, so naming one there would name what is not there.
+res.check("the image that ships one names it",
+          'ENV SELKIES_MULTI_MONITOR_WM="openbox --replace"'
+          in open(DESKTOP_IMAGE, encoding="utf-8").read())
+res.check("the image with no desktop in it names none",
+          "SELKIES_MULTI_MONITOR_WM" not in open(ENTRYPOINT, encoding="utf-8").read())
 
 sys.exit(0 if res.summary() else 1)

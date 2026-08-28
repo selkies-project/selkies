@@ -238,3 +238,9 @@ USER 1000
 ENV SELKIES_COMMAND_ENABLED="true"
 # Start the LXQt session (set to false to run only the display server)
 ENV START_LXQT="true"
+# This session is the image's to manage, and Openbox is the window manager it
+# ships: a desktop that tiles a maximized window across the whole framebuffer
+# rather than the per-display regions is handed to it when a second display
+# opens. Selkies names none by default, since a session on somebody's own
+# desktop is not one to restart window management in.
+ENV SELKIES_MULTI_MONITOR_WM="openbox --replace"
