@@ -249,15 +249,38 @@ def files_buttons(page: Any) -> tuple:
             page.locator('button:has-text("Download Files")').count() > 0)
 
 
-def wait_upload_end(page: Any, name: str, timeout: float = 60) -> list:
-    """The page's upload messages once `name` reports end or error."""
+def wait_upload_end(page: Any, name: str, timeout: float = 60,
+                    watch: Optional[Any] = None) -> list:
+    """The page's upload messages once `name` reports end or error.
+
+    Args:
+        page: The dashboard page.
+        name: File whose transfer is being waited on.
+        timeout: Seconds to wait for it to finish.
+        watch: Called on every poll, for a caller sampling what the dashboard
+            shows while the transfer is still running.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if watch is not None:
+            watch()
         ups = page.evaluate("window.__uploads") or []
         if any(u.get("fileName") == name and u.get("status") in ("end", "error") for u in ups):
             return ups
         time.sleep(0.3)
     return page.evaluate("window.__uploads") or []
+
+
+def upload_progress_shown(page: Any, dashboard: str, name: str) -> bool:
+    """Whether the dashboard is showing this upload's progress at this moment.
+
+    A transfer with no visible progress reads as a dashboard that dropped it,
+    which is the whole reason the notification exists; each dashboard has its
+    own: a progress bar in the classic sidebar, a toast in wish.
+    """
+    if dashboard == "classic":
+        return page.locator(".notification-progress-bar-inner").count() > 0
+    return page.locator(f'[data-sonner-toast]:has-text("{name}")').count() > 0
 
 
 def dashboard_page(pw: Any, mode: str, url_hash: str = "", **context: Any) -> tuple:
@@ -360,18 +383,18 @@ def transport_block(mode: str) -> "H.Results":
                 info = wait_video(page, mode)
                 res.check(f"{dashboard}: video streams over {mode}", info is not None, info)
                 ui_round_trip(res, page, dashboard, mode)
-                if mode == "websockets" and dashboard == "classic":
-                    chunked_through_page(res, page)
+                if mode == "websockets":
+                    chunked_through_page(res, page, dashboard)
             finally:
                 browser.close()
     res.summary()
     return res
 
 
-def chunked_through_page(res: "H.Results", page: Any) -> None:
+def chunked_through_page(res: "H.Results", page: Any, dashboard: str) -> None:
     """One file above the client's slicing threshold, set on the core's file
     input (what the Upload Files button's chooser feeds): the page posts it as
-    slices and the server reassembles it."""
+    slices and the server reassembles it, reporting its progress as it goes."""
     src = os.path.join(H.WORKDIR, "chunked-src.bin")
     with open(src, "wb") as f:
         for _ in range(CHUNKED_BYTES // (1 << 20)):
@@ -381,8 +404,16 @@ def chunked_through_page(res: "H.Results", page: Any) -> None:
     page.on("request", lambda r: requests.append(r) if r.method == "POST" and "/api/upload" in r.url else None)
     started = time.time()
     page.set_input_files("#globalFileInput", src)
-    ups = wait_upload_end(page, "chunked-src.bin", timeout=180)
+    shown = []
+
+    def sample() -> None:
+        if not shown and upload_progress_shown(page, dashboard, "chunked-src.bin"):
+            shown.append(time.time() - started)
+
+    ups = wait_upload_end(page, "chunked-src.bin", timeout=180, watch=sample)
     elapsed = time.time() - started
+    res.check(f"{dashboard}: the transfer is on screen while it runs", bool(shown),
+              f"first seen after {shown[0]:.1f}s of {elapsed:.1f}s" if shown else "never shown")
     res.check("a file above the slicing threshold uploads from the page",
               any(u.get("fileName") == "chunked-src.bin" and u.get("status") == "end" for u in ups),
               f"{elapsed:.1f}s {ups[-1:]}")

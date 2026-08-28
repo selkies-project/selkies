@@ -143,6 +143,7 @@ SUITES: list = [
      "selectors": ["routes", "websockets", "webrtc", "dashboards", "legacy"]},
     {"path": "e2e/test_file_transfer.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["websockets", "webrtc", "policy"]},
+    {"path": "e2e/test_apps_panel.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_dashboard_matrix.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["wish-webrtc-x11", "wish-ws-wl", "wish-webrtc-wl",
                    "gates-webrtc-x11", "gates-ws-wl", "gates-webrtc-wl"]},
