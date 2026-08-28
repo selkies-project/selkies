@@ -846,7 +846,10 @@
             Object.assign(gamepadControlsOverlayElement.style, {
                 position: 'fixed', top: '0', left: '0',
                 width: '100vw', height: 'calc(var(--vh, 1vh) * 100)',
-                zIndex: '2000',
+                // Above the sinks a streaming core stacks (2 to 10) and below
+                // the dashboard chrome drawn over the same viewport, which owns
+                // a press wherever a control of this overlay sits under it.
+                zIndex: '15',
                 pointerEvents: 'none',
                 overflow: 'hidden' 
             });

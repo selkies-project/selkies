@@ -730,9 +730,13 @@ body {
 #dashboard-root.theme-light {
 }
 
-/* Ensure the #dashboard-root portal element has a high z-index. */
+/* The portal element main.jsx creates. Positioned so the z-index applies at all
+   (it adds no layout of its own), and above the touch gamepad overlay, whose
+   controls are drawn over the whole viewport and would otherwise sit on an open
+   panel and take its clicks. */
 #dashboard-root {
-    z-index: 1000;
+    position: relative;
+    z-index: 2100;
 }
 
 /* --- Clipboard Section Styles --- */

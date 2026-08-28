@@ -305,6 +305,92 @@ def classic_layout_check(page, res: "H.Results") -> None:
         time.sleep(0.6)
 
 
+def touch_gamepad_layer_check(page, res: "H.Results", dashboard: str) -> None:
+    """The touch gamepad is drawn over the whole viewport, so the dashboard's own
+    panels have to sit above it: two controls stacked on the same pixels compete
+    for the same tap, and the one that wins is the one nobody can see."""
+    page.evaluate("""() => window.postMessage({
+      type: 'TOUCH_GAMEPAD_SETUP',
+      payload: { targetDivId: 'touch-gamepad-host', visible: true },
+    }, window.location.origin)""")
+    time.sleep(1.2)
+    shown = page.evaluate(
+        "() => document.querySelectorAll('#universal-touch-gamepad-controls-overlay *').length")
+    res.check(f"{dashboard}: the touch gamepad draws its controls", shown > 0, shown)
+
+    panel = ".sidebar"
+    if dashboard == "classic":
+        if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
+            page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+            time.sleep(0.8)
+    else:
+        # Wish portals its panels to the body rather than into the dashboard
+        # root, so they are the half of its chrome that has to clear the pad on
+        # its own footing. Its menus sit at the top out of the pad's way; the
+        # download modal is the one drawn over it.
+        panel = '[data-slot="dialog-overlay"]'
+        opened = wish_open_menu_item(page, "Files")
+        if opened:
+            try:
+                page.locator('button:has-text("Download Files")').first.click()
+                time.sleep(1.5)
+            except Exception as e:
+                print(f"      (wish download modal: {e!r})")
+                opened = False
+        if not opened or page.locator(panel).count() == 0:
+            res.skip(f"{dashboard}: a panel over the touch gamepad", "no panel opened")
+            page.evaluate("""() => window.postMessage({
+              type: 'TOUCH_GAMEPAD_VISIBILITY',
+              payload: { visible: false, targetDivId: 'touch-gamepad-host' },
+            }, window.location.origin)""")
+            return
+
+    # elementsFromPoint reports the whole hit-test stack, so one sample says
+    # both that the two overlap there and which of them takes the press.
+    hits = page.evaluate("""(selector) => {
+      const panel = document.querySelector(selector);
+      const pad = document.getElementById('universal-touch-gamepad-controls-overlay');
+      const pr = panel.getBoundingClientRect();
+      const stacks = { contested: [], padOnly: 0,
+                       covers: pr.left <= 0 && pr.top <= 0
+                               && pr.right >= innerWidth && pr.bottom >= innerHeight };
+      for (const el of pad.querySelectorAll('*')) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        const stack = document.elementsFromPoint(
+          Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2));
+        const overPanel = stack.findIndex((e) => panel.contains(e) || e === panel);
+        const overPad = stack.findIndex((e) => pad.contains(e));
+        if (overPanel >= 0 && overPad >= 0) stacks.contested.push(overPanel < overPad ? 'panel' : 'pad');
+        else if (overPad >= 0) stacks.padOnly++;
+      }
+      return stacks;
+    }""", panel)
+    res.check(f"{dashboard}: an open panel takes the taps of the controls under it",
+              hits["contested"] and all(w == "panel" for w in hits["contested"]),
+              f"{hits['contested'][:8]} contested, {hits['padOnly']} clear")
+    if hits["covers"]:
+        res.skip(f"{dashboard}: controls clear of it still take their own",
+                 "the panel covers the viewport")
+    else:
+        res.check(f"{dashboard}: controls clear of it still take their own",
+                  hits["padOnly"] > 0, hits["padOnly"])
+
+    page.evaluate("""() => window.postMessage({
+      type: 'TOUCH_GAMEPAD_VISIBILITY',
+      payload: { visible: false, targetDivId: 'touch-gamepad-host' },
+    }, window.location.origin)""")
+    time.sleep(0.5)
+    if dashboard == "classic":
+        # Leave the sidebar as found, like the layout check before it.
+        if page.evaluate("!!document.querySelector('.sidebar.is-open')"):
+            page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+            time.sleep(0.6)
+    else:
+        page.keyboard.press("Escape")
+        time.sleep(0.3)
+
+
 def dash_block(dashboard: str, dist: str) -> "H.Results":
     """Exercise one dashboard's settings loop and mode-switch round trip.
 
@@ -365,6 +451,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         gaming_mode_check(page, res, dashboard)
         if dashboard == "classic":
             classic_layout_check(page, res)
+        touch_gamepad_layer_check(page, res, dashboard)
 
         st = len(H.server_log())
         changed = False

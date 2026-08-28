@@ -44,9 +44,13 @@ body {
   overflow-x: hidden;
 }
 
-/* The portal element main.jsx creates, above the stream it overlays. */
+/* The portal element main.jsx creates, above the stream it overlays. Positioned
+   so the z-index applies at all (it adds no layout of its own), and above the
+   touch gamepad overlay, whose controls are drawn over the whole viewport and
+   would otherwise sit on an open panel and take its clicks. */
 #dashboard-root {
-    z-index: 1000;
+    position: relative;
+    z-index: 2100;
 }
 
 /* --- Gamepad visualizer --- */
