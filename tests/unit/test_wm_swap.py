@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Window management is restarted only where the deployment owns the session.
 
-XFCE and Plasma tile a maximized window across the whole framebuffer rather than
-against the per-display regions an extended layout defines, and handing window
-management to Openbox is the workaround. That is right for a session assembled
-around Selkies and wrong for a desktop somebody is using: restarting the window
-manager there takes their session apart. So it is a setting, off unless asked
-for, and the image that owns its session is what asks.
+Some desktops tile a maximized window across the whole framebuffer rather than
+against the per-display regions an extended layout defines, and handing the
+session to a window manager that does not is the way out. That is right for a
+session assembled around Selkies and wrong for a desktop somebody is using:
+restarting the window manager there takes their session apart. So the deployment
+names the one it wants, and an image that assembles its own session is what
+names it.
 """
 import asyncio
 import os
@@ -25,8 +26,8 @@ from selkies.settings import settings  # noqa: E402
 res = H.Results("wm-swap")
 
 
-def swap_attempt(asked: bool, is_wayland: bool = False, displays: int = 2,
-                 running_wm: str = "xfwm4") -> list:
+def swap_attempt(named: str = "openbox --replace", is_wayland: bool = False,
+                 displays: int = 2, running_wm: str = "xfwm4") -> list:
     """Run one `ensure_for` against stand-ins; report the commands it ran."""
     started: list = []
 
@@ -44,34 +45,36 @@ def swap_attempt(asked: bool, is_wayland: bool = False, displays: int = 2,
         return True
 
     saved = (DU.asyncio.create_subprocess_exec, DU.current_wm_name, DU.wait_for_wm,
-             DU.shutil.which, settings.multi_monitor_wm_swap)
+             settings.multi_monitor_wm)
     DU.asyncio.create_subprocess_exec = fake_exec
     DU.current_wm_name = fake_wm_name
     DU.wait_for_wm = fake_wait
-    DU.shutil.which = lambda name: "/usr/bin/" + name if name == "xfce4-session" else None
-    settings.multi_monitor_wm_swap = (asked, False)
+    settings.multi_monitor_wm = named
     try:
         asyncio.run(DU.MultiMonitorWindowManager().ensure_for(displays, is_wayland))
     finally:
         (DU.asyncio.create_subprocess_exec, DU.current_wm_name, DU.wait_for_wm,
-         DU.shutil.which, settings.multi_monitor_wm_swap) = saved
+         settings.multi_monitor_wm) = saved
     return started
 
 
-res.check("a session nobody asked about keeps its window manager",
-          swap_attempt(asked=False) == [], swap_attempt(asked=False))
-res.check("a deployment that asked gets the swap",
-          swap_attempt(asked=True) == ["openbox --replace"], swap_attempt(asked=True))
-res.check("a session already on Openbox is left alone",
-          swap_attempt(asked=True, running_wm="Openbox") == [])
-res.check("one display never swaps", swap_attempt(asked=True, displays=1) == [])
-res.check("Wayland manages its own windows", swap_attempt(asked=True, is_wayland=True) == [])
-res.check("the setting is off unless something asks",
-          settings.multi_monitor_wm_swap[0] is False, settings.multi_monitor_wm_swap)
+res.check("a session that named no window manager keeps its own",
+          swap_attempt(named="") == [], swap_attempt(named=""))
+res.check("the one the deployment named is what starts",
+          swap_attempt() == ["openbox --replace"], swap_attempt())
+res.check("any window manager can be named, not one this code knows",
+          swap_attempt(named="i3 --replace") == ["i3 --replace"],
+          swap_attempt(named="i3 --replace"))
+res.check("a session already running it is left alone",
+          swap_attempt(running_wm="Openbox") == [])
+res.check("one display never swaps", swap_attempt(displays=1) == [])
+res.check("Wayland manages its own windows", swap_attempt(is_wayland=True) == [])
+res.check("no window manager is named unless something names one",
+          settings.multi_monitor_wm == "", repr(settings.multi_monitor_wm))
 
 # The image assembles the session it runs, so it is the one that asks.
 entrypoint = open(ENTRYPOINT, encoding="utf-8").read()
-res.check("the container image asks for it",
-          'SELKIES_MULTI_MONITOR_WM_SWAP="${SELKIES_MULTI_MONITOR_WM_SWAP:-true}"' in entrypoint)
+res.check("the container image names the one it ships",
+          'SELKIES_MULTI_MONITOR_WM="${SELKIES_MULTI_MONITOR_WM:-openbox --replace}"' in entrypoint)
 
 sys.exit(0 if res.summary() else 1)

@@ -913,64 +913,90 @@ def _sync_wm_name() -> str:
             return ""
 
 
-class MultiMonitorWindowManager:
-    """Hands X11 window management to Openbox once a session has two displays.
+def _declared_desktop() -> str:
+    """What the session calls itself, from the variables it sets for exactly
+    this, or "" when it says nothing."""
+    for var in ("XDG_CURRENT_DESKTOP", "DESKTOP_SESSION"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value
+    return ""
 
-    XFCE and Plasma tile a maximized window across the whole framebuffer rather
-    than against the per-display regions an extended layout defines, so a
-    session running one of them can swap to Openbox the first time it extends.
-    Restarting window management is only ever right where the session is the
-    deployment's to manage, never on a desktop somebody is using, so it is off
-    unless `--multi-monitor-wm-swap` asks for it. Both transports share this
-    state: the swap is attempted once per session either way, since a second one
-    would restart window management under whoever is using it. Wayland sessions
-    manage their own windows and never swap.
+
+def _running_desktop(name: str, session_binary: str) -> bool:
+    """Whether the session runs the named desktop.
+
+    A session that says what it is settles it; an installed binary is only a
+    hint, and the wrong one wherever more than one desktop is installed, so it
+    answers for a session that says nothing at all.
+
+    Args:
+        name: Desktop name as it appears in the session's own variables.
+        session_binary: The binary that names that desktop, for a session that
+            declares none.
+    """
+    declared = _declared_desktop().lower()
+    if declared:
+        return name.lower() in declared
+    return bool(which(session_binary))
+
+
+class MultiMonitorWindowManager:
+    """Hands X11 window management to another window manager once a session has
+    two displays.
+
+    Some desktops (XFCE and Plasma among them) tile a maximized window across
+    the whole framebuffer rather than against the per-display regions an
+    extended layout defines, and handing the session to a window manager that
+    does not is the way out. Which one is `--multi-monitor-wm`, unset by
+    default: restarting window management belongs to a session the deployment
+    assembled, never to a desktop somebody is using, and only the deployment
+    knows which of the two it runs. Both transports share this state: the swap
+    is attempted once per session either way, since a second one would restart
+    window management under whoever is using it. Wayland sessions manage their
+    own windows and never swap.
     """
 
     def __init__(self) -> None:
         self._swapped = False
-        self._supported: Optional[bool] = None
 
     async def ensure_for(self, display_count: int, is_wayland: bool) -> None:
-        """Swap if this session needs it and has not already been swapped.
+        """Swap if this session was given a window manager and has not swapped.
 
-        Openbox is started detached, so the window manager outlives this
-        process's session, and on its stock config chain (user/system rc.xml):
-        a hand-written minimal config would strip the stock ``<mouse>``
-        bindings (titlebar double-click maximize, middle-click, menus) that the
-        compiled-in defaults do not cover, leaving presses on decorations dead.
+        The replacement is started detached, so it outlives this process's
+        session, and with the arguments the deployment gave: a window manager
+        started off its own stock configuration chain keeps the bindings its
+        compiled-in defaults do not cover, which a hand-written minimal config
+        would strip.
         """
         if is_wayland or self._swapped or display_count <= 1:
             return
         from .settings import settings as _s
-        if not bool(getattr(_s, "multi_monitor_wm_swap", (False, False))[0]):
+        command = str(getattr(_s, "multi_monitor_wm", "") or "").strip().split()
+        if not command:
             return
-        if self._supported is None:
-            self._supported = bool(
-                shutil.which("xfce4-session") or shutil.which("startplasma-x11"))
-        if not self._supported:
-            return
+        name = os.path.basename(command[0])
         self._swapped = True
-        if "openbox" in (await current_wm_name()).lower():
+        if name.lower() in (await current_wm_name()).lower():
             logger_app_resize.info(
-                "Multi-monitor setup: Openbox already manages the session; no WM swap.")
+                f"Multi-monitor setup: {name} already manages the session; no WM swap.")
             return
-        logger_app_resize.info("Multi-monitor setup: switching to Openbox.")
+        logger_app_resize.info(f"Multi-monitor setup: switching to {name}.")
         try:
             await asyncio.create_subprocess_exec(
-                "openbox", "--replace",
+                *command,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=True,
             )
         except Exception as e:
-            logger_app_resize.error(f"Failed to switch to Openbox: {e}")
+            logger_app_resize.error(f"Failed to switch to {name}: {e}")
             return
         # Before the layout applies: a WM snapshotting the monitor set mid-swap
         # re-tiles maximized windows across the whole framebuffer.
-        if not await wait_for_wm("openbox"):
+        if not await wait_for_wm(name):
             logger_app_resize.warning(
-                "Openbox takeover not confirmed; applying layout anyway.")
+                f"{name} takeover not confirmed; applying layout anyway.")
 
 
 async def current_wm_name() -> str:
@@ -2051,49 +2077,23 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
         return True
 
     any_method_succeeded = False
-    de_name_for_log = "Unknown"
+    desktop = _declared_desktop() or "unnamed"
 
-    if which("startplasma-x11"):
-        de_name_for_log = "KDE"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_app_resize):
-            any_method_succeeded = True
-    
-    elif which("xfce4-session"):
-        de_name_for_log = "XFCE"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying xfconf-query for DPI {dpi_value}.")
+    # Only two desktops keep the density somewhere other than the X resource
+    # database, and everything else — named or not — reads it from there, so
+    # there is nothing to gain from recognising any of them by name.
+    if _running_desktop("xfce", "xfce4-session"):
+        logger_app_resize.info(f"XFCE session ({desktop}): applying xfconf-query for DPI {dpi_value}.")
         if await _run_xfconf(dpi_value, logger_app_resize):
             any_method_succeeded = True
-
-    elif which("mate-session"):
-        de_name_for_log = "MATE"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying MATE gsettings and xrdb for DPI {dpi_value}.")
+    elif _running_desktop("mate", "mate-session"):
+        logger_app_resize.info(f"MATE session ({desktop}): applying gsettings and xrdb for DPI {dpi_value}.")
         mate_gsettings_success = await _run_mate_gsettings(dpi_value, logger_app_resize)
         xrdb_for_mate_success = await _run_xrdb(dpi_value, logger_app_resize)
         if mate_gsettings_success or xrdb_for_mate_success:
             any_method_succeeded = True
-
-    elif which("i3"):
-        de_name_for_log = "i3"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_app_resize):
-            any_method_succeeded = True
-            
-    elif which("lxqt-session"):
-        de_name_for_log = "LXQt"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_app_resize):
-            any_method_succeeded = True
-
-    elif which("openbox-session") or which("openbox"):
-        de_name_for_log = "Openbox"
-        logger_app_resize.info(f"{de_name_for_log} detected. Applying xrdb for DPI {dpi_value}.")
-        if await _run_xrdb(dpi_value, logger_app_resize):
-            any_method_succeeded = True
-            
     else:
-        de_name_for_log = "Generic/Unknown DE"
-        logger_app_resize.info(f"No specific DE session binary found (KDE, XFCE, MATE, i3, LXQt, Openbox). Attempting generic xrdb as a fallback for DPI {dpi_value}.")
+        logger_app_resize.info(f"{desktop} session: applying xrdb for DPI {dpi_value}.")
         if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
 
@@ -2101,7 +2101,8 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
         any_method_succeeded = True
 
     if not any_method_succeeded:
-        logger_app_resize.warning(f"No DPI setting method succeeded for DPI {dpi_value} (Attempted for: {de_name_for_log}).")
+        logger_app_resize.warning(
+            f"No DPI setting method succeeded for DPI {dpi_value} ({desktop} session).")
     else:
         try:
             await asyncio.to_thread(_sync_stamp_root_dpi, dpi_value)

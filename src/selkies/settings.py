@@ -952,10 +952,16 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Enable passing remote cursors to client",
     },
     {
-        "name": "multi_monitor_wm_swap",
-        "type": "bool",
-        "default": False,
-        "help": "Hand X11 window management to Openbox the first time a session extends onto a second display. XFCE and Plasma tile a maximized window across the whole framebuffer instead of the per-display regions, which this works around; it restarts window management, so it belongs to a session the deployment owns rather than a desktop somebody is using.",
+        "name": "app_terminal",
+        "type": "str",
+        "default": "",
+        "help": 'Terminal command prefix the apps panel launches applications under: the terminal plus the flag it takes a command after, such as "xterm -e" or a bare "foot". Empty resolves one — the TERMINAL environment variable, then xdg-terminal-exec, then the first installed terminal for the session\'s windowing system.',
+    },
+    {
+        "name": "multi_monitor_wm",
+        "type": "str",
+        "default": "",
+        "help": 'Window manager to hand an X11 session to the first time it extends onto a second display, as the command that starts it (e.g. "openbox --replace"). Desktops that tile a maximized window across the whole framebuffer rather than the per-display regions need one that does not; empty (the default) never restarts window management, which belongs to a session the deployment assembled rather than a desktop somebody is using.',
     },
     {
         "name": "debug_cursors",
@@ -1150,7 +1156,8 @@ class AppSettings:
     enable_cursors: tuple[bool, bool]
     debug_cursors: tuple[bool, bool]
     enable_resize: tuple[bool, bool]
-    multi_monitor_wm_swap: tuple[bool, bool]
+    app_terminal: tuple[str, bool]
+    multi_monitor_wm: tuple[str, bool]
     audio_bitrate: str
     wayland: tuple[bool, bool]
     cursor_size: int
