@@ -7,9 +7,7 @@
  * a failure as a `command_error` system action whose message ends with the
  * echoed command string, and matching that rolls the optimistic update back. Commands run through a shell on the server, in the environment of
  * the session the applications use, so `~` in a launch command is the
- * session user's home; the launch terminal is the one the server publishes as
- * `app_terminal` for the session's windowing system (`foot` on Wayland, `st`
- * on X11).
+ * session user's home.
  * @module
  */
 
@@ -24,17 +22,17 @@ export const APP_COMMAND_STATE_EVENT = "appCommandState";
 const PENDING_COMMAND_TTL_MS = 10 * 60 * 1000;
 const LAUNCH_FAILURE_WINDOW_MS = 15 * 1000;
 
-const DEFAULT_APP_TERMINAL = "st";
-const appTerminal = () =>
-    typeof window.app_terminal === "string" && window.app_terminal
-        ? window.app_terminal
-        : DEFAULT_APP_TERMINAL;
-/** Shell command per action; the `selkies-proot` wrapper is on PATH in the image. */
+/** Shell command per action; the `selkies-proot` wrapper is on PATH in the image.
+ *
+ * A launch runs the application directly, the way its desktop entry does. It
+ * draws its own window, so a terminal wrapped around it is the only thing the
+ * user sees come up.
+ */
 const appCommandBuilders = {
     install: (app) => `selkies-proot install ${app}`,
     remove: (app) => `selkies-proot remove ${app}`,
     update: (app) => `selkies-proot update ${app}`,
-    launch: (app) => `${appTerminal()} ~/.local/bin/${app}-pa`,
+    launch: (app) => `~/.local/bin/${app}-pa`,
 };
 
 const pendingAppCommands = new Map();
