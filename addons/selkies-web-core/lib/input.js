@@ -2268,7 +2268,8 @@ export class Input {
             }
         }
         if (down && event.button === 0 && event.ctrlKey && event.shiftKey) {
-            const targetElement = event.target.requestPointerLock ? event.target : this.element;
+            const targetElement = this._streamLockTargets().includes(event.target)
+                ? event.target : this.element;
             const lock = () => this._requestPointerLock(targetElement, lock,
                 (err) => console.error("Pointer lock failed:", err));
             lock();
@@ -3297,13 +3298,27 @@ export class Input {
     }
 
     /**
-     * Whether pointer lock is held on the stream: on the overlay element, or on
-     * the ws-core canvas a Ctrl-Shift-Click can land it on instead.
+     * The elements a stream pointer lock can be held on: the input overlay, and
+     * the sinks a Ctrl-Shift-Click lands on where the overlay does not cover
+     * them — either core's video element and the ws-core canvases.
+     * @returns {Element[]}
+     */
+    _streamLockTargets() {
+        const targets = ['videoCanvas', 'videoWorkerCanvas', 'videoStream', 'stream']
+            .map((id) => document.getElementById(id));
+        targets.push(this.element);
+        return targets.filter((el) => el != null);
+    }
+
+    /**
+     * Whether pointer lock is held on the stream. Answers the overlay and the
+     * unlocked case without touching the DOM, since every mouse event asks.
      */
     _isStreamLocked() {
-        const canvas = document.getElementById('videoCanvas');
-        return (this.element != null && document.pointerLockElement === this.element) ||
-            (canvas !== null && document.pointerLockElement === canvas);
+        const locked = document.pointerLockElement;
+        if (locked == null) return false;
+        if (locked === this.element) return true;
+        return this._streamLockTargets().includes(locked);
     }
 
     /**

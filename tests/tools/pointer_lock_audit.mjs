@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// How the client asks for pointer lock. It wants raw movement deltas
+// How the client asks for pointer lock, and where the lock is allowed to land. It wants raw movement deltas
 // (unadjustedMovement), which every engine on Linux and Android refuses with
 // NotSupportedError, so the refusal has to end in a plain lock rather than in
 // no lock at all -- and it has to be remembered, or every lock pays for a
@@ -121,6 +121,68 @@ function reset(element) {
     await sleep(10);
     check('a pre-promise engine is asked once', element.calls.join(',') === 'unadjusted',
           element.calls.join(','));
+}
+
+// --- where a lock may land -------------------------------------------------
+// A Ctrl-Shift-Click asks the element it hit, which is the input overlay
+// wherever the overlay covers the stream and one of the sinks under it where it
+// does not: either core's video element, and the ws-core canvases. A lock the
+// guard does not recognise leaves the pointer locked while motion is still sent
+// as absolute position, so the guard has to know every one of them.
+function stage(ids, locked = null) {
+    const made = {};
+    for (const id of ids) made[id] = { id, requestPointerLock: () => Promise.resolve() };
+    globalThis.document = { pointerLockElement: locked, fullscreenElement: null,
+                            getElementById: (id) => made[id] || null };
+    return made;
+}
+
+{
+    const overlay = makeElement('ok');
+    const sinks = ['videoCanvas', 'videoWorkerCanvas', 'videoStream', 'stream'];
+    for (const id of sinks) {
+        const made = stage(sinks);
+        globalThis.document.pointerLockElement = made[id];
+        const input = makeInput(overlay);
+        check(`a lock on ${id} reads as locked to the stream`, input._isStreamLocked());
+    }
+    const made = stage([...sinks, 'sidebar']);
+    const input = makeInput(overlay);
+    globalThis.document.pointerLockElement = overlay;
+    check('a lock on the overlay reads as locked to the stream', input._isStreamLocked());
+    globalThis.document.pointerLockElement = made.sidebar;
+    check('a lock on something else does not', !input._isStreamLocked());
+    globalThis.document.pointerLockElement = null;
+    check('no lock at all does not', !input._isStreamLocked());
+}
+{
+    // The request itself: the click's own element when it is a sink, and the
+    // overlay for anything else -- every element carries requestPointerLock, so
+    // asking whether the target has one picks the target every time.
+    const asked = [];
+    const overlay = makeElement('ok');
+    const sinks = ['stream', 'sidebar'];
+    const made = stage(sinks);
+    for (const el of [overlay, made.stream, made.sidebar]) {
+        el.requestPointerLock = () => { asked.push(el.id || 'overlay'); return Promise.resolve(); };
+    }
+    const input = makeInput(overlay);
+    Object.assign(input, {
+        buttonMask: 1, inputAttached: false, use_browser_cursors: true,
+        cursorDiv: { style: {} }, _trackpadMode: false,
+        _releaseDesyncedModifiers: () => {}, _focusCompositionHost: () => {},
+        _inputDpr: () => 1,
+    });
+    const click = (target) => input._mouseButtonMovement({
+        type: 'mousedown', button: 0, ctrlKey: true, shiftKey: true, target,
+        clientX: 4, clientY: 4, preventDefault: () => {},
+    });
+    click(overlay);
+    click(made.stream);
+    click(made.sidebar);
+    await sleep(10);
+    check('a lock is asked of the sink that was clicked, and of the overlay otherwise',
+          asked.join(',') === 'overlay,stream,overlay', asked.join(','));
 }
 
 // --- the gaming-mode caller -----------------------------------------------
