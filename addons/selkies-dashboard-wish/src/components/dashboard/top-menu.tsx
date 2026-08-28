@@ -460,8 +460,14 @@ export function TopMenu({
         console.log("No adjacent screens found in cardinal directions. Opening default.");
         launchWindow('right');
       }
-    } catch (err) {
-      console.error("Error with Window Management API or permission denied:", err);
+    } catch (err: any) {
+      // A refused permission is an ordinary outcome — the display still opens,
+      // with no screen to place it on — so it is not reported as a fault.
+      if (err && err.name === "NotAllowedError") {
+        console.warn("Window Management permission refused. Opening default second screen.");
+      } else {
+        console.error("Error with Window Management API:", err);
+      }
       launchWindow('right');
     }
   };
