@@ -128,7 +128,9 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
         udev \
         tzdata && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
-    locale-gen en_US.UTF-8 && \
+    # Debian's locale-gen takes no locale arguments and generates only what
+    # /etc/locale.gen has uncommented, which Ubuntu's honours as well
+    sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen && locale-gen && \
     ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime && echo "${TZ}" > /etc/timezone && \
     # Only use sudo-root for root-owned directory (/dev, /proc, /sys) or user/group permission operations, not for apt-get installation or file/directory operations
     mv -f /usr/bin/sudo /usr/bin/sudo-root && \
