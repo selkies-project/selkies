@@ -2981,11 +2981,16 @@ _command_watch_tasks: set = set()
 # Pids of the client-requested commands launched here and still running.
 _launched_command_pids: set = set()
 
-# proot-apps launch prefixes by the windowing system the session's apps run
-# on: terminal plus its run flag (st and foot take the command bare, xterm
-# wants -e). The first installed one is published to clients as app_terminal.
-X11_APP_TERMINALS = ("st", "xterm -e")
-WAYLAND_APP_TERMINALS = ("foot", "st", "xterm -e")
+# proot-apps launch prefixes by the windowing system the session's apps run on:
+# terminal plus its run flag (st, foot and kitty take the command bare, the
+# others each spell it their own way). The first installed one is published to
+# clients as app_terminal, so the order is lightest first and the list runs to
+# whatever a desktop is likely to have.
+_APP_TERMINALS = ("kitty", "alacritty -e", "wezterm start --", "konsole -e",
+                  "gnome-terminal --", "xfce4-terminal -x", "mate-terminal -x",
+                  "lxterminal -e", "urxvt -e", "xterm -e")
+X11_APP_TERMINALS = ("st",) + _APP_TERMINALS
+WAYLAND_APP_TERMINALS = ("foot", "st") + _APP_TERMINALS
 
 # The wrapper the apps panel drives, and the argument that asks it whether
 # this session can run apps at all.
