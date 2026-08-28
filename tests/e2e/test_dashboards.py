@@ -723,6 +723,50 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
     return res
 
 
+def hidpi_default_block(dashboard: str, dist: str) -> "H.Results":
+    """A deployment that configures a resolution turns HiDPI off, and the core
+    has to stream that way. The dashboard resolves the default; the core starts
+    from its own stored value, so without a push it streams pixel-perfect on
+    every load while the toggle reads off. `useCssScaling` in the settings the
+    core sends is what it is actually applying."""
+    res = H.Results(f"hidpi-{dashboard}")
+    H.server_start(mode="websockets", wayland=False, web_root=dist,
+                   extra_env={"SELKIES_MANUAL_WIDTH": "1280",
+                              "SELKIES_MANUAL_HEIGHT": "800"})
+    # The core persists every `useCssScaling` it applies, so the stored value is
+    # what the session is running; the built-in default is the opposite, so a
+    # stored "true" can only come from the configuration being honoured.
+    applied = """(() => {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k.endsWith('useCssScaling')) return localStorage.getItem(k);
+      }
+      return null;
+    })()"""
+    try:
+        with sync_playwright() as p:
+            browser = C.chromium_launch(p)
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900},
+                                      device_scale_factor=2)
+            ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+            page = ctx.new_page()
+            page.goto(H.BASE_URL, wait_until="load")
+            time.sleep(10.0)
+            first = page.evaluate(applied)
+            res.check("a configured resolution turns HiDPI off in the core",
+                      first == "true", first)
+            page.reload(wait_until="load")
+            time.sleep(10.0)
+            again = page.evaluate(applied)
+            res.check("the reload comes back with HiDPI still off",
+                      again == "true", again)
+            browser.close()
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
 def main() -> None:
     """Run the dashboard blocks named on argv (default: all)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -734,6 +778,9 @@ def main() -> None:
     if which in ("all", "gates"):
         blocks.append(gates_block("classic", H.CLASSIC_DIST))
         blocks.append(gates_block("wish", H.WISH_DIST))
+    if which in ("all", "hidpi"):
+        blocks.append(hidpi_default_block("classic", H.CLASSIC_DIST))
+        blocks.append(hidpi_default_block("wish", H.WISH_DIST))
     failed = sum(len(b.failed()) for b in blocks)
     total = sum(len(b.items) for b in blocks)
     print(f"\n=== DASH: {total - failed}/{total} passed ===")

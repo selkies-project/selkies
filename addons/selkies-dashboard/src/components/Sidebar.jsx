@@ -1617,9 +1617,12 @@ function Sidebar() {
   }, [serverSettings]);
 
   /**
-   * HiDPI's stored value has the same stale echo rate control has: the core
-   * persists every applied `useCssScaling`, so a derived pick outlives the
-   * resolution mode that produced it unless dropped when the ladder moves on.
+   * HiDPI: pushes the resolved value so the core scales the way the toggle
+   * says, since the hook only sets local state and the core otherwise starts
+   * from its own stored default -- a deployment that configures a resolution
+   * would stream pixel-perfect on every load with the toggle reading off. And
+   * drops the unmarked stored echo once the ladder moves on, the same shape as
+   * the rate-control derivation.
    */
   useEffect(() => {
     if (!serverSettings) return;
@@ -1630,6 +1633,12 @@ function Sidebar() {
       && readStored(key) !== null
       && readStored(key) !== HIDPI_SPEC.serialize(resolved)) {
       localStorage.removeItem(getPrefixedKey(key));
+    }
+    if (serverSettings.enable_resize?.value === false) return;
+    if (isSettingPinned(HIDPI_SPEC, serverSettings, readHidpiStored)) return;
+    const serverValue = serverSettings[HIDPI_SPEC.serverKey]?.value;
+    if (serverValue !== undefined && HIDPI_SPEC.toServer(resolved) !== serverValue) {
+      writeConditional(HIDPI_SPEC, resolved, setHidpiEnabled, { persist: false });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverSettings]);

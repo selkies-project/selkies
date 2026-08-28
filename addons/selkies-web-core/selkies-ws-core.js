@@ -112,7 +112,7 @@ import {
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
-import { storageKeyForServerKey } from './lib/conditional-settings.js';
+import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder } from './lib/util.js';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
@@ -746,6 +746,12 @@ const setIntParam = (key, value) => {
     safeSetItem(finalKey, value.toString());
   }
 };
+/** The localStorage key a setting is stored under, display suffix included. */
+const prefixedStorageKey = (key) => {
+  const prefixedKey = `${storageAppName}_${key}`;
+  return (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key))
+    ? `${prefixedKey}_${displayId}` : prefixedKey;
+};
 /** Reads a boolean setting stored as `'true'`/`'false'`. */
 const getBoolParam = (key, default_value) => {
   const prefixedKey = `${storageAppName}_${key}`;
@@ -815,6 +821,25 @@ const setStringParam = (key, value) => {
  * @returns {Object<string, *>} Settings whose effective value changed and must
  *     be applied by the caller.
  */
+/**
+ * The `use_css_scaling` the deployment implies, off the shared ladder: a locked
+ * or operator value, else the client's explicit pick, else CSS scaling whenever
+ * a resolution is configured. Resolved here rather than left to a settings
+ * panel, which a dashboard may mount only when it is opened -- until then the
+ * session would stream pixel-perfect against a configuration that says
+ * otherwise, on every load.
+ * @param {Object<string, Object>} serverSettings The `server_settings` payload.
+ * @returns {boolean}
+ */
+function resolvedCssScaling(serverSettings) {
+  const key = prefixedStorageKey('useCssScaling');
+  const explicit = window.localStorage.getItem(`${key}_explicit_choice`) === 'true';
+  const hidpi = resolveSpec(HIDPI_SPEC, serverSettings,
+    { manualActive: !!window.manual_resolution || manual_width > 0 },
+    () => (explicit ? window.localStorage.getItem(key) : null));
+  return HIDPI_SPEC.toServer(hidpi);
+}
+
 function sanitizeAndStoreSettings(serverSettings) {
   console.log("Sanitizing and storing settings based on server payload.");
   const changes = {};
@@ -6390,6 +6415,11 @@ class WorkerWebSocket {
                 const stored = getStringParam('webcam_encoder', wce.value);
                 webcamEncoderPreference = wce.locked || !WEBCAM_ENCODER_PREFERENCES.includes(stored)
                   ? wce.value : stored;
+              }
+              const cssScaling = resolvedCssScaling(obj.settings);
+              if (cssScaling !== useCssScaling) {
+                  window.postMessage({ type: 'setUseCssScaling', value: cssScaling },
+                                     window.location.origin);
               }
               // After the gates above, so the one-time initial push honours them.
               maybeSendInitialClipboard();

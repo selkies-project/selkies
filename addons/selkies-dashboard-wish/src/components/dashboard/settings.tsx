@@ -362,7 +362,10 @@ export function Settings() {
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [serverSettings]);
-    // Same stale-echo rule for HiDPI, or a derived pick outlives its resolution mode.
+    // Same stale-echo rule for HiDPI, or a derived pick outlives its resolution
+    // mode, and the same push: the core starts from its own stored default, so
+    // a deployment that configures a resolution would stream pixel-perfect on
+    // every load with the toggle reading off.
     useEffect(() => {
         if (!serverSettings) return;
         const key = HIDPI_SPEC.storageKey;
@@ -372,6 +375,12 @@ export function Settings() {
             && readStored(key) !== null
             && readStored(key) !== HIDPI_SPEC.serialize(resolved)) {
             localStorage.removeItem(getPrefixedKey(key));
+        }
+        if (serverSettings.enable_resize?.value === false) return;
+        if (isSettingPinned(HIDPI_SPEC, serverSettings, readHidpiStored)) return;
+        const serverValue = serverSettings[HIDPI_SPEC.serverKey]?.value;
+        if (serverValue !== undefined && HIDPI_SPEC.toServer(resolved) !== serverValue) {
+            writeConditional(HIDPI_SPEC, resolved, setHidpiEnabled, { persist: false });
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [serverSettings]);
