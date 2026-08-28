@@ -450,7 +450,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "enable_collab",
         "type": "bool",
         "default": True,
-        "help": "Enable collaborative (read-write) sharing link.",
+        "help": "Let a viewer holding the session's master-key token act as a read-write collaborator (secure mode only; not a sharing link of its own).",
     },
     {
         "name": "enable_shared",

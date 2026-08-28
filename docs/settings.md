@@ -82,7 +82,7 @@ Every setting below is one entry of `SETTING_DEFINITIONS` in [`src/selkies/setti
 | `--ui-sidebar-show-keyboard-button` | `SELKIES_UI_SIDEBAR_SHOW_KEYBOARD_BUTTON` | bool | `true` | Show the on-screen keyboard button in the display area. |
 | `--ui-sidebar-show-soft-buttons` | `SELKIES_UI_SIDEBAR_SHOW_SOFT_BUTTONS` | bool | `true` | Show the soft buttons section in the sidebar. |
 | `--enable-sharing` | `SELKIES_ENABLE_SHARING` | bool | `true` | Master toggle for all sharing features. |
-| `--enable-collab` | `SELKIES_ENABLE_COLLAB` | bool | `true` | Enable collaborative (read-write) sharing link. |
+| `--enable-collab` | `SELKIES_ENABLE_COLLAB` | bool | `true` | Let a viewer holding the session's master-key token act as a read-write collaborator (secure mode only; not a sharing link of its own). |
 | `--enable-shared` | `SELKIES_ENABLE_SHARED` | bool | `true` | Enable view-only sharing links. |
 | `--enable-player2` | `SELKIES_ENABLE_PLAYER2` | bool | `true` | Enable sharing link for gamepad player 2. |
 | `--enable-player3` | `SELKIES_ENABLE_PLAYER3` | bool | `true` | Enable sharing link for gamepad player 3. |
