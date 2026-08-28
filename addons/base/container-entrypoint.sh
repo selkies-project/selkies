@@ -105,12 +105,42 @@ if [ -n "${SELKIES_MODE}" ]; then
   export SELKIES_MODE
 fi
 
-# Hardware OpenGL. On NVIDIA, Zink routes GL through the Vulkan driver; other
-# vendors go through the display server's render node (services/xvfb/run). Both
-# signals are needed: the device nodes prove a GPU was passed in, nvidia-smi that
-# the driver stack matches it. DISABLE_ZINK=true forces llvmpipe. Settled ahead of
-# the backend, so the probe below sees the GL environment the session will have.
-if ! is_true "${DISABLE_ZINK-false}" && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+# Hardware OpenGL, and the GPU the rest of the session follows. selkies-gpu-probe
+# resolves the render node from --render-dri and the --auto-gpu token exactly as
+# the capture will, and names the GL environment that GPU implies: Zink over the
+# NVIDIA Vulkan driver (Mesa has no driver for that stack, and needs no render
+# node of its own for it), Mesa's own driver for every other vendor. Deciding it
+# from device paths instead would aim a hybrid host's session at the GPU it does
+# not render on. The services read SELKIES_GPU_RENDER_NODE and SELKIES_GPU_DRIVER
+# back out of container-env; DISABLE_ZINK=true keeps the GPU and drops the Zink
+# half. Settled ahead of the backend, so the probe below sees what the session has.
+session_gpu_env="$(timeout 60 selkies-gpu-probe --session-env)" || session_gpu_env=""
+session_gpu_reported="false"
+while IFS= read -r assignment; do
+  case "${assignment}" in
+    # Assignments only: a selkies too old for the question answers the other one
+    # (a backend name), and exporting that would take the container down here.
+    [A-Z_]*=*) session_gpu_reported="true" ;;
+    *) continue ;;
+  esac
+  if is_true "${DISABLE_ZINK-false}"; then
+    case "${assignment}" in
+      GALLIUM_DRIVER=*|MESA_LOADER_DRIVER_OVERRIDE=*|LIBGL_KOPPER_DRI2=*) continue ;;
+    esac
+  fi
+  export "${assignment?}"
+done <<EOF
+${session_gpu_env}
+EOF
+# The probe reports what the GPU implies; say when the opt-out overrode it.
+if is_true "${DISABLE_ZINK-false}" && [ "${SELKIES_GPU_DRIVER-}" = "nvidia" ]; then
+  echo 'DISABLE_ZINK is set: the NVIDIA GPU is left to software OpenGL'
+fi
+if [ "${session_gpu_reported}" != "true" ] && ! is_true "${DISABLE_ZINK-false}" \
+   && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+  # No report to act on (a pixelflux too old to carry one): the driver's own
+  # devices are the only remaining signal that Mesa needs Zink here.
+  export SELKIES_GPU_DRIVER="nvidia"
   export LIBGL_KOPPER_DRI2="1"
   export MESA_LOADER_DRIVER_OVERRIDE="zink"
   export GALLIUM_DRIVER="zink"

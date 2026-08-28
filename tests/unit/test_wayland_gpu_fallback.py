@@ -10,7 +10,9 @@ before anything derived from the backend -- the display, the session type and th
 toolkit defaults all follow it, so a late switch yields a half-Wayland container.
 
 The second half runs the real entrypoint against a stubbed probe and reads the
-environment it hands to the services, rather than restating its logic here.
+environment it hands to the services, rather than restating its logic here. The
+same tool answers which GPU the session renders on, which the GL stack follows
+on either backend, so an X11 session asks that question and not the other.
 """
 import os
 import shutil
@@ -69,8 +71,13 @@ def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
         os.mkdir(stub_dir)
         emit = "printf '%%s\\n' %s\n" % _sh_quote(probe_stdout) if probe_stdout else ""
         probe = os.path.join(stub_dir, "selkies-gpu-probe")
+        # The tool answers two questions and the entrypoint asks both; only the
+        # backend one is scripted here, so the GPU one reports nothing and the
+        # entrypoint falls back to its own device test for the GL stack.
         with open(probe, "w") as f:
-            f.write(f"#!/bin/sh\ntouch {tmp}/probe-ran\n{emit}exit {probe_rc}\n")
+            f.write(f'#!/bin/sh\necho "$@" >> {tmp}/probe-calls\n'
+                    f'case "$1" in --session-env) exit 0 ;; esac\n'
+                    f"{emit}exit {probe_rc}\n")
         os.chmod(probe, 0o755)
         for name in ("sudo-root", "nvidia-smi", "dig"):
             path = os.path.join(stub_dir, name)
@@ -106,7 +113,9 @@ def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
                     if line.startswith("export "):
                         name, _, value = line[len("export "):].partition("=")
                         exported[name] = value.strip().strip("'")
-        exported["_probe_ran"] = os.path.exists(os.path.join(tmp, "probe-ran"))
+        calls = os.path.join(tmp, "probe-calls")
+        exported["_probe_calls"] = (
+            [line.strip() for line in open(calls)] if os.path.exists(calls) else [])
         return exported, proc
 
 
@@ -181,8 +190,15 @@ check("a silent probe leaves the backend alone", env.get("SELKIES_WAYLAND") == "
       env.get("SELKIES_WAYLAND"))
 
 env, _ = run("wayland", env={"SELKIES_WAYLAND": "false"})
-check("X11 is never probed", env.get("_probe_ran") is False)
+# The GL stack follows the GPU on either backend, so that question is asked
+# here too; only the backend question belongs to a Wayland session.
+check("X11 asks which GPU it renders on, not which backend to start",
+      env.get("_probe_calls") == ["--session-env"], env.get("_probe_calls"))
 check("X11 stays X11", env.get("SELKIES_WAYLAND") == "false", env.get("SELKIES_WAYLAND"))
+
+env, _ = run("wayland", env={"SELKIES_WAYLAND": "true"})
+check("a Wayland session asks both", env.get("_probe_calls") == ["--session-env", ""],
+      env.get("_probe_calls"))
 
 # The PIXELFLUX_WAYLAND alias resolves before the probe, so a session asked for
 # that way is judged the same as one asked for by SELKIES_WAYLAND.
@@ -195,12 +211,12 @@ check("the legacy Wayland toggle is judged too", env.get("SELKIES_WAYLAND") == "
 for spelling in ("True", "TRUE", "1", " true "):
     env, _ = run("wayland", env={"SELKIES_WAYLAND": spelling})
     check(f"SELKIES_WAYLAND={spelling!r} is honoured and canonicalized",
-          env.get("SELKIES_WAYLAND") == "true" and env.get("_probe_ran") is True,
+          env.get("SELKIES_WAYLAND") == "true" and env.get("_probe_calls") == ["--session-env", ""],
           env.get("SELKIES_WAYLAND"))
 for spelling in ("False", "FALSE", "0", "no"):
     env, _ = run("wayland", env={"SELKIES_WAYLAND": spelling})
     check(f"SELKIES_WAYLAND={spelling!r} stays X11",
-          env.get("SELKIES_WAYLAND") == "false" and env.get("_probe_ran") is False,
+          env.get("SELKIES_WAYLAND") == "false" and env.get("_probe_calls") == ["--session-env"],
           env.get("SELKIES_WAYLAND"))
 env, _ = run("wayland", env={"PIXELFLUX_WAYLAND": "TRUE"})
 check("the legacy alias is read case-insensitively too",
