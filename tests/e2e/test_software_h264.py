@@ -147,7 +147,6 @@ def run_block(r: "H.Results", wayland: bool) -> None:
                 r.check("h264enc: no decoder errors", not state["errors"], state["errors"][:3])
                 heights = sorted({c["h"] for c in state["cfgs"] if c.get("h")})
                 r.check("h264enc: one full-frame decoder geometry", len(heights) == 1, heights)
-                full_h = heights[0] if heights else 0
                 full_sinks = wait_sinks(page)
                 r.check("h264enc: one video sink on screen", len(full_sinks) == 1, full_sinks)
                 log = H.server_log()
