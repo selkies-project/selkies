@@ -486,6 +486,11 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
     """
     res = H.Results(f"dash-{dashboard}")
     H.server_start(mode="websockets", wayland=False, web_root=dist)
+    # The served document names the tab. Left to the client script, the browser
+    # shows the host URL there until the bundle runs.
+    shell = H.curl("/")[1].decode("utf-8", "replace")
+    res.check("the served page names the tab", "<title>Selkies</title>" in shell,
+              shell[:200])
     # Fixed viewport width keeps the sidebar content deterministic.
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
