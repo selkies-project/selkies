@@ -1108,7 +1108,7 @@ class _XTestKeyboard:
         _overlay: Keysym to overlay keycode.
         _overlay_value_kc: Bound value (`overlay_bind_keysym`) to keycode, kept
             in step with `_overlay` so value lookups need no scan.
-        _overlay_order: Round-robin recycle order.
+        _overlay_order: Overlay keysyms least-recently-used first, the recycle order.
         _pressed_kc: Keysym to the keycode injected at press; release replays
             it and never re-resolves (matching neko's XKeyEntryGet: the layout
             may shift mid-keystroke).
@@ -1233,9 +1233,18 @@ class _XTestKeyboard:
         return kc, needs_settle
 
     def _overlay_keycode(self, keysym: int) -> Optional[int]:
-        """Bind an unmapped keysym to a spare keycode (recycling the oldest) and
-        return it, or None if no spare keycode exists."""
+        """Bind an unmapped keysym to a spare keycode (recycling the least
+        recently used) and return it, or None if no spare keycode exists."""
         if keysym in self._overlay:
+            # Freshly used, so it goes to the back of the recycle queue: a pool
+            # this small (tens of slots against a CJK composition's few keysyms
+            # per syllable) would otherwise rebind a keycode a client may still
+            # be holding the previous symbol for.
+            try:
+                self._overlay_order.remove(keysym)
+            except ValueError:
+                pass
+            self._overlay_order.append(keysym)
             return self._overlay[keysym]
         if self._spare_keycodes is None:
             self._spare_keycodes = self._find_spare_keycodes()
