@@ -305,10 +305,11 @@ def classic_layout_check(page, res: "H.Results") -> None:
         time.sleep(0.6)
 
 
-# A 1x1 PNG, the smallest thing the image path accepts.
+# A 2x2 opaque red PNG: small enough to inline, and the colour is what proves
+# the preview decoded and drew the picked image rather than merely sizing a box.
 CLIPBOARD_PNG = bytes.fromhex(
-    "89504e470d0a1a0a0000000d494844520000000100000001080600000"
-    "01f15c4890000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082")
+    "89504e470d0a1a0a0000000d4948445200000002000000020802000000fdd49a73"
+    "0000001049444154789c63f8cfc000440c100a001fee03fd8b5f14d40000000049454e44ae426082")
 
 
 def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
@@ -353,11 +354,21 @@ def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
     res.check(f"{dashboard}: a picked image reaches the core whole",
               page.evaluate("window.__clipImages") == [len(CLIPBOARD_PNG)],
               page.evaluate("window.__clipImages"))
-    previews = page.locator('img[src^="blob:"]').count()
+    # Nothing points at a URL for the picked file: the preview draws its pixels.
+    urls = page.locator('img[src^="blob:"], img[src^="data:"]').count()
+    drawn = page.evaluate("""() => {
+      const canvas = document.querySelector('canvas[role="img"]');
+      if (!canvas) return null;
+      const pixel = canvas.getContext('2d').getImageData(0, 0, 1, 1).data;
+      return { w: canvas.width, h: canvas.height, pixel: [...pixel] };
+    }""")
     if dashboard == "wish":
-        res.check("wish: the preview shows the blob it minted", previews == 1, previews)
+        res.check("wish: the preview draws the picked image itself",
+                  urls == 0 and drawn is not None and [drawn["w"], drawn["h"]] == [2, 2]
+                  and drawn["pixel"][:3] == [255, 0, 0], drawn)
     else:
-        res.check("classic: the panel previews nothing to mint a URL for", previews == 0, previews)
+        res.check("classic: the panel shows no preview to point anywhere",
+                  urls == 0 and drawn is None, drawn)
 
     picker.set_input_files({"name": "clip.txt", "mimeType": "text/plain", "buffer": b"not an image"})
     time.sleep(0.8)

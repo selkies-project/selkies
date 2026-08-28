@@ -34,12 +34,16 @@ import { t } from "@/i18n";
  * editing it would echo the cut-down text back over the real server
  * clipboard on blur, so truncated content renders read-only.
  */
+/** Tallest the preview is shown, matching the max-h-32 the canvas carries. */
+const PREVIEW_MAX_PX = 128;
+
 export function Clipboard() {
 	const [dashboardClipboardContent, setDashboardClipboardContent] = useState(
 		() => getLastClipboardContent()?.text ?? '');
 	const [clipboardTruncated, setClipboardTruncated] = useState(
 		() => getLastClipboardContent()?.truncated ?? false);
-	const [clipboardImageUrl, setClipboardImageUrl] = useState<string | null>(null);
+	const [clipboardImage, setClipboardImage] = useState<File | null>(null);
+	const previewRef = useRef<HTMLCanvasElement>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
 	const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
 		const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
@@ -114,36 +118,42 @@ export function Clipboard() {
 			}, window.location.origin);
 			return;
 		}
-		// An object URL previews the file without reading a multi-megabyte image
-		// through base64 on the main thread; the one it replaces is revoked as
-		// it goes, and the preview checks the scheme where it uses it.
-		const objectUrl = URL.createObjectURL(file);
-		setClipboardImageUrl(previous => {
-			if (previous) URL.revokeObjectURL(previous);
-			return objectUrl;
-		});
+		setClipboardImage(file);
 		window.postMessage({
 			type: 'clipboardImageUpdate',
 			imageBlob: file,
 		}, window.location.origin);
 	};
 
-	// The preview shows nothing but a URL this component minted from the picked
-	// file: createObjectURL only ever returns a blob:, and testing the scheme
-	// where it is used keeps any other kind of URL out of the img, whatever put
-	// it in the state.
-	const previewUrl = clipboardImageUrl && clipboardImageUrl.startsWith('blob:')
-		? clipboardImageUrl : null;
+	// The preview draws the picked image rather than pointing an <img> at a URL
+	// for it: decoding the bytes that were picked is the whole of it, so there
+	// is no URL to mint, hand to the DOM, scheme-check or revoke.
+	useEffect(() => {
+		const canvas = previewRef.current;
+		if (!canvas || !clipboardImage) return;
+		let cancelled = false;
+		createImageBitmap(clipboardImage).then(bitmap => {
+			if (cancelled) {
+				bitmap.close();
+				return;
+			}
+			// The panel shows it at most PREVIEW_MAX_PX tall; drawing it that
+			// size keeps a multi-megapixel picture off the canvas as well.
+			const scale = Math.min(1, PREVIEW_MAX_PX / bitmap.height);
+			canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+			canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+			canvas.getContext('2d')?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+			bitmap.close();
+		}).catch(() => {});
+		return () => { cancelled = true; };
+	}, [clipboardImage]);
 
 	const handleImageButtonClick = () => {
 		fileInputRef.current?.click();
 	};
 
 	const handleClearImage = () => {
-		setClipboardImageUrl(previous => {
-			if (previous) URL.revokeObjectURL(previous);
-			return null;
-		});
+		setClipboardImage(null);
 		if (fileInputRef.current) {
 			fileInputRef.current.value = '';
 		}
@@ -185,7 +195,7 @@ export function Clipboard() {
 					>
 						{t('clipboard.uploadImage')}
 					</Button>
-					{clipboardImageUrl && (
+					{clipboardImage && (
 						<Button
 							variant="outline"
 							size="sm"
@@ -205,12 +215,13 @@ export function Clipboard() {
 					className="hidden"
 				/>
 
-				{previewUrl && (
+				{clipboardImage && (
 					<div className="mt-2">
-						<img
-							src={previewUrl}
-							alt={t('clipboard.previewAlt')}
-							className="max-w-full max-h-32 object-contain rounded border"
+						<canvas
+							ref={previewRef}
+							role="img"
+							aria-label={t('clipboard.previewAlt')}
+							className="max-w-full max-h-32 rounded border"
 						/>
 					</div>
 				)}
