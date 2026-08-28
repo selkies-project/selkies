@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 """Which backend the example container starts, given what the GPU probe found.
 
-Two halves, because the decision is made in two places. `selkies-gpu-probe`
-weighs a GPU report and names a backend: a Wayland session on a GPU it cannot
-reach loses hardware acceleration the same machine would have kept under Xvfb,
-while with no GPU at all both backends render in software and moving would trade
-a capability for nothing. The entrypoint then acts on that name, and must act
-before anything derived from the backend -- the display, the session type and the
-toolkit defaults all follow it, so a late switch yields a half-Wayland container.
-
-The second half runs the real entrypoint against a stubbed probe and reads the
-environment it hands to the services, rather than restating its logic here. The
-same tool answers which GPU the session renders on, which the GL stack follows
-on either backend, so an X11 session asks that question and not the other.
+The entrypoint decides, and it has to decide before anything derived from the
+backend -- the display, the session type and the toolkit defaults all follow it,
+so a late switch yields a half-Wayland container. This runs the real entrypoint
+against a stand-in probe and reads the environment it hands to the services,
+rather than restating its logic here; the deciding blocks themselves are pinned
+in `test_backend_verdict.py`.
 """
 import os
 import shutil
@@ -28,7 +22,6 @@ ENTRYPOINT = os.path.join(REPO, "addons", "base", "container-entrypoint.sh")
 STOP_AT = "# Derive the service set from the environment toggles"
 
 sys.path.insert(0, os.path.join(REPO, "src"))
-from selkies.gpu_probe import recommend  # noqa: E402
 
 passed = failed = 0
 
@@ -42,11 +35,15 @@ def check(label: str, ok, detail="") -> None:
     print(f"{'PASS' if ok else 'FAIL'}  [wl-fallback] {label}  {detail}", flush=True)
 
 
-def report(accelerated: bool = False, gpu: bool = False, node: str = "",
-           renderer: str = "", error: str = "") -> dict:
-    """A GPU probe report shaped as selkies-gpu-probe emits it."""
-    return {"accelerated": accelerated, "gpu": gpu, "node": node,
-            "renderer": renderer, "error": error}
+def facts(present: bool = True, accelerated: bool = True,
+          node: str = "/dev/dri/renderD128", driver: str = "nvidia") -> str:
+    """What selkies-gpu-probe prints about the session's GPU."""
+    return "\n".join((
+        f"SELKIES_GPU_RENDER_NODE={node}",
+        f"SELKIES_GPU_DRIVER={driver}",
+        f"SELKIES_GPU_PRESENT={'true' if present else 'false'}",
+        f"SELKIES_GPU_ACCELERATED={'true' if accelerated else 'false'}",
+    ))
 
 
 def _sh_quote(text: str) -> str:
@@ -71,12 +68,9 @@ def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
         os.mkdir(stub_dir)
         emit = "printf '%%s\\n' %s\n" % _sh_quote(probe_stdout) if probe_stdout else ""
         probe = os.path.join(stub_dir, "selkies-gpu-probe")
-        # The tool answers two questions and the entrypoint asks both; only the
-        # backend one is scripted here, so the GPU one reports nothing and the
-        # entrypoint falls back to its own device test for the GL stack.
         with open(probe, "w") as f:
             f.write(f'#!/bin/sh\necho "$@" >> {tmp}/probe-calls\n'
-                    f'case "$1" in --session-env) exit 0 ;; esac\n'
+                    f''
                     f"{emit}exit {probe_rc}\n")
         os.chmod(probe, 0o755)
         for name in ("sudo-root", "nvidia-smi", "dig"):
@@ -119,33 +113,12 @@ def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
         return exported, proc
 
 
-backend, why = recommend(report(accelerated=True, gpu=True, node="/dev/dri/renderD128",
-                                renderer="NVIDIA RTX 4090"))
-check("a reachable GPU argues for Wayland", backend == "wayland", backend)
-check("acceleration is reported",
-      "hardware acceleration through NVIDIA RTX 4090" in why, why)
-
-backend, why = recommend(report(gpu=True, node="/dev/dri/renderD128",
-                                error="Failed to create GBM device"))
-check("an unreachable GPU argues for X11", backend == "x11", backend)
-check("the reason for the fallback is reported",
-      "Failed to create GBM device" in why and "/dev/dri/renderD128" in why, why)
-
-backend, why = recommend(report(gpu=True, node="/dev/dri/renderD128",
-                                error="Failed to create GBM device"), allow_x11=False)
-check("declining X11 argues for software Wayland", backend == "wayland-software", backend)
-check("software rendering is reported", "compositing in software" in why, why)
-
-backend, why = recommend(report(error="No render node"))
-check("no GPU argues for Wayland", backend == "wayland", backend)
-check("the absent GPU is reported", "no GPU here" in why, why)
-
 if not shutil.which("bash"):
     print("SKIP bash not found, so the entrypoint cannot be run", flush=True)
     # helpers.SKIP_EXIT, without importing the e2e helper module
     sys.exit(77)
 
-env, proc = run("wayland", env={"SELKIES_WAYLAND": "true", "GALLIUM_DRIVER": "zink"})
+env, proc = run(facts(), env={"SELKIES_WAYLAND": "true"})
 if env is None:
     print(f"FAIL  [wl-fallback] entrypoint has the expected structure  missing: {STOP_AT}")
     sys.exit(1)
@@ -158,7 +131,7 @@ check("Wayland takes the compositor's display", env.get("DISPLAY") == ":0",
 check("an accelerated Wayland session keeps hardware GL",
       env.get("GALLIUM_DRIVER") == "zink", env.get("GALLIUM_DRIVER", "(unset)"))
 
-env, _ = run("x11", env={"SELKIES_WAYLAND": "true", "GALLIUM_DRIVER": "zink"})
+env, _ = run(facts(accelerated=False, node=""), env={"SELKIES_WAYLAND": "true"})
 check("an X11 verdict switches the backend", env.get("SELKIES_WAYLAND") == "false",
       env.get("SELKIES_WAYLAND"))
 # The switch has to precede everything derived from the backend, or the container
@@ -175,9 +148,8 @@ check("the fallback leaves toolkits on X11",
 check("the X11 fallback keeps hardware GL for the session",
       env.get("GALLIUM_DRIVER") == "zink", env.get("GALLIUM_DRIVER", "(unset)"))
 
-env, _ = run("wayland-software", env={"SELKIES_WAYLAND": "true",
-                                      "GALLIUM_DRIVER": "zink",
-                                      "MESA_LOADER_DRIVER_OVERRIDE": "zink"})
+env, _ = run(facts(accelerated=False, node=""),
+             env={"SELKIES_WAYLAND": "true", "SELKIES_WAYLAND_X11_FALLBACK": "false"})
 check("a software verdict keeps Wayland", env.get("SELKIES_WAYLAND") == "true",
       env.get("SELKIES_WAYLAND"))
 check("a software Wayland session gets software GL",
@@ -189,36 +161,36 @@ env, _ = run("", probe_rc=1, env={"SELKIES_WAYLAND": "true"})
 check("a silent probe leaves the backend alone", env.get("SELKIES_WAYLAND") == "true",
       env.get("SELKIES_WAYLAND"))
 
-env, _ = run("wayland", env={"SELKIES_WAYLAND": "false"})
+env, _ = run(facts(), env={"SELKIES_WAYLAND": "false"})
 # The GL stack follows the GPU on either backend, so that question is asked
 # here too; only the backend question belongs to a Wayland session.
-check("X11 asks which GPU it renders on, not which backend to start",
-      env.get("_probe_calls") == ["--session-env"], env.get("_probe_calls"))
+check("X11 asks about the GPU too, since its GL stack follows it",
+      env.get("_probe_calls") == [""], env.get("_probe_calls"))
 check("X11 stays X11", env.get("SELKIES_WAYLAND") == "false", env.get("SELKIES_WAYLAND"))
 
-env, _ = run("wayland", env={"SELKIES_WAYLAND": "true"})
-check("a Wayland session asks both", env.get("_probe_calls") == ["--session-env", ""],
+env, _ = run(facts(), env={"SELKIES_WAYLAND": "true"})
+check("a Wayland session asks the same one question", env.get("_probe_calls") == [""],
       env.get("_probe_calls"))
 
 # The PIXELFLUX_WAYLAND alias resolves before the probe, so a session asked for
 # that way is judged the same as one asked for by SELKIES_WAYLAND.
-env, _ = run("x11", env={"PIXELFLUX_WAYLAND": "true"})
+env, _ = run(facts(accelerated=False, node=""), env={"PIXELFLUX_WAYLAND": "true"})
 check("the legacy Wayland toggle is judged too", env.get("SELKIES_WAYLAND") == "false",
       env.get("SELKIES_WAYLAND"))
 
 # However the operator spelled it, the services and the server downstream read one
 # value -- they compare against a single spelling and cannot each re-derive it.
 for spelling in ("True", "TRUE", "1", " true "):
-    env, _ = run("wayland", env={"SELKIES_WAYLAND": spelling})
+    env, _ = run(facts(), env={"SELKIES_WAYLAND": spelling})
     check(f"SELKIES_WAYLAND={spelling!r} is honoured and canonicalized",
-          env.get("SELKIES_WAYLAND") == "true" and env.get("_probe_calls") == ["--session-env", ""],
+          env.get("SELKIES_WAYLAND") == "true" and env.get("_probe_calls") == [""],
           env.get("SELKIES_WAYLAND"))
 for spelling in ("False", "FALSE", "0", "no"):
-    env, _ = run("wayland", env={"SELKIES_WAYLAND": spelling})
+    env, _ = run(facts(), env={"SELKIES_WAYLAND": spelling})
     check(f"SELKIES_WAYLAND={spelling!r} stays X11",
-          env.get("SELKIES_WAYLAND") == "false" and env.get("_probe_calls") == ["--session-env"],
+          env.get("SELKIES_WAYLAND") == "false" and env.get("_probe_calls") == [""],
           env.get("SELKIES_WAYLAND"))
-env, _ = run("wayland", env={"PIXELFLUX_WAYLAND": "TRUE"})
+env, _ = run(facts(), env={"PIXELFLUX_WAYLAND": "TRUE"})
 check("the legacy alias is read case-insensitively too",
       env.get("SELKIES_WAYLAND") == "true", env.get("SELKIES_WAYLAND"))
 

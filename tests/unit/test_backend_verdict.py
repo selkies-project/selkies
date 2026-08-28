@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""What the container does with what its GPU probe reports.
+"""What the container makes of the GPU its probe reports.
 
-Two answers come out of the one probe. The backend: it brings the compositor's
-own renderer up, so how it exits says as much as what it prints — a report that
-could not be had exits 1 and leaves the session on the backend it was asked for,
-while a bring-up that wedges or dies on a signal is the one the session is about
-to attempt, and starting it regardless is a supervisor restarting a crash with
-no session at all to show for it. And the GPU: which one the session renders on
-decides the GL stack its applications get, so a host with an NVIDIA card whose
-session renders on an Intel node must not be handed Zink.
+`selkies-gpu-probe` reports one thing: the GPU this session has, and whether the
+compositor's renderer came up on it. Every decision downstream is the image's
+own, made here in the entrypoint, and each has a way to be wrong: a GL stack
+chosen from the devices lying around rather than from the GPU the session
+renders on hands a hybrid host Zink for a card it never touches; a backend
+chosen without the report starts a compositor that cannot paint; and a bring-up
+that dies rather than answering is the one the session is about to attempt, so
+starting it anyway is a supervisor restarting a crash with no session to show
+for it.
 
-Both deciding blocks run here verbatim out of the entrypoint, against a stand-in
+The deciding blocks run here verbatim out of the entrypoint, against a stand-in
 probe, under the same `set -e` the entrypoint runs with.
 """
 import glob
@@ -28,125 +29,133 @@ sys.path.insert(0, TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 import helpers as H  # noqa: E402
 
-from selkies import gpu_probe as BV  # noqa: E402
+from selkies import gpu_probe as GP  # noqa: E402
 
-BLOCK_START = 'if [ "${SELKIES_WAYLAND}" = "true" ]; then\n  probe_status=0'
-GL_BLOCK_START = 'session_gpu_env="$(timeout 60 selkies-gpu-probe --session-env)"'
+FACTS_BLOCK = 'gpu_status=0\ngpu_facts="$(timeout 60 selkies-gpu-probe)"'
+GL_BLOCK = 'if [ "${SELKIES_GPU_DRIVER-}" != "nvidia" ]; then'
+BACKEND_BLOCK = 'if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ]'
+STATE = ('echo "WAYLAND=${SELKIES_WAYLAND:-unset} GL=${GALLIUM_DRIVER:-unset}'
+         ' DRIVER=${SELKIES_GPU_DRIVER:-unset} NODE=${SELKIES_GPU_RENDER_NODE:-unset}'
+         ' ACCEL=${SELKIES_GPU_ACCELERATED:-unset} PRESENT=${SELKIES_GPU_PRESENT:-unset}"')
+
+NVIDIA_FACTS = ('echo SELKIES_GPU_RENDER_NODE=/dev/dri/renderD128; echo SELKIES_GPU_DRIVER=nvidia; '
+                'echo SELKIES_GPU_PRESENT=true; echo SELKIES_GPU_ACCELERATED=true')
+INTEL_FACTS = ('echo SELKIES_GPU_RENDER_NODE=/dev/dri/renderD128; echo SELKIES_GPU_DRIVER=i915; '
+               'echo SELKIES_GPU_PRESENT=true; echo SELKIES_GPU_ACCELERATED=true')
+UNREACHABLE_FACTS = ('echo SELKIES_GPU_RENDER_NODE=; echo SELKIES_GPU_DRIVER=nvidia; '
+                     'echo SELKIES_GPU_PRESENT=true; echo SELKIES_GPU_ACCELERATED=false')
+NO_GPU_FACTS = ('echo SELKIES_GPU_RENDER_NODE=; echo SELKIES_GPU_DRIVER=; '
+                'echo SELKIES_GPU_PRESENT=false; echo SELKIES_GPU_ACCELERATED=false')
 
 
-def entrypoint_block(start: str = BLOCK_START) -> str:
-    """A deciding block and the parsing helpers it calls, verbatim.
+def entrypoint_blocks(*starts: str) -> str:
+    """The named deciding blocks and the parsing helpers they call, verbatim.
 
     Args:
-        start: First line of the block to extract; it runs to its closing `fi`.
+        *starts: First line of each block to extract, in the order to run them.
     """
     body = open(ENTRYPOINT, encoding="utf-8").read()
     parts = []
     for name in ("setting_value() {", "is_true() {"):
         begin = body.index(name)
         parts.append(body[begin:body.index("\n}\n", begin) + 3])
-    begin = body.index(start)
-    # Blocks are separated by a blank line and carry none inside them.
-    parts.append(body[begin:body.index("\n\n", begin)])
+    for start in starts:
+        begin = body.index(start)
+        # Blocks are separated by a blank line and carry none inside them.
+        parts.append(body[begin:body.index("\n\n", begin)])
     return "\n".join(parts)
 
 
-def run_block(stub: str, env: dict, block: str, report: str) -> dict:
-    """Run one entrypoint block with `stub` standing in for the probe.
+def run(stub: str = "exit 1", env: Optional[dict] = None,
+        blocks: tuple = (FACTS_BLOCK, GL_BLOCK, BACKEND_BLOCK)) -> dict:
+    """Run the entrypoint's GPU blocks with `stub` standing in for the probe.
 
     Args:
         stub: Shell body of the stand-in `selkies-gpu-probe`.
-        env: Environment the block starts from.
-        block: First line of the block to extract.
-        report: Shell echoing the state the checks read back.
+        env: Environment the blocks start from.
+        blocks: Which blocks to run, in order.
 
     Returns:
-        `stdout` (everything the block said) and `state` (the report line).
+        `state` (the settled variables), `said` (everything printed) and `rc`.
     """
     with tempfile.TemporaryDirectory() as tmp:
         probe = os.path.join(tmp, "selkies-gpu-probe")
         with open(probe, "w") as fh:
             fh.write("#!/bin/bash\n" + stub + "\n")
         os.chmod(probe, 0o755)
-        script = os.path.join(tmp, "block.sh")
+        script = os.path.join(tmp, "blocks.sh")
         with open(script, "w") as fh:
-            fh.write("set -e\n" + entrypoint_block(block) + "\n" + report + "\n")
-        run = subprocess.run(
+            fh.write("set -e\n" + entrypoint_blocks(*blocks) + "\n" + STATE + "\n")
+        out = subprocess.run(
             ["bash", script], capture_output=True, text=True, timeout=120,
-            env=dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], **env))
-        lines = [ln for ln in run.stdout.strip().splitlines() if ln]
-        return {"stdout": run.stdout, "state": lines[-1] if lines else "", "rc": run.returncode}
-
-
-def verdict(stub: str, env: dict) -> dict:
-    """Run the block with `stub` standing in for the probe; report what it settled.
-
-    Args:
-        stub: Shell body of the stand-in `selkies-gpu-probe`.
-        env: Environment the block starts from.
-
-    Returns:
-        The resulting `wayland`, `gl` (the Zink override) and `said` (stdout).
-    """
-    out = run_block(stub, dict(env, GALLIUM_DRIVER="zink",
-                               MESA_LOADER_DRIVER_OVERRIDE="zink", LIBGL_KOPPER_DRI2="1"),
-                    BLOCK_START, 'echo "WAYLAND=${SELKIES_WAYLAND} GL=${GALLIUM_DRIVER-unset}"')
-    return {"wayland": "WAYLAND=true" in out["state"], "gl": "GL=zink" in out["state"],
-            "said": out["stdout"], "rc": out["rc"]}
-
-
-def gl_verdict(stub: str, env: Optional[dict] = None) -> dict:
-    """Run the GL block with `stub` reporting for the probe; report what it set."""
-    out = run_block(stub, dict(env or {}, GALLIUM_DRIVER="", MESA_LOADER_DRIVER_OVERRIDE="",
-                               LIBGL_KOPPER_DRI2="", SELKIES_GPU_DRIVER="",
-                               SELKIES_GPU_RENDER_NODE=""),
-                    GL_BLOCK_START,
-                    'echo "GL=${GALLIUM_DRIVER:-unset} DRIVER=${SELKIES_GPU_DRIVER:-unset}'
-                    ' NODE=${SELKIES_GPU_RENDER_NODE:-unset}"')
-    return {"zink": "GL=zink" in out["state"], "state": out["state"],
-            "said": out["stdout"], "rc": out["rc"]}
+            env=dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"],
+                     GALLIUM_DRIVER="", MESA_LOADER_DRIVER_OVERRIDE="", LIBGL_KOPPER_DRI2="",
+                     SELKIES_GPU_DRIVER="", SELKIES_GPU_RENDER_NODE="",
+                     SELKIES_GPU_PRESENT="", SELKIES_GPU_ACCELERATED="",
+                     **(env or {})))
+        lines = [ln for ln in out.stdout.strip().splitlines() if ln]
+        return {"state": lines[-1] if lines else "", "said": out.stdout, "rc": out.returncode}
 
 
 res = H.Results("backend-verdict")
-ON = {"SELKIES_WAYLAND": "true"}
+WAYLAND = {"SELKIES_WAYLAND": "true"}
 
-named = verdict('echo x11', ON)
-res.check("a probe naming x11 moves the session off Wayland",
-          not named["wayland"] and named["rc"] == 0, named["said"].strip()[:80])
+# --- what the probe reports, and what the entrypoint does when it cannot ---
+reported = run(NVIDIA_FACTS, WAYLAND)
+res.check("the GPU the probe reports is the one the session carries",
+          "DRIVER=nvidia" in reported["state"] and "NODE=/dev/dri/renderD128" in reported["state"]
+          and "ACCEL=true" in reported["state"], reported["state"])
 
-kept = verdict('echo wayland', ON)
-res.check("a probe naming wayland leaves the session and its GL stack alone",
-          kept["wayland"] and kept["gl"], kept["said"].strip()[:80])
+skewed = run("echo wayland", WAYLAND)
+res.check("an answer that is not a report is not exported",
+          skewed["rc"] == 0 and "NODE=unset" in skewed["state"], skewed["state"])
 
-soft = verdict('echo wayland-software', ON)
-res.check("a software verdict drops the Zink override the compositor cannot feed",
-          soft["wayland"] and not soft["gl"], soft["said"].strip()[:80])
+crashed = run("kill -SEGV $$", WAYLAND)
+res.check("a bring-up that dies counts as a GPU the compositor cannot reach",
+          "PRESENT=true" in crashed["state"] and "ACCEL=false" in crashed["state"],
+          crashed["state"])
+res.check("and says so", "did not survive" in crashed["said"], crashed["said"].strip()[:110])
 
-silent = verdict('exit 1', ON)
-res.check("a report that could not be had leaves the ask standing",
-          silent["wayland"] and silent["gl"] and silent["rc"] == 0,
-          silent["said"].strip()[:80])
+# The last resort is the old device test, so what it answers depends on this host.
+nvidia_here = bool(glob.glob("/dev/nvidia*")) and bool(shutil.which("nvidia-smi"))
+silent = run("exit 1", WAYLAND)
+res.check("no report at all falls back to the driver's own devices",
+          ("DRIVER=nvidia" in silent["state"]) == nvidia_here,
+          f"{silent['state']} (nvidia here: {nvidia_here})")
+res.check("and leaves the backend as it was asked for",
+          "WAYLAND=true" in silent["state"], silent["state"])
 
-crashed = verdict('kill -SEGV $$', ON)
-res.check("a bring-up that dies on a signal starts X11 instead",
-          not crashed["wayland"] and crashed["rc"] == 0, crashed["said"].strip()[:120])
-res.check("and says so", "did not survive" in crashed["said"], crashed["said"].strip()[:120])
+# --- the GL stack, which follows that GPU ---------------------------------
+res.check("a session rendering on NVIDIA runs GL through Zink",
+          "GL=zink" in run(NVIDIA_FACTS, WAYLAND)["state"])
+res.check("a session rendering on another vendor keeps Mesa's own driver",
+          "GL=unset" in run(INTEL_FACTS, WAYLAND)["state"])
+opted_out = run(NVIDIA_FACTS, dict(WAYLAND, DISABLE_ZINK="true"))
+res.check("DISABLE_ZINK drops the Zink half and keeps the GPU",
+          "GL=unset" in opted_out["state"] and "DRIVER=nvidia" in opted_out["state"],
+          opted_out["state"])
+res.check("and says the opt-out is what left the GPU behind",
+          "DISABLE_ZINK is set" in opted_out["said"], opted_out["said"].strip()[:90])
 
-# timeout(1) answers 124 for a command it had to stop; the stand-in exits with
-# that status rather than holding the suite for the full minute.
-wedged = verdict('exit 124', ON)
-res.check("a bring-up that wedges starts X11 too",
-          not wedged["wayland"], wedged["said"].strip()[:120])
+# --- the backend, which follows it too ------------------------------------
+res.check("a GPU the compositor reached keeps the session on Wayland",
+          "WAYLAND=true" in run(NVIDIA_FACTS, WAYLAND)["state"])
+unreachable = run(UNREACHABLE_FACTS, WAYLAND)
+res.check("a GPU it cannot reach moves the session to X11, which still has it",
+          "WAYLAND=false" in unreachable["state"] and "GL=zink" in unreachable["state"],
+          unreachable["state"])
+res.check("and says why", "cannot reach it" in unreachable["said"],
+          unreachable["said"].strip()[:110])
+software = run(UNREACHABLE_FACTS, dict(WAYLAND, SELKIES_WAYLAND_X11_FALLBACK="false"))
+res.check("a session that declined X11 composites in software, GL included",
+          "WAYLAND=true" in software["state"] and "GL=unset" in software["state"],
+          software["state"])
+res.check("no GPU at all leaves the session where it is",
+          "WAYLAND=true" in run(NO_GPU_FACTS, WAYLAND)["state"])
+res.check("an X11 session is never moved",
+          "WAYLAND=false" in run(UNREACHABLE_FACTS, {"SELKIES_WAYLAND": "false"})["state"])
 
-no_x11 = verdict('kill -SEGV $$', dict(ON, SELKIES_WAYLAND_X11_FALLBACK="false"))
-res.check("a session that declined X11 composites in software instead",
-          no_x11["wayland"] and not no_x11["gl"], no_x11["said"].strip()[:120])
-
-off = verdict('echo x11', {"SELKIES_WAYLAND": "false"})
-res.check("an X11 session never asks", off["said"].strip().endswith("GL=zink")
-          and "did not survive" not in off["said"], off["said"].strip()[:80])
-
-# --- what the probe resolves that from -----------------------------------
+# --- what the probe resolves the GPU from ---------------------------------
 with tempfile.TemporaryDirectory() as fake:
     def node_named(driver: str) -> str:
         """A render node in a stand-in /sys/class/drm whose device runs `driver`."""
@@ -157,54 +166,27 @@ with tempfile.TemporaryDirectory() as fake:
         return f"/dev/dri/{node}"
 
     drivers = {name: node_named(name) for name in ("nvidia", "nvidia-drm", "i915", "nouveau")}
-    read = {name: BV.render_node_driver(node, fake) for name, node in drivers.items()}
+    read = {name: GP.render_node_driver(node, fake) for name, node in drivers.items()}
     res.check("a render node reports the driver behind it",
               read["i915"] == "i915" and read["nouveau"] == "nouveau", read)
     res.check("both spellings of the proprietary stack read as one driver",
               read["nvidia"] == "nvidia" and read["nvidia-drm"] == "nvidia", read)
     res.check("a node with no identity here reports none",
-              BV.render_node_driver("/dev/dri/renderD200", fake) == "", "")
+              GP.render_node_driver("/dev/dri/renderD200", fake) == "")
     res.check("the node's own driver wins over the devices lying around",
-              BV.session_gpu(drivers["i915"], fake, nvidia_device="/dev/null") == "i915")
+              GP.session_gpu(drivers["i915"], fake, nvidia_device="/dev/null") == "i915")
     res.check("a driver with no render node still answers for itself",
-              BV.session_gpu("", fake, nvidia_device="/dev/null") == "nvidia"
-              and BV.session_gpu("", fake, nvidia_device="/nonexistent") == "")
-    res.check("only the NVIDIA stack asks for Zink",
-              BV.gl_environment("nvidia") == BV.ZINK_ENVIRONMENT
-              and BV.gl_environment("i915") == {} and BV.gl_environment("nouveau") == {})
+              GP.session_gpu("", fake, nvidia_device="/dev/null") == "nvidia"
+              and GP.session_gpu("", fake, nvidia_device="/nonexistent") == "")
 
-# --- the GPU the session renders on, and the GL stack it implies ---------
-NVIDIA_REPORT = ('echo SELKIES_GPU_RENDER_NODE=/dev/dri/renderD128; '
-                 'echo SELKIES_GPU_DRIVER=nvidia; echo MESA_LOADER_DRIVER_OVERRIDE=zink; '
-                 'echo GALLIUM_DRIVER=zink; echo LIBGL_KOPPER_DRI2=1')
-INTEL_REPORT = ('echo SELKIES_GPU_RENDER_NODE=/dev/dri/renderD128; '
-                'echo SELKIES_GPU_DRIVER=i915')
-
-on_nvidia = gl_verdict(NVIDIA_REPORT)
-res.check("a session rendering on NVIDIA runs GL through Zink",
-          on_nvidia["zink"] and "DRIVER=nvidia" in on_nvidia["state"], on_nvidia["state"])
-
-on_intel = gl_verdict(INTEL_REPORT)
-res.check("a session rendering on another vendor keeps Mesa's own driver",
-          not on_intel["zink"] and "DRIVER=i915" in on_intel["state"]
-          and "NODE=/dev/dri/renderD128" in on_intel["state"], on_intel["state"])
-
-opted_out = gl_verdict(NVIDIA_REPORT, {"DISABLE_ZINK": "true"})
-res.check("DISABLE_ZINK drops the Zink half and keeps the GPU",
-          not opted_out["zink"] and "DRIVER=nvidia" in opted_out["state"], opted_out["state"])
-res.check("and says the opt-out is what left the GPU behind",
-          "DISABLE_ZINK is set" in opted_out["said"], opted_out["said"].strip()[:90])
-
-# The fallback is the old device test, so what it answers depends on this host.
-nvidia_here = bool(glob.glob("/dev/nvidia*")) and bool(shutil.which("nvidia-smi"))
-no_report = gl_verdict("exit 1")
-res.check("a probe with no report falls back to the driver's own devices",
-          no_report["zink"] == nvidia_here, f"{no_report['state']} (nvidia here: {nvidia_here})")
-
-# A selkies too old for the question answers the other one, and a backend name
-# is not an assignment: exporting it would take the container down at boot.
-skewed = gl_verdict("echo wayland")
-res.check("an answer that is not a report is not exported",
-          skewed["rc"] == 0 and skewed["zink"] == nvidia_here, f"rc={skewed['rc']} {skewed['state']}")
+missing = GP.facts({"node": "/dev/dri/renderD999", "gpu": True, "accelerated": False,
+                    "error": "Failed to open render device"})
+res.check("a node the report says is not there is no node to render on",
+          missing["SELKIES_GPU_RENDER_NODE"] == "" and missing["SELKIES_GPU_PRESENT"] == "true"
+          and missing["SELKIES_GPU_ACCELERATED"] == "false", missing)
+res.check("every fact is reported whatever the report holds",
+          set(GP.facts({})) == {"SELKIES_GPU_RENDER_NODE", "SELKIES_GPU_DRIVER",
+                                "SELKIES_GPU_PRESENT", "SELKIES_GPU_ACCELERATED"},
+          GP.facts({}))
 
 sys.exit(0 if res.summary() else 1)

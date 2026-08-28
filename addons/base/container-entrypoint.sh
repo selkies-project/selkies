@@ -101,73 +101,69 @@ if [ -n "${SELKIES_MODE}" ]; then
   export SELKIES_MODE
 fi
 
-# Hardware OpenGL, and the GPU the rest of the session follows. selkies-gpu-probe
-# resolves the render node from --render-dri and the --auto-gpu token exactly as
-# the capture will, and names the GL environment that GPU implies: Zink over the
-# NVIDIA Vulkan driver (Mesa has no driver for that stack, and needs no render
-# node of its own for it), Mesa's own driver for every other vendor. Deciding it
-# from device paths instead would aim a hybrid host's session at the GPU it does
-# not render on. The services read SELKIES_GPU_RENDER_NODE and SELKIES_GPU_DRIVER
-# back out of container-env; DISABLE_ZINK=true keeps the GPU and drops the Zink
-# half. Settled ahead of the backend, so the probe below sees what the session has.
-session_gpu_env="$(timeout 60 selkies-gpu-probe --session-env)" || session_gpu_env=""
-session_gpu_reported="false"
+# What GPU this session has. selkies-gpu-probe resolves the render node from
+# --render-dri and the --auto-gpu token exactly as the capture will, and carries
+# the compositor's own renderer bring-up through on it, so the GL stack and the
+# backend below follow one answer rather than each guessing from device paths.
+gpu_status=0
+gpu_facts="$(timeout 60 selkies-gpu-probe)" || gpu_status=$?
 while IFS= read -r assignment; do
+  # Assignments only, so a tool that answers something else cannot be exported
+  # into this environment.
   case "${assignment}" in
-    # Assignments only: a selkies too old for the question answers the other one
-    # (a backend name), and exporting that would take the container down here.
-    [A-Z_]*=*) session_gpu_reported="true" ;;
-    *) continue ;;
+    [A-Z_]*=*) export "${assignment?}" ;;
   esac
-  if is_true "${DISABLE_ZINK-false}"; then
-    case "${assignment}" in
-      GALLIUM_DRIVER=*|MESA_LOADER_DRIVER_OVERRIDE=*|LIBGL_KOPPER_DRI2=*) continue ;;
-    esac
-  fi
-  export "${assignment?}"
 done <<EOF
-${session_gpu_env}
+${gpu_facts}
 EOF
-# The probe reports what the GPU implies; say when the opt-out overrode it.
-if is_true "${DISABLE_ZINK-false}" && [ "${SELKIES_GPU_DRIVER-}" = "nvidia" ]; then
-  echo 'DISABLE_ZINK is set: the NVIDIA GPU is left to software OpenGL'
+# 124 and up is timeout's own status or a signal: the bring-up wedged or died on
+# this driver stack, which the session would then do on every restart. A report
+# that merely could not be had exits 1 and settles nothing.
+if [ "${gpu_status}" -ge 124 ]; then
+  echo "GPU: the renderer bring-up did not survive this driver stack (status ${gpu_status})"
+  export SELKIES_GPU_PRESENT="true"
+  export SELKIES_GPU_ACCELERATED="false"
 fi
-if [ "${session_gpu_reported}" != "true" ] && ! is_true "${DISABLE_ZINK-false}" \
-   && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-  # No report to act on (a pixelflux too old to carry one): the driver's own
-  # devices are the only remaining signal that Mesa needs Zink here.
+# With no report at all, the driver's own devices are the only signal left that
+# this is the NVIDIA stack.
+if [ -z "${SELKIES_GPU_DRIVER-}" ] && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   export SELKIES_GPU_DRIVER="nvidia"
+fi
+
+# Hardware OpenGL for the session's applications. Mesa carries no driver for the
+# proprietary NVIDIA stack, so GL there runs through Zink on its Vulkan driver,
+# which needs no render node of its own; every other vendor has a native Mesa
+# driver, and forcing Zink on it would aim Mesa at a device the session does not
+# render on. DISABLE_ZINK=true leaves that GPU to software OpenGL.
+if [ "${SELKIES_GPU_DRIVER-}" != "nvidia" ]; then
+  :
+elif is_true "${DISABLE_ZINK-false}"; then
+  echo 'DISABLE_ZINK is set: the NVIDIA GPU is left to software OpenGL'
+else
   export LIBGL_KOPPER_DRI2="1"
   export MESA_LOADER_DRIVER_OVERRIDE="zink"
   export GALLIUM_DRIVER="zink"
-  echo 'NVIDIA GPU detected: OpenGL runs through Zink on the NVIDIA Vulkan driver'
+  echo 'NVIDIA GPU: OpenGL runs through Zink on the NVIDIA Vulkan driver'
 fi
 
 # A GPU the compositor cannot reach is a reason to run X11 instead, where the
-# session still gets it through Zink or the server's render node. selkies-gpu-probe
-# weighs that and names the backend; it names none when no report can be had, which
-# leaves the session as it was asked for.
-if [ "${SELKIES_WAYLAND}" = "true" ]; then
-  probe_status=0
-  probe_backend="$(timeout 60 selkies-gpu-probe)" || probe_status=$?
-  # The probe brings up the compositor's own renderer, so a status of 124 or
-  # above — timeout's, or a signal's — is that bring-up wedging or dying on
-  # this driver stack, which the session would then do on every restart. A
-  # report that merely could not be had exits 1 and still leaves the ask alone.
-  if [ -z "${probe_backend}" ] && [ "${probe_status}" -ge 124 ]; then
-    if is_true "${SELKIES_WAYLAND_X11_FALLBACK-true}"; then
-      probe_backend="x11"
-    else
-      probe_backend="wayland-software"
-    fi
-    echo "Wayland backend: the compositor's renderer bring-up did not survive this GPU stack (status ${probe_status}); starting ${probe_backend} instead"
+# session still gets it through Zink or the X server's own render node
+# (services/xvfb/run); with no GPU at all both backends render in software and
+# switching would trade a capability for nothing. Settled before anything
+# derived from the backend: the display, the session type and the toolkit
+# defaults all follow it. SELKIES_WAYLAND_X11_FALLBACK=false keeps Wayland and
+# composites in software, which shares no dmabuf, so a GL client aimed at the
+# Vulkan driver would produce buffers it cannot accept — the Zink override goes
+# with it.
+if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ] \
+   && [ "${SELKIES_GPU_ACCELERATED-}" = "false" ]; then
+  if is_true "${SELKIES_WAYLAND_X11_FALLBACK-true}"; then
+    echo 'GPU: the compositor cannot reach it; starting X11 so the session keeps it'
+    export SELKIES_WAYLAND="false"
+  else
+    echo 'GPU: the compositor cannot reach it; compositing in software'
+    unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
   fi
-  case "${probe_backend}" in
-    x11) export SELKIES_WAYLAND=false ;;
-    # A compositor rendering in software shares no dmabuf, so a GL client aimed at
-    # the Vulkan driver produces buffers it cannot accept and draws nothing.
-    wayland-software) unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 ;;
-  esac
 fi
 
 # With no DRM render node, the NVIDIA EGL/GBM vendor library the container
