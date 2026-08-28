@@ -104,4 +104,9 @@ check('an untracked completion changes nothing',
       pendingAppAction('gimp') === 'install' && stateEvents === 0,
       `${pendingAppAction('gimp')} ${stateEvents}`);
 
+postAppCommand('launch', 'geany');
+check('a launch runs the application, not a terminal wrapped around it',
+      posted.at(-1) && posted.at(-1).value === '~/.local/bin/geany-pa',
+      JSON.stringify(posted.at(-1)));
+
 process.exit(failed ? 1 : 0);
