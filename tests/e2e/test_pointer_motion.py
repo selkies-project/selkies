@@ -58,8 +58,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except ValueError:
             report = None
         if report is not None:
+            seq = LATEST.get("_seq", 0) + 1
             LATEST.clear()
             LATEST.update(report)
+            LATEST["_seq"] = seq
         self.send_response(204)
         self.end_headers()
 
@@ -88,6 +90,27 @@ def wait_for(pred, timeout: float) -> bool:
             return True
         time.sleep(0.2)
     return False
+
+
+def settle(timeout: float = 8.0) -> None:
+    """Wait until the page reports the same travel three times running.
+
+    Warping the pointer under a lock reaches the engine as one large delta, and
+    a baseline read before that delta is reported puts it in the measurement
+    instead. The page posts every 200 ms, so quiet is three identical posts.
+    """
+    end = time.time() + timeout
+    prev, stable, last_seq = None, 0, None
+    while time.time() < end:
+        seq = LATEST.get("_seq")
+        if seq != last_seq:
+            last_seq = seq
+            now = (LATEST.get("moves"), LATEST.get("travelX"))
+            stable = stable + 1 if now == prev else 0
+            prev = now
+            if stable >= 2:
+                return
+        time.sleep(0.05)
 
 
 def binary(browser: str) -> Optional[str]:
@@ -176,7 +199,7 @@ def measure(res, browser: str, dpr: float) -> None:
         for name, count, delta, gap in PATTERNS:
             root.warp_pointer(700, 450)
             d.sync()
-            time.sleep(0.8)
+            settle()
             mark = dict(LATEST)
             for _ in range(count):
                 xtest.fake_input(d, X.MotionNotify, detail=True, root=X.NONE,
@@ -184,7 +207,7 @@ def measure(res, browser: str, dpr: float) -> None:
                 d.flush()
                 if gap:
                     time.sleep(gap)
-            time.sleep(1.2)
+            settle()
             injected = count * delta
             travelled = LATEST.get("travelX", 0) - mark.get("travelX", 0)
             # Tolerance: one event swallowed around the warp, or one percent of
