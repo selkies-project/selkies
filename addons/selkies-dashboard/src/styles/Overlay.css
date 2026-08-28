@@ -233,11 +233,13 @@
     gap: 6px;
 }
 
-/* Generic action button style within the header. */
+/* The header's fullscreen and gaming-mode pair. Both glyphs are drawn at the
+   same size and the padding keeps the pressable box the header row was built
+   around, so enlarging them does not push the row taller. */
 .header-action-button {
     background: none;
     border: none;
-    padding: 5px;
+    padding: 3px;
     margin: 0;
     cursor: pointer;
     display: flex;

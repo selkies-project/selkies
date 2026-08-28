@@ -289,7 +289,7 @@ const CopyIcon = () => (
  */
 const GamingModeIcon = () => (
   <svg className="stroke-icon" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none"
-    width="18" height="18" strokeLinecap="round" strokeLinejoin="round">
+    width="22" height="22" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="12" cy="12" r="6" />
     <path d="M18 12h-2.4M8.4 12H6M12 8.4V6M12 18v-2.4" />
   </svg>
@@ -347,7 +347,7 @@ const TrackpadIcon = () => (
   </svg>
 );
 const FullscreenIcon = () => (
-  <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
+  <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22">
     <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" />
   </svg>
 );
