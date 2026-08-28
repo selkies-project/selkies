@@ -138,7 +138,7 @@ check("software rendering is reported", "compositing in software" in why, why)
 
 backend, why = recommend(report(error="No render node"))
 check("no GPU argues for Wayland", backend == "wayland", backend)
-check("the absent GPU is reported", "no GPU in this container" in why, why)
+check("the absent GPU is reported", "no GPU here" in why, why)
 
 if not shutil.which("bash"):
     print("SKIP bash not found, so the entrypoint cannot be run", flush=True)

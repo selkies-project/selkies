@@ -38,10 +38,6 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 # and a runtime directory left over from a previous run would keep whatever it
 # had. The spec requires 0700 and dbus and PipeWire refuse anything wider.
 mkdir -p "${XDG_RUNTIME_DIR}"
-# The session environment for the s6 services, emptied before anything can read
-# it: the file outlives a container restart, and a probe run by hand loads it.
-ENV_FILE="${XDG_RUNTIME_DIR}/container-env"
-: > "${ENV_FILE}"
 # Not fatal: a runtime directory bind-mounted from elsewhere may not be ours
 # to re-mode, and that is no reason to refuse to start the container.
 chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
@@ -248,6 +244,8 @@ export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
 
 # Compute the shared session environment, including embedded coTURN defaults
+ENV_FILE="${XDG_RUNTIME_DIR}/container-env"
+: > "${ENV_FILE}"
 
 # The address a browser outside this container would reach it on, asked of a
 # public resolver as the only party that can see it; an IPv6 answer is bracketed

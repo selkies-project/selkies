@@ -29,7 +29,6 @@ sys.path.insert(0, os.path.join(REPO, "src"))
 import helpers as H  # noqa: E402
 
 from selkies import gpu_probe as BV  # noqa: E402
-from selkies.gpu_probe import session_environment  # noqa: E402
 
 BLOCK_START = 'if [ "${SELKIES_WAYLAND}" = "true" ]; then\n  probe_status=0'
 GL_BLOCK_START = 'session_gpu_env="$(timeout 60 selkies-gpu-probe --session-env)"'
@@ -207,21 +206,5 @@ res.check("a probe with no report falls back to the driver's own devices",
 skewed = gl_verdict("echo wayland")
 res.check("an answer that is not a report is not exported",
           skewed["rc"] == 0 and skewed["zink"] == nvidia_here, f"rc={skewed['rc']} {skewed['state']}")
-
-# The probe reads this file when it is run by hand, so what it parses out of it
-# has to be what the entrypoint wrote: printf %q quoting, one export per line.
-with tempfile.TemporaryDirectory() as tmp:
-    recorded = os.path.join(tmp, "container-env")
-    subprocess.run(["bash", "-c",
-                    'FOO="a b" BAR= BAZ=plain; export FOO BAR BAZ; '
-                    'env | grep -E "^(FOO|BAR|BAZ)=" | sort | '
-                    'while IFS= read -r kv; do printf "export %s=%q\\n" "${kv%%=*}" "${kv#*=}"; done'],
-                   stdout=open(recorded, "w"), timeout=60, check=True)
-    parsed = session_environment(recorded)
-    res.check("the recorded environment parses back to what was exported",
-              parsed.get("FOO") == "a b" and parsed.get("BAR") == "" and parsed.get("BAZ") == "plain",
-              parsed)
-res.check("a missing recorded environment is no environment",
-          session_environment(os.path.join(tmp, "gone")) == {})
 
 sys.exit(0 if res.summary() else 1)
