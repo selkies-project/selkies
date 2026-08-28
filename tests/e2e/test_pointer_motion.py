@@ -126,7 +126,11 @@ def binary(browser: str) -> Optional[str]:
 
 
 def launch(browser: str, profile: str, dpr: float) -> subprocess.Popen:
-    """Start an installed browser on the test display at a device pixel ratio."""
+    """Start an installed browser on the test display at a device pixel ratio.
+
+    Its output is kept: a browser that dies on startup has to be reported as
+    that and not as a page that never loaded.
+    """
     url = f"http://localhost:{PORT}{PAGE}"
     if browser == "firefox":
         with open(os.path.join(profile, "user.js"), "w") as fh:
@@ -141,12 +145,32 @@ def launch(browser: str, profile: str, dpr: float) -> subprocess.Popen:
         cmd = [binary("firefox"), "--no-remote", "--profile", profile,
                "--width", "1600", "--height", "900", url]
     else:
-        cmd = [binary("chrome"), "--no-first-run", "--no-default-browser-check",
+        # --no-sandbox as everywhere else in the tree: a container without
+        # unprivileged user namespaces leaves Chrome only the setuid helper,
+        # which it refuses to run under rather than drop the sandbox silently.
+        cmd = [binary("chrome"), "--no-sandbox", "--no-first-run",
+               "--no-default-browser-check",
                "--disable-gpu", "--user-data-dir=" + profile,
                f"--force-device-scale-factor={dpr}",
                "--window-position=0,0", "--window-size=1600,900", url]
     env = dict(os.environ, DISPLAY=H.require_display())
-    return H.spawn(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(os.path.join(profile, "browser.log"), "wb") as log:
+        return H.spawn(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
+
+
+def why_silent(proc: subprocess.Popen, profile: str) -> str:
+    """What the browser was doing when the page failed to report."""
+    tail = ""
+    try:
+        with open(os.path.join(profile, "browser.log"), "rb") as fh:
+            said = [ln.strip() for ln in fh.read().decode("utf-8", "replace").splitlines()
+                    if ln.strip()]
+        tail = said[-1][:200] if said else ""
+    except OSError:
+        pass
+    code = proc.poll()
+    state = "still running" if code is None else f"exited {code}"
+    return f"no report, {state}: {tail}" if tail else f"no report, {state}"
 
 
 def measure(res, browser: str, dpr: float) -> None:
@@ -172,8 +196,11 @@ def measure(res, browser: str, dpr: float) -> None:
     d = H.x_display()
     proc = launch(browser, profile, dpr)
     try:
-        if not wait_for(lambda: bool(LATEST), 90):
-            res.check(f"{label}: the probe page loads", False, "no report")
+        # A browser that has already exited will not report, so the wait ends
+        # with it rather than running out the clock three times over.
+        if not wait_for(lambda: bool(LATEST) or proc.poll() is not None, 90) \
+                or not LATEST:
+            res.check(f"{label}: the probe page loads", False, why_silent(proc, profile))
             return
         root = d.screen().root
         # A browser still opening its window swallows the first click; a machine
