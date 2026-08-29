@@ -3420,6 +3420,10 @@ async def run_client_command(command_to_run: str, logger: logging.Logger,
         logger.warning(
             f"Command '{command_to_run}' exited with status {code}{hint} after "
             f"{runtime:.1f}s{detail}")
+        if tail:
+            # The whole captured tail, not just the quoted line: a launch that
+            # fails has no window left to read its output in.
+            logger.debug("Output of '%s':\n%s", command_to_run, "\n".join(tail))
         if notify:
             try:
                 await notify(
