@@ -42,6 +42,16 @@ mkdir -p "${XDG_RUNTIME_DIR}"
 # to re-mode, and that is no reason to refuse to start the container.
 chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 
+# A desktop menu watches the directories it read at startup, and cannot watch one
+# that does not exist yet: the first application installed into a home without
+# them lands in a directory nothing is watching, and never reaches the running
+# session's menu -- the second and every later one does, which is what makes it
+# look like the application, rather than the home, is at fault. Creating them
+# before the session starts is what keeps that first install visible.
+for dir in applications icons/hicolor; do
+  mkdir -p "${XDG_DATA_HOME:-${HOME}/.local/share}/${dir}" 2>/dev/null || true
+done
+
 # Configure joystick interposer and fake-udev (container-only gamepad plumbing)
 # $LIB is a dynamic-loader token; the backslash keeps the shell off it.
 export LIB_PREFIX="/usr/\$LIB"
