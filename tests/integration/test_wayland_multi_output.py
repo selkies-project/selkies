@@ -12,11 +12,30 @@ import os
 import subprocess
 import sys
 import time
+from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
 RUNTIME = os.path.join(H.WORKDIR, "wl-multi-output")
+
+
+def nested_socket_name(capture_socket: str) -> Optional[str]:
+    """The nested compositor's own socket, which is the one that is not the
+    capture socket. Returns None when it has not appeared."""
+    for name in sorted(os.listdir(RUNTIME)):
+        if (name.startswith("wayland-") and not name.endswith(".lock")
+                and name != capture_socket):
+            return name
+    return None
+
+
+def screen_positions(socket: str) -> List[Tuple[int, int]]:
+    """The nested compositor's screen origins, in screen order, read through
+    its own output management."""
+    import pixelflux
+    return [(x, y) for _name, x, y in
+            pixelflux.ScreenCapture().list_app_screens(socket)]
 
 
 def compositor_env(socket: str) -> dict:
@@ -75,6 +94,36 @@ def main() -> "H.Results":
         res.check("nested compositor screens land on separate outputs",
                   len(windows) >= 2 and len(placed) >= 2,
                   f"{len(windows)} toplevel(s) on outputs {placed}")
+
+        # A nested compositor arranges the screens it opens by its own rule —
+        # wlroots places them side by side, whatever the capture layout says —
+        # and that arrangement is the one windows are placed and dragged in, so
+        # a display asked for above or to the left of the primary lands right of
+        # it until the session is told otherwise. Every arrangement is checked,
+        # since an overlap on the way to one is what a screen-at-a-time apply
+        # gets wrong.
+        nested_socket = nested_socket_name(socket)
+        for name, rects in (
+            ("left", [(1920, 0, 1920, 1080), (0, 0, 1920, 1080)]),
+            ("up", [(0, 1080, 1920, 1080), (0, 0, 1920, 1080)]),
+            ("down", [(0, 0, 1920, 1080), (0, 1080, 1920, 1080)]),
+            ("right", [(0, 0, 1920, 1080), (1920, 0, 1920, 1080)]),
+        ):
+            if nested_socket is None:
+                res.check(f"the session lays its screens out for '{name}'",
+                          False, "the nested compositor opened no socket")
+                break
+            try:
+                placed_n = capture.set_app_screen_layout(nested_socket, rects)
+            except Exception as e:
+                res.check(f"the session lays its screens out for '{name}'", False, str(e))
+                continue
+            time.sleep(1.0)
+            got = screen_positions(nested_socket)
+            want = [(x, y) for x, y, _w, _h in rects]
+            res.check(f"the session lays its screens out for '{name}'",
+                      placed_n == len(rects) and got == want,
+                      f"placed={placed_n} got={got} want={want}")
     finally:
         proc.terminate()
         try:

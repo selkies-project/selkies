@@ -89,6 +89,7 @@ from .display_utils import (
     unpremultiply_rgba,
     cursor_content_handle,
     layout_extent,
+    session_screen_index,
 )
 from .media_pipeline import RateControlMode
 from .settings import settings
@@ -3742,7 +3743,7 @@ class WebRTCInput:
                     "clipboard_write_app", "clipboard_unwatch_app",
                     "list_outputs", "create_output", "set_keymap_overlay",
                     "hold_spare_app_screens", "set_app_output_scale",
-                    "set_app_screen_geometry",
+                    "set_app_screen_geometry", "set_app_screen_layout",
                     "set_app_wayland_display", "type_text_wayland",
                     "get_keyboard_state",
                 ) if not hasattr(self.wayland_input, m)]
@@ -5762,6 +5763,53 @@ class WebRTCInput:
         except RuntimeError:
             return
         self._spawn_task(self._hold_spare_screens())
+
+    def schedule_session_screen_layout(self, layouts: dict) -> None:
+        """Lay the session's own screens out the way the capture outputs were placed.
+
+        The session compositor arranges the screens it opens by its own rule
+        (wlroots puts them side by side, in the order they were opened), and
+        that layout is what places windows, not the capture one — so a desktop
+        asked for a display above or to the left of the primary gets one to the
+        right of it. Every screen is positioned in one configuration, since an
+        arrangement applied a screen at a time passes through a state where two
+        overlap and the compositor reflows around it.
+
+        Args:
+            layouts: Display id to its `{x, y, w, h}` rectangle, as the capture
+                outputs were placed.
+        """
+        setter = getattr(self.wayland_input, 'set_app_screen_layout', None)
+        if setter is None or not layouts:
+            return
+        rects = []
+        for display_id in sorted(layouts, key=session_screen_index):
+            rect = layouts[display_id]
+            rects.append((int(rect.get('x') or 0), int(rect.get('y') or 0),
+                          int(rect.get('w') or 0), int(rect.get('h') or 0)))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._spawn_task(self._apply_session_screen_layout(setter, rects))
+
+    async def _apply_session_screen_layout(self, setter: Any, rects: list) -> None:
+        """Hand the arrangement to the session compositor, logging what it did."""
+        display = self._app_wayland_display()
+        try:
+            placed = await asyncio.to_thread(setter, display, rects)
+        except Exception as e:
+            logger_webrtc_input.debug(f"Session screen layout failed: {e}")
+            return
+        if placed:
+            logger_webrtc_input.info(
+                f"Session compositor laid {placed} screen(s) out at {rects}.")
+        else:
+            # A compositor without zwlr_output_management_v1 (KWin, which offers
+            # kde_output_management_v2) arranges its screens itself.
+            logger_webrtc_input.info(
+                "Session compositor manages no outputs for clients; its screen "
+                "arrangement is its own.")
 
     async def _hold_spare_screens(self) -> None:
         """Hold every session screen without a capture output at SPARE_SCREEN_SIZE."""

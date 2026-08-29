@@ -4896,6 +4896,11 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.info(f"Client '{display_id}' is connected but not active. Skipping video start.")
             if IS_WAYLAND and display_id == 'primary':
                 await self._create_wayland_outputs(layouts, keep_ids)
+                # The capture outputs now sit where the arrangement asks; the
+                # session compositor arranges its own screens by its own rule
+                # until it is told this one.
+                if self.input_handler:
+                    self.input_handler.schedule_session_screen_layout(layouts)
         for display_id in list(layouts.keys()):
             client_data = self.display_clients.get(display_id)
             if not (client_data and client_data.get('video_active', False)):
