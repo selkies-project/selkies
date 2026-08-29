@@ -45,6 +45,56 @@ explain_denial() {
     echo "  Grant the container CAP_SYS_PTRACE, or lower the sysctl on the host." >&2
 }
 
+# proot-apps files every app icon under the theme's `scalable` directory
+# whatever its format, and gtk-update-icon-cache indexes no raster there: the
+# cache it then writes is empty, and a desktop that trusts a cache over the
+# directory behind it (Qt reads one, so LXQt does) draws no icon at all. The
+# icons are put where their size says they belong and the cache rebuilt from
+# that, which also leaves the theme laid out the way the spec describes.
+data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
+theme="${data_home}/icons/hicolor"
+
+png_width() {
+    # IHDR width: four big-endian bytes at offset 16 of any PNG.
+    od -An -N4 -j16 -tu4 --endian=big "$1" 2>/dev/null | tr -d ' \n'
+}
+
+theme_dir_for() {
+    # The listed square directory closest to $1 pixels; empty when none fits.
+    best="" diff_best=""
+    for size in 512 256 192 128 96 72 64 48 36 32 24 22 16; do
+        grep -q "^\[${size}x${size}/apps\]" "${theme}/index.theme" 2>/dev/null || continue
+        diff=$(( $1 > size ? $1 - size : size - $1 ))
+        if [ -z "${diff_best}" ] || [ "${diff}" -lt "${diff_best}" ]; then
+            best="${size}" diff_best="${diff}"
+        fi
+    done
+    [ -n "${best}" ] && echo "${best}x${best}/apps"
+}
+
+sort_icons() {
+    [ -d "${theme}/scalable/apps" ] || return 0
+    for icon in "${theme}"/scalable/apps/*.png; do
+        [ -f "${icon}" ] || continue
+        width="$(png_width "${icon}")"
+        [ -n "${width}" ] && [ "${width}" -gt 0 ] 2>/dev/null || continue
+        dir="$(theme_dir_for "${width}")"
+        [ -n "${dir}" ] || continue
+        mkdir -p "${theme}/${dir}"
+        mv -f "${icon}" "${theme}/${dir}/"
+    done
+    # An icon whose app is gone would otherwise outlive it, since proot-apps
+    # deletes only the copy it filed itself.
+    for icon in "${theme}"/*x*/apps/*.png; do
+        [ -f "${icon}" ] || continue
+        name="$(basename "${icon}" .png)"
+        grep -qs "^Icon=${name}$" "${data_home}"/applications/*.desktop || rm -f "${icon}"
+    done
+    command -v gtk-update-icon-cache > /dev/null 2>&1 &&
+        gtk-update-icon-cache -f -t "${theme}" > /dev/null 2>&1
+    return 0
+}
+
 # `check` is what the server asks before telling clients the apps panel is
 # usable; the rest is answered here rather than as a failed unpack several
 # hundred megabytes later.
@@ -59,6 +109,15 @@ case "${1:-}" in
             explain_denial
             exit 1
         fi
+        ;;
+esac
+
+case "${1:-}" in
+    install|update|remove)
+        status=0
+        "${bin}/proot-apps" "$@" || status=$?
+        sort_icons
+        exit "${status}"
         ;;
 esac
 
