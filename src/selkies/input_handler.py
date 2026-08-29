@@ -91,7 +91,7 @@ from .display_utils import (
     layout_extent,
 )
 from .media_pipeline import RateControlMode
-from .settings import settings, WS_MAX_MESSAGE_BYTES
+from .settings import settings
 try:
     from pixelflux import VirtualKeyboardUnavailable as PixelfluxVkUnavailable
 except Exception:
@@ -651,14 +651,34 @@ class _X11ClipboardMonitor:
         _text_targets: (atom, name) text targets in precedence order.
         _changed: Set by every selection-owner change.
         _read_lock: One in-flight conversion or offer at a time.
+        _abort_read: Set by offer() so a read still waiting on a slow owner
+            gives up rather than holding a client's paste behind it.
         _own_data: Payload staged by offer() and served by the event thread.
         _own_mime_atom: Image mime atom of the staged payload (None for text).
         _own_clipboard: Whether CLIPBOARD itself is still ours; the payload
             stays staged while PRIMARY is, but a reader only cares about this.
         _cmd_r, _cmd_w: Self-pipe carrying caller requests to the event thread.
+        _gen: Conversion generation; a reply carrying an older one is stale and
+            is dropped rather than handed to whoever asked next.
+        _props: Transfer properties, one per conversion in turn. An owner slow
+            enough to answer after its reader gave up then writes to a property
+            no transfer is reading, so its bytes cannot become the next
+            target's answer.
+        _serving: (generation, property) of the conversion in flight.
+        _progress: Bumped on every property fetch, so reader and collector time
+            out on a stalled transfer rather than on a slow one.
     """
 
+    # Idle bound once a transfer is under way: one that keeps delivering is
+    # never cut off, one that stops for this long is.
     _READ_TIMEOUT_S = 5.0
+    # Bound on the wait before any data arrives. An owner that holds the image
+    # decoded and re-encodes it per request (Firefox) answers only after
+    # seconds, and cutting that short reads the next target instead.
+    _FIRST_REPLY_TIMEOUT_S = 25.0
+    # Overall bound on one conversion, so an owner feeding a byte at a time
+    # cannot hold the event thread (and the write behind it) forever.
+    _TRANSFER_TIMEOUT_S = 60.0
     # INCR reads accumulate at most this much (matches the Wayland read cap).
     _READ_MAX_BYTES = 64 * 1024 * 1024
     # Cap on a file-manager (text/uri-list) image read from disk.
@@ -704,7 +724,12 @@ class _X11ClipboardMonitor:
             event_mask=X.PropertyChangeMask)
         self._clipboard = self._d.get_atom('CLIPBOARD')
         self._primary = self._d.get_atom('PRIMARY')
-        self._prop = self._d.get_atom('SELKIES_CLIP')
+        # One property per conversion, cycled: a reply the reader has stopped
+        # waiting for lands on a retired property, where neither it nor the
+        # INCR stream behind it can be mistaken for the current transfer.
+        self._props = [self._d.get_atom(f'SELKIES_CLIP_{i}') for i in range(8)]
+        self._prop_next = 0
+        self._prop = self._props[0]
         self._incr = self._d.get_atom('INCR')
         self._targets = self._d.get_atom('TARGETS')
         self._image_targets = [(self._d.get_atom(m), m) for m in (
@@ -725,8 +750,12 @@ class _X11ClipboardMonitor:
             self._d.get_atom('TEXT'), self._d.get_atom('text/plain')]
         self._changed = threading.Event()
         self._pending_target = None
+        self._gen = 0
+        self._serving = None
+        self._progress = 0
         self._reply = None
         self._reply_done = threading.Event()
+        self._abort_read = threading.Event()
         self._read_lock = threading.Lock()
         self._own_data = None
         self._own_mime_atom = None
@@ -751,16 +780,19 @@ class _X11ClipboardMonitor:
                 break
             if self._cmd_r in r:
                 os.read(self._cmd_r, 64)
-                target = self._pending_target
-                if target is not None:
+                pending = self._pending_target
+                if pending is not None:
                     self._pending_target = None
+                    gen, target = pending
+                    self._prop_next = (self._prop_next + 1) % len(self._props)
+                    self._prop = self._props[self._prop_next]
+                    self._serving = (gen, self._prop)
                     try:
                         self._win.convert_selection(self._clipboard, target,
                                                     self._prop, X.CurrentTime)
                         self._d.flush()
                     except Exception:
-                        self._reply = None
-                        self._reply_done.set()
+                        self._finish_reply(None)
                 own = self._pending_own
                 if own is not None:
                     self._pending_own = None
@@ -783,9 +815,22 @@ class _X11ClipboardMonitor:
         payload, and vice versa.
         """
         if isinstance(ev, xfixes.SelectionNotify):
+            if ev.selection == self._clipboard:
+                # The event names the new owner, so ownership is known before
+                # the SelectionClear that follows it is dispatched.
+                owner = getattr(ev.owner, 'id', ev.owner)
+                self._own_clipboard = owner == self._win.id
             self._changed.set()
         elif ev.type == X.SelectionNotify:
             self._collect_selection(ev)
+        elif ev.type == X.PropertyNotify and ev.state == X.PropertyNewValue \
+                and ev.atom in self._props:
+            # The transfer in flight is read by the collector, which the
+            # SelectionNotify still to come drives; anything else is a retired
+            # transfer, drained here so the owner's INCR stream ends.
+            serving = self._serving
+            if serving is None or ev.atom != serving[1]:
+                self._retire_property(ev.atom)
         elif ev.type == X.SelectionRequest:
             self._serve_selection(ev)
         elif ev.type == X.SelectionClear:
@@ -868,77 +913,133 @@ class _X11ClipboardMonitor:
             return bytes(v)
         return bytes(bytearray(v))
 
+    def _finish_reply(self, reply: Optional[tuple]) -> None:
+        """Hand a conversion's result to the caller waiting on that generation.
+
+        A reply that arrives after its caller gave up is dropped: handed on, it
+        would answer the next conversion with the previous target's bytes.
+        """
+        serving, self._serving = self._serving, None
+        if serving is None or serving[0] != self._gen:
+            return
+        self._reply = reply
+        self._reply_done.set()
+
     def _collect_selection(self, ev: Any) -> None:
         """On the event thread: fetch the converted property (INCR-aware).
 
         Under INCR each property delete requests the next chunk and a
-        zero-length chunk ends the transfer. Events are awaited with the
-        remaining deadline so a stalled owner times the read out instead of
-        wedging the event thread inside a blocking next_event(), and the total
-        is capped like the Wayland read so a hostile owner cannot balloon
-        memory; paste requests keep being served mid-transfer.
+        zero-length chunk ends the transfer. Only that ends it successfully: a
+        transfer cut short by the idle bound, the overall bound or the size cap
+        is discarded, since half an image handed on as content is worse than a
+        read that failed. Events are awaited with the remaining deadline so a
+        stalled owner cannot wedge the event thread inside a blocking
+        next_event(); paste requests keep being served mid-transfer.
         """
+        serving = self._serving
+        if serving is None or ev.property not in (X.NONE, serving[1]):
+            # An answer to a conversion nobody is waiting on any more. Its
+            # property is retired, so the owner is released without letting
+            # the bytes near the transfer in flight.
+            self._retire_property(ev.property)
+            return
+        prop_atom = serving[1]
         try:
             if ev.property == X.NONE:
-                self._reply = None
-                self._reply_done.set()
+                self._finish_reply(None)
                 return
-            prop = self._win.get_full_property(self._prop, X.AnyPropertyType)
-            self._win.delete_property(self._prop)
+            prop = self._win.get_full_property(prop_atom, X.AnyPropertyType)
+            self._win.delete_property(prop_atom)
             self._d.flush()
+            self._progress += 1
             if prop is None:
-                self._reply = None
+                reply = None
             elif prop.property_type == self._incr:
                 chunks = []
                 total = 0
+                complete = False
+                hard_deadline = time.monotonic() + self._TRANSFER_TIMEOUT_S
                 deadline = time.monotonic() + self._READ_TIMEOUT_S
-                while time.monotonic() < deadline and total <= self._READ_MAX_BYTES:
+                while time.monotonic() < min(deadline, hard_deadline):
                     if not self._d.pending_events():
-                        remaining = deadline - time.monotonic()
+                        remaining = min(deadline, hard_deadline) - time.monotonic()
                         if remaining <= 0:
                             break
                         r, _, _ = select.select([self._d.fileno()], [], [], remaining)
                         if not r or not self._d.pending_events():
                             continue
                     e = self._d.next_event()
-                    if (e.type == X.PropertyNotify and e.atom == self._prop
-                            and e.state == X.PropertyNewValue):
-                        part = self._win.get_full_property(self._prop, X.AnyPropertyType)
-                        self._win.delete_property(self._prop)
+                    if (e.type == X.PropertyNotify and e.state == X.PropertyNewValue
+                            and e.atom in self._props):
+                        if e.atom != prop_atom:
+                            # A retired transfer still streaming; drained so it
+                            # ends instead of waiting on a delete forever.
+                            self._retire_property(e.atom)
+                            continue
+                        part = self._win.get_full_property(prop_atom, X.AnyPropertyType)
+                        self._win.delete_property(prop_atom)
                         self._d.flush()
+                        self._progress += 1
+                        deadline = time.monotonic() + self._READ_TIMEOUT_S
                         if part is None or len(part.value) == 0:
+                            complete = True
                             break
                         piece = self._prop_bytes(part)
                         chunks.append(piece)
                         total += len(piece)
+                        if total > self._READ_MAX_BYTES:
+                            break
                     elif e.type in (X.SelectionRequest, X.SelectionClear) \
                             or isinstance(e, xfixes.SelectionNotify):
                         self._dispatch_event(e)
-                self._reply = (b"".join(chunks), 8)
+                reply = (b"".join(chunks), 8) if complete else None
             elif prop.format == 32:
-                self._reply = (list(prop.value), 32)
+                reply = (list(prop.value), 32)
             else:
-                self._reply = (self._prop_bytes(prop), prop.format)
-            self._reply_done.set()
+                reply = (self._prop_bytes(prop), prop.format)
+            self._finish_reply(reply)
         except Exception:
-            self._reply = None
-            self._reply_done.set()
+            self._finish_reply(None)
+
+    def _retire_property(self, atom: int) -> None:
+        """Delete a transfer property whose conversion no longer has a reader."""
+        if atom == X.NONE:
+            return
+        try:
+            self._win.delete_property(atom)
+            self._d.flush()
+        except Exception:
+            pass
 
     def _convert_and_wait(self, target_atom: int) -> Optional[tuple]:
         """Request a selection conversion and wait (bounded) for its reply.
+
+        The wait follows the transfer rather than a fixed clock: it extends
+        while the collector keeps fetching property chunks and expires only on
+        a stall, so a multi-megabyte INCR image is not abandoned half-read.
 
         Returns:
             (value, format) — bytes for format 8, an atom list for format 32 —
             or None on timeout/failure.
         """
         with self._read_lock:
+            self._gen += 1
             self._reply = None
             self._reply_done.clear()
-            self._pending_target = target_atom
+            self._pending_target = (self._gen, target_atom)
             os.write(self._cmd_w, b"x")
-            if not self._reply_done.wait(self._READ_TIMEOUT_S):
-                return None
-            return self._reply
+            seen = self._progress
+            hard_deadline = time.monotonic() + self._TRANSFER_TIMEOUT_S
+            deadline = time.monotonic() + self._FIRST_REPLY_TIMEOUT_S
+            while True:
+                remaining = min(deadline, hard_deadline) - time.monotonic()
+                if remaining <= 0 or self._abort_read.is_set():
+                    return None
+                if self._reply_done.wait(min(remaining, 0.25)):
+                    return self._reply
+                if self._progress != seen:
+                    seen = self._progress
+                    deadline = time.monotonic() + self._READ_TIMEOUT_S
 
     def read(self, use_binary: bool) -> tuple:
         """Blocking read (call via executor): (data, mime) like read_clipboard —
@@ -1017,7 +1118,12 @@ class _X11ClipboardMonitor:
             mime_atom = known.get(mime_type)
             if mime_atom is None:
                 return False
+        # A read of the old selection is worth nothing next to content a client
+        # just pasted, and waiting behind a slow owner would hold that paste for
+        # as long as the owner takes to answer.
+        self._abort_read.set()
         with self._read_lock:
+            self._abort_read.clear()
             self._own_done.clear()
             self._own_ok = False
             self._pending_own = (data_bytes, mime_atom, is_text)
@@ -1709,6 +1815,12 @@ logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
 # accumulated chunks are both checked so a client cannot balloon memory.
 MULTIPART_CLIPBOARD_MAX_SIZE = 64 * 1024 * 1024
 
+# Re-reads the outbound monitor gives one selection-change edge whose read came
+# back empty, before treating the selection as genuinely empty.
+_CLIPBOARD_REREAD_ATTEMPTS = 2
+_CLIPBOARD_REREAD_DELAY_S = 0.25
+
+
 # X reply wait on the input connection. Generous: no healthy round trip comes
 # near it, so it fires only on an unresponsive server (bounded stall + reconnect).
 INPUT_X_REPLY_TIMEOUT_S = 20.0
@@ -1792,11 +1904,10 @@ C_INTERPOSER_STRUCT_SIZE = 1360
 # frame send alike, so a slow link is tolerated while a dead one cannot wedge.
 BULK_DRAIN_TIMEOUT_S = 15.0
 
-# Raw bytes per multipart clipboard message: the data channel's 1 MiB ceiling
-# (rtc.get_adjusted_chunk_size), never above the WebSocket frame ceiling, less
-# verb-prefix and base64 margin; a multiple of 3 so chunks concatenate as base64.
-CLIPBOARD_CHUNK_SIZE = min(((WS_MAX_MESSAGE_BYTES - 4096) * 3) // 4,
-                           ((1024 * 1024 - 512) * 3) // 4)
+# Raw bytes per multipart clipboard message, sized for latency rather than
+# capacity: a chunk is the unit at which the audio and input sharing the socket
+# can overtake a transfer. A multiple of 3, so chunks concatenate as base64.
+CLIPBOARD_CHUNK_SIZE = 16 * 1024 // 3 * 3
 
 # Mouse back/forward buttons are injected as Alt+Left / Alt+Right.
 KEYSYM_ALT_L = 0xFFE9
@@ -3392,6 +3503,10 @@ class WebRTCInput:
             injection (the KWin route), serialized so one
             save/write/paste/restore cycle finishes before the next, with a
             reentrancy latch so the paste chord's own key path cannot recurse.
+        _clipboard_self_write: Bytes this server last wrote to the session
+            clipboard, pending the one selection-change edge that write
+            raises. Spent there, so a later edge carrying them is a copy
+            someone made rather than the write coming back.
         _clipboard_last_bytes: Change-detection baseline shared by the monitor
             and write_clipboard: content this server just wrote is never
             re-broadcast (client/server echo loop), and the baseline survives
@@ -3583,6 +3698,7 @@ class WebRTCInput:
         self._clipboard_inject_lock = asyncio.Lock()
         self._clipboard_inject_active = False
         self._clipboard_last_bytes = None
+        self._clipboard_self_write = None
         self._x11_clipboard_monitor = None
         self._x11_monitor_retry_at = 0.0
         self._x11_monitor_unavail_logged = False
@@ -5920,6 +6036,7 @@ class WebRTCInput:
             return True
         input_bytes = data if isinstance(data, bytes) else data.encode('utf-8')
         self._clipboard_last_bytes = input_bytes
+        self._clipboard_self_write = input_bytes
 
         if self.is_wayland:
             if not self._has_separate_app_compositor():
@@ -6207,16 +6324,21 @@ class WebRTCInput:
         wl_native_queue = (self._arm_wayland_native_clipboard()
                            if self.is_wayland and not self._has_separate_app_compositor()
                            else None)
+        # Registering the callback stages the current selection, so the first
+        # delivery after an arm is not a copy anyone made.
+        wl_native_armed = wl_native_queue is not None
         wl_native_item = None
         app_watch_queue = None
         app_watch_display = None
         # Primed so the first pass publishes the current content once.
         first_pass = True
         had_consumers = False
+        reread_pending = 0
         try:
             while self.clipboard_running:
                 try:
                     wl_native_item = None
+                    from_edge = False
                     if self.is_wayland and self._has_separate_app_compositor():
                         if x11_monitor is not None:
                             # A nested session compositor appeared: its XWM bridges
@@ -6236,6 +6358,7 @@ class WebRTCInput:
                         # Direct mode reached only now (a nested compositor died
                         # or never appeared): arm the compositor callback late.
                         wl_native_queue = self._arm_wayland_native_clipboard()
+                        wl_native_armed = wl_native_queue is not None
                     if self.is_wayland and x11_monitor is None:
                         # An X11 desktop's Xwayland comes up after its compositor;
                         # watched from the moment the server answers.
@@ -6243,6 +6366,13 @@ class WebRTCInput:
                     if first_pass:
                         changed = True
                         first_pass = False
+                    elif reread_pending:
+                        # A change edge whose read came back empty: the new owner
+                        # had not settled. Dropping it loses that copy until the
+                        # user makes another.
+                        reread_pending -= 1
+                        await asyncio.sleep(_CLIPBOARD_REREAD_DELAY_S)
+                        changed = True
                     elif x11_monitor is not None:
                         if not x11_monitor.alive():
                             # Rebuilt in place so outbound clipboard heals on its own
@@ -6264,8 +6394,10 @@ class WebRTCInput:
                         elif wl_native_queue is not None:
                             changed, wl_native_item = await self._wait_x11_or_compositor_change(
                                 x11_monitor, wl_native_queue, 2.0)
+                            from_edge = changed and wl_native_item is None
                         else:
                             changed = await x11_monitor.wait_change(2.0)
+                            from_edge = changed
                     elif wl_native_queue is not None and not self._has_separate_app_compositor():
                         # Not re-armed on idle: re-registering would stage a full
                         # selection read every tick.
@@ -6278,6 +6410,7 @@ class WebRTCInput:
                         try:
                             await asyncio.wait_for(app_watch_queue.get(), 2.0)
                             changed = True
+                            from_edge = True
                         except asyncio.TimeoutError:
                             changed = False
                             # A watch on a dead compositor never fires again; a dead
@@ -6300,6 +6433,13 @@ class WebRTCInput:
                         x11_monitor = await self._ensure_x11_clipboard_monitor_async()
                         await asyncio.sleep(0.5)
                         changed = True
+
+                    # Taken here, not at the comparison: a delivery dropped
+                    # for want of consumers still spends the arm's staged read.
+                    if wl_native_item is not None:
+                        wl_native_staged, wl_native_armed = wl_native_armed, False
+                    else:
+                        wl_native_staged = False
 
                     has_consumers = self._clipboard_has_consumers()
                     if has_consumers and not had_consumers:
@@ -6330,7 +6470,28 @@ class WebRTCInput:
                         curr_data_bytes = None
                     else:
                         curr_data_bytes = curr_data.encode('utf-8') if isinstance(curr_data, str) else curr_data
-                    if curr_data_bytes is not None and curr_data_bytes != self._clipboard_last_bytes:
+                    if curr_data_bytes is None and from_edge:
+                        reread_pending = _CLIPBOARD_REREAD_ATTEMPTS
+                    # The baseline exists to swallow this server's own write
+                    # coming back. A delivery that is neither that write nor an
+                    # arm's staged read is a copy someone made, and a client
+                    # whose first attempt at those bytes failed is waiting for
+                    # it -- but only the rungs that can tell the two apart say
+                    # so, since a poll has nothing but the bytes to go on.
+                    if wl_native_item is not None:
+                        recopied = not wl_native_staged
+                    elif x11_monitor is not None:
+                        recopied = from_edge and not x11_monitor.owns_selection()
+                    elif from_edge:
+                        # A watch reports this server's own write back as a
+                        # selection change like any other, so that write spends
+                        # one edge and every later one is someone's copy.
+                        recopied = curr_data_bytes != self._clipboard_self_write
+                        self._clipboard_self_write = None
+                    else:
+                        recopied = False
+                    if curr_data_bytes is not None and (
+                            recopied or curr_data_bytes != self._clipboard_last_bytes):
                         logger_webrtc_input.info(f"Clipboard changed. Sending content ({curr_mime})")
                         self._clipboard_last_bytes = curr_data_bytes
                         await self.on_clipboard_read(curr_data, curr_mime)

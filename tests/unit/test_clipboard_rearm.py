@@ -5,9 +5,12 @@ pixelflux keeps the clipboard callback across capture stops and starts, and
 every set_clipboard_callback stages a fresh read of the whole current
 selection. The monitor loop must therefore register it once per monitor
 start — not on every idle timeout, which re-read and re-delivered a large
-copied image every two seconds — and an unchanged selection the compositor
-hands over again must not be re-broadcast. A backend that is not up yet is
-retried per tick with the failure said once.
+copied image every two seconds — and that staged read must not be broadcast as
+a copy. Every other delivery is one: the compositor hands the selection over
+when an application offers it, so identical bytes are the user copying the
+same thing again, which a client that failed to apply the first one is waiting
+for. A backend that is not up yet is retried per tick with the failure said
+once.
 """
 import asyncio
 import logging
@@ -135,19 +138,19 @@ async def main() -> None:
     check("idle ticks do not re-read the selection", comp.reads == 1, str(comp.reads))
     check("idle ticks do not re-send", h.sent == [("one", "text/plain")], str(h.sent))
 
-    # An unchanged selection handed over again is not re-broadcast.
+    # Handed over again outside an arm: the same thing copied again.
     comp._deliver_current()
     await asyncio.sleep(0.5)
-    check("the same selection delivered again is not re-sent",
-          h.sent == [("one", "text/plain")], str(h.sent))
+    check("the same selection handed over again reaches the clients",
+          h.sent == [("one", "text/plain"), ("one", "text/plain")], str(h.sent))
     image = bytes(range(256)) * (3 * 1024 * 4)
     comp.copy("image/png", image)
     await asyncio.sleep(0.8)
-    check("a large image is sent once", h.sent[1:] == [(image, "image/png")], str(len(h.sent)))
+    check("a large image is sent once", h.sent[2:] == [(image, "image/png")], str(len(h.sent)))
     comp._deliver_current()
     await asyncio.sleep(2.6)
-    check("re-delivered image is not re-sent and nothing re-arms",
-          len(h.sent) == 2 and len(comp.arms) == 1, f"sent={len(h.sent)} arms={len(comp.arms)}")
+    check("a re-copied image reaches the clients without a re-arm",
+          len(h.sent) == 4 and len(comp.arms) == 1, f"sent={len(h.sent)} arms={len(comp.arms)}")
     reads_before = comp.reads
     data, mime = await h.read_clipboard(use_binary=True)
     check("an on-demand read is served from the delivered cache, without a compositor read",
@@ -161,7 +164,7 @@ async def main() -> None:
     await asyncio.sleep(0.6)
     check("a restarted monitor registers once more", len(comp.arms) == 2, str(len(comp.arms)))
     check("the re-staged read of the unchanged selection is not re-sent",
-          len(h.sent) == 2, str(len(h.sent)))
+          len(h.sent) == 4, str(len(h.sent)))
     await stop_monitor(h, task)
 
     # The backend not up yet: retried per tick, said once.
