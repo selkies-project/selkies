@@ -5,17 +5,20 @@ The access log must not carry the query string (the secure-mode session token
 rides the data WebSocket URL as a query parameter), the mode-switch POST must be
 held to the same Origin rule as the WebSocket upgrades unless the Bearer master
 token authenticates it, a secure-mode session token is looked up in constant
-time, and the MK_ACCESS verdict a websockets client is told on connect matches
-the one WebRTC pushes at channel open (a viewer additionally needs collab).
+time, the MK_ACCESS verdict a websockets client is told on connect matches
+the one WebRTC pushes at channel open (a viewer additionally needs collab), and
+a client's gzip frame cannot inflate past the per-message ceiling.
 """
 import asyncio
 import base64
+import gzip
 import json
 import logging
 import os
 import subprocess
 import sys
 import tempfile
+import zlib
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
@@ -24,6 +27,7 @@ sys.path.insert(0, os.path.join(REPO, "src"))
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request  # noqa: E402
 
+from selkies.settings import WS_MAX_MESSAGE_BYTES, inflate_gz_bounded  # noqa: E402
 from selkies.stream_server import CentralizedStreamServer, PathOnlyAccessLogger  # noqa: E402
 
 passed = failed = 0
@@ -231,10 +235,46 @@ print(json.dumps(out))
               got.get("ctrl_no_mk") is True and got.get("ctrl_outranked") is False, got)
 
 
+def gz_bomb_cases() -> None:
+    """A 0x05 frame inflates only up to the ceiling a TEXT message could reach."""
+    ceiling = WS_MAX_MESSAGE_BYTES
+    text = "x" * 4096
+    check("a well-formed frame inflates to its text",
+          inflate_gz_bounded(gzip.compress(text.encode())) == text)
+
+    # ~1000x expansion from a frame small enough to pass every transport limit.
+    bomb = gzip.compress(b"\0" * (ceiling + 1))
+    check("a frame that inflates past the ceiling is refused",
+          _raises(ValueError, bomb), f"{len(bomb)} compressed bytes")
+    check("the ceiling is not reached by the frame's own size", len(bomb) < ceiling)
+
+    exact = gzip.compress(b"\0" * ceiling)
+    got = inflate_gz_bounded(exact)
+    check("a frame right at the ceiling is kept", len(got) == ceiling, len(got))
+
+    check("a truncated stream is refused",
+          _raises(ValueError, gzip.compress(text.encode())[:-4]))
+    check("a non-gzip payload is refused", _raises(zlib.error, b"not gzip at all"))
+    check("invalid UTF-8 is refused",
+          _raises(UnicodeDecodeError, gzip.compress(b"\xff\xfe")))
+
+
+def _raises(exc, payload: bytes) -> bool:
+    """Whether inflating `payload` raises `exc`."""
+    try:
+        inflate_gz_bounded(payload)
+    except exc:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def main() -> bool:
     asyncio.run(access_log_cases())
     asyncio.run(switch_origin_cases())
     mk_verdict_cases()
+    gz_bomb_cases()
     print(f"[control-plane] {passed}/{passed + failed} passed", flush=True)
     return failed == 0
 
