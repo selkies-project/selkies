@@ -26,6 +26,22 @@
  */
 
 /**
+ * A payload the clipboard worker has already digested, standing in for its
+ * bytes wherever a signature is taken.
+ *
+ * The worker walks every byte of a clipboard payload anyway, to decode or
+ * encode it, and digests it on the way through; passing the result here is
+ * what keeps the page from running the same per-byte loop over a payload of
+ * any size, several times per transfer.
+ * @param {number} byteLength Size of the payload.
+ * @param {number} hash Its digest, seeded and computed as `hashBytes` does.
+ * @returns {{__clipDigest: true, byteLength: number, hash: number}}
+ */
+export function digestedPayload(byteLength, hash) {
+    return { __clipDigest: true, byteLength, hash };
+}
+
+/**
  * Re-encodes a raster blob as PNG.
  *
  * Chromium's async clipboard accepts only `image/png` on write, but a source
@@ -67,15 +83,29 @@ export function localClipboardBlocker() {
 }
 
 /**
- * Writes a server image to the local clipboard, PNG-normalized through
- * `reencodeBlobAsPng`.
+ * Writes a server image to the local clipboard, PNG-normalized.
+ *
+ * The re-encode is handed to `reencode` when the caller has a worker to run it
+ * on, since decoding and re-encoding a large image costs the better part of a
+ * second on the thread that also presents video and dispatches input. The
+ * ClipboardItem takes the promise rather than the finished blob, so the write
+ * is issued while the gesture that permits it is still current however long
+ * the encode runs.
  * @param {Blob} blob The image.
  * @param {string} mime Its type.
+ * @param {((blob: Blob) => Promise<Blob>)=} reencode Off-thread re-encoder;
+ *     the page's own canvas is used when it is absent or fails.
  * @throws When the type is undecodable or the clipboard write fails.
  */
-export async function writeImageToLocalClipboard(blob, mime) {
-    const outBlob = mime === 'image/png' ? blob : await reencodeBlobAsPng(blob);
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': outBlob })]);
+export async function writeImageToLocalClipboard(blob, mime, reencode) {
+    if (mime === 'image/png') {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        return;
+    }
+    const png = reencode
+        ? reencode(blob).catch(() => reencodeBlobAsPng(blob))
+        : reencodeBlobAsPng(blob);
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
 }
 
 /**
@@ -127,9 +157,10 @@ export async function readLocalClipboard(binaryEnabled) {
 /**
  * @typedef {object} MultipartClipboardState
  * @property {(mime: string, total: number) => void} begin Arms a transfer.
- * @property {(b64: string) => void} push Accumulates one base64 chunk.
- * @property {() => ({base64: string, mimeType: string, totalSize: number}|null)} assemble
- *     Joins the chunks and resets; `null` when no transfer is in progress.
+ * @property {(b64: string) => void} push Hands one base64 chunk to the worker.
+ * @property {() => Promise<{result: *, mimeType: string, byteLength: number}>} finish
+ *     Resolves with the decoded payload and resets; rejects when no transfer
+ *     is in progress.
  * @property {() => void} reset Drops the transfer.
  * @property {boolean} inProgress
  * @property {string|null} mimeType
@@ -140,15 +171,19 @@ export async function readLocalClipboard(binaryEnabled) {
 /**
  * Multipart server-to-client clipboard download state.
  *
- * The decoded byte count is tracked incrementally from the base64 lengths, so
- * nothing decodes on the main thread until the caller assembles. A truncated
- * stream must never be delivered as content: callers compare `receivedSize`
- * against `totalSize` before assembling, or the decoded byte length after,
- * and discard on a mismatch.
+ * Chunks go straight to the worker as they arrive and the decoded byte count
+ * is tracked from their base64 lengths, so a multi-MB clipboard is never held
+ * on the main thread, let alone joined into one string there and copied again
+ * into the message carrying it off. A truncated stream must never be
+ * delivered as content: callers compare `receivedSize` against `totalSize`
+ * before finishing, or the decoded byte length after, and discard on a
+ * mismatch.
+ * @param {(mime: string) => {push: (b64: string) => void, finish: () => Promise<*>, abort: () => void}} openStream
+ *     Opens the worker-side accumulation for one transfer.
  * @returns {MultipartClipboardState}
  */
-export function createMultipartClipboardState() {
-    let chunks = [];
+export function createMultipartClipboardState(openStream) {
+    let stream = null;
     let mimeType = null;
     let totalSize = 0;
     let receivedSize = 0;
@@ -160,31 +195,36 @@ export function createMultipartClipboardState() {
         return (b64.length / 4) * 3 - pad;
     }
 
+    function clear() {
+        stream = null;
+        mimeType = null;
+        totalSize = 0;
+        receivedSize = 0;
+        inProgress = false;
+    }
+
     return {
         begin(mime, total) {
-            chunks = [];
+            this.reset();
             mimeType = mime;
             totalSize = total;
-            receivedSize = 0;
+            stream = openStream(mime);
             inProgress = true;
         },
         push(b64) {
             if (!inProgress) return;
-            chunks.push(b64);
+            stream.push(b64);
             receivedSize += base64DecodedSize(b64);
         },
-        assemble() {
-            if (!inProgress) return null;
-            const result = { base64: chunks.join(''), mimeType, totalSize };
-            this.reset();
-            return result;
+        finish() {
+            if (!inProgress) return Promise.reject(new Error('no transfer in progress'));
+            const pending = stream.finish();
+            clear();
+            return pending;
         },
         reset() {
-            chunks = [];
-            mimeType = null;
-            totalSize = 0;
-            receivedSize = 0;
-            inProgress = false;
+            if (stream) stream.abort();
+            clear();
         },
         get inProgress() { return inProgress; },
         get mimeType() { return mimeType; },
@@ -239,9 +279,18 @@ export function createTaggedClipboardFetch() {
 }
 
 /**
+ * How long a push the user asked for keeps precedence over a focus read once
+ * it has settled: long enough to cover the refocus the file picker raises as
+ * it closes, far too short to contain a trip to another window and back.
+ */
+const EXPLICIT_PRECEDENCE_MS = 1000;
+
+/**
  * @typedef {object} LocalClipboardSender
  * @property {() => Promise<void>} readAndSend Reads the local clipboard and
  *     pushes any content to the server.
+ * @property {(data: string|ArrayBuffer|Blob, mime?: string, onSkip?: Function) => Promise<void>} sendExplicit
+ *     Pushes content the user named, outranking a concurrent `readAndSend`.
  * @property {() => Promise<void>} maybeInitial The connect-time one-shot send.
  * @property {() => (Promise<void>|null)} getSendInFlight The send the
  *     paste-ordering hold awaits, or `null`.
@@ -255,13 +304,21 @@ export function createTaggedClipboardFetch() {
  * gets no `focus` event after connect and would otherwise leave the server on
  * its stale clipboard until the first alt-tab; it runs only when clipboard
  * read is already granted, since it must never raise a prompt at load.
+ *
+ * `sendExplicit` carries the dashboard's own pushes -- the clipboard box and
+ * the image upload -- and outranks a read while it runs and briefly after:
+ * choosing a file blurs the page and refocuses it, and the read that refocus
+ * fires would put the local clipboard straight back over the upload. It reads
+ * a Blob itself, so the push is on record from the call rather than from
+ * whenever its bytes arrive; a copy made later reaches the session on the next
+ * focus or paste.
  * @param {object} hooks
  * @param {boolean} hooks.isChromium Engine flag.
  * @param {() => boolean} hooks.isSharedMode Viewer sessions never send.
  * @param {() => boolean} hooks.canSync Clipboard sync enabled.
  * @param {() => boolean} hooks.canRead Local-to-server direction enabled.
  * @param {() => boolean} hooks.binaryEnabled Whether images are sent.
- * @param {(data: string|ArrayBuffer, mime?: string) => Promise<void>} hooks.sendClipboardData
+ * @param {(data: string|ArrayBuffer, mime?: string, onSkip?: Function) => Promise<void>} hooks.sendClipboardData
  *     Transport send.
  * @param {boolean} [hooks.dedupeText] Suppresses re-sending unchanged text;
  *     the WebRTC core's behavior, while the WebSocket core sends per event
@@ -283,6 +340,27 @@ export function createLocalClipboardSender({
     let sendInFlight = null;
     let lastText = null;
     let initialAttempted = false;
+    let explicitRunning = 0;
+    let explicitSettledAt = -Infinity;
+
+    /** Whether a push the user asked for is still the session's latest word. */
+    function explicitHasPrecedence() {
+        return explicitRunning > 0
+            || Date.now() - explicitSettledAt < EXPLICIT_PRECEDENCE_MS;
+    }
+
+    /** Runs `work` as the send the paste-ordering hold waits on. */
+    async function asSendInFlight(work) {
+        let settle;
+        const tracker = new Promise((resolve) => { settle = resolve; });
+        sendInFlight = tracker;
+        try {
+            await work;
+        } finally {
+            settle();
+            if (sendInFlight === tracker) sendInFlight = null;
+        }
+    }
 
     /**
      * A server push still settling through the deferred writer must land
@@ -304,12 +382,15 @@ export function createLocalClipboardSender({
             }
         }
 
+        if (explicitHasPrecedence()) return;
+
         const work = (async () => {
             try {
                 const res = await readLocalClipboard(binaryEnabled());
-                if (!res) return;
+                if (!res || explicitHasPrecedence()) return;
                 if (res.kind === 'image') {
                     const arrayBuffer = await res.blob.arrayBuffer();
+                    if (explicitHasPrecedence()) return;
                     await sendClipboardData(arrayBuffer, res.mime);
                     console.log(`Sent binary clipboard: ${res.mime}, size: ${res.blob.size} bytes`);
                 } else if (!dedupeText || res.text !== lastText) {
@@ -324,15 +405,25 @@ export function createLocalClipboardSender({
                 }
             }
         })();
-        let settle;
-        const tracker = new Promise((resolve) => { settle = resolve; });
-        sendInFlight = tracker;
-        try {
-            await work;
-        } finally {
-            settle();
-            if (sendInFlight === tracker) sendInFlight = null;
-        }
+        await asSendInFlight(work);
+    }
+
+    /**
+     * Pushes content the user named. A Blob is read here, so the push counts
+     * from this call rather than from whenever its bytes arrive.
+     */
+    async function sendExplicit(data, mime, onSkip) {
+        explicitRunning++;
+        await asSendInFlight((async () => {
+            try {
+                const payload = (data && typeof data.arrayBuffer === 'function')
+                    ? await data.arrayBuffer() : data;
+                await sendClipboardData(payload, mime, onSkip);
+            } finally {
+                explicitRunning--;
+                explicitSettledAt = Date.now();
+            }
+        })());
     }
 
     async function maybeInitial() {
@@ -346,7 +437,7 @@ export function createLocalClipboardSender({
         } catch (_) { /* permission name unsupported (non-Chromium engines) */ }
     }
 
-    return { readAndSend, maybeInitial, getSendInFlight: () => sendInFlight };
+    return { readAndSend, sendExplicit, maybeInitial, getSendInFlight: () => sendInFlight };
 }
 
 /**
@@ -476,7 +567,8 @@ export function clipboardPreviewMessage(text) {
  * @property {(text?: string, blob?: Blob, mime?: string, bytes?: Uint8Array) => void} resolveServer
  *     Caches fresh server data and settles pending requests.
  * @property {() => Promise<void>} captureLocalImageSig Records the browser's
- *     re-encoded form of the image just written locally.
+ *     re-encoded form of the image just written locally, digesting it through
+ *     the worker where the caller supplied one.
  * @property {(wantBinary: boolean) => Promise<string|Blob>} request Requests
  *     the server clipboard.
  * @property {(textPromise: Promise<string>) => Promise<void>} copyViaExecCommand
@@ -507,7 +599,7 @@ export function clipboardPreviewMessage(text) {
  * @param {() => void} hooks.sendRequest Emits REQUEST_CLIPBOARD on the transport.
  * @returns {ClipboardSync}
  */
-export function createClipboardSync({ sendRequest }) {
+export function createClipboardSync({ sendRequest, digestBytes }) {
     let lastText = '';
     let lastBlob = null;
     let lastMime = 'text/plain';
@@ -537,6 +629,11 @@ export function createClipboardSync({ sendRequest }) {
             let h = 5381;
             for (let i = 0; i < data.length; i++) h = ((h << 5) + h + data.charCodeAt(i)) | 0;
             return { full: `t:${data.length}:${h}`, legacy: null };
+        }
+        if (data && data.__clipDigest) {
+            const dm = mime || '';
+            return { full: `b:${dm}:${data.byteLength}:${data.hash}`,
+                     legacy: `b:${dm}:${data.byteLength}` };
         }
         let parts = null;
         if (data instanceof Uint8Array) parts = [data];
@@ -618,7 +715,9 @@ export function createClipboardSync({ sendRequest }) {
                 const m = it.types.find((t) => t !== 'text/plain');
                 if (!m) continue;
                 const b = await it.getType(m);
-                const reencoded = sig(new Uint8Array(await b.arrayBuffer()), m);
+                const buf = await b.arrayBuffer();
+                const digest = digestBytes ? await digestBytes(buf) : null;
+                const reencoded = sig(digest || new Uint8Array(buf), m);
                 if (lastSyncedSig === anchor) {
                     lastReencodeSig = reencoded;
                 }

@@ -75,7 +75,7 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker } from "./lib/clipboard-sync.js";
+import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, writeImageToLocalClipboard, digestedPayload } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
@@ -350,6 +350,16 @@ export default function webrtc() {
 		const limit = nego > 0 ? Math.min(nego, 1024 * 1024) : 256 * 1024;
 		return limit - 512;
 	};
+	/**
+	 * Raw bytes per clipboard chunk, before base64 expansion, and the channel
+	 * backlog a transfer waits below before queueing the next.
+	 *
+	 * Sized for latency, not capacity: input shares this ordered channel and
+	 * the media streams share its bandwidth, so a transfer left to fill the
+	 * channel puts both behind it. A multiple of 3, to concatenate as base64.
+	 */
+	const CLIPBOARD_CHUNK_SIZE = 16383;
+	const CLIPBOARD_BACKLOG_BYTES = 64 * 1024;
 	const CLIENT_CONTROLLER = "controller";
 	const CLIENT_VIEWER = "viewer";
 
@@ -378,15 +388,28 @@ export default function webrtc() {
 	let force_aligned_resolution = false;
 
 	let enable_binary_clipboard = true;
-	/** Multipart download state and connect-time cache-only fetch tracking (`lib/clipboard-sync.js`). */
-	const multipartClipboard = createMultipartClipboardState();
 	let clipboardWorker = new ClipboardWorkerBridge();
+	/** Multipart download state and connect-time cache-only fetch tracking (`lib/clipboard-sync.js`). */
+	const multipartClipboard = createMultipartClipboardState(
+		(mime) => clipboardWorker.decodeStream(mime));
 	const taggedClipboardFetch = createTaggedClipboardFetch();
 	const armTaggedClipboardReply = () => taggedClipboardFetch.arm();
 	const consumeInitClipboardFetch = () => taggedClipboardFetch.consume();
 	/** Server-clipboard cache, change-only sync and copy request queue; the send hook late-binds `webrtc`. */
+	/**
+	 * PNG-normalizes an image on the worker, which is where the decode and
+	 * re-encode of a large one belong; the page's own canvas covers a worker
+	 * that cannot do it.
+	 */
+	const reencodePngOffThread = (blob) => clipboardWorker.reencodePng(blob)
+		.then((r) => r.result)
+		.catch(() => reencodeBlobAsPng(blob));
 	const clipboardSync = createClipboardSync({
-		sendRequest: () => webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD')
+		sendRequest: () => webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD'),
+		digestBytes: async (buf) => {
+			const { byteLength, hash } = await clipboardWorker.hashBytes(buf);
+			return digestedPayload(byteLength, hash);
+		}
 	});
 	/**
 	 * Retry queue for local clipboard writes of server pushes, which carry no
@@ -1490,8 +1513,7 @@ export default function webrtc() {
 					console.log("Shared mode: Clipboard write to server blocked.");
 					break;
 				}
-				const newClipboardText = message.text;
-				sendClipboardData(newClipboardText);
+				localClipboardSender.sendExplicit(message.text);
 				break;
 			case 'clipboardImageUpdate': {
 				// Every skip surfaces a notification: a dead click reads as a bug.
@@ -1508,15 +1530,14 @@ export default function webrtc() {
 					notifyClipboardImageSkip('image clipboard is disabled on the server (enable_binary_clipboard)', 'clipboardSkipBinaryDisabled');
 					break;
 				}
-				(async () => {
-					try {
-						const buf = await message.imageBlob.arrayBuffer();
-						await sendClipboardData(buf, message.imageBlob.type || 'image/png', notifyClipboardImageSkip);
-					} catch (e) {
-						console.warn('Failed to send uploaded clipboard image:', e);
-						notifyClipboardImageSkip('send failed: ' + e.message, 'clipboardSkipSendFailed');
-					}
-				})();
+				// Recorded here, not after the blob is read: the file picker's own
+				// refocus fires a clipboard read that must already see this push.
+				localClipboardSender.sendExplicit(
+					message.imageBlob, message.imageBlob.type || 'image/png', notifyClipboardImageSkip
+				).catch((e) => {
+					console.warn('Failed to send uploaded clipboard image:', e);
+					notifyClipboardImageSkip('send failed: ' + e.message, 'clipboardSkipSendFailed');
+				});
 				break;
 			}
 			case 'audioDeviceSelected':
@@ -1859,7 +1880,7 @@ export default function webrtc() {
 		canSync: () => clipboardStatus === "enabled" && !!window.clipboard_enabled,
 		canRead: () => !!clipboard_in_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
-		sendClipboardData: (data, mime) => sendClipboardData(data, mime),
+		sendClipboardData: (data, mime, onSkip) => sendClipboardData(data, mime, onSkip),
 		dedupeText: true,
 	});
 	const readLocalClipboardAndSend = () => localClipboardSender.readAndSend();
@@ -1993,11 +2014,6 @@ export default function webrtc() {
 			skip('not connected', 'clipboardSkipNotConnected');
 			return;
 		}
-		if (!clipboardSync.shouldSend(data, mimeType)) {
-			skip('already the current clipboard', 'clipboardSkipUnchanged');
-			return;
-		}
-
 		const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
 		let dataBytes;
 		if (isBinary) {
@@ -2006,15 +2022,31 @@ export default function webrtc() {
 			dataBytes = new TextEncoder().encode(data);
 			mimeType = 'text/plain';
 		}
+		// Binary content is compared by the digest the worker takes, so the page
+		// does not walk a payload of any size to decide whether to send it.
+		let subject = data;
+		if (isBinary) {
+			try {
+				const { byteLength, hash } = await clipboardWorker.hashBytes(dataBytes.slice().buffer);
+				subject = digestedPayload(byteLength, hash);
+			} catch (_) { /* the worker is gone; the page's own hash still decides */ }
+		}
+		if (!clipboardSync.shouldSend(subject, mimeType)) {
+			skip('already the current clipboard', 'clipboardSkipUnchanged');
+			return;
+		}
 		try {
 			await sendClipboardChunked(dataBytes, mimeType, {
 				worker: clipboardWorker,
 				send: (m) => webrtc.sendDataChannelMessage(m),
 				waitDrain: async () => {
-					if (webrtc.waitForDataChannelDrain) await webrtc.waitForDataChannelDrain(1024 * 1024);
+					if (webrtc.waitForDataChannelDrain) {
+						await webrtc.waitForDataChannelDrain(CLIPBOARD_BACKLOG_BYTES);
+					}
 					return true;
 				},
-				chunkRawBytes: Math.max(1, Math.floor(dcMessageBudget() * 3 / 4)),
+				chunkRawBytes: Math.min(CLIPBOARD_CHUNK_SIZE,
+					Math.max(1, Math.floor(dcMessageBudget() * 3 / 4))),
 				nextTid: () => ++__clipboardTransferCounter,
 			});
 			// A closed channel drops sends quietly, so a mid-transfer death throws nothing.
@@ -2022,7 +2054,7 @@ export default function webrtc() {
 				skip('connection lost during send', 'clipboardSkipSendFailed');
 				return;
 			}
-			clipboardSync.markSynced(data, mimeType);
+			clipboardSync.markSynced(subject, mimeType);
 		} catch (err) {
 			console.error("Error sending clipboard data:", err);
 			skip('send failed: ' + (err && err.message ? err.message : err),
@@ -2059,7 +2091,7 @@ export default function webrtc() {
 					blob = new Blob([result], { type: mimeType });
 					if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
 						// ClipboardItem accepts only image/png on write.
-						blob = await reencodeBlobAsPng(blob);
+						blob = await reencodePngOffThread(blob);
 						mimeType = 'image/png';
 					}
 				} catch (err) {
@@ -2079,13 +2111,12 @@ export default function webrtc() {
 				if (!multipartClipboard.inProgress) {
 					return { isMultipart: false, mimeType, content: null };
 				}
-				const assembled = multipartClipboard.assemble();
-				mimeType = assembled.mimeType;
-				const fullBase64 = assembled.base64;
+				mimeType = multipartClipboard.mimeType;
+				const declared = multipartClipboard.totalSize;
 				try {
-					const { result, byteLength } = await clipboardWorker.decode(fullBase64, mimeType);
-					if (byteLength !== assembled.totalSize) {
-						console.warn(`Size mismatch! Expected ${assembled.totalSize}, got ${byteLength}`);
+					const { result, byteLength } = await multipartClipboard.finish();
+					if (byteLength !== declared) {
+						console.warn(`Size mismatch! Expected ${declared}, got ${byteLength}`);
 						return { isMultipart: false, mimeType, content: null };
 					}
 					if (mimeType === 'text/plain') {
@@ -2095,7 +2126,7 @@ export default function webrtc() {
 					} else {
 						let blob = new Blob([result], { type: mimeType });
 						if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
-							blob = await reencodeBlobAsPng(blob);
+							blob = await reencodePngOffThread(blob);
 							mimeType = 'image/png';
 						}
 						content = new ClipboardItem({ [mimeType]: blob });
@@ -2512,9 +2543,10 @@ export default function webrtc() {
 					let isFreshImage = true;
 					try {
 						const b = await content.getType(mimeType);
-						const bytes = new Uint8Array(await b.arrayBuffer());
-						isFreshImage = clipboardSync.shouldSend(bytes, mimeType);
-						clipboardSync.resolveServer(undefined, b, mimeType, bytes);
+						const { byteLength, hash } = await clipboardWorker.hashBytes(await b.arrayBuffer());
+						const digest = digestedPayload(byteLength, hash);
+						isFreshImage = clipboardSync.shouldSend(digest, mimeType);
+						clipboardSync.resolveServer(undefined, b, mimeType, digest);
 					} catch (_) {}
 					if (canWriteLocal && isFreshImage) {
 						deferredClipboardWriter.write(

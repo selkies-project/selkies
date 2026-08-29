@@ -104,7 +104,8 @@ import {
   writeImageToLocalClipboard,
   localClipboardBlocker,
   createDeferredClipboardWriter,
-  clipboardPreviewMessage
+  clipboardPreviewMessage,
+  digestedPayload
 } from './lib/clipboard-sync.js';
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js';
 import {
@@ -355,21 +356,18 @@ const BACKPRESSURE_INTERVAL_MS = 50;
 /** How often the socket worker re-reports a draining send buffer. */
 const BUFFERED_DRAIN_MS = 20;
 /**
- * The server's WebSocket receive ceiling; aiohttp's stock 4 MiB until the
- * `ws_max_message_bytes` server setting advertises the real one.
+ * Raw bytes per clipboard chunk, before base64 expansion, and the socket
+ * backlog a transfer waits below before queueing the next.
+ *
+ * Sized for latency, not capacity: the microphone and every input event share
+ * this one ordered socket, and together these bound what they can find queued
+ * ahead of them. Well under any server receive ceiling, so the advertised one
+ * is not consulted. The chunk is a multiple of 3, to concatenate as base64.
  */
-let wsMaxMessageBytes = 4 * 1024 * 1024;
-/** Raw bytes per clipboard chunk, before base64 expansion, sized to fill one message. */
-let CLIPBOARD_CHUNK_SIZE = ((wsMaxMessageBytes - 4096) * 3) >> 2;
-/**
- * Adopts the server's advertised receive ceiling and resizes clipboard chunks to it.
- * @param {number} bytes
- */
-const applyWsMessageBudget = (bytes) => {
-  if (!Number.isFinite(bytes) || bytes < 65536) return;
-  wsMaxMessageBytes = bytes;
-  CLIPBOARD_CHUNK_SIZE = ((wsMaxMessageBytes - 4096) * 3) >> 2;
-};
+const CLIPBOARD_CHUNK_SIZE = 16383;
+const CLIPBOARD_BACKLOG_BYTES = 64 * 1024;
+/** Backlog re-check interval; the socket worker re-reports as the socket drains. */
+const CLIPBOARD_BACKLOG_POLL_MS = 20;
 window.manual_resolution = false;
 let manual_width = null;
 let manual_height = null;
@@ -466,6 +464,12 @@ function setRealViewportHeight() {
 /** One id per multipart clipboard transfer. */
 let clipboardTransferCounter = 0;
 const clipboardWorker = new ClipboardWorkerBridge();
+/**
+ * PNG-normalizes an image on the worker, which is where the decode and
+ * re-encode of a large one belong; the page's own canvas covers a worker that
+ * cannot do it.
+ */
+const reencodePngOffThread = (blob) => clipboardWorker.reencodePng(blob).then((r) => r.result);
 let enable_binary_clipboard = true;
 /**
  * Server-clipboard cache, change-only sync and Ctrl/Cmd+C request queue
@@ -476,6 +480,10 @@ const clipboardSync = createClipboardSync({
         if (websocket && websocket.readyState === WebSocket.OPEN) {
             websocket.send('REQUEST_CLIPBOARD');
         }
+    },
+    digestBytes: async (buf) => {
+        const { byteLength, hash } = await clipboardWorker.hashBytes(buf);
+        return digestedPayload(byteLength, hash);
     }
 });
 /**
@@ -484,10 +492,29 @@ const clipboardSync = createClipboardSync({
  */
 const deferredClipboardWriter = createDeferredClipboardWriter();
 /** Multipart download state and connect-time cache-only fetch (`cr`) tracking, shared with the WebRTC core. */
-const multipartClipboard = createMultipartClipboardState();
+const multipartClipboard = createMultipartClipboardState(
+  (mime) => clipboardWorker.decodeStream(mime));
 const taggedClipboardFetch = createTaggedClipboardFetch();
 const armTaggedClipboardReply = () => taggedClipboardFetch.arm();
 const consumeInitClipboardFetch = () => taggedClipboardFetch.consume();
+/** Local-to-server clipboard sync, built with the connection; the dashboard's own pushes go through it. */
+let localClipboardSender = null;
+
+/**
+ * Sends content the user named (the clipboard box, the image upload) so it
+ * outranks the focus read. Refused before the connection builds the sender.
+ * @param {string|ArrayBuffer|Blob} data
+ * @param {string} [mime]
+ * @param {Function} [onSkip] Told why nothing was sent.
+ * @returns {Promise<void>}
+ */
+function sendExplicitClipboard(data, mime, onSkip) {
+  if (!localClipboardSender) {
+    if (onSkip) onSkip('not connected', 'clipboardSkipNotConnected');
+    return Promise.resolve();
+  }
+  return localClipboardSender.sendExplicit(data, mime, onSkip);
+}
 
 let detectedSharedModeType = null;
 let playerInputTargetIndex = 0;
@@ -3894,8 +3921,7 @@ function receiveMessage(event) {
         console.log("Shared mode: Clipboard write to server blocked.");
         break;
       }
-      const newClipboardText = message.text;
-      sendClipboardData(newClipboardText);
+      sendExplicitClipboard(message.text);
       break;
     case 'clipboardImageUpdate': {
       if (isSharedMode) {
@@ -3911,15 +3937,14 @@ function receiveMessage(event) {
         notifyClipboardImageSkip('image clipboard is disabled on the server (enable_binary_clipboard)', 'clipboardSkipBinaryDisabled');
         break;
       }
-      (async () => {
-        try {
-          const buf = await message.imageBlob.arrayBuffer();
-          await sendClipboardData(buf, message.imageBlob.type || 'image/png', notifyClipboardImageSkip);
-        } catch (e) {
-          console.warn('Failed to send uploaded clipboard image:', e);
-          notifyClipboardImageSkip('send failed: ' + e.message, 'clipboardSkipSendFailed');
-        }
-      })();
+      // Recorded here, not after the blob is read: the file picker's own
+      // refocus fires a clipboard read that must already see this push.
+      sendExplicitClipboard(
+        message.imageBlob, message.imageBlob.type || 'image/png', notifyClipboardImageSkip
+      ).catch((e) => {
+        console.warn('Failed to send uploaded clipboard image:', e);
+        notifyClipboardImageSkip('send failed: ' + e.message, 'clipboardSkipSendFailed');
+      });
       break;
     }
     case 'pipelineStatusUpdate':
@@ -4193,9 +4218,9 @@ function notifyClipboardImageWriteFailed(error) {
  * Sends local clipboard content to the server as a chunked transfer
  * (lib/clipboard-worker-bridge.js, the same wire protocol and worker offload
  * as the WebRTC core), gated on the clipboard-in setting and the change-only
- * sync. A bufferedAmount backpressure gate keeps a burst from starving
- * uploads and input on the same socket; only a completed transfer marks the
- * content synced, so an aborted one stays re-sendable.
+ * sync. A bufferedAmount backpressure gate keeps a burst from starving the
+ * microphone and input on the same socket; only a completed transfer marks
+ * the content synced, so an aborted one stays re-sendable.
  * @param {string|ArrayBuffer|Uint8Array} data Text, or image bytes.
  * @param {string} [mimeType] Forced to `text/plain` for text.
  * @param {Function|null} [onSkip] Called with reason and code when nothing was sent.
@@ -4219,10 +4244,6 @@ async function sendClipboardData(data, mimeType = 'text/plain', onSkip = null) {
         skip('not connected', 'clipboardSkipNotConnected');
         return;
     }
-    if (!clipboardSync.shouldSend(data, mimeType)) {
-        skip('already the current clipboard', 'clipboardSkipUnchanged');
-        return;
-    }
     const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
     let dataBytes;
     if (isBinary) {
@@ -4231,13 +4252,26 @@ async function sendClipboardData(data, mimeType = 'text/plain', onSkip = null) {
         dataBytes = new TextEncoder().encode(data);
         mimeType = 'text/plain';
     }
+    // Binary content is compared by the digest the worker takes, so the page
+    // does not walk a payload of any size to decide whether to send it.
+    let subject = data;
+    if (isBinary) {
+        try {
+            const { byteLength, hash } = await clipboardWorker.hashBytes(dataBytes.slice().buffer);
+            subject = digestedPayload(byteLength, hash);
+        } catch (_) { /* the worker is gone; the page's own hash still decides */ }
+    }
+    if (!clipboardSync.shouldSend(subject, mimeType)) {
+        skip('already the current clipboard', 'clipboardSkipUnchanged');
+        return;
+    }
     let transferAborted = false;
     await sendClipboardChunked(dataBytes, mimeType, {
         worker: clipboardWorker,
         send: (m) => websocket.send(m),
         waitDrain: async () => {
-            while (websocket.bufferedAmount > 4 * 1024 * 1024) {
-                await new Promise(resolve => setTimeout(resolve, 50));
+            while (websocket.bufferedAmount > CLIPBOARD_BACKLOG_BYTES) {
+                await new Promise(resolve => setTimeout(resolve, CLIPBOARD_BACKLOG_POLL_MS));
                 if (websocket.readyState !== WebSocket.OPEN) {
                     transferAborted = true;
                     return false;
@@ -4249,7 +4283,7 @@ async function sendClipboardData(data, mimeType = 'text/plain', onSkip = null) {
         nextTid: () => ++clipboardTransferCounter,
     });
     if (!transferAborted && websocket.readyState === WebSocket.OPEN) {
-        clipboardSync.markSynced(data, mimeType);
+        clipboardSync.markSynced(subject, mimeType);
     } else {
         skip('connection lost during send', 'clipboardSkipSendFailed');
     }
@@ -4482,14 +4516,14 @@ function initWebsockets() {
   const pathname = getRoutePrefix() + '/';
 
   /** Focus and gesture local-to-server clipboard sync (lib/clipboard-sync.js); text is deduped server-side. */
-  const localClipboardSender = createLocalClipboardSender({
+  localClipboardSender = createLocalClipboardSender({
     isChromium,
     getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
     isSharedMode: () => isSharedMode,
     canSync: () => !!window.clipboard_enabled,
     canRead: () => !!clipboard_in_enabled,
     binaryEnabled: () => !!enable_binary_clipboard,
-    sendClipboardData: (data, mime) => sendClipboardData(data, mime),
+    sendClipboardData: (data, mime, onSkip) => sendClipboardData(data, mime, onSkip),
   });
   const readLocalClipboardAndSend = () => localClipboardSender.readAndSend();
   const maybeSendInitialClipboard = () => localClipboardSender.maybeInitial();
@@ -6434,8 +6468,6 @@ class WorkerWebSocket {
               if (typeof window['video_streaming_mode'] === 'boolean') {
                   video_streaming_mode = window['video_streaming_mode'];
               }
-              const wsMax = obj.settings && obj.settings.ws_max_message_bytes;
-              if (wsMax && typeof wsMax.value === 'number') applyWsMessageBudget(wsMax.value);
               // The server-advertised value, not window.command_enabled, which
               // for an unlocked bool keeps the client's persisted value.
               const ce = obj.settings && obj.settings.command_enabled;
@@ -6619,7 +6651,8 @@ class WorkerWebSocket {
         } else if (event.data.startsWith('clipboard_data,')) {
             if (multipartClipboard.inProgress) {
                 try {
-                    // Accumulated as base64; one worker decode at finish keeps the main thread clear.
+                    // Handed to the worker as it arrives, so the page never
+                    // holds the payload.
                     multipartClipboard.push(event.data.substring(15));
                 } catch (e) {
                     console.error('Error processing multi-part clipboard chunk:', e);
@@ -6636,8 +6669,8 @@ class WorkerWebSocket {
                     // Consumed before the async decode so message order still
                     // defines which payload settles the connect-time fetch.
                     const isInitClipboardFetch = consumeInitClipboardFetch();
-                    const { base64: fullBase64, mimeType: mpMime } = multipartClipboard.assemble();
-                    clipboardWorker.decode(fullBase64, mpMime).then(({ result }) => {
+                    const mpMime = multipartClipboard.mimeType;
+                    multipartClipboard.finish().then(({ result, hash, byteLength }) => {
                         if (mpMime === 'text/plain') {
                             const text = result;
                             // Checked before resolveServer records the signature.
@@ -6653,11 +6686,12 @@ class WorkerWebSocket {
                         } else if (clipboard_out_enabled && enable_binary_clipboard) {
                             const bytes = result;
                             const blob = new Blob([bytes], { type: mpMime });
-                            const isFreshContent = clipboardSync.shouldSend(new Uint8Array(bytes), mpMime);
-                            clipboardSync.resolveServer(undefined, blob, mpMime, bytes);
+                            const digest = digestedPayload(byteLength, hash);
+                            const isFreshContent = clipboardSync.shouldSend(digest, mpMime);
+                            clipboardSync.resolveServer(undefined, blob, mpMime, digest);
                             if (!isInitClipboardFetch && isFreshContent) {
                                 deferredClipboardWriter.write(
-                                    () => writeImageToLocalClipboard(blob, mpMime), {
+                                    () => writeImageToLocalClipboard(blob, mpMime, reencodePngOffThread), {
                                         onSuccess: () => {
                                             console.log(`Successfully wrote multi-part image (${mpMime}) from server to local clipboard.`);
                                             clipboardSync.captureLocalImageSig();
@@ -6692,15 +6726,16 @@ class WorkerWebSocket {
                 const base64Data = parts[2];
                 // Consumed before the async decode, which runs in the worker.
                 const isInitClipboardFetch = consumeInitClipboardFetch();
-                clipboardWorker.decode(base64Data, mimeType).then(({ result }) => {
+                clipboardWorker.decode(base64Data, mimeType).then(({ result, hash, byteLength }) => {
                     const bytes = result;
                     const blob = new Blob([bytes], { type: mimeType });
-                    const isFreshContent = clipboardSync.shouldSend(new Uint8Array(bytes), mimeType);
-                    clipboardSync.resolveServer(undefined, blob, mimeType, bytes);
+                    const digest = digestedPayload(byteLength, hash);
+                    const isFreshContent = clipboardSync.shouldSend(digest, mimeType);
+                    clipboardSync.resolveServer(undefined, blob, mimeType, digest);
                     if (isInitClipboardFetch) return;
                     if (!isFreshContent) return;
                     deferredClipboardWriter.write(
-                        () => writeImageToLocalClipboard(blob, mimeType), {
+                        () => writeImageToLocalClipboard(blob, mimeType, reencodePngOffThread), {
                             onSuccess: () => {
                                 console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
                                 clipboardSync.captureLocalImageSig();
