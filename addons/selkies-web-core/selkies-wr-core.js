@@ -794,9 +794,8 @@ export default function webrtc() {
 	 * with no stored pick is reported back as a change, so it is applied for
 	 * real: window state alone leaves runtime consumers on their defaults.
 	 * Ranged settings are parsed as floats: `"0.5"` read as an int is 0, out of
-	 * range, and wiped on every connect. Plain values (`audio_channels`,
-	 * `app_terminal`) configure pipelines rather than preferences and stay
-	 * runtime-only.
+	 * range, and wiped on every connect. Plain values (`audio_channels`)
+	 * configure pipelines rather than preferences and stay runtime-only.
 	 * @param {Object<string, object>} serverSettings The payload's per-key specs.
 	 * @returns {Object<string, *>} Corrections the server has to be told about.
 	 */

@@ -679,9 +679,6 @@ class WebRTCService(BaseStreamingService):
         if (isinstance(apps, dict) and apps.get("value")
                 and self.input_handler and not self.input_handler.apps_available()):
             payload["settings"]["ui_sidebar_show_apps"] = dict(apps, value=False)
-        terminal = self.input_handler.app_terminal() if self.input_handler else None
-        if terminal:
-            payload["settings"]["app_terminal"] = {"value": terminal}
         return payload
 
     def handle_data_channel_open(self, channel: Optional[Any] = None) -> None:

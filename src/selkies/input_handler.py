@@ -3085,28 +3085,6 @@ _command_watch_tasks: set = set()
 # Pids of the client-requested commands launched here and still running.
 _launched_command_pids: set = set()
 
-# How a terminal is told to run a command. A terminal's desktop entry does not
-# say, and there is no property to ask it for, which is why every launcher that
-# does this keeps a table; empty means it takes the command bare.
-TERMINAL_RUN_FLAGS = {
-    "st": "", "foot": "", "kitty": "", "xdg-terminal-exec": "",
-    "alacritty": "-e", "wezterm": "start --", "konsole": "-e",
-    "gnome-terminal": "--", "xfce4-terminal": "-x", "mate-terminal": "-x",
-    "lxterminal": "-e", "urxvt": "-e", "x-terminal-emulator": "-e", "xterm": "-e",
-}
-# What an unlisted terminal is assumed to take, the flag all but a handful use.
-DEFAULT_TERMINAL_RUN_FLAG = "-e"
-# What already answers this question on a system, in the order that respects
-# whoever configured it: the freedesktop resolver, then the alternatives entry a
-# distribution maintains for exactly this.
-TERMINAL_RESOLVERS = ("xdg-terminal-exec", "x-terminal-emulator")
-# Last resort, when none of them is installed: the session's own terminal first,
-# then what a desktop is likely to have.
-_APP_TERMINALS = ("kitty", "alacritty", "wezterm", "konsole", "gnome-terminal",
-                  "xfce4-terminal", "mate-terminal", "lxterminal", "urxvt", "xterm")
-X11_APP_TERMINALS = ("st",) + _APP_TERMINALS
-WAYLAND_APP_TERMINALS = ("foot", "st") + _APP_TERMINALS
-
 # The wrapper the apps panel drives, and the argument that asks it whether
 # this session can run apps at all.
 APP_RUNNER = "selkies-proot"
@@ -3288,28 +3266,6 @@ def session_environment(x11_display: Optional[str], wayland_display: Optional[st
         if dbus_address_live(env["DBUS_SESSION_BUS_ADDRESS"]):
             return {k: env[k] for k in SESSION_ENV_ADOPTED if env.get(k)}
     return {}
-
-
-def terminal_command(name: str) -> str:
-    """`name` plus the flag it takes a command after.
-
-    Args:
-        name: A terminal's command name or path.
-
-    Returns:
-        The launch prefix, e.g. `xterm -e` or a bare `foot`.
-    """
-    flag = TERMINAL_RUN_FLAGS.get(os.path.basename(name), DEFAULT_TERMINAL_RUN_FLAG)
-    return f"{name} {flag}".strip()
-
-
-def first_installed(commands: Iterable[str]) -> Optional[str]:
-    """The first command prefix whose executable (its first word) is installed."""
-    for command in commands:
-        words = command.split()
-        if words and shutil.which(words[0]):
-            return command
-    return None
 
 
 # What a client command's output leaves behind: the last lines, one line's
@@ -5538,31 +5494,6 @@ class WebRTCInput:
         for name, value in adopted.items():
             env.setdefault(name, value)
         return env
-
-    def app_terminal(self) -> Optional[str]:
-        """Terminal command prefix clients launch proot-apps under (the terminal
-        plus its run-this flag, e.g. `xterm -e`), published as app_terminal.
-
-        Asked in the order that leaves the answer to whoever already has one:
-        the `app_terminal` setting, then `TERMINAL` as any other launcher reads
-        it, then the resolvers a system provides for this question —
-        `xdg-terminal-exec` and a distribution's `x-terminal-emulator`. Only
-        when none of them answers does it fall to the first installed terminal
-        for the windowing system the session's applications use — foot on a
-        Wayland session, st on an X11 one.
-        """
-        configured = str(getattr(settings, "app_terminal", "") or "").strip()
-        if configured:
-            return configured
-        named = os.environ.get("TERMINAL", "").strip()
-        if named and shutil.which(named.split()[0]):
-            return named if len(named.split()) > 1 else terminal_command(named)
-        resolver = first_installed(terminal_command(name) for name in TERMINAL_RESOLVERS)
-        if resolver:
-            return resolver
-        session = self.app_session()
-        names = WAYLAND_APP_TERMINALS if session["type"] == "wayland" else X11_APP_TERMINALS
-        return first_installed(terminal_command(name) for name in names)
 
     def apps_available(self) -> bool:
         """Whether the apps panel has a runner it could work through here.

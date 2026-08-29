@@ -2091,9 +2091,8 @@ class DataStreamingServer(BaseStreamingService):
         pick, else the session default a fresh capture would use): clients key
         their wire-format demux off this value and drop every chunk of any other
         format. Also carried: `ws_max_message_bytes` (transport capacity, so
-        the client sizes multipart chunks to the whole frame), `app_terminal`
-        (the terminal the apps panel launches in, absent when none is
-        installed), and `second_screen` and `ui_sidebar_show_apps` as effective
+        the client sizes multipart chunks to the whole frame), and
+        `second_screen` and `ui_sidebar_show_apps` as effective
         availability — the admin flag and what the backend can actually do — so
         dashboards never offer a display the server would immediately kill, nor
         an apps panel whose every button would fail.
@@ -2104,9 +2103,6 @@ class DataStreamingServer(BaseStreamingService):
             payload['encoder'] = dict(payload['encoder'])
             payload['encoder']['value'] = live_encoder
         payload['ws_max_message_bytes'] = {"value": WS_MAX_MESSAGE_BYTES}
-        terminal = self.input_handler.app_terminal() if self.input_handler else None
-        if terminal:
-            payload['app_terminal'] = {"value": terminal}
         available, _ = self._second_screen_availability()
         entry = payload.get('second_screen')
         if isinstance(entry, dict) and entry.get('value') and not available:
