@@ -106,7 +106,12 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # image or a downloaded file arrives as (WebP, TIFF, AVIF, HEIF) needs
         # these, and without them lximage-qt and the file manager show nothing
         qt6-image-formats-plugins \
-        kimageformat6-plugins && \
+        kimageformat6-plugins \
+        # proot-apps refreshes the icon cache of the per-user theme it installs
+        # into by calling gtk-update-icon-cache, which nothing else here brings
+        # in; without it that refresh is a silent no-op and an installed app's
+        # icon is whatever was cached before it existed
+        gtk-update-icon-cache && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
 # LXQt's system defaults, which the distribution packages do not ship: without
