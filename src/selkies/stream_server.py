@@ -1284,7 +1284,9 @@ class CentralizedStreamServer:
         The new SSL context is built before the old site is stopped so a bad
         certificate never takes the server offline, and the recorded mtime only
         advances once the new site is up, so a failed reload is retried on the
-        next poll.
+        next poll. Both the stat and the context build run off the loop: they
+        read files that may sit on a network mount, and this runs while the
+        session is streaming.
         """
         reload_interval = getattr(self.settings, "cert_reload_interval", 30)
         if reload_interval <= 0:
@@ -1292,7 +1294,7 @@ class CentralizedStreamServer:
             return
 
         current_site = self.site
-        last_mtime = self._get_cert_mtime()
+        last_mtime = await asyncio.to_thread(self._get_cert_mtime)
         logger.info(
             "Certificate reload watcher started (interval=%ds, initial mtime=%.0f)",
             reload_interval,
@@ -1302,7 +1304,7 @@ class CentralizedStreamServer:
         while True:
             await asyncio.sleep(reload_interval)
             try:
-                new_mtime = self._get_cert_mtime()
+                new_mtime = await asyncio.to_thread(self._get_cert_mtime)
             except Exception as exc:
                 logger.warning("Could not stat cert/key files: %s", exc)
                 continue
@@ -1316,7 +1318,7 @@ class CentralizedStreamServer:
                 new_mtime,
             )
             try:
-                new_ssl_context = self._create_ssl_context()
+                new_ssl_context = await asyncio.to_thread(self._create_ssl_context)
             except Exception as exc:
                 logger.error(
                     "Failed to create new SSL context, keeping old certificate: %s",
