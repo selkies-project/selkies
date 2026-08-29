@@ -212,6 +212,17 @@ RUN set -eu; \
         printf '[Settings]\ngtk-decoration-layout=:minimize,maximize,close\n' > /etc/gtk-3.0/settings.ini; \
     fi
 
+# Leaving the session is not something this desktop can offer: logging out ends
+# the session the stream is showing and leaves a connected client on a dead
+# display, and shutdown and reboot address an init this container does not run.
+# The entry is hidden rather than the package dropped, since lxqt-session
+# installs the binary as part of itself; a higher-precedence data directory
+# shadows the shipped entry, so the package stays intact and a later upgrade
+# does not undo this.
+RUN mkdir -pm755 /usr/local/share/applications && \
+    printf '[Desktop Entry]\nType=Application\nName=Leave\nExec=lxqt-leave\nIcon=system-shutdown\nCategories=System;X-Leave;\nOnlyShowIn=LXQt;\nNoDisplay=true\n' \
+        > /usr/local/share/applications/lxqt-leave.desktop
+
 # The session's own s6 service, supervised beside the base container's
 COPY --chown=1000:1000 addons/desktop/services/ /etc/service/
 RUN find /etc/service \( -name run -o -name finish \) -exec chmod -f 755 {} +
