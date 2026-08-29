@@ -952,12 +952,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Enable passing remote cursors to client",
     },
     {
-        "name": "app_terminal",
-        "type": "str",
-        "default": "",
-        "help": 'Terminal command prefix the apps panel launches applications under: the terminal plus the flag it takes a command after, such as "xterm -e" or a bare "foot". Empty resolves one — the TERMINAL environment variable, then xdg-terminal-exec, then the first installed terminal for the session\'s windowing system.',
-    },
-    {
         "name": "multi_monitor_wm",
         "type": "str",
         "default": "",
@@ -1155,7 +1149,6 @@ class AppSettings:
     enable_cursors: tuple[bool, bool]
     debug_cursors: tuple[bool, bool]
     enable_resize: tuple[bool, bool]
-    app_terminal: tuple[str, bool]
     multi_monitor_wm: tuple[str, bool]
     audio_bitrate: str
     wayland: tuple[bool, bool]

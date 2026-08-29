@@ -2,9 +2,9 @@
 """Where client-requested commands launch: the session the applications run in.
 
 app_session() maps the backend and the compositor topology onto the display(s)
-a launched application must use; app_launch_env() turns that into DISPLAY /
+a launched application must use, and app_launch_env() turns that into DISPLAY /
 WAYLAND_DISPLAY / XDG_SESSION_TYPE and adopts the desktop's session bus from
-its own processes; app_terminal() picks the terminal for that windowing system.
+its own processes.
 """
 import os
 import shutil
@@ -71,16 +71,6 @@ def main():
         ih.live_x_displays = lambda: []
         s = make_handler(True).app_session()
         check("plain Wayland session: capture compositor socket", s == {"x11_display": None, "wayland_display": "wayland-1", "type": "wayland"}, str(s))
-
-        ih.shutil.which = lambda n: "/usr/bin/" + n if n in ("foot", "st") else None
-        ih.x_display_live = lambda name: name == disp
-        check("X11 session launches in st", make_handler(True).app_terminal() == "st")
-        ih.x_display_live = lambda name: False
-        check("Wayland session launches in foot", make_handler(True).app_terminal() == "foot")
-        ih.shutil.which = lambda n: "/usr/bin/st" if n == "st" else None
-        check("Wayland session falls back to st when foot is missing", make_handler(True).app_terminal() == "st")
-        ih.shutil.which = lambda n: None
-        check("no terminal installed: nothing published", make_handler(True).app_terminal() is None)
 
         # The session bus is adopted from a real dbus-daemon, never from our own launched
         # children; the real which() must be back for the dbus-run-session probe below.
