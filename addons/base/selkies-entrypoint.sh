@@ -43,6 +43,25 @@ wayland="${wayland#"${wayland%%[![:space:]]*}"}"
 wayland="${wayland%"${wayland##*[![:space:]]}"}"
 wayland="${wayland,,}"
 
+# Dev mode: run a checkout mounted into the container instead of the package
+# baked into the image, so a change can be tried without rebuilding. The web
+# client is a build product and is absent from a fresh checkout, so the image's
+# own bundle is linked in where the tree has none -- the path is gitignored, so
+# the link does not show up as a change in the checkout.
+if [ -n "${SELKIES_DEV_SOURCE:-}" ]; then
+  if [ -d "${SELKIES_DEV_SOURCE}/src/selkies" ]; then
+    bundled="$(python3 -c 'import os, selkies; print(os.path.join(os.path.dirname(selkies.__file__), "selkies_web"))' 2>/dev/null || true)"
+    if [ ! -e "${SELKIES_DEV_SOURCE}/src/selkies/selkies_web" ] && [ -d "${bundled}" ]; then
+      ln -sfn "${bundled}" "${SELKIES_DEV_SOURCE}/src/selkies/selkies_web" 2>/dev/null ||
+        echo "Dev mode: no web client in the checkout and its src/selkies is not writable" >&2
+    fi
+    export PYTHONPATH="${SELKIES_DEV_SOURCE}/src${PYTHONPATH:+:${PYTHONPATH}}"
+    echo "Dev mode: serving from ${SELKIES_DEV_SOURCE}/src"
+  else
+    echo "Dev mode: ${SELKIES_DEV_SOURCE} holds no src/selkies; serving the image's own package" >&2
+  fi
+fi
+
 # Wait for the X11 socket in the X11 backend; the Wayland backend owns its own
 # headless compositor and needs no display server to wait for.
 if [ "${wayland}" != "true" ] && [ "${wayland}" != "1" ]; then

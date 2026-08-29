@@ -91,15 +91,19 @@ services:
       # Render/encode GPU selection; empty means auto-detect
       SELKIES_RENDER_DRI: ${SELKIES_RENDER_DRI:-}
       DRI_NODE: ${DRI_NODE:-}
+      # Serve the bind-mounted checkout below rather than the installed package
+      SELKIES_DEV_SOURCE: /opt/selkies-src
     ports:
       - "${SELKIES_PORT:-8080}:${SELKIES_PORT:-8080}"
     volumes:
+      # The checkout runs instead of the package baked into the image, so a
+      # server-side edit takes effect on a restart rather than a rebuild.
+      # Writable because a checkout with no built web client is given the
+      # image's own, as a link at the (gitignored) path the client is served
+      # from.
       - type: bind
-        source: ./src/selkies
-        # pip installs into the base image's interpreter; set PYTHON_VERSION to
-        # match when DISTRIB_IMAGE/DISTRIB_RELEASE select a different one
-        target: /usr/local/lib/python${PYTHON_VERSION:-3.12}/dist-packages/selkies
-        read_only: true
+        source: ./
+        target: /opt/selkies-src
     # The browsers in the image allocate their shared memory here; the 64 MB
     # Docker default makes them abort on the first heavy page
     shm_size: "2gb"

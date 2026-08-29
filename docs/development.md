@@ -112,14 +112,22 @@ This section is a knowledge base for code contributions and development.
 
 ```bash
 docker compose build dist                    # the wheel, web client included
-docker compose build base example            # the session, then the desktop on top of it
-docker compose up example                    # the Example Container on http://localhost:8080
-docker compose --profile gpu up example-gpu  # the same container with a GPU attached
+docker compose build base desktop            # the session, then the desktop on top of it
+docker compose up desktop                    # the Desktop Container on https://localhost:8080
+docker compose --profile gpu up desktop-gpu  # the same container with a GPU attached
 ```
 
 Each service names the `Dockerfile` that builds it, and those files are also the reference build procedure for a host without Docker®: the commands run in a shell as they stand.
 
-`example` bind-mounts `src/selkies` over the installed package, so server-side edits take effect on a restart rather than a rebuild. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. To run a wheel built from this tree instead of the latest PyPI release, copy it out of the `selkies-py-build` image into `addons/base/wheels/` before building.
+`desktop` bind-mounts the checkout at `/opt/selkies-src` and sets `SELKIES_DEV_SOURCE` to it, so the server runs from the tree and a change to it takes effect on a restart rather than a rebuild. `SELKIES_DEV_SOURCE` works on any image, including a published one:
+
+```bash
+docker run --rm -it --shm-size=2g -p 8080:8080 \
+  -v "$PWD:/opt/selkies-src" -e SELKIES_DEV_SOURCE=/opt/selkies-src \
+  ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04
+```
+
+The web client is a build product and a fresh checkout has none, so the image's own bundle is linked in at the (gitignored) path it is served from; `docker compose build dist` builds a real one into the tree. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. To run a wheel built from this tree instead of the latest PyPI release, copy it out of the `selkies-py-build` image into `addons/base/wheels/` before building.
 
 ## Documentation
 
