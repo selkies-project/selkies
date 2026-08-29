@@ -2,10 +2,8 @@
 """The 0x06 flags byte carries the frame's upright transform next to the
 keyframe bit: bits 1-2 the clockwise rotation in quarter turns, bit 3 a
 horizontal flip applied after the rotation. The bit layout is wire ABI shared
-with the web client's sendFrame, so it is pinned here, and the optional
-``rotation``/``flip`` arguments of ``VirtualWebcam.push`` must degrade to the
-old four-argument call against a pixelflux build that predates them (announced
-once, never retried per frame).
+with the web client's sendFrame, so it is pinned here, along with the
+``rotation``/``flip`` arguments ``VirtualWebcam.push`` hands the camera.
 
 The client half -- which transform it puts on a frame, on which engines it
 derives one, and what it does with a frame the socket cannot take -- is
@@ -42,19 +40,11 @@ def check(label: str, ok, detail="") -> None:
     print(f"{'PASS' if ok else 'FAIL'}  [webcam-orient] {label}  {detail}", flush=True)
 
 
-class OldCam:
-    """A pixelflux VirtualCamera whose push predates the orientation arguments."""
+class Cam:
+    """A stand-in pixelflux VirtualCamera recording exactly the arguments given."""
 
     def __init__(self):
         self.calls = []
-
-    def push(self, data, codec, keyframe=False, offset=0):
-        self.calls.append((codec, keyframe, offset))
-        return 0
-
-
-class NewCam(OldCam):
-    """Records exactly the arguments given, so a short call stays a 3-tuple."""
 
     def push(self, data, *args, **kwargs):
         self.calls.append(args + tuple(kwargs.values()))
@@ -77,21 +67,14 @@ def main() -> int:
     wc = VirtualWebcam()
     check("no camera drops silently", wc.push(b"x", 1, True, 3, 180, False) == 0)
 
-    wc._cam = new = NewCam()
+    wc._cam = cam = Cam()
     wc.push(b"x", 1, True, 3, 180, False)
-    check("orientation forwarded", new.calls[-1] == (1, True, 3, 180, False), str(new.calls[-1]))
+    check("orientation forwarded", cam.calls[-1] == (1, True, 3, 180, False), str(cam.calls[-1]))
     wc.push(b"x", 1, False, 3, 0, True)
-    check("flip alone forwarded", new.calls[-1] == (1, False, 3, 0, True), str(new.calls[-1]))
+    check("flip alone forwarded", cam.calls[-1] == (1, False, 3, 0, True), str(cam.calls[-1]))
     wc.push(b"x", 1, False, 3)
-    check("upright frames keep the short call", new.calls[-1] == (1, False, 3), str(new.calls[-1]))
-
-    wc = VirtualWebcam()
-    wc._cam = old = OldCam()
-    wc.push(b"x", 2, True, 3, 90, False)
-    check("old pixelflux falls back", old.calls == [(2, True, 3)], str(old.calls))
-    check("fallback latched", wc._push_orientation is False)
-    wc.push(b"x", 2, False, 3, 270, True)
-    check("no per-frame retry", old.calls == [(2, True, 3), (2, False, 3)], str(old.calls))
+    check("upright frames carry a zero orientation",
+          cam.calls[-1] == (1, False, 3, 0, False), str(cam.calls[-1]))
 
     node = shutil.which("node")
     if not node:
