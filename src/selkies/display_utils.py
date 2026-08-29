@@ -2468,12 +2468,3 @@ def format_pixelflux_cursor(
         }
     return None
 
-
-def pixelflux_x11_cursor() -> bool:
-    """True when pixelflux delivers X11 cursor shapes through set_cursor_callback
-    (its XFixes monitor thread); selkies then skips its python cursor monitor."""
-    try:
-        import pixelflux
-    except Exception:
-        return False
-    return bool(getattr(pixelflux, "X11_CURSOR_CALLBACK", False))

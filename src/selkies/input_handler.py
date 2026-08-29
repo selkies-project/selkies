@@ -85,7 +85,6 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Container, Iterable, List, Optional, Tuple, Union
 from .display_utils import (
-    pixelflux_x11_cursor,
     unpremultiply_rgba,
     cursor_content_handle,
     layout_extent,
@@ -3441,8 +3440,8 @@ class WebRTCInput:
     """The server-side input authority shared by both transports.
 
     Dispatches every client data-channel/WebSocket message: keyboard, mouse,
-    gamepad, clipboard (including multipart transfers), cursor monitoring, and
-    the settings/stats callbacks the streaming pipeline registers on it. One
+    gamepad, clipboard (including multipart transfers), and the settings/stats
+    callbacks the streaming pipeline registers on it. One
     instance exists per transport service; X11 and Wayland sessions flow
     through the same handler so behavior stays in parity, with the backend
     chosen by is_wayland.
@@ -3465,10 +3464,9 @@ class WebRTCInput:
         _app_wl_is_separate: True once a resolved app compositor is confirmed
             distinct from the capture compositor, so
             `_has_separate_app_compositor` answers without re-resolving.
-        _x_event_wake, _x_watcher_fd: Event-driven wake for the X consumers
-            (cursor monitor, keymap watch): a loop reader on the input
-            connection's fd sets the Event, so those loops block with zero
-            wakeups instead of polling the socket.
+        _x_event_wake, _x_watcher_fd: Event-driven wake for the keymap watch:
+            a loop reader on the input connection's fd sets the Event, so it
+            blocks with zero wakeups instead of polling the socket.
         LEVEL_MODIFIER_KEYSYMS: Shift_L/R, ISO_Level3_Shift, Mode_switch — the
             level-selecting modifiers whose client-held state the injectors
             consult in place of a per-press server query.
@@ -3551,8 +3549,7 @@ class WebRTCInput:
             heartbeat is older than this (stalled stream / hidden tab); kept
             above ~3x the client's 100 ms heartbeat.
         key_repeat_state: Keysym to the monotonic time of its next due repeat.
-        keymap_watch_task: MappingNotify consumer for sessions where the
-            cursor monitor (the normal X event consumer) is disabled.
+        keymap_watch_task: The session's MappingNotify consumer.
     """
 
     def __init__(
@@ -3631,7 +3628,6 @@ class WebRTCInput:
         self.enable_binary_clipboard = enable_binary_clipboard
         self._apps_runner_ok: Optional[bool] = None
         self.enable_cursors = enable_cursors
-        self.cursors_running = False
         self.cursor_scale = cursor_scale
         self.cursor_size = cursor_size
         self.cursor_debug = cursor_debug
@@ -3936,14 +3932,6 @@ class WebRTCInput:
         self.__keyboard_connect()
         if not self.is_wayland:
             self.mouse = _XTestMouse(self.xdisplay)
-        if self.cursors_running:
-            try:
-                screen = self.xdisplay.screen()
-                self.xdisplay.xfixes_select_cursor_input(
-                    screen.root, xfixes.XFixesDisplayCursorNotifyMask
-                )
-            except Exception as e:
-                logger_webrtc_input.warning(f"Could not re-arm cursor monitor after reconnect: {e}")
         logger_webrtc_input.warning("Input X connection was unresponsive; reconnected.")
 
     def _is_x_conn_closed(self, exc: BaseException) -> bool:
@@ -6625,13 +6613,12 @@ class WebRTCInput:
         return True
 
     async def _keymap_watch_loop(self) -> None:
-        """Drain X events for MappingNotify when the cursor monitor is not the
-        event consumer (pixelflux delivers cursors natively then). Two consumers
-        must never race next_event(), so this loop idles while cursors_running."""
+        """Drain X events for MappingNotify: this session's sole X event consumer,
+        since pixelflux delivers cursors from its own XFixes thread."""
         while True:
-            if self.cursors_running or self.xdisplay is None:
-                # Idle poll only: the event wake is not armed for this consumer
-                # when nothing drives it, and a foreign remap is not urgent here.
+            if self.xdisplay is None:
+                # Idle poll only: the event wake is not armed while a reconnect
+                # is in flight, and a foreign remap is not urgent here.
                 await asyncio.sleep(0.5)
                 continue
             wake = self._x_event_wake
@@ -6640,7 +6627,7 @@ class WebRTCInput:
             if self.xdisplay.pending_events() == 0:
                 self._arm_x_event_watcher()
                 await self._wait_x_event(timeout=2.0)
-            if self.cursors_running or self.xdisplay is None:
+            if self.xdisplay is None:
                 continue
             try:
                 while self.xdisplay.pending_events():
@@ -6652,90 +6639,6 @@ class WebRTCInput:
                     self._reconnect_xdisplay()
                 else:
                     logger_webrtc_input.debug(f"keymap watch: {e}")
-
-    async def start_cursor_monitor(self) -> None:
-        """Watch XFixes cursor-change events and push encoded cursors to clients.
-
-        Runs only when pixelflux does not already deliver cursors natively;
-        this loop is then the session's single X event consumer (MappingNotify
-        included), so it never races _keymap_watch_loop on next_event(). The
-        X fetch stays on this thread (python-xlib connections are not
-        thread-safe and the loop also injects input on this display), while
-        the PIL resize and PNG encode, pure CPU, run off the loop.
-        """
-        if self.is_wayland:
-            logger_webrtc_input.info("Wayland mode: Cursor monitor disabled (handled by compositor callback).")
-            return
-        if pixelflux_x11_cursor():
-            logger_webrtc_input.info(
-                "X11 cursor monitor disabled (pixelflux cursor callback active)."
-            )
-            return
-        if not self.xdisplay.has_extension("XFIXES"):
-            if self.xdisplay.query_extension("XFIXES") is None:
-                logger_webrtc_input.error(
-                    "XFIXES extension not supported, cannot watch cursor changes"
-                )
-                return
-        xfixes_version = self.xdisplay.xfixes_query_version()
-        logger_webrtc_input.info(
-            "Found XFIXES version %s.%s",
-            xfixes_version.major_version,
-            xfixes_version.minor_version,
-        )
-        logger_webrtc_input.info("starting cursor monitor")
-        self.cursors_running = True
-        screen = self.xdisplay.screen()
-        self.xdisplay.xfixes_select_cursor_input(
-            screen.root, xfixes.XFixesDisplayCursorNotifyMask
-        )
-        logger_webrtc_input.info("watching for cursor changes")
-        try:
-            cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
-            cursor_data = await asyncio.to_thread(self._encode_cursor, cursor_image)
-            self.on_cursor_change(cursor_data)
-        except Exception as e:
-            logger_webrtc_input.warning("exception from fetching initial cursor image: %s", e)
-            if self._is_x_conn_closed(e):
-                self._reconnect_xdisplay()
-
-        while self.cursors_running:
-            if self.xdisplay is None:
-                # A background reconnect is in flight; the fresh connection
-                # was xfixes-armed at install, so only screen needs rebinding.
-                await asyncio.sleep(0.5)
-                if self.xdisplay is not None:
-                    screen = self.xdisplay.screen()
-                continue
-            wake = self._x_event_wake
-            if wake is not None:
-                wake.clear()
-            if self.xdisplay.pending_events() == 0:
-                # The 1 s failsafe bounds the wait if the loop reader was lost to a reconnect.
-                self._arm_x_event_watcher()
-                await self._wait_x_event(timeout=1.0)
-                continue
-
-            event = self.xdisplay.next_event()
-            if self._dispatch_keymap_event(event):
-                continue
-            if (event.type, 0) == self.xdisplay.extension_event.DisplayCursorNotify:
-                try:
-                    cursor_image = self.xdisplay.xfixes_get_cursor_image(screen.root)
-                    cursor_data = await asyncio.to_thread(self._encode_cursor, cursor_image)
-                    self.on_cursor_change(cursor_data)
-                except Exception as e:
-                    logger_webrtc_input.warning(
-                        "exception from fetching cursor image on change: %s", e
-                    )
-                    if self._is_x_conn_closed(e):
-                        # The None guard above rebinds screen once the reconnect lands.
-                        self._reconnect_xdisplay()
-        logger_webrtc_input.info("cursor monitor stopped")
-
-    def stop_cursor_monitor(self) -> None:
-        logger_webrtc_input.info("stopping cursor monitor")
-        self.cursors_running = False
 
     def get_current_cursor_data(self) -> Optional[dict]:
         """One-shot fetch of the current X cursor as a client message, for
@@ -6752,7 +6655,7 @@ class WebRTCInput:
                     )
                     return None
             # XFixes wants version negotiation before any other request, and
-            # this fetch runs whether or not the cursor monitor is up.
+            # this fetch runs whether or not a capture is up.
             if not getattr(self, "_xfixes_negotiated", False):
                 self.xdisplay.xfixes_query_version()
                 self._xfixes_negotiated = True
@@ -6765,9 +6668,8 @@ class WebRTCInput:
 
     def _encode_cursor(self, cursor: Any) -> dict:
         """cursor_to_msg behind a one-entry cache keyed by the XFixes cursor
-        serial (and the size cap the encode depends on): the monitor encodes
-        each cursor once, off the loop, and the per-connect fetch — sync, on
-        the loop — reuses that instead of encoding the same PNG again."""
+        serial (and the size cap the encode depends on), so the per-connect
+        fetch — sync, on the loop — encodes an unchanged cursor only once."""
         key = (getattr(cursor, "cursor_serial", None), self.cursor_size_cap)
         cached = self._cursor_msg_cache
         if key[0] is not None and cached is not None and cached[0] == key:

@@ -2448,14 +2448,13 @@ class DataStreamingServer(BaseStreamingService):
         """Scale the remote-cursor delivery cap with a new DPI, on both backends.
 
         Tracks the DPI on the input handler and re-derives its cap from the
-        DPI-scaled maximum sprite size (the python cursor monitor downscales
-        shapes past it; the desktop cursor itself was just resized for the
-        same DPI). Running captures take the cap live through pixelflux's
-        tunables path, so the sprite pixelflux's own cursor monitor delivers
-        follows without a capture restart; later (re)starts thread it through
-        CaptureSettings. On Wayland the compositor's composited cursor follows
-        the output scale on its own (set_cursor_size re-derives its theme
-        pixel size on DPI changes).
+        DPI-scaled maximum sprite size (the connect-time seed downscales shapes
+        past it; the desktop cursor itself was just resized for the same DPI).
+        Running captures take the cap live through pixelflux's tunables path,
+        so the sprite its cursor monitor delivers follows without a capture
+        restart; later (re)starts thread it through CaptureSettings. On Wayland
+        the compositor's composited cursor follows the output scale on its own
+        (set_cursor_size re-derives its theme pixel size on DPI changes).
         """
         ih = self.input_handler
         if ih is None:
@@ -5341,10 +5340,6 @@ class DataStreamingServer(BaseStreamingService):
                 self.input_handler.start_clipboard(), name="ClipboardMon"
             )
             self._tasks_to_run.append(self.input_handler.clipboard_monitor_task)
-        if hasattr(self.input_handler, "start_cursor_monitor"):
-            self._tasks_to_run.append(
-                asyncio.create_task(self.input_handler.start_cursor_monitor(), name="CursorMon")
-            )
         if hasattr(self.input_handler, "probe_apps_runner"):
             self._tasks_to_run.append(
                 asyncio.create_task(self.input_handler.probe_apps_runner(), name="AppsProbe")
@@ -5438,8 +5433,6 @@ class DataStreamingServer(BaseStreamingService):
             logger.info("Stopping InputHandler components...")
             if hasattr(self.input_handler, "stop_clipboard"):
                 self.input_handler.stop_clipboard()
-            if hasattr(self.input_handler, "stop_cursor_monitor"):
-                self.input_handler.stop_cursor_monitor()
             if hasattr(self.input_handler, "disconnect") and inspect.iscoroutinefunction(
                 self.input_handler.disconnect
             ):

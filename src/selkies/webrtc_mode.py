@@ -2291,9 +2291,6 @@ class WebRTCService(BaseStreamingService):
             self.tasks.append(asyncio.create_task(self.input_handler.connect()))
             self.tasks.append(asyncio.create_task(self.input_handler.start_clipboard()))
             self.tasks.append(asyncio.create_task(self.input_handler.probe_apps_runner()))
-            self.tasks.append(
-                asyncio.create_task(self.input_handler.start_cursor_monitor())
-            )
 
         startup_dpi = int(float(getattr(settings, "scaling_dpi", "96") or 96))
         if startup_dpi != 96:
@@ -2456,10 +2453,6 @@ class WebRTCService(BaseStreamingService):
                 self.input_handler.stop_clipboard()
             except Exception:
                 logger.exception("Error stopping clipboard monitor")
-            try:
-                self.input_handler.stop_cursor_monitor()
-            except Exception:
-                logger.exception("Error stopping cursor monitor")
             stop_coros.append(
                 (
                     _await_with_timeout(
