@@ -85,7 +85,7 @@ export function localClipboardBlocker() {
 /**
  * Writes a server image to the local clipboard, PNG-normalized.
  *
- * The re-encode is handed to `reencode` when the caller has a worker to run it
+ * The conversion is handed to `toPng` when the caller has a worker to run it
  * on, since decoding and re-encoding a large image costs the better part of a
  * second on the thread that also presents video and dispatches input. The
  * ClipboardItem takes the promise rather than the finished blob, so the write
@@ -93,17 +93,17 @@ export function localClipboardBlocker() {
  * the encode runs.
  * @param {Blob} blob The image.
  * @param {string} mime Its type.
- * @param {((blob: Blob) => Promise<Blob>)=} reencode Off-thread re-encoder;
- *     the page's own canvas is used when it is absent or fails.
+ * @param {((blob: Blob) => Promise<Blob>)=} toPng Off-thread converter; the
+ *     page's own canvas is used when it is absent or fails.
  * @throws When the type is undecodable or the clipboard write fails.
  */
-export async function writeImageToLocalClipboard(blob, mime, reencode) {
+export async function writeImageToLocalClipboard(blob, mime, toPng) {
     if (mime === 'image/png') {
         await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
         return;
     }
-    const png = reencode
-        ? reencode(blob).catch(() => reencodeBlobAsPng(blob))
+    const png = toPng
+        ? toPng(blob).catch(() => reencodeBlobAsPng(blob))
         : reencodeBlobAsPng(blob);
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
 }

@@ -109,8 +109,8 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         kimageformat6-plugins \
         # proot-apps refreshes the icon cache of the per-user theme it installs
         # into by calling gtk-update-icon-cache, which nothing else here brings
-        # in; without it that refresh is a silent no-op and an installed app's
-        # icon is whatever was cached before it existed
+        # in; without it that refresh is a silent no-op and the cache a session
+        # reads is whatever was there before the application arrived
         gtk-update-icon-cache && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
