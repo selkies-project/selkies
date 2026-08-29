@@ -1210,14 +1210,12 @@ class WebRTCService(BaseStreamingService):
     ) -> Optional[str]:
         """The reason a display's Wayland capture failed, or a caveat a live one came up
         with (encoder fell back to CPU, host connect refused), or None. Read straight from
-        ``capture_state`` (no barrier); the caller ensures ordering. None on an older
-        pixelflux without the readback."""
+        ``capture_state`` (no barrier); the caller ensures ordering."""
         module = getattr(pipeline, "capture_module", None) if pipeline is not None else None
-        getter = getattr(module, "capture_state", None) if module is not None else None
-        if getter is None:
+        if module is None:
             return None
         try:
-            _state, last_error = getter(wayland_output_id(did))
+            _state, last_error = module.capture_state(wayland_output_id(did))
             return last_error
         except Exception:
             return None

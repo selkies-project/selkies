@@ -65,10 +65,10 @@ check("webrtc defaults to cbr", got == "cbr", got)
 
 # The software H.264 encoder is a property of the pixelflux build, read from
 # pixelflux.SOFTWARE_H264_ENCODER; settings must agree with the installed
-# build, including its own fallback: a pixelflux that predates the attribute,
-# or no pixelflux at all, reads as the default x264 build.
+# build, and with the x264 default it falls back to where there is no extension
+# to read.
 got = probe("import importlib.util as iu"
-            "; enc = getattr(__import__('pixelflux'), 'SOFTWARE_H264_ENCODER', 'x264')"
+            "; enc = __import__('pixelflux').SOFTWARE_H264_ENCODER"
             " if iu.find_spec('pixelflux') else 'x264'"
             "; print(s.software_h264_encoder() == enc,"
             " s.software_h264_encoder() in ('x264', 'openh264'))")

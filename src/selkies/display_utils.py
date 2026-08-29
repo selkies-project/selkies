@@ -2470,11 +2470,8 @@ def format_pixelflux_cursor(
 
 
 def pixelflux_x11_cursor() -> bool:
-    """True when the installed pixelflux delivers X11 cursor shapes through
-    set_cursor_callback (its XFixes monitor thread); selkies then skips its
-    python cursor monitor. A pixelflux build without the flag stashes the
-    callback without ever firing it on X11, so registering is safe either
-    way."""
+    """True when pixelflux delivers X11 cursor shapes through set_cursor_callback
+    (its XFixes monitor thread); selkies then skips its python cursor monitor."""
     try:
         import pixelflux
     except Exception:

@@ -1085,15 +1085,14 @@ def software_h264_encoder() -> str:
     """The software H.264 encoder of the installed pixelflux build, "x264" or "openh264".
 
     Read from pixelflux.SOFTWARE_H264_ENCODER, which a build sets from its
-    features (libx264 by default, OpenH264 for a GPL-free build). A pixelflux
-    that predates the attribute, or that cannot be imported here, reads as the
-    default x264 build.
+    features (libx264 by default, OpenH264 for a GPL-free build). Rendering the
+    settings reference needs no extension, and reads as the default x264 build.
     """
     try:
         import pixelflux
     except ImportError:
         return "x264"
-    return str(getattr(pixelflux, "SOFTWARE_H264_ENCODER", "x264"))
+    return str(pixelflux.SOFTWARE_H264_ENCODER)
 
 
 def software_h264_path(encoder: str, use_cpu: bool) -> bool:

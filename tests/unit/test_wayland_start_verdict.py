@@ -29,21 +29,16 @@ import selkies.selkies as S
 class FakeModule:
     """A ScreenCapture stand-in: the readback the verdict reads."""
 
-    def __init__(self, geom, state, last_error, capturing,
-                 has_geometry=True, has_state=True):
+    def __init__(self, geom, state, last_error, capturing):
         self._geom = geom
         self._state = state
         self._last_error = last_error
         self._capturing = capturing
-        if has_geometry:
-            self.get_realized_geometry = self._get_realized_geometry
-        if has_state:
-            self.capture_state = self._capture_state
 
-    def _get_realized_geometry(self, _display_id):
+    def get_realized_geometry(self, _display_id):
         return self._geom
 
-    def _capture_state(self, _display_id):
+    def capture_state(self, _display_id):
         return (self._state, self._last_error)
 
     @property
@@ -99,14 +94,6 @@ def main() -> bool:
         res.check("a geometry timeout still reads liveness", live is True and err is None,
                   f"{live} {err}")
 
-        # An older pixelflux without the readback is trusted (X11 already raises on
-        # failure; a Wayland build this old predates the async start too).
-        live, err = asyncio.run(srv._wayland_start_verdict(
-            FakeModule(None, None, None, False, has_geometry=False, has_state=False),
-            "primary"))
-        res.check("an older pixelflux without the readback is trusted",
-                  live is True and err is None, f"{live} {err}")
-
         live, err = asyncio.run(srv._wayland_start_verdict(
             FakeModule((0, 0, 0.0), "idle", None, False), "primary"))
         res.check("no live pipeline and no error still fails",
@@ -116,9 +103,6 @@ def main() -> bool:
             FakeModule((0, 0, 0.0), "failed", "encoder session exhausted", False), "display2")
         res.check("last-error reads the recorded reason",
                   err == "encoder session exhausted", err)
-        err = srv._wayland_capture_last_error(
-            FakeModule(None, None, None, True, has_state=False), "primary")
-        res.check("last-error is None without capture_state", err is None, err)
         res.check("last-error tolerates a missing module",
                   srv._wayland_capture_last_error(None, "primary") is None)
     finally:

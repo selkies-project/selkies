@@ -97,7 +97,7 @@ try:
     from pixelflux import VirtualKeyboardUnavailable as PixelfluxVkUnavailable
 except Exception:
     class PixelfluxVkUnavailable(RuntimeError):
-        """Stand-in when pixelflux predates the typed exception."""
+        """Stand-in for environments with no pixelflux extension to import."""
 try:
     libxkb = ctypes.CDLL("libxkbcommon.so.0")
     libxkb.xkb_keysym_to_utf8.argtypes = [ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t]

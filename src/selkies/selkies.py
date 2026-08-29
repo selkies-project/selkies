@@ -5177,8 +5177,7 @@ class DataStreamingServer(BaseStreamingService):
                     f"Reusing ScreenCapture instance for '{display_id}' (backend kept warm)."
                 )
 
-            # pixelflux is the cursor source on both backends (an older pixelflux
-            # stashes this harmlessly and the python monitor keeps delivering).
+            # pixelflux is the cursor source on both backends.
             capture_module.set_cursor_callback(pixelflux_cursor_handler)
 
             await self.capture_loop.run_in_executor(
@@ -5223,27 +5222,25 @@ class DataStreamingServer(BaseStreamingService):
         makes ``is_capturing`` and ``capture_state`` authoritative; ``capture_state``
         then reports whether a live pipeline exists and, if it degraded or failed, why.
 
-        Non-Wayland or an older pixelflux without the readback returns ``(True, None)``
-        -- the X11 path already surfaces its failures by raising.
+        Non-Wayland returns ``(True, None)`` -- the X11 path already surfaces its
+        failures by raising.
 
         Returns:
             ``(is_live, last_error)``: whether a live capture exists, and the reason a
             start failed or a caveat a degraded-but-live start came up with.
         """
-        if not IS_WAYLAND or not hasattr(module, 'get_realized_geometry'):
+        if not IS_WAYLAND:
             return True, None
         try:
             await asyncio.to_thread(module.get_realized_geometry, wayland_output_id(display_id))
         except Exception as e:
             data_logger.warning(f"Wayland start barrier failed for '{display_id}': {e}")
         last_error = None
-        state_getter = getattr(module, 'capture_state', None)
-        if state_getter is not None:
-            try:
-                _state, last_error = await asyncio.to_thread(
-                    state_getter, wayland_output_id(display_id))
-            except Exception:
-                last_error = None
+        try:
+            _state, last_error = await asyncio.to_thread(
+                module.capture_state, wayland_output_id(display_id))
+        except Exception:
+            last_error = None
         live = False
         try:
             live = bool(module.is_capturing)
@@ -5255,14 +5252,12 @@ class DataStreamingServer(BaseStreamingService):
         """The reason a Wayland capture failed, or a caveat a live one came up with, or None.
 
         Read straight from ``capture_state`` (no command round-trip); the caller is
-        responsible for any ordering barrier. Returns None on an older pixelflux that
-        does not expose the outcome.
+        responsible for any ordering barrier.
         """
-        getter = getattr(module, 'capture_state', None) if module is not None else None
-        if getter is None:
+        if module is None:
             return None
         try:
-            _state, last_error = getter(wayland_output_id(display_id))
+            _state, last_error = module.capture_state(wayland_output_id(display_id))
             return last_error
         except Exception:
             return None
