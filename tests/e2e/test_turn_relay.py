@@ -206,10 +206,19 @@ def main() -> None:
                           selected and all(p["localAddress"].startswith("127.0.0.1:")
                                            and RELAY_PORTS[0] <= int(p["localAddress"].rsplit(":", 1)[1]) <= RELAY_PORTS[1]
                                            for p in selected), [p["localAddress"] for p in selected])
+                # The encoder sends on damage, so an idle desktop produces no
+                # media however long the wait: the pointer is moved to make some,
+                # and the counter polled rather than sampled once, since a fixed
+                # window can also fall between consent-freshness exchanges.
                 before = received_bytes(page)
-                time.sleep(3.0)
-                after = received_bytes(page)
-                res.check("bytes keep arriving over the relayed pair", after > before, f"{before} -> {after}")
+                after = before
+                deadline = time.monotonic() + 20.0
+                while after <= before and time.monotonic() < deadline:
+                    page.mouse.move(200 + (int(time.monotonic() * 10) % 40), 150)
+                    time.sleep(0.5)
+                    after = received_bytes(page)
+                res.check("bytes keep arriving over the relayed pair", after > before,
+                          f"{before} -> {after}")
                 # Input rides the data channel on the same transport.
                 page.mouse.click(640, 360)
                 time.sleep(0.4)

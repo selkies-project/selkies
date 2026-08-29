@@ -108,12 +108,27 @@ def run_block(mode: str, wayland: bool, block: str = "",
                 ev = wl_obs.wait_for("ptr_button", state=1, timeout=3)
                 res.check("input: mouse button reached wayland seat", ev is not None, ev)
             else:
+                # The client maps page coordinates onto the stream it is shown,
+                # so the X pointer lands at the page point scaled by the root
+                # size over the video element's own. A session that opened on a
+                # root wider than the element (one left extended by whatever ran
+                # before) is mapping correctly, not wrongly, and the check has to
+                # follow the same arithmetic to say so.
+                box = page.evaluate(
+                    "() => { const v = document.querySelector('video');"
+                    " if (!v) return null; const r = v.getBoundingClientRect();"
+                    " return {w: r.width, h: r.height, vw: v.videoWidth, vh: v.videoHeight}; }")
                 before = C.x11_mouse_pos()
                 page.mouse.move(200, 150)
                 time.sleep(0.6)
                 after = C.x11_mouse_pos()
-                moved = (abs(after[0] - 200) <= 4 and abs(after[1] - 150) <= 4)
-                res.check("input: pointer moved in X (200,150)", moved, f"{before}->{after}")
+                if box and box["w"] and box["h"] and box["vw"] and box["vh"]:
+                    want = (200 * box["vw"] / box["w"], 150 * box["vh"] / box["h"])
+                else:
+                    want = (200, 150)
+                moved = (abs(after[0] - want[0]) <= 4 and abs(after[1] - want[1]) <= 4)
+                res.check("input: pointer moved in X (200,150)", moved,
+                          f"{before}->{after} want=({want[0]:.0f},{want[1]:.0f}) {box}")
                 page.mouse.click(300, 200)
                 time.sleep(0.3)
 
