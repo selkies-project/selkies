@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Large clipboard (multipart) parity: push a ~1.5MB text payload from the X
 server to the page (server->client) and from the page (client->server), on both
-transports. Confirms the multipart chunked paths and the ws_max_message_bytes
-capacity wiring."""
+transports. Confirms the multipart chunked paths carry a payload of many
+chunks whole in either direction."""
 import os
 import sys
 import time

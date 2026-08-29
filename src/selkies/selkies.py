@@ -45,12 +45,18 @@ import hmac
 import json
 import logging
 import os
+import struct
 import time
 from collections import OrderedDict, deque
 from datetime import datetime
 from enum import Enum
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Optional, Tuple, Union
+
+try:
+    import fcntl
+except ImportError:  # no ioctl to ask a socket what it still owes the network
+    fcntl = None
 
 import psutil
 from aiohttp import web, WSMsgType
@@ -135,6 +141,11 @@ VIDEO_RELAY_BUDGET_MIN_BYTES = 4 * 1024 * 1024
 # concurrent requests into one flag, so this only bounds the IDR bitrate a
 # hopeless client can add to the shared stream (~1 IDR/s).
 VIDEO_RELAY_SYNC_FLOOR_SECONDS = 1.0
+# What a real-time frame may find queued in front of it: a bulk (clipboard)
+# chunk is only admitted below this. Left to fill the socket buffer instead, a
+# transfer stalls playback for as long as that buffer takes to drain.
+WS_BULK_BACKLOG_BYTES = 16 * 1024
+WS_BULK_BACKLOG_POLL_S = 0.002
 RTT_SMOOTHING_SAMPLES = 20
 # RFC 2198 RED redundancy depth (distance=2) for the shared Opus audio stream.
 AUDIO_RED_DISTANCE = 2
@@ -367,6 +378,58 @@ def _close_abandoned_ws(client: web.WebSocketResponse) -> None:
         except Exception:
             pass
     _spawn_background_task(_close())
+
+
+# Linux SIOCOUTQ: bytes a socket has accepted but not yet put on the network.
+_SIOCOUTQ = 0x5411
+_SIOCOUTQ_ARG = struct.pack("i", 0)
+
+
+def _ws_write_backlog(ws: Any) -> Optional[int]:
+    """Bytes this socket still owes the network, or None when nothing can say.
+
+    Both queues count. asyncio's own buffer stays near empty while the kernel
+    socket buffer absorbs megabytes, so the transport's figure alone reports no
+    backlog on the very transfer that is burying the stream behind one.
+    """
+    transport = getattr(getattr(ws, "_writer", None), "transport", None)
+    if transport is None:
+        return None
+    pending = None
+    size = getattr(transport, "get_write_buffer_size", None)
+    if callable(size):
+        try:
+            pending = size()
+        except Exception:
+            pending = None
+    if fcntl is not None:
+        try:
+            sock = transport.get_extra_info("socket")
+            if sock is not None:
+                unsent = struct.unpack(
+                    "i", fcntl.ioctl(sock.fileno(), _SIOCOUTQ, _SIOCOUTQ_ARG))[0]
+                pending = (pending or 0) + unsent
+        except Exception:
+            pass
+    return pending
+
+
+async def _await_bulk_window(ws: Any, deadline: float) -> None:
+    """Hold a bulk sender until this socket's queue is short again.
+
+    Frames written while a clipboard chunk is queued go out behind it, so a
+    transfer is admitted a chunk at a time rather than as fast as the socket
+    takes it; on a fast link the queue is already short and nothing waits.
+    Returns at the deadline regardless: the send that follows is bounded too.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        backlog = _ws_write_backlog(ws)
+        if backlog is None or backlog <= WS_BULK_BACKLOG_BYTES:
+            return
+        if loop.time() >= deadline:
+            return
+        await asyncio.sleep(WS_BULK_BACKLOG_POLL_S)
 
 
 async def _broadcast_to_clients(
@@ -805,17 +868,23 @@ class SelkiesStreamingApp:
                 start_message = f"clipboard_start,{mime_type},{total_size}"
                 clients = self.data_streaming_server.clients
 
-                async def deliver(cid: int) -> None:
+                async def deliver(client: Any) -> None:
                     """One pipeline per client, a chunk at a time: a slow link
                     paces only its own transfer and a dead one drops out of the
-                    set without touching anyone else's."""
+                    set without touching anyone else's. Each chunk waits for
+                    the socket's backlog to fall first, so the audio and input
+                    sharing the connection are never queued behind more than
+                    one of them."""
+                    cid = id(client)
                     if await _broadcast_to_clients(clients, start_message,
                                                    per_client_timeout=2.0, only=cid):
                         return
                     offset = 0
+                    loop = asyncio.get_running_loop()
                     while offset < total_size:
                         chunk = data_bytes[offset:offset + CLIPBOARD_CHUNK_SIZE]
                         data_message = "clipboard_data," + base64.b64encode(chunk).decode('ascii')
+                        await _await_bulk_window(client, loop.time() + BULK_DRAIN_TIMEOUT_S)
                         if await _broadcast_to_clients(clients, data_message,
                                                        per_client_timeout=BULK_DRAIN_TIMEOUT_S, only=cid):
                             return
@@ -824,8 +893,8 @@ class SelkiesStreamingApp:
                     await _broadcast_to_clients(clients, "clipboard_finish",
                                                 per_client_timeout=2.0, only=cid)
 
-                recipients = [id(c) for c in list(clients) if conn_id is None or id(c) == conn_id]
-                await asyncio.gather(*(deliver(cid) for cid in recipients))
+                recipients = [c for c in list(clients) if conn_id is None or id(c) == conn_id]
+                await asyncio.gather(*(deliver(c) for c in recipients))
                 data_logger.info("Finished sending multi-part clipboard data.")
         except Exception as e:
             data_logger.error(f"Failed to send clipboard data: {e}", exc_info=True)

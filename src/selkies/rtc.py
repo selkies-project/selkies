@@ -137,14 +137,13 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
-# 256 KiB standard SCTP message less envelope margin, times 3/4 for base64; not
-# the 8 MiB WebSocket chunk size, which no browser's SCTP stack accepts.
-DATA_CHANNEL_FALLBACK_CHUNK_SIZE = ((262144 - 512) * 3) // 4
-
-
-# Per-channel SCTP queue cap for bulk (clipboard) sends: bounds server memory
-# and how long input/cursor/stats wait behind a bulk payload on the one stream.
-DATA_CHANNEL_BULK_HIGH_WATER = 1024 * 1024
+# Raw bytes per bulk (clipboard) chunk before base64 expansion, and the SCTP
+# queue cap a transfer waits below. Both sized for latency: a chunk is the unit
+# at which input and the media streams can overtake a transfer, and the cap
+# bounds what a transfer holds away from them. The chunk is a multiple of 3, so
+# chunks concatenate as base64.
+DATA_CHANNEL_BULK_CHUNK_SIZE = 16 * 1024 // 3 * 3
+DATA_CHANNEL_BULK_HIGH_WATER = 64 * 1024
 
 
 async def drain_data_channel(channel: RTCDataChannel,
@@ -191,11 +190,9 @@ async def drain_data_channel(channel: RTCDataChannel,
 def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
     """Raw-byte chunk size for base64 payloads over the data channel.
 
-    Sized from the smallest max-message-size the connected peers negotiated
-    (RFC 8841 a=max-message-size), less an envelope margin, times 3/4 for the
-    base64 expansion; a 1 MiB message ceiling bounds per-message buffering. The
-    result never exceeds a peer's negotiated limit, so a peer advertising a
-    smaller size is honored rather than overrun.
+    DATA_CHANNEL_BULK_CHUNK_SIZE, lowered to whatever the connected peers
+    negotiated (RFC 8841 a=max-message-size) where one of them advertises less,
+    so a peer is never overrun.
 
     Args:
         peers: Mapping of peer id to peer entry (each may carry a
@@ -212,9 +209,9 @@ def get_adjusted_chunk_size(peers: Optional[dict] = None) -> int:
         if nego:
             limit = nego if limit is None else min(limit, nego)
     if not limit:
-        return DATA_CHANNEL_FALLBACK_CHUNK_SIZE
-    usable = min(limit, 1024 * 1024) - 512
-    return (usable * 3) // 4
+        return DATA_CHANNEL_BULK_CHUNK_SIZE
+    usable = limit - 512
+    return min((usable * 3) // 4, DATA_CHANNEL_BULK_CHUNK_SIZE)
 
 class ClientType(str, Enum):
     """Role a peer connected with: a controller drives a display's media
