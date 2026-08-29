@@ -182,6 +182,24 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         curl \
         jq \
         dnsutils \
+        # A session hands the user a terminal: `file` is what desktop tooling
+        # types a path with, `less` is the pager man and git reach for, and nano
+        # is the only editor otherwise present
+        file \
+        less \
+        nano \
+        # Archive handling, which a file manager shells out to and a session
+        # with no unpacker cannot do at all
+        zip \
+        unzip \
+        xz-utils \
+        bzip2 \
+        zstd \
+        # How an application opens a file or a URL in the session, and the
+        # standard home directories a file manager and desktop expect
+        xdg-utils \
+        xdg-user-dirs \
+        desktop-file-utils \
         # X11 display server and utilities
         xserver-xorg-core \
         xvfb \
@@ -191,6 +209,13 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         xauth \
         wmctrl \
         dbus-x11 \
+        # Forked by Selkies where the in-process paths cannot serve: xdotool for
+        # key injection a layout cannot express, xclip for the X11 clipboard
+        # fallback, and cvt (xcvt) for the modeline a resize needs when the
+        # requested mode is not already on the output
+        xdotool \
+        xclip \
+        xcvt \
         # X11 client libraries required by pixelflux (XShm capture) and input injection
         libx11-xcb1 \
         libxcb1 \
@@ -225,6 +250,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         pipewire-audio \
         pipewire-pulse \
         wireplumber \
+        # Applications that open an ALSA device directly rather than through
+        # PulseAudio, which find no sound card at all without this
+        pipewire-alsa \
         # Xft resources alone reach a toolkit only at process start, and few
         # desktop environments run an XSETTINGS manager of their own: without
         # one on the selection a DPI change moves nothing until the session
@@ -245,6 +273,10 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         libgbm1 \
         libvulkan1 \
         libglu1-mesa \
+        # The ICD written below names an OpenCL driver; without a loader to read
+        # it the file is inert and no application sees a device
+        ocl-icd-libopencl1 \
+        clinfo \
         # VDPAU and the tools that inspect whichever GPU is passed in. The
         # drivers themselves rather than vdpau-driver-all: that metapackage
         # pulls the proprietary NVIDIA driver and is absent on some releases.
@@ -262,6 +294,12 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         fonts-noto-core \
         fonts-noto-cjk \
         fonts-noto-color-emoji \
+        fonts-noto-extra \
+        fonts-noto-cjk-extra \
+        fonts-symbola \
+        # The SVG loader GdkPixbuf needs, so GTK applications render scalable
+        # icons rather than blanks
+        librsvg2-common \
         # Python runtime and the embedded coTURN server (WebRTC mode)
         python3 \
         python3-pip \
@@ -347,8 +385,14 @@ COPY --chown=1000:1000 addons/base/services/ /etc/service/
 RUN chmod -f 755 /etc/container-entrypoint.sh /etc/selkies-entrypoint.sh && \
     find /etc/service \( -name run -o -name finish \) -exec chmod -f 755 {} +
 
-# Configure bashrc to show /etc/motd and enable bash completion
-RUN echo "[ ! -z \"\$TERM\" -a -r /etc/motd ] && echo \"\$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '\"')\" && cat /etc/motd" >> /etc/bash.bashrc && \
+# Configure bashrc to show /etc/motd and enable bash completion, and to give an
+# interactive shell the running session's environment. A shell started with
+# `docker exec` is not a child of the entrypoint and inherits none of what it
+# resolved, so DISPLAY, WAYLAND_DISPLAY and the audio socket are all unset and
+# every graphical command fails. Only filled in when the caller passed no
+# display of their own.
+RUN echo "[ -n \"\$PS1\" ] && [ -z \"\$DISPLAY\" ] && [ -z \"\$WAYLAND_DISPLAY\" ] && [ -r \"\${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}/container-env\" ] && . \"\${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}/container-env\"" >> /etc/bash.bashrc && \
+    echo "[ ! -z \"\$TERM\" -a -r /etc/motd ] && echo \"\$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '\"')\" && cat /etc/motd" >> /etc/bash.bashrc && \
     printf "==============================================\n=           Selkies Base Container           =\n==============================================\n" > /etc/motd
 
 USER 0
@@ -404,6 +448,9 @@ ENV SELKIES_WAYLAND_OUTPUTS=""
 ENV SELKIES_WAYLAND_X11_FALLBACK="true"
 # Web interface port
 ENV SELKIES_PORT="8080"
+# AppImages mount themselves through FUSE, which a container is usually not
+# given; extracting instead is what makes them run at all here.
+ENV APPIMAGE_EXTRACT_AND_RUN="1"
 
 ENV SHELL="/bin/bash"
 ENV USER="ubuntu"

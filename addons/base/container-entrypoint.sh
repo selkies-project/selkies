@@ -299,8 +299,13 @@ if [ "${SELKIES_MODE}" = "webrtc" ] || is_true "${SELKIES_ENABLE_DUAL_MODE-false
 fi
 
 # Persist the environment for the s6 services (they are siblings, not children,
-# of selkies and coturn would otherwise not see these computed values)
+# of selkies and coturn would otherwise not see these computed values). The
+# variables a shell maintains for itself are left out: exported into another
+# shell they describe that shell wrongly.
 env | sort | while IFS= read -r kv; do
+  case "${kv%%=*}" in
+    PWD|OLDPWD|SHLVL|_|PS1|BASH_*) continue ;;
+  esac
   printf 'export %s=%q\n' "${kv%%=*}" "${kv#*=}"
 done > "${ENV_FILE}"
 

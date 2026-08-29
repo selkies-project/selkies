@@ -101,7 +101,12 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # Qt 6 splits SVG rendering into qt6-svg-plugins with nothing depending on
         # it. Without the SVG icon engine every scalable icon in the session — menu
         # entries, the panel's menu button, tray icons — is silently blank
-        qt6-svg-plugins && \
+        qt6-svg-plugins \
+        # Qt reads only PNG, JPEG and GIF on its own; the rest of what a clipboard
+        # image or a downloaded file arrives as (WebP, TIFF, AVIF, HEIF) needs
+        # these, and without them lximage-qt and the file manager show nothing
+        qt6-image-formats-plugins \
+        kimageformat6-plugins && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
 # LXQt's system defaults, which the distribution packages do not ship: without
