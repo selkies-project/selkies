@@ -448,6 +448,12 @@ ENV SELKIES_WAYLAND_OUTPUTS=""
 ENV SELKIES_WAYLAND_X11_FALLBACK="true"
 # Web interface port
 ENV SELKIES_PORT="8080"
+# A session carries a login and a clipboard, so the container serves TLS by
+# default, on the distribution's snakeoil certificate where the operator names
+# none. Browsers warn once on that certificate; --https-cert / --https-key
+# point at a real one, and SELKIES_ENABLE_HTTPS=false serves plain HTTP for a
+# deployment that terminates TLS in front of the container.
+ENV SELKIES_ENABLE_HTTPS="true"
 # AppImages mount themselves through FUSE, which a container is usually not
 # given; extracting instead is what makes them run at all here.
 ENV APPIMAGE_EXTRACT_AND_RUN="1"

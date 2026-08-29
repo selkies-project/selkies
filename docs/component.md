@@ -213,7 +213,7 @@ The dashboards' apps panel is backed by [proot-apps](https://github.com/linuxser
 
 Read the [Development](development.md) section for customizing this container for your own usage.
 
-Start it and connect to <http://localhost:8080>. The default WebSocket transport carries everything on that one port, so that is the whole command:
+Start it and connect to <https://localhost:8080>. The default WebSocket transport carries everything on that one port, so that is the whole command:
 
 > **The default login is `ubuntu` / `mypasswd`.** Change it with `-e PASSWD=...` (or `-e SELKIES_BASIC_AUTH_PASSWORD=`), and do that before putting a session anywhere others can reach it.
 

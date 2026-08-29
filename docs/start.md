@@ -5,7 +5,7 @@ description: Run the Selkies desktop container, with or without a GPU, and open 
 
 ## Quick Start
 
-The container carries a desktop, a browser and an audio stack, so there is nothing to install and nothing to prepare. Selkies streams over plain WebSockets on a **single port (default `8080`)**; WebRTC is an opt-in transport (`--mode=webrtc`). Open <http://localhost:8080> when it is up.
+The container carries a desktop, a browser and an audio stack, so there is nothing to install and nothing to prepare. Selkies streams over plain WebSockets on a **single port (default `8080`)**; WebRTC is an opt-in transport (`--mode=webrtc`). Open <https://localhost:8080> when it is up, and accept the container's self-signed certificate.
 
 > **The default login is `ubuntu` / `mypasswd`.** Change it with `-e PASSWD=...` (or `-e SELKIES_BASIC_AUTH_PASSWORD=`), and do that before putting a session anywhere others can reach it.
 
@@ -46,7 +46,9 @@ Older toolkit releases leave `/dev/nvidia-modeset` and the DRM render node out; 
 
 `--shm-size=2g` matters because the browsers inside the desktop crash on Docker®'s 64 MB default, and `-p 8080:8080` is the one port the whole session is served on. The image tag names the distribution inside the image — `ubuntu26.04` or `debiantrixie`, a free choice unrelated to your host — and `main` is the newest commit, `latest` the newest release.
 
-`-e SELKIES_BASIC_AUTH_USER=` and `-e SELKIES_BASIC_AUTH_PASSWORD=` replace the default login, `-e SELKIES_ENABLE_HTTPS=true` serves it over TLS (Selkies writes a self-signed certificate when none is configured), `-e SELKIES_MODE=webrtc` opts into the WebRTC transport, and `-e SELKIES_WAYLAND=true` runs the same desktop on the headless Wayland backend. On a machine with more than one GPU, `-e SELKIES_AUTO_GPU=` picks which one the session renders on. [Desktop Container](component.md#desktop-container) covers each of them, along with the second display, the apps panel and the embedded TURN server.
+The container serves HTTPS by default, on the distribution's snakeoil certificate, so the browser warns once until you trust it or name a real certificate with `-e SELKIES_HTTPS_CERT=` and `-e SELKIES_HTTPS_KEY=`; `-e SELKIES_ENABLE_HTTPS=false` serves plain HTTP where something in front already terminates TLS.
+
+`-e SELKIES_BASIC_AUTH_USER=` and `-e SELKIES_BASIC_AUTH_PASSWORD=` replace the default login, `-e SELKIES_MODE=webrtc` opts into the WebRTC transport, and `-e SELKIES_WAYLAND=true` runs the same desktop on the headless Wayland backend. On a machine with more than one GPU, `-e SELKIES_AUTO_GPU=` picks which one the session renders on. [Desktop Container](component.md#desktop-container) covers each of them, along with the second display, the apps panel and the embedded TURN server.
 
 ## Desktop Container
 
