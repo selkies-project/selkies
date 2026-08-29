@@ -28,14 +28,6 @@ def main() -> bool:
               flush=True)
         sys.exit(H.SKIP_EXIT)
 
-    if not hasattr(pixelflux, "probe_wayland_gpu"):
-        # A released pixelflux that predates the report is not a broken contract:
-        # the container's probe raises, is caught, and the backend stays as asked.
-        res.skip("pixelflux reports on Wayland acceleration",
-                 "the installed pixelflux does not carry probe_wayland_gpu yet")
-        return res.summary()
-    res.check("pixelflux reports on Wayland acceleration", True)
-
     report = pixelflux.probe_wayland_gpu("", "true")
     res.check("the report has every field the container reads",
               set(report) >= set(KEYS), sorted(report))

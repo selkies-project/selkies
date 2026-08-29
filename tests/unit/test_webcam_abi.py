@@ -109,12 +109,11 @@ def main() -> int:
     check("interposer compiles", syntax.returncode == 0, syntax.stderr.strip().splitlines()[-1] if syntax.returncode else "")
 
     try:
-        import pixelflux
-        cam = getattr(pixelflux, "VirtualCamera", None)
+        from pixelflux import VirtualCamera as cam
     except ImportError:
         cam = None
     if cam is None:
-        print("SKIP  no importable pixelflux with a virtual camera; "
+        print("SKIP  no importable pixelflux; "
               "checking the C side against the pinned layout only")
     else:
         layout = dict(cam.shm_layout())

@@ -9,6 +9,7 @@ websockets clients on the websockets transport against the in-process pixelflux
 compositor, no browser.
 """
 import asyncio
+import importlib.util
 import json
 import os
 import sys
@@ -117,12 +118,8 @@ async def drive(res: "H.Results") -> None:
 
 def main() -> "H.Results":
     res = H.Results("wl-primary-shrink")
-    try:
-        import pixelflux
-    except ImportError:
+    if importlib.util.find_spec("pixelflux") is None:
         H.skip_suite("pixelflux is not installed")
-    if not hasattr(pixelflux.ScreenCapture, "create_output"):
-        H.skip_suite("the installed pixelflux has no multi-output API")
     H.server_start(mode="websockets", wayland=True)
     try:
         asyncio.run(drive(res))

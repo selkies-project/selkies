@@ -37,8 +37,6 @@ try:
     from pixelflux import ScreenCapture
 except Exception as exc:
     H.skip_suite(f"pixelflux is not importable: {exc}")
-if not hasattr(ScreenCapture, "type_keysyms_wayland"):
-    H.skip_suite("the installed pixelflux has no virtual-keyboard typer")
 
 
 def boot(runtime: str) -> tuple:

@@ -74,13 +74,6 @@ def main() -> "H.Results":
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
     import pixelflux
 
-    missing = [name for name in ("create_output", "set_app_screen_layout",
-                                "list_app_screens")
-               if not hasattr(pixelflux.ScreenCapture, name)]
-    if missing:
-        H.skip_suite("the installed pixelflux has no multi-output API: "
-                     + ", ".join(missing))
-
     res = H.Results("wl-multi-output")
     socket = pixelflux.ensure_wayland_display(width=1920, height=1080,
                                               render_node="", auto_gpu="",

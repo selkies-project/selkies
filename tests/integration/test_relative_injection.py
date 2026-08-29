@@ -91,13 +91,6 @@ def x11_block(res) -> None:
 
 def wayland_block(res) -> None:
     """The same motion against the Wayland backend's seat."""
-    try:
-        from pixelflux import ScreenCapture
-        rung = ("relative injection" if hasattr(ScreenCapture, "inject_relative_mouse_move")
-                else "the absolute fallback")
-    except ImportError:
-        rung = "no pixelflux at all"
-    print(f"[relative-injection] PREFLIGHT: wayland deltas go through {rung}", flush=True)
     H.server_start(mode="websockets", wayland=True)
     obs = H.WlObs(WL_SOCKET)
     try:

@@ -28,19 +28,6 @@ def run_block(mode: str, wayland: bool, block: str = "",
     res = H.Results(tag)
     wl_socket = "wayland-1"
 
-    if wayland:
-        try:
-            from pixelflux import ScreenCapture
-            missing = [m for m in ("clipboard_write_app", "list_outputs",
-                                   "create_output", "set_keymap_overlay")
-                       if not hasattr(ScreenCapture, m)]
-        except ImportError:
-            missing = ["the module entirely"]
-        if missing:
-            print(f"[{tag}] PREFLIGHT: installed pixelflux is missing APIs "
-                  "this tree expects; wayland checks will fail against it",
-                  flush=True)
-
     H.server_start(mode=mode, wayland=wayland)
     res.check("server up", True, H.curl("/api/status")[0])
     st_mode = json.loads(H.curl("/api/status")[1]).get("current_mode")
