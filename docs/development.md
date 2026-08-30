@@ -113,7 +113,7 @@ This section is a knowledge base for code contributions and development.
 ```bash
 docker compose build dist                    # the wheel, web client included
 docker compose build base desktop            # the session, then the desktop on top of it
-docker compose up desktop                    # the Desktop Container on https://localhost:8080
+docker compose up desktop                    # the Desktop Container on http://localhost:8080
 docker compose --profile gpu up desktop-gpu  # the same container with a GPU attached
 ```
 
@@ -127,7 +127,7 @@ docker run --rm -it --shm-size=2g -p 8080:8080 \
   ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04
 ```
 
-The web client is a build product and a fresh checkout has none, so the image's own bundle is linked in at the (gitignored) path it is served from; `docker compose build dist` builds a real one into the tree. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. To run a wheel built from this tree instead of the latest PyPI release, copy it out of the `selkies-py-build` image into `addons/base/wheels/` before building.
+The web client is a build product and a fresh checkout has none, so the image's own bundle is linked in at the (gitignored) path it is served from; running `scripts/ci/build-web.sh` locally builds a real one into the tree. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. The images build with BuildKit (`RUN --mount`); the legacy builder cannot build them. To run a wheel built from this tree instead of the latest PyPI release, copy it out of the `selkies-py-build` image into `addons/base/wheels/` before building.
 
 ## Documentation
 
@@ -183,7 +183,7 @@ The comment conventions each language follows are in [`AGENTS.md`](https://githu
 
 ## Container Customization
 
-The reference container images (the [Base Container](https://github.com/selkies-project/selkies/tree/main/addons/base), the [Example Container](https://github.com/selkies-project/selkies/tree/main/addons/desktop) built on it, and the LXQt desktop images built by CI) use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor, installed from the distribution's package registry (`s6` package): `s6-svscan /etc/service` starts one `s6-supervise` per service directory — the X11 display server (or the headless Wayland compositor), the desktop session, the audio stack (`pipewire`/`wireplumber`/`pipewire-pulse`), `dbus`, and `selkies`, restarting any that crash. Services are controlled with `s6-svc` and inspected with `s6-svstat`, the `supervisord`/`supervisorctl` equivalents, without any Python dependency (`s6-overlay` is deliberately NOT used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init or launcher).
+The reference container images (the [Base Container](https://github.com/selkies-project/selkies/tree/main/addons/base), the [Desktop Container](https://github.com/selkies-project/selkies/tree/main/addons/desktop) built on it, and the LXQt desktop images built by CI) use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor, installed from the distribution's package registry (`s6` package): `s6-svscan /etc/service` starts one `s6-supervise` per service directory — the X11 display server (or the headless Wayland compositor), the desktop session, the audio stack (`pipewire`/`wireplumber`/`pipewire-pulse`), `dbus`, and `selkies`, restarting any that crash. Services are controlled with `s6-svc` and inspected with `s6-svstat`, the `supervisord`/`supervisorctl` equivalents, without any Python dependency (`s6-overlay` is deliberately NOT used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init or launcher).
 
 **If you want to change the image behavior, use the original container as a base image and only replace the entrypoint script(s) and/or the s6 service files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu26.04` for the [Desktop Container](component.md#desktop-container)) to preserve a specific container build.**
 
@@ -224,11 +224,11 @@ The entrypoint script of the base images launches `s6-svscan /etc/service` itsel
 
 The [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) and [`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) repositories (the Desktop Containers here) share components with the [Desktop Container](component.md#desktop-container), which is the reference they follow: `container-entrypoint.sh` prepares the session and launches `s6-svscan /etc/service`, the `selkies` service runs `selkies-entrypoint.sh`, and every other daemon is a `run` script under `services/`. There is no `supervisord.conf` and no nginx, since Selkies serves the web client and every endpoint on its single port.
 
-**A change to any shared component is three Pull Requests — the Example Container and both Desktop Containers — and a change confined to the Desktop Containers is two.** What is shared, and how closely:
+**A change to any shared component is three Pull Requests — this repository's Desktop Container and both downstream Desktop Containers — and a change confined to the Desktop Containers is two.** What is shared, and how closely:
 
 | Component | Shared between | When updating |
 | --- | --- | --- |
-| `LICENSE`, entrypoint script, service definitions | both Desktop Containers, following the Example Container | identical; copy between them |
+| `LICENSE`, entrypoint script, service definitions | both Desktop Containers, following this repository's | identical; copy between them |
 | Entrypoint script, start to the `export PULSE_SERVER=...` line | both Desktop Containers | identical; the NVIDIA userspace driver install differs only in its outermost `if` |
 | `Dockerfile`, outside the `Anything above/below this line should always be kept the same...` markers | both Desktop Containers | identical, and the Selkies install procedure follows every release |
 | Remaining entrypoint sections, `README.md`, `egl.yml`/`xgl.yml` | both Desktop Containers | similar but not identical; assess by hand |

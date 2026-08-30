@@ -3,7 +3,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# PID-agnostic container init for the Selkies example container. It prepares the
+# PID-agnostic container init for the Selkies desktop container. It prepares the
 # runtime environment (joystick, webcam and fake-udev LD_PRELOAD, device nodes,
 # TURN defaults), derives the service set from the environment toggles, and then
 # hands service supervision to s6 (`s6-svscan /etc/service`): one `s6-supervise`
