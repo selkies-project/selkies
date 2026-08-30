@@ -298,6 +298,12 @@ def sink_block(engine: str) -> "H.Results":
     whose sink most needs naming -- and the one that used to say nothing. The
     worker is blocked the way a content policy that forbids blob workers
     blocks it: the constructor throws.
+
+    The generator sink itself is out of reach here: it needs
+    `VideoTrackGenerator` in a worker, which WebKit gates on a preference that
+    defaults on under `PLATFORM(COCOA)` alone, so the build this matrix launches
+    reports a canvas sink however the shipping browser behaves. What a browser
+    that has it settles on is read from the line this check makes it print.
     """
     res = H.Results(f"sink-{engine}")
     H.server_start(mode="websockets", wayland=False)
