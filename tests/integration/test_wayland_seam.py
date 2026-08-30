@@ -17,6 +17,7 @@ Usage: python3 tests/integration/test_wayland_seam.py
 """
 import io
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -61,7 +62,8 @@ class Sink:
             data = self.last
         if data is None:
             return 0.0
-        px = list(Image.open(io.BytesIO(data)).convert("RGB").resize((160, 90)).getdata())
+        raw = Image.open(io.BytesIO(data)).convert("RGB").resize((160, 90)).tobytes()
+        px = [raw[i : i + 3] for i in range(0, len(raw), 3)]
         near = sum(1 for p in px if all(abs(p[i] - rgb[i]) <= tol for i in range(3)))
         return near / len(px)
 
@@ -142,11 +144,14 @@ class Patch:
         self.d.sync()
         time.sleep(1.5)
 
-    def move_to(self, x: int) -> None:
-        """Put the window's left edge at `x` and let the frame settle."""
+    def place(self, x: int) -> None:
+        """Map the window with its left edge at `x`; the caller polls for it.
+
+        Mapping again is idempotent, and re-issuing the whole placement is what
+        lets a poll recover a window a loaded nested session dropped."""
+        self.win.map()
         self.win.configure(x=x, y=300)
         self.d.sync()
-        time.sleep(2.5)
 
     def close(self) -> None:
         self.win.destroy()
@@ -156,6 +161,9 @@ class Patch:
 
 def main() -> "H.Results":
     """Walk a window across the seam and watch both displays' pixels."""
+    # A previous run's env dump, log and socket files would be read as this
+    # run's; a stale display number can even point at a live foreign server.
+    shutil.rmtree(RUNTIME, ignore_errors=True)
     os.makedirs(RUNTIME, mode=0o700, exist_ok=True)
     os.environ["XDG_RUNTIME_DIR"] = RUNTIME
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
@@ -190,18 +198,33 @@ def main() -> "H.Results":
             H.skip_suite("the nested compositor did not come up")
         time.sleep(1.5)
         patch = Patch(display, WIN_RGB)
-        patch.move_to(300)
-        first = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
+
+        def settled(want, x, deadline=15.0):
+            """Poll both displays for the wanted split, re-placing the window
+            between samples: encoding is damage-driven, so a fresh frame takes
+            a moment, and a loaded nested session can drop a placement."""
+            last = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
+            end = time.monotonic() + deadline
+            while not want(*last) and time.monotonic() < end:
+                time.sleep(0.4)
+                patch.place(x)
+                last = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
+            return last
+
+        patch.place(300)
+        first = settled(lambda l, r: l > PRESENT and r <= PRESENT, 300)
         res.check("a window on the first display shows only there",
                   first[0] > PRESENT and first[1] <= PRESENT, first)
 
-        patch.move_to(DISPLAY[0] - 250)
-        across = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
+        patch.place(DISPLAY[0] - 250)
+        across = settled(lambda l, r: l > PRESENT and r > PRESENT,
+                         DISPLAY[0] - 250)
         res.check("a window over the boundary shows on both",
                   across[0] > PRESENT and across[1] > PRESENT, across)
 
-        patch.move_to(DISPLAY[0] + 400)
-        second = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
+        patch.place(DISPLAY[0] + 400)
+        second = settled(lambda l, r: l <= PRESENT and r > PRESENT,
+                         DISPLAY[0] + 400)
         res.check("a window past the boundary shows only on the second",
                   second[0] <= PRESENT and second[1] > PRESENT, second)
 
@@ -223,9 +246,15 @@ def main() -> "H.Results":
                 time.sleep(0.03)
             time.sleep(0.6)
             left_cap.inject_mouse_button(1, 0)
-            seen = [ln["x"] for ln in obs.lines if ln.get("kind") == "ptr_motion"]
-            clicks = [ln for ln in obs.lines if ln.get("kind") == "ptr_button"]
-            reach = max(seen) if seen else -1.0
+            reach, clicks = -1.0, []
+            end = time.monotonic() + 10.0
+            while time.monotonic() < end:
+                seen = [ln["x"] for ln in obs.lines if ln.get("kind") == "ptr_motion"]
+                clicks = [ln for ln in obs.lines if ln.get("kind") == "ptr_button"]
+                reach = max(seen) if seen else -1.0
+                if reach > DISPLAY[0] + 500 and clicks:
+                    break
+                time.sleep(0.3)
             res.check("a held grab crosses the boundary", reach > DISPLAY[0] + 500,
                       f"reached x={reach}, boundary at {DISPLAY[0]}")
             res.check("injected buttons reach the session's clients",
