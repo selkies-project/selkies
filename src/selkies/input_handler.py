@@ -754,6 +754,7 @@ class _X11ClipboardMonitor:
         self._progress = 0
         self._reply = None
         self._reply_done = threading.Event()
+        self._reply_lock = threading.Lock()
         self._abort_read = threading.Event()
         self._read_lock = threading.Lock()
         self._own_data = None
@@ -918,11 +919,12 @@ class _X11ClipboardMonitor:
         A reply that arrives after its caller gave up is dropped: handed on, it
         would answer the next conversion with the previous target's bytes.
         """
-        serving, self._serving = self._serving, None
-        if serving is None or serving[0] != self._gen:
-            return
-        self._reply = reply
-        self._reply_done.set()
+        with self._reply_lock:
+            serving, self._serving = self._serving, None
+            if serving is None or serving[0] != self._gen:
+                return
+            self._reply = reply
+            self._reply_done.set()
 
     def _collect_selection(self, ev: Any) -> None:
         """On the event thread: fetch the converted property (INCR-aware).
@@ -960,11 +962,20 @@ class _X11ClipboardMonitor:
                 hard_deadline = time.monotonic() + self._TRANSFER_TIMEOUT_S
                 deadline = time.monotonic() + self._READ_TIMEOUT_S
                 while time.monotonic() < min(deadline, hard_deadline):
+                    if self._abort_read.is_set():
+                        break
                     if not self._d.pending_events():
                         remaining = min(deadline, hard_deadline) - time.monotonic()
                         if remaining <= 0:
                             break
-                        r, _, _ = select.select([self._d.fileno()], [], [], remaining)
+                        r, _, _ = select.select(
+                            [self._d.fileno(), self._cmd_r], [], [], remaining)
+                        if self._cmd_r in r:
+                            # A command is a paste or a shutdown, and neither
+                            # may wait behind a streaming owner: the transfer
+                            # is the one to lose. The byte stays unread for
+                            # the main loop to serve.
+                            break
                         if not r or not self._d.pending_events():
                             continue
                     e = self._d.next_event()
@@ -1022,10 +1033,11 @@ class _X11ClipboardMonitor:
             or None on timeout/failure.
         """
         with self._read_lock:
-            self._gen += 1
-            self._reply = None
-            self._reply_done.clear()
-            self._pending_target = (self._gen, target_atom)
+            with self._reply_lock:
+                self._gen += 1
+                self._reply = None
+                self._reply_done.clear()
+                self._pending_target = (self._gen, target_atom)
             os.write(self._cmd_w, b"x")
             seen = self._progress
             hard_deadline = time.monotonic() + self._TRANSFER_TIMEOUT_S
@@ -1128,6 +1140,9 @@ class _X11ClipboardMonitor:
             self._pending_own = (data_bytes, mime_atom, is_text)
             os.write(self._cmd_w, b"o")
             if not self._own_done.wait(self._READ_TIMEOUT_S):
+                # Withdrawn: taken late, the ownership would revert the
+                # clipboard to this stale payload after a newer X copy.
+                self._pending_own = None
                 return False
             return self._own_ok
 

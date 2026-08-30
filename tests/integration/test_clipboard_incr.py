@@ -219,6 +219,22 @@ def run() -> "H.Results":
         state["flag"] = True
         res.check("a write does not wait out a slow read",
                   took and elapsed < 5.0, f"offer took {elapsed:.2f}s")
+
+        # A paste landing while an owner is mid-stream -- chunks still coming --
+        # is served between chunks rather than waiting the transfer out.
+        d, state = incr_owner(display, payload, "image/png", delay=0.4)
+        owners.append((d, state))
+        time.sleep(0.3)
+        threading.Thread(target=monitor.read, args=(True,), daemon=True).start()
+        time.sleep(0.6)
+        started = time.monotonic()
+        took = monitor.offer(b"pasted mid-stream", "text/plain")
+        elapsed = time.monotonic() - started
+        state["flag"] = True
+        res.check("a paste is served between a streaming owner's chunks",
+                  took and elapsed < 2.0, f"offer took {elapsed:.2f}s, ok={took}")
+        res.check("the mid-stream paste took the selection",
+                  monitor.owns_selection(), str(monitor.owns_selection()))
         monitor.close()
     finally:
         for _d, state in owners:
