@@ -30,10 +30,13 @@ function check(label, ok, detail = '') {
 }
 
 const MOD_CODES = {
-    ShiftLeft: 'Shift', ControlLeft: 'Control',
-    AltLeft: 'Alt', AltRight: 'Alt', MetaLeft: 'Meta',
+    ShiftLeft: 'Shift', ShiftRight: 'Shift', ControlLeft: 'Control',
+    ControlRight: 'Control', AltLeft: 'Alt', AltRight: 'Alt',
+    MetaLeft: 'Meta', MetaRight: 'Meta',
 };
-const LOCATION = { ShiftLeft: 1, ControlLeft: 1, AltLeft: 1, AltRight: 2, MetaLeft: 1 };
+const LOCATION = { ShiftLeft: 1, ShiftRight: 2, ControlLeft: 1, ControlRight: 2,
+                   AltLeft: 1, AltRight: 2, MetaLeft: 1, MetaRight: 2 };
+const held = (down, side) => down.has(side + 'Left') || down.has(side + 'Right');
 
 /**
  * How one engine on one platform describes the keyboard. `key` names the
@@ -48,7 +51,7 @@ const ENGINES = {
     },
     'gecko-mac': {
         platform: 'MacIntel', ua: 'Mozilla/5.0 (Macintosh) Gecko Firefox/140', chrome: false,
-        flags: (down) => ({ altGraph: down.has('AltLeft') || down.has('AltRight') }),
+        flags: (down) => ({ altGraph: held(down, 'Alt') }),
     },
     'webkit-mac': {
         platform: 'MacIntel', ua: 'Mozilla/5.0 (Macintosh) Version/18 Safari/605', chrome: false,
@@ -131,8 +134,8 @@ function wire(engineName, steps, opts = {}) {
         if (action === 'down') down.add(code); else down.delete(code);
         const { replay, physical, ...override } = forced || {};
         const flags = {
-            shift: down.has('ShiftLeft'), ctrl: down.has('ControlLeft'),
-            alt: down.has('AltLeft') || down.has('AltRight'), meta: down.has('MetaLeft'),
+            shift: held(down, 'Shift'), ctrl: held(down, 'Control'),
+            alt: held(down, 'Alt'), meta: held(down, 'Meta'),
             ...engine.flags(down), ...override,
         };
         const key = char !== undefined ? char
@@ -141,7 +144,8 @@ function wire(engineName, steps, opts = {}) {
                         Shift: flags.shift, AltGraph: flags.altGraph };
         const event = {
             key, code, location: LOCATION[code] || 0, keyCode: 0, isComposing: false,
-            timeStamp: 0, isTrusted: physical === true || engine.trusted !== false,
+            timeStamp: 0,
+            isTrusted: physical === true || (!replay && engine.trusted !== false),
             altKey: flags.alt, ctrlKey: flags.ctrl, metaKey: flags.meta, shiftKey: flags.shift,
             target: { classList: { contains: () => false }, parentElement: null },
             getModifierState: (name) => !!state[name],
@@ -156,7 +160,8 @@ function wire(engineName, steps, opts = {}) {
 }
 
 const XK = { Alt_L: 65513, Mode_switch: 65406, ISO_Level3_Shift: 65027, Control_L: 65507,
-             Super_L: 65515, Meta_L: 65511, Omega: 0x7d9, lstroke: 435, Tab: 65289, Left: 65361 };
+             Control_R: 65508, Super_L: 65515, Meta_L: 65511, Omega: 0x7d9, lstroke: 435,
+             Tab: 65289, Left: 65361 };
 
 /**
  * One physical action, the engines that can perform it, and the wire it means.
@@ -221,6 +226,23 @@ const ACTIONS = [
       engines: ['blink-pc', 'gecko-pc', 'legacy-pc'],
       steps: [['down', 'AltLeft'], ['down', 'KeyF', 'f']],
       wire: `kd,${XK.Alt_L} kd,102` },
+    { name: 'a right Option reported as a Meta key still types its character',
+      engines: ['webkit-mac'],
+      steps: [['down', 'AltRight'], ['down', 'KeyZ', 'Ω'], ['up', 'KeyZ', 'Ω'], ['up', 'AltRight']],
+      wire: `kd,65512 kd,${XK.Omega} ku,${XK.Omega} ku,65512` },
+    { name: 'a right Alt with no AltGr on it names the shortcut',
+      engines: ['blink-pc', 'gecko-pc'],
+      steps: [['down', 'AltRight', 'Alt', { altGraph: false, alt: true }],
+              ['down', 'KeyF', 'f', { altGraph: false, alt: true }]],
+      wire: 'kd,65514 kd,102' },
+    { name: 'the right Shift and Meta hold their own side',
+      engines: ['blink-pc', 'gecko-pc'],
+      steps: [['down', 'ShiftRight'], ['down', 'MetaRight'], ['down', 'KeyA', 'A']],
+      wire: 'kd,65506 kd,65516 kd,65' },
+    { name: 'the right Control names the shortcut its own side does',
+      engines: ['blink-pc', 'gecko-pc'],
+      steps: [['down', 'ControlRight'], ['down', 'KeyZ', 'я']],
+      wire: `kd,${XK.Control_R} kd,122` },
     // -- A page-built event names the modifier it wants held, with no platform
     // -- remap over it: the on-screen Alt is Alt even on a macOS client.
     { name: 'the on-screen Alt holds Alt, not the platform level-3 shift',
@@ -280,6 +302,14 @@ check('an AltGr whose keydown was swallowed still types its character',
 const swallowedAlt = wire('blink-mac', [['down', 'KeyZ', 'Ω', { alt: true }]]);
 check('an Alt whose keydown was swallowed still names the shortcut',
       swallowedAlt === `kd,${XK.Alt_L} kd,122 ku,${XK.Alt_L}`, swallowedAlt);
+
+// A Control the page never saw go down is held by nothing, so only its flag
+// says the chord is a shortcut rather than the character Option composed.
+const swallowedCtrl = wire('blink-mac',
+    [['down', 'AltLeft'], ['down', 'KeyX', '≈', { ctrl: true }]]);
+check('a Control whose keydown was swallowed still names the shortcut',
+      swallowedCtrl === `kd,${XK.Mode_switch} kd,${XK.Control_L} kd,${XK.Alt_L} kd,120 `
+                     + `ku,${XK.Alt_L} ku,${XK.Control_L}`, swallowedCtrl);
 
 // clipboard-sync holds a paste chord while a transfer is in flight and
 // re-dispatches it after, so the replay is the physical key, deferred.
