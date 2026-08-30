@@ -14,7 +14,8 @@ it. Put rationale in the docblock of the function or module it explains, and pre
 helper over a comment. An inline comment is for the line that stays surprising after that — a workaround for a
 specific bug, an ordering or value that looks wrong but is required — and says why the line is that way, not what
 it does. Comments are terse and current: no PR summaries, no issue or task numbers, no narration of what the code
-used to do.
+used to do. The prose under `docs/` follows the same rule: it describes what the tree does now, not what an
+earlier revision did or what a change replaced.
 
 Every language follows one shape: a Google-style docblock on the module, on every class, and on every function
 that is not trivially self-describing, with the types on the signature. A docblock opens with a summary line, then
