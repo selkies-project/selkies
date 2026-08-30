@@ -872,8 +872,8 @@ export default function webrtc() {
 	/**
 	 * Turns full colour off where this engine's decoder has no 4:4:4 profile.
 	 *
-	 * Only Chromium decodes H.264 4:4:4; elsewhere a full-colour stream is not
-	 * a heavier picture but no picture, so the setting is dropped rather than
+	 * Where the decoder has no 4:4:4 profile a full-colour stream is not a
+	 * heavier picture but no picture, so the setting is dropped rather than
 	 * asked for. Written to storage, which is what every payload and both
 	 * dashboards read, so the toggle shows what the stream is.
 	 */

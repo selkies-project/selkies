@@ -2,12 +2,12 @@
 """Full colour is asked for only where the engine can decode it.
 
 `video_fullcolor` makes the H.264 encoders emit 4:4:4, which is High 4:4:4
-Predictive on the wire. Only Chromium's decoder has that profile: Firefox and
-WebKit take 4:2:0 and nothing else -- not 4:2:2, not VP9 profile 1, not AV1
-profile 1 -- so on them a full-colour stream is not a heavier picture but no
-picture at all, and every stripe decoder is built and refused for as long as it
-runs. The client therefore settles the question against its own decoder before
-it asks the server for anything.
+Predictive on the wire, and engines differ on whether their decoder has that
+profile. One that does not shows no picture at all rather than a worse one,
+with every stripe decoder built and refused for as long as the session runs, so
+the client settles the question against its own decoder before it asks the
+server for anything. This suite asks each engine the same way rather than
+naming which ones can: what an engine decodes changes with its releases.
 
 Driven with the setting stored on before the page loads, the way a user who
 turned it on in Chromium and then opened the same URL in Safari arrives. Both

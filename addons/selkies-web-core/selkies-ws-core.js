@@ -1086,16 +1086,16 @@ const isChromium = (() => {
  * report it, which is why the worker is started before this is consulted.
  *
  * Sink priority: the worker's VideoTrackGenerator, then this, then the worker's
- * OffscreenCanvas, then the page's own canvas. Chromium has this one; an engine
- * with neither composites in the worker instead.
+ * OffscreenCanvas, then the page's own canvas. Which of the generators an engine
+ * has is probed, never assumed: both come and go with browser releases.
  */
 const supportsWindowMSTG = (typeof MediaStreamTrackGenerator !== 'undefined');
 
 /**
  * Whether the worker video sink is enabled (`?offscreen_worker=false` turns
  * it off). The worker hosts either the standard VideoTrackGenerator, whose
- * MediaStreamTrack is transferred back for `<video>.srcObject`, or, where the
- * engine has none, an OffscreenCanvas it composites onto.
+ * MediaStreamTrack is transferred back for `<video>.srcObject`, or, where it
+ * has none, an OffscreenCanvas it composites onto.
  */
 let USE_OFFSCREEN_WORKER = false;
 let videoWorker = null;
@@ -2425,7 +2425,7 @@ function answerRefusedCodec(codec) {
     console.error(`This session streams ${codec}, which this browser cannot decode.`);
     if (statusDisplayElement) {
         statusDisplayElement.textContent = 'Error: This session streams video in a format this '
-            + 'browser cannot decode. Full color (4:4:4) needs a Chromium-based browser.';
+            + 'browser cannot decode. Full color (4:4:4) needs a browser whose decoder has that profile.';
         statusDisplayElement.classList.remove('hidden');
     }
 }

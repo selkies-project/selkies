@@ -90,8 +90,7 @@ Each is documented in full where named; read that before changing the subsystem.
 - A modifier's role comes from the keysym the client resolved for it, never from the engine's flags:
   browsers name the same physical key differently (macOS Option is `AltGraph` to Gecko, `Alt` to Blink, a
   Meta key to WebKit). That decides both text-versus-shortcut and when a held modifier is stale
-  (`Input._composesText`, `Input._releaseDesyncedModifiers`; `tests/tools/keyboard_chord_audit.mjs` holds
-  every engine to one answer).
+  (`Input._composesText`, `Input._releaseDesyncedModifiers`).
 - Every display of an extended desktop is published as a RandR logical monitor listing the physical output,
   because a toolkit realizes a monitor only where one is listed; whether the server lets several monitors share
   the output is read back from the reply rather than assumed, since RandR 1.5 gives an output to one monitor and
@@ -100,9 +99,9 @@ Each is documented in full where named; read that before changing the subsystem.
   event reports held, never the transitions one page happened to witness: a held drag crosses between pages,
   reaching one that never saw the press and leaving one that never sees the release
   (`Input._mouseButtonMovement`).
-- A client asks the server only for what its own decoder will take, measured rather than assumed: full colour
-  is H.264 4:4:4, which Chromium alone decodes, and elsewhere it is not a heavier picture but no picture at all
-  (`util.canDecodeFullColor`, `canDecodeEncoder`; `tests/e2e/test_full_color.py` holds every engine to it).
+- A client asks the server only for what its own decoder will take, measured rather than assumed: engines
+  differ on H.264 4:4:4 and change with every release, and one whose decoder lacks the profile shows no picture
+  at all rather than a worse one (`util.canDecodeFullColor`, `canDecodeEncoder`).
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `src/selkies/webcam.py`,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).

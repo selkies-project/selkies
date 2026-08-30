@@ -118,11 +118,11 @@ let fullColorProbe = null;
 /**
  * Whether this engine's `VideoDecoder` will take H.264 full colour (4:4:4).
  *
- * Only Chromium decodes High 4:4:4 Predictive; Firefox and WebKit take 4:2:0
- * alone, and neither has any other 4:4:4 profile a Selkies encoder emits, so
- * for them full colour is not a quality trade but a stream that paints
- * nothing. A client that cannot decode it therefore never asks the server for
- * it. The question is asked at level 3.0 because the profile is what is in
+ * Engines differ on High 4:4:4 Predictive, and one whose decoder lacks it
+ * cannot show the stream at all rather than showing it worse, so full colour
+ * is asked of the decoder before it is asked of the server. Which engines have
+ * it changes with their releases, which is why this probes instead of naming
+ * them. The question is asked at level 3.0 because the profile is what is in
  * doubt: the level of a real stream is re-derived from its keyframe's SPS.
  * @returns {Promise<boolean>} False where there is no `VideoDecoder` at all.
  */

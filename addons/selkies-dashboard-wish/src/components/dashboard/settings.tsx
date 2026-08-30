@@ -386,8 +386,8 @@ export function Settings() {
     }, [serverSettings]);
     const [videoFullColor, setVideoFullColor] = useConditionalSetting(
         VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-    // Full colour is 4:4:4 H.264, which only Chromium decodes; elsewhere the
-    // core turns it off, so offering the switch would offer nothing.
+    // Full colour is 4:4:4 H.264; where the decoder has no such profile the core
+    // turns it off, so offering the switch would offer nothing.
     const [fullColorDecodable, setFullColorDecodable] = useState(true);
     useEffect(() => { canDecodeFullColor().then(setFullColorDecodable); }, []);
     const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
