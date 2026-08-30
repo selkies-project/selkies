@@ -29,6 +29,7 @@ from typing import Any, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
+from selkies.Xlib import display as x11_display
 from playwright.sync_api import sync_playwright
 
 SECRET = "e2e-turn-shared-secret"
@@ -207,18 +208,30 @@ def main() -> None:
                                            and RELAY_PORTS[0] <= int(p["localAddress"].rsplit(":", 1)[1]) <= RELAY_PORTS[1]
                                            for p in selected), [p["localAddress"] for p in selected])
                 # The encoder sends on damage, so an idle desktop produces no
-                # media however long the wait: the pointer is moved to make some,
-                # and the counter polled rather than sampled once, since a fixed
-                # window can also fall between consent-freshness exchanges.
+                # media however long the wait, and moving the pointer makes none
+                # of its own: the cursor rides a channel of its own rather than
+                # the framebuffer. The desktop is repainted instead, and the
+                # counter polled rather than sampled once, since a fixed window
+                # can fall between frames.
                 before = received_bytes(page)
                 after = before
                 deadline = time.monotonic() + 20.0
-                while after <= before and time.monotonic() < deadline:
-                    page.mouse.move(200 + (int(time.monotonic() * 10) % 40), 150)
-                    time.sleep(0.5)
-                    after = received_bytes(page)
+                d = x11_display.Display(H.require_display())
+                try:
+                    root = d.screen().root
+                    gc = root.create_gc()
+                    repaints = 0
+                    while after <= before and time.monotonic() < deadline:
+                        repaints += 1
+                        gc.change(foreground=(repaints * 0x3B5B1F) & 0xFFFFFF)
+                        root.fill_rectangle(gc, 0, 0, 640, 480)
+                        d.sync()
+                        time.sleep(0.5)
+                        after = received_bytes(page)
+                finally:
+                    d.close()
                 res.check("bytes keep arriving over the relayed pair", after > before,
-                          f"{before} -> {after}")
+                          f"{before} -> {after} over {repaints} repaints")
                 # Input rides the data channel on the same transport.
                 page.mouse.click(640, 360)
                 time.sleep(0.4)
