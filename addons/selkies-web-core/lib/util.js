@@ -6,9 +6,9 @@
 
 /**
  * Helpers shared by the streaming cores and both dashboards: a small FIFO
- * queue, the human-readable labels for wire values, the WebSocket decodability
- * check, and the route prefix and localStorage namespace every caller derives
- * the same way.
+ * queue, the human-readable labels for wire values, the decodability checks
+ * that keep a client from asking for a stream it cannot play, and the route
+ * prefix and localStorage namespace every caller derives the same way.
  * @module
  */
 
@@ -111,6 +111,37 @@ export const canDecodeEncoder = (encoder) => encoder === "jpeg" || typeof VideoD
  * @returns {string[]} Those `canDecodeEncoder` accepts.
  */
 export const decodableEncoders = (encoders) => encoders.filter(canDecodeEncoder);
+
+/** Cached answer of `canDecodeFullColor`, so the probe runs once. */
+let fullColorProbe = null;
+
+/**
+ * Whether this engine's `VideoDecoder` will take H.264 full colour (4:4:4).
+ *
+ * Only Chromium decodes High 4:4:4 Predictive; Firefox and WebKit take 4:2:0
+ * alone, and neither has any other 4:4:4 profile a Selkies encoder emits, so
+ * for them full colour is not a quality trade but a stream that paints
+ * nothing. A client that cannot decode it therefore never asks the server for
+ * it. The question is asked at level 3.0 because the profile is what is in
+ * doubt: the level of a real stream is re-derived from its keyframe's SPS.
+ * @returns {Promise<boolean>} False where there is no `VideoDecoder` at all.
+ */
+export function canDecodeFullColor() {
+    if (!fullColorProbe) {
+        fullColorProbe = (async () => {
+            if (typeof VideoDecoder === "undefined") return false;
+            try {
+                const support = await VideoDecoder.isConfigSupported({
+                    codec: "avc1.F4001E", codedWidth: 1280, codedHeight: 720,
+                });
+                return !!(support && support.supported);
+            } catch (err) {
+                return false;
+            }
+        })();
+    }
+    return fullColorProbe;
+}
 
 /**
  * Directory this document is served from, without a trailing slash (`''` at

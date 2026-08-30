@@ -33,7 +33,7 @@
  */
 
 import { Card, CardContent } from "@/components/ui/card";
-import { displayLabel, decodableEncoders } from "../../../../selkies-web-core/lib/util.js";
+import { displayLabel, decodableEncoders, canDecodeFullColor } from "../../../../selkies-web-core/lib/util.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
@@ -386,6 +386,10 @@ export function Settings() {
     }, [serverSettings]);
     const [videoFullColor, setVideoFullColor] = useConditionalSetting(
         VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    // Full colour is 4:4:4 H.264, which only Chromium decodes; elsewhere the
+    // core turns it off, so offering the switch would offer nothing.
+    const [fullColorDecodable, setFullColorDecodable] = useState(true);
+    useEffect(() => { canDecodeFullColor().then(setFullColorDecodable); }, []);
     const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
         VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     // Pre-settings fallbacks mirror the server defaults (settings.py).
@@ -1395,7 +1399,7 @@ export function Settings() {
                         {/* Paint-over, Turbo and 4:4:4 are pixelflux encoder features shared by both transports. */}
                         {isH264 && (
                             <>
-                                {(renderableSettings.videoFullColor ?? true) && (
+                                {(renderableSettings.videoFullColor ?? true) && fullColorDecodable && (
                                 <div className="flex items-center justify-between">
                                     <div className="space-y-0.5">
                                         <label className="text-sm font-medium">{t('sections.video.fullColorLabel')}</label>

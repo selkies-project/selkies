@@ -50,7 +50,7 @@
  * @module
  */
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
-import { displayLabel, decodableEncoders, getRoutePrefix, getStorageAppName, isMobileClient } from "../../../selkies-web-core/lib/util.js";
+import { displayLabel, decodableEncoders, canDecodeFullColor, getRoutePrefix, getStorageAppName, isMobileClient } from "../../../selkies-web-core/lib/util.js";
 import { withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
@@ -1299,6 +1299,10 @@ function Sidebar() {
     USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings, rateControlMode], readPaintOverStored);
   const [videoFullColor, setVideoFullColor] = useConditionalSetting(
     VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  // Full colour is 4:4:4 H.264, which only Chromium decodes; elsewhere the
+  // core turns it off, so offering the switch would offer nothing.
+  const [fullColorDecodable, setFullColorDecodable] = useState(true);
+  useEffect(() => { canDecodeFullColor().then(setFullColorDecodable); }, []);
   const [use_cpu, setUseCpu] = useConditionalSetting(
     USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
@@ -3465,7 +3469,7 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {showH264Options && (renderableSettings.videoFullColor ?? true) && (
+                {showH264Options && (renderableSettings.videoFullColor ?? true) && fullColorDecodable && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="videoFullColorToggle">
                       {t("sections.video.fullColorLabel")}

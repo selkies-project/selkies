@@ -115,7 +115,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor } from './lib/util.js';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 
@@ -2352,6 +2352,62 @@ body {
   `;
   document.head.appendChild(style);
 };
+
+/**
+ * Settles whether full colour is on the table for this engine, before the
+ * first SETTINGS payload is built.
+ *
+ * An engine whose decoder has no 4:4:4 profile cannot show a full-colour
+ * stream at all -- every stripe is refused and nothing paints -- so the
+ * setting is turned off rather than asked for. It is written to storage, not
+ * merely dropped from one payload: every payload is built from storage, and
+ * the dashboards read the same keys, so the toggle shows what the stream is.
+ */
+async function settleFullColorSupport() {
+    if (await canDecodeFullColor()) return;
+    if (!getBoolParam('video_fullcolor', false)) return;
+    console.warn('[Selkies] full colour (4:4:4) is off: this browser decodes H.264 4:2:0 only.');
+    video_fullcolor = false;
+    setBoolParam('video_fullcolor', false);
+}
+
+let codecRefusalAnswered = false;
+let codecRefusalUnanswerable = false;
+/**
+ * Answers a decoder config this engine will not take, and reports it.
+ *
+ * The codec is the stream's own, read from the keyframe's SPS, so it is what
+ * the server is really sending rather than what the settings say: a
+ * `video_fullcolor` the server holds locked arrives as 4:4:4 in the bitstream
+ * and as nothing at all in the settings echo. Left alone, every stripe of
+ * every frame builds a decoder and has it refused, and the page stays black
+ * without saying why.
+ *
+ * A client that owns its settings takes the ladder's own last rung, the JPEG
+ * encoder, whose stripes need no `VideoDecoder`. Refusals that outlive that
+ * switch mean the server holds the encoder too, and a shared viewer owns none
+ * of the stream's settings to begin with: both are told, once.
+ * @param {string} codec The refused codec string.
+ */
+function answerRefusedCodec(codec) {
+    if (codecRefusalUnanswerable) return;
+    if (!codecRefusalAnswered) {
+        codecRefusalAnswered = true;
+        if (!isSharedMode && currentEncoderMode !== 'jpeg') {
+            console.warn(`This browser has no decoder for ${codec}; switching to the JPEG encoder.`);
+            pinJpegEncoder();
+            sendFullSettingsUpdateToServer(`no decoder for ${codec}`);
+            return;
+        }
+    }
+    codecRefusalUnanswerable = true;
+    console.error(`This session streams ${codec}, which this browser cannot decode.`);
+    if (statusDisplayElement) {
+        statusDisplayElement.textContent = 'Error: This session streams video in a format this '
+            + 'browser cannot decode. Full color (4:4:4) needs a Chromium-based browser.';
+        statusDisplayElement.classList.remove('hidden');
+    }
+}
 
 /**
  * Sends the full `SETTINGS,{json}` payload; never from a shared viewer.
@@ -5786,8 +5842,9 @@ class WorkerWebSocket {
    * suffixed per-display keys, never the primary's), advertises gzip,
    * requests the cache-only clipboard, and starts the metrics and ack timers.
    */
-  websocket.onopen = () => {
+  websocket.onopen = async () => {
     console.log('[websockets] Connection opened!');
+    await settleFullColorSupport();
     wsEverOpened = true;
     try { sessionStorage.removeItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
     status = 'connected_waiting_mode';
@@ -6157,14 +6214,17 @@ class WorkerWebSocket {
                             return newStripeDecoder.configure(decoderConfig);
                         } else {
                             // The catch below closes the decoder while the map entry still points at it.
-                            return Promise.reject(new Error(`config not supported: ${dynamicCodec}`));
+                            answerRefusedCodec(dynamicCodec);
+                            const refusal = new Error(`config not supported: ${dynamicCodec}`);
+                            refusal.quiet = true;
+                            return Promise.reject(refusal);
                         }
                     })
                     .then(() => {
                         processPendingChunksForStripe(vncStripeYStart);
                     })
                     .catch(e => {
-                        console.error(`Error configuring VNC stripe decoder Y=${vncStripeYStart}:`, e);
+                        if (!e.quiet) console.error(`Error configuring VNC stripe decoder Y=${vncStripeYStart}:`, e);
                         if (vncStripeDecoders[vncStripeYStart] && vncStripeDecoders[vncStripeYStart].decoder === newStripeDecoder) {
                             try { if (newStripeDecoder.state !== 'closed') newStripeDecoder.close(); } catch (_) {}
                             delete vncStripeDecoders[vncStripeYStart];

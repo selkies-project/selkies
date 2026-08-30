@@ -82,7 +82,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeFullColor } from './lib/util.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -867,6 +867,21 @@ export default function webrtc() {
 			}
 		}
 		return changes;
+	}
+
+	/**
+	 * Turns full colour off where this engine's decoder has no 4:4:4 profile.
+	 *
+	 * Only Chromium decodes H.264 4:4:4; elsewhere a full-colour stream is not
+	 * a heavier picture but no picture, so the setting is dropped rather than
+	 * asked for. Written to storage, which is what every payload and both
+	 * dashboards read, so the toggle shows what the stream is.
+	 */
+	async function settleFullColorSupport() {
+		if (await canDecodeFullColor()) return;
+		if (!getBoolParam('video_fullcolor', false)) return;
+		console.warn('[Selkies] full colour (4:4:4) is off: this browser decodes H.264 4:2:0 only.');
+		setBoolParam('video_fullcolor', false);
 	}
 
 	/**
@@ -2483,7 +2498,7 @@ export default function webrtc() {
 				}
 
 				loadLastSessionSettings();
-				sendClientPersistedSettings();
+				settleFullColorSupport().then(sendClientPersistedSettings);
 
 				// One loop per channel: a reopened channel restarts it.
 				if (metricsLoopId !== null) clearInterval(metricsLoopId);

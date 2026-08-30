@@ -595,7 +595,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "video_fullcolor",
         "type": "bool",
         "default": False,
-        "help": "Enable H.264 full color range for pixelflux encoders.",
+        "help": "Encode H.264 with 4:4:4 chroma rather than 4:2:0, for pixelflux encoders. Only Chromium-based browsers decode 4:4:4, so a client that cannot turns it off for itself; where it is locked on, such a client falls back to the JPEG encoder.",
     },
     {
         "name": "video_streaming_mode",

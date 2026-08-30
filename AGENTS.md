@@ -100,6 +100,9 @@ Each is documented in full where named; read that before changing the subsystem.
   event reports held, never the transitions one page happened to witness: a held drag crosses between pages,
   reaching one that never saw the press and leaving one that never sees the release
   (`Input._mouseButtonMovement`).
+- A client asks the server only for what its own decoder will take, measured rather than assumed: full colour
+  is H.264 4:4:4, which Chromium alone decodes, and elsewhere it is not a heavier picture but no picture at all
+  (`util.canDecodeFullColor`, `canDecodeEncoder`; `tests/e2e/test_full_color.py` holds every engine to it).
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `src/selkies/webcam.py`,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).
