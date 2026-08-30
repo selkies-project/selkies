@@ -386,9 +386,11 @@ def _close_abandoned_ws(client: web.WebSocketResponse) -> None:
     _spawn_background_task(_close())
 
 
-# Linux SIOCOUTQ: bytes a socket has accepted but not yet put on the network.
-_SIOCOUTQ = 0x5411
-_SIOCOUTQ_ARG = struct.pack("i", 0)
+# Linux SIOCOUTQNSD: bytes a socket has accepted but not yet sent. SIOCOUTQ
+# would also count sent-but-unacked bytes, which scale with the path's
+# bandwidth-delay product and keep a healthy long link reading as backlogged.
+_SIOCOUTQNSD = 0x894B
+_SIOCOUTQNSD_ARG = struct.pack("i", 0)
 
 
 def _ws_write_backlog(ws: Any) -> Optional[int]:
@@ -413,7 +415,7 @@ def _ws_write_backlog(ws: Any) -> Optional[int]:
             sock = transport.get_extra_info("socket")
             if sock is not None:
                 unsent = struct.unpack(
-                    "i", fcntl.ioctl(sock.fileno(), _SIOCOUTQ, _SIOCOUTQ_ARG))[0]
+                    "i", fcntl.ioctl(sock.fileno(), _SIOCOUTQNSD, _SIOCOUTQNSD_ARG))[0]
                 pending = (pending or 0) + unsent
         except Exception:
             pass
