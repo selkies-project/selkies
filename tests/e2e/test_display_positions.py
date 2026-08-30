@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""A second display opens where the client asked for it, on the Wayland backend.
+
+"Left", "up" and "down" have to place the second screen there, not beside the
+first: a session that arranges its own screens does so by its own rule -- side
+by side, in the order they were opened -- and every arrangement then comes out
+looking like "right". Here each display is a view of one screen instead, placed
+at the rectangle the layout says, so the asked-for position is the one the
+compositor shows.
+
+Both halves are checked for each position: the layout the server computes, and
+where the compositor actually put the views. Driven with raw websockets clients
+against the in-process pixelflux compositor, no browser.
+
+Usage: python3 tests/e2e/test_display_positions.py
+"""
+import asyncio
+import importlib.util
+import json
+import os
+import sys
+import time
+from typing import Dict, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import helpers as H
+import websockets
+
+PRIMARY = (1920, 1080)
+SECONDARY = (1280, 720)
+
+
+def settings_for(display_id: str, size: Tuple[int, int], position: str) -> dict:
+    return {
+        "displayId": display_id, "initialClientWidth": size[0],
+        "initialClientHeight": size[1], "manual_resolution": False,
+        "framerate": 30, "encoder": "jpeg", "video_crf": 25,
+        "video_bitrate": 6000, "audio_bitrate": 128000,
+        "scaling_dpi": 96, "displayPosition": position,
+    }
+
+
+def wait_log_from(mark: int, substr: str, timeout: float = 45) -> bool:
+    """Whether `substr` shows up in the server log at or after byte `mark`."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if H.server_log().find(substr, mark) >= 0:
+            return True
+        time.sleep(0.4)
+    return False
+
+
+def layouts_from(mark: int) -> list:
+    """Every layout the server calculated at or after byte `mark`."""
+    import ast
+
+    out = []
+    for line in H.server_log()[mark:].splitlines():
+        if "Layout calculated" in line and "Layouts: " in line:
+            try:
+                out.append(ast.literal_eval(line.split("Layouts: ", 1)[1]))
+            except (ValueError, SyntaxError):
+                continue
+    return out
+
+
+def beside(position: str, first: Dict[str, int], second: Dict[str, int]) -> bool:
+    """Whether `second` really sits at `position` relative to `first`."""
+    if position == "right":
+        return second["x"] >= first["x"] + first["w"]
+    if position == "left":
+        return second["x"] + second["w"] <= first["x"]
+    if position == "down":
+        return second["y"] >= first["y"] + first["h"]
+    return second["y"] + second["h"] <= first["y"]
+
+
+def views_from(log: str) -> Dict[int, Tuple[int, int]]:
+    """Where the compositor last put each display's view, by display id.
+
+    Read from the compositor's own log lines, since it runs inside the server
+    rather than in this process.
+    """
+    import re
+
+    where: Dict[int, Tuple[int, int]] = {}
+    for oid, x, y in re.findall(
+            r"View (\d+) (?:created over output \d+: \d+x\d+ @ |moved to )\((-?\d+), (-?\d+)\)",
+            log):
+        where[int(oid)] = (int(x), int(y))
+    return where
+
+
+async def drain(ws) -> None:
+    """Keep reading a client's socket, so the server never drops it for not
+    consuming the stream it is being sent."""
+    try:
+        while True:
+            await ws.recv()
+    except Exception:
+        return
+
+
+async def drive(res: "H.Results") -> None:
+    """Move the second display to each position and see where it lands.
+
+    One pair of connections for the whole run, re-sent with a new position each
+    time: the server debounces reconnects, and a live position change is what a
+    client does anyway.
+    """
+    from selkies.display_utils import wayland_output_id
+
+    uri = f"ws://localhost:{H.PORT}/api/websockets"
+    async with websockets.connect(uri, max_size=None) as primary:
+        await asyncio.wait_for(primary.recv(), timeout=10)
+        mark = len(H.server_log())
+        await primary.send("SETTINGS," + json.dumps(
+            settings_for("primary", PRIMARY, "right")))
+        if not wait_log_from(mark, "SUCCESS: Capture started for 'primary'"):
+            res.check("the primary streams", False, "no capture")
+            return
+        pump = asyncio.create_task(drain(primary))
+        # The server debounces reconnects from one address; the second client is
+        # a fresh connection from the same one.
+        await asyncio.sleep(1.0)
+        async with websockets.connect(uri, max_size=None) as secondary:
+            await asyncio.wait_for(secondary.recv(), timeout=10)
+            pump2 = asyncio.create_task(drain(secondary))
+            for position in ("right", "left", "up", "down"):
+                mark = len(H.server_log())
+                await secondary.send("SETTINGS," + json.dumps(
+                    settings_for("display2", SECONDARY, position)))
+                wait_log_from(mark, "SUCCESS: Capture started for 'display2'", 20)
+                await asyncio.sleep(4.0)
+                layouts = layouts_from(mark)
+                got = layouts[-1] if layouts else {}
+                placed = (got.get("primary") and got.get("display2")
+                          and beside(position, got["primary"], got["display2"]))
+                res.check(f"the layout puts a '{position}' display there", placed, got)
+
+                want = {wayland_output_id(did): (rect["x"], rect["y"])
+                        for did, rect in got.items()} if got else {}
+                where = views_from(H.server_log())
+                res.check(f"the compositor's views follow it for '{position}'",
+                          bool(want) and all(where.get(oid) == pos
+                                             for oid, pos in want.items()),
+                          f"views={where} layout={want}")
+            pump2.cancel()
+        pump.cancel()
+
+
+def main() -> "H.Results":
+    res = H.Results("display-positions")
+    if importlib.util.find_spec("pixelflux") is None:
+        H.skip_suite("pixelflux is not installed")
+    H.server_start(mode="websockets", wayland=True)
+    try:
+        asyncio.run(drive(res))
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
+if __name__ == "__main__":
+    r = main()
+    sys.exit(0 if not r.failed() else 1)
