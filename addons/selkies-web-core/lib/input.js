@@ -64,6 +64,17 @@ import { Queue } from './util.js';
 /** CSS class on elements (and their descendants) whose input stays native. */
 const WHITELIST_CLASS = 'allow-native-input';
 
+/**
+ * A `MouseEvent.buttons` bitmask in the wire's numbering, which counts buttons
+ * the way `MouseEvent.button` does. The two orders disagree on the middle and
+ * secondary buttons alone, so those two bits swap and the rest pass through.
+ * @param {number} buttons
+ * @returns {number}
+ */
+function _wireButtons(buttons) {
+    return (buttons & ~0x6) | ((buttons & 0x2) << 1) | ((buttons & 0x4) >> 1);
+}
+
 /** Physical code to `getModifierState()` name, for every modifier tracked in `_keyDownList`. */
 const MODIFIER_STATE_BY_CODE = {
     ShiftLeft: 'Shift', ShiftRight: 'Shift',
@@ -2436,10 +2447,15 @@ export class Input {
             } else {
                 this.buttonMask &= ~mask;
             }
-        } else if (event.type === 'pointercancel') {
-            // A cancel ends all pen contact with button -1 and no pointerup
-            // follows: every pen button (tip 0, barrel 2, eraser 5) is cleared.
-            this.buttonMask &= ~((1 << 0) | (1 << 2) | (1 << 5));
+        } else if (event.target === this.element) {
+            // Motion over the stream states which buttons are down instead of
+            // accumulating transitions. Each display page runs an `Input` of
+            // its own against one remote pointer, so a held drag that crosses
+            // between them reaches a page that never saw the press and leaves
+            // one that never sees the release; the buttons the event reports
+            // are the physical state either way. A pen cancel arrives here
+            // too, ending contact with no pointerup to follow.
+            this.buttonMask = _wireButtons(event.buttons);
         }
         const outX = (mtype === "m2") ? relX : this.x;
         const outY = (mtype === "m2") ? relY : this.y;

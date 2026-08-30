@@ -92,6 +92,10 @@ Each is documented in full where named; read that before changing the subsystem.
   Meta key to WebKit). That decides both text-versus-shortcut and when a held modifier is stale
   (`Input._composesText`, `Input._releaseDesyncedModifiers`; `tests/tools/keyboard_chord_audit.mjs` holds
   every engine to one answer).
+- One remote pointer is driven by an `Input` per display page, so a pointer message carries the buttons the
+  event reports held, never the transitions one page happened to witness: a held drag crosses between pages,
+  reaching one that never saw the press and leaving one that never sees the release
+  (`Input._mouseButtonMovement`).
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `src/selkies/webcam.py`,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).

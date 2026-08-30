@@ -71,19 +71,26 @@ def new_display_context(browser: Any, mode: str, css: Tuple[int, int],
     return page
 
 
-def mouse(page: Any, kind: str, cx: int, cy: int, held: bool) -> None:
+def mouse(page: Any, kind: str, cx: int, cy: int, held: bool,
+          on_stream: bool = False) -> None:
     """Dispatches a synthetic mouse event the way a captured drag delivers it:
     the press on the stream overlay, everything after on the window, client
-    coordinates free to leave the viewport."""
-    page.evaluate("""([kind, cx, cy, held]) => {
+    coordinates free to leave the viewport.
+
+    Args:
+        on_stream: Deliver to the overlay instead, which is what the page the
+            pointer arrives on gets: the browser targets whatever sits under
+            the pointer, and on that page the stream does.
+    """
+    page.evaluate("""([kind, cx, cy, held, onStream]) => {
       const ev = new MouseEvent(kind, {button: 0, buttons: held ? 1 : 0,
         clientX: cx, clientY: cy, bubbles: true});
-      if (kind === 'mousedown') {
+      if (onStream || kind === 'mousedown') {
         document.getElementById('overlayInput').dispatchEvent(ev);
       } else {
         window.dispatchEvent(ev);
       }
-    }""", [kind, cx, cy, held])
+    }""", [kind, cx, cy, held, on_stream])
 
 
 def moved_to(page: Any, cx: int, cy: int) -> Tuple[int, int]:
@@ -96,6 +103,47 @@ def moved_to(page: Any, cx: int, cy: int) -> Tuple[int, int]:
 def wait_video(page: Any, mode: str, timeout: float = 45) -> Optional[dict]:
     return (C.wait_wr_video(page, timeout=timeout) if mode == "webrtc"
             else C.wait_ws_video(page, timeout=timeout))
+
+
+def handoff(res: "H.Results", mode: str, page: Any, dpage: Any, seam: int) -> None:
+    """The press lands on one page and everything after it on the neighbor.
+
+    What the browser does once the pointer crosses into the other window: it
+    delivers there instead, so the page that owns the grab stops hearing about
+    the drag and the neighbor hears about it having missed the press. The
+    neighbor holds an `Input` of its own whose mask starts empty, and a move
+    reporting that mask would release the button under the window being
+    dragged. It carries what the event says is held instead, and the page left
+    behind drops its own stale mask rather than pressing again on the next
+    hover.
+    """
+    mouse(page, "mousedown", 700, 400, True)
+    time.sleep(0.3)
+    res.check(f"[{mode}] the press lands", C.x11_buttons_held() == (1,),
+              C.x11_buttons_held())
+    dpage.evaluate("window.__wireSent.length = 0")
+    for cx in (300, 700):
+        mouse(dpage, "mousemove", cx, 500, True, on_stream=True)
+        time.sleep(0.3)
+        pos = C.x11_mouse_pos()
+        res.check(f"[{mode}] the drag stays held on the page it crossed to",
+                  C.x11_buttons_held() == (1,) and pos[0] > seam,
+                  f"{C.x11_buttons_held()} {pos} seam={seam}")
+    held = [m for m in dpage.evaluate(
+        "window.__wireSent.filter(d => d.startsWith && d.startsWith('m,'))")
+        if m.split(",")[3] == "1"]
+    res.check(f"[{mode}] the neighbor's own wire carries the held button",
+              len(held) >= 2, held[:2])
+
+    mouse(dpage, "mouseup", 700, 500, False, on_stream=True)
+    time.sleep(0.3)
+    res.check(f"[{mode}] the only release, on the page that ends the drag",
+              C.x11_buttons_held() == (), C.x11_buttons_held())
+
+    mouse(page, "mousemove", 700, 400, False, on_stream=True)
+    time.sleep(0.3)
+    res.check(f"[{mode}] the page left behind does not press again",
+              C.x11_buttons_held() == (), C.x11_buttons_held())
 
 
 def drive(res: "H.Results", mode: str) -> None:
@@ -180,6 +228,8 @@ def drive(res: "H.Results", mode: str) -> None:
             res.check(f"[{mode}] the wire itself carries the crossing",
                       len(crossing) > 0 and crossing[-1].split(",")[3] == "0",
                       crossing[-1:] or sent[-3:])
+
+            handoff(res, mode, page, dpage, seam)
 
             if full:
                 # The neighbor page maps the same physical spot to the same

@@ -374,3 +374,17 @@ def x11_mouse_pos() -> tuple:
         return p.root_x, p.root_y
     finally:
         d.close()
+
+
+def x11_buttons_held() -> tuple:
+    """Core pointer buttons the X server reports held, lowest first.
+
+    The reply's modifier mask carries Button1Mask at bit 8, so a held drag is
+    visible without asking the client what it thinks it sent.
+    """
+    d = H.x_display()
+    try:
+        mask = d.screen().root.query_pointer().mask
+        return tuple(b for b in range(1, 6) if mask & (1 << (7 + b)))
+    finally:
+        d.close()
