@@ -116,6 +116,8 @@ ARG DEBIAN_FRONTEND="noninteractive"
 # Configure rootless user environment for constrained conditions without escalated root privileges inside containers
 ARG TZ="UTC"
 ENV PASSWD="mypasswd"
+# The one knob for the generated locale; the ENV block below reuses it.
+ARG LOCALE="en_US.UTF-8"
 RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get install --no-install-recommends -y \
         apt-utils \
         dbus-user-session \
@@ -130,7 +132,7 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
     # Debian's locale-gen takes no locale arguments and generates only what
     # /etc/locale.gen has uncommented, which Ubuntu's honours as well
-    sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen && locale-gen && \
+    sed -i "s/^# *\(${LOCALE} UTF-8\)/\1/" /etc/locale.gen && locale-gen && \
     ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime && echo "${TZ}" > /etc/timezone && \
     # Only use sudo-root for root-owned directory (/dev, /proc, /sys) or user/group permission operations, not for apt-get installation or file/directory operations
     mv -f /usr/bin/sudo /usr/bin/sudo-root && \
@@ -157,9 +159,9 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     chmod -f 2755 /var/local /var/mail /usr/bin/wall /usr/bin/write /usr/sbin/unix_chkpwd /usr/sbin/pam_extrausers_chkpwd /usr/bin/expiry /usr/bin/chage || echo 'Failed to set chmod setgid for some paths'
 
 # Set locales
-ENV LANG="en_US.UTF-8"
+ENV LANG="${LOCALE}"
 ENV LANGUAGE="en_US:en"
-ENV LC_ALL="en_US.UTF-8"
+ENV LC_ALL="${LOCALE}"
 
 # Rootless build from here on: layers run as the session user through
 # fakeroot, so the package database and apt cache stay owned by that user and
