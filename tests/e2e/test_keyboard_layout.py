@@ -21,6 +21,12 @@ Wayland: the client's `keyboardLayout` hint (the layout-map probe for de, the
 The keys are pressed through CDP with the key/code a real de or ru keyboard
 produces, since Playwright's own keyboard knows only the US layout.
 
+A macOS client then types the same way through its Option key, which the layout
+uses as a level-3 shift while Blink reports it as a plain Alt: the chord has to
+arrive as the character it produced, and an Option over a key that produced none
+has to stay the Alt shortcut it is. The page announces itself as macOS, so the
+client takes the platform's own path.
+
     python3 tests/e2e/test_keyboard_layout.py ws-x11|wr-x11|ws-wl|wr-wl
 """
 import ctypes
@@ -60,6 +66,42 @@ LAYOUT_MAPS = {
     "ru": {},
 }
 LOCALES = {"us": "en-US", "de": "de-DE", "ru": "ru-RU"}
+
+# A macOS client, and the Option chords a US and a German macOS layout produce.
+# CDP's Alt bit is all Blink gives Option: it never reports AltGraph for it.
+CDP_ALT = 1
+MAC_INIT = ("Object.defineProperty(navigator, 'platform', "
+            "{ get: () => 'MacIntel', configurable: true });")
+XK_ALT_L = 0xFFE9
+XK_TAB = 0xFF09
+
+
+def opt(kind: str, key: str, code: str, text: Optional[str] = None,
+        location: int = 0, modifiers: int = CDP_ALT) -> dict:
+    """One CDP key event of an Option chord."""
+    event = {"type": kind, "key": key, "code": code, "modifiers": modifiers}
+    if location:
+        event["location"] = location
+    if text is not None:
+        event.update({"text": text, "unmodifiedText": text})
+    return event
+
+
+def option_chord(code: str, char: Optional[str]) -> list:
+    """Option held down over one key, then both released."""
+    key = char if char is not None else code
+    return [opt("keyDown", "Alt", "AltLeft", location=1),
+            opt("keyDown", key, code, text=char),
+            opt("keyUp", key, code, text=char),
+            opt("keyUp", "Alt", "AltLeft", location=1, modifiers=0)]
+
+
+# (name, the chord, the character it has to type, the keysym it has to press).
+OPTION_CHORDS = (
+    ("Option+Z", option_chord("KeyZ", "\u03a9"), "\u03a9", None),
+    ("Option+L on a German layout", option_chord("KeyL", "@"), "@", None),
+    ("Option+Tab", option_chord("Tab", None), None, XK_TAB),
+)
 
 
 def layout_js(layout: str) -> str:
@@ -160,13 +202,51 @@ def wl_tapper(cdp: Any, keys: "WlKeys") -> Any:
     return events_after
 
 
-def open_page(browser: Any, mode: str, layout: str) -> Any:
+def open_page(browser: Any, mode: str, layout: str, mac: bool = False) -> Any:
     ctx = browser.new_context(viewport={"width": 1280, "height": 720}, locale=LOCALES[layout])
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
     ctx.add_init_script(layout_js(layout))
+    if mac:
+        ctx.add_init_script(MAC_INIT)
     page = ctx.new_page()
     page.goto(H.BASE_URL + "/", wait_until="load")
     return page
+
+
+def x11_chorder(cdp: Any, obs: Any) -> Any:
+    """A chord runner returning what the X observer received."""
+    def events_after(chord: list) -> list:
+        obs.drain(0.02)
+        for event in chord:
+            cdp.send("Input.dispatchKeyEvent", event)
+        return [(pressed, kc, ks) for pressed, kc, _group, ks in obs.drain(0.8)]
+    return events_after
+
+
+def wl_chorder(cdp: Any, keys: "WlKeys") -> Any:
+    """A chord runner returning what the Wayland observer resolved it to."""
+    def events_after(chord: list) -> list:
+        start = len(keys.obs.lines)
+        for event in chord:
+            cdp.send("Input.dispatchKeyEvent", event)
+        time.sleep(0.8)
+        return keys.since(start)
+    return events_after
+
+
+def check_option_chords(res: "H.Results", label: str, xkb: Xkb, events_after: Any) -> None:
+    """Type every Option chord and judge what the application received."""
+    for name, chord, char, keysym in OPTION_CHORDS:
+        pressed = [ks for down, _kc, ks in events_after(chord) if down]
+        seen = [hex(ks) for ks in pressed]
+        if char is not None:
+            res.check(f"{label}: {name} types the character it produced",
+                      any(xkb.char(ks) == char for ks in pressed), seen)
+            res.check(f"{label}: {name} wraps no Alt around it",
+                      XK_ALT_L not in pressed, seen)
+        else:
+            res.check(f"{label}: {name} stays the Alt shortcut",
+                      XK_ALT_L in pressed and keysym in pressed, seen)
 
 
 def wait_video(page: Any, mode: str) -> Optional[dict]:
@@ -216,6 +296,15 @@ def run_x11(mode: str, res: "H.Results") -> None:
                         time.sleep(0.5)
                         check_probes(res, layout, xkb, x11_tapper(page.context.new_cdp_session(page), obs), 8)
                         page.context.close()
+                    subprocess.run(["setxkbmap", "-display", display, "us"], check=True, timeout=20)
+                    time.sleep(0.5)
+                    page = open_page(browser, mode, "us", mac=True)
+                    res.check("macOS: video flowing", bool(wait_video(page, mode)))
+                    page.mouse.click(640, 360)
+                    time.sleep(0.5)
+                    check_option_chords(res, "x11", xkb,
+                                        x11_chorder(page.context.new_cdp_session(page), obs))
+                    page.context.close()
                 finally:
                     browser.close()
         finally:
@@ -244,6 +333,13 @@ def run_wayland(mode: str, res: "H.Results") -> None:
                     time.sleep(0.5)
                     check_probes(res, layout, xkb, wl_tapper(page.context.new_cdp_session(page), keys), 0)
                     page.context.close()
+                page = open_page(browser, mode, "us", mac=True)
+                res.check("macOS: video flowing", bool(wait_video(page, mode)))
+                page.mouse.click(640, 360)
+                time.sleep(0.5)
+                check_option_chords(res, "wayland", xkb,
+                                    wl_chorder(page.context.new_cdp_session(page), keys))
+                page.context.close()
             finally:
                 browser.close()
     finally:
