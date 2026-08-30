@@ -2833,6 +2833,15 @@ class DataStreamingServer(BaseStreamingService):
                     if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
                         data_logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
                     new_dpi = old_settings.get("scaling_dpi")
+                elif display_id != 'primary' and new_dpi != old_settings.get("scaling_dpi"):
+                    # The desktop has one DPI and every display page derives its
+                    # own from the density it is shown at, so a secondary on a
+                    # different screen would rescale the whole session each time
+                    # its window is restored. The primary's page owns it.
+                    data_logger.info(
+                        f"Ignoring DPI {new_dpi} from '{display_id}': the desktop DPI follows the primary display."
+                    )
+                    new_dpi = old_settings.get("scaling_dpi")
                 if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
                     data_logger.info(f"DPI changed from {old_settings.get('scaling_dpi')} to {new_dpi}. Applying system-level change.")
                     if not IS_WAYLAND:
@@ -3956,6 +3965,13 @@ class DataStreamingServer(BaseStreamingService):
                             if app_settings._overridden.get("scaling_dpi", False):
                                 # An operator-set DPI (CLI/env) governs the desktop.
                                 data_logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
+                                continue
+                            if client_display_id and client_display_id != 'primary':
+                                # One desktop, one DPI: the primary's page owns it.
+                                data_logger.info(
+                                    f"Ignoring DPI {dpi_value} from '{client_display_id}': "
+                                    "the desktop DPI follows the primary display."
+                                )
                                 continue
 
                             data_logger.info(f"Received DPI setting from client: {dpi_value}")
