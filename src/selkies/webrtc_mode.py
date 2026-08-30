@@ -232,6 +232,9 @@ class WebRTCService(BaseStreamingService):
         self.supervisor = supervisor
         self.display_clients: Dict[str, Dict[str, Any]] = {}
         self.display_layouts: Dict[str, Dict[str, int]] = {}
+        # Each page's reported CSS-to-remote scale, by display id (the primary
+        # included), rebroadcast with the layout for cross-display drags.
+        self._client_scales: Dict[str, float] = {}
         self.display_pipelines: Dict[str, MediaPipelinePixel] = {}
         self._last_idr_request_times: Dict[str, float] = {}
         self._display_lock = asyncio.Lock()
@@ -692,9 +695,8 @@ class WebRTCService(BaseStreamingService):
             self.rtc_app.send_message_to_channel(
                 channel, "server_settings", server_settings_payload
             )
-            displays = ["primary"] + [d for d in self.display_clients.keys() if d != "primary"]
             self.rtc_app.send_message_to_channel(
-                channel, "display_config_update", {"displays": displays}
+                channel, "display_config_update", self._display_config_payload()
             )
         else:
             self.rtc_app.send_media_data_over_channel(
@@ -1062,6 +1064,7 @@ class WebRTCService(BaseStreamingService):
             pipeline = self.display_pipelines.pop(display_id, None)
             self.display_clients.pop(display_id, None)
             self.display_layouts.pop(display_id, None)
+            self._client_scales.pop(display_id, None)
             if pipeline is not None:
                 await pipeline.stop_media_pipeline()
         await self.reconfigure_displays()
@@ -1489,6 +1492,7 @@ class WebRTCService(BaseStreamingService):
         pipeline = self.display_pipelines.pop(did, None)
         self.display_clients.pop(did, None)
         self.display_layouts.pop(did, None)
+        self._client_scales.pop(did, None)
         primary_layout = self.display_layouts.get("primary")
         if primary_layout:
             # Input offsets follow the layout; the primary re-anchors at the origin.
@@ -1534,6 +1538,7 @@ class WebRTCService(BaseStreamingService):
         pipeline = self.display_pipelines.pop(did, None)
         self.display_clients.pop(did, None)
         self.display_layouts.pop(did, None)
+        self._client_scales.pop(did, None)
         primary_layout = self.display_layouts.get("primary")
         if primary_layout:
             # Input offsets follow the layout; the primary is back at the origin.
@@ -1786,15 +1791,31 @@ class WebRTCService(BaseStreamingService):
             if w > 0 and h > 0:
                 self.rtc_app.send_remote_resolution(f"{w}x{h}", did)
 
+    def _display_config_payload(self) -> Dict[str, Any]:
+        """display_config_update body: the display roster, plus each laid-out
+        display's rectangle and its client's reported CSS-to-remote scale, so
+        a page can map a cross-display drag into its neighbor's region."""
+        displays = ["primary"] + [d for d in self.display_clients.keys() if d != "primary"]
+        payload: Dict[str, Any] = {"displays": displays}
+        layouts = {}
+        for did, rect in (self.display_layouts or {}).items():
+            entry: Dict[str, Any] = dict(rect)
+            scale = self._client_scales.get(did)
+            if scale:
+                entry["scale"] = scale
+            layouts[did] = entry
+        if layouts:
+            payload["layouts"] = layouts
+        return payload
+
     def _broadcast_display_config(self) -> None:
         """Tell every connected page which displays are attached (websockets
         parity: the primary page forces browser-cursor rendering while a
         secondary is connected, keyed off this broadcast)."""
         if not self.rtc_app:
             return
-        displays = ["primary"] + [d for d in self.display_clients.keys() if d != "primary"]
         self.rtc_app.send_media_data_over_channel(
-            "display_config_update", {"displays": displays}
+            "display_config_update", self._display_config_payload()
         )
 
     def _update_cursor_cap(self, dpi_value: float) -> None:
@@ -2073,6 +2094,19 @@ class WebRTCService(BaseStreamingService):
         def sanitize_value(name: str, client_value: Any) -> Any:
             """One-transport wrapper over the shared sanitizer (settings.py)."""
             return sanitize_client_setting(name, client_value, self.settings, logger)
+
+        # The page's CSS-to-remote scale, rebroadcast with the layout so a
+        # neighboring display can scale a cross-display drag over it. Stored
+        # before any position-triggered reconfigure, whose broadcast carries it.
+        if settings_json.get("displayScale") is not None:
+            try:
+                client_scale = float(settings_json.get("displayScale"))
+            except (TypeError, ValueError):
+                client_scale = 0.0
+            if 0.05 <= client_scale <= 100.0 and \
+                    self._client_scales.get(display_id) != client_scale:
+                self._client_scales[display_id] = client_scale
+                self._broadcast_display_config()
 
         new_position = settings_json.get("displayPosition")
         if new_position is not None and display_id != "primary":

@@ -943,6 +943,19 @@ export default function webrtc() {
 			settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
 		}
 		settingsToSend['useCssScaling'] = useCssScaling;
+		// This page's remote pixels per CSS pixel, so a neighboring display can
+		// scale a cross-display drag's travel over this one: the fitted video
+		// box where one is measurable, else the device pixel ratio the
+		// resolution request was built with.
+		settingsToSend['displayScale'] = (() => {
+			const v = videoElement;
+			if (v && v.videoWidth > 0 && v.videoHeight > 0) {
+				const r = v.getBoundingClientRect();
+				const fit = Math.min(r.width / v.videoWidth, r.height / v.videoHeight);
+				if (fit > 0) return 1 / fit;
+			}
+			return dpr;
+		})();
 
 		try {
 			const settingsJson = JSON.stringify(settingsToSend);
@@ -2269,6 +2282,8 @@ export default function webrtc() {
 				const posMatch = hash.match(/^#display2-(right|left|up|down)/);
 				if (posMatch) displayPosition = posMatch[1];
 			}
+			/** Display rectangles (+ per-page scale) from the last display-config update. */
+			let latestDisplayLayouts = null;
 
 			var pathname = getRoutePrefix() + "/";
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
@@ -2308,6 +2323,7 @@ export default function webrtc() {
 				webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
+			input.setDisplayLayouts(latestDisplayLayouts, displayId);
 			/**
 			 * Assigned before attach(), so the pad resync inside it and a pad
 			 * pressed before the channel opens go through the persisted toggle
@@ -2577,6 +2593,10 @@ export default function webrtc() {
 			/** A secondary joining or leaving flips the multi-monitor cursor override. */
 			webrtc.ondisplayconfig = (config) => {
 				const displays = (config && config.displays) || [];
+				latestDisplayLayouts = (config && config.layouts) || null;
+				if (input && input.setDisplayLayouts) {
+					input.setDisplayLayouts(latestDisplayLayouts, displayId);
+				}
 				const secondaryConnected = displays.some((d) => d !== 'primary');
 				if (isSecondaryDisplayConnected !== secondaryConnected) {
 					console.log(`Secondary display connection status changed to: ${secondaryConnected}`);

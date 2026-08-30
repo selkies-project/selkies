@@ -1449,16 +1449,31 @@ class DataStreamingServer(BaseStreamingService):
             except Exception as e:
                 data_logger.warning(f"Live CRF update failed for '{display_id}' ({e}).")
 
+    def _display_config_payload(self) -> dict:
+        """DISPLAY_CONFIG_UPDATE body: the display roster, plus each laid-out
+        display's rectangle and its client's reported CSS-to-remote scale, so
+        a page can map a cross-display drag into its neighbor's region."""
+        payload = {
+            "type": "display_config_update",
+            "displays": list(self.display_clients.keys()),
+        }
+        layouts = {}
+        for did, rect in (self.display_layouts or {}).items():
+            entry = dict(rect)
+            scale = (self.display_clients.get(did) or {}).get("client_scale")
+            if scale:
+                entry["scale"] = scale
+            layouts[did] = entry
+        if layouts:
+            payload["layouts"] = layouts
+        return payload
+
     async def broadcast_display_config(self) -> None:
         """Broadcast the current display roster to all clients."""
         if not self.clients:
             return
-        
-        connected_displays = list(self.display_clients.keys())
-        payload = {
-            "type": "display_config_update",
-            "displays": connected_displays
-        }
+
+        payload = self._display_config_payload()
         message_str = f"DISPLAY_CONFIG_UPDATE,{json.dumps(payload)}"
         
         data_logger.info(f"Broadcasting display config update: {message_str}")
@@ -2550,6 +2565,7 @@ class DataStreamingServer(BaseStreamingService):
         parsed["enable_binary_clipboard"] = get_bool("enable_binary_clipboard")
         parsed["displayId"] = get_str("displayId") or "primary"
         parsed["displayPosition"] = get_str("displayPosition")
+        parsed["displayScale"] = get_number("displayScale")
         parsed["rate_control_mode"] = get_str("rate_control_mode")
         parsed["video_bitrate"] = get_number("video_bitrate")
         parsed["force_aligned_resolution"] = get_bool("force_aligned_resolution")
@@ -2685,6 +2701,18 @@ class DataStreamingServer(BaseStreamingService):
                     if display_id == 'primary':
                         self.app.display_width = target_w
                         self.app.display_height = target_h
+                # The page's CSS-to-remote scale, rebroadcast with the layout so
+                # a neighboring display can scale a cross-display drag over it.
+                client_scale_changed = False
+                if settings.get("displayScale") is not None:
+                    try:
+                        client_scale = float(settings.get("displayScale"))
+                    except (TypeError, ValueError):
+                        client_scale = 0.0
+                    if 0.05 <= client_scale <= 100.0 and \
+                            display_state.get("client_scale") != client_scale:
+                        display_state["client_scale"] = client_scale
+                        client_scale_changed = True
                 # Only keys the payload carries: sanitizing an absent (None) key
                 # would reset the stored choice to the server default on every partial update.
                 for key in ("encoder", "framerate", "video_crf", "video_fullcolor",
@@ -2895,6 +2923,9 @@ class DataStreamingServer(BaseStreamingService):
             await self.reconfigure_displays()
         elif needs_fallback_reconfigure or self._reconfigure_pending:
             await self.reconfigure_displays()
+        elif client_scale_changed:
+            # No reconfigure ran to carry the new scale; announce it alone.
+            await self.broadcast_display_config()
         if is_initial_settings and self.client_settings_received and not self.client_settings_received.is_set():
             self.client_settings_received.set()
 
@@ -3048,9 +3079,8 @@ class DataStreamingServer(BaseStreamingService):
         # A page joining after a secondary attached must learn the roster now, not
         # at the next reconfigure.
         try:
-            displays = list(self.display_clients.keys())
             await websocket.send_str(
-                f"DISPLAY_CONFIG_UPDATE,{json.dumps({'type': 'display_config_update', 'displays': displays})}"
+                f"DISPLAY_CONFIG_UPDATE,{json.dumps(self._display_config_payload())}"
             )
         except (ConnectionResetError, OSError, RuntimeError):
             pass

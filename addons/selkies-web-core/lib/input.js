@@ -1282,6 +1282,7 @@ export class Input {
         this._latestMouseY = 0;
         this.useCssScaling = useCssScaling;
         this.m = null;
+        this._layout = null;
         this.buttonMask = 0;
         this.gamepadManager = null;
         this.x = 0;
@@ -2294,10 +2295,14 @@ export class Input {
                     this._windowMath();
                 }
                 if (this.m) {
-                    let logicalX_on_element = this._clientToServerX(event.clientX);
-                    let logicalY_on_element = this._clientToServerY(event.clientY);
-                    this.x = Math.round(logicalX_on_element * dpr_for_input_coords);
-                    this.y = Math.round(logicalY_on_element * dpr_for_input_coords);
+                    const rx = this._clientToServerX(event.clientX) * dpr_for_input_coords;
+                    const ry = this._clientToServerY(event.clientY) * dpr_for_input_coords;
+                    if (!this._mapToLayout(rx, ry,
+                            this.m.mouseMultiX * dpr_for_input_coords,
+                            this.m.mouseMultiY * dpr_for_input_coords)) {
+                        this.x = Math.round(rx);
+                        this.y = Math.round(ry);
+                    }
                 } else {
                     this.x = 0; this.y = 0;
                 }
@@ -2629,6 +2634,8 @@ export class Input {
 
     /**
      * Maps a client position through the sink box into `this.x`/`this.y`.
+     * A position past the box during a cross-display drag maps into the
+     * neighboring display's region; otherwise it clamps to this display.
      * @returns {boolean} False when no sink applies.
      */
     _applySinkCoordinates(clientX, clientY, canvas, videoEle) {
@@ -2638,8 +2645,110 @@ export class Input {
         }
         const scaleX = box.sinkW / box.boxW;
         const scaleY = box.sinkH / box.boxH;
-        this.x = Math.max(0, Math.min(box.sinkW, Math.round((clientX - box.boxLeft) * scaleX)));
-        this.y = Math.max(0, Math.min(box.sinkH, Math.round((clientY - box.boxTop) * scaleY)));
+        const rx = (clientX - box.boxLeft) * scaleX;
+        const ry = (clientY - box.boxTop) * scaleY;
+        if (this._mapToLayout(rx, ry, scaleX, scaleY)) {
+            return true;
+        }
+        this.x = Math.max(0, Math.min(box.sinkW, Math.round(rx)));
+        this.y = Math.max(0, Math.min(box.sinkH, Math.round(ry)));
+        return true;
+    }
+
+    /**
+     * Sets the extended-desktop layout the mapping above uses: display
+     * rectangles in remote pixels, keyed by display id, each carrying the
+     * owning page's CSS-to-remote `scale` where known. Fewer than two valid
+     * rectangles (or no entry for `ownId`) disables cross-display mapping.
+     * @param {Object<string, {x: number, y: number, w: number, h: number,
+     *     scale: (number|undefined)}>|null} layouts
+     * @param {string} ownId Display id this page renders.
+     */
+    setDisplayLayouts(layouts, ownId) {
+        this._layout = null;
+        if (!layouts || typeof layouts !== 'object') {
+            return;
+        }
+        const rects = [];
+        let own = null;
+        for (const id in layouts) {
+            const entry = layouts[id];
+            if (!entry) continue;
+            const x = Number(entry.x), y = Number(entry.y);
+            const w = Number(entry.w), h = Number(entry.h);
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !(w > 0) || !(h > 0)) {
+                continue;
+            }
+            const scale = Number(entry.scale);
+            const rect = { x, y, w, h,
+                           scale: (Number.isFinite(scale) && scale > 0) ? scale : 0 };
+            rects.push(rect);
+            if (id === ownId) own = rect;
+        }
+        if (!own || rects.length < 2) {
+            return;
+        }
+        this._layout = { own, rects, ownX: own.x, ownY: own.y, ownW: own.w, ownH: own.h };
+    }
+
+    /**
+     * Maps a raw own-display position (remote pixels, unclamped) that left
+     * this display's rectangle onto the neighboring display, into
+     * `this.x`/`this.y` still relative to this display's origin (the wire
+     * coordinate space; the server adds this display's offset).
+     *
+     * The overshoot converts at the neighbor's own CSS-to-remote scale: a
+     * captured drag keeps streaming this page CSS pixels while the pointer
+     * physically travels the neighbor page, whose pixels they are. The
+     * result clamps to the union of display rectangles, the way a multihead
+     * X server bounds its pointer, so an edge with no neighbor still pins
+     * and the dead corner beside a shorter display stays unreachable.
+     *
+     * Runs per pointer event; allocation-free.
+     * @param {number} rx Own-scale remote X, relative to this display.
+     * @param {number} ry Own-scale remote Y.
+     * @param {number} sxOwn This page's remote pixels per CSS pixel, X.
+     * @param {number} syOwn Same for Y.
+     * @returns {boolean} False inside this display or with no multi-display
+     *     layout, so the caller keeps its single-display behavior.
+     */
+    _mapToLayout(rx, ry, sxOwn, syOwn) {
+        const L = this._layout;
+        if (!L || (rx >= 0 && rx <= L.ownW && ry >= 0 && ry <= L.ownH)) {
+            return false;
+        }
+        let gx = L.ownX + rx;
+        let gy = L.ownY + ry;
+        // The display nearest the raw point owns the overshoot's scale.
+        let target = null, bestD = Infinity;
+        for (let i = 0; i < L.rects.length; i++) {
+            const r = L.rects[i];
+            if (r === L.own) continue;
+            const dx = gx < r.x ? r.x - gx : (gx > r.x + r.w ? gx - (r.x + r.w) : 0);
+            const dy = gy < r.y ? r.y - gy : (gy > r.y + r.h ? gy - (r.y + r.h) : 0);
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { bestD = d; target = r; }
+        }
+        if (target && target.scale > 0 && sxOwn > 0 && syOwn > 0) {
+            const kx = target.scale / sxOwn;
+            const ky = target.scale / syOwn;
+            if (rx > L.ownW) gx = L.ownX + L.ownW + (rx - L.ownW) * kx;
+            else if (rx < 0) gx = L.ownX + rx * kx;
+            if (ry > L.ownH) gy = L.ownY + L.ownH + (ry - L.ownH) * ky;
+            else if (ry < 0) gy = L.ownY + ry * ky;
+        }
+        let cx = gx, cy = gy;
+        bestD = Infinity;
+        for (let i = 0; i < L.rects.length; i++) {
+            const r = L.rects[i];
+            const px = gx < r.x ? r.x : (gx > r.x + r.w ? r.x + r.w : gx);
+            const py = gy < r.y ? r.y : (gy > r.y + r.h ? r.y + r.h : gy);
+            const dx = gx - px, dy = gy - py;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { bestD = d; cx = px; cy = py; }
+        }
+        this.x = Math.round(cx - L.ownX);
+        this.y = Math.round(cy - L.ownY);
         return true;
     }
 
@@ -2737,10 +2846,14 @@ export class Input {
         } else {
             if (!this.m) this._windowMath();
             if (this.m) {
-                let logicalX_on_element = this._clientToServerX(touchPoint.clientX);
-                let logicalY_on_element = this._clientToServerY(touchPoint.clientY);
-                this.x = Math.round(logicalX_on_element * dpr_for_input_coords);
-                this.y = Math.round(logicalY_on_element * dpr_for_input_coords);
+                const rx = this._clientToServerX(touchPoint.clientX) * dpr_for_input_coords;
+                const ry = this._clientToServerY(touchPoint.clientY) * dpr_for_input_coords;
+                if (!this._mapToLayout(rx, ry,
+                        this.m.mouseMultiX * dpr_for_input_coords,
+                        this.m.mouseMultiY * dpr_for_input_coords)) {
+                    this.x = Math.round(rx);
+                    this.y = Math.round(ry);
+                }
             } else {
                 this.x = Math.round(touchPoint.clientX * dpr_for_input_coords);
                 this.y = Math.round(touchPoint.clientY * dpr_for_input_coords);

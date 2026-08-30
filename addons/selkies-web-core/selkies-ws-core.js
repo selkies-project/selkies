@@ -216,6 +216,8 @@ function extractOpusFrames(arrayBuffer) {
  */
 export default function websockets() {
 let isSecondaryDisplayConnected = false;
+/** Display rectangles (+ per-page scale) from the last DISPLAY_CONFIG_UPDATE. */
+let latestDisplayLayouts = null;
 let audioDecoderWorker = null;
 let canvas = null;
 let canvasContext = null;
@@ -2371,6 +2373,27 @@ function sendFullSettingsUpdateToServer(reason) {
  * capability that makes the server enable Opus redundancy.
  * @returns {Object<string, *>}
  */
+/**
+ * This page's remote pixels per CSS pixel, reported so a neighboring display
+ * can scale a cross-display drag's travel over this one: the presented stream
+ * box where one is measurable (manual mode scales it freely), else the device
+ * pixel ratio the resolution request was built with.
+ * @param {number} dpr
+ * @returns {number}
+ */
+function currentDisplayScale(dpr) {
+    const canvas = document.getElementById('videoCanvas');
+    if (canvas && canvas.width > 0) {
+        const sinks = [canvas, document.getElementById('videoStream'),
+                       document.getElementById('videoWorkerCanvas')];
+        for (const el of sinks) {
+            const r = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            if (r && r.width > 0) return canvas.width / r.width;
+        }
+    }
+    return dpr;
+}
+
 function getCurrentSettingsPayload() {
     const settingsToSend = {};
     const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
@@ -2427,6 +2450,7 @@ function getCurrentSettingsPayload() {
     }
     settingsToSend['useCssScaling'] = useCssScaling;
     settingsToSend['displayId'] = displayId;
+    settingsToSend['displayScale'] = currentDisplayScale(dpr);
     if (displayId === 'display2') {
         settingsToSend['displayPosition'] = displayPosition;
     }
@@ -3485,6 +3509,7 @@ const initializeInput = () => {
       inputInstance.detach_context();
   }
   window.webrtcInput = inputInstance;
+  inputInstance.setDisplayLayouts(latestDisplayLayouts, displayId);
   applyEffectiveCursorSetting();
 
   if (overlayInput) {
@@ -5834,6 +5859,7 @@ class WorkerWebSocket {
       }
       settingsToSend['useCssScaling'] = useCssScaling;
       settingsToSend['displayId'] = displayId;
+      settingsToSend['displayScale'] = currentDisplayScale(dpr);
       if (displayId === 'display2') {
           settingsToSend['displayPosition'] = displayPosition;
       }
@@ -6833,6 +6859,10 @@ class WorkerWebSocket {
                 const jsonPayload = event.data.substring(event.data.indexOf(',') + 1);
                 const payload = JSON.parse(jsonPayload);
 
+                latestDisplayLayouts = payload.layouts || null;
+                if (window.webrtcInput && window.webrtcInput.setDisplayLayouts) {
+                    window.webrtcInput.setDisplayLayouts(latestDisplayLayouts, displayId);
+                }
                 if (displayId === 'primary') {
                     const secondaryConnected = payload.displays.includes('display2');
                     if (isSecondaryDisplayConnected !== secondaryConnected) {
