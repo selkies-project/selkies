@@ -1054,21 +1054,23 @@ WEBRTC_ENCODER_CHOICES = ("h264enc",)
 # Spellings base images still ship in SELKIES_ENCODER; both mean full-frame
 # H.264 (the software encoder is the pixelflux build's, software_h264_encoder).
 ENCODER_ALIASES = {"x264enc": "h264enc", "openh264enc": "h264enc"}
-_RETIRED_ENCODER_WARNED = set()
+_ALIAS_WARNED = set()
 
 
 def canonical_encoder(name: Any) -> str:
-    """Map a legacy encoder name onto the current one, warning once per retired name.
+    """Map an encoder alias onto the encoder that serves it.
 
-    Any other value comes back unchanged (as a string), so the caller's own
-    validation still decides what it means.
+    `x264enc` and `openh264enc` both name software H.264, whose implementation
+    is the build's rather than a choice; that spelling warns once. Any other
+    value comes back unchanged (as a string), so the caller's own validation
+    still decides what it means.
     """
     text = str(name).strip()
     key = text.lower()
-    if key == "openh264enc" and key not in _RETIRED_ENCODER_WARNED:
-        _RETIRED_ENCODER_WARNED.add(key)
+    if key == "openh264enc" and key not in _ALIAS_WARNED:
+        _ALIAS_WARNED.add(key)
         logging.warning(
-            "Encoder 'openh264enc' is no longer a separate choice: software H.264 "
+            "Encoder 'openh264enc' is not a separate choice: software H.264 "
             "is the encoder pixelflux was built with (%s); using 'h264enc'.",
             software_h264_encoder(),
         )
