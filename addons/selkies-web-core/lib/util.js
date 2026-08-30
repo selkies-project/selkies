@@ -122,8 +122,15 @@ let fullColorProbe = null;
  * cannot show the stream at all rather than showing it worse, so full colour
  * is asked of the decoder before it is asked of the server. Which engines have
  * it changes with their releases, which is why this probes instead of naming
- * them. The question is asked at level 3.0 because the profile is what is in
- * doubt: the level of a real stream is re-derived from its keyframe's SPS.
+ * them.
+ *
+ * The profile is the whole question, so it is asked in the least demanding
+ * form that can carry it: `F4` with no constraint bits set, which is what the
+ * encoders emit and the only spelling engines accept -- setting them names the
+ * Intra-only variant and is refused -- at the smallest frame the level allows,
+ * since a level is a ceiling and a size beyond it is a pair an implementation
+ * may reject on its own. What a real stream is decoded with comes from its
+ * keyframe's SPS instead.
  * @returns {Promise<boolean>} False where there is no `VideoDecoder` at all.
  */
 export function canDecodeFullColor() {
@@ -132,7 +139,7 @@ export function canDecodeFullColor() {
             if (typeof VideoDecoder === "undefined") return false;
             try {
                 const support = await VideoDecoder.isConfigSupported({
-                    codec: "avc1.F4001E", codedWidth: 1280, codedHeight: 720,
+                    codec: "avc1.F4001E", codedWidth: 320, codedHeight: 240,
                 });
                 return !!(support && support.supported);
             } catch (err) {
