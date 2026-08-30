@@ -1848,6 +1848,12 @@ function updateVideoDivert(force) {
   // The diverted wire feeds the worker sink directly, so the page-side present
   // helpers that would normally reveal it never run; shown from here instead.
   if (on) {
+    if (striped) {
+      // The worker decodes now; page-built row decoders would only sit
+      // configured behind it until the next resize or reconnect.
+      clearAllVncStripeDecoders();
+      cleanupJpegStripeQueue();
+    }
     syncWireGeom();
     activateWorkerSinkDisplay();
   }
@@ -1945,6 +1951,7 @@ function ensureVideoWorker() {
           console.info('[Selkies] video sink: VideoTrackGenerator in the video worker.');
           decodeInWorker = true;
           videoWorkerReady = true;
+          videoWorkerSpawnAttempts = 0;
           syncWireGeom();
           updateVideoDivert();
         } else if (supportsWindowMSTG &&
@@ -1974,6 +1981,7 @@ function ensureVideoWorker() {
           // full-frame decode stays on the page feeding that generator.
           decodeInWorker = !supportsWindowMSTG;
           videoWorkerReady = true;
+          videoWorkerSpawnAttempts = 0;
           syncWireGeom();
           updateVideoDivert();
         }
