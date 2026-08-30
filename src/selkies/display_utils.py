@@ -137,6 +137,12 @@ def _cvt_rb_mode_info(width: int, height: int, refresh: float = 60.0) -> Dict[st
 
 
 _x11_lock = threading.Lock()
+
+# Whether this X server lets several logical monitors list the same physical
+# output, measured the first time a layout asks for it; None until then. RandR
+# 1.5 has an output belong to one monitor and servers before 21.1 enforce it
+# (`_sync_set_selkies_layout`).
+_OUTPUT_SHARED: Optional[bool] = None
 _x11_conn: Optional[x11_display.Display] = None
 
 
@@ -625,17 +631,21 @@ def _monitor_info(
     y: int,
     w: int,
     h: int,
+    take_output: bool = True,
 ) -> Dict[str, Any]:
     """Build the RRSetMonitor request dict for logical monitor ``name``.
 
-    Every monitor lists the (single) connected physical output: the server
-    does not reserve an output for one monitor, and GTK3's X11 backend
-    realizes a GdkMonitor only for RandR monitors that carry a live output —
-    an outputless monitor is invisible to GTK apps, whose desktops then
-    paint and tile short of that region. The primary monitor carries the
-    RandR primary flag: the WM tiles panels against it, and the same-set
-    no-op in `_sync_replace_selkies_monitors` reads it back to prove the
-    live set already matches.
+    ``take_output`` lists the (single) connected physical output on this
+    monitor. GTK3's X11 backend realizes a GdkMonitor only for a RandR
+    monitor that carries a live output, so a monitor without one is invisible
+    to every GTK app and their desktops paint and tile short of that region —
+    which is why every monitor asks for it. Whether the server lets them all
+    keep it is a property of the server (`_sync_set_selkies_layout`), so a
+    caller that has measured a refusal passes False for the rest.
+
+    The primary monitor carries the RandR primary flag: the WM tiles panels
+    against it, and the same-set no-op in `_sync_replace_selkies_monitors`
+    reads it back to prove the live set already matches.
     """
     return {
         "name": d.intern_atom(name),
@@ -647,7 +657,7 @@ def _monitor_info(
         "height_in_pixels": int(h),
         "width_in_millimeters": max(1, round(w * 25.4 / (_APPLIED_DPI if _APPLIED_DPI is not None else 96.0))),
         "height_in_millimeters": max(1, round(h * 25.4 / (_APPLIED_DPI if _APPLIED_DPI is not None else 96.0))),
-        "crtcs": [out_id],
+        "crtcs": [out_id] if take_output else [],
     }
 
 
@@ -682,13 +692,14 @@ def _verify_monitors_on_display(
             )
 
 
-def _sync_set_monitor(name: str, x: int, y: int, w: int, h: int) -> None:
+def _sync_set_monitor(name: str, x: int, y: int, w: int, h: int,
+                      take_output: bool = True) -> None:
     """Blocking RandR 1.5 set-monitor on the module connection."""
     with _x11_lock:
         try:
             d = _module_display()
             root, _, out_id, _, _ = _connected_output_state(d)
-            randr.set_monitor(root, _monitor_info(d, out_id, name, x, y, w, h))
+            randr.set_monitor(root, _monitor_info(d, out_id, name, x, y, w, h, take_output))
             d.sync()
             _verify_monitors_on_display(
                 d, {name: (int(x), int(y), int(w), int(h))}
@@ -753,6 +764,68 @@ def _sync_grow_screen(w: int, h: int) -> None:
             raise RuntimeError(f"screen is {geom.width}x{geom.height} after grow to {w}x{h}")
 
 
+def _sync_selkies_monitors(
+    d: x11_display.Display, root: Any
+) -> Dict[str, Tuple[int, int, int, int, bool, bool]]:
+    """Live selkies-* monitors as `{name: (x, y, w, h, has_output, primary)}`."""
+    monitors = {}
+    for m in randr.get_monitors(root, is_active=False).monitors:
+        try:
+            name = d.get_atom_name(m.name)
+        except Exception:
+            continue
+        if name.startswith("selkies-"):
+            monitors[name] = (m.x, m.y, m.width_in_pixels, m.height_in_pixels,
+                              bool(m.crtcs), bool(m.primary))
+    return monitors
+
+
+def _monitors_match(
+    live: Dict[str, Tuple[int, int, int, int, bool, bool]],
+    desired: Dict[str, Tuple[int, int, int, int]],
+    share_output: bool,
+) -> bool:
+    """Whether the live selkies-* set already is what a publish would define:
+    the same rectangles, the primary flag on the primary, and the output where
+    this server was measured to keep it."""
+    if {name: m[:4] for name, m in live.items()} != desired:
+        return False
+    if "selkies-primary" in desired and not live["selkies-primary"][5]:
+        return False
+    return all(m[4] == (share_output or name == "selkies-primary")
+               for name, m in live.items())
+
+
+def _sync_set_selkies_layout(
+    d: x11_display.Display, root: Any, out_id: int,
+    ordered: List[Tuple[str, Dict[str, int]]], share_output: bool,
+) -> Dict[str, Tuple[int, int, int, int, bool, bool]]:
+    """Define the whole selkies-* set from scratch; returns what survived.
+
+    RandR 1.5 has an output belong to one logical monitor: defining a monitor
+    over an output takes it from whichever monitor held it and deletes that
+    monitor once it is left with none. Servers before 21.1 do exactly that, so
+    listing the one physical output on every display would leave the last
+    display alone. ``share_output`` asks for it on all of them anyway, because
+    a server that does not enforce the rule is the only way several displays
+    become GdkMonitors at once (see `_monitor_info`); the caller compares the
+    returned set against what it asked for and repeats with ``False``, which
+    leaves the output on the primary and the rest of the displays invisible to
+    GTK apps.
+    """
+    for name in _sync_selkies_monitors(d, root):
+        randr.delete_monitor(root, d.intern_atom(name))
+    take_output = True
+    for display_id, l in ordered:
+        randr.set_monitor(root, _monitor_info(
+            d, out_id, f"selkies-{display_id}",
+            l["x"], l["y"], l["w"], l["h"], take_output,
+        ))
+        take_output = share_output
+    d.sync()
+    return _sync_selkies_monitors(d, root)
+
+
 def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
     """Blocking swap of ALL selkies-* logical monitors to exactly ``layouts``.
 
@@ -767,49 +840,37 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
     against a monitor-less or half-defined screen. Foreign (non-selkies)
     monitors are left untouched. A request matching the live set returns
     without touching the server: even that swap costs a delete+create and
-    hands the WM a ConfigureNotify to re-tile against. A live monitor
-    listing no output never counts as a match: monitors outlive the client
-    that set them, and a stale outputless set at the right geometry is
-    invisible to GTK apps (see `_monitor_info`), so it is re-swapped.
+    hands the WM a ConfigureNotify to re-tile against. A live set whose
+    outputs sit differently than this server was measured to allow never
+    counts as a match: monitors outlive the client that set them, and a stale
+    outputless set at the right geometry is invisible to GTK apps.
     """
+    global _OUTPUT_SHARED
     with _x11_lock:
         try:
             d = _module_display()
             root, _, out_id, _, _ = _connected_output_state(d)
-            reply = randr.get_monitors(root, is_active=False)
-            stale = []
-            live = {}
-            primary_name = None
-            every_output_listed = True
-            for m in reply.monitors:
-                try:
-                    name = d.get_atom_name(m.name)
-                except Exception:
-                    continue
-                if name.startswith("selkies-"):
-                    stale.append(name)
-                    live[name] = (m.x, m.y, m.width_in_pixels, m.height_in_pixels)
-                    if m.primary:
-                        primary_name = name
-                    every_output_listed &= bool(m.crtcs)
             desired = {
                 f"selkies-{did}": (int(l["x"]), int(l["y"]), int(l["w"]), int(l["h"]))
                 for did, l in layouts.items()
             }
-            if live == desired and every_output_listed and (
-                primary_name == "selkies-primary" or "selkies-primary" not in desired
-            ):
-                return
             ordered = sorted(layouts.items(), key=lambda kv: kv[0] != "primary")
+            share = _OUTPUT_SHARED is not False
+            if _monitors_match(_sync_selkies_monitors(d, root), desired, share):
+                return
             d.grab_server()
             try:
-                for name in stale:
-                    randr.delete_monitor(root, d.intern_atom(name))
-                for display_id, l in ordered:
-                    randr.set_monitor(root, _monitor_info(
-                        d, out_id, f"selkies-{display_id}",
-                        l["x"], l["y"], l["w"], l["h"],
-                    ))
+                live = _sync_set_selkies_layout(d, root, out_id, ordered, share)
+                if share and set(live) != set(desired):
+                    _OUTPUT_SHARED = False
+                    logger_app_resize.info(
+                        "This X server keeps a logical monitor's output to itself, so only "
+                        "the primary display becomes a monitor toolkits can see; the rest "
+                        "of the desktop paints and tiles as if they were not there."
+                    )
+                    live = _sync_set_selkies_layout(d, root, out_id, ordered, False)
+                elif share:
+                    _OUTPUT_SHARED = True
                 if layouts:
                     randr.set_output_primary(root, out_id)
             finally:
@@ -853,11 +914,13 @@ async def replace_selkies_monitors(
         logger_app_resize.info(f"Native monitor replace failed ({e}); using xrandr fallback.")
     await clear_selkies_monitors()
     ok = True
+    take_output = True
     for display_id, l in sorted(layouts.items(), key=lambda kv: kv[0] != "primary"):
         ok &= await set_logical_monitor(
             f"selkies-{display_id}", l["x"], l["y"], l["w"], l["h"],
-            screen_name=screen_name,
+            take_output, screen_name=screen_name,
         )
+        take_output = _OUTPUT_SHARED is not False
     await designate_primary_output(screen_name)
     return ok
 
@@ -1029,20 +1092,22 @@ async def set_logical_monitor(
     y: int,
     w: int,
     h: int,
+    take_output: bool = True,
     screen_name: Optional[str] = None,
 ) -> bool:
     """Define/replace logical monitor ``name`` over the given pixel geometry:
-    native RandR 1.5 first, xrandr --setmonitor fallback. The monitor lists
-    the physical output (see `_monitor_info`); the fallback goes outputless
-    only when no output name is known. Returns success."""
+    native RandR 1.5 first, xrandr --setmonitor fallback. ``take_output`` lists
+    the physical output on the monitor (see `_monitor_info`); the fallback also
+    goes outputless when no output name is known. Returns success."""
     try:
-        await asyncio.to_thread(_sync_set_monitor, name, x, y, w, h)
+        await asyncio.to_thread(_sync_set_monitor, name, x, y, w, h, take_output)
         return True
     except Exception as e:
         logger_app_resize.info(f"Native set-monitor '{name}' failed ({e}); using xrandr fallback.")
     geometry = f"{w}/0x{h}/0+{x}+{y}"
+    output = screen_name if (take_output and screen_name) else "none"
     return await _run_xrandr(
-        ["--setmonitor", name, geometry, screen_name or "none"],
+        ["--setmonitor", name, geometry, output],
         f"set logical monitor {name}",
     )
 

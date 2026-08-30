@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Every published logical monitor must list the physical output.
+"""Every display stays a logical monitor, with the output where the server allows.
 
-RandR lets one output appear in any number of logical monitors, and GTK3's
-X11 backend realizes a GdkMonitor only for monitors that carry a live
-output: an outputless monitor is invisible to every GTK3 app, so desktops
-size themselves to the output-owning region alone and the rest of the root
-stays black. Proven from the wire (GetMonitors) rather than the code path:
-the server accepts the outputless form without complaint, so only the reply
-shows the defect.
+GTK3's X11 backend realizes a GdkMonitor only for a RandR monitor carrying a
+live output, so a display published without one is invisible to every GTK app
+and their desktops paint and tile short of it. RandR 1.5 has an output belong
+to one monitor, though: a server that enforces the rule deletes the monitor a
+new one takes the output from, which would drop a display outright. So the
+publish asks for the output on all of them and reads the reply back, and the
+enforcing shape is driven here through a shim implementing that clause on top
+of whichever server the host runs. Proven from the wire (GetMonitors), because
+the server accepts either form without complaint.
 """
 import asyncio
 import os
@@ -20,6 +22,7 @@ import helpers as H  # noqa: E402
 
 PRIMARY = {"x": 0, "y": 0, "w": 1024, "h": 640}
 DISPLAY2 = {"x": 0, "y": 640, "w": 1024, "h": 640}
+LAYOUTS = {"primary": dict(PRIMARY), "display2": dict(DISPLAY2)}
 
 
 def read_monitors(display_name: str) -> dict:
@@ -66,6 +69,53 @@ def publish_outputless_secondary(display_name: str) -> None:
         d.close()
 
 
+def exclusive_outputs(du) -> object:
+    """Make RRSetMonitor behave as servers before 21.1 implement it.
+
+    Their clause: each output the new monitor lists is removed from every
+    pre-existing monitor, and a monitor left with none is deleted. One output
+    exists here, so any monitor holding it loses its last one. The clause is
+    about monitors a client defined; the whole-CRTC one the server makes up
+    for an unclaimed output is not deletable and goes away by itself.
+
+    Returns:
+        The real `set_monitor`, to hand back to `du.randr`.
+    """
+    real = du.randr.set_monitor
+
+    def enforcing(root, info):
+        taken = set(info.get("crtcs") or ())
+        if taken:
+            for m in du.randr.get_monitors(root, is_active=False).monitors:
+                if (not m.automatic and m.name != info["name"]
+                        and taken.intersection(m.crtcs)):
+                    du.randr.delete_monitor(root, m.name)
+        return real(root, info)
+
+    du.randr.set_monitor = enforcing
+    return real
+
+
+def check_shape(res, display_name: str, tag: str, shared: bool) -> None:
+    """Both displays live at their rectangles, with the outputs `shared` says."""
+    monitors = read_monitors(display_name)["monitors"]
+    prim = monitors.get("selkies-primary")
+    sec = monitors.get("selkies-display2")
+    res.check(f"{tag}: both displays are logical monitors",
+              sorted(monitors) == ["selkies-display2", "selkies-primary"],
+              sorted(monitors))
+    res.check(f"{tag}: rectangles match the layout",
+              prim and prim[:4] == (0, 0, 1024, 640)
+              and sec and sec[:4] == (0, 640, 1024, 640),
+              f"primary={prim} display2={sec}")
+    res.check(f"{tag}: the primary flag sits on selkies-primary",
+              prim and prim[4] and sec and not sec[4], (prim, sec))
+    res.check(f"{tag}: the primary carries the output",
+              prim and bool(prim[5]), prim)
+    res.check(f"{tag}: the secondary carries the output only where it may",
+              sec and bool(sec[5]) == shared, f"display2={sec} shared={shared}")
+
+
 def main() -> bool:
     res = H.Results("extended-monitor-outputs")
     server, display_name = H.private_x_server(1024, 1280)
@@ -79,46 +129,43 @@ def main() -> bool:
         res.check("single display: primary published with the output",
                   single and single[4] and single[5], single)
 
-        layouts = {"primary": dict(PRIMARY), "display2": dict(DISPLAY2)}
-        ok = asyncio.run(du.apply_extended_layout(layouts, 1024, 1280))
+        ok = asyncio.run(du.apply_extended_layout(LAYOUTS, 1024, 1280))
         state = read_monitors(display_name)
-        monitors = state["monitors"]
         res.check("extended layout applied", ok and state["root"] == (1024, 1280),
                   f"root={state['root']}")
-        res.check("exactly the two selkies monitors are live",
-                  sorted(monitors) == ["selkies-display2", "selkies-primary"],
-                  sorted(monitors))
-        prim = monitors.get("selkies-primary")
-        sec = monitors.get("selkies-display2")
-        res.check("rectangles match the layout",
-                  prim and prim[:4] == (0, 0, 1024, 640)
-                  and sec and sec[:4] == (0, 640, 1024, 640),
-                  f"primary={prim} display2={sec}")
-        res.check("primary flag sits on selkies-primary",
-                  prim and prim[4] and sec and not sec[4], (prim, sec))
-        # The heart of it: a monitor with no outputs never becomes a GdkMonitor,
-        # so a GTK3 desktop covers only the output-owning region.
-        res.check("every monitor lists the physical output",
-                  prim and sec and prim[5] and prim[5] == sec[5],
-                  f"primary outputs={prim and prim[5]} display2 outputs={sec and sec[5]}")
+        shared = du._OUTPUT_SHARED
+        res.check("the server's answer about sharing one output is recorded",
+                  shared in (True, False), shared)
+        check_shape(res, display_name, "as published", bool(shared))
 
-        asyncio.run(du.replace_selkies_monitors(layouts))
-        monitors = read_monitors(display_name)["monitors"]
-        republished = [m for m in monitors.values() if m[5]]
-        res.check("re-publish keeps the output on every monitor",
-                  len(monitors) == 2 and len(republished) == 2,
-                  {n: m[5] for n, m in monitors.items()})
+        asyncio.run(du.replace_selkies_monitors(LAYOUTS))
+        check_shape(res, display_name, "re-published", bool(shared))
 
         # Monitors outlive the client that set them: a stale outputless set at
         # matching geometry must be re-swapped, not taken as already-live.
         publish_outputless_secondary(display_name)
         stale = read_monitors(display_name)["monitors"].get("selkies-display2")
         res.check("stale outputless secondary is in place", stale and not stale[5], stale)
-        asyncio.run(du.replace_selkies_monitors(layouts))
-        monitors = read_monitors(display_name)["monitors"]
-        res.check("same-geometry publish repairs an outputless live set",
-                  all(m[5] for m in monitors.values()) and len(monitors) == 2,
-                  {n: m[5] for n, m in monitors.items()})
+        asyncio.run(du.replace_selkies_monitors(LAYOUTS))
+        check_shape(res, display_name, "after a stale set", bool(shared))
+
+        # The other kind of server: it takes the output from whoever held it,
+        # so asking for it on every monitor would publish one display alone.
+        asyncio.run(du.clear_selkies_monitors())
+        du._OUTPUT_SHARED = None
+        real_set = exclusive_outputs(du)
+        try:
+            asyncio.run(du.apply_extended_layout(LAYOUTS, 1024, 1280))
+            res.check("an exclusive-output server is measured as one",
+                      du._OUTPUT_SHARED is False, du._OUTPUT_SHARED)
+            check_shape(res, display_name, "exclusive outputs", False)
+            before = read_monitors(display_name)["monitors"]
+            asyncio.run(du.replace_selkies_monitors(LAYOUTS))
+            res.check("the settled shape is a no-op to publish again",
+                      read_monitors(display_name)["monitors"] == before, before)
+        finally:
+            du.randr.set_monitor = real_set
+            du._OUTPUT_SHARED = None
 
         if shutil.which("xrandr"):
             _, _, _, _, screen_name = asyncio.run(du.get_new_res("1x1"))

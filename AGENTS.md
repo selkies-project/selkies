@@ -92,6 +92,10 @@ Each is documented in full where named; read that before changing the subsystem.
   Meta key to WebKit). That decides both text-versus-shortcut and when a held modifier is stale
   (`Input._composesText`, `Input._releaseDesyncedModifiers`; `tests/tools/keyboard_chord_audit.mjs` holds
   every engine to one answer).
+- Every display of an extended desktop is published as a RandR logical monitor listing the physical output,
+  because a toolkit realizes a monitor only where one is listed; whether the server lets several monitors share
+  the output is read back from the reply rather than assumed, since RandR 1.5 gives an output to one monitor and
+  servers before 21.1 enforce that (`display_utils._sync_set_selkies_layout`).
 - One remote pointer is driven by an `Input` per display page, so a pointer message carries the buttons the
   event reports held, never the transitions one page happened to witness: a held drag crosses between pages,
   reaching one that never saw the press and leaving one that never sees the release
