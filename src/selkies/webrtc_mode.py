@@ -654,7 +654,7 @@ class WebRTCService(BaseStreamingService):
         if not IS_WAYLAND or not (self.settings.wayland_host_display or "").strip():
             return False
         module = self._wayland_capture_handle()
-        if module is None or not hasattr(module, "output_capacity"):
+        if module is None:
             return False
         try:
             capacity = int(await asyncio.to_thread(module.output_capacity))
@@ -871,10 +871,11 @@ class WebRTCService(BaseStreamingService):
         current size would churn RandR (X11) or restart the capture (Wayland)
         for nothing; the last request counts as applied too, or a request the
         realized size differs from (CVT cell alignment) would read as pending
-        forever. On Wayland there is no X server to resize: the compositor
-        output follows the capture dimensions, so a running capture restarts
-        and the compositor's realized geometry (it may even-mask or refuse the
-        mode) is reconciled and pushed to the client.
+        forever. On Wayland there is no X server to resize: the screen is
+        grown ahead of the capture restart, the restarted capture resizes the
+        view, the compositor's realized geometry (it may even-mask or refuse
+        the mode) is reconciled and pushed to the client, and the screen is
+        then fitted to it.
         """
         if self._server_locked_dims() is not None:
             logger.warning(
@@ -911,8 +912,12 @@ class WebRTCService(BaseStreamingService):
                 # can land while audio is still coming up. An unstarted capture
                 # reads the new size when it starts.
                 if self.media_pipeline.is_screen_capturing():
+                    await self._size_wayland_screen(target_w, target_h, grow_only=True)
                     await self.media_pipeline.restart_screen_capture()
                     await self._push_wayland_realized_geometry("primary", self.media_pipeline)
+                    if not self.display_layouts:
+                        await self._size_wayland_screen(
+                            self.media_pipeline.width, self.media_pipeline.height)
                 self.media_pipeline.last_resize_success = True
                 self._last_resize_request = (target_w, target_h)
                 logger.info(
@@ -1128,6 +1133,28 @@ class WebRTCService(BaseStreamingService):
             self._wayland_ctl_module = PixelfluxScreenCapture()
         return self._wayland_ctl_module
 
+    async def _size_wayland_screen(self, width: int, height: int,
+                                   grow_only: bool = False) -> None:
+        """Size the session's one screen: grown before views or captures land
+        outside it, fitted to the union once they carry their new sizes -- a
+        view is as big as what it captures, so an early shrink is refused."""
+        module = self._wayland_capture_handle()
+        if module is None or width <= 0 or height <= 0:
+            return
+        scale = float(getattr(self.media_pipeline, "scale", 1.0) or 1.0)
+        try:
+            if grow_only:
+                outputs = {o[0]: o for o in await asyncio.to_thread(module.list_outputs)}
+                screen = outputs.get(WAYLAND_SCREEN_OUTPUT_ID)
+                if screen:
+                    width, height = max(width, screen[3]), max(height, screen[4])
+            ok = await asyncio.to_thread(
+                module.resize_output, WAYLAND_SCREEN_OUTPUT_ID, width, height, scale)
+            if not ok:
+                logger.warning(f"Wayland screen resize to {width}x{height} refused.")
+        except Exception as e:
+            logger.error(f"Wayland resize_output failed: {e}")
+
     async def _retire_wayland_views(self, keep_oid: Optional[int] = None) -> None:
         """Retire the secondary displays' views of the session's screen.
 
@@ -1230,7 +1257,7 @@ class WebRTCService(BaseStreamingService):
         pipeline = (self.media_pipeline if did == "primary"
                     else self.display_pipelines.get(did))
         module = getattr(pipeline, "capture_module", None)
-        if module is None or not hasattr(module, "get_realized_geometry"):
+        if module is None:
             return None
         try:
             geom = await asyncio.to_thread(
@@ -1264,7 +1291,7 @@ class WebRTCService(BaseStreamingService):
         if not IS_WAYLAND or pipeline is None:
             return
         module = getattr(pipeline, "capture_module", None)
-        if module is None or not hasattr(module, "get_realized_geometry"):
+        if module is None:
             return
         try:
             geom = await asyncio.to_thread(
@@ -1301,13 +1328,11 @@ class WebRTCService(BaseStreamingService):
         if CURSOR_SIZE is None:
             return
         module = self._wayland_capture_handle()
-        setter = getattr(module, "set_cursor_size", None) if module else None
-        if setter is None:
-            logger.warning("Wayland cursor resize unavailable (no set_cursor_size).")
+        if module is None:
             return
         size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
         try:
-            if await asyncio.to_thread(setter, size):
+            if await asyncio.to_thread(module.set_cursor_size, size):
                 logger.info(f"Wayland cursor size set to {size} (DPI {dpi_value}).")
             else:
                 logger.warning(f"Wayland compositor refused cursor size {size}.")
@@ -1607,10 +1632,20 @@ class WebRTCService(BaseStreamingService):
                     if IS_WAYLAND:
                         await self._retire_wayland_views()
                         self.media_pipeline.capture_region = None
+                        module = self._wayland_capture_handle()
+                        if module is not None:
+                            try:
+                                await asyncio.to_thread(
+                                    module.reposition_output,
+                                    wayland_output_id("primary"), 0, 0)
+                            except Exception as e:
+                                logger.warning(f"Primary view reposition failed: {e}")
                         if (self.media_pipeline.width, self.media_pipeline.height) != (p_w, p_h):
                             self.media_pipeline.width, self.media_pipeline.height = p_w, p_h
                             if self.media_pipeline.is_media_pipeline_running():
                                 await self.media_pipeline.restart_screen_capture()
+                        await self._size_wayland_screen(
+                            self.media_pipeline.width, self.media_pipeline.height)
                         self._broadcast_display_config()
                         return
                     # Before the shrink, so no monitor lingers outside the framebuffer.
@@ -1774,6 +1809,12 @@ class WebRTCService(BaseStreamingService):
                         await self._push_wayland_realized_geometry(did, pipeline)
             if not IS_WAYLAND:
                 self._push_x11_layout_geometry(layouts)
+            else:
+                # Both captures carry their layout sizes past the barrier above,
+                # so the screen can come down to the union they cover.
+                await self._size_wayland_screen(
+                    max(r["x"] + r["w"] for r in layouts.values()),
+                    max(r["y"] + r["h"] for r in layouts.values()))
         self._broadcast_display_config()
 
     def _push_x11_layout_geometry(self, layouts: Dict[str, Dict[str, int]]) -> None:

@@ -23,8 +23,8 @@ What to do about that -- which display backend to start, which GL stack the
 session's applications are given -- is the deployment's own policy, and belongs
 where the deployment is assembled rather than here.
 
-Exits non-zero without printing anything when no report can be had: a pixelflux
-too old to carry one, or a driver that refuses to answer at all.
+Exits non-zero without printing anything when no report can be had: a driver
+that refuses to answer at all.
 """
 
 import os

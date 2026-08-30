@@ -1548,7 +1548,6 @@ class DataStreamingServer(BaseStreamingService):
         silent. The failure is logged once per run, and the restart — the same
         stop/start the audio toggles use — runs as its own task (the stop
         cancels the broadcast loop) no more often than the restart floor.
-        Older pcmflux builds without the attribute never report one.
         """
         module = self.pcmflux_module
         if module is None or not self.is_pcmflux_capturing:
@@ -2089,7 +2088,7 @@ class DataStreamingServer(BaseStreamingService):
         if not IS_WAYLAND or not (self.cli_args.wayland_host_display or '').strip():
             return False
         module = self._wayland_control_module()
-        if module is None or not hasattr(module, 'output_capacity'):
+        if module is None:
             return False
         try:
             capacity = int(await asyncio.to_thread(module.output_capacity))
@@ -2376,7 +2375,7 @@ class DataStreamingServer(BaseStreamingService):
             return
         inst = self.capture_instances.get(display_id)
         module = inst.get('module') if inst else None
-        if module is None or not hasattr(module, 'get_realized_geometry'):
+        if module is None:
             return
         try:
             geom = await asyncio.to_thread(
@@ -2427,7 +2426,7 @@ class DataStreamingServer(BaseStreamingService):
             return layout['w'], layout['h']
         if IS_WAYLAND:
             module = self._wayland_control_module()
-            if module is None or not hasattr(module, 'get_realized_geometry'):
+            if module is None:
                 return None
             try:
                 geom = await asyncio.to_thread(
@@ -2450,13 +2449,11 @@ class DataStreamingServer(BaseStreamingService):
         if CURSOR_SIZE is None:
             return
         module = self._wayland_control_module()
-        setter = getattr(module, 'set_cursor_size', None) if module else None
-        if setter is None:
-            data_logger.warning("Wayland cursor resize unavailable (no set_cursor_size).")
+        if module is None:
             return
         size = cursor_size_for_dpi(dpi, CURSOR_SIZE)
         try:
-            if await asyncio.to_thread(setter, size):
+            if await asyncio.to_thread(module.set_cursor_size, size):
                 data_logger.info(f"Wayland cursor size set to {size} (DPI {dpi}).")
             else:
                 data_logger.warning(f"Wayland compositor refused cursor size {size}.")
@@ -4392,15 +4389,21 @@ class DataStreamingServer(BaseStreamingService):
 
         async def size_screen(width: int, height: int) -> None:
             try:
-                await asyncio.to_thread(
+                ok = await asyncio.to_thread(
                     module.resize_output, WAYLAND_SCREEN_OUTPUT_ID, width, height, scale)
+                if not ok:
+                    data_logger.warning(f"Wayland screen resize to {width}x{height} refused.")
             except Exception as e:
                 data_logger.error(f"Wayland resize_output failed: {e}")
 
         await size_screen(max(have[0], want[0]), max(have[1], want[1]))
 
         wanted = {wayland_output_id(did): did for did in layouts}
-        for oid in [o for o in nodes if o != WAYLAND_SCREEN_OUTPUT_ID and o not in wanted]:
+        # A screen always carries the default view; teardown leaves the resting
+        # state the compositor booted with rather than a bare screen.
+        default_view = wayland_output_id('primary')
+        for oid in [o for o in nodes if o != WAYLAND_SCREEN_OUTPUT_ID and o not in wanted
+                    and (layouts or o != default_view)]:
             data_logger.info(f"Retiring the view of display {oid}.")
             try:
                 await asyncio.to_thread(module.destroy_output, oid)
@@ -4408,7 +4411,15 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.error(f"Wayland destroy_output {oid} failed: {e}")
             nodes.pop(oid, None)
 
+        for did in [d for d in layouts if wanted.get(wayland_output_id(d)) != d]:
+            del layouts[did]
+            keep_ids.discard(did)
+            await self._drop_wayland_secondary(
+                did, "This display's name collides with another display's view."
+            )
         for oid, did in wanted.items():
+            if did not in layouts:
+                continue
             rect = layouts[did]
             existing = nodes.get(oid)
             placed = True
@@ -4452,8 +4463,10 @@ class DataStreamingServer(BaseStreamingService):
                 max(r['y'] + r['h'] for r in layouts.values()))
         scale = float((self.display_clients.get('primary') or {}).get('scale', 1.0) or 1.0)
         try:
-            await asyncio.to_thread(
+            ok = await asyncio.to_thread(
                 module.resize_output, WAYLAND_SCREEN_OUTPUT_ID, want[0], want[1], scale)
+            if not ok:
+                data_logger.warning(f"Wayland screen fit to {want[0]}x{want[1]} refused.")
         except Exception as e:
             data_logger.error(f"Wayland resize_output failed: {e}")
 

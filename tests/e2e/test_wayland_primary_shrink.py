@@ -5,7 +5,7 @@ Both displays are views of one screen, so the secondary only has to move into
 the room the primary gives up -- no output is destroyed and none can collide
 with another, and the screen the two are cut from is resized around them. What
 this pins is that the move happens and that the second display survives it,
-since dropping it on every primary shrink is what the arrangement used to do.
+since dropping it on every primary shrink is what a screen-per-display arrangement would do.
 Driven with raw websockets clients on the websockets transport against the
 in-process pixelflux compositor, no browser.
 """
@@ -102,7 +102,7 @@ async def drive(res: "H.Results") -> None:
             tail = H.server_log()[mark:]
             # Moving a view does not disturb what it captures, so the second
             # display streams across the shrink rather than being torn down and
-            # rebuilt as it was when each display owned a screen.
+            # rebuilt as a screen-per-display arrangement would leave it.
             res.check("the secondary streams across the shrink without a restart",
                       "Stopping all streams for display 'display2'" not in tail, "")
             res.check("no view placement was refused",

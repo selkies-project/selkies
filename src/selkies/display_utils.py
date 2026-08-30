@@ -440,12 +440,16 @@ def wayland_output_id(display_id: Optional[str]) -> int:
     """Stable compositor id for a display name, shared by both transports.
 
     'primary' maps to 1 and 'displayN' to N, leaving 0 to the screen they are
-    all views of. A secondary name without a numeric suffix falls back to 2.
+    all views of. A secondary name without a numeric suffix falls back to 2,
+    and so does one whose digits would land on the screen or the primary's
+    view ('display0', 'display1'): a client-chosen name must never address
+    the session's own nodes.
     """
     if not display_id or display_id == "primary":
         return 1
     m = re.search(r"(\d+)$", str(display_id))
-    return int(m.group(1)) if m else 2
+    n = int(m.group(1)) if m else 2
+    return n if n >= 2 else 2
 
 
 def compute_dual_layout(
