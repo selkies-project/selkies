@@ -83,6 +83,11 @@ Each is documented in full where named; read that before changing the subsystem.
   (`settings.software_h264_encoder`, `canonical_encoder`; the OpenH264 profile gate in `src/selkies/rtc.py`).
 - The sound-server control plane is in-process over pulsectl_asyncio under a never-cancel discipline; `pactl` is
   only the fallback when the bindings are missing (`src/selkies/audio_control.py` module docstring).
+- A modifier's role comes from the keysym the client resolved for it, never from the engine's flags:
+  browsers name the same physical key differently (macOS Option is `AltGraph` to Gecko, `Alt` to Blink, a
+  Meta key to WebKit). That decides both text-versus-shortcut and when a held modifier is stale
+  (`Input._composesText`, `Input._releaseDesyncedModifiers`; `tests/tools/keyboard_chord_audit.mjs` holds
+  every engine to one answer).
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `src/selkies/webcam.py`,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).

@@ -72,6 +72,55 @@ const MODIFIER_STATE_BY_CODE = {
     MetaLeft: 'Meta', MetaRight: 'Meta',
 };
 
+/**
+ * Whether the event still reports the key an Alt-position code sits on. That
+ * key answers to `AltGraph` where the layout puts a level-3 shift on it and to
+ * `Alt` where the engine reports the key itself, and no engine reports both
+ * everywhere -- Gecko names macOS Option both ways, Blink only `Alt`, a PC
+ * AltGr only `AltGraph` -- so either name keeps it held.
+ * @param {KeyboardEvent} event
+ * @returns {boolean}
+ */
+function _altPositionHeld(event) {
+    return !!event.altKey || (typeof event.getModifierState === 'function' &&
+                              event.getModifierState('AltGraph'));
+}
+
+/**
+ * Whether the event reports one modifier state as active.
+ * @param {KeyboardEvent} event
+ * @param {string} [state] A `getModifierState()` name; absent reports nothing.
+ * @returns {boolean}
+ */
+function _modifierStateHeld(event, state) {
+    if (!state) return false;
+    return state === 'Alt' ? _altPositionHeld(event) : event.getModifierState(state);
+}
+
+/**
+ * Whether a key value is a character rather than the name of a key.
+ * @param {string} key
+ * @returns {boolean}
+ */
+function _isCharacterKey(key) {
+    if (typeof key !== 'string' || [...key].length !== 1) return false;
+    const cp = key.codePointAt(0);
+    return cp >= 0x20 && cp !== 0x7f;
+}
+
+/**
+ * Whether the platform's own key remaps apply to this event. They describe
+ * physical keys, so an event the page constructed -- a soft keyboard naming
+ * the modifier it wants held on the server -- is taken at its word instead. A
+ * clipboard replay re-dispatches a real keydown once the transfer it waited on
+ * settles (`lib/clipboard-sync.js`), so it is still the physical key.
+ * @param {KeyboardEvent} event
+ * @returns {boolean}
+ */
+function _isPhysicalKey(event) {
+    return event.isTrusted !== false || event.__selkiesClipReplay === true;
+}
+
 /** X11 keysym values by name. */
 const KeyTable = {
     XK_VoidSymbol:                  0xffffff,
@@ -1003,6 +1052,23 @@ const browser = {
     isSafari: function() { return /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent); },
 };
 
+/** Codes of the modifiers no layout picks a character with, so a chord holding
+ *  one names a shortcut. Codes rather than keysyms, since the platform remaps
+ *  move those around: macOS Command is sent as Alt_L. */
+const SHORTCUT_MODIFIER_CODES = ['ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'];
+
+/** Keysym to `getModifierState()` name, for a code whose own name is wrong: an
+ *  xkb swap leaves an Alt code holding Control_L, and the macOS remaps leave a
+ *  Meta code holding Alt_L and an Alt code holding Mode_switch or Meta_L. */
+const MODIFIER_STATE_BY_KEYSYM = {
+    [KeyTable.XK_Shift_L]: 'Shift', [KeyTable.XK_Shift_R]: 'Shift',
+    [KeyTable.XK_Control_L]: 'Control', [KeyTable.XK_Control_R]: 'Control',
+    [KeyTable.XK_Alt_L]: 'Alt', [KeyTable.XK_Alt_R]: 'Alt',
+    [KeyTable.XK_Meta_L]: 'Meta', [KeyTable.XK_Meta_R]: 'Meta',
+    [KeyTable.XK_Super_L]: 'Meta', [KeyTable.XK_Super_R]: 'Meta',
+    [KeyTable.XK_ISO_Level3_Shift]: 'Alt', [KeyTable.XK_Mode_switch]: 'Alt',
+};
+
 /** Keypad keysyms sent as their main-keyboard equivalents, the NumLock-on set. */
 const NumpadTranslations_NumLockOn = {
     [KeyTable.XK_KP_Space]: KeyTable.XK_space,
@@ -1349,6 +1415,12 @@ export class Input {
         this._macCmdSwapped = false;
 
         this._isSynth = false;
+        /**
+         * Keysym this client resolved each held Alt-position key to. Kept
+         * apart from `_keyDownList` because the right Option's keysym is sent
+         * momentarily, and the role has to outlive the send.
+         */
+        this._altKeysymByCode = new Map();
         this.isComposing = false;
         this.compositionString = "";
         /** Shortcut chord that arrived mid-composition, held until the commit lands so it applies after the text. */
@@ -1635,18 +1707,29 @@ export class Input {
      * modified. Trusted events carry live modifier state, so whatever they
      * report up is released. Composition and `Process` events are exempt: an
      * IME does not report modifier state reliably, even when keyCode is not
-     * 229.
+     * 229, and so is synthetic mode, where a soft key holds a modifier the
+     * physical keyboard's own events do not report.
+     *
+     * A modifier is stale only when neither the key's position nor the keysym
+     * it holds is reported down, because a remap can leave the two disagreeing
+     * and either one still means the key is held: an xkb Ctrl/Alt swap leaves
+     * an Alt code holding Control_L, and macOS Command holds Alt_L on a Meta
+     * code. Asking only one of them releases a modifier mid-chord, which the
+     * server then sees as the chord ending.
      */
     _releaseDesyncedModifiers(event) {
-        if (typeof event.getModifierState !== 'function') return;
+        if (typeof event.getModifierState !== 'function' || this._isSynth) return;
         if (this.isComposing || event.isComposing || event.keyCode === 229 ||
             event.key === 'Process') return;
+        if (!_altPositionHeld(event)) this._altKeysymByCode.clear();
         for (const code in this._keyDownList) {
-            const state = MODIFIER_STATE_BY_CODE[code];
-            if (state && !event.getModifierState(state)) {
-                this._sendKeyEvent(this._keyDownList[code], code, false);
-                delete this._keyDownList[code];
-            }
+            const keysym = this._keyDownList[code];
+            const byCode = MODIFIER_STATE_BY_CODE[code];
+            const byKeysym = MODIFIER_STATE_BY_KEYSYM[keysym];
+            if (!byCode && !byKeysym) continue;
+            if (_modifierStateHeld(event, byCode) || _modifierStateHeld(event, byKeysym)) continue;
+            this._sendKeyEvent(keysym, code, false);
+            delete this._keyDownList[code];
         }
     }
 
@@ -1663,6 +1746,7 @@ export class Input {
             this._sendKeyEvent(this._keyDownList[code], code, false);
         }
         this._keyDownList = {};
+        this._altKeysymByCode.clear();
     }
 
     /** Releases held keys when the page is hidden: throttled heartbeats in a background tab can exceed the server's stale-key window. */
@@ -1686,8 +1770,8 @@ export class Input {
 
     /**
      * Keydown handler, in order: the dashboard hotkeys, the native-input
-     * class, modifier healing, CapsLock, repeat suppression, the IME path,
-     * the stuck-modifier heal, keysym resolution with the Windows AltGr and
+     * class, modifier healing (`_releaseDesyncedModifiers`), CapsLock, repeat
+     * suppression, the IME path, keysym resolution with the Windows AltGr and
      * macOS remaps, and the send, wrapped in any chord modifiers the server
      * is not holding.
      *
@@ -1708,16 +1792,15 @@ export class Input {
      * intended Ctrl either way, as the Korean IME can deliver the Process
      * keydown with ctrlKey unset.
      *
-     * The stuck-modifier heal skips `Process` events, whose modifier flags
-     * can be stale, and matches on the stored keysym rather than the physical
-     * code: an xkb remap can leave an Alt code holding Control_L, and the
-     * macOS Option remap leaves AltLeft/AltRight holding Meta_L/R while
-     * Option drives altKey and AltGraph, not metaKey.
+     * The Windows AltGr and macOS remaps describe physical keys, so an event
+     * the page constructed -- a soft keyboard naming the modifier it wants
+     * held -- keeps the modifier it named and takes none of them.
      *
      * A shortcut chord on a non-Latin layout resolves from the physical
      * position (the OS convention), since `event.key` is a localized
      * character the server layout cannot map with the modifier; ASCII keys
-     * stay layout-resolved (QWERTZ Ctrl+Z is `z`) and AltGr chords are text.
+     * stay layout-resolved (QWERTZ Ctrl+Z is `z`). A chord `_composesText`
+     * calls text goes as its character with nothing wrapped around it.
      * Outside Chromium, Ctrl/Cmd+V keeps its default action because clipboard
      * sync rides the trusted `paste` event (lib/clipboard-sync.js); the key
      * still streams to the remote desktop.
@@ -1751,7 +1834,7 @@ export class Input {
         if (this.isComposing || event.isComposing || event.keyCode === 229) {
             const armedCtrl = this._altGrArmed;
             if ((event.ctrlKey || event.altKey || event.metaKey || armedCtrl) &&
-                !(event.getModifierState && event.getModifierState('AltGraph'))) {
+                !this._composesText(event)) {
                 const chordKeysym = KeyboardUtil.getKeysymFromCode(event.code);
                 if (chordKeysym) {
                     if (this.isComposing || event.isComposing) {
@@ -1781,31 +1864,6 @@ export class Input {
             return;
         }
 
-        if (!this._isSynth && event.key !== 'Process') {
-            for (const code in this._keyDownList) {
-                const keysym = this._keyDownList[code];
-                if ((keysym === KeyTable.XK_Control_L || keysym === KeyTable.XK_Control_R) && !event.ctrlKey) {
-                    this._sendKeyEvent(keysym, code, false);
-                } else if ((keysym === KeyTable.XK_Alt_L || keysym === KeyTable.XK_Alt_R) && !event.altKey) {
-                    this._sendKeyEvent(keysym, code, false);
-                } else if ((keysym === KeyTable.XK_ISO_Level3_Shift || keysym === KeyTable.XK_Mode_switch) && !event.getModifierState('AltGraph')) {
-                    this._sendKeyEvent(keysym, code, false);
-                } else if ((keysym === KeyTable.XK_Shift_L || keysym === KeyTable.XK_Shift_R) && !event.shiftKey) {
-                    this._sendKeyEvent(keysym, code, false);
-                } else if (keysym === KeyTable.XK_Super_L || keysym === KeyTable.XK_Super_R ||
-                            keysym === KeyTable.XK_Meta_L || keysym === KeyTable.XK_Meta_R) {
-                    if ((keysym === KeyTable.XK_Meta_L || keysym === KeyTable.XK_Meta_R) &&
-                        (code === 'AltLeft' || code === 'AltRight')) {
-                        if (!event.altKey && !event.getModifierState('AltGraph')) {
-                            this._sendKeyEvent(keysym, code, false);
-                        }
-                    } else if (!event.metaKey) {
-                        this._sendKeyEvent(keysym, code, false);
-                    }
-                }
-            }
-        }
-
         const code = KeyboardUtil.getKeyCode(event);
         let keysym = KeyboardUtil.getKeysym(event);
 
@@ -1819,10 +1877,9 @@ export class Input {
             }
         }
 
-        if (keysym !== null &&
-            (event.ctrlKey || event.metaKey ||
-             (event.altKey && !event.getModifierState('AltGraph')))) {
-            const kchar = event.key;
+        if (keysym !== null && !this._composesText(event) &&
+            (event.ctrlKey || event.metaKey || event.altKey)) {
+            const kchar = KeyboardUtil.getKey(event);
             if (typeof kchar === 'string' && [...kchar].length === 1 &&
                 kchar.codePointAt(0) > 0x7f) {
                 const positional = KeyboardUtil.getKeysymFromCode(event.code);
@@ -1836,8 +1893,8 @@ export class Input {
             return;
         }
 
-        if (browser.isMac() && code !== "MetaLeft" && code !== "MetaRight" &&
-            event.metaKey && !event.ctrlKey && !event.altKey) {
+        if (browser.isMac() && _isPhysicalKey(event) && code !== "MetaLeft" &&
+            code !== "MetaRight" && event.metaKey && !event.ctrlKey && !event.altKey) {
             if (this._keyDownList["MetaLeft"] || this._keyDownList["MetaRight"]) {
                 console.log(`macOS: Cmd+key detected for code '${code}'. Remapping Cmd to Ctrl.`);
                 if (this._keyDownList["MetaLeft"]) {
@@ -1851,7 +1908,7 @@ export class Input {
             }
         }
 
-        if (browser.isMac() || browser.isIOS()) {
+        if ((browser.isMac() || browser.isIOS()) && _isPhysicalKey(event)) {
             switch (keysym) {
                 case KeyTable.XK_Super_L: keysym = KeyTable.XK_Alt_L; break;
                 // X11 convention maps the right Command key onto Super_L.
@@ -1861,7 +1918,10 @@ export class Input {
             }
         }
 
-        if ((browser.isMac() || browser.isIOS()) && keysym === KeyTable.XK_ISO_Level3_Shift) {
+        if (MODIFIER_STATE_BY_CODE[code] === 'Alt') this._altKeysymByCode.set(code, keysym);
+
+        if ((browser.isMac() || browser.isIOS()) && _isPhysicalKey(event) &&
+            keysym === KeyTable.XK_ISO_Level3_Shift) {
             // The right Option's keyup is unreliable, so a held ISO_Level3_Shift
             // would stick; it is sent momentarily instead.
             console.log(`macOS: AltRight pressed, sending ISO_Level3_Shift momentarily`);
@@ -1889,7 +1949,8 @@ export class Input {
             !this.isComposing;
         if (!allowNativePaste) _stopEvent(event);
 
-        if ((code === "ControlLeft") && browser.isWindows() && !(code in this._keyDownList)) {
+        if ((code === "ControlLeft") && browser.isWindows() && _isPhysicalKey(event) &&
+            !(code in this._keyDownList)) {
             this._altGrArmed = true;
             this._altGrCtrlTime = event.timeStamp;
             this._altGrTimeout = setTimeout(() => {
@@ -1901,7 +1962,7 @@ export class Input {
         // Meta is exempt while the macOS Cmd-to-Ctrl swap carries the chord.
         if (keysym !== null && !MODIFIER_STATE_BY_CODE[code] &&
             (event.ctrlKey || event.altKey || event.metaKey) &&
-            !(event.getModifierState && event.getModifierState('AltGraph'))) {
+            !this._composesText(event)) {
             const missingMods = this._missingChordModifiers({
                 ctrl: event.ctrlKey,
                 alt: event.altKey,
@@ -1965,6 +2026,7 @@ export class Input {
             this._sendKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
         }
 
+        this._altKeysymByCode.delete(code);
         const keysym = this._keyDownList[code];
         this._sendKeyEvent(keysym, code, false);
 
@@ -2184,6 +2246,62 @@ export class Input {
         for (const ks of keysyms) this._momentaryChordMods.add(ks);
         clearTimeout(this._momentaryChordModsTimer);
         this._momentaryChordModsTimer = setTimeout(() => this._momentaryChordMods.clear(), 250);
+    }
+
+    /**
+     * Whether the chord picked the character in `key` rather than naming a
+     * shortcut, so that character is the payload and no modifier is wrapped
+     * around it.
+     *
+     * A layout picks characters with Shift and the level-3 shift; Control and
+     * Command sit under no glyph, so a chord holding either is a shortcut.
+     * That leaves the Alt-position key, which the engines cannot settle:
+     * `AltGraph` separates a level-3 shift from a plain Alt only where the
+     * engine reports it, which Gecko does for macOS Option and Blink does
+     * not. The answer comes instead from what this client resolved that key
+     * to when it went down (`_altShiftsLevel`), which is what the server is
+     * holding for it.
+     *
+     * The Control and Command flags stand in for a keydown that never arrived
+     * (an IME or an OS grab swallowed it), but not alongside `AltGraph`: an
+     * engine with no AltGraph flag of its own reports AltGr as the Ctrl+Alt
+     * pair it sits on, and that Ctrl is the same key, not a second one.
+     * @param {KeyboardEvent} event
+     * @returns {boolean}
+     */
+    _composesText(event) {
+        if (!_isCharacterKey(KeyboardUtil.getKey(event))) return false;
+        for (const code of SHORTCUT_MODIFIER_CODES) {
+            if (code in this._keyDownList) return false;
+        }
+        if ((event.ctrlKey || event.metaKey) &&
+            !(typeof event.getModifierState === 'function' &&
+              event.getModifierState('AltGraph'))) {
+            return false;
+        }
+        return _altPositionHeld(event) && this._altShiftsLevel(event);
+    }
+
+    /**
+     * Whether every Alt-position key down is a level shift rather than Alt.
+     * This client wraps Alt_L around a chord because it read the Alt-position
+     * key as Alt, so a key it read as anything else must not be wrapped: the
+     * `getKeysym` remaps put macOS Option on Mode_switch, ISO_Level3_Shift or
+     * Meta_L there, and only Alt_L/Alt_R name the action modifier. With
+     * nothing resolved for it -- a keydown an IME or an OS grab swallowed --
+     * only an engine's own `AltGraph` says it shifted a level.
+     * @param {KeyboardEvent} event
+     * @returns {boolean}
+     */
+    _altShiftsLevel(event) {
+        if (this._altKeysymByCode.size === 0) {
+            return typeof event.getModifierState === 'function' &&
+                event.getModifierState('AltGraph');
+        }
+        for (const keysym of this._altKeysymByCode.values()) {
+            if (keysym === KeyTable.XK_Alt_L || keysym === KeyTable.XK_Alt_R) return false;
+        }
+        return true;
     }
 
     /** True when any of the given keysyms is currently held server-side. */
