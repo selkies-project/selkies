@@ -24,7 +24,7 @@ ARG BASE_IMAGE="ghcr.io/selkies-project/selkies/base:main-ubuntu26.04"
 FROM ${BASE_IMAGE}
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
-LABEL org.opencontainers.image.title="Selkies Example Container"
+LABEL org.opencontainers.image.title="Selkies Desktop Container"
 LABEL org.opencontainers.image.description="Reference minimal Selkies container: LXQt on X11 by default, the same desktop on headless Wayland (labwc) with SELKIES_WAYLAND=true, s6 service supervision, embedded coTURN"
 LABEL org.opencontainers.image.source="https://github.com/selkies-project/selkies"
 LABEL org.opencontainers.image.licenses="MPL-2.0"
@@ -51,11 +51,8 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         qterminal \
         pcmanfm-qt \
         # qterminal is the session's terminal; xterm backs the callers that spawn
-        # a terminal by hardcoded name (libfm-qt, GLib's Terminal=true handling),
-        # and stterm provides the `st` the dashboards' apps panel launches
-        # proot-apps entries in
+        # a terminal by hardcoded name (libfm-qt, GLib's Terminal=true handling)
         xterm \
-        stterm \
         # Recommends of the packages above, named here because the image installs
         # none of them by default and each is load-bearing rather than optional:
         # lxqt-qtplugin is the platform theme QT_QPA_PLATFORMTHEME=lxqt loads, so
@@ -75,6 +72,8 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # there.
         gvfs \
         gvfs-daemons \
+        # notify-send, for the notice the replaced leave binary shows
+        libnotify-bin \
         lxqt-qtplugin \
         lxqt-config \
         lxqt-notificationd \
@@ -243,20 +242,21 @@ RUN set -eu; \
 RUN mkdir -pm755 /usr/local/share/applications && \
     grep -lE '^Exec=[^=]*lxqt-leave' /usr/share/applications/*.desktop | while read -r entry; do \
         hidden="/usr/local/share/applications/$(basename "${entry}")"; \
-        sed '/^NoDisplay=/d' "${entry}" > "${hidden}"; \
-        printf 'NoDisplay=true\n' >> "${hidden}"; \
+        sed -e '/^NoDisplay=/d' -e '/^\[Desktop Entry\]/a NoDisplay=true' \
+            "${entry}" > "${hidden}"; \
     done && \
-    [ -x /usr/bin/lxqt-leave ] && \
-    dpkg-divert --divert /usr/bin/lxqt-leave.real --rename /usr/bin/lxqt-leave && \
-    printf '#!/bin/sh\n# See the Dockerfile: this desktop has no session to leave.\nnotify-send -i dialog-information "Not available here" "This desktop runs in a container: there is no session to log out of, lock, or shut down." 2>/dev/null || true\nexit 0\n' \
-        > /usr/bin/lxqt-leave && \
-    chmod 755 /usr/bin/lxqt-leave
+    if [ -x /usr/bin/lxqt-leave ]; then \
+        dpkg-divert --divert /usr/bin/lxqt-leave.real --rename /usr/bin/lxqt-leave && \
+        printf '#!/bin/sh\n# See the Dockerfile: this desktop has no session to leave.\nnotify-send -i dialog-information "Not available here" "This desktop runs in a container: there is no session to log out of, lock, or shut down." 2>/dev/null || true\nexit 0\n' \
+            > /usr/bin/lxqt-leave && \
+        chmod 755 /usr/bin/lxqt-leave; \
+    fi
 
 # The session's own s6 service, supervised beside the base container's
 COPY --chown=1000:1000 addons/desktop/services/ /etc/service/
 RUN find /etc/service \( -name run -o -name finish \) -exec chmod -f 755 {} +
 
-RUN printf "==============================================\n=         Selkies Example Container          =\n==============================================\n" > /etc/motd
+RUN printf "==============================================\n=         Selkies Desktop Container          =\n==============================================\n" > /etc/motd
 
 USER 0
 # Real root for the same reason the base needs it: under the fakeroot SHELL an
