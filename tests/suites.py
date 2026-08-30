@@ -101,6 +101,7 @@ SUITES: list = [
     {"path": "integration/test_wayland_seam.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_gpu_probe.py", "tier": "integration", "timeout": 180},
     {"path": "integration/test_two_display_pixels.py", "tier": "integration", "timeout": 600},
+    {"path": "integration/test_extended_monitor_outputs.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_retype_case.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_x_connection_leak.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_keymap_parity.py", "tier": "integration", "timeout": 300},

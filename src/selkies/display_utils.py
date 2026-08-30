@@ -621,16 +621,17 @@ def _monitor_info(
     y: int,
     w: int,
     h: int,
-    take_output: bool,
 ) -> Dict[str, Any]:
     """Build the RRSetMonitor request dict for logical monitor ``name``.
 
-    ``take_output`` attaches the (single) connected physical output; an
-    output can belong to only one logical monitor, so exactly one monitor per
-    layout takes it. The primary monitor carries the RandR primary flag: the
-    WM tiles panels against it, and the same-set no-op in
-    `_sync_replace_selkies_monitors` reads it back to prove the live set
-    already matches.
+    Every monitor lists the (single) connected physical output: the server
+    does not reserve an output for one monitor, and GTK3's X11 backend
+    realizes a GdkMonitor only for RandR monitors that carry a live output —
+    an outputless monitor is invisible to GTK apps, whose desktops then
+    paint and tile short of that region. The primary monitor carries the
+    RandR primary flag: the WM tiles panels against it, and the same-set
+    no-op in `_sync_replace_selkies_monitors` reads it back to prove the
+    live set already matches.
     """
     return {
         "name": d.intern_atom(name),
@@ -642,7 +643,7 @@ def _monitor_info(
         "height_in_pixels": int(h),
         "width_in_millimeters": max(1, round(w * 25.4 / (_APPLIED_DPI if _APPLIED_DPI is not None else 96.0))),
         "height_in_millimeters": max(1, round(h * 25.4 / (_APPLIED_DPI if _APPLIED_DPI is not None else 96.0))),
-        "crtcs": [out_id] if take_output else [],
+        "crtcs": [out_id],
     }
 
 
@@ -677,15 +678,13 @@ def _verify_monitors_on_display(
             )
 
 
-def _sync_set_monitor(
-    name: str, x: int, y: int, w: int, h: int, take_output: bool
-) -> None:
+def _sync_set_monitor(name: str, x: int, y: int, w: int, h: int) -> None:
     """Blocking RandR 1.5 set-monitor on the module connection."""
     with _x11_lock:
         try:
             d = _module_display()
             root, _, out_id, _, _ = _connected_output_state(d)
-            randr.set_monitor(root, _monitor_info(d, out_id, name, x, y, w, h, take_output))
+            randr.set_monitor(root, _monitor_info(d, out_id, name, x, y, w, h))
             d.sync()
             _verify_monitors_on_display(
                 d, {name: (int(x), int(y), int(w), int(h))}
@@ -764,7 +763,10 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
     against a monitor-less or half-defined screen. Foreign (non-selkies)
     monitors are left untouched. A request matching the live set returns
     without touching the server: even that swap costs a delete+create and
-    hands the WM a ConfigureNotify to re-tile against.
+    hands the WM a ConfigureNotify to re-tile against. A live monitor
+    listing no output never counts as a match: monitors outlive the client
+    that set them, and a stale outputless set at the right geometry is
+    invisible to GTK apps (see `_monitor_info`), so it is re-swapped.
     """
     with _x11_lock:
         try:
@@ -774,6 +776,7 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
             stale = []
             live = {}
             primary_name = None
+            every_output_listed = True
             for m in reply.monitors:
                 try:
                     name = d.get_atom_name(m.name)
@@ -784,11 +787,12 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
                     live[name] = (m.x, m.y, m.width_in_pixels, m.height_in_pixels)
                     if m.primary:
                         primary_name = name
+                    every_output_listed &= bool(m.crtcs)
             desired = {
                 f"selkies-{did}": (int(l["x"]), int(l["y"]), int(l["w"]), int(l["h"]))
                 for did, l in layouts.items()
             }
-            if live == desired and (
+            if live == desired and every_output_listed and (
                 primary_name == "selkies-primary" or "selkies-primary" not in desired
             ):
                 return
@@ -797,13 +801,11 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
             try:
                 for name in stale:
                     randr.delete_monitor(root, d.intern_atom(name))
-                take_output = True
                 for display_id, l in ordered:
                     randr.set_monitor(root, _monitor_info(
                         d, out_id, f"selkies-{display_id}",
-                        l["x"], l["y"], l["w"], l["h"], take_output,
+                        l["x"], l["y"], l["w"], l["h"],
                     ))
-                    take_output = False
                 if layouts:
                     randr.set_output_primary(root, out_id)
             finally:
@@ -847,13 +849,11 @@ async def replace_selkies_monitors(
         logger_app_resize.info(f"Native monitor replace failed ({e}); using xrandr fallback.")
     await clear_selkies_monitors()
     ok = True
-    take_output = True
     for display_id, l in sorted(layouts.items(), key=lambda kv: kv[0] != "primary"):
         ok &= await set_logical_monitor(
             f"selkies-{display_id}", l["x"], l["y"], l["w"], l["h"],
-            take_output, screen_name=screen_name,
+            screen_name=screen_name,
         )
-        take_output = False
     await designate_primary_output(screen_name)
     return ok
 
@@ -1025,20 +1025,21 @@ async def set_logical_monitor(
     y: int,
     w: int,
     h: int,
-    take_output: bool,
     screen_name: Optional[str] = None,
 ) -> bool:
     """Define/replace logical monitor ``name`` over the given pixel geometry:
-    native RandR 1.5 first, xrandr --setmonitor fallback. Returns success."""
+    native RandR 1.5 first, xrandr --setmonitor fallback. The monitor lists
+    the physical output (see `_monitor_info`); the fallback goes outputless
+    only when no output name is known. Returns success."""
     try:
-        await asyncio.to_thread(_sync_set_monitor, name, x, y, w, h, take_output)
+        await asyncio.to_thread(_sync_set_monitor, name, x, y, w, h)
         return True
     except Exception as e:
         logger_app_resize.info(f"Native set-monitor '{name}' failed ({e}); using xrandr fallback.")
     geometry = f"{w}/0x{h}/0+{x}+{y}"
-    output = screen_name if (take_output and screen_name) else "none"
     return await _run_xrandr(
-        ["--setmonitor", name, geometry, output], f"set logical monitor {name}"
+        ["--setmonitor", name, geometry, screen_name or "none"],
+        f"set logical monitor {name}",
     )
 
 
