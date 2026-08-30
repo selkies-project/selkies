@@ -448,30 +448,6 @@ def wayland_output_id(display_id: Optional[str]) -> int:
     return int(m.group(1)) if m else 2
 
 
-async def wayland_reposition_primary(module: Any, x: int, y: int) -> bool:
-    """Move the pixelflux primary output (id 0) to a union-layout offset.
-
-    The Wayland counterpart of laying the primary at a non-origin xrandr
-    position for 'left'/'up' arrangements (and of re-anchoring it at the
-    origin on teardown). The compositor remaps the output, its windows, and
-    the input offset live; the capture follows without a restart.
-
-    Returns:
-        True on success; False when the compositor refuses the move or the
-        module lacks the API.
-    """
-    mover = getattr(module, "reposition_output", None) if module else None
-    if mover is None:
-        logger_app_resize.error(
-            "pixelflux lacks reposition_output; cannot move the primary output.")
-        return False
-    try:
-        return bool(await asyncio.to_thread(mover, 0, int(x), int(y)))
-    except Exception as e:
-        logger_app_resize.error(f"Wayland primary reposition to +{x}+{y} failed: {e}")
-        return False
-
-
 def compute_dual_layout(
     primary_wh: Tuple[int, int],
     secondary_wh: Tuple[int, int],

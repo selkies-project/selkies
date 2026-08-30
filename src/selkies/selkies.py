@@ -2401,7 +2401,7 @@ class DataStreamingServer(BaseStreamingService):
         What a connection that may not resize the desktop streams: the
         primary's rectangle of an extended layout while a secondary display is
         connected (the X root then spans every display), else the root window
-        (RandR) on X11 or compositor output 0 on Wayland — read live, so a
+        (RandR) on X11 or the display's own view on Wayland — read live, so a
         desktop resized between connections (selkies-resize) is streamed at
         its new size rather than the last connection's.
 
@@ -4554,9 +4554,8 @@ class DataStreamingServer(BaseStreamingService):
         the union layout from all display clients, decide per running capture
         whether it can follow the new layout live (structurally identical
         sessions retune in place; the rest are stopped and rebuilt), realize
-        the layout (xrandr monitors + framebuffer on X11; on Wayland the
-        compositor outputs, whose secondaries are created only after the
-        primary's capture start has sized output 0), clamp everything to what
+        the layout (xrandr monitors + framebuffer on X11; on Wayland a view of
+        the session's one screen per display), clamp everything to what
         the server actually realized — dropping displays that cannot exist —
         then (re)start the active captures and broadcast the resulting
         resolutions and roster. A capture that did not come up yields a

@@ -1485,12 +1485,10 @@ class WebRTCService(BaseStreamingService):
 
     async def _drop_wayland_secondary(self, did: str, reason: str) -> None:
         """Refuse a secondary display the compositor cannot realize: unregister
-        it, stop its pipeline, destroy its output, and close its peers with a
-        fatal signaling verdict (4000) so the client does not re-register in a
-        loop — the Wayland mirror of the X11 unrealizable-extension drop. The
-        primary output, which may sit at a 'left'/'up' offset for the
-        arrangement this display anchored, goes back to the origin. Caller
-        holds _display_lock."""
+        it, stop its pipeline, retire its view of the screen, and close its
+        peers with a fatal signaling verdict (4000) so the client does not
+        re-register in a loop — the Wayland mirror of the X11
+        unrealizable-extension drop. Caller holds _display_lock."""
         pipeline = self.display_pipelines.pop(did, None)
         self.display_clients.pop(did, None)
         self.display_layouts.pop(did, None)
