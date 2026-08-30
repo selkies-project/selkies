@@ -1074,15 +1074,22 @@ function Sidebar() {
     setAvailablePlacements(null);
   };
 
+  /** Every side, with no screen to place the window on: what the arrows offer
+   *  when nothing can be measured to choose a side from. */
+  const ANY_SIDE = { up: null, down: null, left: null, right: null };
+
   /**
-   * Add Screen: places the second display on an adjacent physical screen
-   * when the Window Management API reports exactly one, offers the placement
-   * arrows when it reports several, and otherwise opens it to the right.
+   * Add Screen: places the second display on an adjacent physical screen when
+   * the Window Management API reports exactly one, and otherwise offers the
+   * placement arrows. Asking beats guessing: the API answers nothing without
+   * the window-management permission, and a display silently opened to the
+   * right of a monitor that sits above or left of this one is the one thing
+   * the arrows exist to avoid.
    */
   const handleAddScreenClick = async () => {
     if (!('getScreenDetails' in window)) {
-      console.warn("Window Management API not supported. Opening default second screen.");
-      launchWindow('right');
+      console.warn("Window Management API not supported; asking which side.");
+      setAvailablePlacements(ANY_SIDE);
       return;
     }
 
@@ -1092,8 +1099,8 @@ function Sidebar() {
       const otherScreens = screenDetails.screens.filter(s => s !== currentScreen);
 
       if (otherScreens.length === 0) {
-        console.log("No other screens detected. Opening default second screen.");
-        launchWindow('right');
+        console.log("No other screens detected; asking which side.");
+        setAvailablePlacements(ANY_SIDE);
         return;
       }
 
@@ -1124,18 +1131,18 @@ function Sidebar() {
         console.log("Multiple placement options found. Showing arrows.");
         setAvailablePlacements(placements);
       } else {
-        console.log("No adjacent screens found in cardinal directions. Opening default.");
-        launchWindow('right');
+        console.log("No adjacent screens found in cardinal directions; asking which side.");
+        setAvailablePlacements(ANY_SIDE);
       }
     } catch (err) {
-      // A refused permission is an ordinary outcome — the display still opens,
-      // with no screen to place it on — so it is not reported as a fault.
+      // A refused permission is an ordinary outcome — the arrows still ask,
+      // with no screen to place the window on — so it is not a fault.
       if (err && err.name === "NotAllowedError") {
-        console.warn("Window Management permission refused. Opening default second screen.");
+        console.warn("Window Management permission refused; asking which side.");
       } else {
         console.error("Error with Window Management API:", err);
       }
-      launchWindow('right');
+      setAvailablePlacements(ANY_SIDE);
     }
   };
 
@@ -2996,16 +3003,16 @@ function Sidebar() {
             }}
             onClick={() => setAvailablePlacements(null)}
           >
-            {availablePlacements.up && (
+            {availablePlacements.up !== undefined && (
               <button style={{...arrowBaseStyle, top: '40px', left: '50%', transform: 'translateX(-50%)'}} onClick={(e) => handleArrowClick(e, 'up', availablePlacements.up)}>▲</button>
             )}
-            {availablePlacements.down && (
+            {availablePlacements.down !== undefined && (
               <button style={{...arrowBaseStyle, bottom: '40px', left: '50%', transform: 'translateX(-50%)'}} onClick={(e) => handleArrowClick(e, 'down', availablePlacements.down)}>▼</button>
             )}
-            {availablePlacements.left && (
+            {availablePlacements.left !== undefined && (
               <button style={{...arrowBaseStyle, left: '40px', top: '50%', transform: 'translateY(-50%)'}} onClick={(e) => handleArrowClick(e, 'left', availablePlacements.left)}>◄</button>
             )}
-            {availablePlacements.right && (
+            {availablePlacements.right !== undefined && (
               <button style={{...arrowBaseStyle, right: '40px', top: '50%', transform: 'translateY(-50%)'}} onClick={(e) => handleArrowClick(e, 'right', availablePlacements.right)}>►</button>
             )}
           </div>

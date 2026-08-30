@@ -407,15 +407,21 @@ export function TopMenu({
     setAvailablePlacements(null);
   };
 
+  /** Every side, with no screen to place the window on: what the arrows offer
+   *  when nothing can be measured to choose a side from. */
+  const ANY_SIDE = { up: null, down: null, left: null, right: null };
+
   /**
-   * Adds a secondary display. With the Window Management API, a single
-   * adjacent screen is used directly and several show placement arrows;
-   * without it, or on denial, the display opens to the right.
+   * Adds a secondary display. With the Window Management API a single adjacent
+   * screen is used directly; anything else offers the placement arrows. Asking
+   * beats guessing: the API answers nothing without the window-management
+   * permission, and a display silently opened to the right of a monitor that
+   * sits above or left of this one is what the arrows exist to avoid.
    */
   const handleAddScreenClick = async () => {
     if (!('getScreenDetails' in window)) {
-      console.warn("Window Management API not supported. Opening default second screen.");
-      launchWindow('right');
+      console.warn("Window Management API not supported; asking which side.");
+      setAvailablePlacements(ANY_SIDE);
       return;
     }
 
@@ -425,8 +431,8 @@ export function TopMenu({
       const otherScreens = screenDetails.screens.filter((s: any) => s !== currentScreen);
 
       if (otherScreens.length === 0) {
-        console.log("No other screens detected. Opening default second screen.");
-        launchWindow('right');
+        console.log("No other screens detected; asking which side.");
+        setAvailablePlacements(ANY_SIDE);
         return;
       }
 
@@ -457,18 +463,18 @@ export function TopMenu({
         console.log("Multiple placement options found. Showing arrows.");
         setAvailablePlacements(placements);
       } else {
-        console.log("No adjacent screens found in cardinal directions. Opening default.");
-        launchWindow('right');
+        console.log("No adjacent screens found in cardinal directions; asking which side.");
+        setAvailablePlacements(ANY_SIDE);
       }
     } catch (err: any) {
-      // A refused permission is an ordinary outcome — the display still opens,
-      // with no screen to place it on — so it is not reported as a fault.
+      // A refused permission is an ordinary outcome — the arrows still ask,
+      // with no screen to place the window on — so it is not a fault.
       if (err && err.name === "NotAllowedError") {
-        console.warn("Window Management permission refused. Opening default second screen.");
+        console.warn("Window Management permission refused; asking which side.");
       } else {
         console.error("Error with Window Management API:", err);
       }
-      launchWindow('right');
+      setAvailablePlacements(ANY_SIDE);
     }
   };
 
@@ -1102,7 +1108,7 @@ export function TopMenu({
           className="fixed inset-0 z-50 pointer-events-auto"
           onClick={() => setAvailablePlacements(null)}
         >
-          {availablePlacements.up && (
+          {availablePlacements.up !== undefined && (
             <Button
               className="absolute top-10 left-1/2 transform -translate-x-1/2 w-24 h-24 text-4xl"
               onClick={(e) => {
@@ -1113,7 +1119,7 @@ export function TopMenu({
               ▲
             </Button>
           )}
-          {availablePlacements.down && (
+          {availablePlacements.down !== undefined && (
             <Button
               className="absolute bottom-10 left-1/2 transform -translate-x-1/2 w-24 h-24 text-4xl"
               onClick={(e) => {
@@ -1124,7 +1130,7 @@ export function TopMenu({
               ▼
             </Button>
           )}
-          {availablePlacements.left && (
+          {availablePlacements.left !== undefined && (
             <Button
               className="absolute left-10 top-1/2 transform -translate-y-1/2 w-24 h-24 text-4xl"
               onClick={(e) => {
@@ -1135,7 +1141,7 @@ export function TopMenu({
               ◄
             </Button>
           )}
-          {availablePlacements.right && (
+          {availablePlacements.right !== undefined && (
             <Button
               className="absolute right-10 top-1/2 transform -translate-y-1/2 w-24 h-24 text-4xl"
               onClick={(e) => {
