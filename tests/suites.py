@@ -118,7 +118,7 @@ SUITES: list = [
     {"path": "e2e/test_scroll.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets-x11", "webrtc-x11", "websockets-wl", "webrtc-wl"]},
     {"path": "e2e/test_browsers.py", "tier": "e2e", "timeout": 1800,
-     "selectors": ["chromium-ws", "firefox-ws", "webkit-ws", "chromium-wr", "firefox-wr"]},
+     "selectors": ["chromium-ws", "firefox-ws", "webkit-ws", "chromium-wr", "firefox-wr", "striped"]},
     {"path": "e2e/test_dashboards.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["classic", "wish", "gates", "hidpi"]},
     {"path": "e2e/test_clipboard_large.py", "tier": "e2e", "timeout": 900,
