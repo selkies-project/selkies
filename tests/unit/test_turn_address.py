@@ -41,7 +41,7 @@ def helpers():
 
     Returns:
         A (source, missing) pair: the slice between the markers and an empty
-        string, or None and the marker the entrypoint no longer carries.
+        string, or None and the marker the entrypoint is missing.
     """
     body = open(ENTRYPOINT).read()
     for marker in (BEGIN, END):

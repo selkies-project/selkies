@@ -234,10 +234,9 @@ def striped_block(engine: str) -> "H.Results":
     chromium and firefox take the divert (fps counts the worker's composites,
     the worker canvas is the visible sink). Playwright's WebKit claims support
     for striped decoder configs but every decode fails (`EncodingError`), in
-    the worker and on the page ladder alike and unchanged from before the
-    divert, leaving its software-decode retry cycling; so there the checks
-    stop at the wire flowing without page errors, and real Safari cannot be
-    exercised in this harness.
+    the worker and on the page ladder alike, leaving its software-decode retry
+    cycling; so there the checks stop at the wire flowing without page errors,
+    and real Safari cannot be exercised in this harness.
     """
     tag = f"{engine}-striped"
     res = H.Results(tag)

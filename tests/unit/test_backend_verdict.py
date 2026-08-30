@@ -116,7 +116,7 @@ res.check("a bring-up that dies counts as a GPU the compositor cannot reach",
           crashed["state"])
 res.check("and says so", "did not survive" in crashed["said"], crashed["said"].strip()[:110])
 
-# The last resort is the old device test, so what it answers depends on this host.
+# The last resort is the device-node test, so what it answers depends on this host.
 nvidia_here = bool(glob.glob("/dev/nvidia*")) and bool(shutil.which("nvidia-smi"))
 silent = run("exit 1", WAYLAND)
 res.check("no report at all falls back to the driver's own devices",

@@ -5,14 +5,13 @@ Every pointermove of a button-held drag keeps streaming to the page the press
 landed on, with client coordinates far past its viewport. The client maps such
 positions into the neighboring display's rectangle -- converting the overshoot
 at the neighbor's own CSS-to-remote scale, the layout and scales arriving on
-DISPLAY_CONFIG_UPDATE -- instead of clamping at its own edge, where the remote
-pointer used to pin at the seam for as long as the button was held. Toward an
-edge with no neighbor the drag still clamps, and the union of display
-rectangles bounds it everywhere, the way a multihead X server bounds its
-pointer.
+DISPLAY_CONFIG_UPDATE -- instead of clamping at its own edge, which pins the
+remote pointer at the seam for as long as the button is held. Toward an edge
+with no neighbor the drag still clamps, and the union of display rectangles
+bounds it everywhere, the way a multihead X server bounds its pointer.
 
 The primary page runs DPR 2 with a manual resolution (the configuration that
-maps input through the presented stream box, where the seam pin lived) and the
+maps input through the presented stream box rather than the viewport) and the
 secondary runs DPR 1, so the crossing also proves the per-display scale
 conversion. Checked over websockets by watching the X server's own pointer,
 then over WebRTC for transport parity; the vertical and left-neighbor

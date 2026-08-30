@@ -78,8 +78,8 @@ def run() -> "H.Results":
                   f"{kb._overlay.get(oldest)} was {held_kc}")
         kb._pressed_kc.pop(oldest, None)
 
-        # A bind no longer sleeps: it arms a settle deadline the injecting call
-        # waits out, so the event loop can await it instead of blocking.
+        # A bind arms a settle deadline the injecting call waits out, so the event
+        # loop can await it instead of blocking inside the bind.
         fresh = ih._XTestKeyboard(d)
         started = time.monotonic()
         fresh._overlay_keycode(keysym(500))

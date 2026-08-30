@@ -46,7 +46,7 @@ def main() -> bool:
     res.check("jpeg switches to software", state is True)
     state = effective_use_cpu("h264enc", requested, False)
     res.check("returning to h264enc restores hardware", state is False,
-              "this is the regression: it used to stay True")
+              "a flag that sticks across the encoder change reads True")
 
     # An explicit client preference survives the same round trip.
     requested = True

@@ -113,7 +113,7 @@ got = probe(
     "print(','.join(next(d for d in s.settings._setting_definitions"
     " if d['name'] == 'encoder')['meta']['allowed']))",
     SELKIES_MODE="websockets")
-check("openh264enc is no longer a published encoder", got == "h264enc,h264enc-striped,jpeg", got)
+check("openh264enc is not a published encoder", got == "h264enc,h264enc-striped,jpeg", got)
 
 # One encoder knob, both transports: in webrtc mode a websockets-only choice
 # falls back to the default and the published menu is filtered; switching back

@@ -11,7 +11,7 @@ a bare pipeline failure looks transient and the client reloads into a loop.
 The cap is real, not simulated: Xvfb fixes its maximum screen size at the
 initial allocation, so RRAddOutputMode and RRSetScreenSize past it fail the way
 a driver out of scanout memory fails. Both engines run against the same capped
-server, because this is exactly the path where they used to disagree.
+server, because this is exactly the path where they are apt to disagree.
 
 The fitting rule itself is pinned branch by branch in
 tests/unit/test_realized_layout.py.

@@ -571,7 +571,7 @@ let isSharedMode = detectedSharedModeType !== null;
 /**
  * Whether the server executes `cmd,` messages, mirroring its `command_enabled`
  * setting; true until a server_settings payload says otherwise, so a server
- * that never advertises the key behaves as before.
+ * that never advertises the key leaves commands enabled.
  */
 let serverCommandEnabled = true;
 
