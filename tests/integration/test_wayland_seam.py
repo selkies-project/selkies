@@ -117,10 +117,37 @@ def session(socket: str) -> Tuple[str, str]:
     return inner, display
 
 
-def window_at(xenv: dict, wid: str, x: int) -> None:
-    """Move the walked window's left edge to `x` and let the frame settle."""
-    subprocess.run(["xdotool", "windowmove", wid, str(x), "300"], env=xenv)
-    time.sleep(2.0)
+class Patch:
+    """A solid-coloured window on the session's X display, placed by this test.
+
+    Override-redirect so its position is the test's to state rather than the
+    window manager's, and drawn by the X server from the window background, so
+    the suite needs no client program of its own.
+    """
+
+    def __init__(self, display: str, rgb: Tuple[int, int, int]) -> None:
+        from selkies.Xlib import X, display as xdisplay
+
+        self.d = xdisplay.Display(display)
+        root = self.d.screen().root
+        self.win = root.create_window(
+            300, 300, 500, 400, 0, X.CopyFromParent, X.InputOutput,
+            X.CopyFromParent, override_redirect=True,
+            background_pixel=(rgb[0] << 16) | (rgb[1] << 8) | rgb[2])
+        self.win.map()
+        self.d.sync()
+        time.sleep(1.5)
+
+    def move_to(self, x: int) -> None:
+        """Put the window's left edge at `x` and let the frame settle."""
+        self.win.configure(x=x, y=300)
+        self.d.sync()
+        time.sleep(2.5)
+
+    def close(self) -> None:
+        self.win.destroy()
+        self.d.sync()
+        self.d.close()
 
 
 def main() -> "H.Results":
@@ -147,7 +174,7 @@ def main() -> "H.Results":
     time.sleep(2.0)
 
     proc = nested(socket, config)
-    xterm = None
+    patch = None
     try:
         inner, display = session(socket)
         if not inner or not display:
@@ -159,28 +186,18 @@ def main() -> "H.Results":
         res.check("the session's screens sit side by side",
                   [(x, y) for _n, x, y in screens] == [(0, 0), (SCREEN[0], 0)], screens)
 
-        xenv = dict(os.environ, DISPLAY=display, XDG_RUNTIME_DIR=RUNTIME)
-        xterm = H.spawn(["xterm", "-geometry", "60x20+300+300", "-bg", "#f01414",
-                         "-fg", "#f01414"], env=xenv, stdout=subprocess.DEVNULL,
-                        stderr=subprocess.STDOUT)
-        found = subprocess.run(["xdotool", "search", "--sync", "--class", "xterm"],
-                               env=xenv, capture_output=True, text=True).stdout.split()
-        if not found:
-            H.skip_suite("no X client mapped in the nested session")
-        wid = found[-1]
-        subprocess.run(["xdotool", "windowsize", wid, "500", "400"], env=xenv)
-
-        window_at(xenv, wid, 300)
+        patch = Patch(display, WIN_RGB)
+        patch.move_to(300)
         first = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
         res.check("a window on the first screen shows only there",
                   first[0] > PRESENT and first[1] <= PRESENT, first)
 
-        window_at(xenv, wid, SCREEN[0] - 250)
+        patch.move_to(SCREEN[0] - 250)
         across = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
         res.check("a window over the boundary shows on both",
                   across[0] > PRESENT and across[1] > PRESENT, across)
 
-        window_at(xenv, wid, SCREEN[0] + 400)
+        patch.move_to(SCREEN[0] + 400)
         second = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
         res.check("a window past the boundary shows only on the second",
                   second[0] <= PRESENT and second[1] > PRESENT, second)
@@ -207,9 +224,9 @@ def main() -> "H.Results":
             res.check("injected buttons reach them too", len(clicks) >= 2, clicks)
             obs.proc.terminate()
     finally:
-        for p in (xterm, proc):
-            if p is not None:
-                p.terminate()
+        if patch is not None:
+            patch.close()
+        proc.terminate()
         left_cap.stop_capture()
         right_cap.stop_capture()
     res.summary()
