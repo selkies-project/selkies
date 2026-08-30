@@ -10,10 +10,17 @@ loopback: a metered relay stands in for one, holding no more than that link
 would, and the check is the worst gap between audio frames while the transfer
 runs.
 
-A raw client, so what is measured is the connection's own delivery rather than
-a browser's jitter buffer smoothing it over.
+The `bloat` selector gives that relay a deep buffer instead, the shape a
+reverse proxy in front of the server has. The sender's own queue then stays
+empty however fast it writes, so a transfer paced by that queue alone runs
+flat out and the stream waits behind the whole buffer; only a gauge measuring
+the far end -- the pong queued behind the same bytes -- sees it filling.
 
-Usage: python3 tests/e2e/test_clipboard_pacing.py [websockets|wayland]
+A raw client, so what is measured is the connection's own delivery rather than
+a browser's jitter buffer smoothing it over. It answers the gauge's pings in
+the websocket library, as a browser answers them in its network process.
+
+Usage: python3 tests/e2e/test_clipboard_pacing.py [websockets|wayland|bloat]
 """
 import asyncio
 import json
@@ -38,6 +45,9 @@ LINK_BYTES_PER_S = 1_250_000
 # link: the sender's queue stays empty however fast it writes, so the gap below
 # would be that buffer draining, as deep as the host's tcp_rmem allows.
 RELAY_BUFFER_BYTES = 32 * 1024
+# The `bloat` selector's buffer instead: about a second of the link, the depth
+# loopback autotuning reaches here and a proxy in front would hold.
+RELAY_BLOAT_BYTES = 512 * 1024
 RELAY_PORT = int(os.environ.get("E2E_PACING_PORT", "18197"))
 CLIPBOARD_MB = 8
 # What a jitter buffer of a few 10 ms packets absorbs. An unpaced transfer
@@ -172,16 +182,15 @@ async def measure(port: int, wayland: bool) -> tuple:
             len(stamps))
 
 
-def block(wayland: bool) -> "H.Results":
-    tag = f"clippacing-{'wl' if wayland else 'x11'}"
+def block(wayland: bool, bufsize: int = RELAY_BUFFER_BYTES) -> "H.Results":
+    tag = f"clippacing-{'bloat' if bufsize != RELAY_BUFFER_BYTES else ('wl' if wayland else 'x11')}"
     res = H.Results(tag)
     module = load_sine()
     relay = None
     try:
         H.server_start(mode="websockets", wayland=wayland)
         relay = H.spawn([sys.executable, "-c", RELAY, str(RELAY_PORT),
-                         str(H.PORT), str(LINK_BYTES_PER_S),
-                         str(RELAY_BUFFER_BYTES)])
+                         str(H.PORT), str(LINK_BYTES_PER_S), str(bufsize)])
         time.sleep(1.0)
         idle, during, frames = asyncio.run(measure(RELAY_PORT, wayland))
         res.check("audio streams over the metered link", frames > 100 and idle,
@@ -204,9 +213,15 @@ def block(wayland: bool) -> "H.Results":
     return res
 
 
+SELECTORS = ("websockets", "wayland", "bloat")
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "websockets"
-    result = block(which == "wayland")
+    if which not in SELECTORS:
+        raise SystemExit(f"unknown selector {which!r}; one of {SELECTORS}")
+    result = block(which == "wayland",
+                   RELAY_BLOAT_BYTES if which == "bloat" else RELAY_BUFFER_BYTES)
     print(f"\n=== CLIPBOARD PACING: {'FAIL' if result.failed() else 'PASS'} ===")
     sys.exit(1 if result.failed() else 0)
 

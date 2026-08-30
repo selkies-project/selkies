@@ -327,8 +327,27 @@ class UplinkGauge:
         return verdict
 
 
+def socket_gauge(ws: Any) -> UplinkGauge:
+    """An `UplinkGauge` over one session websocket alone.
+
+    For a sender pacing what it writes to that socket: the pong queues behind
+    everything already written to it, so its round trip is what the bytes in
+    front of it cost. The uploads' gauge instead spans every session socket of
+    one client, because an upload's congestion is on a client uplink those
+    sockets share rather than on any one of them.
+
+    Args:
+        ws: The session websocket; its ping clock and floor history live in
+            `_UPLINK_SESSIONS`, so successive senders share one floor.
+    """
+    state = _uplink_session_state(ws)
+    return UplinkGauge([[ws, state, state["seq"]]])
+
+
 class TransferPacer:
-    """File-transfer pacing shared across all transfers of one server.
+    """Rate pacing for bulk traffic, one instance per allowance: the file
+    transfers share one across the server, and a clipboard transfer paces its
+    own against the socket it is writing to.
 
     Two modes. A static cap (rate_bps) exists for links whose rate the operator
     already knows. Without one, the pacer instead holds every download inside a

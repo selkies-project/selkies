@@ -83,6 +83,10 @@ Each is documented in full where named; read that before changing the subsystem.
   (`settings.software_h264_encoder`, `canonical_encoder`; the OpenH264 profile gate in `src/selkies/rtc.py`).
 - The sound-server control plane is in-process over pulsectl_asyncio under a never-cancel discipline; `pactl` is
   only the fallback when the bindings are missing (`src/selkies/audio_control.py` module docstring).
+- Bulk traffic sharing the session connection is paced by an end-to-end gauge, never by the local send
+  queue alone: a proxy or a receive window in front absorbs writes, so that queue reads empty on the very
+  transfer burying the stream (`selkies._bulk_pace`, `stream_server.UplinkGauge`; WebRTC instead rides
+  SCTP's own congestion control, which no such hop can hide).
 - A modifier's role comes from the keysym the client resolved for it, never from the engine's flags:
   browsers name the same physical key differently (macOS Option is `AltGraph` to Gecko, `Alt` to Blink, a
   Meta key to WebKit). That decides both text-versus-shortcut and when a held modifier is stale

@@ -109,7 +109,8 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
-from .stream_server import BaseStreamingService, note_pong
+from .stream_server import (BaseStreamingService, TransferPacer, UplinkGauge, note_pong,
+                            socket_gauge)
 from .webrtc_utils import Metrics
 
 BACKPRESSURE_ALLOWED_DESYNC_MS = 2000
@@ -429,6 +430,11 @@ async def _await_bulk_window(ws: Any, deadline: float) -> None:
     transfer is admitted a chunk at a time rather than as fast as the socket
     takes it; on a fast link the queue is already short and nothing waits.
     Returns at the deadline regardless: the send that follows is bounded too.
+
+    This queue is only the part of the path this host owns. Anything ahead of
+    it -- a reverse proxy's buffer, the peer's receive window -- absorbs writes
+    without ever showing here, so the level this bounds is not the one a frame
+    actually waits behind; `_bulk_pace` measures that end to end.
     """
     loop = asyncio.get_running_loop()
     while True:
@@ -438,6 +444,27 @@ async def _await_bulk_window(ws: Any, deadline: float) -> None:
         if loop.time() >= deadline:
             return
         await asyncio.sleep(WS_BULK_BACKLOG_POLL_S)
+
+
+async def _bulk_pace(gauge: UplinkGauge, pacer: TransferPacer, nbytes: int) -> None:
+    """Hold a bulk sender to the rate its socket has been draining end to end.
+
+    A queue check cannot tell a fast link from a deep buffer: both take
+    everything written and report nothing pending, so a transfer that a proxy
+    is absorbing runs flat out and the real-time stream sharing the connection
+    waits behind however much that buffer holds. The gauge's pong crosses the
+    whole path and queues behind the same bytes, so its round trip inflating
+    past the connection's floor is that buffer filling, whoever owns it. Those
+    verdicts drive the transfers' own token bucket, which starts slow and
+    doubles while the path stays clear, so a fast link is reached in a second
+    and a bufferbloated one is never overrun to begin with.
+
+    Args:
+        gauge: `socket_gauge` over the socket being written to.
+        pacer: This transfer's allowance.
+        nbytes: What the caller is about to write.
+    """
+    await pacer.pace_verdict(nbytes, await gauge.sample())
 
 
 async def _broadcast_to_clients(
@@ -879,19 +906,24 @@ class SelkiesStreamingApp:
                 async def deliver(client: Any) -> None:
                     """One pipeline per client, a chunk at a time: a slow link
                     paces only its own transfer and a dead one drops out of the
-                    set without touching anyone else's. Each chunk waits for
-                    the socket's backlog to fall first, so the audio and input
-                    sharing the connection are never queued behind more than
-                    one of them."""
+                    set without touching anyone else's. Each chunk is held
+                    twice, so the audio and input sharing the connection are
+                    never queued behind more than one of them: for this host's
+                    own send queue to drain (`_await_bulk_window`) and for the
+                    rate the whole path has been taking (`_bulk_pace`), which
+                    is the only one of the two a buffer in front can hide."""
                     cid = id(client)
                     if await _broadcast_to_clients(clients, start_message,
                                                    per_client_timeout=2.0, only=cid):
                         return
                     offset = 0
                     loop = asyncio.get_running_loop()
+                    gauge = socket_gauge(client)
+                    pacer = TransferPacer(adaptive=True)
                     while offset < total_size:
                         chunk = data_bytes[offset:offset + CLIPBOARD_CHUNK_SIZE]
                         data_message = "clipboard_data," + base64.b64encode(chunk).decode('ascii')
+                        await _bulk_pace(gauge, pacer, len(data_message))
                         await _await_bulk_window(client, loop.time() + BULK_DRAIN_TIMEOUT_S)
                         if await _broadcast_to_clients(clients, data_message,
                                                        per_client_timeout=BULK_DRAIN_TIMEOUT_S, only=cid):

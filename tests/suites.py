@@ -127,7 +127,7 @@ SUITES: list = [
     {"path": "e2e/test_clipboard_image.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc", "wayland"]},
     {"path": "e2e/test_clipboard_pacing.py", "tier": "e2e", "timeout": 900,
-     "selectors": ["websockets", "wayland"]},
+     "selectors": ["websockets", "wayland", "bloat"]},
     {"path": "e2e/test_cross_transition.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_two_displays.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["websockets-x11", "webrtc-x11", "websockets-wl", "webrtc-wl"]},
