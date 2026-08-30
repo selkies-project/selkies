@@ -88,7 +88,6 @@ from .display_utils import (
     unpremultiply_rgba,
     cursor_content_handle,
     layout_extent,
-    session_screen_index,
 )
 from .media_pipeline import RateControlMode
 from .settings import settings
@@ -3739,22 +3738,6 @@ class WebRTCInput:
                     raise RuntimeError("pixelflux is not installed")
                 self.wayland_input = ScreenCapture()
                 logger_webrtc_input.info("Wayland input injection initialized.")
-                missing = [m for m in (
-                    "clipboard_write_app", "clipboard_unwatch_app",
-                    "list_outputs", "create_output", "set_keymap_overlay",
-                    "hold_spare_app_screens", "set_app_output_scale",
-                    "set_app_screen_geometry", "set_app_screen_layout",
-                    "set_app_wayland_display", "type_text_wayland",
-                    "get_keyboard_state",
-                ) if not hasattr(self.wayland_input, m)]
-                if missing:
-                    logger_webrtc_input.warning(
-                        "Installed pixelflux is missing APIs this build "
-                        "expects; Wayland features that depend on them "
-                        "degrade or stay off. Update pixelflux to a "
-                        "matching build.")
-                    logger_webrtc_input.debug(
-                        f"pixelflux methods absent: {', '.join(missing)}")
             except Exception as e:
                 logger_webrtc_input.error(f"Failed to initialize Wayland input: {e}")
 
@@ -5484,7 +5467,6 @@ class WebRTCInput:
                 logger_webrtc_input.debug(
                     f"pixelflux set_app_wayland_display failed: {e}")
             self._schedule_session_scale()
-            self._schedule_spare_screen_hold()
             self._schedule_seat_layout_restore()
         return resolved
 
@@ -5666,7 +5648,7 @@ class WebRTCInput:
         self._app_wayland_display()
         return self._app_wl_is_separate
 
-    def _size_session_screen(self, display: str, display_index: int, scale: float,
+    def _size_session_screen(self, display: str, scale: float,
                              size: Optional[Tuple[int, int]]) -> bool:
         """Give the session compositor's screen its scale, and its mode too when
         the caller knows the size the screen is about to carry. Blocking.
@@ -5674,17 +5656,14 @@ class WebRTCInput:
         A session lays its desktop out once per applied configuration, so a scale
         that arrives on its own leaves the screen at the old mode under the new
         scale — a fraction of the size it ends at, which is what a client that
-        does not lay out again keeps. Older pixelflux builds have no combined
-        call and take the scale alone.
+        does not lay out again keeps.
         """
-        geometry = getattr(self.wayland_input, "set_app_screen_geometry", None)
-        if geometry is not None and size and size[0] > 0 and size[1] > 0:
-            return bool(geometry(display, display_index,
-                                 int(size[0]), int(size[1]), scale))
-        return bool(self.wayland_input.set_app_output_scale(
-            display, display_index, scale))
+        if size and size[0] > 0 and size[1] > 0:
+            return bool(self.wayland_input.set_app_screen_geometry(
+                display, int(size[0]), int(size[1]), scale))
+        return bool(self.wayland_input.set_app_output_scale(display, scale))
 
-    async def realize_wayland_dpi(self, dpi: Any, display_index: int = 0,
+    async def realize_wayland_dpi(self, dpi: Any,
                                   size: Optional[Tuple[int, int]] = None) -> float:
         """Apply a DPI on the Wayland backend and return the capture output
         scale it leaves behind.
@@ -5701,8 +5680,7 @@ class WebRTCInput:
 
         Args:
             dpi: The desktop DPI to realize; 96 is unity.
-            display_index: Which of the session's screens backs this display.
-            size: The pixel size that screen is about to carry, when the caller
+            size: The pixel size the screen is about to carry, when the caller
                 already knows it, so the mode and the scale land together.
 
         Returns:
@@ -5718,106 +5696,14 @@ class WebRTCInput:
                 return scale
             display = self._app_wayland_display()
             applied = await asyncio.to_thread(
-                self._size_session_screen, display, display_index, scale, size)
+                self._size_session_screen, display, scale, size)
         except Exception as e:
             logger_webrtc_input.debug(f"Session output scale failed: {e}")
             return scale
         if applied:
-            logger_webrtc_input.info(
-                f"Session compositor screen {display_index} scaled to {scale}.")
+            logger_webrtc_input.info(f"Session compositor screen scaled to {scale}.")
             return 1.0
         return scale
-
-    # Size of a held spare session screen: small enough to leave the desktop's
-    # centre on the screen that is shown, large enough for a compositor to lay out.
-    SPARE_SCREEN_SIZE = (320, 240)
-
-    def resync_session_screens(self) -> None:
-        """Re-hold the session's spare screens after the output set changed.
-
-        The nested session opens the screens it was started with, and which of
-        them a capture drives changes as displays come and go, so the hold is
-        recomputed whenever a layout pass creates or destroys an output.
-        """
-        if self.wayland_input is None:
-            return
-        self._schedule_spare_screen_hold()
-
-    def _schedule_spare_screen_hold(self) -> None:
-        """A nested session opens the screens it was started with, whether or
-        not the capture drives that many: the extra ones stretch its desktop
-        onto a screen nobody sees, which is where a client that centres itself
-        then lands. Hold them small until a display arrives for them —
-        pixelflux resizes one to its full size the moment it gets an output,
-        and back when it loses one."""
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        self._spawn_task(self._hold_spare_screens())
-
-    def schedule_session_screen_layout(self, layouts: dict) -> None:
-        """Lay the session's own screens out the way the capture outputs were placed.
-
-        The session compositor arranges the screens it opens by its own rule
-        (wlroots puts them side by side, in the order they were opened), and
-        that layout is what places windows, not the capture one — so a desktop
-        asked for a display above or to the left of the primary gets one to the
-        right of it. Every screen is positioned in one configuration, since an
-        arrangement applied a screen at a time passes through a state where two
-        overlap and the compositor reflows around it.
-
-        Args:
-            layouts: Display id to its `{x, y, w, h}` rectangle, as the capture
-                outputs were placed.
-        """
-        setter = getattr(self.wayland_input, 'set_app_screen_layout', None)
-        if setter is None or not layouts:
-            return
-        rects = []
-        for display_id in sorted(layouts, key=session_screen_index):
-            rect = layouts[display_id]
-            rects.append((int(rect.get('x') or 0), int(rect.get('y') or 0),
-                          int(rect.get('w') or 0), int(rect.get('h') or 0)))
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        self._spawn_task(self._apply_session_screen_layout(setter, rects))
-
-    async def _apply_session_screen_layout(self, setter: Any, rects: list) -> None:
-        """Hand the arrangement to the session compositor, logging what it did."""
-        display = self._app_wayland_display()
-        try:
-            placed = await asyncio.to_thread(setter, display, rects)
-        except Exception as e:
-            logger_webrtc_input.debug(f"Session screen layout failed: {e}")
-            return
-        if placed:
-            logger_webrtc_input.info(
-                f"Session compositor laid {placed} screen(s) out at {rects}.")
-        else:
-            # A compositor without zwlr_output_management_v1 (KWin, which offers
-            # kde_output_management_v2) arranges its screens itself.
-            logger_webrtc_input.info(
-                "Session compositor manages no outputs for clients; its screen "
-                "arrangement is its own.")
-
-    async def _hold_spare_screens(self) -> None:
-        """Hold every session screen without a capture output at SPARE_SCREEN_SIZE."""
-        display = self._app_wayland_display()
-        try:
-            keep = max(1, len(await asyncio.to_thread(self.wayland_input.list_outputs)))
-            held = await asyncio.to_thread(
-                self.wayland_input.hold_spare_app_screens, display, keep,
-                *self.SPARE_SCREEN_SIZE)
-        except Exception as e:
-            logger_webrtc_input.debug(f"Holding spare session screens failed: {e}")
-            return
-        if held:
-            logger_webrtc_input.info(
-                f"Session compositor has {held} screen(s) with no capture output; "
-                f"held at {self.SPARE_SCREEN_SIZE[0]}x{self.SPARE_SCREEN_SIZE[1]}.")
 
     def _schedule_session_scale(self) -> None:
         """A session compositor was just adopted: hand it the effective DPI as

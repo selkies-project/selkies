@@ -239,6 +239,7 @@ RUN mkdir -pm755 /usr/local/share/applications && \
         sed '/^NoDisplay=/d' "${entry}" > "${hidden}"; \
         printf 'NoDisplay=true\n' >> "${hidden}"; \
     done && \
+    [ -x /usr/bin/lxqt-leave ] && \
     dpkg-divert --divert /usr/bin/lxqt-leave.real --rename /usr/bin/lxqt-leave && \
     printf '#!/bin/sh\n# See the Dockerfile: this desktop has no session to leave.\nnotify-send -i dialog-information "Not available here" "This desktop runs in a container: there is no session to log out of, lock, or shut down." 2>/dev/null || true\nexit 0\n' \
         > /usr/bin/lxqt-leave && \

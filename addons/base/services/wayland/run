@@ -35,12 +35,6 @@ export WAYLAND_DISPLAY
 echo "${WAYLAND_DISPLAY}" > "${XDG_RUNTIME_DIR}/selkies-capture-display"
 
 export WLR_BACKENDS="wayland"
-# Screens the session opens. It cannot gain or lose one while it runs, so it
-# opens the two Selkies can show and Selkies holds the second small until a
-# client connects for it: a screen held at full size would stretch the desktop
-# across an area nothing displays, which is where a window that centres itself
-# would land. SELKIES_WAYLAND_OUTPUTS overrides the count.
-export WLR_WL_OUTPUTS="${SELKIES_WAYLAND_OUTPUTS:-2}"
 [ -n "${SELKIES_WAYLAND_RENDERER}" ] && export WLR_RENDERER="${SELKIES_WAYLAND_RENDERER}"
 
 exec "${SELKIES_WAYLAND_COMPOSITOR}"

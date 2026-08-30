@@ -51,18 +51,11 @@ class FakeSession:
             raise self.answer
         return self.answer
 
-    def set_app_output_scale(self, display: str, index: int, scale: float):
-        return self._record((display, index, scale))
+    def set_app_output_scale(self, display: str, scale: float):
+        return self._record((display, scale))
 
-    def set_app_screen_geometry(self, display: str, index: int,
-                                width: int, height: int, scale: float):
-        return self._record((display, index, width, height, scale))
-
-
-class OlderSession(FakeSession):
-    """A pixelflux from before the combined call, which takes the scale alone."""
-
-    set_app_screen_geometry = None
+    def set_app_screen_geometry(self, display: str, width: int, height: int, scale: float):
+        return self._record((display, width, height, scale))
 
 
 def make_handler(separate: bool, answer=True, session=FakeSession) -> WebRTCInput:
@@ -72,8 +65,7 @@ def make_handler(separate: bool, answer=True, session=FakeSession) -> WebRTCInpu
         separate: Whether the handler believes a nested app compositor exists.
         answer: What the fake session returns, or an Exception instance to raise
             instead.
-        session: The fake session class, so the fallback for a pixelflux without
-            the combined call is exercised too.
+        session: The fake session class.
 
     Returns:
         A WebRTCInput constructed without __init__, carrying only the
@@ -87,19 +79,15 @@ def make_handler(separate: bool, answer=True, session=FakeSession) -> WebRTCInpu
     return h
 
 
-def realize(handler: WebRTCInput, dpi: float, index: int = 0, size=None) -> float:
+def realize(handler: WebRTCInput, dpi: float, size=None) -> float:
     """Run the async DPI realization policy and return the capture scale."""
-    return asyncio.run(handler.realize_wayland_dpi(dpi, index, size))
+    return asyncio.run(handler.realize_wayland_dpi(dpi, size))
 
 
 nested = make_handler(True)
 check("a nested session takes the scale on its own screen",
       realize(nested, 192) == 1.0
-      and nested.wayland_input.calls == [("wayland-9", 0, 2.0)])
-second = make_handler(True)
-realize(second, 144, 1)
-check("a second display scales the session's second screen",
-      second.wayland_input.calls == [("wayland-9", 1, 1.5)])
+      and nested.wayland_input.calls == [("wayland-9", 2.0)])
 check("a session that manages no outputs keeps the capture scale",
       realize(make_handler(True, answer=False), 192) == 2.0)
 check("a refused configuration keeps the capture scale",
@@ -114,19 +102,14 @@ check("scale floor guards degenerate DPI",
 # the size sends both in one configuration and the session lays out once.
 sized = make_handler(True)
 check("a known size lands with the scale in one configuration",
-      realize(sized, 192, 0, (2864, 1656)) == 1.0
-      and sized.wayland_input.calls == [("wayland-9", 0, 2864, 1656, 2.0)],
+      realize(sized, 192, (2864, 1656)) == 1.0
+      and sized.wayland_input.calls == [("wayland-9", 2864, 1656, 2.0)],
       sized.wayland_input.calls)
 for label, size in (("no size", None), ("an unrealized size", (0, 0))):
     unsized = make_handler(True)
-    realize(unsized, 192, 0, size)
+    realize(unsized, 192, size)
     check(f"{label} takes the scale alone", unsized.wayland_input.calls
-          == [("wayland-9", 0, 2.0)], unsized.wayland_input.calls)
-older = make_handler(True, session=OlderSession)
-check("a pixelflux without the combined call still takes the scale",
-      realize(older, 192, 0, (2864, 1656)) == 1.0
-      and older.wayland_input.calls == [("wayland-9", 0, 2.0)],
-      older.wayland_input.calls)
+          == [("wayland-9", 2.0)], unsized.wayland_input.calls)
 
 if not shutil.which("Xvfb") or not shutil.which("xrdb"):
     print("SKIP Xvfb/xrdb not installed; resource-merge checks need an X server",

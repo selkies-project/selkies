@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""The seam between two Wayland displays is continuous, so a window crosses it.
+"""Two displays cut out of one Wayland screen, and the seam between them.
 
-Two capture outputs side by side are one compositor space, not two desktops: an
-element that overlaps both is composited onto both, each output drawing the part
-that falls in its own rectangle. That is what lets a window be dragged from one
-screen to the next instead of snapping to whichever it started on, and it is
-checked here from the pixels each display's capture actually delivers -- a
-window walked across the boundary has to appear on the first, then on both, then
-on the second.
+Each display is a view of one screen rather than a screen of its own, so the
+session sees a single desk: a window that overlaps the boundary is composited
+onto both views, each drawing the part that falls in its own rectangle, and --
+the point of the whole arrangement -- a pointer grab crosses the boundary
+instead of stopping at it. A drag runs under such a grab, so with a screen per
+display a window cannot be dragged from one to the next: the grab clamps at the
+first screen's edge, which is what this pins against.
 
-The pointer that would drive such a drag is checked too: motion and buttons
-injected into the capture compositor have to reach a client of the NESTED
-compositor, since that is the chain a desktop session runs through.
+The pixels come from what each display's capture actually delivers, and the
+grab from a client of the NESTED compositor, since that is the chain a desktop
+session runs through.
 
 Usage: python3 tests/integration/test_wayland_seam.py
 """
@@ -27,7 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
 RUNTIME = os.path.join(H.WORKDIR, "wl-seam")
-SCREEN = (1920, 1080)
+#: One display's size; the screen the two are cut from is twice as wide.
+DISPLAY = (1920, 1080)
+SPAN = (DISPLAY[0] * 2, DISPLAY[1])
 # The colour the walked window is painted, and how much of a display it has to
 # cover to count as present there (a 500x400 window is ~10% of one screen).
 WIN_RGB = (240, 20, 20)
@@ -65,13 +67,13 @@ class Sink:
 
 
 def settings(display_id: int):
-    """A JPEG capture of one whole output."""
+    """A JPEG capture of one display-sized view."""
     import pixelflux
 
     cs = pixelflux.CaptureSettings()
     cs.use_wayland = True
     cs.display_id = display_id
-    cs.capture_width, cs.capture_height = SCREEN
+    cs.capture_width, cs.capture_height = DISPLAY
     cs.target_fps = 10.0
     cs.output_mode = 0
     cs.jpeg_quality = 80
@@ -81,14 +83,16 @@ def settings(display_id: int):
 
 
 def nested(socket: str, config: str) -> subprocess.Popen:
-    """Start a decorated nested labwc spanning both screens, with XWayland."""
+    """Start a decorated nested labwc on the one screen, with XWayland."""
     startup = os.path.join(RUNTIME, "startup.sh")
     with open(startup, "w") as fh:
         fh.write(f"#!/bin/bash\nenv | grep ^DISPLAY= > {RUNTIME}/env\nexec sleep 3600\n")
     os.chmod(startup, 0o755)
+    # No screen count is set: a nested wlroots opens one by default, which is
+    # what the displays are cut from.
     env = dict(os.environ, WAYLAND_DISPLAY=socket, WLR_BACKENDS="wayland",
                XDG_RUNTIME_DIR=RUNTIME, WLR_RENDERER="pixman", XDG_CONFIG_HOME=config,
-               LIBGL_ALWAYS_SOFTWARE="1", WLR_WL_OUTPUTS="2")
+               LIBGL_ALWAYS_SOFTWARE="1")
     env.pop("DISPLAY", None)
     # Xwayland inherits this: its glamor probe segfaults inside the NVIDIA EGL
     # vendor when the renderer underneath is software.
@@ -164,14 +168,19 @@ def main() -> "H.Results":
     import pixelflux
 
     res = H.Results("wl-seam")
-    socket = pixelflux.ensure_wayland_display(width=SCREEN[0], height=SCREEN[1],
+    socket = pixelflux.ensure_wayland_display(width=SPAN[0], height=SPAN[1],
                                               render_node="", auto_gpu="", cursor_size=-1)
     left_cap, right_cap = pixelflux.ScreenCapture(), pixelflux.ScreenCapture()
-    left_cap.create_output(1, SCREEN[0], SCREEN[1], SCREEN[0], 0, 1.0)
+    # The screen carries the first display from the start; the second is cut
+    # from it beside the first.
+    default = [o[0] for o in left_cap.list_outputs()]
+    res.check("the screen comes with one display on it", default == [0, 1], default)
+    res.check("a second display is cut from the same screen",
+              left_cap.create_view(2, 0, DISPLAY[0], 0, *DISPLAY))
     left, right = Sink(), Sink()
-    left_cap.start_capture(left, settings(0))
-    right_cap.start_capture(right, settings(1))
-    time.sleep(2.0)
+    left_cap.start_capture(left, settings(1))
+    right_cap.start_capture(right, settings(2))
+    time.sleep(2.5)
 
     proc = nested(socket, config)
     patch = None
@@ -179,49 +188,48 @@ def main() -> "H.Results":
         inner, display = session(socket)
         if not inner or not display:
             H.skip_suite("the nested compositor did not come up")
-        pixelflux.ScreenCapture().set_app_screen_layout(
-            inner, [(0, 0, SCREEN[0], SCREEN[1]), (SCREEN[0], 0, SCREEN[0], SCREEN[1])])
         time.sleep(1.5)
-        screens = pixelflux.ScreenCapture().list_app_screens(inner)
-        res.check("the session's screens sit side by side",
-                  [(x, y) for _n, x, y in screens] == [(0, 0), (SCREEN[0], 0)], screens)
-
         patch = Patch(display, WIN_RGB)
         patch.move_to(300)
         first = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
-        res.check("a window on the first screen shows only there",
+        res.check("a window on the first display shows only there",
                   first[0] > PRESENT and first[1] <= PRESENT, first)
 
-        patch.move_to(SCREEN[0] - 250)
+        patch.move_to(DISPLAY[0] - 250)
         across = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
         res.check("a window over the boundary shows on both",
                   across[0] > PRESENT and across[1] > PRESENT, across)
 
-        patch.move_to(SCREEN[0] + 400)
+        patch.move_to(DISPLAY[0] + 400)
         second = (left.coverage(WIN_RGB), right.coverage(WIN_RGB))
         res.check("a window past the boundary shows only on the second",
                   second[0] <= PRESENT and second[1] > PRESENT, second)
 
-        # The pointer a drag rides on: injected into the capture compositor, it
-        # has to arrive at a client of the nested one.
+        # What a drag rides on. The grab is held across the boundary: with a
+        # screen per display it clamps at the first screen's last column, and
+        # the window being dragged stops there with it.
         obs = H.WlObs(inner)
         if not obs.ready(20):
-            res.skip("injected input reaches the session", "no observer surface")
+            res.skip("a held grab crosses the boundary", "no observer surface")
         else:
             time.sleep(1.0)
             obs.lines.clear()
-            for step in range(30):
-                left_cap.inject_mouse_move(300.0 + step * 30, 400.0)
-                time.sleep(0.05)
+            left_cap.inject_mouse_move(500.0, 400.0)
+            time.sleep(0.4)
             left_cap.inject_mouse_button(1, 1)
             time.sleep(0.3)
+            for x in range(500, SPAN[0] - 40, 50):
+                left_cap.inject_mouse_move(float(x), 400.0)
+                time.sleep(0.03)
+            time.sleep(0.6)
             left_cap.inject_mouse_button(1, 0)
-            time.sleep(0.8)
-            moves = [ln for ln in obs.lines if ln.get("kind") in ("ptr_motion", "ptr_enter")]
+            seen = [ln["x"] for ln in obs.lines if ln.get("kind") == "ptr_motion"]
             clicks = [ln for ln in obs.lines if ln.get("kind") == "ptr_button"]
-            res.check("injected motion reaches the session's clients",
-                      bool(moves) and moves[-1]["x"] >= 1100, moves[-1] if moves else None)
-            res.check("injected buttons reach them too", len(clicks) >= 2, clicks)
+            reach = max(seen) if seen else -1.0
+            res.check("a held grab crosses the boundary", reach > DISPLAY[0] + 500,
+                      f"reached x={reach}, boundary at {DISPLAY[0]}")
+            res.check("injected buttons reach the session's clients",
+                      len(clicks) >= 1, clicks)
             obs.proc.terminate()
     finally:
         if patch is not None:

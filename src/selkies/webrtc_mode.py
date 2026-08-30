@@ -60,8 +60,7 @@ from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_
                             compute_dual_layout, apply_extended_layout, get_new_res,
                             clear_selkies_monitors, clamp_primary_feedback,
                             MultiMonitorWindowManager,
-                            wayland_output_id, wayland_reposition_primary,
-                            session_screen_index,
+                            WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id,
                             parse_resize_dims, cursor_size_for_dpi, align_dims_16)
 from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
 from .settings import (settings, AppSettings, SETTING_DEFINITIONS,
@@ -1129,32 +1128,35 @@ class WebRTCService(BaseStreamingService):
             self._wayland_ctl_module = PixelfluxScreenCapture()
         return self._wayland_ctl_module
 
-    async def _destroy_wayland_secondary_outputs(self, keep_oid: Optional[int] = None) -> None:
-        """Retire every secondary compositor output except `keep_oid` (the
-        primary, output 0, always persists)."""
+    async def _retire_wayland_views(self, keep_oid: Optional[int] = None) -> None:
+        """Retire the secondary displays' views of the session's screen.
+
+        The screen itself and the primary's view of it always persist -- the
+        primary is the session, not an extension of it -- and so does `keep_oid`.
+        """
         module = self._wayland_capture_handle()
         if module is None:
             return
+        keep = {WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id("primary"), keep_oid}
         try:
             for out in await asyncio.to_thread(module.list_outputs):
-                if out[0] != 0 and out[0] != keep_oid:
+                if out[0] not in keep:
                     await asyncio.to_thread(module.destroy_output, out[0])
         except Exception as e:
-            logger.warning(f"Wayland output teardown failed: {e}")
+            logger.warning(f"Wayland view teardown failed: {e}")
 
     async def _apply_wayland_extension(self, did: str, layouts: Dict[str, Dict[str, int]]) -> bool:
-        """Realize the extended layout as compositor outputs, BEFORE the
+        """Cut the extended layout out of the session's one screen, BEFORE the
         secondary's pipeline binds a capture — the Wayland counterpart of
         apply_extended_layout.
 
-        The primary (output 0) MOVES to its layout offset ('left'/'up' place it
-        off-origin); a secondary reposition is a destroy + recreate (its
-        capture rebinds on the pipeline restart that follows), destroyed before
-        the primary moves so the rectangles never overlap.
+        Every display is a view of output 0 at its layout rectangle, and the
+        screen is grown to the union first so no view is ever placed outside it.
+        The session sees one screen throughout, so nothing about it changes as
+        displays come and go.
 
         Returns:
-            False when the output cannot be created or the primary cannot move
-            (the caller drops the display).
+            False when a view cannot be placed (the caller drops the display).
         """
         module = self._wayland_capture_handle()
         if module is None:
@@ -1167,30 +1169,30 @@ class WebRTCService(BaseStreamingService):
         except Exception as e:
             logger.error(f"Wayland list_outputs failed: {e}")
             outputs = {}
-        await self._destroy_wayland_secondary_outputs(keep_oid=oid)
-        existing = outputs.get(oid)
-        if existing is not None and (existing[1], existing[2]) != (s["x"], s["y"]):
-            logger.info(f"Wayland output {oid} moves to +{s['x']}+{s['y']}; recreating it.")
-            await asyncio.to_thread(module.destroy_output, oid)
-            existing = None
-        p = layouts.get("primary") or {"x": 0, "y": 0}
-        existing0 = outputs.get(0)
-        current0 = (existing0[1], existing0[2]) if existing0 is not None else (0, 0)
-        if (p["x"], p["y"]) != current0:
-            if not await wayland_reposition_primary(module, p["x"], p["y"]):
-                return False
-        if existing is not None:
-            return True
+        await self._retire_wayland_views(keep_oid=oid)
+        screen = outputs.get(WAYLAND_SCREEN_OUTPUT_ID)
+        have = (screen[3], screen[4]) if screen else (0, 0)
+        want = (max([r["x"] + r["w"] for r in layouts.values()] + [have[0]]),
+                max([r["y"] + r["h"] for r in layouts.values()] + [have[1]]))
         try:
-            created = bool(await asyncio.to_thread(
-                module.create_output, oid, s["w"], s["h"], s["x"], s["y"], scale))
+            await asyncio.to_thread(
+                module.resize_output, WAYLAND_SCREEN_OUTPUT_ID, want[0], want[1], scale)
         except Exception as e:
-            logger.error(f"Wayland create_output {oid} failed: {e}")
+            logger.error(f"Wayland resize_output failed: {e}")
             return False
-        if created and self.input_handler:
-            # Which of the session's own screens a capture drives changed.
-            self.input_handler.resync_session_screens()
-        return created
+        existing = outputs.get(oid)
+        try:
+            if existing is None:
+                return bool(await asyncio.to_thread(
+                    module.create_view, oid, WAYLAND_SCREEN_OUTPUT_ID,
+                    s["x"], s["y"], s["w"], s["h"]))
+            if (existing[1], existing[2]) != (s["x"], s["y"]):
+                return bool(await asyncio.to_thread(
+                    module.reposition_output, oid, s["x"], s["y"]))
+        except Exception as e:
+            logger.error(f"Wayland view {oid} placement failed: {e}")
+            return False
+        return True
 
     async def _wayland_capture_live(self, did: str, pipeline: MediaPipelinePixel) -> bool:
         """Whether the display's capture really runs in the compositor. The
@@ -1504,7 +1506,6 @@ class WebRTCService(BaseStreamingService):
                 await asyncio.to_thread(module.destroy_output, wayland_output_id(did))
             except Exception:
                 pass
-            await wayland_reposition_primary(module, 0, 0)
         if self.peer_manager is not None:
             async with self.peer_manager.lock:
                 doomed = [
@@ -1604,8 +1605,7 @@ class WebRTCService(BaseStreamingService):
                     # The pipeline dimensions are the primary's authority again.
                     self._primary_dims = None
                     if IS_WAYLAND:
-                        await self._destroy_wayland_secondary_outputs()
-                        await wayland_reposition_primary(self._wayland_capture_handle(), 0, 0)
+                        await self._retire_wayland_views()
                         self.media_pipeline.capture_region = None
                         if (self.media_pipeline.width, self.media_pipeline.height) != (p_w, p_h):
                             self.media_pipeline.width, self.media_pipeline.height = p_w, p_h
@@ -1726,7 +1726,7 @@ class WebRTCService(BaseStreamingService):
                     pipeline.scale = await self.input_handler.realize_wayland_dpi(
                         getattr(self, "_last_applied_dpi", None)
                         or getattr(settings, "scaling_dpi", 96) or 96,
-                        session_screen_index(did), (s["w"], s["h"]))
+                        (s["w"], s["h"]))
                 else:
                     pipeline.scale = getattr(self.media_pipeline, "scale", 1.0)
                 # The native-cursor toggle is global across displays.
@@ -1874,7 +1874,7 @@ class WebRTCService(BaseStreamingService):
                 if pipeline is None:
                     continue
                 new_scale = (await self.input_handler.realize_wayland_dpi(
-                    dpi_value, session_screen_index(did),
+                    dpi_value,
                     (pipeline.width, pipeline.height))
                     if self.input_handler else float(dpi_value) / 96.0)
                 if pipeline.scale == new_scale:

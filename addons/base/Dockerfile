@@ -437,10 +437,6 @@ ENV DBUS_SYSTEM_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/dbus-system-bus"
 # management and no XWayland, and any other name runs that compositor as it is
 # installed
 ENV SELKIES_WAYLAND_COMPOSITOR=""
-# Screens the nested compositor opens at startup, which is as many as it will
-# ever have. Empty opens the two Selkies can show; the second is held small
-# until a client connects for it.
-ENV SELKIES_WAYLAND_OUTPUTS=""
 # Run X11 instead when a GPU is present but the Wayland compositor cannot reach
 # it, so the session keeps hardware acceleration. Without a GPU both backends
 # render in software and Wayland stays; set false to keep Wayland either way,

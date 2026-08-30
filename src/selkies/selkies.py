@@ -77,9 +77,8 @@ from .display_utils import (
     reconcile_realized_layout,
     read_realized_root,
     MultiMonitorWindowManager,
+    WAYLAND_SCREEN_OUTPUT_ID,
     wayland_output_id,
-    session_screen_index,
-    wayland_reposition_primary,
     grow_framebuffer,
     set_dpi,
     set_cursor_size,
@@ -2792,7 +2791,7 @@ class DataStreamingServer(BaseStreamingService):
                         # scale, which the 'scale' restart trigger below reads.
                         display_state['scale'] = (
                             await self.input_handler.realize_wayland_dpi(
-                                new_dpi, session_screen_index(display_id),
+                                new_dpi,
                                 (display_state.get('width'), display_state.get('height')))
                             if self.input_handler else float(new_dpi) / 96.0)
                         self._update_cursor_cap(new_dpi)
@@ -3503,8 +3502,7 @@ class DataStreamingServer(BaseStreamingService):
                                     # sync, so the first capture starts at the intended scale.
                                     self.display_clients[display_id]['scale'] = (
                                         await self.input_handler.realize_wayland_dpi(
-                                            getattr(app_settings, "scaling_dpi", "96") or 96,
-                                            session_screen_index(display_id)))
+                                            getattr(app_settings, "scaling_dpi", "96") or 96))
                             else:
                                 data_logger.info(f"Client is taking over existing display '{display_id}'. Updating state for new connection.")
                                 display_state = self.display_clients[display_id]
@@ -3918,7 +3916,7 @@ class DataStreamingServer(BaseStreamingService):
                                 entry = self.display_clients.get(client_display_id)
                                 size = ((entry or {}).get('width'), (entry or {}).get('height'))
                                 scale_val = await self.input_handler.realize_wayland_dpi(
-                                    dpi_value, session_screen_index(client_display_id), size)
+                                    dpi_value, size)
                                 capture_scale_changed = (
                                     entry is not None and entry.get('scale') != scale_val)
                                 if entry is not None:
@@ -4329,151 +4327,107 @@ class DataStreamingServer(BaseStreamingService):
             except (ConnectionResetError, OSError, RuntimeError):
                 pass
 
-    async def _reanchor_wayland_primary(self, layouts: dict, keep_ids: set[str]) -> None:
-        """Collapse an unrealizable Wayland arrangement: primary back at the
-        origin (layout + capture rebuild) — the Wayland mirror of the X11
-        re-anchor when the extension does not fit the realized root."""
-        primary_layout = layouts.get('primary')
-        if primary_layout:
-            primary_layout['x'], primary_layout['y'] = 0, 0
-        if 'primary' in keep_ids:
-            keep_ids.discard('primary')
-            await self._stop_capture_for_display('primary')
+    async def _apply_wayland_views(self, layouts: dict, keep_ids: set[str]) -> None:
+        """Cut the computed union layout out of the session's one screen.
 
-    async def _apply_wayland_output_layout(self, layouts: dict, keep_ids: set[str]) -> None:
-        """Retire and move compositor outputs for the computed union layout.
+        Every display is a view of output 0, placed at its layout rectangle, and
+        the screen is the union they are cut from -- so the session sees one desk
+        however many displays the client is shown, and a window dragged off the
+        edge of one carries on into the next instead of stopping at a screen
+        boundary. Nothing about the session changes as displays come and go: only
+        the views over it do.
 
-        The Wayland counterpart of the X11 monitor/framebuffer apply, split
-        around the primary's capture start: pixelflux refuses any placement
-        that overlaps a live output, while a capture start resizes output 0
-        unvalidated, so a secondary moving into room a shrinking primary gives
-        up can only be created once output 0 has shrunk. This pass therefore
-        only removes and moves: stale and moved secondaries are destroyed (a
-        secondary reposition is a destroy + recreate; its capture dies with the
-        output and the start loop rebuilds it) and the primary (output 0) is
-        moved to its layout offset ('left'/'up' place it off-origin; teardown
-        re-anchors it at 0,0). A primary move the compositor refuses is retried
-        with every secondary output destroyed — a secondary that shrinks can
-        leave the primary's new offset inside its old rectangle, and the
-        outputs come back in _create_wayland_outputs anyway — and only then is
-        the arrangement void: primary back at the origin, every secondary
-        dropped. _create_wayland_outputs, run by the start loop right after
-        the primary's capture start, creates the secondary outputs.
+        The screen is only grown here, since a view may never leave it and the
+        views still carry the sizes their captures had: _fit_wayland_screen
+        takes it back down to the union once those have restarted. Between the
+        two the views are created, moved and retired in any order, because views
+        of one screen cannot collide the way separate outputs can.
 
         Args:
-            layouts: display_id to layout rect; mutated when a display has to
-                be dropped (the primary move refused), killing its client like
-                the X11 path.
+            layouts: display_id to layout rect; mutated when a display has to be
+                dropped, killing its client like the X11 path.
             keep_ids: The keep-alive capture set; mutated alongside `layouts`.
         """
         module = self._wayland_control_module()
         if module is None:
             return
         try:
-            outputs = {o[0]: o for o in await asyncio.to_thread(module.list_outputs)}
+            nodes = {o[0]: o for o in await asyncio.to_thread(module.list_outputs)}
         except Exception as e:
             data_logger.error(f"Wayland list_outputs failed: {e}")
-            outputs = {}
-        wanted = {wayland_output_id(did): did for did in layouts if did != 'primary'}
-        for oid in list(outputs):
-            if oid != 0 and oid not in wanted:
-                data_logger.info(f"Destroying stale Wayland output {oid}.")
-                await asyncio.to_thread(module.destroy_output, oid)
-                outputs.pop(oid, None)
-
-        async def recreate_later(oid: int, did: str, why: str) -> None:
-            data_logger.info(f"Wayland output {oid} {why}; recreating it.")
-            await asyncio.to_thread(module.destroy_output, oid)
-            keep_ids.discard(did)
-            await self._stop_capture_for_display(did)
-            outputs.pop(oid, None)
-
-        for oid, did in wanted.items():
-            layout = layouts[did]
-            existing = outputs.get(oid)
-            if existing is not None and (existing[1], existing[2]) != (layout['x'], layout['y']):
-                await recreate_later(oid, did, f"moves to +{layout['x']}+{layout['y']}")
-        primary_layout = layouts.get('primary')
-        target = (primary_layout['x'], primary_layout['y']) if primary_layout else (0, 0)
-        existing0 = outputs.get(0)
-        current = (existing0[1], existing0[2]) if existing0 is not None else (0, 0)
-        if target != current:
-            moved = await wayland_reposition_primary(module, target[0], target[1])
-            if not moved and any(outputs.get(oid) is not None for oid in wanted):
-                for oid, did in wanted.items():
-                    if outputs.get(oid) is not None:
-                        await recreate_later(oid, did, "blocks the primary's move")
-                moved = await wayland_reposition_primary(module, target[0], target[1])
-            if not moved:
-                await wayland_reposition_primary(module, 0, 0)
-                await self._reanchor_wayland_primary(layouts, keep_ids)
-                for did in [d for d in list(layouts) if d != 'primary']:
-                    del layouts[did]
-                    keep_ids.discard(did)
-                    await self._drop_wayland_secondary(
-                        did, "The compositor cannot move the primary output for this arrangement."
-                    )
-        # Which of the session's own screens a capture drives has just changed.
-        if self.input_handler:
-            self.input_handler.resync_session_screens()
-
-    async def _create_wayland_outputs(self, layouts: dict, keep_ids: set[str]) -> None:
-        """Give every laid-out secondary its compositor output, at its layout rectangle.
-
-        The second half of the Wayland layout apply, run once the primary's
-        capture start has sized output 0 (see _apply_wayland_output_layout).
-        A display whose output the compositor cannot create is dropped like the
-        X11 path's unrealizable display, and when the arrangement was built
-        around it the primary returns to the origin — its capture follows the
-        moved output live, so only the layout and the tracked capture offset
-        change.
-
-        Args:
-            layouts: display_id to layout rect; mutated when a display is
-                dropped, killing its client.
-            keep_ids: The keep-alive capture set; mutated alongside `layouts`.
-        """
-        module = self._wayland_control_module()
-        if module is None:
             return
-        wanted = {wayland_output_id(did): did for did in layouts if did != 'primary'}
-        if not wanted:
-            return
-        try:
-            outputs = {o[0]: o for o in await asyncio.to_thread(module.list_outputs)}
-        except Exception as e:
-            data_logger.error(f"Wayland list_outputs failed: {e}")
-            outputs = {}
-        primary_layout = layouts.get('primary')
-        created_any = False
-        for oid, did in wanted.items():
-            if did not in layouts or outputs.get(oid) is not None:
-                continue
-            layout = layouts[did]
-            client = self.display_clients.get(did) or {}
-            scale = float(client.get('scale', 1.0) or 1.0)
-            created = False
+        screen = nodes.get(WAYLAND_SCREEN_OUTPUT_ID)
+        have = (screen[3], screen[4]) if screen else (0, 0)
+        want = (max((r['x'] + r['w'] for r in layouts.values()), default=have[0]),
+                max((r['y'] + r['h'] for r in layouts.values()), default=have[1]))
+        scale = float((self.display_clients.get('primary') or {}).get('scale', 1.0) or 1.0)
+
+        async def size_screen(width: int, height: int) -> None:
             try:
-                created = bool(await asyncio.to_thread(
-                    module.create_output, oid,
-                    layout['w'], layout['h'], layout['x'], layout['y'], scale,
-                ))
+                await asyncio.to_thread(
+                    module.resize_output, WAYLAND_SCREEN_OUTPUT_ID, width, height, scale)
             except Exception as e:
-                data_logger.error(f"Wayland create_output {oid} failed: {e}")
-            if created:
-                created_any = True
+                data_logger.error(f"Wayland resize_output failed: {e}")
+
+        await size_screen(max(have[0], want[0]), max(have[1], want[1]))
+
+        wanted = {wayland_output_id(did): did for did in layouts}
+        for oid in [o for o in nodes if o != WAYLAND_SCREEN_OUTPUT_ID and o not in wanted]:
+            data_logger.info(f"Retiring the view of display {oid}.")
+            try:
+                await asyncio.to_thread(module.destroy_output, oid)
+            except Exception as e:
+                data_logger.error(f"Wayland destroy_output {oid} failed: {e}")
+            nodes.pop(oid, None)
+
+        for oid, did in wanted.items():
+            rect = layouts[did]
+            existing = nodes.get(oid)
+            placed = True
+            try:
+                if existing is None:
+                    placed = bool(await asyncio.to_thread(
+                        module.create_view, oid, WAYLAND_SCREEN_OUTPUT_ID,
+                        rect['x'], rect['y'], rect['w'], rect['h']))
+                elif (existing[1], existing[2]) != (rect['x'], rect['y']):
+                    placed = bool(await asyncio.to_thread(
+                        module.reposition_output, oid, rect['x'], rect['y']))
+            except Exception as e:
+                data_logger.error(f"Wayland view {oid} placement failed: {e}")
+                placed = False
+            if placed:
+                continue
+            if did == 'primary':
+                # Without the primary there is no session to show, so the
+                # arrangement collapses to it alone at the origin.
+                rect['x'], rect['y'] = 0, 0
+                keep_ids.discard(did)
+                await self._stop_capture_for_display(did)
                 continue
             del layouts[did]
             keep_ids.discard(did)
             await self._drop_wayland_secondary(
-                did, "The compositor cannot create an output for this display."
+                did, "The compositor cannot place a view for this display."
             )
-            if primary_layout and (primary_layout['x'], primary_layout['y']) != (0, 0):
-                if await wayland_reposition_primary(module, 0, 0):
-                    primary_layout['x'], primary_layout['y'] = 0, 0
-                    self._track_capture_settings('primary', capture_x=0, capture_y=0)
-        if created_any and self.input_handler:
-            self.input_handler.resync_session_screens()
+
+    async def _fit_wayland_screen(self, layouts: dict) -> None:
+        """Take the screen down to the union its views now cover.
+
+        Run once the captures have restarted, because a view is as big as what
+        it captures: shrinking before that is refused by the compositor, which
+        will not leave a view hanging outside the screen it is cut from.
+        """
+        module = self._wayland_control_module()
+        if module is None or not layouts:
+            return
+        want = (max(r['x'] + r['w'] for r in layouts.values()),
+                max(r['y'] + r['h'] for r in layouts.values()))
+        scale = float((self.display_clients.get('primary') or {}).get('scale', 1.0) or 1.0)
+        try:
+            await asyncio.to_thread(
+                module.resize_output, WAYLAND_SCREEN_OUTPUT_ID, want[0], want[1], scale)
+        except Exception as e:
+            data_logger.error(f"Wayland resize_output failed: {e}")
 
     async def _stop_capture_for_display(self, display_id: str) -> None:
         """Stop one display's capture, serialized against any concurrent start/stop."""
@@ -4620,8 +4574,8 @@ class DataStreamingServer(BaseStreamingService):
             if not IS_WAYLAND:
                 await clear_selkies_monitors()
             else:
-                # The primary output persists; only the secondaries are retired.
-                await self._apply_wayland_output_layout({}, set())
+                # The screen persists; only the views over it are retired.
+                await self._apply_wayland_views({}, set())
             return
         data_logger.info("Calculating new extended desktop layout from ALL clients...")
         layouts = {}
@@ -4850,9 +4804,8 @@ class DataStreamingServer(BaseStreamingService):
                 if fit.dropped or fit.reanchored or fit.clamped:
                     await replace_selkies_monitors(layouts, screen_name=screen_name)
         else:
-            await self._apply_wayland_output_layout(layouts, keep_ids)
+            await self._apply_wayland_views(layouts, keep_ids)
         data_logger.info("Starting separate capture instances for each ACTIVE display region...")
-        # The primary first: on Wayland its capture start sizes output 0.
         for display_id in sorted(layouts, key=lambda did: did != 'primary'):
             if display_id not in layouts:
                 continue
@@ -4900,13 +4853,6 @@ class DataStreamingServer(BaseStreamingService):
                     )
             else:
                 data_logger.info(f"Client '{display_id}' is connected but not active. Skipping video start.")
-            if IS_WAYLAND and display_id == 'primary':
-                await self._create_wayland_outputs(layouts, keep_ids)
-                # The capture outputs now sit where the arrangement asks; the
-                # session compositor arranges its own screens by its own rule
-                # until it is told this one.
-                if self.input_handler:
-                    self.input_handler.schedule_session_screen_layout(layouts)
         for display_id in list(layouts.keys()):
             client_data = self.display_clients.get(display_id)
             if not (client_data and client_data.get('video_active', False)):
@@ -4936,6 +4882,10 @@ class DataStreamingServer(BaseStreamingService):
                         last_error or "The capture pipeline could not start for this "
                         "display (encoder session or GPU resources exhausted).",
                     )
+        if IS_WAYLAND:
+            # Last, because a view is as big as what it captures and every
+            # capture is live at its new size only past the barrier above.
+            await self._fit_wayland_screen(layouts)
         await self.broadcast_stream_resolution()
         await self.broadcast_display_config()
         data_logger.info("Display reconfiguration finished successfully.")
