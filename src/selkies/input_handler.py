@@ -1237,7 +1237,7 @@ class _XTestKeyboard:
     # Settle after binding a keycode, before pressing it: toolkits refetch the
     # keymap asynchronously, and one that has not caught up reads the keycode by
     # its previous symbol -- NoSymbol on a spare, which drops the key outright.
-    # 10 ms did not cover a Chrome whose main thread was starved of its core.
+    # A Chrome whose main thread is starved of its core needs ~25 ms.
     _BIND_SETTLE_S = 0.025
     # A group lock outlives the last key that needed it by this long: one switch
     # per run of keystrokes, and the desktop's layout indicator stays put.
@@ -1258,6 +1258,7 @@ class _XTestKeyboard:
         self._spare_set = frozenset()
         self._overlay = {}
         self._overlay_value_kc = {}
+        self._settle_until = 0.0
         self._overlay_order = []
         self._pressed_kc = {}
 
@@ -1324,6 +1325,35 @@ class _XTestKeyboard:
                 return self._overlay_value_kc.get(keysym, 0)
         return kc
 
+    def settle_delay(self) -> float:
+        """Seconds the newest overlay bind still owes clients before a press
+        on it reads correctly; an async caller awaits this off the event loop
+        (bind_ahead() first), and injection itself waits out any remainder."""
+        return max(0.0, self._settle_until - time.monotonic())
+
+    def _settle(self) -> None:
+        remaining = self._settle_until - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def bind_ahead(self, keysym: int) -> None:
+        """Resolve any overlay bind the keysym needs now, so the settle can
+        be awaited before the injecting call re-resolves it from cache."""
+        try:
+            self._resolve(keysym)
+        except Exception:
+            pass
+
+    def _recycle_index(self) -> int:
+        """Index into _overlay_order of the oldest binding whose keycode is
+        not physically down: rebound while held, a keycode's eventual release
+        would be read under the new symbol and leave the old one stuck."""
+        held = set(self._pressed_kc.values())
+        for i, ks in enumerate(self._overlay_order):
+            if self._overlay[ks] not in held:
+                return i
+        return 0
+
     def _alloc_overlay_keycode(self, keysym: int) -> int:
         """Reserve a spare keycode for keysym and record the binding.
 
@@ -1334,7 +1364,7 @@ class _XTestKeyboard:
         if free:
             kc = free[0]
         else:
-            oldest = self._overlay_order.pop(0)
+            oldest = self._overlay_order.pop(self._recycle_index())
             kc = self._overlay.pop(oldest)
             self._overlay_value_kc.pop(overlay_bind_keysym(oldest), None)
         self._overlay[keysym] = kc
@@ -1365,7 +1395,7 @@ class _XTestKeyboard:
         bind_value = overlay_bind_keysym(keysym)
         self._d.change_keyboard_mapping(kc, [[bind_value, bind_value]])
         self._d.sync()
-        time.sleep(self._BIND_SETTLE_S)
+        self._settle_until = time.monotonic() + self._BIND_SETTLE_S
         return kc
 
     def prebind(self, keysyms: Iterable[int]) -> bool:
@@ -1409,7 +1439,7 @@ class _XTestKeyboard:
                 break
             picked.extend(run[:len(missing) - len(picked)])
         while len(picked) < len(missing):
-            oldest = self._overlay_order.pop(0)
+            oldest = self._overlay_order.pop(self._recycle_index())
             picked.append(self._overlay.pop(oldest))
             self._overlay_value_kc.pop(overlay_bind_keysym(oldest), None)
         assigns = []
@@ -1429,8 +1459,8 @@ class _XTestKeyboard:
                 [[overlay_bind_keysym(ks)] * 2 for _kc, ks in assigns[i:j + 1]])
             i = j + 1
         d.sync()
-        # One settle for the whole batch, since one sync covers every bind.
-        time.sleep(self._BIND_SETTLE_S)
+        # One settle deadline for the whole batch, since one sync covers it.
+        self._settle_until = time.monotonic() + self._BIND_SETTLE_S
         return True
 
     def bindings_intact(self) -> bool:
@@ -1661,6 +1691,7 @@ class _XTestKeyboard:
                 holds, consulted instead of a per-press server query.
         """
         kc, mods, group = self._resolve(keysym)
+        self._settle()
         self._enter_group(keysym, group)
         down = self._down_mod_keycodes(held_keysyms)
         lifted = self._mods_to_lift(set(mods), down) if neutralize else []
@@ -1688,6 +1719,7 @@ class _XTestKeyboard:
         kc = self._pressed_kc.pop(keysym, None)
         if kc is None:
             kc, _, _ = self._resolve(keysym)
+            self._settle()
         self._leave_group(keysym)
         xtest.fake_input(self._d, Xlib.X.KeyRelease, kc)
         for m in reversed(self._synth_mods.pop(keysym, ())):
@@ -4649,6 +4681,10 @@ class WebRTCInput:
                         return
                     if self.keyboard:
                         if down:
+                            self.keyboard.bind_ahead(keysym)
+                            settle = self.keyboard.settle_delay()
+                            if settle > 0:
+                                await asyncio.sleep(settle)
                             self.keyboard.press(keysym, neutralize=neutralize,
                                                 held_keysyms=held_level_mods)
                         else:
@@ -4686,7 +4722,7 @@ class WebRTCInput:
                     self._reconnect_xdisplay()
                 await self._type_keysym_fallback(keysym, down)
 
-    def _type_text_xtest(self, text: str, neutralize: bool = False) -> bool:
+    async def _type_text_xtest(self, text: str, neutralize: bool = False) -> bool:
         """Type a string in-process via the XTEST shim.
 
         Each char is a press+release of its keysym (mapped chars with shift
@@ -4718,6 +4754,9 @@ class WebRTCInput:
         try:
             if not self.keyboard.prebind(keysyms):
                 return False
+            settle = self.keyboard.settle_delay()
+            if settle > 0:
+                await asyncio.sleep(settle)
             lifted = []
             if neutralize:
                 down = self.keyboard._down_mod_keycodes(
@@ -7222,7 +7261,7 @@ class WebRTCInput:
                 text_to_type = msg[7:]
                 if self.is_wayland:
                     self._keyboard_enqueue(("co_end", text_to_type))
-                elif self._type_text_xtest(
+                elif await self._type_text_xtest(
                         text_to_type,
                         neutralize=not (self.active_modifiers
                                         & self.ACTION_MODIFIER_KEYSYMS)):

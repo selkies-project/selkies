@@ -67,20 +67,40 @@ def run() -> "H.Results":
         res.check("the longest-unused keysym gave up its slot",
                   second not in kb._overlay, sorted(kb._overlay)[:3])
 
-        # A handler that has bound nothing yet takes a spare no client has seen
-        # a symbol on, and that bind has to settle like any other.
+        # A keycode that is physically down is skipped over for recycling: its
+        # release would otherwise be read under whichever symbol replaced it.
+        oldest = kb._overlay_order[0]
+        kb._pressed_kc[oldest] = kb._overlay[oldest]
+        held_kc = kb._overlay[oldest]
+        kb._overlay_keycode(keysym(len(pool) + 1))
+        res.check("a held keycode survives the recycle",
+                  kb._overlay.get(oldest) == held_kc,
+                  f"{kb._overlay.get(oldest)} was {held_kc}")
+        kb._pressed_kc.pop(oldest, None)
+
+        # A bind no longer sleeps: it arms a settle deadline the injecting call
+        # waits out, so the event loop can await it instead of blocking.
         fresh = ih._XTestKeyboard(d)
         started = time.monotonic()
         fresh._overlay_keycode(keysym(500))
         single = time.monotonic() - started
-        res.check("a first bind settles before its keycode is handed back",
-                  single >= fresh._BIND_SETTLE_S, f"{single * 1000:.1f} ms")
+        res.check("a first bind hands its keycode back without sleeping",
+                  single < fresh._BIND_SETTLE_S, f"{single * 1000:.1f} ms")
+        res.check("the bind's settle is owed to the next injection",
+                  fresh.settle_delay() > 0, f"{fresh.settle_delay() * 1000:.1f} ms")
+        started = time.monotonic()
+        fresh._settle()
+        settled = time.monotonic() - started
+        res.check("injection waits out what is left of the settle",
+                  settled > 0 and fresh.settle_delay() == 0,
+                  f"{settled * 1000:.1f} ms")
 
         started = time.monotonic()
         fresh.prebind([keysym(501), keysym(502), keysym(503)])
         batch = time.monotonic() - started
-        res.check("a batch settles too", batch >= fresh._BIND_SETTLE_S,
-                  f"{batch * 1000:.1f} ms")
+        res.check("a batch arms one settle without sleeping",
+                  batch < fresh._BIND_SETTLE_S and fresh.settle_delay() > 0,
+                  f"{batch * 1000:.1f} ms, owed {fresh.settle_delay() * 1000:.1f} ms")
     finally:
         H.stop_x_server(proc, display)
     res.summary()

@@ -70,7 +70,9 @@ async def main() -> None:
     hx.is_wayland = False
     hx.active_modifiers = set()
     hx.ACTION_MODIFIER_KEYSYMS = set()
-    hx._type_text_xtest = lambda text, neutralize=False: False
+    async def _no_xtest_type(text, neutralize=False):
+        return False
+    hx._type_text_xtest = _no_xtest_type
     argv = []
 
     async def fake_exec(*cmd, **kwargs):

@@ -285,7 +285,7 @@ async def run(res: "H.Results", display_name: str) -> None:
     real_lock = h.keyboard._xkb.lock_group
     h.keyboard._xkb.lock_group = lambda g: (locks.append(g), real_lock(g))
     obs.drain(0.02)
-    ok = h._type_text_xtest("привет")
+    ok = await h._type_text_xtest("привет")
     d.sync()
     ev = obs.drain(0.15)
     h.keyboard._xkb.lock_group = real_lock
