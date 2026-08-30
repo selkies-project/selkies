@@ -445,11 +445,17 @@ ENV SELKIES_WAYLAND_X11_FALLBACK="true"
 # Web interface port
 ENV SELKIES_PORT="8080"
 # A session carries a login and a clipboard, so the container serves TLS by
-# default, on the distribution's snakeoil certificate where the operator names
-# none. Browsers warn once on that certificate; --https-cert / --https-key
-# point at a real one, and SELKIES_ENABLE_HTTPS=false serves plain HTTP for a
+# default. With nothing at the configured certificate paths the server mints a
+# pair per install in its state directory; --https-cert / --https-key point at
+# a real one, and SELKIES_ENABLE_HTTPS=false serves plain HTTP for a
 # deployment that terminates TLS in front of the container.
 ENV SELKIES_ENABLE_HTTPS="true"
+
+# The snakeoil pair ssl-cert generated above was generated during the image
+# build: every pull of this image holds that private key, so serving on it
+# would let any of them impersonate any other. Removed, so the per-install
+# pair is what a deployment falls back to.
+RUN rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem
 # AppImages mount themselves through FUSE, which a container is usually not
 # given; extracting instead is what makes them run at all here.
 ENV APPIMAGE_EXTRACT_AND_RUN="1"
