@@ -44,8 +44,6 @@ services:
         DISTRIB_IMAGE: ${DISTRIB_IMAGE:-ubuntu}
         DISTRIB_RELEASE: ${DISTRIB_RELEASE:-26.04}
         PYPI_PACKAGE: selkies
-        # DRI3-capable Xvfb; see the Dockerfile for what overriding this costs
-        XVFB_IMAGE: ${XVFB_IMAGE:-lscr.io/linuxserver/xvfb:debianbookworm}
 
   desktop:
     image: selkies-desktop:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}

@@ -8,7 +8,7 @@
 
 # 1) Build the web client through the same script the CI wheel build and the
 #    conda recipe run, so every channel ships an identical bundle
-FROM docker.io/library/node:26-alpine AS web-build
+FROM node:26-alpine AS web-build
 
 WORKDIR /build
 
@@ -25,7 +25,7 @@ COPY docs/assets/logo ./docs/assets/logo
 RUN mkdir -p src/selkies && sh scripts/ci/build-web.sh
 
 # 2) Build the Python wheel with the web client bundled
-FROM docker.io/library/python:3-slim AS py-build
+FROM python:3-slim AS py-build
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
 
