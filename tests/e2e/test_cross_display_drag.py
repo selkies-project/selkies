@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A held drag crosses from one display page into its neighbor's region.
+"""One remote pointer under a held drag, across display pages and pen contact.
 
 Every pointermove of a button-held drag keeps streaming to the page the press
 landed on, with client coordinates far past its viewport. The client maps such
@@ -16,6 +16,12 @@ secondary runs DPR 1, so the crossing also proves the per-display scale
 conversion. Checked over websockets by watching the X server's own pointer,
 then over WebRTC for transport parity; the vertical and left-neighbor
 arrangements are driven through the same mapping on synthetic layouts.
+
+The held button is the second half: a page runs an `Input` of its own against
+the one remote pointer, so a drag that crosses reaches a page that never saw
+the press and leaves one that never sees the release, and a stylus ends contact
+with a cancel rather than a release. Every one of them carries what the event
+says is held.
 
 Uses `E2E_DISPLAY` when set; otherwise starts a throwaway Xvfb wide enough for
 the two-display union.
@@ -103,6 +109,45 @@ def moved_to(page: Any, cx: int, cy: int) -> Tuple[int, int]:
 def wait_video(page: Any, mode: str, timeout: float = 45) -> Optional[dict]:
     return (C.wait_wr_video(page, timeout=timeout) if mode == "webrtc"
             else C.wait_ws_video(page, timeout=timeout))
+
+
+def pen(page: Any, kind: str, button: int, buttons: int, cx: int, cy: int) -> None:
+    """Dispatches one stylus pointer event on the stream overlay."""
+    page.evaluate("""([kind, button, buttons, cx, cy]) => {
+      document.getElementById('overlayInput').dispatchEvent(new PointerEvent(kind, {
+        pointerType: 'pen', pointerId: 3, isPrimary: true, button, buttons,
+        clientX: cx, clientY: cy, bubbles: true, cancelable: true}));
+    }""", [kind, button, buttons, cx, cy])
+    time.sleep(0.3)
+
+
+def pen_contact(res: "H.Results", mode: str, page: Any) -> None:
+    """A stylus drives the same one pointer, and its contact can end unsaid.
+
+    Contact reaches the mouse path, but the browser can end it with a cancel
+    carrying button -1 and nothing held, or simply stop reporting the tip on
+    the next move. Either way what the event says is held is what is left, and
+    the eraser presses as the tip does, since neither X nor wl_pointer has a
+    button for it.
+    """
+    pen(page, "pointerdown", 0, 1, 700, 400)
+    res.check(f"[{mode}] pen contact presses", C.x11_buttons_held() == (1,),
+              C.x11_buttons_held())
+    pen(page, "pointermove", -1, 0, 720, 400)
+    res.check(f"[{mode}] contact the page never saw end is not still held",
+              C.x11_buttons_held() == (), C.x11_buttons_held())
+
+    pen(page, "pointerdown", 0, 1, 700, 400)
+    pen(page, "pointercancel", -1, 0, 700, 400)
+    res.check(f"[{mode}] a cancel releases with no pointerup to follow",
+              C.x11_buttons_held() == (), C.x11_buttons_held())
+
+    pen(page, "pointerdown", 5, 32, 700, 400)
+    res.check(f"[{mode}] the eraser presses like the tip", C.x11_buttons_held() == (1,),
+              C.x11_buttons_held())
+    pen(page, "pointerup", 5, 0, 700, 400)
+    res.check(f"[{mode}] the eraser lifts", C.x11_buttons_held() == (),
+              C.x11_buttons_held())
 
 
 def handoff(res: "H.Results", mode: str, page: Any, dpage: Any, seam: int) -> None:
@@ -230,6 +275,7 @@ def drive(res: "H.Results", mode: str) -> None:
                       crossing[-1:] or sent[-3:])
 
             handoff(res, mode, page, dpage, seam)
+            pen_contact(res, mode, page)
 
             if full:
                 # The neighbor page maps the same physical spot to the same
