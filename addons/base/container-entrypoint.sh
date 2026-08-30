@@ -49,7 +49,8 @@ chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 # look like the application, rather than the home, is at fault. Creating them
 # before the session starts is what keeps that first install visible.
 for dir in applications icons/hicolor; do
-  mkdir -p "${XDG_DATA_HOME:-${HOME}/.local/share}/${dir}" 2>/dev/null || true
+  mkdir -p "${XDG_DATA_HOME:-${HOME}/.local/share}/${dir}" 2>/dev/null || \
+    echo "selkies: cannot create ${XDG_DATA_HOME:-${HOME}/.local/share}/${dir}; a first install may not reach the menu" >&2
 done
 
 # Configure joystick interposer and fake-udev (container-only gamepad plumbing)
@@ -118,10 +119,12 @@ fi
 gpu_status=0
 gpu_facts="$(timeout 60 selkies-gpu-probe)" || gpu_status=$?
 while IFS= read -r assignment; do
-  # Assignments only, so a tool that answers something else cannot be exported
-  # into this environment.
-  case "${assignment}" in
-    [A-Z_]*=*) export "${assignment?}" ;;
+  # Assignments with a clean name only, so a tool that answers something else
+  # cannot be exported into this environment or abort it under set -e.
+  case "${assignment}" in *=*) ;; *) continue ;; esac
+  case "${assignment%%=*}" in
+    ''|*[!A-Z0-9_]*) ;;
+    *) export "${assignment?}" ;;
   esac
 done <<EOF
 ${gpu_facts}
