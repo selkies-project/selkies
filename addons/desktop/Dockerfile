@@ -217,16 +217,26 @@ RUN set -eu; \
         printf '[Settings]\ngtk-decoration-layout=:minimize,maximize,close\n' > /etc/gtk-3.0/settings.ini; \
     fi
 
-# Leaving the session is not something this desktop can offer: logging out ends
-# the session the stream is showing and leaves a connected client on a dead
-# display, and shutdown and reboot address an init this container does not run.
-# The entry is hidden rather than the package dropped, since lxqt-session
-# installs the binary as part of itself; a higher-precedence data directory
-# shadows the shipped entry, so the package stays intact and a later upgrade
-# does not undo this.
-RUN mkdir -pm755 /usr/local/share/applications && \
-    printf '[Desktop Entry]\nType=Application\nName=Leave\nExec=lxqt-leave\nIcon=system-shutdown\nCategories=System;X-Leave;\nOnlyShowIn=LXQt;\nNoDisplay=true\n' \
-        > /usr/local/share/applications/lxqt-leave.desktop
+# Leaving the session is not something this desktop can offer: logging out or
+# locking ends or blocks the session the stream is showing and leaves a
+# connected client on a dead display, and shutdown, reboot, suspend and
+# hibernate address an init this container does not run.
+#
+# Every one of those entries runs the one lxqt-leave binary, and the panel's own
+# power button calls it directly rather than through an entry, so both are
+# shadowed: the entries so nothing offers the actions, and the binary so nothing
+# performs them. Shadowing rather than deleting keeps lxqt-session's package
+# intact, and a later upgrade of it does not undo either half.
+RUN mkdir -pm755 /usr/local/share/applications /usr/local/bin && \
+    for leave in leave logout lockscreen reboot shutdown suspend hibernate; do \
+        entry="/usr/share/applications/lxqt-${leave}.desktop"; \
+        [ -f "${entry}" ] || continue; \
+        sed '/^NoDisplay=/d' "${entry}" > "/usr/local/share/applications/lxqt-${leave}.desktop"; \
+        printf 'NoDisplay=true\n' >> "/usr/local/share/applications/lxqt-${leave}.desktop"; \
+    done && \
+    printf '#!/bin/sh\n# Shadows lxqt-leave: this desktop has no session to leave.\nnotify-send -i dialog-information "Not available here" "This desktop runs in a container: there is no session to log out of, lock or shut down." 2>/dev/null || true\nexit 0\n' \
+        > /usr/local/bin/lxqt-leave && \
+    chmod 755 /usr/local/bin/lxqt-leave
 
 # The session's own s6 service, supervised beside the base container's
 COPY --chown=1000:1000 addons/desktop/services/ /etc/service/
