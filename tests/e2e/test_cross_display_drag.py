@@ -23,10 +23,15 @@ the press and leaves one that never sees the release, and a stylus ends contact
 with a cancel rather than a release. Every one of them carries what the event
 says is held.
 
+Both backends: on X11 the crossing is read back from the X pointer, and on the
+Wayland backend, which has none to read, from the coordinates and mask the
+pages put on the wire -- the client's half of it, which is where the mapping
+and the held button live.
+
 Uses `E2E_DISPLAY` when set; otherwise starts a throwaway Xvfb wide enough for
 the two-display union.
 
-Usage: python3 tests/e2e/test_cross_display_drag.py
+Usage: python3 tests/e2e/test_cross_display_drag.py wl
 """
 import os
 import sys
@@ -99,11 +104,44 @@ def mouse(page: Any, kind: str, cx: int, cy: int, held: bool,
     }""", [kind, cx, cy, held, on_stream])
 
 
-def moved_to(page: Any, cx: int, cy: int) -> Tuple[int, int]:
-    """One held move, then the pointer read back from the X server."""
+def wire_pos(page: Any) -> Tuple[int, int]:
+    """The point the page's last motion asked for, in the layout's own space:
+    its display origin plus the coordinate it sent.
+
+    What the Wayland backend is read by, having no X pointer to query. It is
+    the client's half of the crossing -- the mapping under test -- and not the
+    compositor's answer to it.
+    """
+    sent = page.evaluate("() => { const s = window.__wireSent.filter("
+                         "d => d.startsWith && d.startsWith('m,'));"
+                         " return s.length ? s[s.length - 1] : null; }")
+    layout = page.evaluate(LAYOUT_JS) or {}
+    parts = (sent or "m,0,0,0,0").split(",")
+    return (layout.get("ownX", 0) + int(parts[1]), layout.get("ownY", 0) + int(parts[2]))
+
+
+def wire_mask(page: Any) -> int:
+    """The button mask the page's last pointer message carried."""
+    sent = page.evaluate("() => { const s = window.__wireSent.filter("
+                         "d => d.startsWith && d.startsWith('m,'));"
+                         " return s.length ? s[s.length - 1] : null; }")
+    return int((sent or "m,0,0,0,0").split(",")[3])
+
+
+def wire_buttons(page: Any) -> tuple:
+    """The buttons the page's last pointer message carried, lowest first. The
+    eraser is not among them: it rides a bit of its own that the server folds
+    onto the primary button, which the wire never shows."""
+    mask = wire_mask(page)
+    return tuple(b for b in range(1, 6) if mask & (1 << (b - 1)))
+
+
+def moved_to(page: Any, cx: int, cy: int, wayland: bool = False) -> Tuple[int, int]:
+    """One held move, then the pointer read back from the X server, or from the
+    wire where there is no X pointer to read."""
     mouse(page, "mousemove", cx, cy, True)
     time.sleep(0.3)
-    return C.x11_mouse_pos()
+    return wire_pos(page) if wayland else C.x11_mouse_pos()
 
 
 def wait_video(page: Any, mode: str, timeout: float = 45) -> Optional[dict]:
@@ -121,7 +159,13 @@ def pen(page: Any, kind: str, button: int, buttons: int, cx: int, cy: int) -> No
     time.sleep(0.3)
 
 
-def pen_contact(res: "H.Results", mode: str, page: Any) -> None:
+def buttons_held(page: Any, wayland: bool) -> tuple:
+    """Buttons the remote pointer holds: from the X server, or from the last
+    message `page` sent where there is no X pointer to ask."""
+    return wire_buttons(page) if wayland else C.x11_buttons_held()
+
+
+def pen_contact(res: "H.Results", mode: str, page: Any, wayland: bool) -> None:
     """A stylus drives the same one pointer, and its contact can end unsaid.
 
     Contact reaches the mouse path, but the browser can end it with a cancel
@@ -131,26 +175,34 @@ def pen_contact(res: "H.Results", mode: str, page: Any) -> None:
     button for it.
     """
     pen(page, "pointerdown", 0, 1, 700, 400)
-    res.check(f"[{mode}] pen contact presses", C.x11_buttons_held() == (1,),
-              C.x11_buttons_held())
+    res.check(f"[{mode}] pen contact presses", buttons_held(page, wayland) == (1,),
+              buttons_held(page, wayland))
     pen(page, "pointermove", -1, 0, 720, 400)
     res.check(f"[{mode}] contact the page never saw end is not still held",
-              C.x11_buttons_held() == (), C.x11_buttons_held())
+              buttons_held(page, wayland) == (), buttons_held(page, wayland))
 
     pen(page, "pointerdown", 0, 1, 700, 400)
     pen(page, "pointercancel", -1, 0, 700, 400)
     res.check(f"[{mode}] a cancel releases with no pointerup to follow",
-              C.x11_buttons_held() == (), C.x11_buttons_held())
+              buttons_held(page, wayland) == (), buttons_held(page, wayland))
 
     pen(page, "pointerdown", 5, 32, 700, 400)
-    res.check(f"[{mode}] the eraser presses like the tip", C.x11_buttons_held() == (1,),
-              C.x11_buttons_held())
+    if wayland:
+        # Only the fold onto the primary button makes the eraser press, and it
+        # happens where the pointer is injected; the wire carries the bit.
+        res.check(f"[{mode}] the eraser reaches the server on its own bit",
+                  wire_mask(page) == 32, wire_mask(page))
+    else:
+        res.check(f"[{mode}] the eraser presses like the tip",
+                  buttons_held(page, wayland) == (1,), buttons_held(page, wayland))
     pen(page, "pointerup", 5, 0, 700, 400)
-    res.check(f"[{mode}] the eraser lifts", C.x11_buttons_held() == (),
-              C.x11_buttons_held())
+    res.check(f"[{mode}] the eraser lifts",
+              wire_mask(page) == 0 if wayland else buttons_held(page, wayland) == (),
+              wire_mask(page) if wayland else buttons_held(page, wayland))
 
 
-def handoff(res: "H.Results", mode: str, page: Any, dpage: Any, seam: int) -> None:
+def handoff(res: "H.Results", mode: str, page: Any, dpage: Any, seam: int,
+            wayland: bool) -> None:
     """The press lands on one page and everything after it on the neighbor.
 
     What the browser does once the pointer crosses into the other window: it
@@ -164,37 +216,37 @@ def handoff(res: "H.Results", mode: str, page: Any, dpage: Any, seam: int) -> No
     """
     mouse(page, "mousedown", 700, 400, True)
     time.sleep(0.3)
-    res.check(f"[{mode}] the press lands", C.x11_buttons_held() == (1,),
-              C.x11_buttons_held())
+    res.check(f"[{mode}] the press lands", buttons_held(page, wayland) == (1,),
+              buttons_held(page, wayland))
     dpage.evaluate("window.__wireSent.length = 0")
     for cx in (300, 700):
         mouse(dpage, "mousemove", cx, 500, True, on_stream=True)
         time.sleep(0.3)
-        pos = C.x11_mouse_pos()
+        pos = wire_pos(dpage) if wayland else C.x11_mouse_pos()
         res.check(f"[{mode}] the drag stays held on the page it crossed to",
-                  C.x11_buttons_held() == (1,) and pos[0] > seam,
-                  f"{C.x11_buttons_held()} {pos} seam={seam}")
-    held = [m for m in dpage.evaluate(
+                  buttons_held(dpage, wayland) == (1,) and pos[0] > seam,
+                  f"{buttons_held(dpage, wayland)} {pos} seam={seam}")
+    carried = [m for m in dpage.evaluate(
         "window.__wireSent.filter(d => d.startsWith && d.startsWith('m,'))")
         if m.split(",")[3] == "1"]
     res.check(f"[{mode}] the neighbor's own wire carries the held button",
-              len(held) >= 2, held[:2])
+              len(carried) >= 2, carried[:2])
 
     mouse(dpage, "mouseup", 700, 500, False, on_stream=True)
     time.sleep(0.3)
     res.check(f"[{mode}] the only release, on the page that ends the drag",
-              C.x11_buttons_held() == (), C.x11_buttons_held())
+              buttons_held(dpage, wayland) == (), buttons_held(dpage, wayland))
 
     mouse(page, "mousemove", 700, 400, False, on_stream=True)
     time.sleep(0.3)
     res.check(f"[{mode}] the page left behind does not press again",
-              C.x11_buttons_held() == (), C.x11_buttons_held())
+              buttons_held(page, wayland) == (), buttons_held(page, wayland))
 
 
-def drive(res: "H.Results", mode: str) -> None:
+def drive(res: "H.Results", mode: str, wayland: bool) -> None:
     """One transport's crossing checks; the full set runs on websockets."""
     full = mode == "websockets"
-    H.server_start(mode=mode, wayland=False)
+    H.server_start(mode=mode, wayland=wayland)
     with sync_playwright() as p:
         kwargs = {"headless": True, "args": C.BROWSER_ARGS}
         if C.CHROME_PATH:
@@ -230,8 +282,8 @@ def drive(res: "H.Results", mode: str) -> None:
             # locates the edge in client coordinates, so the letterboxed WebRTC
             # video box maps as exactly as the websockets canvas.
             mouse(page, "mousedown", 700, 400, True)
-            p1 = moved_to(page, 700, 400)
-            p2 = moved_to(page, 1100, 400)
+            p1 = moved_to(page, 700, 400, wayland)
+            p2 = moved_to(page, 1100, 400, wayland)
             own_scale = (p2[0] - p1[0]) / 400.0
             res.check(f"[{mode}] in-bounds motion maps linearly",
                       own_scale > 0, f"{p1} {p2}")
@@ -242,8 +294,8 @@ def drive(res: "H.Results", mode: str) -> None:
                 res.check("manual DPR-2 mapping is exact",
                           abs(p1[0] - 1400) <= 2 and abs(p1[1] - 800) <= 2 and edge == PRIMARY_CSS[0],
                           f"{p1} edge={edge}")
-            over = moved_to(page, edge + 300, 400)
-            far = moved_to(page, edge + 1088, 400)
+            over = moved_to(page, edge + 300, 400, wayland)
+            far = moved_to(page, edge + 1088, 400, wayland)
             res.check(f"[{mode}] held drag crosses the seam",
                       over[0] > seam, f"{over} seam={seam}")
             res.check(f"[{mode}] overshoot travels at the neighbor's scale",
@@ -251,20 +303,20 @@ def drive(res: "H.Results", mode: str) -> None:
                       f"{over} {far} seam={seam}")
 
             if full:
-                clamped = moved_to(page, edge + 3000, 400)
+                clamped = moved_to(page, edge + 3000, 400, wayland)
                 res.check("far overshoot clamps at the union's edge",
                           abs(clamped[0] - (union_r - 1)) <= 1, f"{clamped} union={union_r}")
-                low = moved_to(page, 2000, 700)
+                low = moved_to(page, 2000, 700, wayland)
                 res.check("the dead corner past a shorter neighbor is out of reach",
                           low[1] <= d2["y"] + d2["h"], f"{low} d2={d2}")
-                left = moved_to(page, -300, 400)
+                left = moved_to(page, -300, 400, wayland)
                 res.check("an edge with no neighbor still clamps",
                           left[0] == 0, left)
 
-            end = moved_to(page, edge + 1088, 400)
+            end = moved_to(page, edge + 1088, 400, wayland)
             mouse(page, "mouseup", edge + 1088, 400, False)
             time.sleep(0.3)
-            released = C.x11_mouse_pos()
+            released = wire_pos(page) if wayland else C.x11_mouse_pos()
             res.check(f"[{mode}] release lands across the seam",
                       released[0] > seam and abs(released[0] - end[0]) <= 2,
                       f"end={end} released={released}")
@@ -274,8 +326,8 @@ def drive(res: "H.Results", mode: str) -> None:
                       len(crossing) > 0 and crossing[-1].split(",")[3] == "0",
                       crossing[-1:] or sent[-3:])
 
-            handoff(res, mode, page, dpage, seam)
-            pen_contact(res, mode, page)
+            handoff(res, mode, page, dpage, seam, wayland)
+            pen_contact(res, mode, page, wayland)
 
             if full:
                 # The neighbor page maps the same physical spot to the same
@@ -285,7 +337,7 @@ def drive(res: "H.Results", mode: str) -> None:
                     new MouseEvent('mousemove', {buttons: 0, clientX: cx, clientY: cy, bubbles: true}));
                 }""", [1088, 800])
                 time.sleep(0.3)
-                hover = C.x11_mouse_pos()
+                hover = wire_pos(dpage) if wayland else C.x11_mouse_pos()
                 res.check("hover handoff to the neighbor page does not jump",
                           abs(hover[0] - released[0]) <= 1 and abs(hover[1] - released[1]) <= 1,
                           f"released={released} hover={hover}")
@@ -326,14 +378,18 @@ SYNTH_JS = """(() => {
 
 
 def main() -> "H.Results":
-    res = H.Results("cross-display-drag")
+    """One backend per run: `x11` reads the crossing back from the X pointer,
+    `wl` from the wire, having none to read."""
+    backend = sys.argv[1] if len(sys.argv) > 1 else "x11"
+    wayland = backend == "wl"
+    res = H.Results(f"cross-display-drag-{backend}")
     xproc = None
     if not H.TEST_DISPLAY:
         xproc, xdisp = H.private_x_server(width=8192, height=4096)
         H.TEST_DISPLAY = xdisp
     try:
         for mode in ("websockets", "webrtc"):
-            drive(res, mode)
+            drive(res, mode, wayland)
     finally:
         H.server_stop()
         if xproc is not None:
